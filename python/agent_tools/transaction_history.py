@@ -2,7 +2,10 @@
 #207 D13): the lifecycle vocabularies, the `Custody` credential and `Transaction` snapshot
 types, the credential shape checks, the pure history validator and the snapshot fold. The
 validator hands each action event to `agent_tools.transaction_invocation`, whose fold also
-derives the snapshot's per-action `actions` view on every load. It accepts the stored
+derives the snapshot's per-action `actions` view on every load, and each proof event to
+`agent_tools.transaction_proof`, whose `proof_view` derives the snapshot's `proof` view on
+every load too; an `obligation_observed` joins the evidence-id fold exactly as an
+`evidence_recorded` does (#207 D25). It accepts the stored
 `proof_plan` only as the materialization of its own declaration, through
 `agent_tools.transaction_plan`'s `plan_violation`, and only when the `created` event pins its
 `telemetry_digest` (#207 D3, D24). It reads no file, lock or clock: `validate_state` takes
@@ -25,11 +28,13 @@ from typing import Any
 
 from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_custody import (
-    CUSTODY_EVENTS, EVIDENCE_FORMS, admissibility, fence_violation)
+    CUSTODY_EVENTS, EVIDENCE_EVENTS, EVIDENCE_FORMS, admissibility, fence_violation)
 from agent_tools.transaction_invocation import (
     ACTION_EVENT_KEYS, action_event_violation, action_views, apply_action_event, status,
     unresolved)
 from agent_tools.transaction_plan import plan_violation
+from agent_tools.transaction_proof import (
+    PROOF_EVENT_KEYS, ProofFold, apply_proof_event, proof_event_violation, proof_view)
 from agent_tools.transaction_storage import (
     StateInvalid, format_at, json_object_violation, parse_at, serialize)
 
@@ -115,7 +120,8 @@ class Transaction:
     them cannot reach disk. `evidence` and `grants` entries carry verdicts
     derived from the history on every load, and `actions` holds one read-only view per
     declared action, in declaration order (#206 D2); none of them is ever stored.
-    `proof_plan` is the stored plan fixed at creation, a read-only view over a deep copy
+    `proof_plan` is the stored plan fixed at creation, a read-only view over a deep copy,
+    and `proof` a read-only view over `proof_view`, derived on every load and never stored
     (#207 D3, D13).
     """
 
@@ -132,6 +138,7 @@ class Transaction:
     grants: tuple[Mapping[str, Any], ...]
     actions: tuple[Mapping[str, Any], ...]
     proof_plan: Mapping[str, Any]
+    proof: Mapping[str, Any]
 
 
 def edge_allowed(source: str, parked_from: str | None, target: str) -> bool:
@@ -254,7 +261,7 @@ def _id_violation(event: dict, fold: _CustodyFold) -> str | None:
         return f"grant_id {grant_id!r} is reused" if grant_id in fold.grant_ids else None
     evidence_id = event["evidence_id"]
     seen = fold.evidence_ids.get(evidence_id)
-    if event["type"] == "evidence_recorded" and event["form"] == "interval":
+    if event["type"] in EVIDENCE_EVENTS and event["form"] == "interval":
         if seen is None:
             return f"evidence_id {evidence_id!r} closes no opened interval"
         if seen == "opened":
@@ -263,7 +270,8 @@ def _id_violation(event: dict, fold: _CustodyFold) -> str | None:
 
 
 def _note_id(event: dict, fold: _CustodyFold) -> None:
-    """Fold one fenced record's id: a grant, an opened interval or a recorded item."""
+    """Fold one fenced record's id: a grant, an opened interval or a recorded item, an
+    observation included."""
     if event["type"] == "grant_issued":
         fold.grant_ids.add(event["grant_id"])
     else:
@@ -274,10 +282,10 @@ def _note_id(event: dict, fold: _CustodyFold) -> None:
 def fenced_id_violation(events: Sequence[Mapping[str, Any]],
                         event: Mapping[str, Any]) -> str | None:
     """The id rule the fenced record `event` breaks against the evidence, interval and
-    grant ids `events` already hold, or None (D27)."""
+    grant ids `events` already hold, observations included, or None (D27; #207 D25)."""
     fold = _CustodyFold([])
     for prior in events:
-        if prior["type"] in _FENCED_EVENTS:
+        if prior["type"] in _FENCED_EVENTS or prior["type"] == "obligation_observed":
             _note_id(prior, fold)
     return _id_violation(event, fold)
 
@@ -422,7 +430,9 @@ def validate_state(document: Any, transaction_id: str,
     `proof_plan` must be the materialization of its own declaration for `transaction_id`, and
     the `created` event must pin its `telemetry_digest` (#207 D3, D24); each action event is
     checked by `action_event_violation` against the actions before it, and a transition into
-    a terminal while `unresolved` names an action is refused (#206 D20)."""
+    a terminal while `unresolved` names an action is refused (#206 D20). Each proof event is
+    checked by `proof_event_violation` against the history before it and then, for an
+    `obligation_observed`, by the evidence-id fold (#207 D25)."""
     def refuse(rule: str) -> StateInvalid:
         return StateInvalid(f"{transaction_id}: {rule}")
 
@@ -471,6 +481,7 @@ def validate_state(document: Any, transaction_id: str,
     state, parked, entered_terminal = "created", None, None
     fold = _CustodyFold(keys)
     actions: dict = {}
+    proof_fold = ProofFold()
     for seq, event in enumerate(events[1:], start=2):
         if state in TERMINALS and not (
                 entered_terminal == seq - 1 and type(event) is dict
@@ -503,6 +514,19 @@ def validate_state(document: Any, transaction_id: str,
                 if violation is not None:
                     raise refuse(f"event {seq} {violation}")
                 apply_action_event(event, actions)
+            case str() if event_type in PROOF_EVENT_KEYS:
+                _check_envelope(event, seq, PROOF_EVENT_KEYS[event_type], refuse)
+                violation = proof_event_violation(
+                    event, events[:seq - 1], proof_fold, plan=document["proof_plan"], keys=keys,
+                    open_fence=None if fold.custody is None else fold.custody["fence"],
+                    state=state)
+                if violation is None and event_type == "obligation_observed":
+                    violation = _id_violation(event, fold)
+                if violation is not None:
+                    raise refuse(f"event {seq} {violation}")
+                if event_type == "obligation_observed":
+                    _note_id(event, fold)
+                apply_proof_event(event, proof_fold)
             case _:
                 raise refuse(f"event {seq} has unknown event type {event_type!r}")
     custody = fold.custody
@@ -549,6 +573,7 @@ def snapshot(document: dict) -> Transaction:
         grants=tuple(MappingProxyType(entry) for entry in grants),
         actions=tuple(MappingProxyType(view) for view in action_views(document["events"])),
         proof_plan=MappingProxyType(copy.deepcopy(document["proof_plan"])),
+        proof=MappingProxyType(proof_view(document)),
     )
 
 

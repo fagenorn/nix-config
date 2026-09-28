@@ -27,6 +27,7 @@ CUSTODY_EVENTS = frozenset({"lease_acquired", "lease_reacquired", "lease_release
                             "lease_lapse_detected"})
 INSTANCE_PATTERN = re.compile(r"lin_[0-9a-f]{32}")
 EVIDENCE_FORMS = ("event", "snapshot", "interval")
+EVIDENCE_EVENTS = ("evidence_recorded", "obligation_observed")  # both record evidence
 
 _RECORD_KEYS = frozenset({"schema", "key", "epoch", "holder"})
 _HOLDER_KEYS = frozenset({"transaction_id", "executor_id", "instance", "term", "ttl_ms",
@@ -71,7 +72,8 @@ def fence_violation(fence: Any, keys: Iterable[str] | None = None) -> str | None
 def admissibility(events: Sequence[Mapping[str, Any]]) -> tuple[list[dict], list[dict]]:
     """The evidence and grant entries a validated history derives, in `seq` order (D20).
 
-    The latest fence is the last opening's. `event` evidence is always
+    An `obligation_observed` event is judged exactly as an `evidence_recorded` one (#207
+    D25). The latest fence is the last opening's. `event` evidence is always
     admissible; `snapshot` needs the latest fence (else `fence_changed`);
     `interval` needs no custody event strictly between its open and its record
     (else `fence_discontinuity`) and then the latest fence (else `fence_changed`).
@@ -90,7 +92,7 @@ def admissibility(events: Sequence[Mapping[str, Any]]) -> tuple[list[dict], list
             opened_at[event["evidence_id"]] = event["seq"]
     evidence, grants = [], []
     for event in events:
-        if event["type"] == "evidence_recorded":
+        if event["type"] in EVIDENCE_EVENTS:
             void = None
             if event["form"] == "interval" and any(
                     opened_at[event["evidence_id"]] < seq < event["seq"] for seq in custody_seqs):

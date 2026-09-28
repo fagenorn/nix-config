@@ -30,7 +30,8 @@ transaction, and `advance` enters no terminal while an action is `open`, `in_pro
 this module re-exports the errors and the public model names. `action_id` and the retry
 constants live in `agent_tools.transaction_invocation`, which this module re-exports too.
 `agent_tools.transaction_plan` is the home of the proof declaration's compiler and the plan
-constants, which this module re-exports as well.
+constants, which this module re-exports as well. `collect_obligation` records one proof
+observation around the pure halves in `agent_tools.transaction_proof` (re-exported too).
 The module has no command and no caller yet.
 """
 
@@ -66,9 +67,13 @@ from agent_tools.transaction_plan import (
     MAX_COHORT_ATTEMPTS, MAX_COLLECTION_LATENCY_MS, MAX_CONVERGENCE_WINDOW_MS, MAX_FRESHNESS_MS,
     PLAN_REJECTION_REASONS, PLAN_SCHEMA, RUNNING_IDENTITY_FRESHNESS_MS, compile_proof,
     materialize_plan)
+from agent_tools.transaction_proof import (
+    PROOF_REFUSAL_REASONS, collection_refusal, next_evidence_id, obligation,
+    observation_request, observation_violation, open_cohort, proof_refused)
 from agent_tools.transaction_storage import (
     LAST_AT_MS, CreationConflict, CustodyMisbound, EffectResultInvalid, FenceViolation,
-    GrantInvalid, InvocationRefused, LeaseUnavailable, ProofPlanRejected, StaleCustody,
+    GrantInvalid, InvocationRefused, LeaseUnavailable, ProofPlanRejected, ProofRefused,
+    StaleCustody,
     StateInvalid, TransactionBusy, TransactionError, TransitionRefused, UnknownTransaction,
     atomic_write, fsync_directory, lstat_mode, open_lock, read_json, require_directory)
 
@@ -714,6 +719,60 @@ class TransactionStore:
                 {"type": "action_inspected", "action_id": identity,
                  "outcome": inspected["outcome"], "reference": inspected["reference"],
                  "fence": fence}])
+
+    def collect_obligation(self, custody: Custody, *, obligation_id: str,
+                           observer: Any) -> Transaction:
+        """Observe one plan obligation through `observer.observe`, then record it (#207 D6,
+        D7, D27, D33, D34).
+
+        A malformed credential or id, or no callable `observe`, is `StateInvalid` before any
+        lock. The first hold (`_fenced`, clock read once as `started`) refuses a broken
+        admission rule `ProofRefused` with no write and no call, appends `interval_opened`
+        for an `interval` obligation, and builds the request. The observer runs with no lock
+        held; what it raises propagates, and a result outside the closed shape is
+        `EffectResultInvalid`. The second hold refuses a terminal, a lapse (`StaleCustody`),
+        `clock_regressed`, a re-run admission rule and a changed cohort
+        (`not_cohort_member`); none records anything from the call, but an opened interval
+        stays unclosed and the next collection mints a new id. Otherwise it appends
+        `obligation_observed` with the held fence and `latency_ms = now - started`.
+        """
+        require_texts(custody, "collect_obligation", obligation_id=obligation_id)
+        transaction_id = custody.transaction_id
+        if not callable(getattr(observer, "observe", None)):
+            raise StateInvalid(f"{transaction_id}: collect_obligation: observer has no callable "
+                               f"observe")
+        detail = f"collect_obligation {obligation_id!r}"
+        with self._fenced(custody, "collect_obligation", writes=True) as (prior, started):
+            reason = collection_refusal(prior, obligation_id, started)
+            if reason is not None:
+                raise proof_refused(transaction_id, reason, detail)
+            entry = obligation(prior["proof_plan"], obligation_id)
+            cohort = open_cohort(prior["events"], prior["custody"]["fence"])
+            evidence_id = None
+            if entry["form"] == "interval":
+                evidence_id = next_evidence_id(prior["events"], obligation_id)
+                self._append(prior, started, [{"type": "interval_opened",
+                                               "evidence_id": evidence_id,
+                                               "fence": prior["custody"]["fence"]}])
+            request = observation_request(prior, entry, cohort)
+        result = observer.observe(request)
+        violation = observation_violation(result, entry)
+        if violation is not None:
+            raise EffectResultInvalid(f"{transaction_id}: collect_obligation: {violation}")
+        with self._fenced(custody, "collect_obligation", writes=True) as (prior, now):
+            fence = prior["custody"]["fence"]
+            reason = "clock_regressed" if now < started else collection_refusal(
+                prior, obligation_id, now)
+            if reason is None and open_cohort(prior["events"], fence) != cohort:
+                reason = "not_cohort_member"
+            if reason is not None:
+                raise proof_refused(transaction_id, reason, detail)
+            return self._append(prior, now, [{
+                "type": "obligation_observed", "obligation_id": obligation_id,
+                "evidence_id": evidence_id or next_evidence_id(prior["events"], obligation_id),
+                "form": entry["form"], "outcome": result["outcome"],
+                "reason": result["reason"], "reference": result["reference"],
+                "fence": fence, "cohort": cohort, "latency_ms": now - started}])
 
     def _check_custody(self, prior: dict, custody: Custody, now: int) -> None:
         """The fenced check (D12, D25): credential, then path, then live records at `now`.

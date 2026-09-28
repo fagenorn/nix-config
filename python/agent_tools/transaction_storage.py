@@ -91,6 +91,16 @@ class ProofPlanRejected(TransactionError):
         self.reason = reason
 
 
+class ProofRefused(TransactionError):
+    """A proof operation the core refuses; `reason` names the closed rule. An admission
+    refusal precedes any write or observer call; one at `collect_obligation`'s second hold
+    follows the call and records nothing from it (#207 D18, D33)."""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 LAST_AT_MS = 253_402_300_799_999  # 9999-12-31T23:59:59.999Z, the last `at` that fits
 
 
