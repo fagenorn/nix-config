@@ -20,7 +20,7 @@ from agent_tools import transaction_core
 from agent_tools.transaction_core import TransactionStore
 
 from .transaction_core_shapes import SHAPES
-from .transaction_core_sweep_support import SCENARIOS, drive
+from .transaction_core_sweep_support import SCENARIOS, drive, shape_declaration
 from .transaction_core_world import World
 
 WITH_ACTIVATION = ("created", "awaiting_verification", "ready", "publishing", "published",
@@ -46,8 +46,7 @@ SWEEP = {
     ("product", "lease_lapse"): ("succeeded", LAPSED, frozenset({"snapshot"}), (1, 1)),
     ("daemon", "lease_lapse"): ("succeeded", LAPSED, frozenset({"snapshot", "interval"}),
                                 (1, 1)),
-    ("library", "lease_lapse"): ("succeeded", LAPSED_LIBRARY, frozenset({"snapshot"}),
-                                 (1, 1)),
+    ("library", "lease_lapse"): ("succeeded", LAPSED_LIBRARY, frozenset(), (1, 1)),
     **{(shape, "resume_after_crash"): (
         "succeeded", RESUMED_LIBRARY if shape == "library" else RESUMED, frozenset(), (2, 1))
        for shape in ("platform", "product", "daemon", "library")},
@@ -139,6 +138,29 @@ class SweepTableTest(unittest.TestCase):
                              for e in persisted.events if e["type"] == "invocation_returned"
                              and e["action_id"] == identity],
                             [(1, "rejected", "provider_throttled"), (2, "accepted", None)])
+                types = [e["type"] for e in persisted.events]
+                self.assertNotIn("evidence_recorded", types)
+                self.assertEqual((types.count("proof_cohort_started"),
+                                  types.count("proof_sealed")), (1, 1))
+                seal = next(e for e in persisted.events if e["type"] == "proof_sealed")
+                self.assertEqual(persisted.proof["proof_cutoff_at"], seal["at"])
+                required = [o for o in persisted.proof["obligations"] if o["required"]]
+                self.assertTrue(required)
+                self.assertEqual({o["latest_outcome"] for o in required}, {"satisfied"})
+                self.assertEqual(
+                    sorted(u["name"] for u in persisted.proof_plan["units"]),
+                    declared_nodes(shape))
+
+    def test_every_shape_declares_a_feasible_plan_whose_units_are_its_nodes(self):
+        for shape in SHAPES:
+            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as tmp:
+                created = TransactionStore(Path(tmp)).create(
+                    "probe", {"s": shape}, concurrency_keys=["k"],
+                    proof=shape_declaration(shape))
+                plan = created.proof_plan
+                self.assertEqual(sorted(u["name"] for u in plan["units"]),
+                                 declared_nodes(shape))
+                self.assertLessEqual(plan["cohort"]["makespan_ms"], 90_000)
 
     def test_the_crashed_action_reads_intent_inspection_then_retry(self):
         def epoch(event):
@@ -182,7 +204,7 @@ class SweepTableTest(unittest.TestCase):
             persisted = store.load(first)
             again = store.create("library:success", dict(persisted.subject),
                                  concurrency_keys=list(persisted.concurrency_keys),
-                                 proof={"units": [], "obligations": [], "collectors": {}})
+                                 proof=shape_declaration("library"))
             self.assertEqual(again.transaction_id, first)
             self.assertEqual(len(again.events), len(persisted.events))
 

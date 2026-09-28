@@ -1,29 +1,39 @@
 """Scenario fixture and fixture executor for the transaction core sweep (#204 D6, D17;
-#206 D12, D18).
+#206 D12, D18; #207 D14, D15, D29).
 
 The executor is a happy-path walker over the simulated world that asks the shipped core
 to advance at each lifecycle boundary through the public store API, on a store whose
-clock is the world clock (#205 D22, D29). It acquires custody before publishing and
-presents it on every later advance. Every publication and activation node is an action
-driven through the core: one effect per binding wraps that binding's adapter, action
-`name` is the node id and `parameters` its mode and expected subject, and no adapter
-effect is called outside `inspect_action` / `invoke_action`. Each node is pre-inspected,
-then invoked until its view reads `satisfied`; before each retry the world clock moves
-30 seconds, so the core's retry budget and window run on the world clock. While proving
-it records one fenced evidence item per obligation in the obligation's temporal form,
-opening an interval first, and skips an obligation whose latest record is still
-admissible. Scenario hooks move the world clock: `lease_renewal` renews in place twice;
-`lease_lapse` lets the lease expire, has the reaper park the transaction, reacquires,
-resumes proving and recollects what the new fence voided; `resume_after_crash` kills the
-executor between the first publication action's recorded intent and its call, lets the
-lease expire, reaps, reacquires, checks that a blind invoke is refused
-`inspection_required`, and resumes publication through a fresh inspection. It carries
-none of the prototype's authorization or recovery logic. Any view other than `absent`
-or `satisfied`, and any invocation refusal, parks the transaction in attention_required
-with the observation or the refusal's reason.
+clock is the world clock (#205 D22, D29). It creates each transaction with the proof
+declaration its shape implies (`proof_declaration`): every publication and activation node
+is a unit whose collector is its binding, every profile `proof` entry an obligation, and
+every binding a deterministic collector of its adapter's supported predicates with a 30 s
+collection bound. It acquires custody before publishing and presents it on every later
+advance. Every node is an action driven through the core: one effect per binding wraps
+that binding's adapter, action `name` is the node id and `parameters` its mode and
+expected subject, and no adapter effect is called outside `inspect_action` /
+`invoke_action`. Each node is pre-inspected, then invoked until its view reads
+`satisfied`; before each retry the world clock moves 30 seconds, so the core's retry
+budget and window run on the world clock. Proof is collected through the core: one
+`_Observer` per binding is the only caller of the adapter's proof predicates. A first
+pass collects every plan obligation in plan order through `collect_obligation`, skipping
+one whose latest evidence is still admissible and one refused `unsupported_obligation` or
+`dependency_not_accepted`. Then each convergence cohort is started, its members collected
+with custody renewed after each, and `settle_proof` either seals into `succeeded` or parks
+with its typed reason; the executor repeats while it leaves the transaction in `proving`
+and never advances past it. Scenario hooks move the world clock: `lease_renewal` renews
+in place twice; `lease_lapse` lets the lease expire before the last required obligation,
+has the reaper park the transaction, reacquires, resumes proving and recollects what the
+new fence voided; `resume_after_crash` kills the executor between the first publication
+action's recorded intent and its call, lets the lease expire, reaps, reacquires, checks
+that a blind invoke is refused `inspection_required`, and resumes publication through a
+fresh inspection. It carries none of the prototype's authorization or recovery logic. Any
+action view other than `absent` or `satisfied`, and any invocation or proof refusal not
+named above, parks the transaction in attention_required with the observation or the
+refusal's reason.
 """
 
-from agent_tools.transaction_core import InvocationRefused, StaleCustody, TransactionStore
+from agent_tools.transaction_core import (
+    InvocationRefused, ProofRefused, StaleCustody, TransactionStore)
 
 from .transaction_core_shapes import SHAPES
 from .transaction_core_world import ExecutorCrash, World
@@ -52,8 +62,51 @@ SCENARIOS = {
 }
 
 
+# The reason a derived obligation's `unknown` observation carries, per class (#207 D29).
+UNOBSERVABLE = {"published_artifact_identity": "store_unreachable",
+                "running_subject_identity": "identity_unobservable"}
+# Collection refusals the first pass steps over rather than parks on (#207 D29).
+SKIPPED = ("unsupported_obligation", "dependency_not_accepted")
+
+
 class _Parked(Exception):
     pass
+
+
+def proof_declaration(profile, registry):
+    """The proof declaration a shape's profile implies (#207 D14)."""
+    activation = [] if profile["activation"] == "none" else profile["activation"]
+    units = [{"name": node["id"],
+              "parameters": {"mode": node["mode"],
+                             "expected_subject": node["expected_subject"]},
+              "phase": phase, "collector": node["binding"]}
+             for phase, nodes in (("publication", profile["publication"]),
+                                  ("activation", activation))
+             for node in nodes]
+    obligations = []
+    for entry in profile["proof"]:
+        obligation = {"id": entry["id"], "semantic": entry["semantic"],
+                      "form": entry["temporal"], "predicate": entry["predicate"],
+                      "collector": entry["binding"], "required": entry["required"],
+                      "deps": list(entry.get("deps", [])),
+                      "parameters": {"expected_subject": entry["expected_subject"]}}
+        if entry["temporal"] == "snapshot":
+            obligation["freshness_ms"] = entry["freshness_seconds"] * 1000
+        obligations.append(obligation)
+    collectors = {
+        alias: {"basis": "deterministic",
+                "predicates": sorted(predicate for predicate, support
+                                     in registry[binding["adapter"]].predicates.items()
+                                     if support == "supported"),
+                "max_collection_latency_ms": 30_000}
+        for alias, binding in profile["bindings"].items() if not alias.startswith("_")}
+    return {"units": units, "obligations": obligations, "collectors": collectors}
+
+
+def shape_declaration(shape):
+    """The declaration `drive` passes for `shape`."""
+    _, profile, registry = SHAPES[shape](World())
+    return proof_declaration(profile, registry)
 
 
 def _in_dependency_order(nodes):
@@ -95,6 +148,30 @@ class _Effect:
                 or f"{self.unit.name}:{called['error_class']}"}
 
 
+class _Observer:
+    """One binding's observer: asks the adapter's predicate hook about the request's expected
+    subject and maps its outcome onto a stable reason token (#207 D29)."""
+
+    def __init__(self, unit):
+        self.unit = unit
+
+    def observe(self, request):
+        identity = request["obligation_id"]
+        derived = identity.split(":")[1] if identity.startswith("derived:") else None
+        parameters = request["parameters"]
+        subject = (parameters["parameters"] if derived else parameters)["expected_subject"]
+        seen = self.unit.inspect(request["predicate"], {"expected_subject": subject})
+        outcome = (seen["outcome"] if seen["outcome"] in ("satisfied", "unsatisfied", "unknown")
+                   else "unknown")
+        if derived is None or outcome == "satisfied":
+            reason = outcome
+        elif outcome == "unsatisfied":
+            reason = "subject_mismatch"
+        else:
+            reason = UNOBSERVABLE[derived]
+        return {"outcome": outcome, "reason": reason, "reference": seen["payload_ref"]}
+
+
 def drive(root, shape, scenario, world=None):
     world = World() if world is None else world
     world.faults = set(SCENARIOS[scenario]["faults"])
@@ -103,7 +180,7 @@ def drive(root, shape, scenario, world=None):
     keys = profile["target"]["concurrency_keys"]
     transaction_id = store.create(
         f"{shape}:{scenario}", subject, concurrency_keys=keys,
-        proof={"units": [], "obligations": [], "collectors": {}}).transaction_id
+        proof=proof_declaration(profile, registry)).transaction_id
     definite = {"all": True}
     held = {"custody": None}
 
@@ -112,6 +189,7 @@ def drive(root, shape, scenario, world=None):
 
     effects = {alias: _Effect(adapter(alias)) for alias in profile["bindings"]
                if not alias.startswith("_")}
+    observers = {alias: _Observer(adapter(alias)) for alias in effects}
 
     def external_state():
         return "known" if definite["all"] else "unknown"
@@ -190,32 +268,56 @@ def drive(root, shape, scenario, world=None):
         world.tick(301)
         store.renew(held["custody"])
 
-    def prove(obligations, first_pass):
+    def collect(entry, skipped=()):
+        """Collect `entry` through its collector's observer; False when a `skipped` refusal
+        stepped over it, parked on any other refusal."""
+        try:
+            store.collect_obligation(held["custody"], obligation_id=entry["obligation_id"],
+                                     observer=observers[entry["collector"]])
+        except ProofRefused as refused:
+            if refused.reason in skipped:
+                return False
+            raise _Parked(f"{entry['obligation_id']}: collection refused "
+                          f"{refused.reason}") from None
+        return True
+
+    def first_pass(lapsing):
+        obligations = store.load(transaction_id).proof_plan["obligations"]
+        required = [entry["obligation_id"] for entry in obligations if entry["required"]]
         if scenario == "lease_renewal":
             renew()
-        accepted, recorded = set(), 0
-        for obligation_id, predicate, source, deps, form in obligations:
-            earlier = records(obligation_id)
+        collected = 0
+        for entry in obligations:
+            earlier = records(entry["obligation_id"])
             if earlier and earlier[-1]["admissible"]:
-                accepted.add(obligation_id)
                 continue
-            unmet = [dep for dep in deps if dep not in accepted]
-            if unmet:
-                raise _Parked(f"{obligation_id}: prerequisite not accepted {unmet}")
-            evidence_id = f"{obligation_id}@{len(earlier) + 1}"
-            if form == "interval":
-                store.open_interval(held["custody"], evidence_id=evidence_id)
-            result = adapter(source["binding"]).inspect(
-                predicate, {"expected_subject": source["expected_subject"]})
-            observe(result, obligation_id)
-            store.record_evidence(held["custody"], evidence_id=evidence_id, form=form,
-                                  reference=result["payload_ref"])
-            accepted.add(obligation_id)
-            recorded += 1
-            if scenario == "lease_renewal" and recorded == len(obligations) // 2:
-                renew()
-            if scenario == "lease_lapse" and first_pass and recorded == len(obligations) - 1:
+            if lapsing and entry["obligation_id"] == required[-1]:
                 world.tick(601)
+            if not collect(entry, SKIPPED) or not entry["required"]:
+                continue
+            collected += 1
+            if scenario == "lease_renewal" and collected == len(required) // 2:
+                renew()
+
+    def converge():
+        while True:
+            try:
+                started = store.start_cohort(held["custody"])
+            except ProofRefused as refused:
+                if refused.reason not in ("proof_incomplete", "convergence_exhausted"):
+                    raise _Parked(f"start_cohort refused {refused.reason}") from None
+            else:
+                plan = started.proof_plan
+                by_id = {entry["obligation_id"]: entry for entry in plan["obligations"]}
+                for member in plan["cohort"]["members"]:
+                    collect(by_id[member])
+                    store.renew(held["custody"])
+            try:
+                settled = store.settle_proof(held["custody"])
+            except ProofRefused as refused:
+                raise _Parked(f"settle_proof refused {refused.reason}") from None
+            if settled.state != "proving":
+                return
 
     try:
         advance("awaiting_verification", "candidate verification requested")
@@ -235,25 +337,17 @@ def drive(root, shape, scenario, world=None):
             advance("proving", "every activation unit satisfied")
         else:
             advance("proving", "profile declares activation none")
-        obligations = (
-            [("floor:publication:" + n["id"], "publication_visible", n, [], "snapshot")
-             for n in profile["publication"]]
-            + [("floor:activation:" + n["id"], "running_subject_identity", n, [], "snapshot")
-               for n in activation]
-            + [(o["id"], o["predicate"], o, o.get("deps", []), o["temporal"])
-               for o in profile["proof"] if o["required"]])
         try:
-            prove(obligations, first_pass=True)
+            first_pass(lapsing=scenario == "lease_lapse")
         except StaleCustody:
             store.reap(transaction_id, reason="lease expired during proving")
             acquire()
             advance("proving", "resumed after reacquisition")
-            prove(obligations, first_pass=False)
+            first_pass(lapsing=False)
         if scenario == "lease_renewal" and any(
                 store.inspect_lease(key)["holder"]["term"] != 3 for key in keys):
             raise _Parked("lease was not renewed to term 3 before sealing")
-        store.start_cohort(held["custody"])
-        store.settle_proof(held["custody"])
+        converge()
     except _Parked as parked:
         advance("attention_required", str(parked))
     return transaction_id
