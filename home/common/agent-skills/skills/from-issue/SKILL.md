@@ -301,7 +301,8 @@ truthful booleans for next-phase context need, artifact sufficiency, and
 remainder self-containment. Do not fabricate usage:
 omit unavailable `--turn-count` or `--context-tokens`. Use the
 defaults `--turn-ceiling 120 --context-ceiling 150000 --turn-headroom 2
---context-headroom 10000`. Obey the returned action exactly; the closed set is
+--context-headroom 10000`. Obey the returned action exactly: it is the
+`action` of the validated `phase_gate` reply, and the closed set is
 `continue | fresh_start | handoff | delegate`:
 
 1. **`continue`** — proceed in this conversation.
@@ -425,12 +426,15 @@ parks the attempt without ending it — it consumes no attempt, needs no
 authorization phrase, and re-entry resumes it in place. Call:
 
 ```text
-workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --issue <n> --attempt <k> --blocked-on <value>
+workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --issue <n> --attempt <k> --blocked-on <value> | artifact-budget validate-report --boundary workflow-response --input -
 ```
 
 with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`, or
-`agent_dispatch` (the reaper alone owns `unknown`). Then print the canonical
-line as the final user-facing output:
+`agent_dispatch` (the reaper alone owns `unknown`). A validated `kind: terminal`
+reply means the anti-zombie bound ended the attempt instead: handle it as the
+terminal replay in the terminal return procedure — print its `reentry`, relay
+it, and write no `finish` — and stop. Otherwise the reply is `kind: suspended`;
+print the canonical line as the final user-facing output:
 
 ```text
 Suspended (blocked_on=<value>). Resume: <reentry from the envelope>
