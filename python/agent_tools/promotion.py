@@ -29,14 +29,15 @@ from pathlib import Path
 from typing import NamedTuple
 
 from agent_tools.promotion_lifecycle import ARGUMENT_TARGETS, Arguments, advance
-from agent_tools.promotion_schema import (CANDIDATE_KIND, COMMAND_NAME, DRAFT_KIND,
-                                          INTERNAL_FAILURE_MESSAGE, STATES, Refusal,
-                                          load_strict, mint_candidate, mint_evaluation,
-                                          validate_document, violation)
+from agent_tools.promotion_schema import (CANDIDATE_KIND, COMMAND_NAME, DIGEST_ID,
+                                          DRAFT_KIND, INTERNAL_FAILURE_MESSAGE, STATES,
+                                          Refusal, load_strict, mint_candidate,
+                                          mint_evaluation, validate_document, violation)
 
 RESOLVER = "resolve-project"
 RESOLVER_TIMEOUT = 60
 GITHUB_TRACKER = "github"
+SUPERSEDED = "superseded"
 
 
 class Project(NamedTuple):
@@ -225,6 +226,8 @@ def run_advance(args) -> int:
     for member, targets in ARGUMENT_TARGETS.items():
         if getattr(args, member) is not None and args.to not in targets:
             parser.error(f"{_flag(member)} has no meaning for --to {args.to}")
+    if args.to == SUPERSEDED and args.superseded_by is None:
+        parser.error(f"--to {SUPERSEDED} requires --superseded-by")
     project = resolve(args.repo_root)
     candidate = read_document(args.candidate)
     violations = validate_document(candidate)
@@ -257,6 +260,13 @@ def _positive_int(text: str) -> int:
     if value < 1:
         raise argparse.ArgumentTypeError(f"must be an integer of at least 1: {text!r}")
     return value
+
+
+def _digest_id(text: str) -> str:
+    if DIGEST_ID.fullmatch(text) is None:
+        raise argparse.ArgumentTypeError(
+            f"must be 'sha256:' and 64 lowercase hex digits: {text!r}")
+    return text
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -302,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
                                 help="the human authorizing the promotion")
     advance_parser.add_argument("--rationale", metavar="TEXT",
                                 help="why the candidate is rejected or withdrawn")
-    advance_parser.add_argument("--superseded-by", metavar="ID",
+    advance_parser.add_argument("--superseded-by", type=_digest_id, metavar="ID",
                                 help="the candidate_id that supersedes this one")
     advance_parser.set_defaults(handler=run_advance, parser=advance_parser)
     validate = subcommands.add_parser(

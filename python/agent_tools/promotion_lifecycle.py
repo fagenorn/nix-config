@@ -7,17 +7,21 @@ order of D29 and the first failure is the only refusal. Classification is
 computed once, on the bind edge, by walking `CLASSIFICATION_RULES` (D6). A
 cited bundle is re-read and re-verified through `agent_gate_bundle` at every
 gate that relies on it, and its recorded state is never trusted (D8).
+Deployment (`authorized -> promoted`) is verified in this repository only and
+the module deletes, moves and rewrites nothing on disk (D9).
 Candidates are not a `transaction_core` consumer (D22).
 """
 
 import copy
 import dataclasses
+import hashlib
+import os
 from pathlib import Path
 
 from agent_tools.agent_gate_bundle import (GATE_CONTRACT, GATE_VERSION,
                                            BundleIntegrityError, verify_bundle)
-from agent_tools.promotion_schema import (CLASSIFICATION_RULES, Refusal,
-                                          is_safe_relative_path, load_strict,
+from agent_tools.promotion_schema import (CLASSIFICATION_RULES, PROJECT_ONLY_RESIDUE,
+                                          Refusal, is_safe_relative_path, load_strict,
                                           symlinked_component, violation)
 
 TRANSITIONS: dict[tuple[str, str], str] = {
@@ -31,6 +35,8 @@ TRANSITIONS: dict[tuple[str, str], str] = {
     ("decision_ready", "rejected"): "rationale",
     ("decision_ready", "withdrawn"): "rationale",
     ("authorized", "rejected"): "rationale",
+    ("authorized", "promoted"): "promote",
+    ("promoted", "superseded"): "supersede",
 }
 ARGUMENT_TARGETS = {"tracker_ref": ("evaluating",), "bundle": ("decision_ready",),
                     "authorized_by": ("authorized",), "rationale": ("rejected", "withdrawn"),
@@ -117,11 +123,14 @@ def resolve_bundle(root: Path, relative: str | None) -> tuple[str, str]:
     pointer = "/evidence/bundle_path"
     if relative is None:
         raise _refuse("evidence_unresolvable", pointer, "no --bundle was given")
-    if not is_safe_relative_path(relative) or symlinked_component(root, relative):
-        raise _refuse("evidence_unresolvable", pointer,
-                      "must be a safe path under project.root with no symlinked component")
+    unsafe = _refuse("evidence_unresolvable", pointer,
+                     "must be a safe path under project.root with no symlinked component")
+    if not is_safe_relative_path(relative):
+        raise unsafe
     path = Path(root) / relative
     try:
+        if symlinked_component(root, relative):
+            raise unsafe
         if not path.is_file() or path.is_symlink():
             raise _refuse("evidence_unresolvable", pointer, "is not a regular file")
         text = path.read_bytes().decode("utf-8")
@@ -169,6 +178,62 @@ def authorization_gates(candidate: dict, root: Path) -> None:
                       f"a native extension must be {ADMITTED} by #64's gate")
 
 
+def _reconcile(index: int, message: str) -> Refusal:
+    return _refuse("promotion_reconciliation_required",
+                   f"/local_duplicates/{index}/path", message)
+
+
+def _require_absent(root: Path, index: int, entry: dict) -> None:
+    """Return when `entry`'s path is absent in `root`; otherwise refuse.
+
+    Absent means no symlinked component and nothing at the path. A regular file
+    whose bytes match a non-null `sha256` is `duplicate_present`; anything else
+    (other bytes, a null digest, a directory, a symlink, an unreadable file)
+    needs reconciliation.
+    """
+    relative = entry["path"]
+    if not is_safe_relative_path(relative):
+        raise _reconcile(index, "is not a safe path under project.root")
+    path = Path(root) / relative
+    try:
+        if symlinked_component(root, relative) is not None:
+            raise _reconcile(index, "has a symlinked component")
+        if not os.path.lexists(path):
+            return
+        if not path.is_file() or path.is_symlink():
+            raise _reconcile(index, "is present but is not a regular file")
+        if entry["sha256"] is None:
+            raise _reconcile(index, "is present and its recorded sha256 is null")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        raise _reconcile(index, "cannot be inspected")
+    if digest == entry["sha256"]:
+        raise _refuse("duplicate_present", f"/local_duplicates/{index}/path",
+                      "the declared duplicate is still on disk, unchanged")
+    raise _reconcile(index, "is present with bytes other than the recorded sha256")
+
+
+def verify_deployment(candidate: dict, root: Path, here: str) -> dict:
+    """The `deployment` section for `candidate` in repository `here`, or a Refusal.
+
+    Walks `local_duplicates` in order (D9): `project_only_residue` is retained,
+    a foreign repository is deferred (first occurrence only), a local path must
+    be absent. The first refusal wins. Nothing on disk is changed.
+    """
+    removed, retained, deferred = [], [], []
+    for index, entry in enumerate(candidate["local_duplicates"]):
+        if entry["disposition"] == PROJECT_ONLY_RESIDUE:
+            retained.append(entry["path"])
+        elif entry["repository"] != here:
+            if entry["repository"] not in deferred:
+                deferred.append(entry["repository"])
+        else:
+            _require_absent(root, index, entry)
+            removed.append(entry["path"])
+    return {"verified_repository": here, "removed": removed, "retained": retained,
+            "deferred_repositories": deferred}
+
+
 def _bind(result: dict, root: Path, here: str, arguments: Arguments) -> None:
     if arguments.tracker_ref is None:
         raise _refuse("tracker_ref_required", "/tracker/ref",
@@ -202,8 +267,24 @@ def _remeasure(result: dict, root: Path, here: str, arguments: Arguments) -> Non
     result["evidence"] = None
 
 
+def _promote(result: dict, root: Path, here: str, arguments: Arguments) -> None:
+    authorization_gates(result, root)
+    destination = result["destination"]
+    if not anchor_line_present(root, destination["path"], destination["anchor"]):
+        raise _refuse("destination_missing", "/destination/path",
+                      "the destination has no line equal to the anchor")
+    result["deployment"] = verify_deployment(result, root, here)
+
+
+def _supersede(result: dict, root: Path, here: str, arguments: Arguments) -> None:
+    """Shape is checked by the CLI's argparse type (D32); nothing else changes."""
+
+
 GATES = {"bind": _bind, "rationale": _rationale, "measure": _measure,
-         "authorize": _authorize, "remeasure": _remeasure}
+         "authorize": _authorize, "remeasure": _remeasure, "promote": _promote,
+         "supersede": _supersede}
+RATIONALES = {"rationale": lambda arguments: arguments.rationale,
+              "supersede": lambda arguments: f"superseded by {arguments.superseded_by}"}
 
 
 def advance(candidate: dict, target: str, root: Path, here: str, arguments: Arguments) -> dict:
@@ -228,5 +309,5 @@ def advance(candidate: dict, target: str, root: Path, here: str, arguments: Argu
     result["history"].append({
         "from": current, "to": target,
         "actor": arguments.authorized_by if family == "authorize" else None,
-        "rationale": arguments.rationale if family == "rationale" else None})
+        "rationale": RATIONALES.get(family, lambda arguments: None)(arguments)})
     return result

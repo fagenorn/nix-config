@@ -100,6 +100,7 @@ agent-workflow-tests:
     tests/test_agent_gate_bundle.py \
     tests/test_promotion_documents.py \
     tests/test_promotion_lifecycle.py \
+    tests/test_promotion_deployment.py \
     tests/test_context_map_lint.py \
     tests/test_branch_protection.py
 
