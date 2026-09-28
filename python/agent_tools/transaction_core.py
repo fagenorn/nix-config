@@ -1,4 +1,4 @@
-"""The transaction core (#204, #205, #206).
+"""The transaction core (#204, #205, #206, #207, #208).
 
 A caller-rooted store of closed-schema transactions with a closed lifecycle:
 `TransactionStore(root, clock=...)` creates deduplicated transactions under an
@@ -37,7 +37,9 @@ observation around the pure halves in `agent_tools.transaction_proof` (re-export
 `start_cohort` opens a convergence cohort and `settle_proof` judges it in one write.
 `agent_tools.transaction_recovery_plan` compiles, binds and materializes the recovery
 declaration (#208); this module re-exports its constants and those three functions.
-The module has no command and no caller yet.
+`verify_anchors` observes every restorable unit's rollback anchor in `ready` around the pure
+halves in `agent_tools.transaction_recovery`, whose refusal reasons this module re-exports, and
+`advance` applies that module's publication gate. The module has no command and no caller yet.
 """
 
 import contextlib
@@ -76,13 +78,16 @@ from agent_tools.transaction_proof import (
     PROOF_REFUSAL_REASONS, advance_violation, cohort_start, collection_refusal,
     next_evidence_id, obligation, observation_request, observation_violation, open_cohort,
     proof_refused, settlement)
+from agent_tools.transaction_recovery import (
+    RECOVERY_REFUSAL_REASONS, anchor_requests, anchors_events, check_result_violation,
+    recovery_advance_violation, recovery_refused)
 from agent_tools.transaction_recovery_plan import (
     EDGE_ACTIONS, POSTURES, RECOVERY_PLAN_SCHEMA, RECOVERY_REJECTION_REASONS, bind_recovery,
     compile_recovery, materialize_recovery)
 from agent_tools.transaction_storage import (
     LAST_AT_MS, CreationConflict, CustodyMisbound, EffectResultInvalid, FenceViolation,
     GrantInvalid, InvocationRefused, LeaseUnavailable, ProofPlanRejected, ProofRefused,
-    RecoveryPlanRejected, StaleCustody,
+    RecoveryPlanRejected, RecoveryRefused, StaleCustody,
     StateInvalid, TransactionBusy, TransactionError, TransitionRefused, UnknownTransaction,
     atomic_write, fsync_directory, lstat_mode, open_lock, read_json, require_directory)
 
@@ -221,8 +226,9 @@ class TransactionStore:
         whatever `external_state` the caller passes. Before it, `advance_violation` refuses
         `succeeded` (entered only through `settle_proof`), a `proving -> attention_required`
         with a reserved reason, and a failing publication or activation gate (#207 D10, D12,
-        D27). Entering a terminal while custody
-        is held appends the transition and a `lease_released` reason `terminal` in one
+        D27); after it, `recovery_advance_violation` refuses `ready -> publishing` without an
+        `anchors_verified` under the held fence (#208 D7, D22). Entering a terminal while
+        custody is held appends the transition and a `lease_released` reason `terminal` in one
         `state.json` write, then clears the lease records. Every refusal happens
         before any write; the lock file is never created.
         """
@@ -289,6 +295,9 @@ class TransactionStore:
         if blocker is not None:
             raise TransitionRefused(f"{where}: terminal target over unresolved action "
                                     f"{blocker.action_id} ({status(blocker)})")
+        rule = recovery_advance_violation(prior, target, reason)
+        if rule is not None:
+            raise TransitionRefused(f"{where}: {rule}")
         return self._append(prior, now, [{
             "type": "transitioned", "from": source, "to": target, "reason": reason,
             "external_state": external_state}])
@@ -813,6 +822,47 @@ class TransactionStore:
         rejected, seal (into `succeeded`), cohort failed, exhausted, else `no_open_cohort`
         (#207 D10, D11, D21, D22)."""
         return self._decide(custody, "settle_proof", settlement)
+
+    def verify_anchors(self, custody: Custody, *, observer: Any) -> Transaction:
+        """Observe every `restorable` unit's rollback anchor in `ready`, then record
+        `anchors_verified`: `_observed` around `anchor_requests` and `anchors_events` (#208
+        D7, D20). Every refusal, `rollback_anchor_missing` included, writes nothing."""
+        return self._observed(custody, "verify_anchors", observer, anchor_requests,
+                              anchors_events)
+
+    def _observed(self, custody: Custody, operation: str, observer: Any,
+                  admit: Callable[[dict], list[Mapping]],
+                  conclude: Callable[[dict, list, list], list[dict]]) -> Transaction:
+        """The two-hold check pattern (#207 D6; #208 D20). Before any lock, a malformed
+        credential or no callable `observer.observe` is `StateInvalid`. The first hold
+        (`_fenced`) runs `admit`, which may refuse; with no request it appends what
+        `conclude(prior, [], [])` yields, if anything, and returns. Each request then goes to
+        `observer.observe` with no lock held; what it raises propagates, and a result failing
+        `check_result_violation` is `EffectResultInvalid`. The second hold refuses
+        `history_changed` when the revision moved, else appends `conclude`'s events."""
+        require_custody_shape(custody)
+        transaction_id = custody.transaction_id
+        if not callable(getattr(observer, "observe", None)):
+            raise StateInvalid(f"{transaction_id}: {operation}: observer has no callable "
+                               f"observe")
+        with self._fenced(custody, operation, writes=True) as (prior, now):
+            requests = admit(prior)
+            if not requests:
+                events = conclude(prior, [], [])
+                return self._append(prior, now, events) if events else snapshot(prior)
+            revision = prior["revision"]
+        results = []
+        for request in requests:
+            result = observer.observe(request)
+            violation = check_result_violation(result)
+            if violation is not None:
+                raise EffectResultInvalid(f"{transaction_id}: {operation}: {violation}")
+            results.append(result)
+        with self._fenced(custody, operation, writes=True) as (prior, now):
+            if prior["revision"] != revision:
+                raise recovery_refused(transaction_id, "history_changed",
+                                       f"{operation}: the history grew during the calls")
+            return self._append(prior, now, conclude(prior, requests, results))
 
     def _decide(self, custody: Custody, operation: str,
                 decide: Callable[[dict, int], list[dict]]) -> Transaction:

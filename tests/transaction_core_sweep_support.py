@@ -11,7 +11,9 @@ Beside it goes the recovery declaration the shape implies (`recovery_declaration
 every such node is a unit whose effect is its binding and whose posture, anchor and edges
 come from the profile's `recovery` entry for it, and every binding an effect offering its
 adapter's supported modes. It acquires custody before publishing and presents it on every
-later advance. Every node is an action driven through the core: one effect per binding wraps
+later advance. Right after acquiring in `ready` it verifies the rollback anchors through
+`_Router`, which sends each check to its collector binding's adapter hook, and parks on a
+refusal. Every node is an action driven through the core: one effect per binding wraps
 that binding's adapter, action `name` is the node id and `parameters` its mode and expected
 subject, and no adapter effect is called outside `inspect_action` / `invoke_action`. Each
 node is pre-inspected, then invoked until its view reads `satisfied`; before each retry the
@@ -39,7 +41,7 @@ observation or the refusal's reason.
 """
 
 from agent_tools.transaction_core import (
-    InvocationRefused, ProofRefused, StaleCustody, TransactionStore)
+    InvocationRefused, ProofRefused, RecoveryRefused, StaleCustody, TransactionStore)
 
 from .transaction_core_shapes import SHAPES
 from .transaction_core_world import ExecutorCrash, World
@@ -237,6 +239,23 @@ class _Observer:
         return {"outcome": outcome, "reason": reason, "reference": seen["payload_ref"]}
 
 
+class _Router:
+    """Every anchor or compatibility check goes to its collector binding's adapter hook; an
+    adapter `absent` is `unsatisfied` with reason `anchor_absent` (#208)."""
+
+    def __init__(self, adapters):
+        self.adapters = adapters
+
+    def observe(self, request):
+        seen = self.adapters[request["collector"]].inspect(request["predicate"],
+                                                           request["parameters"])
+        outcome = {"absent": "unsatisfied"}.get(seen["outcome"], seen["outcome"])
+        if outcome not in ("satisfied", "unsatisfied"):
+            outcome = "unknown"
+        reason = "anchor_absent" if seen["outcome"] == "absent" else outcome
+        return {"outcome": outcome, "reason": reason, "reference": seen["payload_ref"]}
+
+
 def drive(root, shape, scenario, world=None):
     world = World() if world is None else world
     world.faults = set(SCENARIOS[scenario]["faults"])
@@ -256,6 +275,7 @@ def drive(root, shape, scenario, world=None):
     effects = {alias: _Effect(adapter(alias)) for alias in profile["bindings"]
                if not alias.startswith("_")}
     observers = {alias: _Observer(adapter(alias)) for alias in effects}
+    router = _Router({alias: adapter(alias) for alias in effects})
 
     def external_state():
         return "known" if definite["all"] else "unknown"
@@ -393,6 +413,11 @@ def drive(root, shape, scenario, world=None):
                 "candidate verification")
         advance("ready", "candidate verification satisfied")
         acquire()
+        try:
+            store.verify_anchors(held["custody"], observer=router)
+        except RecoveryRefused as refused:
+            world.notes.append(str(refused))
+            raise _Parked(f"rollback anchors refused: {refused}") from None
         advance("publishing", "publication started")
         publish()
         advance("published", "every publication unit satisfied")

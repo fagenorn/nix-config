@@ -144,17 +144,26 @@ def observation_request(document: dict, entry: dict, cohort: int | None) -> Mapp
         "fence": copy.deepcopy(document["custody"]["fence"]), "cohort": cohort})
 
 
-def observation_violation(result: Any, entry: Mapping) -> str | None:
-    """How an observer's `result` for `entry` fails the closed `{outcome, reason, reference}`
-    shape, or None; a derived obligation's non-`satisfied` reason must lie in its class's
-    closed space (D8)."""
+def closed_result_violation(result: Any, label: str) -> str | None:
+    """How `result` fails the closed `{outcome, reason, reference}` shape, an `outcome` in
+    `OUTCOMES` and a non-empty `reason` and `reference`, in a message starting with `label`,
+    or None (#208 D26)."""
     if type(result) is not dict or set(result) != _RESULT_KEYS:
-        return "observation is not the closed outcome/reason/reference object"
+        return f"{label} is not the closed outcome/reason/reference object"
     if type(result["outcome"]) is not str or result["outcome"] not in OUTCOMES:
-        return f"observation outcome {result['outcome']!r} is not one of {OUTCOMES}"
+        return f"{label} outcome {result['outcome']!r} is not one of {OUTCOMES}"
     for name in ("reason", "reference"):
         if type(result[name]) is not str or not result[name]:
-            return f"observation {name} is not a non-empty string"
+            return f"{label} {name} is not a non-empty string"
+    return None
+
+
+def observation_violation(result: Any, entry: Mapping) -> str | None:
+    """How an observer's `result` for `entry` fails `closed_result_violation`, or None; a
+    derived obligation's non-`satisfied` reason must lie in its class's closed space (D8)."""
+    violation = closed_result_violation(result, "observation")
+    if violation is not None:
+        return violation
     if (entry["obligation_kind"] == "core_derived" and result["outcome"] != "satisfied"
             and result["reason"] not in DERIVED_REASONS[entry["derived_class"]]):
         return (f"observation reason {result['reason']!r} is not in the "

@@ -199,6 +199,8 @@ class SweepTableTest(unittest.TestCase):
                              and e["action_id"] == identity],
                             [(1, "rejected", "provider_throttled"), (2, "accepted", None)])
                 types = [e["type"] for e in persisted.events]
+                self.assertEqual(types.count("anchors_verified"),
+                                 0 if shape == "library" else 1)
                 self.assertNotIn("evidence_recorded", types)
                 self.assertEqual((types.count("proof_cohort_started"),
                                   types.count("proof_sealed")), (1, 1))

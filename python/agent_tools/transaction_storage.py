@@ -111,6 +111,15 @@ class ProofRefused(TransactionError):
         self.reason = reason
 
 
+class RecoveryRefused(TransactionError):
+    """A recovery operation the core refuses; `reason` names the closed rule, and nothing is
+    written (#208 D16)."""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 LAST_AT_MS = 253_402_300_799_999  # 9999-12-31T23:59:59.999Z, the last `at` that fits
 
 

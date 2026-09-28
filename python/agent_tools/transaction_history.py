@@ -13,13 +13,15 @@ declaration bound to the proof plan's, through `agent_tools.transaction_recovery
 `recovery_plan_violation`, only when the `created` event pins its digest, and with a
 `recovers` back-link that is null or another transaction's id;
 `agent_tools.transaction_recovery`'s `recovery_view` derives the snapshot's `recovery` view
-on every load (#208 D6, D12). It reads no file, lock or clock: `validate_state` takes the
-creation-key index lookup as a callable, which `agent_tools.transaction_core` binds to its
-store root. It also composes what a reap appends to a lapsed span (`reaped`) and a late
-owner result's event (`owner_result_event`), and answers whether an executor and fence were
-ever issued a span (`span_issued`). The `at`-timestamp codec (`format_at`, `parse_at`) and
-the strict JSON object rule (`json_object_violation`) that a created `subject` and a late
-`result` share are imported from `agent_tools.transaction_storage`, not held here.
+on every load (#208 D6, D12), its `recovery_event_violation` checks each recovery event and
+its `recovery_transition_violation` gates each transition (#208 D7). It reads no file, lock
+or clock: `validate_state` takes the creation-key index lookup as a callable, which
+`agent_tools.transaction_core` binds to its store root. It also composes what a reap
+appends to a lapsed span (`reaped`) and a late owner result's event (`owner_result_event`),
+and answers whether an executor and fence were ever issued a span (`span_issued`). The
+`at`-timestamp codec (`format_at`, `parse_at`) and the strict JSON object rule
+(`json_object_violation`) that a created `subject` and a late `result` share are imported
+from `agent_tools.transaction_storage`, not held here.
 """
 
 import copy
@@ -41,7 +43,9 @@ from agent_tools.transaction_plan import plan_violation
 from agent_tools.transaction_proof import (
     PROOF_EVENT_KEYS, ProofFold, apply_proof_event, gate_violation, pairing_violation,
     proof_event_violation, proof_view)
-from agent_tools.transaction_recovery import recovery_view
+from agent_tools.transaction_recovery import (
+    RECOVERY_EVENT_KEYS, recovery_event_violation, recovery_transition_violation,
+    recovery_view)
 from agent_tools.transaction_recovery_plan import recovery_plan_violation
 from agent_tools.transaction_storage import (
     StateInvalid, format_at, json_object_violation, parse_at, serialize)
@@ -451,7 +455,9 @@ def validate_state(document: Any, transaction_id: str,
     its fence and passes `seal_violation`, which settlement also uses (#207 D31); and
     `pairing_violation` binds each rejection, exhaustion and seal to the transition right
     after it, and each reserved parking reason and `succeeded` to the event right before it
-    (#207 D10); every transition passes `gate_violation` over the actions before it (D12)."""
+    (#207 D10); every transition passes `gate_violation` over the actions before it (D12) and,
+    after the terminal check, `recovery_transition_violation` with the open span's fence; each
+    recovery event is checked by `recovery_event_violation` (#208 D7, D22)."""
     def refuse(rule: str) -> StateInvalid:
         return StateInvalid(f"{transaction_id}: {rule}")
 
@@ -533,6 +539,11 @@ def validate_state(document: Any, transaction_id: str,
                         raise refuse(f"event {seq} reaches terminal {state} over unresolved "
                                      f"action {blocker.action_id} ({status(blocker)})")
                     entered_terminal = seq
+                violation = recovery_transition_violation(
+                    document, events[:seq - 1], event["from"], state,
+                    None if fold.custody is None else fold.custody["fence"])
+                if violation is not None:
+                    raise refuse(f"event {seq} {violation}")
             case str() if event_type in CUSTODY_EVENTS:
                 _fold_custody(event, seq, fold, state, entered_terminal, refuse)
             case str() if event_type in _FENCED_EVENTS:
@@ -561,6 +572,14 @@ def validate_state(document: Any, transaction_id: str,
                 if event_type == "obligation_observed":
                     _note_id(event, fold)
                 apply_proof_event(event, proof_fold)
+            case str() if event_type in RECOVERY_EVENT_KEYS:
+                _check_envelope(event, seq, RECOVERY_EVENT_KEYS[event_type], refuse)
+                violation = recovery_event_violation(
+                    event, events[:seq - 1], document, keys=keys,
+                    open_fence=None if fold.custody is None else fold.custody["fence"],
+                    state=state)
+                if violation is not None:
+                    raise refuse(f"event {seq} {violation}")
             case _:
                 raise refuse(f"event {seq} has unknown event type {event_type!r}")
     violation = pairing_violation(events[-1], None)
