@@ -3521,6 +3521,21 @@ def _installing_runs(repo_root: Path, issue: str, digest: str) -> Iterator[Path]
             yield run_dir
 
 
+def _installed_delivery(runtime: Any, run_dir: Path, issue: str, digest: str) -> dict[str, Any]:
+    """The validated delivery an installing run holds, re-read unlocked, or a refusal (#193 D14)."""
+    invalid = f"build-delivery refused: installing ledger {run_dir.name} is invalid"
+    try:
+        state = read_state_unlocked(run_dir / "state.json", run_dir.name)
+        delivery = state["issues"][issue]["delivery"]
+        # Validation already ties contract_digest to the contract, so this
+        # only fires when the file was replaced between the two unlocked reads.
+        if runtime.model.canonical_digest(delivery["contract"]) != digest:
+            raise WorkflowError(invalid)
+    except Exception as error:
+        raise WorkflowError(invalid) from error
+    return delivery
+
+
 def installed_initial_intent(runtime: Any, repo_root_value: str,
                              contract: dict[str, Any]) -> dict[str, Any] | None:
     """The root intent a ledger under the repo root installed with ``contract``, or None.
@@ -3545,18 +3560,13 @@ def installed_initial_intent(runtime: Any, repo_root_value: str,
     run_dir = next(_installing_runs(repo_root, issue, digest), None)
     if run_dir is None:
         return None
-    invalid = f"build-delivery refused: installing ledger {run_dir.name} is invalid"
+    delivery = _installed_delivery(runtime, run_dir, issue, digest)
     try:
-        state = read_state_unlocked(run_dir / "state.json", run_dir.name)
-        delivery = state["issues"][issue]["delivery"]
-        # Validation already ties contract_digest to the contract, so this
-        # only fires when the file was replaced between the two unlocked reads.
-        if runtime.model.canonical_digest(delivery["contract"]) != digest:
-            raise WorkflowError(invalid)
         root = next(item for item in delivery["authorization_intents"]
                     if item["predecessor_intent_id"] is None)
     except Exception as error:
-        raise WorkflowError(invalid) from error
+        raise WorkflowError(
+            f"build-delivery refused: installing ledger {run_dir.name} is invalid") from error
     return copy.deepcopy(root)
 
 
@@ -3582,15 +3592,7 @@ def installing_ledger_delivery(runtime: Any, repo_root_value: str,
                             "than one ledger: " + ", ".join(run.name for run in runs))
     if not runs:
         return None
-    invalid = f"build-delivery refused: installing ledger {runs[0].name} is invalid"
-    try:
-        state = read_state_unlocked(runs[0] / "state.json", runs[0].name)
-        delivery = state["issues"][issue]["delivery"]
-        if runtime.model.canonical_digest(delivery["contract"]) != digest:
-            raise WorkflowError(invalid)
-    except Exception as error:
-        raise WorkflowError(invalid) from error
-    return copy.deepcopy(delivery)
+    return copy.deepcopy(_installed_delivery(runtime, runs[0], issue, digest))
 
 
 def command_check_launch(args: argparse.Namespace) -> int:
