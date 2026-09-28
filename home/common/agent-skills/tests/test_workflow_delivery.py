@@ -457,5 +457,29 @@ class WorktreeBranchTest(unittest.TestCase):
             self.runtime.worktree_pattern_refusal(LEGACY, "the worktree is absent"),
             prefix + ", and the worktree is absent")
 
+
+class CurrentSelectionTest(unittest.TestCase):
+    """#192 D25: the builder re-checks the delivery workflow-state hands it."""
+
+    def test_a_missing_foreign_or_malformed_delivery_is_refused(self):
+        runtime = runpy.run_path(str(ENTRY))["DeliveryRuntime"](notes_max_characters=10_000)
+        contract = runtime.build_delivery("contract", {
+            "issue": 154, "worktree": f"/repo/.worktrees/{LIVE}",
+            "source_kind": "explicit_user",
+            "source_reference": "invocation:/from-issue 154 --auto", "now": NOW},
+            policy=resolved_snapshot("/repo"))["contract"]
+        for label, delivery, reason in (
+                ("no ledger", None, "no ledger under the repo root installs this contract"),
+                ("malformed", {}, "the installed delivery is invalid"),
+                ("another contract's",
+                 contract_and_delivery_for_stage(runtime.model, "merge")[1],
+                 "the installed delivery is invalid")):
+            with self.subTest(label=label):
+                with self.assertRaises(ValueError) as caught:
+                    runtime.build_delivery("current-selection", {"contract": contract},
+                                           policy=None, installed_delivery=delivery)
+                self.assertEqual(str(caught.exception), "current selection: " + reason)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -15,7 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 
 SCHEMA_VERSION = 4
@@ -3502,6 +3502,25 @@ def _non_symlink(path: Path, kind: Callable[[int], bool]) -> bool:
     return status is not None and not stat.S_ISLNK(status.st_mode) and kind(status.st_mode)
 
 
+def _installing_runs(repo_root: Path, issue: str, digest: str) -> Iterator[Path]:
+    """Each run under repo_root whose raw state records digest for issue, sorted (#193 D3)."""
+    workflows = repo_root / ".superpowers" / "workflows"
+    if not all(_non_symlink(path, stat.S_ISDIR) for path in (workflows.parent, workflows)):
+        return
+    for run_dir in sorted(workflows.iterdir(), key=lambda path: path.name):
+        state_path = run_dir / "state.json"
+        try:
+            if (not RUN_ID_PATTERN.fullmatch(run_dir.name)
+                    or not _non_symlink(run_dir, stat.S_ISDIR)
+                    or not _non_symlink(state_path, stat.S_ISREG)):
+                continue
+            raw_state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        if _stored_contract_digest(raw_state, issue) == digest:
+            yield run_dir
+
+
 def installed_initial_intent(runtime: Any, repo_root_value: str,
                              contract: dict[str, Any]) -> dict[str, Any] | None:
     """The root intent a ledger under the repo root installed with ``contract``, or None.
@@ -3517,41 +3536,61 @@ def installed_initial_intent(runtime: Any, repo_root_value: str,
     run (D14).
     """
     repo_root = resolve_repo_root(repo_root_value)
-    workflows = repo_root / ".superpowers" / "workflows"
-    if not all(_non_symlink(path, stat.S_ISDIR) for path in (workflows.parent, workflows)):
-        return None
     try:
         digest = runtime.model.canonical_digest(contract)
     except ValueError:
         # A contract without canonical bytes cannot be recorded by any ledger.
         return None
     issue = str(contract["issue"])
-    for run_dir in sorted(workflows.iterdir(), key=lambda path: path.name):
-        state_path = run_dir / "state.json"
-        try:
-            if (not RUN_ID_PATTERN.fullmatch(run_dir.name)
-                    or not _non_symlink(run_dir, stat.S_ISDIR)
-                    or not _non_symlink(state_path, stat.S_ISREG)):
-                continue
-            raw_state = json.loads(state_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, RecursionError):
-            continue
-        if _stored_contract_digest(raw_state, issue) != digest:
-            continue
-        invalid = f"build-delivery refused: installing ledger {run_dir.name} is invalid"
-        try:
-            state = read_state_unlocked(state_path, run_dir.name)
-            delivery = state["issues"][issue]["delivery"]
-            # Validation already ties contract_digest to the contract, so this
-            # only fires when the file was replaced between the two unlocked reads.
-            if runtime.model.canonical_digest(delivery["contract"]) != digest:
-                raise WorkflowError(invalid)
-            root = next(item for item in delivery["authorization_intents"]
-                        if item["predecessor_intent_id"] is None)
-        except Exception as error:
-            raise WorkflowError(invalid) from error
-        return copy.deepcopy(root)
-    return None
+    run_dir = next(_installing_runs(repo_root, issue, digest), None)
+    if run_dir is None:
+        return None
+    invalid = f"build-delivery refused: installing ledger {run_dir.name} is invalid"
+    try:
+        state = read_state_unlocked(run_dir / "state.json", run_dir.name)
+        delivery = state["issues"][issue]["delivery"]
+        # Validation already ties contract_digest to the contract, so this
+        # only fires when the file was replaced between the two unlocked reads.
+        if runtime.model.canonical_digest(delivery["contract"]) != digest:
+            raise WorkflowError(invalid)
+        root = next(item for item in delivery["authorization_intents"]
+                    if item["predecessor_intent_id"] is None)
+    except Exception as error:
+        raise WorkflowError(invalid) from error
+    return copy.deepcopy(root)
+
+
+def installing_ledger_delivery(runtime: Any, repo_root_value: str,
+                               contract: object) -> dict[str, Any] | None:
+    """The validated delivery the one ledger that installed ``contract`` holds, or None.
+
+    Read-only like ``installed_initial_intent``, over the same scan (#192 D25).
+    A selection can differ between ledgers where a root intent cannot, so two
+    raw matches refuse naming both runs instead of taking the first. A value
+    with no canonical bytes or issue matches no ledger and meets the builder's
+    own contract refusal.
+    """
+    repo_root = resolve_repo_root(repo_root_value)
+    try:
+        digest = runtime.model.canonical_digest(contract)
+        issue = str(contract["issue"])
+    except Exception:
+        return None
+    runs = list(_installing_runs(repo_root, issue, digest))
+    if len(runs) > 1:
+        raise WorkflowError("build-delivery refused: the contract is installed by more "
+                            "than one ledger: " + ", ".join(run.name for run in runs))
+    if not runs:
+        return None
+    invalid = f"build-delivery refused: installing ledger {runs[0].name} is invalid"
+    try:
+        state = read_state_unlocked(runs[0] / "state.json", runs[0].name)
+        delivery = state["issues"][issue]["delivery"]
+        if runtime.model.canonical_digest(delivery["contract"]) != digest:
+            raise WorkflowError(invalid)
+    except Exception as error:
+        raise WorkflowError(invalid) from error
+    return copy.deepcopy(delivery)
 
 
 def command_check_launch(args: argparse.Namespace) -> int:
@@ -3775,7 +3814,9 @@ def command_build_delivery(args: argparse.Namespace) -> int:
 
     A contract the builder cannot re-derive is served only against the initial
     intent a ledger under --repo-root installed with it, which
-    ``installed_initial_intent`` finds; that is the only ledger read (#193 D2).
+    ``installed_initial_intent`` finds, and --kind current-selection is served
+    the current selection of the one ledger ``installing_ledger_delivery``
+    finds (#192 D24); those are the only ledger reads (#193 D2).
     For --kind contract, a worktree whose name is not an issue branch is probed for
     the branch it has checked out (#192 D3); that is the command's only git read.
     """
@@ -3795,10 +3836,15 @@ def command_build_delivery(args: argparse.Namespace) -> int:
     if (args.kind != "contract" and isinstance(value, dict) and "contract" in value
             and runtime.requires_installed_intent(value["contract"])):
         installed = installed_initial_intent(runtime, args.repo_root, value["contract"])
+    installed_delivery = None
+    if args.kind == "current-selection" and isinstance(value, dict) and "contract" in value:
+        installed_delivery = installing_ledger_delivery(runtime, args.repo_root,
+                                                        value["contract"])
     try:
         result = runtime.build_delivery(args.kind, value, policy=policy,
                                         installed_intent=installed,
-                                        worktree_branch=worktree_branch)
+                                        worktree_branch=worktree_branch,
+                                        installed_delivery=installed_delivery)
     except Exception as error:
         raise WorkflowError(f"build-delivery refused: {error}") from error
     if args.kind == "contract":
@@ -3892,7 +3938,9 @@ def build_parser() -> argparse.ArgumentParser:
         "It takes no lock, reads no clock and writes nothing. "
         "A contract the builder cannot re-derive is served only when a ledger under "
         "--repo-root has installed it, and then against that ledger's stored initial "
-        "intent; that is the only time it reads a ledger. "
+        "intent. --kind current-selection serves the current selection of the "
+        "contract's reviewed slot from the one ledger that installed the contract. "
+        "Those are the only times it reads a ledger. "
         "--kind contract resolves project policy with resolve-project at --repo-root, "
         "the ledger repository root, and seals only that policy. "
         "The contract's branch is the worktree path's final component when that name "
@@ -3900,7 +3948,10 @@ def build_parser() -> argparse.ArgumentParser:
         "path, which must be the top level of a git worktree, and that branch must match "
         "the pattern. When the input's "
         "worktree path already exists, it also resolves there and refuses if any "
-        "sealed policy member differs. The other kinds resolve no project policy. Every refusal "
+        "sealed policy member differs. The other kinds resolve no project policy. "
+        "--kind sync-selection seals a selection that extends --input's "
+        "prior_selection by one sync merge commit whose first parent is that "
+        "selection's head. Every refusal "
         "after argument parsing exits 2 with empty stdout and one stderr line; when "
         "resolve-project refuses, that line ends with the resolver's error document as "
         "one line of canonical JSON."))
@@ -3908,8 +3959,9 @@ def build_parser() -> argparse.ArgumentParser:
         "absolute ledger repository root; --kind contract resolves the policy it seals here"))
     build_delivery.add_argument(
         "--kind", required=True,
-        choices=("contract", "initial-intent", "scope", "selected-output", "observation",
-                 "authority-observation", "authorization-chain"))
+        choices=("contract", "initial-intent", "scope", "selected-output", "sync-selection",
+                 "current-selection", "observation", "authority-observation",
+                 "authorization-chain"))
     build_delivery.add_argument("--input", required=True)
     build_delivery.set_defaults(handler=command_build_delivery)
 

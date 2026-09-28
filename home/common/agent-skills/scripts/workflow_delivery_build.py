@@ -12,7 +12,10 @@ The ``authorization-chain`` kind seals the handoff's chain digest over the inten
 an owner holds. Every kind that takes a contract works from its reference
 initial intent: the one derived from the contract when it re-derives, else the
 intent a ledger installed with it, which workflow-state finds and hands in as
-``installed_intent``. Declared scopes (in that intent) and actual scopes (kind
+``installed_intent``.
+The ``current-selection`` kind serves the current selection from the delivery
+that ledger holds, which workflow-state hands in as ``installed_delivery``.
+Declared scopes (in that intent) and actual scopes (kind
 ``scope``) come from the one reference intent, so exact matching can only
 disagree when the inputs differ. Selections and observations take only what a probe returns;
 every member the contract determines is filled from the contract, so an owner
@@ -41,6 +44,7 @@ _SLOT_STAGES = ("select_reviewed_output", "publish_branch", "open_pr", "merge_pr
 _PR_STAGES = frozenset({"open_pr", "merge_pr"})
 _CONTRACT_INPUT = {"issue", "worktree", "source_kind", "source_reference", "now"}
 _SELECTION_INPUT = {"contract", "head", "tree", "acceptance_ref", "review_ref", "test_ref"}
+_SYNC_INPUT = {"contract", "prior_selection", "head", "tree", "parents", "review_ref", "test_ref"}
 _OBSERVATION_INPUT = {"contract", "observation_kind", "source_kind", "source_reference",
                       "observed_at", "evidence"}
 _OBSERVATION_SOURCES = frozenset({"provider", "tracker", "repository", "filesystem",
@@ -240,7 +244,8 @@ class DeliveryBuilder:
 
     def build(self, kind: str, value: object, *, policy: dict | None,
               installed_intent: object = None,
-              worktree_branch: str | None = None) -> object:
+              worktree_branch: str | None = None,
+              installed_delivery: object = None) -> object:
         if kind == "contract":
             return self._build_contract(value, policy, worktree_branch)
         if kind == "initial-intent":
@@ -270,6 +275,10 @@ class DeliveryBuilder:
             return self._authority(value, installed_intent)
         if kind == "authorization-chain":
             return self._chain(value, installed_intent)
+        if kind == "sync-selection":
+            return self._sync_selection(value, installed_intent)
+        if kind == "current-selection":
+            return self._current_selection(value, installed_intent, installed_delivery)
         _refuse(f"unknown builder kind: {kind!r}")
 
     def requires_installed_intent(self, value: object) -> bool:
@@ -410,6 +419,77 @@ class DeliveryBuilder:
             "review_evidence_ids": [f"review:{refs['review_ref']}@{head}"],
             "test_evidence_ids": [f"test:{refs['test_ref']}@{head}"],
         })
+
+    def _sync_selection(self, value: object, installed_intent: object) -> dict[str, Any]:
+        """Seal one sync selection extending ``prior_selection`` by one merge (#192 §5)."""
+        value = _closed(value, _SYNC_INPUT)
+        refs = {name: _text(value[name], name) for name in (
+            "head", "tree", "review_ref", "test_ref")}
+        contract, _ = self._checked_contract(value["contract"], installed_intent)
+        digest = self._model.canonical_digest(contract)
+        _, _, branch, base, _ = self._contract_facts(contract)
+        repository = contract["project"]["repository_id"]
+        try:
+            prior = self._model.validate_delivery_object(
+                value["prior_selection"], expected_kind="selected-output",
+                notes_max_characters=self._notes_max)
+        except Exception:
+            # A null nested member raises AttributeError, not ValueError (#193 D14).
+            prior = None
+        if prior is None or (prior["contract_digest"], prior["slot_id"], prior["subject_kind"],
+                             prior["repository_id"], prior["branch"], prior["base"]) != (
+                digest, _SLOT, "commit", repository, branch, base):
+            _refuse("sync selection: prior_selection is not a valid selection of this contract")
+        head = refs["head"]
+        if head == prior["subject_value"]:
+            _refuse("sync selection: head equals the prior selection's head")
+        parents = value["parents"]
+        if (not isinstance(parents, list) or len(parents) != 2
+                or not all(isinstance(item, str) and item for item in parents)
+                or parents[0] == parents[1] or head in parents):
+            _refuse("sync selection: parents must be two distinct non-empty strings "
+                    "other than head")
+        if parents[0] != prior["subject_value"]:
+            _refuse("sync selection: parents[0] is not the prior selection's head")
+        sync = {"prior_selection_id": prior["id"], "first_parent": parents[0],
+                "integration_parent": parents[1]}
+        return self._seal({
+            "schema_version": 2, "kind": "selected-output", "contract_digest": digest,
+            "slot_id": _SLOT, "subject_kind": "commit", "subject_value": head,
+            "data_identity_digest": self._model.canonical_digest(
+                {"kind": "git-tree", "value": refs["tree"]}),
+            "repository_id": repository, "branch": branch, "base": base,
+            "evidence_digest": self._model.canonical_digest({
+                "head": head, "review_ref": refs["review_ref"],
+                "test_ref": refs["test_ref"], "sync": sync}),
+            "acceptance_evidence_ids": list(prior["acceptance_evidence_ids"]),
+            "review_evidence_ids": sorted({*prior["review_evidence_ids"],
+                                           f"review:{refs['review_ref']}@{head}"}),
+            "test_evidence_ids": sorted({*prior["test_evidence_ids"],
+                                         f"test:{refs['test_ref']}@{head}"}),
+            "sync": sync,
+        })
+
+    def _current_selection(self, value: object, installed_intent: object,
+                           installed_delivery: object) -> dict[str, Any]:
+        """The contract's current selection, from the ledger that installed it (#192 D24)."""
+        contract, _ = self._checked_contract(_closed(value, {"contract"})["contract"],
+                                             installed_intent)
+        if installed_delivery is None:
+            _refuse("current selection: no ledger under the repo root installs this contract")
+        try:
+            if installed_delivery["contract_digest"] != self._model.canonical_digest(contract):
+                raise ValueError("the delivery belongs to another contract")
+            current = self._model.current_selection(installed_delivery)
+        except Exception:
+            # A null nested member raises AttributeError, not ValueError (#193 D14).
+            current = False
+        if current is False:
+            _refuse("current selection: the installed delivery is invalid")
+        if current is None:
+            _refuse("current selection: the installing ledger holds no selection of the "
+                    "contract's reviewed slot")
+        return current
 
     def _observation(self, value: object, installed_intent: object) -> dict[str, Any]:
         if not isinstance(value, dict) or not isinstance(value.get("observation_kind"), str):

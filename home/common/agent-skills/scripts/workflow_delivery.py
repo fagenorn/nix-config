@@ -91,15 +91,19 @@ class DeliveryRuntime:
     _BUILD_OUTPUT_KINDS = {"initial-intent": "authorization-intent", "scope": "scope-tuple",
                            "selected-output": "selected-output",
                            "observation": "delivery-observation",
-                           "authority-observation": "authority-observation"}
+                           "authority-observation": "authority-observation",
+                           "sync-selection": "selected-output",
+                           "current-selection": "selected-output"}
 
     def build_delivery(self, kind: str, value: object, *, policy: dict[str, Any] | None,
                        installed_intent: object = None,
-                       worktree_branch: str | None = None) -> object:
+                       worktree_branch: str | None = None,
+                       installed_delivery: object = None) -> object:
         """Build one sealed delivery value and validate every object it carries."""
         result = self._builder.build(kind, value, policy=policy,
                                      installed_intent=installed_intent,
-                                     worktree_branch=worktree_branch)
+                                     worktree_branch=worktree_branch,
+                                     installed_delivery=installed_delivery)
         if kind == "contract":
             if not isinstance(result, dict) or set(result) != {"contract", "initial_intent"}:
                 raise ValueError("builder returned an invalid contract result")
