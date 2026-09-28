@@ -24,11 +24,17 @@ operations are that and `invoke_action`, which calls the effect only after a fre
 inspection, behind a durable intent and within the retry budget. An action observed in
 flight (`open`, or last read `in_progress`) keeps `renew` from quiescing a parked
 transaction, and `advance` enters no terminal while an action is `open`, `in_progress` or
-`unknown`. The durable-file primitives and the refusal hierarchy live in
+`unknown`; it never enters `succeeded` nor writes a reserved parking reason, and applies
+the publication and activation gates of `agent_tools.transaction_proof`. The durable-file
+primitives and the refusal hierarchy live in
 `agent_tools.transaction_storage`, and the document model — vocabularies, `Custody`,
 `Transaction`, the validator and the snapshot fold — in `agent_tools.transaction_history`;
 this module re-exports the errors and the public model names. `action_id` and the retry
 constants live in `agent_tools.transaction_invocation`, which this module re-exports too.
+`agent_tools.transaction_plan` is the home of the proof declaration's compiler and the plan
+constants, which this module re-exports as well. `collect_obligation` records one proof
+observation around the pure halves in `agent_tools.transaction_proof` (re-exported too);
+`start_cohort` opens a convergence cohort and `settle_proof` judges it in one write.
 The module has no command and no caller yet.
 """
 
@@ -59,11 +65,21 @@ from agent_tools.transaction_invocation import (
     EFFECT_STATES, MAX_ATTEMPTS, REFUSAL_REASONS, RETRY_WINDOW_MS, ActionFold, action_id,
     action_violation, effect_request, fold_actions, inspect_result_violation,
     invoke_result_violation, observed, refusal, refused_error, satisfied, status, unresolved)
+from agent_tools.transaction_plan import (
+    COHORT_MARGIN_FLOOR_MS, COHORT_MARGIN_PERCENT, DEFAULT_CONVERGENCE_WINDOW_MS,
+    MAX_COHORT_ATTEMPTS, MAX_COLLECTION_LATENCY_MS, MAX_CONVERGENCE_WINDOW_MS, MAX_FRESHNESS_MS,
+    PLAN_REJECTION_REASONS, PLAN_SCHEMA, RUNNING_IDENTITY_FRESHNESS_MS, compile_proof,
+    materialize_plan)
+from agent_tools.transaction_proof import (
+    PROOF_REFUSAL_REASONS, advance_violation, cohort_start, collection_refusal,
+    next_evidence_id, obligation, observation_request, observation_violation, open_cohort,
+    proof_refused, settlement)
 from agent_tools.transaction_storage import (
     LAST_AT_MS, CreationConflict, CustodyMisbound, EffectResultInvalid, FenceViolation,
-    GrantInvalid, InvocationRefused, LeaseUnavailable, StaleCustody, StateInvalid,
-    TransactionBusy, TransactionError, TransitionRefused, UnknownTransaction, atomic_write,
-    fsync_directory, lstat_mode, open_lock, read_json, require_directory)
+    GrantInvalid, InvocationRefused, LeaseUnavailable, ProofPlanRejected, ProofRefused,
+    StaleCustody,
+    StateInvalid, TransactionBusy, TransactionError, TransitionRefused, UnknownTransaction,
+    atomic_write, fsync_directory, lstat_mode, open_lock, read_json, require_directory)
 
 INDEX_SCHEMA = "transaction-creation-key/v1"
 PARKED_CUSTODY_WINDOW_MS = 900_000  # the core cap on custody held through a parking (D19)
@@ -111,7 +127,7 @@ def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
 
 def _require_creatable(root: Path, creation_key: Any, subject: Any,
                        concurrency_keys: Any) -> None:
-    """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v3 document."""
+    """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v4 document."""
     where = f"{root}: creation_key {creation_key!r}"
     if type(creation_key) is not str or not creation_key:
         raise StateInvalid(f"{where}: not a non-empty string")
@@ -197,7 +213,10 @@ class TransactionStore:
         fenced-checked, required or not, before the lifecycle refusals. The last of
         those refuses a terminal target while some action is `open`, `in_progress` or
         `unknown` (`TransitionRefused` naming the first such action and its status),
-        whatever `external_state` the caller passes. Entering a terminal while custody
+        whatever `external_state` the caller passes. Before it, `advance_violation` refuses
+        `succeeded` (entered only through `settle_proof`), a `proving -> attention_required`
+        with a reserved reason, and a failing publication or activation gate (#207 D10, D12,
+        D27). Entering a terminal while custody
         is held appends the transition and a `lease_released` reason `terminal` in one
         `state.json` write, then clears the lease records. Every refusal happens
         before any write; the lock file is never created.
@@ -258,59 +277,40 @@ class TransactionStore:
             raise TransitionRefused(f"{where}: external_state is not known, unknown or None")
         if target in TERMINALS and external_state != "known":
             raise TransitionRefused(f"{where}: terminal target needs known external state")
+        rule = advance_violation(prior, target, reason)
+        if rule is not None:
+            raise TransitionRefused(f"{where}: {rule}")
         blocker = unresolved(fold_actions(prior["events"])) if target in TERMINALS else None
         if blocker is not None:
             raise TransitionRefused(f"{where}: terminal target over unresolved action "
                                     f"{blocker.action_id} ({status(blocker)})")
-        at = format_at(now)
-        candidate = copy.deepcopy(prior)
-        candidate["events"].append({
-            "seq": prior["revision"] + 1, "type": "transitioned", "at": at,
-            "from": source, "to": target, "reason": reason,
-            "external_state": external_state})
-        if target == "attention_required":
-            candidate["parked_from"] = source
-        elif source == "attention_required":
-            candidate["parked_from"] = None
-        candidate["state"] = target
-        fence = prior["custody"]["fence"] if prior["custody"] is not None else None
-        if target in TERMINALS and fence is not None:
-            candidate["events"].append({
-                "seq": len(candidate["events"]) + 1, "type": "lease_released", "at": at,
-                "fence": fence, "reason": "terminal"})
-            candidate["custody"] = None
-        candidate["revision"] = len(candidate["events"])
-        if candidate["events"][:len(prior["events"])] != prior["events"]:
-            raise StateInvalid(f"{transaction_id}: prior events are not the new history's "
-                               f"prefix")
-        _validate_state(candidate, transaction_id, self.root)
-        directory = self.root / transaction_id
-        if candidate["custody"] is None and fence is not None:
-            with self._leases.locked():
-                atomic_write(directory, directory / "state.json", candidate)
-                self._leases.clear(fence)
-        else:
-            atomic_write(directory, directory / "state.json", candidate)
-        return snapshot(candidate)
+        return self._append(prior, now, [{
+            "type": "transitioned", "from": source, "to": target, "reason": reason,
+            "external_state": external_state}])
 
-    def create(self, creation_key: str, subject: dict, *,
-               concurrency_keys: Collection[str]) -> Transaction:
+    def create(self, creation_key: str, subject: dict, *, concurrency_keys: Collection[str],
+               proof: dict) -> Transaction:
         """Create the transaction for `creation_key`, or return the one it already names.
 
         The concurrency key set is fixed here, stored sorted, and compared with the
-        subject when the key already names a transaction (D4).
+        subject when the key already names a transaction (D4). The `proof` declaration
+        has no default and is compiled before any lock, so a rejected one
+        (`ProofPlanRejected`) leaves nothing behind; the plan it materializes under the
+        transaction id is stored with its digest on the `created` event, and a same-key
+        create whose plan digest differs is a `CreationConflict` (#207 D2, D3).
         """
         _require_creatable(self.root, creation_key, subject, concurrency_keys)
+        compiled = compile_proof(proof, where=f"{self.root}: creation_key {creation_key!r}")
         keys = sorted(concurrency_keys)
         at = format_at(self._now())
         descriptor = open_lock(self.root / "creation.lock")
         try:
-            return self._create_locked(creation_key, subject, keys, at)
+            return self._create_locked(creation_key, subject, keys, compiled, at)
         finally:
             os.close(descriptor)
 
     def _create_locked(self, creation_key: str, subject: dict, keys: list[str],
-                       at: str) -> Transaction:
+                       compiled: dict, at: str) -> Transaction:
         transaction_id = _read_index(self.root, creation_key)
         if transaction_id is None:
             transaction_id = _mint_id()
@@ -327,6 +327,7 @@ class TransactionStore:
             directory.mkdir(exist_ok=True)
             require_directory(directory, missing_ok=False)
             fsync_directory(self.root)
+        plan = materialize_plan(compiled, transaction_id)
         descriptor = open_lock(directory / "lock")
         try:
             if lstat_mode(directory / "state.json") is not None:
@@ -338,7 +339,9 @@ class TransactionStore:
                 differs = [name for name, differ in (
                     ("subject", telemetry_digest(document["subject"])
                      != telemetry_digest(subject)),
-                    ("concurrency key set", document["concurrency_keys"] != keys)) if differ]
+                    ("concurrency key set", document["concurrency_keys"] != keys),
+                    ("proof plan", telemetry_digest(plan)
+                     != document["events"][0]["proof_plan_digest"])) if differ]
                 if differs:
                     raise CreationConflict(
                         f"{transaction_id}: creation_key {creation_key!r} already names a "
@@ -348,8 +351,9 @@ class TransactionStore:
                 "schema": SCHEMA, "transaction_id": transaction_id,
                 "creation_key": creation_key, "subject": copy.deepcopy(subject),
                 "state": "created", "parked_from": None, "revision": 1,
-                "events": [{"seq": 1, "type": "created", "at": at}],
-                "concurrency_keys": keys, "custody": None,
+                "events": [{"seq": 1, "type": "created", "at": at,
+                            "proof_plan_digest": telemetry_digest(plan)}],
+                "concurrency_keys": keys, "custody": None, "proof_plan": plan,
             }
             _validate_state(document, transaction_id, self.root)
             atomic_write(directory, directory / "state.json", document)
@@ -568,17 +572,37 @@ class TransactionStore:
 
     def _append(self, prior: dict, now: int, events: list[dict]) -> Transaction:
         """Append `events` numbered from `prior`'s revision, each stamped `at` `now`, in one
-        validated `state.json` write; the caller holds the transaction lock."""
+        validated `state.json` write; the caller holds the transaction lock. A `transitioned`
+        event moves `state` and `parked_from`; entering a terminal under custody also appends
+        `lease_released` reason `terminal` and clears the records under the lease lock."""
         transaction_id = prior["transaction_id"]
         candidate = copy.deepcopy(prior)
         at = format_at(now)
         for fields in events:
             candidate["events"].append(
                 {"seq": len(candidate["events"]) + 1, "at": at, **fields})
+            if fields["type"] == "transitioned":
+                source, target = fields["from"], fields["to"]
+                if target == "attention_required":
+                    candidate["parked_from"] = source
+                elif source == "attention_required":
+                    candidate["parked_from"] = None
+                candidate["state"] = target
+        fence = prior["custody"]["fence"] if prior["custody"] is not None else None
+        if candidate["state"] in TERMINALS and fence is not None:
+            candidate["events"].append({
+                "seq": len(candidate["events"]) + 1, "type": "lease_released", "at": at,
+                "fence": fence, "reason": "terminal"})
+            candidate["custody"] = None
         candidate["revision"] = len(candidate["events"])
         _validate_state(candidate, transaction_id, self.root)
         directory = self.root / transaction_id
-        atomic_write(directory, directory / "state.json", candidate)
+        if candidate["custody"] is None and fence is not None:
+            with self._leases.locked():
+                atomic_write(directory, directory / "state.json", candidate)
+                self._leases.clear(fence)
+        else:
+            atomic_write(directory, directory / "state.json", candidate)
         return snapshot(candidate)
 
     @staticmethod
@@ -698,6 +722,79 @@ class TransactionStore:
                 {"type": "action_inspected", "action_id": identity,
                  "outcome": inspected["outcome"], "reference": inspected["reference"],
                  "fence": fence}])
+
+    def collect_obligation(self, custody: Custody, *, obligation_id: str,
+                           observer: Any) -> Transaction:
+        """Observe one plan obligation through `observer.observe`, then record it (#207 D6,
+        D7, D27, D33, D34).
+
+        A malformed credential or id, or no callable `observe`, is `StateInvalid` before any
+        lock. The first hold (`_fenced`, clock read once as `started`) refuses a broken
+        admission rule `ProofRefused` with no write and no call, appends `interval_opened`
+        for an `interval` obligation, and builds the request. The observer runs with no lock
+        held; what it raises propagates, and a result outside the closed shape is
+        `EffectResultInvalid`. The second hold refuses a terminal, a lapse (`StaleCustody`),
+        `clock_regressed`, a re-run admission rule and a changed cohort
+        (`not_cohort_member`); none records anything from the call, but an opened interval
+        stays unclosed and the next collection mints a new id. Otherwise it appends
+        `obligation_observed` with the held fence and `latency_ms = now - started`.
+        """
+        require_texts(custody, "collect_obligation", obligation_id=obligation_id)
+        transaction_id = custody.transaction_id
+        if not callable(getattr(observer, "observe", None)):
+            raise StateInvalid(f"{transaction_id}: collect_obligation: observer has no callable "
+                               f"observe")
+        detail = f"collect_obligation {obligation_id!r}"
+        with self._fenced(custody, "collect_obligation", writes=True) as (prior, started):
+            reason = collection_refusal(prior, obligation_id, started)
+            if reason is not None:
+                raise proof_refused(transaction_id, reason, detail)
+            entry = obligation(prior["proof_plan"], obligation_id)
+            cohort = open_cohort(prior["events"], prior["custody"]["fence"])
+            evidence_id = None
+            if entry["form"] == "interval":
+                evidence_id = next_evidence_id(prior["events"], obligation_id)
+                self._append(prior, started, [{"type": "interval_opened",
+                                               "evidence_id": evidence_id,
+                                               "fence": prior["custody"]["fence"]}])
+            request = observation_request(prior, entry, cohort)
+        result = observer.observe(request)
+        violation = observation_violation(result, entry)
+        if violation is not None:
+            raise EffectResultInvalid(f"{transaction_id}: collect_obligation: {violation}")
+        with self._fenced(custody, "collect_obligation", writes=True) as (prior, now):
+            fence = prior["custody"]["fence"]
+            reason = "clock_regressed" if now < started else collection_refusal(
+                prior, obligation_id, now)
+            if reason is None and open_cohort(prior["events"], fence) != cohort:
+                reason = "not_cohort_member"
+            if reason is not None:
+                raise proof_refused(transaction_id, reason, detail)
+            return self._append(prior, now, [{
+                "type": "obligation_observed", "obligation_id": obligation_id,
+                "evidence_id": evidence_id or next_evidence_id(prior["events"], obligation_id),
+                "form": entry["form"], "outcome": result["outcome"],
+                "reason": result["reason"], "reference": result["reference"],
+                "fence": fence, "cohort": cohort, "latency_ms": now - started}])
+
+    def start_cohort(self, custody: Custody) -> Transaction:
+        """Open the next cohort in one write: `cohort_start`'s events, which first fail one
+        left open under an older fence, or its `ProofRefused` (#207 D11, D22)."""
+        return self._decide(custody, "start_cohort", cohort_start)
+
+    def settle_proof(self, custody: Custody) -> Transaction:
+        """Judge the proof at one cutoff in one write, `settlement`'s first matching case:
+        rejected, seal (into `succeeded`), cohort failed, exhausted, else `no_open_cohort`
+        (#207 D10, D11, D21, D22)."""
+        return self._decide(custody, "settle_proof", settlement)
+
+    def _decide(self, custody: Custody, operation: str,
+                decide: Callable[[dict, int], list[dict]]) -> Transaction:
+        """A malformed credential refuses before any lock; `decide` refuses before any
+        write; no observer or effect is called."""
+        require_custody_shape(custody)
+        with self._fenced(custody, operation, writes=True) as (prior, now):
+            return self._append(prior, now, decide(prior, now))
 
     def _check_custody(self, prior: dict, custody: Custody, now: int) -> None:
         """The fenced check (D12, D25): credential, then path, then live records at `now`.

@@ -20,7 +20,7 @@ from agent_tools import transaction_core
 from agent_tools.transaction_core import TransactionStore
 
 from .transaction_core_shapes import SHAPES
-from .transaction_core_sweep_support import SCENARIOS, drive
+from .transaction_core_sweep_support import SCENARIOS, drive, shape_declaration
 from .transaction_core_world import World
 
 WITH_ACTIVATION = ("created", "awaiting_verification", "ready", "publishing", "published",
@@ -46,8 +46,7 @@ SWEEP = {
     ("product", "lease_lapse"): ("succeeded", LAPSED, frozenset({"snapshot"}), (1, 1)),
     ("daemon", "lease_lapse"): ("succeeded", LAPSED, frozenset({"snapshot", "interval"}),
                                 (1, 1)),
-    ("library", "lease_lapse"): ("succeeded", LAPSED_LIBRARY, frozenset({"snapshot"}),
-                                 (1, 1)),
+    ("library", "lease_lapse"): ("succeeded", LAPSED_LIBRARY, frozenset(), (1, 1)),
     **{(shape, "resume_after_crash"): (
         "succeeded", RESUMED_LIBRARY if shape == "library" else RESUMED, frozenset(), (2, 1))
        for shape in ("platform", "product", "daemon", "library")},
@@ -59,6 +58,64 @@ CUSTODY_EVENTS = {
     "throttled_retry": ["lease_acquired", "lease_released"],
     "lease_lapse": ["lease_acquired", *LAPSING, "lease_released"],
     "resume_after_crash": ["lease_acquired", *LAPSING, "lease_released"],
+}
+PUB_PARK = WITH_ACTIVATION[:4] + ("attention_required",)
+ACT_PARK = WITH_ACTIVATION[:6] + ("attention_required",)
+PROOF_PARK = WITH_ACTIVATION[:7] + ("attention_required",)
+
+
+def succeeded(shape, **expect):
+    return ("succeeded", WITHOUT_ACTIVATION if shape == "library" else WITH_ACTIVATION,
+            expect)
+
+
+def published(first, second, **more):
+    return {first: "satisfied", second: "satisfied", **more}
+
+
+# (shape, scenario) -> (final state, path, expectations): #207's committed landings.
+LANDINGS = {
+    ("platform", "partial_publication"): ("attention_required", PUB_PARK, {
+        "actions": {"build_closure": "satisfied", "tag_release": "diverged"}}),
+    ("product", "partial_publication"): ("attention_required", PUB_PARK, {
+        "actions": {"build_image": "satisfied", "index_channel": "diverged"}}),
+    ("daemon", "partial_publication"): ("attention_required", PUB_PARK, {
+        "actions": {"build_helpers": "satisfied", "stage_helpers": "diverged"}}),
+    ("library", "partial_publication"): ("attention_required", PUB_PARK, {
+        "actions": {"upload_artifact": "satisfied", "bind_version": "diverged"}}),
+    ("platform", "failed_activation"): ("attention_required", ACT_PARK, {
+        "actions": published("build_closure", "tag_release", switch_host_a="diverged")}),
+    ("product", "failed_activation"): ("attention_required", ACT_PARK, {
+        "actions": published("build_image", "index_channel", deploy_api="diverged")}),
+    ("daemon", "failed_activation"): ("attention_required", ACT_PARK, {
+        "actions": published("build_helpers", "stage_helpers", install_job="diverged")}),
+    ("library", "failed_activation"): succeeded("library"),
+    ("platform", "stale_false_positive_health"): ("attention_required", PROOF_PARK, {
+        "reason": "proof_rejected", "rejected": ["switch_host_a", "switch_host_b"],
+        "satisfied": []}),
+    ("product", "stale_false_positive_health"): ("attention_required", PROOF_PARK, {
+        "reason": "proof_rejected", "rejected": ["deploy_api", "deploy_admin"],
+        "satisfied": ["api_liveness", "admin_liveness"]}),
+    ("daemon", "stale_false_positive_health"): ("attention_required", PROOF_PARK, {
+        "reason": "proof_rejected", "rejected": ["install_job", "restart_job"],
+        "satisfied": ["job_liveness"]}),
+    ("library", "stale_false_positive_health"): succeeded("library"),
+    ("platform", "expired_snapshot"): ("attention_required", PROOF_PARK, {
+        "reason": "proof_did_not_converge", "failed": ["cohort_expired"] * 3,
+        "exhausted_by": "budget"}),
+    ("product", "expired_snapshot"): ("attention_required", PROOF_PARK, {
+        "reason": "proof_did_not_converge", "failed": ["cohort_expired"] * 2,
+        "exhausted_by": "window"}),
+    ("daemon", "expired_snapshot"): ("attention_required", PROOF_PARK, {
+        "reason": "proof_did_not_converge", "failed": ["cohort_expired"] * 2,
+        "exhausted_by": "window"}),
+    ("library", "expired_snapshot"): succeeded("library", members=[]),
+    ("platform", "fleet_stall"): succeeded("platform"),
+    ("product", "fleet_stall"): ("attention_required", ACT_PARK, {
+        "actions": published("build_image", "index_channel", deploy_api="satisfied",
+                             deploy_admin="satisfied", converge_fleet="in_progress")}),
+    ("daemon", "fleet_stall"): succeeded("daemon"),
+    ("library", "fleet_stall"): succeeded("library"),
 }
 
 
@@ -79,8 +136,9 @@ def states_passed(transaction):
 
 class SweepTableTest(unittest.TestCase):
     def test_the_table_covers_every_shape_for_every_ported_scenario(self):
-        self.assertEqual(set(SWEEP), {(shape, scenario) for shape in SHAPES
-                                      for scenario in SCENARIOS})
+        self.assertEqual(set(SWEEP) | set(LANDINGS), {(shape, scenario) for shape in SHAPES
+                                                      for scenario in SCENARIOS})
+        self.assertEqual(set(SWEEP) & set(LANDINGS), set())
 
     def test_every_cell_lands_where_the_table_says(self):
         for (shape, scenario), (final, path, voided, (first, rest)) in SWEEP.items():
@@ -139,6 +197,83 @@ class SweepTableTest(unittest.TestCase):
                              for e in persisted.events if e["type"] == "invocation_returned"
                              and e["action_id"] == identity],
                             [(1, "rejected", "provider_throttled"), (2, "accepted", None)])
+                types = [e["type"] for e in persisted.events]
+                self.assertNotIn("evidence_recorded", types)
+                self.assertEqual((types.count("proof_cohort_started"),
+                                  types.count("proof_sealed")), (1, 1))
+                seal = next(e for e in persisted.events if e["type"] == "proof_sealed")
+                self.assertEqual(persisted.proof["proof_cutoff_at"], seal["at"])
+                required = [o for o in persisted.proof["obligations"] if o["required"]]
+                self.assertTrue(required)
+                self.assertEqual({o["latest_outcome"] for o in required}, {"satisfied"})
+                self.assertEqual(
+                    sorted(u["name"] for u in persisted.proof_plan["units"]),
+                    declared_nodes(shape))
+
+    def test_every_new_row_lands_where_the_committed_table_says(self):
+        for (shape, scenario), (final, path, expect) in LANDINGS.items():
+            with self.subTest(shape=shape, scenario=scenario), \
+                    tempfile.TemporaryDirectory() as tmp:
+                world = World()
+                transaction_id = drive(Path(tmp), shape, scenario, world=world)
+                persisted = TransactionStore(Path(tmp)).load(transaction_id)
+                types = [e["type"] for e in persisted.events]
+                self.assertEqual((persisted.state, states_passed(persisted)), (final, path))
+                self.assertTrue(set(world.invokes.values()) <= {1})
+                names = {u["action_id"]: u["name"] for u in persisted.proof_plan["units"]}
+                observed = [e for e in persisted.events if e["type"] == "obligation_observed"]
+                cohorts = persisted.proof["cohorts"]
+                if final == "succeeded":
+                    self.assertEqual(CUSTODY_EVENTS["success"],
+                                     [t for t in types if t.startswith("lease_")])
+                    self.assertEqual([c["status"] for c in cohorts], ["sealed"])
+                    if "members" in expect:
+                        self.assertEqual(persisted.proof_plan["cohort"]["members"],
+                                         expect["members"])
+                    continue
+                self.assertEqual([t for t in types if t.startswith("lease_")],
+                                 ["lease_acquired"])
+                self.assertIsNotNone(persisted.custody)
+                last = transitions(persisted)[-1]
+                if "actions" in expect:
+                    self.assertEqual({a["name"]: a["status"] for a in persisted.actions},
+                                     expect["actions"])
+                    self.assertEqual(observed, [])
+                    stuck = [a["action_id"] for a in persisted.actions
+                             if a["status"] != "satisfied"]
+                    self.assertEqual([world.invokes[a] for a in stuck], [1])
+                    continue
+                self.assertEqual(last["reason"], expect["reason"])
+                self.assertEqual(last["external_state"], "known")
+                if expect["reason"] == "proof_rejected":
+                    [rejected] = [e for e in persisted.events if e["type"] == "proof_rejected"]
+                    self.assertEqual([names[i.rsplit(":", 1)[1]] for i in rejected["obligations"]],
+                                     expect["rejected"])
+                    self.assertEqual(cohorts, [])
+                    latest = {o["obligation_id"]: o["latest_outcome"]
+                              for o in persisted.proof["obligations"]}
+                    for obligation_id in expect["satisfied"]:
+                        self.assertEqual(latest[obligation_id], "satisfied")
+                else:
+                    self.assertEqual([(c["status"], c["reason"]) for c in cohorts],
+                                     [("failed", r) for r in expect["failed"]])
+                    [exhausted] = [e for e in persisted.events
+                                   if e["type"] == "proof_convergence_exhausted"]
+                    self.assertEqual((exhausted["cohorts"], exhausted["exhausted_by"]),
+                                     (len(expect["failed"]), expect["exhausted_by"]))
+                    park = last["seq"]
+                    self.assertFalse([e for e in persisted.events if e["seq"] > park])
+
+    def test_every_shape_declares_a_feasible_plan_whose_units_are_its_nodes(self):
+        for shape in SHAPES:
+            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as tmp:
+                created = TransactionStore(Path(tmp)).create(
+                    "probe", {"s": shape}, concurrency_keys=["k"],
+                    proof=shape_declaration(shape))
+                plan = created.proof_plan
+                self.assertEqual(sorted(u["name"] for u in plan["units"]),
+                                 declared_nodes(shape))
+                self.assertLessEqual(plan["cohort"]["makespan_ms"], 90_000)
 
     def test_the_crashed_action_reads_intent_inspection_then_retry(self):
         def epoch(event):
@@ -181,7 +316,8 @@ class SweepTableTest(unittest.TestCase):
             store = TransactionStore(Path(tmp))
             persisted = store.load(first)
             again = store.create("library:success", dict(persisted.subject),
-                                 concurrency_keys=list(persisted.concurrency_keys))
+                                 concurrency_keys=list(persisted.concurrency_keys),
+                                 proof=shape_declaration("library"))
             self.assertEqual(again.transaction_id, first)
             self.assertEqual(len(again.events), len(persisted.events))
 
@@ -229,10 +365,10 @@ def neutrality_findings(source):
 
 
 from agent_tools import (transaction_custody, transaction_history, transaction_invocation,
-                         transaction_storage)
+                         transaction_plan, transaction_proof, transaction_storage)
 
-NEUTRAL_MODULES = (transaction_core, transaction_history, transaction_invocation,
-                   transaction_custody, transaction_storage)
+NEUTRAL_MODULES = (transaction_core, transaction_history, transaction_proof, transaction_plan,
+                   transaction_invocation, transaction_custody, transaction_storage)
 
 
 class NeutralityTest(unittest.TestCase):

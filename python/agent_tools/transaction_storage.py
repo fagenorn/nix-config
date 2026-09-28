@@ -37,7 +37,8 @@ class TransitionRefused(TransactionError):
 
 
 class CreationConflict(TransactionError):
-    """The same creation key was requested with a different subject or concurrency key set."""
+    """The same creation key was requested with a different subject, concurrency key set or
+    proof plan."""
 
 
 class UnknownTransaction(TransactionError):
@@ -79,6 +80,25 @@ class InvocationRefused(TransactionError):
 class EffectResultInvalid(TransactionError):
     """An effect result outside the closed shapes; nothing from
     that call is recorded (#206 D11)."""
+
+
+class ProofPlanRejected(TransactionError):
+    """A proof declaration the core refuses to compile; `reason` is one of the closed plan
+    rejection reasons, and it is raised before any lock or write (#207 D18)."""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class ProofRefused(TransactionError):
+    """A proof operation the core refuses; `reason` names the closed rule. An admission
+    refusal precedes any write or observer call; one at `collect_obligation`'s second hold
+    follows the call and records nothing from it (#207 D18, D33)."""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 LAST_AT_MS = 253_402_300_799_999  # 9999-12-31T23:59:59.999Z, the last `at` that fits

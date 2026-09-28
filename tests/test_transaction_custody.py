@@ -22,6 +22,7 @@ T0 = 1_800_000_000_000
 TTL = 600_000
 KEYS = ("target:alpha", "project:alpha")
 SUBJECT = {"candidate": "sha256:abc"}
+EMPTY_PROOF = {"units": [], "obligations": [], "collectors": {}}
 PATH = "/work/alpha"
 INSTANCE = re.compile(r"lin_[0-9a-f]{32}")
 
@@ -55,7 +56,8 @@ class CustodyCase(unittest.TestCase):
         self.store = TransactionStore(self.root, clock=self.clock)
 
     def new(self, key="k", keys=KEYS):
-        return self.store.create(key, SUBJECT, concurrency_keys=keys).transaction_id
+        return self.store.create(key, SUBJECT, concurrency_keys=keys,
+                                 proof=EMPTY_PROOF).transaction_id
 
     def acquire(self, transaction_id, executor="exec-a", path=PATH, ttl=TTL):
         return self.store.acquire(transaction_id, executor_id=executor, subject_path=path,
@@ -449,8 +451,12 @@ class QuiesceTest(CustodyCase):
 class FencedAdvanceTest(CustodyCase):
     def step(self, transaction_id, *targets, custody=None):
         for target in targets:
-            after = self.store.advance(transaction_id, target, reason="r",
-                                       external_state="known", custody=custody)
+            if target == "succeeded":
+                self.store.start_cohort(custody)
+                after = self.store.settle_proof(custody)
+            else:
+                after = self.store.advance(transaction_id, target, reason="r",
+                                           external_state="known", custody=custody)
         return after
 
     def test_publishing_and_everything_after_it_requires_custody(self):
@@ -796,8 +802,8 @@ class OwnerResultTest(ReapTest):
 
     def test_a_terminal_transaction_refuses_late_results(self):
         transaction_id, custody = self.proving()
-        self.store.advance(transaction_id, "succeeded", reason="r", external_state="known",
-                           custody=custody)
+        self.store.start_cohort(custody)
+        self.store.settle_proof(custody)
         self.assertRefusedUnchanged(TransitionRefused,
                                     lambda: self.late(transaction_id, custody))
 
