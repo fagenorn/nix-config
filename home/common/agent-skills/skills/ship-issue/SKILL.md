@@ -47,7 +47,7 @@ review prompt.
 ## The flow
 
 ```
-0. Pre-flight              → worktree clean, branch pattern ok, no PR yet
+0. Pre-flight              → dispatch probe, worktree clean, branch pattern ok, no PR yet
 1. Sync integration branch → fetch + merge origin/<integration>, hybrid conflict policy
 2. Verify locally          → lint + tests inside the worktree
 3. Consolidate learnings   → see CONSOLIDATE.md; drop most candidates
@@ -151,7 +151,34 @@ Throughout, follow `writing-plans`' Payload discipline: targeted `rg` over whole
 
 ## Phase 0 — Pre-flight
 
-Verify the workspace is shippable before doing anything destructive:
+**Reviewer-dispatch probe — first, before any write.** This is Phase 0's first
+step. It runs after entry validation and before the four checks below, and so
+before `## Delivery loop`'s synchronizing null-scope checkpoint, the Phase-1
+sync, and every forge, ledger or git write. Confirm that this context can launch
+the subagents this skill's reviewer dispatch sites name: the subagent-launch
+tool is in your tool surface, or, on a host that defers tool schemas, its tool
+search returns that tool's schema (Claude Code: `ToolSearch` `select:Agent`).
+Test the capability, never a host by name. The probe launches nothing, writes
+nothing and makes no trial dispatch. It proves the tool is present, not that a
+later launch will succeed: a Phase-5 launch that fails after a passing probe
+keeps its existing failure handling. It runs in every review-bearing
+invocation — a `ship-handoff/v2` or legacy handoff, or a standalone
+`/ship-issue <num>` — even when the merge delta may turn out empty, because the
+delta is unknown until the sync this probe precedes. Remainder mode skips
+Phases 0–5 and never probes.
+
+When the probe fails, stop with nothing launched or written. From a handoff,
+your whole return is exactly this closed line, with no ship summary and no
+validation:
+
+```text
+capability_gap: agent_dispatch
+```
+
+Standalone, tell the user the probe found no subagent-launch tool, end with that
+same line, and stop, keeping the worktree.
+
+Then verify the workspace is shippable before doing anything destructive:
 
 1. `git rev-parse --git-common-dir` ≠ `git rev-parse --git-dir` — a linked worktree, not the main checkout.
 2. `git branch --show-current` matches the regex built from retained `bindings.vcs.branch_pattern` and `bindings.vcs.worktree.prefix`; both configured forms are valid. Extract `<num>`. An argument or handoff `issue_number` wins, but verify it matches the branch.

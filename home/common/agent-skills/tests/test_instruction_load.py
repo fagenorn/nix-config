@@ -409,14 +409,16 @@ class LiveModelTest(unittest.TestCase):
         def empty_note(m):
             self.profile(m, "research")["note"] = ""
 
-        sync = "home/common/agent-skills/skills/ship-issue/SYNC.md"
+        # A member exactly one profile lists, so the copy yields exactly one violation.
+        deepening = "home/common/agent-skills/skills/codebase-design/DEEPENING.md"
         cases = (
             ("a matrix site dropped", drop_site, live,
              "matrix site sdd-final-correctness-rereview is in no profile"),
             ("an unknown member", unknown_member, live,
              "profile research: from-issue/NOPE.md resolves to no document"),
-            ("an ambiguous member", None, with_copy(sync),
-             "profile ship-owner: ship-issue/SYNC.md resolves to 2 documents"),
+            ("an ambiguous member", None, with_copy(deepening),
+             "profile architecture-scan-owner: codebase-design/DEEPENING.md resolves to "
+             "2 documents"),
             ("an unnamed member", unnamed_member, live,
              "profile research: to-issues/WIDE-REFACTORS.md is named by neither its "
              "prompt nor another member"),

@@ -350,8 +350,10 @@ report.
 Render a `finalize` action from the bounded summaries in the same
 interface_version 3 control response. Produce a per-issue table with issue,
 state, custody, PR, one-line reason, `blocked_on`, open delivery stages, and a re-entry line —
-`/from-issue <issue> --auto` for an issue suspended on a human gate, and the
-orchestrate re-invocation itself for the whole run — every column sourced from
+`/from-issue <issue> --auto` for an issue suspended on a cause that a `--label`
+or `--milestone` sweep does not resume (`human_gate`, `external` or
+`agent_dispatch`), and the orchestrate re-invocation itself for the whole run —
+every column sourced from
 those finalize summaries: `custody` names the implementation attempt or delivery
 remainder that holds the issue, `pending_stage_ids` are the delivery stages
 still open, and the PR and `discussion_items` come from the summary's `result`.
