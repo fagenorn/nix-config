@@ -49,7 +49,9 @@ class FenceViolation(TransactionError):
 
 
 class StaleCustody(FenceViolation):
-    """No, stale or lapsed custody, or an unissued late-result credential."""
+    """No, stale or lapsed custody, or an unissued late-result credential. At
+    `invoke_action`'s second fenced check it follows the call, leaving the intent open and
+    the effect possibly applied (#206 D19)."""
 
 
 class CustodyMisbound(FenceViolation):

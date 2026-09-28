@@ -4,9 +4,17 @@ budget (`MAX_ATTEMPTS` attempts within `RETRY_WINDOW_MS`), the action name and p
 (`action_violation`), the deterministic action id (`action_id`) that is also the idempotency
 key an effect receives, the closed action event key sets (`ACTION_EVENT_KEYS`), the rule an
 action event breaks against the fold before it (`action_event_violation`), the fold itself
-(`apply_action_event`, `fold_actions`, `ActionFold`), the inspect result check
-(`inspect_result_violation`), the request an effect receives (`effect_request`) and the
-per-action view a snapshot derives (`action_views`). It reads no file, lock or clock.
+(`apply_action_event`, `fold_actions`, `ActionFold`), the inspect and invoke result checks
+(`inspect_result_violation`, `invoke_result_violation`), the request an effect receives
+(`effect_request`) and the per-action view a snapshot derives (`action_views`).
+
+Admission is decided here too: `satisfied` says an invoke is a no-op, and `refusal` is the one
+home of the four admission rules, in order: a fresh `absent` inspection under the held fence
+(`inspection_required`, `not_absent`), a retry-safe predecessor (`not_retryable`), at most
+`MAX_ATTEMPTS` attempts (`budget_exhausted`) and a retry within `RETRY_WINDOW_MS` of the first
+retryable failure, inclusive (`window_closed`). `refused_error` is the one construction path
+for `InvocationRefused` and raises `ValueError` for a reason outside `REFUSAL_REASONS`. The
+module reads no file, lock or clock; the caller passes the time `refusal` judges at.
 """
 
 import copy
@@ -18,7 +26,7 @@ from typing import Any
 from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_custody import fence_violation
 from agent_tools.transaction_storage import (
-    StateInvalid, format_at, json_object_violation, parse_at)
+    InvocationRefused, StateInvalid, format_at, json_object_violation, parse_at)
 
 OUTCOMES = ("absent", "in_progress", "satisfied", "diverged", "unknown")
 RESULTS = ("accepted", "rejected", "unknown")
@@ -37,8 +45,12 @@ _ENVELOPE_KEYS = frozenset({"seq", "type", "at"})
 ACTION_EVENT_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
     "action_declared": _ENVELOPE_KEYS | {"action_id", "name", "parameters"},
     "action_inspected": _ENVELOPE_KEYS | {"action_id", "outcome", "reference", "fence"},
+    "invocation_intended": _ENVELOPE_KEYS | {"action_id", "attempt", "fence"},
+    "invocation_returned": _ENVELOPE_KEYS | {"action_id", "attempt", "result", "error_class",
+                                             "reference", "fence"},
 })
 _INSPECT_RESULT_KEYS = frozenset({"outcome", "reference"})
+_INVOKE_RESULT_KEYS = frozenset({"result", "error_class", "reference"})
 
 
 @dataclasses.dataclass
@@ -96,6 +108,24 @@ def _reference_violation(reference: Any) -> str | None:
     return None
 
 
+def _returned_violation(result: Any, error_class: Any, reference: Any) -> str | None:
+    if type(result) is not str or result not in RESULTS:
+        return "result is not accepted, rejected or unknown"
+    if (error_class is not None if result == "accepted"
+            else type(error_class) is not str or error_class not in ERROR_CLASSES):
+        return "error_class does not match the result"
+    return _reference_violation(reference)
+
+
+def invoke_result_violation(result: Any) -> str | None:
+    """The first rule an `invoke` result breaks, or None: the closed
+    `{result, error_class, reference}` object, `error_class` null exactly when the result
+    is `accepted` and otherwise one of `ERROR_CLASSES` (#206 D11)."""
+    if type(result) is not dict or set(result) != _INVOKE_RESULT_KEYS:
+        return "invoke result is not the closed {result, error_class, reference} object"
+    return _returned_violation(result["result"], result["error_class"], result["reference"])
+
+
 def inspect_result_violation(result: Any) -> str | None:
     """The first rule an `inspect` result breaks, or None: the closed
     `{outcome, reference}` object (#206 D11)."""
@@ -136,6 +166,32 @@ def action_event_violation(event: dict, actions: dict[str, ActionFold], *,
     if event_type == "action_inspected":
         return (_outcome_violation(event["outcome"])
                 or _reference_violation(event["reference"]))
+    entry = actions[identity]
+    attempt, latest = event["attempt"], entry.attempts
+    if event_type == "invocation_intended":
+        if type(attempt) is not int or attempt != latest + 1:
+            return f"invocation_intended attempt {attempt!r} does not follow attempt {latest}"
+        if attempt > MAX_ATTEMPTS:
+            return f"invocation_intended attempt {attempt} exceeds {MAX_ATTEMPTS}"
+        if state not in EFFECT_STATES:
+            return "invocation_intended sits outside publishing and activating"
+        inspection = entry.inspection
+        if (entry.open or inspection is None or inspection["outcome"] != "absent"
+                or inspection["fence"] != event["fence"]):
+            return "invocation_intended does not follow an absent inspection under its fence"
+        if attempt > 1 and not retry_safe(entry):
+            return "invocation_intended retry follows an attempt that is not retry-safe"
+        return None
+    if event_type == "invocation_returned":
+        if not entry.open:
+            return "invocation_returned follows no open attempt"
+        if type(attempt) is not int or attempt != latest:
+            return "invocation_returned attempt does not name the open attempt"
+        if entry.returned is not None:
+            return f"invocation_returned attempt {latest} already returned"
+        if event["fence"] != entry.intent_fence:
+            return "invocation_returned fence does not equal its intent's"
+        return _returned_violation(event["result"], event["error_class"], event["reference"])
     raise ValueError(f"action_event_violation: unhandled action event type {event_type!r}")
 
 
@@ -153,6 +209,13 @@ def apply_action_event(event: dict, actions: dict[str, ActionFold]) -> None:
         if (event["outcome"] == "absent" and entry.attempts >= 1
                 and entry.first_failure_ms is None):
             entry.first_failure_ms = parse_at(event["at"])
+        return
+    if event_type == "invocation_intended":
+        entry.attempts, entry.open = event["attempt"], True
+        entry.intent_fence, entry.returned = event["fence"], None
+        return
+    if event_type == "invocation_returned":
+        entry.returned = {key: event[key] for key in _INVOKE_RESULT_KEYS}
         return
     raise ValueError(f"apply_action_event: unhandled action event type {event_type!r}")
 
@@ -172,6 +235,39 @@ def retry_safe(entry: ActionFold) -> bool:
     returned = entry.returned
     return (returned is not None and returned["result"] != "accepted"
             and returned["error_class"] in RETRY_SAFE_CLASSES)
+
+
+def satisfied(entry: ActionFold | None) -> bool:
+    """Whether the action exists, has no open attempt and last read `satisfied` (#206 D7)."""
+    return (entry is not None and not entry.open and entry.inspection is not None
+            and entry.inspection["outcome"] == "satisfied")
+
+
+def refusal(entry: ActionFold | None, *, held_fence: dict, now_ms: int) -> str | None:
+    """The reason the next attempt is not admitted at `now_ms` under `held_fence`, or None:
+    rules 1-4 in order (#206 D5, D6)."""
+    inspection = None if entry is None or entry.open else entry.inspection
+    if inspection is None or inspection["fence"] != held_fence:
+        return "inspection_required"
+    if inspection["outcome"] != "absent":
+        return "not_absent"
+    attempt = entry.attempts + 1
+    if attempt > 1 and not retry_safe(entry):
+        return "not_retryable"
+    if attempt > MAX_ATTEMPTS:
+        return "budget_exhausted"
+    if attempt > 1 and now_ms - entry.first_failure_ms > RETRY_WINDOW_MS:
+        return "window_closed"
+    return None
+
+
+def refused_error(transaction_id: str, identity: str, reason: str) -> InvocationRefused:
+    """The one construction path for `InvocationRefused`; a `reason` outside
+    `REFUSAL_REASONS` is a programming error (`ValueError`) (#206 D21)."""
+    if reason not in REFUSAL_REASONS:
+        raise ValueError(f"refused_error: {reason!r} is not a refusal reason")
+    return InvocationRefused(f"{transaction_id}: action {identity} refused: {reason}",
+                             reason=reason)
 
 
 def status(entry: ActionFold) -> str:

@@ -281,5 +281,244 @@ class InspectActionTest(ProtocolCase):
                 self.assertRuleRefuses(self.transaction_id, edit(change), fragment)
 
 
+THROTTLED = ("rejected", "provider_throttled")
+
+
+class InvokeCase(ProtocolCase):
+    def setUp(self):
+        super().setUp()
+        self.publishing()
+
+    def invoke(self, effect=None, *, custody=None, name=None):
+        return self.store.invoke_action(
+            custody or self.custody, name=name or self.NAME, parameters=self.PARAMETERS,
+            effect=effect or self.effect())
+
+    def refused(self, reason, call, name=None):
+        error = self.assertRefusedUnchanged(InvocationRefused, call)
+        self.assertEqual(error.reason, reason)
+        self.assertIn(self.transaction_id, str(error))
+        self.assertIn(self.act(name), str(error))
+        return error
+
+    def views(self):
+        return {e["name"]: dict(e) for e in self.store.load(self.transaction_id).actions}
+
+    def attempts(self, name=None):
+        identity = self.act(name)
+        return [e["attempt"] for e in self.store.load(self.transaction_id).events
+                if e["type"] == "invocation_intended" and e["action_id"] == identity]
+
+    def wait(self, ms):
+        while ms:
+            step = min(ms, 400_000)
+            self.clock.advance(step)
+            ms -= step
+            self.store.renew(self.custody)
+
+
+class InvokeActionTest(InvokeCase):
+    def test_an_absent_action_is_invoked_once_then_inspected(self):
+        self.inspect()
+        after = self.invoke()
+        fence, at = plain(self.custody.fence), "2027-01-15T08:00:00.000Z"
+        self.assertEqual([dict(e) for e in after.events[7:]], [
+            {"seq": 8, "type": "invocation_intended", "at": at, "action_id": self.act(),
+             "attempt": 1, "fence": fence},
+            {"seq": 9, "type": "invocation_returned", "at": at, "action_id": self.act(),
+             "attempt": 1, "result": "accepted", "error_class": None,
+             "reference": "call:1", "fence": fence},
+            {"seq": 10, "type": "action_inspected", "at": at, "action_id": self.act(),
+             "outcome": "satisfied", "reference": "seen:1:1", "fence": fence}])
+        self.assertEqual((self.world.invokes, self.world.applied),
+                         ({self.act(): 1}, {self.act(): 1}))
+        self.assertEqual((self.view()["status"], self.view()["attempts"]), ("satisfied", 1))
+
+    def test_a_satisfied_action_is_never_invoked_again(self):
+        self.inspect()
+        self.invoke()
+        before = self.files()
+        self.assertEqual(self.invoke(self.effect(during=self.fail)).revision, 10)
+        self.assertEqual(self.files(), before)
+        self.assertEqual(self.world.invokes, {self.act(): 1})
+
+    def test_an_inspection_reading_satisfied_settles_the_action_without_a_call(self):
+        self.world.applied[self.act()] = 0
+        self.inspect()
+        self.invoke(self.effect(during=self.fail))
+        self.assertEqual(self.world.invokes, {})
+        self.assertEqual(self.action_types(), ["action_declared", "action_inspected"])
+
+    def test_a_blind_invoke_is_refused_before_any_call(self):
+        self.refused("inspection_required", lambda: self.invoke(self.effect(during=self.fail)))
+        self.assertEqual(self.world.invokes, {})
+
+    def test_an_inspection_that_is_not_absent_refuses_the_call(self):
+        for outcome in ("in_progress", "diverged", "unknown"):
+            with self.subTest(outcome=outcome):
+                self.inspect(self.effect(inspect_outcome=outcome))
+                self.refused("not_absent", lambda: self.invoke(self.effect(during=self.fail)))
+
+    def test_only_publishing_and_activating_may_invoke(self):
+        self.inspect()
+        self.to("attention_required")
+        self.refused("state_not_effectful", lambda: self.invoke(self.effect(during=self.fail)))
+        self.to("publishing", "published")
+        self.refused("state_not_effectful", lambda: self.invoke(self.effect(during=self.fail)))
+        self.to("activating")
+        self.invoke()
+        self.assertEqual(self.world.invokes, {self.act(): 1})
+
+    def test_a_throttled_attempt_is_retried_once(self):
+        self.inspect()
+        self.invoke(self.effect(results=[THROTTLED]))
+        self.assertEqual(self.view(), {
+            "action_id": self.act(), "name": "build", "attempts": 1, "status": "absent",
+            "last_error_class": "provider_throttled", "retry_eligible": True,
+            "retry_deadline_at": "2027-01-15T08:15:00.000Z"})
+        self.clock.advance(30_000)
+        self.invoke()
+        self.assertEqual(self.view(), {
+            "action_id": self.act(), "name": "build", "attempts": 2, "status": "satisfied",
+            "last_error_class": None, "retry_eligible": False,
+            "retry_deadline_at": "2027-01-15T08:15:00.000Z"})
+        self.assertEqual((self.attempts(), self.world.invokes), ([1, 2], {self.act(): 2}))
+
+    def test_a_fourth_try_is_refused_budget_exhausted(self):
+        self.inspect()
+        throttled = self.effect(results=[THROTTLED] * 3)
+        for _ in range(MAX_ATTEMPTS):
+            self.invoke(throttled)
+        self.assertFalse(self.view()["retry_eligible"])
+        self.refused("budget_exhausted", lambda: self.invoke(self.effect(during=self.fail)))
+        self.assertEqual(self.world.invokes, {self.act(): 3})
+
+    def test_the_window_admits_exactly_900_000_ms_and_refuses_one_more(self):
+        for name in ("late", "exact"):
+            self.inspect(name=name)
+            self.invoke(self.effect(results=[THROTTLED]), name=name)
+            self.clock.advance(1)
+        self.wait(RETRY_WINDOW_MS - 1)
+        self.refused("window_closed",
+                     lambda: self.invoke(self.effect(during=self.fail), name="late"),
+                     name="late")
+        self.invoke(name="exact")
+        self.assertEqual(self.views()["exact"]["status"], "satisfied")
+
+    def test_a_non_retry_safe_class_or_an_accepted_absent_attempt_is_not_retryable(self):
+        for name, result in (("denied", ("rejected", "invalid_input")),
+                             ("vanished", ("accepted", None))):
+            with self.subTest(name=name):
+                self.inspect(name=name)
+                self.invoke(self.effect(results=[result], inspect_outcome="absent"), name=name)
+                self.assertFalse(self.views()[name]["retry_eligible"])
+                self.refused("not_retryable",
+                             lambda: self.invoke(self.effect(during=self.fail), name=name),
+                             name=name)
+
+    def test_an_inspection_from_an_earlier_custody_span_licenses_no_call(self):
+        self.inspect()
+        self.invoke(self.effect(results=[THROTTLED]))
+        self.store.release(self.custody)
+        self.custody = self.acquire(self.transaction_id)
+        self.refused("inspection_required", lambda: self.invoke(self.effect(during=self.fail)))
+        self.assertEqual(self.inspect().events[-1]["reference"], "seen:1:2")
+        self.invoke()
+        self.assertEqual((self.attempts(), self.world.invokes), ([1, 2], {self.act(): 2}))
+
+    def test_a_malformed_invoke_result_leaves_the_intent_open(self):
+        class Returning(FakeEffect):
+            def invoke(self, request):
+                return self.results[0]
+
+        for index, result in enumerate((
+                None, {"result": "accepted", "error_class": None},
+                {"result": "done", "error_class": None, "reference": "r"},
+                {"result": "accepted", "error_class": "invalid_input", "reference": "r"},
+                {"result": "rejected", "error_class": None, "reference": "r"},
+                {"result": "rejected", "error_class": "flaky", "reference": "r"},
+                {"result": "accepted", "error_class": None, "reference": ""})):
+            with self.subTest(result=result):
+                name = f"bad-{index}"
+                self.inspect(name=name)
+                with self.assertRaises(EffectResultInvalid):
+                    self.invoke(Returning(self.world, results=[result]), name=name)
+                self.assertEqual(self.views()[name]["status"], "open")
+                self.assertEqual(self.store.load(self.transaction_id).events[-1]["type"],
+                                 "invocation_intended")
+
+    def test_a_lease_lapse_during_the_call_leaves_the_intent_open(self):
+        self.inspect()
+        with self.assertRaises(StaleCustody):
+            self.invoke(self.effect(during=lambda: self.clock.advance(TTL)))
+        self.assertEqual(self.action_types()[-1], "invocation_intended")
+        self.assertEqual(self.world.invokes, {self.act(): 1})
+
+    def test_hand_edited_attempt_histories_fail_the_named_rule(self):
+        self.inspect()
+        self.invoke(self.effect(results=[THROTTLED]))
+        self.invoke()
+        good = self.state_doc(self.transaction_id)
+        parked = {"type": "transitioned", "at": good["events"][7]["at"],
+                  "from": "publishing", "to": "attention_required", "reason": "r",
+                  "external_state": None}
+
+        def edit(change):
+            document = copy.deepcopy(good)
+            change(document["events"])
+            return renumbered(document)
+
+        cases = {
+            "attempt 3 does not follow attempt 1": lambda ev: ev[10].update(attempt=3),
+            "does not follow an absent inspection under its fence": lambda ev: ev.pop(9),
+            "invocation_intended sits outside publishing and activating":
+                lambda ev: ev.insert(7, dict(parked)),
+            "retry follows an attempt that is not retry-safe":
+                lambda ev: ev[8].update(error_class="invalid_input"),
+            "invocation_returned follows no open attempt":
+                lambda ev: ev.insert(10, copy.deepcopy(ev[8])),
+            "attempt 1 already returned": lambda ev: ev.insert(9, copy.deepcopy(ev[8])),
+            "attempt does not name the open attempt": lambda ev: ev[8].update(attempt=2),
+            "result is not accepted, rejected or unknown":
+                lambda ev: ev[8].update(result="done"),
+            "error_class does not match the result":
+                lambda ev: ev[11].update(error_class="provider_throttled"),
+            "is not the closed invocation_intended event": lambda ev: ev[7].update(extra=1),
+            "reference is not a non-empty string": lambda ev: ev[8].update(reference=""),
+        }
+        for fragment, change in cases.items():
+            with self.subTest(fragment=fragment):
+                self.assertRuleRefuses(self.transaction_id, edit(change), fragment)
+        for attempt in (True, 1.0):
+            with self.subTest(attempt=attempt):
+                self.assertRuleRefuses(
+                    self.transaction_id, edit(lambda ev: ev[8].update(attempt=attempt)),
+                    "attempt does not name the open attempt")
+
+    def test_a_return_under_another_fence_than_its_intent_is_refused(self):
+        self.inspect()
+        with self.assertRaises(Crash):
+            self.invoke(self.effect(crash="before"))
+        self.store.release(self.custody)
+        self.custody = self.acquire(self.transaction_id)
+        document = self.state_doc(self.transaction_id)
+        document["events"].append({
+            "type": "invocation_returned", "at": document["events"][-1]["at"],
+            "action_id": self.act(), "attempt": 1, "result": "accepted", "error_class": None,
+            "reference": "r", "fence": plain(self.custody.fence)})
+        self.assertRuleRefuses(self.transaction_id, renumbered(document),
+                               "fence does not equal its intent's")
+
+    def test_a_fourth_attempt_in_history_is_refused(self):
+        self.inspect()
+        throttled = self.effect(results=[THROTTLED] * 3)
+        for _ in range(MAX_ATTEMPTS):
+            self.invoke(throttled)
+        document = self.state_doc(self.transaction_id)
+        document["events"].append({**document["events"][-3], "attempt": 4})
+        self.assertRuleRefuses(self.transaction_id, renumbered(document),
+                               "attempt 4 exceeds 3")
+
+
 if __name__ == "__main__":
     unittest.main()
