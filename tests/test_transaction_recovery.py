@@ -10,8 +10,8 @@ from agent_tools.transaction_core import (
     RECOVERY_REFUSAL_REASONS, EffectResultInvalid, RecoveryRefused, StaleCustody,
     TransactionError, TransitionRefused, action_id)
 
-from .test_transaction_custody import KEYS, SUBJECT, TTL, CustodyCase, plain
-from .test_transaction_invocation import FakeEffect, FakeWorld, renumbered
+from .test_transaction_custody import KEYS, SUBJECT, TTL, CustodyCase, plain, serialize
+from .test_transaction_invocation import Crash, FakeEffect, FakeWorld, renumbered
 from .test_transaction_recovery_plan import PROOF, RECOVERY, with_unit
 
 
@@ -64,6 +64,13 @@ class RecoveryCase(CustodyCase):
 
     def verify(self, checker=None):
         return self.store.verify_anchors(self.custody, observer=checker or Checker())
+
+    def grant(self, grant_id="g-1"):
+        return self.store.issue_grant(self.custody, grant_id=grant_id, actor="operator")
+
+    def begin(self, grant_id="g-1", checker=None):
+        return self.store.begin_recovery(self.custody, grant_id=grant_id,
+                                         observer=checker or Checker())
 
     def run_action(self, name, parameters, outcome=None, results=()):
         self.store.inspect_action(self.custody, name=name, parameters=parameters,
@@ -183,6 +190,190 @@ class AnchorsTest(RecoveryCase):
             "from": "ready", "to": "publishing", "reason": "r", "external_state": "known"}
         skipped["state"] = "publishing"
         self.assertRuleRefuses(self.transaction_id, renumbered(skipped), "anchors_verified")
+
+
+class BeginTest(RecoveryCase):
+    def test_begin_freezes_the_snapshot_selects_every_edge_and_enters_recovering(self):
+        self.parked()
+        self.grant()
+        after = self.begin()
+        started, moved = (dict(e) for e in after.events[-2:])
+        build, start, pin = self.act("build", n=1), self.act("start", n=2), self.act("pin", n=3)
+        self.assertEqual(started["effect_snapshot"], {
+            build: "target_satisfied", start: "diverged", pin: "no_effect"})
+        self.assertEqual(started["selected"], [
+            self.act("compensate", unit="build"), self.act("restore", unit="start"),
+            self.act("compensate", unit="start")])
+        self.assertEqual([check["unit"] for check in started["checks"]], [start])
+        self.assertEqual((started["grant_id"], started["fence"]),
+                         ("g-1", plain(self.custody.fence)))
+        self.assertEqual((moved["from"], moved["to"], moved["reason"], moved["external_state"]),
+                         ("attention_required", "recovering", "recovery_started", "known"))
+        self.assertEqual(after.state, "recovering")
+        self.assertEqual((dict(after.recovery["effect_snapshot"]), list(after.recovery["selected"])),
+                         (started["effect_snapshot"], started["selected"]))
+
+    def test_an_affected_compensatable_unit_alone_needs_no_check(self):
+        self.published()
+        self.to("attention_required")
+        self.grant()
+        after = self.begin(checker=Checker(fail=Boom()))
+        self.assertEqual(list(after.recovery["selected"]), [self.act("compensate", unit="build")])
+        self.assertEqual(after.events[-2]["checks"], [])
+
+    def test_begin_outside_attention_or_without_a_fresh_grant_is_refused(self):
+        self.to("awaiting_verification")
+        self.grant("early")
+        self.refused("state_not_attention", lambda: self.begin("early"))
+        self.to("attention_required")
+        self.refused("grant_required", lambda: self.begin("early"))
+        self.refused("grant_required", lambda: self.begin("never-issued"))
+
+    def test_an_action_inspected_under_an_older_fence_needs_reconciliation(self):
+        self.parked()
+        self.clock.advance(TTL)
+        self.store.reap(self.transaction_id, reason="executor lost")
+        self.custody = self.acquire(self.transaction_id)
+        self.grant()
+        self.refused("reconciliation_required", lambda: self.begin(checker=Checker(fail=Boom())))
+        for name, parameters in (("build", {"n": 1}), ("start", {"n": 2})):
+            self.store.inspect_action(self.custody, name=name, parameters=parameters,
+                                      effect=FakeEffect(self.world))
+        self.assertEqual(self.begin().state, "recovering")
+
+    def test_an_open_attempt_needs_reconciliation(self):
+        self.published()
+        self.to("published", "activating")
+        self.store.inspect_action(self.custody, name="start", parameters={"n": 2},
+                                  effect=FakeEffect(self.world))
+        with self.assertRaises(Crash):
+            self.store.invoke_action(self.custody, name="start", parameters={"n": 2},
+                                     effect=FakeEffect(self.world, crash="before"))
+        self.to("attention_required")
+        self.grant()
+        self.refused("reconciliation_required", lambda: self.begin(checker=Checker(fail=Boom())))
+
+    def test_an_undeclared_effect_or_an_uncertain_unit_is_refused(self):
+        self.published()
+        self.run_action("extra", {"n": 9})
+        self.to("attention_required")
+        self.grant()
+        self.refused("undeclared_effect", lambda: self.begin(checker=Checker(fail=Boom())))
+        for outcome in ("unknown", "in_progress"):
+            with self.subTest(outcome=outcome):
+                self.start_with(RECOVERY, key=outcome, keys=(f"key:{outcome}",))
+                self.parked(start=outcome)
+                self.grant()
+                error = self.refused("effect_uncertain",
+                                     lambda: self.begin(checker=Checker(fail=Boom())))
+                self.assertIn(self.act("start", n=2), str(error))
+
+    def test_no_affected_unit_is_refused_no_effect(self):
+        self.to("awaiting_verification", "ready")
+        self.verify()
+        self.to("attention_required")
+        self.grant()
+        self.refused("no_effect", lambda: self.begin(checker=Checker(fail=Boom())))
+
+    def test_an_affected_non_restorable_unit_is_refused_before_any_check(self):
+        self.parked(pin="diverged")
+        self.grant()
+        error = self.refused("unit_not_restorable",
+                             lambda: self.begin(checker=Checker(fail=Boom())))
+        self.assertIn(f"pin ({self.act('pin', n=3)})", str(error))
+        self.start_with(with_unit(1, posture="supersedable_only", anchor=None,
+                                  compatibility=None, edges=[]),
+                        key="forward-only", keys=("key:forward-only",))
+        self.parked()
+        self.grant()
+        error = self.refused("unit_not_restorable",
+                             lambda: self.begin(checker=Checker(fail=Boom())))
+        self.assertIn("start (", str(error))
+
+    def test_an_incompatible_restore_is_refused_after_the_check(self):
+        self.parked()
+        self.grant()
+        for outcome in ("unsatisfied", "unknown"):
+            with self.subTest(outcome=outcome):
+                error = self.refused("restore_incompatible", lambda: self.begin(
+                    checker=Checker({"compatibility": outcome})))
+                self.assertIn("start (", str(error))
+
+    def test_a_history_grown_during_the_check_is_refused(self):
+        self.parked()
+        self.grant()
+        grow = lambda: self.store.issue_grant(self.custody, grant_id="during", actor="op")
+        with self.assertRaises(RecoveryRefused) as caught:
+            self.begin(checker=Checker(during=grow))
+        self.assertEqual(caught.exception.reason, "history_changed")
+        self.assertEqual(self.store.load(self.transaction_id).state, "attention_required")
+
+    def test_moving_into_recovering_does_not_restart_the_quiescence_window(self):
+        self.parked()
+        self.grant()
+        self.clock.advance(400_000)
+        self.store.renew(self.custody)
+        self.begin()
+        self.clock.advance(400_000)
+        self.store.renew(self.custody)
+        self.clock.advance(100_001)
+        self.assertIsNone(self.store.renew(self.custody).custody)
+
+
+class AbandonAndReservedTest(RecoveryCase):
+    def test_abandoned_needs_every_action_without_effect(self):
+        self.parked()
+        error = self.assertRefusedUnchanged(TransitionRefused, lambda: self.to("abandoned"))
+        self.assertIn(self.act("build", n=1), str(error))
+
+    def test_an_inspected_but_never_invoked_action_has_no_effect(self):
+        self.to("awaiting_verification", "ready")
+        self.verify()
+        self.to("publishing")
+        self.store.inspect_action(self.custody, name="build", parameters={"n": 1},
+                                  effect=FakeEffect(self.world, inspect_outcome="satisfied"))
+        self.to("attention_required")
+        self.assertEqual(self.to("abandoned").state, "abandoned")
+
+    def test_advance_never_enters_recovering_nor_writes_recovery_started(self):
+        self.parked()
+        error = self.assertRefusedUnchanged(TransitionRefused, lambda: self.to("recovering"))
+        self.assertIn("begin_recovery", str(error))
+        self.assertRefusedUnchanged(TransitionRefused,
+                                    lambda: self.to("activating", reason="recovery_started"))
+
+    def test_hand_built_recovery_breaches_are_state_invalid(self):
+        self.parked()
+        parked = self.state_doc(self.transaction_id)
+        at = parked["events"][-1]["at"]
+
+        def moved(document, target):
+            document = copy.deepcopy(document)
+            document["events"].append({"seq": 0, "type": "transitioned", "at": at,
+                                       "from": "attention_required", "to": target,
+                                       "reason": "r", "external_state": "known"})
+            document.update(state=target, parked_from=None)
+            return renumbered(document)
+
+        self.assertRuleRefuses(self.transaction_id, moved(parked, "abandoned"),
+                               self.act("build", n=1))
+        self.assertRuleRefuses(self.transaction_id, moved(parked, "recovering"),
+                               "recovery_started")
+        (self.root / self.transaction_id / "state.json").write_text(serialize(parked))
+        self.grant()
+        self.begin()
+        begun = self.state_doc(self.transaction_id)
+        pin = self.act("pin", n=3)
+        for field, value, fragment in (
+                ("effect_snapshot", {**begun["events"][-2]["effect_snapshot"], pin: "diverged"},
+                 "effect_snapshot"),
+                ("selected", begun["events"][-2]["selected"][:1], "selected"),
+                ("checks", [], "checks"),
+                ("grant_id", "never-issued", "grant_required")):
+            with self.subTest(field=field):
+                edited = copy.deepcopy(begun)
+                edited["events"][-2][field] = value
+                self.assertRuleRefuses(self.transaction_id, edited, fragment)
 
 
 class RecoveryVocabularyTest(unittest.TestCase):

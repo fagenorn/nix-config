@@ -240,11 +240,14 @@ class LoadTest(StoreCase):
             "k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF,
             recovery=EMPTY_RECOVERY).transaction_id
         base = self.document(transaction_id)
-        for targets in (("attention_required", "created", "abandoned"),
-                        ("attention_required", "recovering", "rolled_back")):
-            with self.subTest(targets=targets):
-                self.write(transaction_id, with_history(base, *targets))
-                self.assertEqual(self.store.load(transaction_id).state, targets[-1])
+        self.write(transaction_id, with_history(base, "attention_required", "created",
+                                                "abandoned"))
+        self.assertEqual(self.store.load(transaction_id).state, "abandoned")
+        self.write(transaction_id, with_history(base, "attention_required", "recovering",
+                                                "rolled_back"))
+        with self.assertRaises(StateInvalid) as caught:
+            self.store.load(transaction_id)
+        self.assertIn("recovery_started", str(caught.exception))
 
     def test_a_hand_built_succeeded_without_a_seal_is_refused(self):
         transaction_id = self.store.create("k", SUBJECT, concurrency_keys=KEYS,
@@ -331,13 +334,11 @@ class LoadTest(StoreCase):
 PATHS_TO = {  # a legal path from `created` to each nonterminal source
     **{state: FORWARD[1:i + 1] for i, state in enumerate(FORWARD)},
     "attention_required": ("attention_required",),
-    "recovering": ("attention_required", "recovering"),
 }
 PATHS_TO_TERMINAL = {
     "succeeded": FORWARD[1:] + ("succeeded",),
     "abandoned": ("abandoned",),
     "failed": ("attention_required", "failed"),
-    "rolled_back": ("attention_required", "recovering", "rolled_back"),
 }
 
 
@@ -398,7 +399,7 @@ class AdvanceTest(AdvanceCase):
         for source, path in PATHS_TO.items():
             allowed = EXPECTED_EDGES[source]
             if source == "attention_required":
-                allowed = {"created", "recovering", "abandoned", "failed"}
+                allowed = {"created", "abandoned", "failed"}
             allowed = allowed - {"succeeded"}
             for target in sorted(STATES | {"not_a_state"}):
                 with self.subTest(source=source, target=target):

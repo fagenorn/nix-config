@@ -432,16 +432,6 @@ class QuiesceTest(CustodyCase):
         self.assertEqual(self.store.load(transaction_id).events[-1]["reason"], "released")
         self.assertEqual({entry["epoch"] for entry in resumed.fence.values()}, {2})
 
-    def test_moving_between_parkings_does_not_restart_the_window(self):
-        transaction_id, custody = self.park()
-        self.clock.advance(400_000)
-        self.store.renew(custody)
-        self.store.advance(transaction_id, "recovering", reason="try", custody=custody)
-        self.clock.advance(400_000)
-        self.store.renew(custody)
-        self.clock.advance(100_001)
-        self.assertIsNone(self.store.renew(custody).custody)
-
     def test_an_unparked_transaction_is_never_quiesced(self):
         custody = self.acquire(self.new())
         for _ in range(4):

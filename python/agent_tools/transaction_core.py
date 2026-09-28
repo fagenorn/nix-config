@@ -38,8 +38,9 @@ observation around the pure halves in `agent_tools.transaction_proof` (re-export
 `agent_tools.transaction_recovery_plan` compiles, binds and materializes the recovery
 declaration (#208); this module re-exports its constants and those three functions.
 `verify_anchors` observes every restorable unit's rollback anchor in `ready` around the pure
-halves in `agent_tools.transaction_recovery`, whose refusal reasons this module re-exports, and
-`advance` applies that module's publication gate. The module has no command and no caller yet.
+halves in `agent_tools.transaction_recovery`, whose refusal reasons and effect classes this
+module re-exports; `begin_recovery` enters `recovering` under a fresh grant around that module's
+admission, and `advance` applies its gates. The module has no command and no caller yet.
 """
 
 import contextlib
@@ -79,8 +80,8 @@ from agent_tools.transaction_proof import (
     next_evidence_id, obligation, observation_request, observation_violation, open_cohort,
     proof_refused, settlement)
 from agent_tools.transaction_recovery import (
-    RECOVERY_REFUSAL_REASONS, anchor_requests, anchors_events, check_result_violation,
-    recovery_advance_violation, recovery_refused)
+    EFFECT_CLASSES, RECOVERY_REFUSAL_REASONS, anchor_requests, anchors_events, begin_events,
+    begin_requests, check_result_violation, recovery_advance_violation, recovery_refused)
 from agent_tools.transaction_recovery_plan import (
     EDGE_ACTIONS, POSTURES, RECOVERY_PLAN_SCHEMA, RECOVERY_REJECTION_REASONS, bind_recovery,
     compile_recovery, materialize_recovery)
@@ -226,8 +227,9 @@ class TransactionStore:
         whatever `external_state` the caller passes. Before it, `advance_violation` refuses
         `succeeded` (entered only through `settle_proof`), a `proving -> attention_required`
         with a reserved reason, and a failing publication or activation gate (#207 D10, D12,
-        D27); after it, `recovery_advance_violation` refuses `ready -> publishing` without an
-        `anchors_verified` under the held fence (#208 D7, D22). Entering a terminal while
+        D27); after it, `recovery_advance_violation` refuses `recovering`, a reserved recovery
+        reason, `abandoned` over an action with effect, and `ready -> publishing` without an
+        `anchors_verified` under the held fence (#208 D7, D10, D22). Entering a terminal while
         custody is held appends the transition and a `lease_released` reason `terminal` in one
         `state.json` write, then clears the lease records. Every refusal happens
         before any write; the lock file is never created.
@@ -829,6 +831,15 @@ class TransactionStore:
         D7, D20). Every refusal, `rollback_anchor_missing` included, writes nothing."""
         return self._observed(custody, "verify_anchors", observer, anchor_requests,
                               anchors_events)
+
+    def begin_recovery(self, custody: Custody, *, grant_id: str, observer: Any) -> Transaction:
+        """Enter `recovering`: `_observed` around `begin_requests` and `begin_events` for
+        `grant_id` (#208 D8, D20). A malformed credential or `grant_id` refuses before any
+        lock; every refusal writes nothing."""
+        require_texts(custody, "begin_recovery", grant_id=grant_id)
+        return self._observed(
+            custody, "begin_recovery", observer, lambda prior: begin_requests(prior, grant_id),
+            lambda prior, requests, results: begin_events(prior, grant_id, requests, results))
 
     def _observed(self, custody: Custody, operation: str, observer: Any,
                   admit: Callable[[dict], list[Mapping]],

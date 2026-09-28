@@ -13,8 +13,9 @@ declaration bound to the proof plan's, through `agent_tools.transaction_recovery
 `recovery_plan_violation`, only when the `created` event pins its digest, and with a
 `recovers` back-link that is null or another transaction's id;
 `agent_tools.transaction_recovery`'s `recovery_view` derives the snapshot's `recovery` view
-on every load (#208 D6, D12), its `recovery_event_violation` checks each recovery event and
-its `recovery_transition_violation` gates each transition (#208 D7). It reads no file, lock
+on every load (#208 D6, D12), its `recovery_event_violation` checks each recovery event, its
+`recovery_transition_violation` gates each transition and its `recovery_pairing_violation`
+binds `recovery_started` to the entry into `recovering` (#208 D7, D10). It reads no file, lock
 or clock: `validate_state` takes the creation-key index lookup as a callable, which
 `agent_tools.transaction_core` binds to its store root. It also composes what a reap
 appends to a lapsed span (`reaped`) and a late owner result's event (`owner_result_event`),
@@ -44,8 +45,8 @@ from agent_tools.transaction_proof import (
     PROOF_EVENT_KEYS, ProofFold, apply_proof_event, gate_violation, pairing_violation,
     proof_event_violation, proof_view)
 from agent_tools.transaction_recovery import (
-    RECOVERY_EVENT_KEYS, recovery_event_violation, recovery_transition_violation,
-    recovery_view)
+    RECOVERY_EVENT_KEYS, recovery_event_violation, recovery_pairing_violation,
+    recovery_transition_violation, recovery_view)
 from agent_tools.transaction_recovery_plan import recovery_plan_violation
 from agent_tools.transaction_storage import (
     StateInvalid, format_at, json_object_violation, parse_at, serialize)
@@ -457,7 +458,9 @@ def validate_state(document: Any, transaction_id: str,
     after it, and each reserved parking reason and `succeeded` to the event right before it
     (#207 D10); every transition passes `gate_violation` over the actions before it (D12) and,
     after the terminal check, `recovery_transition_violation` with the open span's fence; each
-    recovery event is checked by `recovery_event_violation` (#208 D7, D22)."""
+    recovery event is checked by `recovery_event_violation`, and `recovery_pairing_violation`
+    binds each recovery event and reserved recovery reason as `pairing_violation` does (#208
+    D7, D10, D22)."""
     def refuse(rule: str) -> StateInvalid:
         return StateInvalid(f"{transaction_id}: {rule}")
 
@@ -523,7 +526,8 @@ def validate_state(document: Any, transaction_id: str,
             raise refuse(f"event {seq} follows the terminal state {state}")
         if type(event) is not dict:
             raise refuse(f"event {seq} is not a JSON object")
-        violation = pairing_violation(events[seq - 2], event)
+        violation = (pairing_violation(events[seq - 2], event)
+                     or recovery_pairing_violation(events[seq - 2], event))
         if violation is not None:
             raise refuse(f"event {seq} {violation}")
         event_type = event.get("type")
@@ -582,7 +586,8 @@ def validate_state(document: Any, transaction_id: str,
                     raise refuse(f"event {seq} {violation}")
             case _:
                 raise refuse(f"event {seq} has unknown event type {event_type!r}")
-    violation = pairing_violation(events[-1], None)
+    violation = (pairing_violation(events[-1], None)
+                 or recovery_pairing_violation(events[-1], None))
     if violation is not None:
         raise refuse(f"event {len(events)} {violation}")
     custody = fold.custody
