@@ -29,7 +29,10 @@
     str, keys: list[str], open_fence: dict | None, state: str) -> str | None` — the rule
     one envelope-checked action event breaks, or None.
   - `apply_action_event(event: dict, actions: dict[str, ActionFold]) -> None` — folds one
-    valid event; never raises on a valid history.
+    valid event; never raises on a valid history. Both it and `action_event_violation`
+    end their type dispatch in a branch that raises `ValueError` naming an unhandled event
+    type (fail loud, per D21), so a type added to `ACTION_EVENT_KEYS` without an arm
+    cannot pass silently.
   - `fold_actions(events: Sequence[Mapping]) -> dict[str, ActionFold]` — declaration-ordered.
   - `retry_safe(entry: ActionFold) -> bool` — for now: the latest attempt has a return that
     is not `accepted` and whose class is in `RETRY_SAFE_CLASSES` (Task 4 widens it).
@@ -50,13 +53,15 @@
   operation, name, parameters, effect) -> str` (the action id) and `_append(prior: dict,
   now: int, events: list[dict]) -> Transaction` (numbers each fields dict with `seq` and
   `at = format_at(now)`, sets `revision`, validates, writes, returns the snapshot). Task 3
-  reuses both.
+  reuses both. The existing `_append_fenced` keeps its fence stamp and
+  `fenced_id_violation` check and then delegates to `_append` instead of repeating the
+  number/validate/write sequence.
 
 **Invariants:**
 - Validator rules this task adds, each message containing the quoted fragment:
-  a non-string `action_id` → `"action_id is not a string"`; a declared id already declared
-  → `"is declared twice"`; a declared name/parameters with an `action_violation` → that
-  rule; a declared id ≠ `action_id(transaction_id, name, parameters)` → `"does not re-derive
+  a non-string `action_id` → `"action_id is not a string"`; then, for `action_declared`
+  in this order, a declared id already declared → `"is declared twice"`; a declared
+  name/parameters with an `action_violation` → that rule; a declared id ≠ `action_id(transaction_id, name, parameters)` → `"does not re-derive
   from its name and parameters"`; any other action event whose id is undeclared → `"has no
   earlier action_declared"`; a fenced action event with a malformed fence →
   `fence_violation`'s rule; with no open span → `"sits outside an open custody span"`;
@@ -295,6 +300,9 @@ class InspectActionTest(ProtocolCase):
             "does not re-derive from its name and parameters":
                 lambda ev: ev[2].update(name="stage"),
             "is declared twice": lambda ev: ev.append(copy.deepcopy(ev[2])),
+            "name '' is not a non-empty string": lambda ev: ev[2].update(name=""),
+            "parameters is not a JSON object": lambda ev: ev[2].update(parameters=[]),
+            "fence is not a non-empty object": lambda ev: ev[3].update(fence={}),
             "has no earlier action_declared": lambda ev: ev.pop(2),
             "action_id is not a string": lambda ev: ev[3].update(action_id=["x"]),
             "outcome is not absent, in_progress, satisfied, diverged or unknown":
@@ -336,8 +344,11 @@ and the v3 schema assertion.
      `apply_action_event`. `snapshot` sets `actions`. Update the module, `Transaction` and
      `validate_state` docstrings from v2 to v3 and name the derived `actions` view.
   3. Core: `inspect_action` per the invariants, using `_action_arguments` and `_append`;
-     `_require_creatable`'s docstring says v3. Docstring of `inspect_action`: describe the
+     `_append_fenced` delegates to `_append` (see **Produces**); `_require_creatable`'s
+     docstring says v3. Docstring of `inspect_action`: describe the
      two lock holds, the unlocked call and what is appended, from the implemented code.
+  4. Update `transaction_invocation`'s module docstring from the implemented code (it now
+     also holds the action fold, the result checks and the per-action view).
 
 - [ ] **Step 4: Verify**
 
@@ -355,4 +366,4 @@ git add python/agent_tools/transaction_invocation.py python/agent_tools/transact
 git commit -m "feat(transaction-core): record action inspections under schema v3 (#206)"
 ```
 
-Decisions: per D2, D3, D5, D8, D11, D13, D17.
+Decisions: per D2, D3, D5, D8, D11, D13, D17, D21.

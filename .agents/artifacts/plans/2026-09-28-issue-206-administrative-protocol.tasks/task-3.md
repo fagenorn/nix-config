@@ -3,13 +3,14 @@
 **Files:**
 - Modify: `python/agent_tools/transaction_invocation.py`
 - Modify: `python/agent_tools/transaction_core.py`
+- Modify: `python/agent_tools/transaction_storage.py` (`StaleCustody` docstring only)
 - Modify: `tests/test_transaction_invocation.py` (append before the `if __name__` block)
 
 **Interfaces:**
 - Consumes (Tasks 1–2): `ActionFold`, `ACTION_EVENT_KEYS`, `action_event_violation`,
   `apply_action_event`, `fold_actions`, `retry_safe`, `effect_request`, the constants;
   core `_action_arguments`, `_append`, `_fenced`; test fixtures `ProtocolCase`,
-  `FakeEffect`, `FakeWorld`, `renumbered`, `OTHER_FENCE`.
+  `FakeEffect`, `FakeWorld`, `Crash`, `renumbered`, `OTHER_FENCE`.
 - Produces (`transaction_invocation`):
   - `ACTION_EVENT_KEYS` gains `invocation_intended`: envelope ∪ {`action_id`, `attempt`,
     `fence`} and `invocation_returned`: envelope ∪ {`action_id`, `attempt`, `result`,
@@ -27,6 +28,12 @@
     `not_retryable` when `n > 1` and not `retry_safe(entry)`; `budget_exhausted` when
     `n > MAX_ATTEMPTS`; `window_closed` when `n > 1` and `now_ms - first_failure_ms >
     RETRY_WINDOW_MS` (inclusive bound).
+  - `refused_error(transaction_id: str, identity: str, reason: str) -> InvocationRefused` —
+    the one construction path for `InvocationRefused` (per D21): it raises `ValueError`
+    (a programming error, never caught) for a `reason` outside `REFUSAL_REASONS`, and
+    otherwise returns the error with a message naming the transaction id, the action id
+    and the reason. Every core raise site (this task, Tasks 4 and 5) is
+    `raise refused_error(...)`.
 - Produces (core): `TransactionStore.invoke_action(custody: Custody, *, name: str,
   parameters: dict, effect: Any) -> Transaction`; core re-imports `EFFECT_STATES`.
 
@@ -36,14 +43,15 @@
   `{result, error_class, reference}`.
 - Validator rules this task adds, checked after the shared id and fence rules, each
   message containing the quoted fragment (`n` the event's attempt, `m` the folded one):
-  intent — a non-int or bool attempt, or `n != m + 1` → `"attempt {n!r} does not follow
-  attempt {m}"`; `n > MAX_ATTEMPTS` → `"attempt {n} exceeds 3"`; state not in
+  intent — `type(n) is not int` (so `bool` and `float` are refused, per D21), or
+  `n != m + 1` → `"attempt {n!r} does not follow attempt {m}"`; `n > MAX_ATTEMPTS` → `"attempt {n} exceeds 3"`; state not in
   `EFFECT_STATES` → `"invocation_intended sits outside publishing and activating"` (per
   D17); open, no inspection, or latest inspection not `absent` or under another fence →
   `"does not follow an absent inspection under its fence"`; `n > 1` and not
   `retry_safe` → `"retry follows an attempt that is not retry-safe"`. Return — not open →
-  `"invocation_returned follows no open attempt"`; `n != m` → `"attempt does not name the
-  open attempt"`; `returned` already set → `"attempt {m} already returned"`; fence ≠
+  `"invocation_returned follows no open attempt"`; `type(n) is not int` or `n != m` →
+  `"attempt does not name the open attempt"` (the type check first, so `True` and `1.0`
+  never equal attempt 1, per D21); `returned` already set → `"attempt {m} already returned"`; fence ≠
   `intent_fence` → `"fence does not equal its intent's"`; result → `"result is not accepted,
   rejected or unknown"`; class → `"error_class does not match the result"`; reference →
   `"reference is not a non-empty string"`.
@@ -56,7 +64,9 @@
   shape-checked (`EffectResultInvalid`, the intent stays open). Under a second `_fenced`:
   one `_append` of `invocation_returned` (the result's three fields, held fence) and the
   closing `action_inspected`. Every refusal message names the transaction id, the action id
-  and the reason; nothing is caught.
+  and the reason; nothing is caught. The first-hold refusals are admission refusals, before
+  any write or call; a `StaleCustody` at the second fenced check follows the call and
+  leaves the persisted intent open and the effect possibly applied (per D19).
 - Interim gap (closed by Task 4): an attempt with no return is not retry-safe, and
   `inspect_action` may still close an attempt open under the held fence.
 
@@ -76,10 +86,11 @@ class InvokeCase(ProtocolCase):
             custody or self.custody, name=name or self.NAME, parameters=self.PARAMETERS,
             effect=effect or self.effect())
 
-    def refused(self, reason, call):
+    def refused(self, reason, call, name=None):
         error = self.assertRefusedUnchanged(InvocationRefused, call)
         self.assertEqual(error.reason, reason)
         self.assertIn(self.transaction_id, str(error))
+        self.assertIn(self.act(name), str(error))
         return error
 
     def views(self):
@@ -181,7 +192,8 @@ class InvokeActionTest(InvokeCase):
             self.clock.advance(1)
         self.wait(RETRY_WINDOW_MS - 1)
         self.refused("window_closed",
-                     lambda: self.invoke(self.effect(during=self.fail), name="late"))
+                     lambda: self.invoke(self.effect(during=self.fail), name="late"),
+                     name="late")
         self.invoke(name="exact")
         self.assertEqual(self.views()["exact"]["status"], "satisfied")
 
@@ -193,7 +205,8 @@ class InvokeActionTest(InvokeCase):
                 self.invoke(self.effect(results=[result], inspect_outcome="absent"), name=name)
                 self.assertFalse(self.views()[name]["retry_eligible"])
                 self.refused("not_retryable",
-                             lambda: self.invoke(self.effect(during=self.fail), name=name))
+                             lambda: self.invoke(self.effect(during=self.fail), name=name),
+                             name=name)
 
     def test_an_inspection_from_an_earlier_custody_span_licenses_no_call(self):
         self.inspect()
@@ -263,10 +276,30 @@ class InvokeActionTest(InvokeCase):
             "error_class does not match the result":
                 lambda ev: ev[11].update(error_class="provider_throttled"),
             "is not the closed invocation_intended event": lambda ev: ev[7].update(extra=1),
+            "reference is not a non-empty string": lambda ev: ev[8].update(reference=""),
         }
         for fragment, change in cases.items():
             with self.subTest(fragment=fragment):
                 self.assertRuleRefuses(self.transaction_id, edit(change), fragment)
+        for attempt in (True, 1.0):
+            with self.subTest(attempt=attempt):
+                self.assertRuleRefuses(
+                    self.transaction_id, edit(lambda ev: ev[8].update(attempt=attempt)),
+                    "attempt does not name the open attempt")
+
+    def test_a_return_under_another_fence_than_its_intent_is_refused(self):
+        self.inspect()
+        with self.assertRaises(Crash):
+            self.invoke(self.effect(crash="before"))
+        self.store.release(self.custody)
+        self.custody = self.acquire(self.transaction_id)
+        document = self.state_doc(self.transaction_id)
+        document["events"].append({
+            "type": "invocation_returned", "at": document["events"][-1]["at"],
+            "action_id": self.act(), "attempt": 1, "result": "accepted", "error_class": None,
+            "reference": "r", "fence": plain(self.custody.fence)})
+        self.assertRuleRefuses(self.transaction_id, renumbered(document),
+                               "fence does not equal its intent's")
 
     def test_a_fourth_attempt_in_history_is_refused(self):
         self.inspect()
@@ -289,7 +322,11 @@ Expected: FAIL — `AttributeError: ... no attribute 'invoke_action'`.
   `retry_safe` and does not re-implement rule 4. Write `invoke_action`'s docstring from the
   implemented code: the refusal order, the satisfied no-op, the two writes around the
   unlocked calls, and that effect exceptions propagate with the intent open. Extend the
-  core module docstring with one sentence naming the two protocol operations.
+  core module docstring with one sentence naming the two protocol operations. Extend
+  `StaleCustody`'s docstring with one sentence: at `invoke_action`'s second fenced check it
+  follows the call, leaving the intent open and the effect possibly applied (#206 D19).
+  Update `transaction_invocation`'s module docstring from the implemented code (admission
+  rules and `refused_error`).
 
 - [ ] **Step 4: Verify**
 
@@ -300,7 +337,7 @@ Expected: `OK`.
 
 ```bash
 git add python/agent_tools/transaction_invocation.py python/agent_tools/transaction_core.py \
-  tests/test_transaction_invocation.py
+  python/agent_tools/transaction_storage.py tests/test_transaction_invocation.py
 git commit -m "feat(transaction-core): invoke actions behind a durable intent and retry budget (#206)"
 ```
 
@@ -319,4 +356,4 @@ test "$fail" = 0
 Expected: exit 0 (estimates: core ~42000 bytes, test file diff ~35000). A miss means the
 task is not done: move pure logic from the core into `transaction_invocation`.
 
-Decisions: per D3, D5, D6, D7, D8, D10, D11, D17.
+Decisions: per D3, D5, D6, D7, D8, D10, D11, D17, D19, D21.

@@ -25,7 +25,7 @@ codecs and the two new errors in storage (per D15). Task 1 lays the vocabulary; 
 import check, unchanged).
 
 Spec (source of truth, read it whole):
-`.agents/artifacts/specs/2026-09-28-issue-206-administrative-protocol-design.md`, D1–D18.
+`.agents/artifacts/specs/2026-09-28-issue-206-administrative-protocol-design.md`, D1–D21.
 Slices 1–2 code at the base commit `ce33847bd60d4dc40a8a241d9f35b2bbdc9aaae1`.
 
 ## Global Constraints
@@ -48,8 +48,10 @@ Slices 1–2 code at the base commit `ce33847bd60d4dc40a8a241d9f35b2bbdc9aaae1`.
   the neutrality lists in `tests/test_transaction_core_sweep.py` (e.g. `push`, `tag`,
   `deploy`, `git`, `switch`).
 - No lock is held while an effect runs (per D3); the core catches nothing an effect raises.
-- Every refusal names the transaction id and the rule, and happens before any write and,
-  for `InvocationRefused`, before any effect call (per D7).
+- Every refusal names the transaction id and the rule. Admission refusals come before any
+  write and any effect call (per D7); post-call refusals do not (per D19): the second
+  hold's `attempt_in_flight` records nothing from the call, and a second-check
+  `StaleCustody` in `invoke_action` can leave a persisted intent and an applied effect.
 - Constants, exact: schema `transaction-state/v3`; `MAX_ATTEMPTS = 3`;
   `RETRY_WINDOW_MS = 900_000`; action id `act_` + 32 lowercase hex.
 - Size caps (per #205 D33): after every task, `transaction_core.py` ≤ 55000 bytes and each
@@ -102,6 +104,17 @@ Task 6 — Sweep rows `throttled_retry` and `resume_after_crash`, attempts colum
 
 The spec's `## Decision ledger` owns every decision. Tasks cite: D1, D4, D7, D11, D15
 (Task 1); D2, D3, D5, D8, D11, D13, D17 (Task 2); D3, D5–D8, D10, D11, D17 (Task 3); D3,
-D6, D14, D16 (Task 4); D7, D9 (Task 5); D12, D18 (Task 6). Planning added D15–D18.
+D6, D14, D16 (Task 4); D7, D9, D20, D21 (Task 5); D12, D18 (Task 6); D19 (Tasks 1, 3, 4);
+D21 (Tasks 2, 3). Planning added D15–D18; the standards review added D19–D21.
+
+## Standards review provenance
+
+- **Reviewer:** Claude fallback (native reviewer of record), isolated read-only mode.
+- **Base SHA:** ce33847bd60d4dc40a8a241d9f35b2bbdc9aaae1.
+- **Fallback reason:** Codex JSONL lacked the runtime model/effort selection event; its
+  findings were verified and folded in as supplementary input.
+- **Findings:** 10 accepted and applied inline (ledger rows D19–D21 for the non-obvious
+  ones), 1 rejected (X2: D16 names both second-hold clauses; the fence clause is cheap
+  defense in depth), 0 deferred.
 
 ---

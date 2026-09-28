@@ -46,6 +46,11 @@
   Every other scenario runs publication once.
 - Earlier rows keep their landings; every row now also asserts one attempts pair and
   the world's invoke counts.
+- Expected action sets never come from recorded events alone: each cell derives the
+  complete publication and activation node ids from the shape's own profile
+  (`SHAPES[shape](World())`) and asserts the recorded action names equal them, so a
+  skipped node fails. Each `throttled_retry` action's returns read exactly attempt 1
+  `rejected`/`provider_throttled`, then attempt 2 `accepted`.
 
 - [ ] **Step 1: Write the failing tests** — in `tests/test_transaction_core_sweep.py`,
   import `World` from `.transaction_core_world`, and replace the table and the cell test's
@@ -84,6 +89,16 @@ CUSTODY_EVENTS = {
 }
 ```
 
+  Add a module-level helper beside the table:
+
+```python
+def declared_nodes(shape):
+    """Every publication and activation node id the shape's profile declares."""
+    _, profile, _ = SHAPES[shape](World())
+    activation = [] if profile["activation"] == "none" else profile["activation"]
+    return sorted(node["id"] for node in [*profile["publication"], *activation])
+```
+
   In `test_every_cell_lands_where_the_table_says`, unpack `(final, path, voided, (first,
   rest))`, create `world = World()`, call `drive(root, shape, scenario, world=world)`, change
   the lease-record epoch expectation to `2 if CUSTODY_EVENTS[scenario][1] ==
@@ -96,10 +111,19 @@ CUSTODY_EVENTS = {
                             if e["type"] == "invocation_intended"}
                 self.assertEqual([attempts[a] for a in declared],
                                  [first] + [rest] * (len(declared) - 1))
+                self.assertEqual(sorted(e["name"] for e in persisted.actions),
+                                 declared_nodes(shape))
                 self.assertEqual({e["status"] for e in persisted.actions}, {"satisfied"})
                 self.assertEqual(set(world.invokes), set(declared))
                 self.assertEqual(set(world.invokes.values()),
                                  {2 if scenario == "throttled_retry" else 1})
+                if scenario == "throttled_retry":
+                    for identity in declared:
+                        self.assertEqual(
+                            [(e["attempt"], e["result"], e["error_class"])
+                             for e in persisted.events if e["type"] == "invocation_returned"
+                             and e["action_id"] == identity],
+                            [(1, "rejected", "provider_throttled"), (2, "accepted", None)])
 ```
 
   Add to `SweepTableTest`:

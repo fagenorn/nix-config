@@ -17,11 +17,13 @@
 **Invariants:**
 - First lock hold of `inspect_action`: when the action's latest attempt is open and its
   `intent_fence` equals the held fence, raise `InvocationRefused` reason
-  `attempt_in_flight` before any effect call (per D14).
+  `attempt_in_flight` before any effect call (per D14), raised through `refused_error`
+  (its message names the transaction id and the action id).
 - Second lock hold of `inspect_action` (per D16): re-fold; when the entry's attempt count
   (0 without an entry) differs from the count read at the first hold, or the entry is open
   under the held fence, raise `InvocationRefused` reason `attempt_in_flight` with nothing
-  written. An inspection made before another attempt began is never recorded.
+  written. An inspection made before another attempt began is never recorded. This is a
+  post-call refusal: the effect's `inspect` has already run (per D19).
 - Validator rule (per D14): an `action_inspected` that closes an open attempt with no
   recorded return and carries the intent's fence is refused with a message containing
   `"closes a return-less attempt under its intent's fence"`. A return-less attempt closed
@@ -94,7 +96,8 @@ refused `not_retryable`, and the stale observation is recorded.
 - [ ] **Step 3: Implement** the three invariants in `transaction_invocation` (the
   `retry_safe` widening and the validator rule) and `transaction_core` (the two
   `inspect_action` checks, reading the attempt count at the first hold). Rewrite
-  `inspect_action`'s docstring from the implemented code to name both refusals.
+  `inspect_action`'s docstring from the implemented code to name both refusals and say
+  the second follows the read-only `inspect` call and records nothing.
 
 - [ ] **Step 4: Verify**
 
@@ -123,4 +126,4 @@ test "$fail" = 0
 
 Expected: exit 0. A miss means the task is not done.
 
-Decisions: per D3, D4, D6, D14, D16.
+Decisions: per D3, D4, D6, D14, D16, D19.

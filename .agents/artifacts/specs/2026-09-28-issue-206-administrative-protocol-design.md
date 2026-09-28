@@ -149,8 +149,11 @@ in this order under the lock on one clock reading (D5, D6):
 
 Every refusal is `InvocationRefused`, carrying one `reason` from that closed set, plus
 `state_not_effectful` for an invoke outside the effect states and `attempt_in_flight` for an
-inspection of an attempt still open under the held fence. It is raised before any write and
-before any effect call (D7). The protocol never moves the lifecycle itself: the caller parks, as
+inspection of an attempt still open under the held fence. An admission refusal is raised
+before any write and before any effect call (D7). Two refusals follow the call instead (D19): an
+operation's second lock hold refuses `attempt_in_flight` and records nothing from the call (D16),
+and a `StaleCustody` at `invoke_action`'s second fenced check leaves the intent open and the
+external effect possibly applied. The protocol never moves the lifecycle itself: the caller parks, as
 every other advance in slices 1–2 is caller-driven, and the refusal reason is the typed attention
 cause #82 names (`retry_exhausted` is `budget_exhausted` here). Every retry through
 `invoke_action` is automatic. The #82 authorized extra attempt, profile-lowered limits, backoff
@@ -163,7 +166,8 @@ the attempt's closing inspection, and under the intent's fence. An inspection th
 attempt with no return carries a fence other than the intent's. Each retry follows a retry-safe
 predecessor. `action_declared` precedes every other event of its id, and its id re-derives from
 its `name` and `parameters`. Every fenced action event sits inside an open custody span whose fence
-it equals. The fifteen-minute window is enforced only at invoke time on the store clock, because
+it equals. A terminal transition over an `open`, `in_progress` or `unknown` action is refused
+(D20). The fifteen-minute window is enforced only at invoke time on the store clock, because
 event `at` is not monotonic by contract (#205 D3) (D6).
 
 ### Transaction state `transaction-state/v3`
@@ -320,3 +324,6 @@ where the schema string and the new required pre-inspection demand it.
 | D16 | Plan: each operation's second write re-folds the action and refuses `attempt_in_flight`, recording nothing from the call, when the action's attempt count changed since its first read or an attempt is open under the held fence; `invoke_action`'s own second write needs its intent to be still the action's latest event, which the validator enforces. | D3 (no lock across a call), D5, D14. | Appending an observation made before a newer attempt (a stale `absent` would license a duplicate), or demanding an unchanged revision (unrelated records would refuse honest inspections). |
 | D17 | Plan: the validator also refuses an `invocation_intended` outside `publishing`/`activating` and a second `action_declared` of one id; the view's `retry_eligible` is true for an `absent` action with no attempts, and `retry_deadline_at` is an `at`-format timestamp. | Spec: the validator re-checks everything that needs no clock; D8. | Leaving the state unchecked (a hand-edited intent in a parking would load). |
 | D18 | Plan: the sweep's `drive(root, shape, scenario, world=None)` still returns the transaction id, and a caller-passed `World` exposes its invoke counts; one effect wrapper per binding maps `SimAdapter` observations to the closed shapes, with action `name` the node id and `parameters` `{"mode", "expected_subject"}`; the attempts column is `(first publication action's attempts, every other action's attempts)`. | D12, D13; #205 D22 seam 2. | Changing `drive`'s return type (every existing caller changes) or reading counts from a call log. |
+| D19 | Standards review: admission refusals (`StateInvalid`, `TransitionRefused`, the fenced check, every first-hold `InvocationRefused`) come before any write and any effect call; post-call refusals are the second hold's `attempt_in_flight`, which records nothing from the call, and a second-check `StaleCustody`, which can leave a persisted intent and an applied external effect; the error docstrings say so. | Reviewer: D16's re-check and the lapse test already refuse after the call, so a universal "before any call" promise is false; the-bar fail loud (docs state real behavior); #82 an open intent is what resume reconciles. | Keeping the universal claim (contradicted by D16 and the lease-lapse behavior) or dropping the post-call checks (records stale observations). |
+| D20 | Standards review: the history validator refuses a `transitioned` into a terminal while the shared `unresolved` predicate names an `open`, `in_progress` or `unknown` action, as `advance` does. | Reviewer: the spec promises the validator re-checks every clock-free rule, and a hand-edited terminal would otherwise load over unresolved reality; #82 unknown reality is never terminal; D9. | Enforcing D9 only in `advance` (hand-edited history bypasses it). |
+| D21 | Standards review: closed vocabularies fail loud — the one `InvocationRefused` construction path raises a programming error for a reason outside `REFUSAL_REASONS`, which a test pins to the reasons the tests observe; both action-event dispatches raise on an unhandled type; an event `attempt` is an exact `int` (never `bool` or `float`). | Reviewer: a typo'd reason, a missed dispatch arm or `True == 1` would pass silently; the-bar fail loud; D7, D11. | Trusting call sites to pass known reasons, or `==` comparison on attempts. |

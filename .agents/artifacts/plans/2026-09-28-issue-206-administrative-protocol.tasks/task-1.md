@@ -34,7 +34,7 @@
   `action_violation(name: Any, parameters: Any) -> str | None`;
   `action_id(transaction_id: str, name: str, parameters: dict) -> str`.
 - Produces (`agent_tools.transaction_core` re-exports): `action_id`, `MAX_ATTEMPTS`,
-  `RETRY_WINDOW_MS`, `InvocationRefused`, `EffectResultInvalid`.
+  `RETRY_WINDOW_MS`, `REFUSAL_REASONS`, `InvocationRefused`, `EffectResultInvalid`.
 
 **Invariants:**
 - `action_id(t, n, p) == "act_" + telemetry_digest([t, n, p])[len("sha256:"):][:32]` (per D4).
@@ -60,8 +60,6 @@ from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_core import (
     MAX_ATTEMPTS, RETRY_WINDOW_MS, EffectResultInvalid, InvocationRefused, StateInvalid,
     TransactionError, action_id)
-
-from .test_transaction_custody import T0
 
 TID = "rel_01890a5d-ac96-7abc-8def-0123456789ab"
 
@@ -107,11 +105,9 @@ class VocabularyTest(unittest.TestCase):
         self.assertEqual((error.reason, str(error)), ("window_closed", "rel_x: refused"))
 
     def test_the_codecs_have_one_home_in_storage(self):
-        for name in ("format_at", "json_object_violation"):
+        for name in ("format_at", "parse_at", "json_object_violation"):
             self.assertIs(getattr(transaction_history, name),
                           getattr(transaction_storage, name))
-        self.assertEqual(transaction_storage.format_at(T0 + 1234), "2027-01-15T08:00:01.234Z")
-        self.assertEqual(transaction_storage.parse_at("2027-01-15T08:00:01.234Z"), T0 + 1234)
 
 
 if __name__ == "__main__":
@@ -142,12 +138,17 @@ Expected: FAIL — `ImportError: cannot import name 'MAX_ATTEMPTS'`.
      telemetry_digest`; move `format_at` and `_parse_at` (renamed `parse_at`) and
      `json_object_violation` from history verbatim (docstrings kept; `json_object_violation`
      keeps citing #205 D34). Add the two errors after `LeaseUnavailable`, docstrings:
-     `"""An administrative-protocol refusal before any write or effect call; `reason` names
-     the rule (#206 D7)."""` and `"""An effect result outside the closed shapes; nothing from
+     `"""An administrative-protocol refusal; `reason` names the rule. An admission refusal
+     comes before any write or effect call; `attempt_in_flight` at an operation's second
+     lock hold follows the call and records nothing from it (#206 D7, D19)."""` and `"""An effect result outside the closed shapes; nothing from
      that call is recorded (#206 D11)."""`.
+     Rewrite storage's module docstring from the resulting code: it also homes the pure
+     `at`-timestamp and strict-JSON-object codecs.
   2. History: delete the moved bodies, import `format_at`, `json_object_violation`,
      `parse_at` from storage, and switch `parked_since` to `parse_at`. Drop imports that
-     become unused (`calendar`; keep `datetime`, still used by `_is_timestamp`).
+     become unused (`calendar`; keep `datetime`, still used by `_is_timestamp`). Rewrite the
+     module docstring from the resulting code: `json_object_violation` is re-imported from
+     storage, no longer held here.
   3. New module: a docstring stating what it holds now (vocabularies, retry constants,
      `action_id`) and that it reads no file, lock or clock; the constants above;
 
@@ -176,7 +177,7 @@ def action_id(transaction_id: str, name: str, parameters: dict) -> str:
     return "act_" + telemetry_digest([transaction_id, name, parameters])[7:39]
 ```
 
-  4. Core: import `MAX_ATTEMPTS, RETRY_WINDOW_MS, action_id` from
+  4. Core: import `MAX_ATTEMPTS, REFUSAL_REASONS, RETRY_WINDOW_MS, action_id` from
      `transaction_invocation` and `EffectResultInvalid, InvocationRefused` from storage
      (re-exports; unused-name linting is not configured). Add one sentence to the module
      docstring naming `agent_tools.transaction_invocation` as the home of `action_id` and
@@ -207,4 +208,4 @@ git add python/agent_tools/transaction_invocation.py python/agent_tools/transact
 git commit -m "feat(transaction-core): add the invocation vocabulary and action ids (#206)"
 ```
 
-Decisions: per D1, D4, D7, D11, D15.
+Decisions: per D1, D4, D7, D11, D15, D19.
