@@ -1,0 +1,217 @@
+# Task 6: Reap, synthesized stop and late owner-result intake
+
+**Files:**
+- Modify: `python/agent_tools/transaction_core.py`
+- Modify: `tests/test_transaction_custody.py` (append classes before `if __name__`)
+
+**Interfaces:**
+- Consumes (Tasks 3–5): `LeaseAuthority.span_lapsed(fence, now)`,
+  `self._check_custody`, `self._transaction_locked`, `self._now()`, `_format_at`,
+  `_require_custody_shape` (its fence-shape part), the validator dispatch and
+  `_EVENT_KEYS`, `record_evidence`, `advance(..., custody=)`, `StaleCustody`,
+  `CustodyMisbound`, `TransitionRefused`, `StateInvalid`; slice 1's strict-JSON
+  round-trip rule used by `_require_creatable` for `subject`; test helpers
+  `CustodyCase`, `plain`, `TTL`, `KEYS`, `PATH`, `serialize`.
+- Produces: `TransactionStore.reap(self, transaction_id: str, *, reason: str) -> Transaction`
+  and `TransactionStore.record_owner_result(self, transaction_id: str, *, executor_id: str, subject_path: str, fence: Mapping[str, Mapping[str, Any]], result: dict) -> Transaction`.
+  Task 7's reaper step calls `reap` exactly so.
+
+**Invariants:**
+- `reap` takes no custody and never refuses a held, absent or terminal custody: with no
+  open span, a terminal, or a live span (per `span_lapsed` at one `now`) it writes nothing
+  and returns the unchanged snapshot (D17).
+- On a lapsed open span one write appends `lease_lapse_detected {fence, executor_id}`,
+  `stop_synthesized {fence, executor_id, reason}` and — only when the state is not a
+  parking — `transitioned` to `attention_required` with the given `reason` and
+  `external_state: "unknown"`; `custody` becomes `None`. Lease records are not touched
+  (an expired or re-held record is already inert, D24).
+- `record_owner_result` is authentic iff some `lease_acquired`/`lease_reacquired` event
+  carries that `executor_id` and an equal fence, else `StaleCustody`; then the path must
+  equal the bound one, else `CustodyMisbound`; a terminal refuses with
+  `TransitionRefused` first (D18, D27). It appends one `owner_result {executor_id, fence,
+  custody, supersedes, result}` where `custody` is `"current"` iff the projection holds
+  that executor and fence and `span_lapsed` is false, else `"stale"`; `supersedes` is
+  the `seq` of the latest `stop_synthesized` with an equal fence, else `None`. It never
+  changes `state`, `parked_from` or `custody`, and never touches lease records.
+- Validator: `stop_synthesized` directly follows a `lease_lapse_detected` of the same
+  fence and executor, with a non-empty `reason`; `owner_result` names a span's executor
+  and fence, `custody` is `current`/`stale`, `supersedes` is `None` or the `seq` of an
+  earlier `stop_synthesized` with an equal fence, and `result` is a JSON object (D30).
+- Shape errors (`StateInvalid`, before any lock): empty `reason`/`executor_id`; bad
+  `subject_path` per Task 3; malformed fence; `result` not a `dict` that survives the
+  strict JSON round trip slice 1 applies to `subject`.
+
+- [ ] **Step 1: Write the failing tests** — append to `tests/test_transaction_custody.py`:
+
+```python
+class ReapTest(CustodyCase):
+    def proving(self):
+        transaction_id = self.new()
+        custody = self.acquire(transaction_id)
+        for target in ("awaiting_verification", "ready", "publishing", "published",
+                       "proving"):
+            self.store.advance(transaction_id, target, reason="r", external_state="known",
+                               custody=custody)
+        return transaction_id, custody
+
+    def test_reap_writes_nothing_without_a_lapse(self):
+        bare = self.new("bare", keys=("project:bare",))
+        transaction_id, _ = self.proving()
+        before = self.files()
+        for candidate in (bare, transaction_id):
+            self.assertEqual(self.store.reap(candidate, reason="sweep"),
+                             self.store.load(candidate))
+        self.assertEqual(self.files(), before)
+
+    def test_reaping_a_lapse_parks_with_a_synthesized_stop_once(self):
+        transaction_id, custody = self.proving()
+        self.clock.advance(TTL)
+        reaped = self.store.reap(transaction_id, reason="lease expired")
+        tail = [dict(e) for e in reaped.events[-3:]]
+        self.assertEqual([e["type"] for e in tail],
+                         ["lease_lapse_detected", "stop_synthesized", "transitioned"])
+        self.assertEqual((tail[1]["fence"], tail[1]["executor_id"], tail[1]["reason"]),
+                         (plain(custody.fence), "exec-a", "lease expired"))
+        self.assertEqual((tail[2]["to"], tail[2]["external_state"], tail[2]["reason"]),
+                         ("attention_required", "unknown", "lease expired"))
+        self.assertEqual((reaped.state, reaped.parked_from, reaped.custody),
+                         ("attention_required", "proving", None))
+        before = self.files()
+        self.assertEqual(self.store.reap(transaction_id, reason="again"), reaped)
+        self.assertEqual(self.files(), before)
+        for call in (
+                lambda: self.store.advance(transaction_id, "proving", reason="r",
+                                           custody=custody),
+                lambda: self.store.record_evidence(custody, evidence_id="x",
+                                                   form="snapshot", reference="r")):
+            self.assertRefusedUnchanged(StaleCustody, call)
+
+    def test_reaping_a_parked_lapse_adds_no_transition(self):
+        transaction_id = self.new()
+        custody = self.acquire(transaction_id)
+        self.store.advance(transaction_id, "attention_required", reason="r", custody=custody)
+        self.clock.advance(TTL)
+        reaped = self.store.reap(transaction_id, reason="lease expired")
+        self.assertEqual([e["type"] for e in reaped.events[-2:]],
+                         ["lease_lapse_detected", "stop_synthesized"])
+        self.assertEqual(reaped.state, "attention_required")
+
+
+class OwnerResultTest(ReapTest):
+    def late(self, transaction_id, custody, **overrides):
+        arguments = {"executor_id": custody.executor_id,
+                     "subject_path": custody.subject_path, "fence": plain(custody.fence),
+                     "result": {"status": "done", "items": [1, 2]}, **overrides}
+        return self.store.record_owner_result(transaction_id, **arguments)
+
+    def test_a_late_authentic_result_is_kept_beside_the_synthesized_stop(self):
+        transaction_id, custody = self.proving()
+        self.clock.advance(TTL)
+        reaped = self.store.reap(transaction_id, reason="lease expired")
+        stop = next(e for e in reaped.events if e["type"] == "stop_synthesized")
+        after = self.late(transaction_id, custody)
+        event = dict(after.events[-1])
+        self.assertEqual(event, {
+            "seq": reaped.revision + 1, "type": "owner_result", "at": event["at"],
+            "executor_id": "exec-a", "fence": plain(custody.fence), "custody": "stale",
+            "supersedes": stop["seq"], "result": {"status": "done", "items": [1, 2]}})
+        self.assertEqual((after.state, after.parked_from, after.custody),
+                         (reaped.state, reaped.parked_from, None))
+        self.assertIn("stop_synthesized", [e["type"] for e in after.events])
+        self.assertRefusedUnchanged(StaleCustody, lambda: self.store.advance(
+            transaction_id, "proving", reason="r", custody=custody))
+
+    def test_a_result_under_live_custody_is_current(self):
+        transaction_id, custody = self.proving()
+        event = self.late(transaction_id, custody).events[-1]
+        self.assertEqual((event["custody"], event["supersedes"]), ("current", None))
+        self.assertEqual(self.store.load(transaction_id).custody, custody)
+
+    def test_unissued_misbound_or_malformed_results_are_refused_before_any_write(self):
+        transaction_id, custody = self.proving()
+        bumped = {k: {**v, "epoch": v["epoch"] + 1} for k, v in plain(custody.fence).items()}
+        for overrides in ({"fence": bumped}, {"executor_id": "exec-z"}):
+            with self.subTest(overrides=overrides):
+                self.assertRefusedUnchanged(
+                    StaleCustody, lambda: self.late(transaction_id, custody, **overrides))
+        self.assertRefusedUnchanged(CustodyMisbound, lambda: self.late(
+            transaction_id, custody, subject_path="/work/beta"))
+        for result in (["not", "an", "object"], {"x": float("nan")}, {1: "int key"},
+                       {"t": (1, 2)}):
+            with self.subTest(result=result):
+                self.assertRefusedUnchanged(
+                    StateInvalid, lambda: self.late(transaction_id, custody, result=result))
+
+    def test_a_terminal_transaction_refuses_late_results(self):
+        transaction_id, custody = self.proving()
+        self.store.advance(transaction_id, "succeeded", reason="r", external_state="known",
+                           custody=custody)
+        self.assertRefusedUnchanged(TransitionRefused,
+                                    lambda: self.late(transaction_id, custody))
+
+    def test_hand_edited_stop_and_result_histories_are_state_invalid(self):
+        transaction_id, custody = self.proving()
+        self.clock.advance(TTL)
+        self.store.reap(transaction_id, reason="lease expired")
+        self.late(transaction_id, custody)
+        base = self.state_doc(transaction_id)
+        *head, lapse, stop, park, result = base["events"]
+
+        def events(*tail):
+            return lambda d: {**d, "events": [*head, *tail],
+                              "revision": len(head) + len(tail)}
+
+        cases = {
+            "stop without lapse": events({**stop, "seq": lapse["seq"]}, park, result),
+            "result names no span": events(lapse, stop, park, {**result,
+                                                               "executor_id": "exec-z"}),
+            "supersedes no stop": events(lapse, stop, park, {**result,
+                                                             "supersedes": park["seq"]}),
+            "unknown custody word": events(lapse, stop, park, {**result,
+                                                               "custody": "maybe"}),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(case=name):
+                (self.root / transaction_id / "state.json").write_text(
+                    serialize(mutate(copy.deepcopy(base))))
+                with self.assertRaises(StateInvalid):
+                    self.store.load(transaction_id)
+```
+
+`OwnerResultTest` subclasses `ReapTest` only to reuse `proving`; it therefore also
+re-runs `ReapTest`'s three tests, which is intended and harmless.
+
+- [ ] **Step 2: Run the tests and watch them fail**
+
+Run: `PYTHONPATH=python python3 -m unittest tests/test_transaction_custody.py 2>&1 | tail -3`
+Expected: FAIL — `AttributeError: 'TransactionStore' object has no attribute 'reap'`.
+
+- [ ] **Step 3: Write the minimal implementation**
+
+1. Add `stop_synthesized {seq, type, at, fence, executor_id, reason}` and
+   `owner_result {seq, type, at, executor_id, fence, custody, supersedes, result}` to
+   `_EVENT_KEYS` and the validator rules above; neither opens or closes a span.
+2. `reap`: `reason` shape → `_transaction_locked` → `prior` → return `_snapshot(prior)`
+   when terminal or `prior["custody"] is None` → `now` → return unchanged unless
+   `span_lapsed(fence, now)` → build the one candidate per the invariant (every event
+   stamped `_format_at(now)`; the park updates `parked_from` exactly as `advance` does)
+   → validate → `atomic_write`. No lease lock.
+3. `record_owner_result`: shapes → lock → `prior` → terminal refusal → authenticity →
+   bound path → `now` → `custody` word and `supersedes` → append → validate → write. The
+   `result` stored is a deep copy.
+4. Docstrings of both methods describe these rules as implemented.
+
+- [ ] **Step 4: Verify**
+
+Run: `PYTHONPATH=python python3 -m unittest tests/test_transaction_custody.py 2>&1 | tail -3`
+Expected: `OK` (Task 5's custody-file count + 11 test runs: 3 in `ReapTest`, 3 inherited
+plus 5 in `OwnerResultTest`).
+
+Run: `just agent-workflow-tests 2>&1 | tail -3` — Expected: `OK`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add python/agent_tools/transaction_core.py tests/test_transaction_custody.py
+git commit -m "feat(transaction-core): reap lapsed custody and take late owner results (#205)"
+```
