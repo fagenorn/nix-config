@@ -21,7 +21,7 @@
   `TransactionStore.open_interval(self, custody, *, evidence_id: str) -> Transaction`;
   `TransactionStore.issue_grant(self, custody, *, grant_id: str, actor: str) -> Transaction`;
   `TransactionStore.check_grant(self, custody, grant_id: str) -> Mapping[str, Any]`.
-  Task 7's executor calls the first two.
+  Task 8's executor calls the first two.
 
 **Invariants:**
 - New closed events: `evidence_recorded {seq, type, at, evidence_id, form, reference,

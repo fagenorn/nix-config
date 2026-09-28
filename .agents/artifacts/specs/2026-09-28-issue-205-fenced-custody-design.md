@@ -62,8 +62,11 @@ arrives with the adapter slice, and the first consumer (#125) runs on one host.
 The custody concern is a second reason to change the store, so it gets its own module (D1):
 
 - `agent_tools.transaction_core` keeps the public surface: `TransactionStore`, `Transaction`,
-  `Custody`, the vocabularies and every error class. It owns the lifecycle fold and the
-  transaction-state validator, now covering custody events.
+  `Custody`, the vocabularies and every error class, re-exporting what its siblings define. It
+  owns the store operations.
+- `agent_tools.transaction_history` (D33) owns the pure `transaction-state/v2` document model:
+  the vocabularies, `Custody` and `Transaction`, the lifecycle fold and the transaction-state
+  validator, now covering custody events, and the snapshot fold. It reads no file, lock or clock.
 - `agent_tools.transaction_custody` owns the local lease authority (lease records, the lease lock,
   epoch/term/expiry arithmetic, the renewal margin) and the pure admissibility fold for evidence
   and grants.
@@ -72,8 +75,9 @@ The custody concern is a second reason to change the store, so it gets its own m
   hierarchy, so both modules share one home. `transaction_core` re-exports the errors; its import
   surface is a superset of slice 1's.
 
-All three stay standard-library only, have no command-table row, and are covered by the Nix build's
-recursive import check. The neutrality check extends to all three modules.
+All four stay standard-library only, have no command-table row, and are covered by the Nix build's
+recursive import check; they import one way, core → history → custody → storage. The neutrality
+check extends to all four modules.
 
 ### Clock
 
@@ -337,7 +341,7 @@ still asserts against a reloaded store.
 ### Documentation
 
 CLAUDE.md's "Agent helper package" sentence on `agent_tools.transaction_core` names the custody
-slice and its two sibling modules, still caller-less until #125. New test files join
+slice and its sibling modules, still caller-less until #125. New test files join
 `just agent-workflow-tests`. The #204 spec is a point-in-time record and is not edited.
 
 ## Test seams
@@ -355,7 +359,7 @@ The slice keeps slice 1's three seams and adds no other (D23):
    contention; the v2 validator's new rules by hand-edited documents; v1 refused.
 2. **Fixture executor against the store** — the asserted sweep table, now three scenarios by four
    shapes.
-3. **Neutrality checker** over the source of all three transaction modules.
+3. **Neutrality checker** over the source of all four transaction modules.
 
 Custody tests live in a new test file beside `tests/test_transaction_core.py`; slice 1's tests are
 updated only where the new required `concurrency_keys` and custodial advances demand it. No test
@@ -408,3 +412,4 @@ command-table row, Nix or host change; state cleanup.
 | D30 | The v2 validator also cross-checks what the spec leaves implicit: `lease_reacquired`'s `reason` matches how the prior span closed, `prior_executor_id` names that span's executor, one `instance` per fence, and `owner_result`'s executor and `supersedes` name a matching span and an earlier `stop_synthesized` of that fence. | #204 D5 projection validation; the-bar defense in depth. | Treating those fields as opaque (a hand-edited history could claim a false reason or supersession). |
 | D31 | Transaction ids stay `rel_` UUIDv7 over the wall clock; only event `at` and lease arithmetic read the injected clock. | #204 D3 (id time is creation wall time); D3 names expiry and event `at` only. | Minting ids from the injected clock (a fake clock would stamp future or epoch-zero ids, breaking UUIDv7 time order). |
 | D32 | Fail loud at both edges of the input: the v2 validator's per-type dispatch refuses an unknown event type by name, and a clock reading outside `[0, 253402300799999]` (the last millisecond a four-digit-year `at` can hold) is a `TransactionError` naming the root. | the-bar fail loud; #204 closed schema; D3's `at` format. | A permissive default branch (an unknown type would pass unvalidated) or unbounded readings (`at` formatting overflows past year 9999). |
+| D33 | Amends D1: a fourth module, `agent_tools.transaction_history`, takes the pure `transaction-state/v2` document model out of `transaction_core` (vocabularies, `Custody`/`Transaction`, credential shape checks, validator, snapshot fold, and the reap/owner-result history rules), importing one way core → history → custody → storage; `transaction_core` keeps the store operations and re-exports every public name, and the neutrality check covers the new module. | D1's own rejected alternative (one module past a thousand lines: the core reached 1053 after Task 5); the review package's 65536-byte per-member cap, which the core's cumulative `-U10` diff (65625 bytes) broke with no packaging remediation for one handwritten file. | Raising the member cap or splitting the review package (the cap is the reviewer's budget, not the plan's), or moving store operations out of `TransactionStore` (one class across modules, a mixin with no second user). |

@@ -26,7 +26,7 @@
   private `self._now() -> int`, `_format_at(ms: int) -> str`, `_parse_at(at: str) -> int`
   (exact inverse of `_format_at`); private context manager
   `self._transaction_locked(transaction_id)` — the existing no-`O_CREAT` lock block of
-  `advance`, yielding with the transaction lock held. Tasks 3–6 call these three.
+  `advance`, yielding with the transaction lock held. Tasks 3–7 call these three.
 
 **Invariants:**
 - `transaction_core`'s import surface is a superset of the base commit's; every existing

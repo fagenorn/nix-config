@@ -32,7 +32,7 @@
   `TransactionStore.release(self, custody: Custody) -> Transaction`;
   `TransactionStore.inspect_lease(self, key: str) -> Mapping[str, Any] | None`; private
   `self._check_custody(prior: dict, custody: Custody, now: int) -> None` and
-  `_require_custody_shape(custody) -> None` — Tasks 4–6 call both.
+  `_require_custody_shape(custody) -> None` — Tasks 4–7 call both.
 
 **Invariants:**
 - Lease record: closed `{schema, key, epoch, holder}`; `holder` null or closed
@@ -46,7 +46,7 @@
   `state.json`; release writes `state.json`, then clears records (D8). Locks: transaction
   then lease, non-blocking.
 - `span_lapsed(fence, now)` is true when any key's record is missing, holds no holder, names
-  another instance or epoch, or has `now >= expires_at`; reap (Task 6) and acquisition
+  another instance or epoch, or has `now >= expires_at`; reap (Task 7) and acquisition
   use only this predicate (D24).
 - `clear` nulls `holder` only on records whose holder instance equals the fence's (D24).
 - Fenced check order, under the transaction lock, before any write: projection is `None`

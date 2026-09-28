@@ -18,7 +18,7 @@
   `LeaseAuthority.extend_if_due(fence, now: int) -> bool`;
   `TransactionStore.renew(self, custody: Custody) -> Transaction`;
   `TransactionStore.advance(self, transaction_id, target, *, reason, external_state=None, custody: Custody | None = None) -> Transaction`;
-  private `_parked_since(events) -> int | None`. Task 7's executor calls `renew` and
+  private `_parked_since(events) -> int | None`. Task 8's executor calls `renew` and
   `advance(..., custody=...)` exactly so.
 
 **Invariants:**
