@@ -31,7 +31,8 @@ this module re-exports the errors and the public model names. `action_id` and th
 constants live in `agent_tools.transaction_invocation`, which this module re-exports too.
 `agent_tools.transaction_plan` is the home of the proof declaration's compiler and the plan
 constants, which this module re-exports as well. `collect_obligation` records one proof
-observation around the pure halves in `agent_tools.transaction_proof` (re-exported too).
+observation around the pure halves in `agent_tools.transaction_proof` (re-exported too);
+`start_cohort` opens a convergence cohort and `settle_proof` judges it in one write.
 The module has no command and no caller yet.
 """
 
@@ -68,8 +69,8 @@ from agent_tools.transaction_plan import (
     PLAN_REJECTION_REASONS, PLAN_SCHEMA, RUNNING_IDENTITY_FRESHNESS_MS, compile_proof,
     materialize_plan)
 from agent_tools.transaction_proof import (
-    PROOF_REFUSAL_REASONS, collection_refusal, next_evidence_id, obligation,
-    observation_request, observation_violation, open_cohort, proof_refused)
+    PROOF_REFUSAL_REASONS, cohort_start, collection_refusal, next_evidence_id, obligation,
+    observation_request, observation_violation, open_cohort, proof_refused, settlement)
 from agent_tools.transaction_storage import (
     LAST_AT_MS, CreationConflict, CustodyMisbound, EffectResultInvalid, FenceViolation,
     GrantInvalid, InvocationRefused, LeaseUnavailable, ProofPlanRejected, ProofRefused,
@@ -274,36 +275,9 @@ class TransactionStore:
         if blocker is not None:
             raise TransitionRefused(f"{where}: terminal target over unresolved action "
                                     f"{blocker.action_id} ({status(blocker)})")
-        at = format_at(now)
-        candidate = copy.deepcopy(prior)
-        candidate["events"].append({
-            "seq": prior["revision"] + 1, "type": "transitioned", "at": at,
-            "from": source, "to": target, "reason": reason,
-            "external_state": external_state})
-        if target == "attention_required":
-            candidate["parked_from"] = source
-        elif source == "attention_required":
-            candidate["parked_from"] = None
-        candidate["state"] = target
-        fence = prior["custody"]["fence"] if prior["custody"] is not None else None
-        if target in TERMINALS and fence is not None:
-            candidate["events"].append({
-                "seq": len(candidate["events"]) + 1, "type": "lease_released", "at": at,
-                "fence": fence, "reason": "terminal"})
-            candidate["custody"] = None
-        candidate["revision"] = len(candidate["events"])
-        if candidate["events"][:len(prior["events"])] != prior["events"]:
-            raise StateInvalid(f"{transaction_id}: prior events are not the new history's "
-                               f"prefix")
-        _validate_state(candidate, transaction_id, self.root)
-        directory = self.root / transaction_id
-        if candidate["custody"] is None and fence is not None:
-            with self._leases.locked():
-                atomic_write(directory, directory / "state.json", candidate)
-                self._leases.clear(fence)
-        else:
-            atomic_write(directory, directory / "state.json", candidate)
-        return snapshot(candidate)
+        return self._append(prior, now, [{
+            "type": "transitioned", "from": source, "to": target, "reason": reason,
+            "external_state": external_state}])
 
     def create(self, creation_key: str, subject: dict, *, concurrency_keys: Collection[str],
                proof: dict) -> Transaction:
@@ -589,17 +563,37 @@ class TransactionStore:
 
     def _append(self, prior: dict, now: int, events: list[dict]) -> Transaction:
         """Append `events` numbered from `prior`'s revision, each stamped `at` `now`, in one
-        validated `state.json` write; the caller holds the transaction lock."""
+        validated `state.json` write; the caller holds the transaction lock. A `transitioned`
+        event moves `state` and `parked_from`; entering a terminal under custody also appends
+        `lease_released` reason `terminal` and clears the records under the lease lock."""
         transaction_id = prior["transaction_id"]
         candidate = copy.deepcopy(prior)
         at = format_at(now)
         for fields in events:
             candidate["events"].append(
                 {"seq": len(candidate["events"]) + 1, "at": at, **fields})
+            if fields["type"] == "transitioned":
+                source, target = fields["from"], fields["to"]
+                if target == "attention_required":
+                    candidate["parked_from"] = source
+                elif source == "attention_required":
+                    candidate["parked_from"] = None
+                candidate["state"] = target
+        fence = prior["custody"]["fence"] if prior["custody"] is not None else None
+        if candidate["state"] in TERMINALS and fence is not None:
+            candidate["events"].append({
+                "seq": len(candidate["events"]) + 1, "type": "lease_released", "at": at,
+                "fence": fence, "reason": "terminal"})
+            candidate["custody"] = None
         candidate["revision"] = len(candidate["events"])
         _validate_state(candidate, transaction_id, self.root)
         directory = self.root / transaction_id
-        atomic_write(directory, directory / "state.json", candidate)
+        if candidate["custody"] is None and fence is not None:
+            with self._leases.locked():
+                atomic_write(directory, directory / "state.json", candidate)
+                self._leases.clear(fence)
+        else:
+            atomic_write(directory, directory / "state.json", candidate)
         return snapshot(candidate)
 
     @staticmethod
@@ -773,6 +767,25 @@ class TransactionStore:
                 "form": entry["form"], "outcome": result["outcome"],
                 "reason": result["reason"], "reference": result["reference"],
                 "fence": fence, "cohort": cohort, "latency_ms": now - started}])
+
+    def start_cohort(self, custody: Custody) -> Transaction:
+        """Open the next cohort in one write: `cohort_start`'s events, which first fail one
+        left open under an older fence, or its `ProofRefused` (#207 D11, D22)."""
+        return self._decide(custody, "start_cohort", cohort_start)
+
+    def settle_proof(self, custody: Custody) -> Transaction:
+        """Judge the proof at one cutoff in one write, `settlement`'s first matching case:
+        rejected, seal (into `succeeded`), cohort failed, exhausted, else `no_open_cohort`
+        (#207 D10, D11, D21, D22)."""
+        return self._decide(custody, "settle_proof", settlement)
+
+    def _decide(self, custody: Custody, operation: str,
+                decide: Callable[[dict, int], list[dict]]) -> Transaction:
+        """A malformed credential refuses before any lock; `decide` refuses before any
+        write; no observer or effect is called."""
+        require_custody_shape(custody)
+        with self._fenced(custody, operation, writes=True) as (prior, now):
+            return self._append(prior, now, decide(prior, now))
 
     def _check_custody(self, prior: dict, custody: Custody, now: int) -> None:
         """The fenced check (D12, D25): credential, then path, then live records at `now`.

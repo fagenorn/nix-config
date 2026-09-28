@@ -34,7 +34,8 @@ from agent_tools.transaction_invocation import (
     unresolved)
 from agent_tools.transaction_plan import plan_violation
 from agent_tools.transaction_proof import (
-    PROOF_EVENT_KEYS, ProofFold, apply_proof_event, proof_event_violation, proof_view)
+    PROOF_EVENT_KEYS, ProofFold, apply_proof_event, pairing_violation, proof_event_violation,
+    proof_view)
 from agent_tools.transaction_storage import (
     StateInvalid, format_at, json_object_violation, parse_at, serialize)
 
@@ -432,7 +433,11 @@ def validate_state(document: Any, transaction_id: str,
     checked by `action_event_violation` against the actions before it, and a transition into
     a terminal while `unresolved` names an action is refused (#206 D20). Each proof event is
     checked by `proof_event_violation` against the history before it and then, for an
-    `obligation_observed`, by the evidence-id fold (#207 D25)."""
+    `obligation_observed`, by the evidence-id fold (#207 D25). Cohorts are numbered from 1,
+    at most `MAX_COHORT_ATTEMPTS`, one open at a time; a seal names the cohort open under
+    its fence and passes `seal_violation`, which settlement also uses (#207 D31); and
+    `pairing_violation` binds each rejection, exhaustion and seal to the transition right
+    after it, and each reserved parking reason to the event right before it (#207 D10)."""
     def refuse(rule: str) -> StateInvalid:
         return StateInvalid(f"{transaction_id}: {rule}")
 
@@ -489,6 +494,9 @@ def validate_state(document: Any, transaction_id: str,
             raise refuse(f"event {seq} follows the terminal state {state}")
         if type(event) is not dict:
             raise refuse(f"event {seq} is not a JSON object")
+        violation = pairing_violation(events[seq - 2], event)
+        if violation is not None:
+            raise refuse(f"event {seq} {violation}")
         event_type = event.get("type")
         match event_type:
             case "transitioned":
@@ -529,6 +537,9 @@ def validate_state(document: Any, transaction_id: str,
                 apply_proof_event(event, proof_fold)
             case _:
                 raise refuse(f"event {seq} has unknown event type {event_type!r}")
+    violation = pairing_violation(events[-1], None)
+    if violation is not None:
+        raise refuse(f"event {len(events)} {violation}")
     custody = fold.custody
     if state in TERMINALS and custody is not None:
         raise refuse(f"terminal state {state} still holds custody")
