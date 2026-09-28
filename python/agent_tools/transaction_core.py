@@ -397,6 +397,9 @@ def _fold_fenced(event: dict, seq: int, fold: _CustodyFold,
         raise refuse(f"event {seq} form is not event, snapshot or interval")
     if fold.custody is None:
         raise refuse(f"event {seq} {event_type} sits outside an open custody span")
+    violation = fence_violation(event["fence"], fold.keys)
+    if violation is not None:
+        raise refuse(f"event {seq} {violation}")
     if event["fence"] != fold.custody["fence"]:
         raise refuse(f"event {seq} {event_type} fence does not equal the open span's fence")
     violation = _id_violation(event, fold)

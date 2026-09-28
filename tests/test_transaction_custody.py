@@ -609,7 +609,16 @@ class EvidenceTest(CustodyCase):
         _, acquired, opened, closed, granted = base["events"]
         held = span(acquired)
         foreign = {k: {**v, "epoch": 9} for k, v in opened["fence"].items()}
+        self.assertTrue(all(v["epoch"] == 1 for v in granted["fence"].values()))
+        boolean = {k: {**v, "epoch": True} for k, v in granted["fence"].items()}
+        floating = {k: {**v, "epoch": 1.0} for k, v in granted["fence"].items()}
         cases = {
+            "boolean grant epoch": (
+                history(base, acquired, opened, closed, {**granted, "fence": boolean},
+                        custody=held), "is not an integer >= 1"),
+            "float grant epoch": (
+                history(base, acquired, opened, closed, {**granted, "fence": floating},
+                        custody=held), "is not an integer >= 1"),
             "evidence outside a span": (
                 history(base, {**closed, "form": "snapshot"}, custody=None),
                 "outside an open custody span"),
