@@ -13,8 +13,14 @@ home of the four admission rules, in order: a fresh `absent` inspection under th
 (`inspection_required`, `not_absent`), a retry-safe predecessor (`not_retryable`), at most
 `MAX_ATTEMPTS` attempts (`budget_exhausted`) and a retry within `RETRY_WINDOW_MS` of the first
 retryable failure, inclusive (`window_closed`). `refused_error` is the one construction path
-for `InvocationRefused` and raises `ValueError` for a reason outside `REFUSAL_REASONS`. The
-module reads no file, lock or clock; the caller passes the time `refusal` judges at.
+for `InvocationRefused` and raises `ValueError` for a reason outside `REFUSAL_REASONS`.
+
+Two predicates over the fold tie the actions to custody and the lifecycle (#206 D9, D20):
+`observed` is true while some action is `open` or last read `in_progress`, which keeps a
+parked transaction's custody from quiescing, and `unresolved` names the first action that is
+`open`, `in_progress` or `unknown`, over which neither `advance` nor the history validator
+admits a terminal. The module reads no file, lock or clock; the caller passes the time
+`refusal` judges at.
 """
 
 import copy
@@ -280,6 +286,19 @@ def status(entry: ActionFold) -> str:
     if entry.open:
         return "open"
     return "declared" if entry.inspection is None else entry.inspection["outcome"]
+
+
+def observed(actions: dict[str, ActionFold]) -> bool:
+    """Whether some action is observed in flight: `open`, or last read `in_progress`; such
+    an action holds a parked transaction's custody past the window (#206 D9)."""
+    return any(status(entry) in ("open", "in_progress") for entry in actions.values())
+
+
+def unresolved(actions: dict[str, ActionFold]) -> ActionFold | None:
+    """The first action, in declaration order, whose `status` is `open`, `in_progress` or
+    `unknown`, or None; no terminal is entered over it (#206 D9, D20)."""
+    return next((entry for entry in actions.values()
+                 if status(entry) in ("open", "in_progress", "unknown")), None)
 
 
 def action_views(events: Sequence[Mapping[str, Any]]) -> list[dict]:

@@ -4,14 +4,16 @@ Run: just agent-workflow-tests
 """
 
 import copy
+import dataclasses
 import fcntl
 import unittest
 
 from agent_tools import transaction_history, transaction_storage
 from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_core import (
-    MAX_ATTEMPTS, RETRY_WINDOW_MS, EffectResultInvalid, InvocationRefused, StaleCustody,
-    StateInvalid, TransactionError, TransactionStore, TransitionRefused, action_id)
+    MAX_ATTEMPTS, PARKED_CUSTODY_WINDOW_MS, REFUSAL_REASONS, RETRY_WINDOW_MS,
+    EffectResultInvalid, InvocationRefused, StaleCustody, StateInvalid, TransactionError,
+    TransactionStore, TransitionRefused, action_id)
 
 from .test_transaction_custody import TTL, CustodyCase, T0, plain, serialize
 
@@ -580,6 +582,104 @@ class CrashSeamTest(InvokeCase):
         self.assertEqual(self.action_types()[-1], "invocation_intended")
         self.assertEqual((self.view()["status"], self.world.invokes),
                          ("open", {self.act(): 1}))
+
+
+class LifecycleTest(InvokeCase):
+    def fresh(self, key):
+        self.transaction_id = self.new(key, keys=(f"key:{key}",))
+        self.custody = self.acquire(self.transaction_id)
+        self.to("attention_required")
+
+    def test_an_open_attempt_holds_parked_custody_past_the_window(self):
+        self.inspect()
+        with self.assertRaises(Crash):
+            self.invoke(self.effect(crash="before"))
+        self.to("attention_required")
+        self.wait(PARKED_CUSTODY_WINDOW_MS + 1)
+        after = self.store.renew(self.custody)
+        self.assertEqual(after.custody, self.custody)
+        self.assertNotIn("lease_released", [e["type"] for e in after.events])
+
+    def test_only_an_in_progress_inspection_holds_parked_custody(self):
+        for outcome, held in (("in_progress", True), ("unknown", False),
+                              ("diverged", False)):
+            with self.subTest(outcome=outcome):
+                self.fresh(outcome)
+                self.inspect(self.effect(inspect_outcome=outcome))
+                self.wait(PARKED_CUSTODY_WINDOW_MS)
+                self.clock.advance(1)
+                after = self.store.renew(self.custody)
+                self.assertEqual(after.custody is not None, held)
+
+    def test_a_terminal_is_refused_over_unresolved_external_state(self):
+        for outcome, allowed in (("in_progress", False), ("unknown", False),
+                                 ("diverged", True), ("absent", True), ("satisfied", True)):
+            with self.subTest(outcome=outcome):
+                self.fresh(outcome)
+                self.inspect(self.effect(inspect_outcome=outcome))
+                if allowed:
+                    self.assertEqual(self.to("abandoned").state, "abandoned")
+                else:
+                    error = self.assertRefusedUnchanged(TransitionRefused,
+                                                        lambda: self.to("abandoned"))
+                    self.assertIn(self.act(), str(error))
+                    self.assertIn(outcome, str(error))
+
+    def test_an_open_attempt_blocks_a_terminal(self):
+        self.inspect()
+        with self.assertRaises(Crash):
+            self.invoke(self.effect(crash="before"))
+        self.to("attention_required")
+        error = self.assertRefusedUnchanged(TransitionRefused, lambda: self.to("failed"))
+        self.assertIn("open", str(error))
+
+    def test_refusals_keep_their_precedence(self):
+        self.inspect()
+        with open(self.root / self.transaction_id / "lock", "r+") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertRefusedUnchanged(StateInvalid, lambda: self.store.invoke_action(
+                self.custody, name="", parameters={}, effect=self.effect()))
+        self.to("attention_required")
+        forged = dataclasses.replace(self.custody, executor_id="someone-else")
+        self.assertRefusedUnchanged(StaleCustody, lambda: self.invoke(
+            self.effect(during=self.fail), custody=forged))
+        self.refused("state_not_effectful", lambda: self.invoke(self.effect(during=self.fail)))
+        self.to("abandoned")
+        for call in (lambda: self.invoke(self.effect(during=self.fail), custody=forged),
+                     lambda: self.inspect(self.effect(during=self.fail), custody=forged)):
+            self.assertRefusedUnchanged(TransitionRefused, call)
+
+    def test_a_hand_edited_terminal_over_an_unresolved_action_is_refused(self):
+        for status in ("open", "in_progress", "unknown"):
+            with self.subTest(status=status):
+                if status == "open":
+                    self.transaction_id = self.new(status, keys=(f"key:{status}",))
+                    self.custody = self.acquire(self.transaction_id)
+                    self.publishing()
+                    self.inspect()
+                    with self.assertRaises(Crash):
+                        self.invoke(self.effect(crash="before"))
+                    self.to("attention_required")
+                else:
+                    self.fresh(status)
+                    self.inspect(self.effect(inspect_outcome=status))
+                document = self.state_doc(self.transaction_id)
+                document["events"].append({
+                    "type": "transitioned", "at": document["events"][-1]["at"],
+                    "from": "attention_required", "to": "abandoned", "reason": "r",
+                    "external_state": "known"})
+                self.assertRuleRefuses(self.transaction_id, renumbered(document),
+                                       "over unresolved action")
+
+
+# Every reason some `refused(...)` call in this file asserts; pinned to the vocabulary.
+OBSERVED_REASONS = {"inspection_required", "not_absent", "not_retryable", "budget_exhausted",
+                    "window_closed", "state_not_effectful", "attempt_in_flight"}
+
+
+class RefusalVocabularyTest(unittest.TestCase):
+    def test_the_refusal_reasons_are_exactly_the_observed_ones(self):
+        self.assertEqual(set(REFUSAL_REASONS), OBSERVED_REASONS)
 
 
 if __name__ == "__main__":

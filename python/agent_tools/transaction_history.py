@@ -24,7 +24,8 @@ from typing import Any
 from agent_tools.transaction_custody import (
     CUSTODY_EVENTS, EVIDENCE_FORMS, admissibility, fence_violation)
 from agent_tools.transaction_invocation import (
-    ACTION_EVENT_KEYS, action_event_violation, action_views, apply_action_event)
+    ACTION_EVENT_KEYS, action_event_violation, action_views, apply_action_event, status,
+    unresolved)
 from agent_tools.transaction_storage import (
     StateInvalid, format_at, json_object_violation, parse_at, serialize)
 
@@ -410,7 +411,8 @@ def _fold_custody(event: dict, seq: int, fold: _CustodyFold, state: str,
 def validate_state(document: Any, transaction_id: str,
                    indexed: Callable[[str], str | None]) -> None:
     """Refuse (StateInvalid) any document that is not a valid transaction-state/v3; each
-    action event is checked by `action_event_violation` against the actions before it."""
+    action event is checked by `action_event_violation` against the actions before it, and
+    a transition into a terminal while `unresolved` names an action is refused (#206 D20)."""
     def refuse(rule: str) -> StateInvalid:
         return StateInvalid(f"{transaction_id}: {rule}")
 
@@ -466,6 +468,10 @@ def validate_state(document: Any, transaction_id: str,
             case "transitioned":
                 state, parked = _fold_transitioned(event, seq, state, parked, refuse)
                 if state in TERMINALS:
+                    blocker = unresolved(actions)
+                    if blocker is not None:
+                        raise refuse(f"event {seq} reaches terminal {state} over unresolved "
+                                     f"action {blocker.action_id} ({status(blocker)})")
                     entered_terminal = seq
             case str() if event_type in CUSTODY_EVENTS:
                 _fold_custody(event, seq, fold, state, entered_terminal, refuse)

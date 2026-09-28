@@ -1,4 +1,4 @@
-"""The transaction core (#204, #205).
+"""The transaction core (#204, #205, #206).
 
 A caller-rooted store of closed-schema transactions with a closed lifecycle:
 `TransactionStore(root, clock=...)` creates deduplicated transactions under an
@@ -21,13 +21,15 @@ authentic late owner result beside that stop without changing state or custody.
 `inspect_action` observes one declared action through a caller-passed effect with no lock
 held across the call, and records the observation fence-stamped (#206); the two protocol
 operations are that and `invoke_action`, which calls the effect only after a fresh `absent`
-inspection, behind a durable intent and within the retry budget. The durable-file
-primitives and the refusal hierarchy live in `agent_tools.transaction_storage`, and
-the document model — vocabularies, `Custody`, `Transaction`, the validator and the
-snapshot fold — in `agent_tools.transaction_history`; this module re-exports the
-errors and the public model names. `action_id` and the retry constants live in
-`agent_tools.transaction_invocation`, which this module re-exports too. The module has no
-command and no caller yet.
+inspection, behind a durable intent and within the retry budget. An action observed in
+flight (`open`, or last read `in_progress`) keeps `renew` from quiescing a parked
+transaction, and `advance` enters no terminal while an action is `open`, `in_progress` or
+`unknown`. The durable-file primitives and the refusal hierarchy live in
+`agent_tools.transaction_storage`, and the document model — vocabularies, `Custody`,
+`Transaction`, the validator and the snapshot fold — in `agent_tools.transaction_history`;
+this module re-exports the errors and the public model names. `action_id` and the retry
+constants live in `agent_tools.transaction_invocation`, which this module re-exports too.
+The module has no command and no caller yet.
 """
 
 import contextlib
@@ -56,7 +58,7 @@ from agent_tools.transaction_history import (
 from agent_tools.transaction_invocation import (
     EFFECT_STATES, MAX_ATTEMPTS, REFUSAL_REASONS, RETRY_WINDOW_MS, ActionFold, action_id,
     action_violation, effect_request, fold_actions, inspect_result_violation,
-    invoke_result_violation, refusal, refused_error, satisfied)
+    invoke_result_violation, observed, refusal, refused_error, satisfied, status, unresolved)
 from agent_tools.transaction_storage import (
     CreationConflict, CustodyMisbound, EffectResultInvalid, FenceViolation, GrantInvalid,
     InvocationRefused, LeaseUnavailable, StaleCustody, StateInvalid, TransactionBusy,
@@ -185,16 +187,19 @@ class TransactionStore:
                 external_state: str | None = None,
                 custody: Custody | None = None) -> Transaction:
         """Move one transaction along one allowed edge under its lock (#204; #205 D14,
-        D26, D27).
+        D26, D27; #206 D9).
 
         A terminal source is `TransitionRefused` before any custody check. Custody
         is required when the target is `publishing`, when the history has ever
         entered `publishing`, or when the transaction holds custody; a required
         custody that is None is `StaleCustody`. A presented custody is always
-        fenced-checked, required or not, before the lifecycle refusals. Entering a
-        terminal while custody is held appends the transition and a `lease_released`
-        reason `terminal` in one `state.json` write, then clears the lease records.
-        Every refusal happens before any write; the lock file is never created.
+        fenced-checked, required or not, before the lifecycle refusals. The last of
+        those refuses a terminal target while some action is `open`, `in_progress` or
+        `unknown` (`TransitionRefused` naming the first such action and its status),
+        whatever `external_state` the caller passes. Entering a terminal while custody
+        is held appends the transition and a `lease_released` reason `terminal` in one
+        `state.json` write, then clears the lease records. Every refusal happens
+        before any write; the lock file is never created.
         """
         if custody is not None:
             require_custody_shape(custody)
@@ -252,6 +257,10 @@ class TransactionStore:
             raise TransitionRefused(f"{where}: external_state is not known, unknown or None")
         if target in TERMINALS and external_state != "known":
             raise TransitionRefused(f"{where}: terminal target needs known external state")
+        blocker = unresolved(fold_actions(prior["events"])) if target in TERMINALS else None
+        if blocker is not None:
+            raise TransitionRefused(f"{where}: terminal target over unresolved action "
+                                    f"{blocker.action_id} ({status(blocker)})")
         at = format_at(now)
         candidate = copy.deepcopy(prior)
         candidate["events"].append({
@@ -448,19 +457,22 @@ class TransactionStore:
         return snapshot(candidate)
 
     def renew(self, custody: Custody) -> Transaction:
-        """The core's renewal duty, a tick the holder's host loop calls (D13, D19, D27, D28).
+        """The core's renewal duty, a tick the holder's host loop calls (D13, D19, D27, D28;
+        #206 D9).
 
         A terminal transaction is `TransitionRefused` before the fenced check; a
         failed check (a lapsed lease included) refuses without reacquiring. While
         the transaction is parked longer than `PARKED_CUSTODY_WINDOW_MS`, measured
-        from the transition that entered the parked run, it quiesces instead:
-        `lease_released` reason `quiesced` in `state.json`, then the records are
-        cleared, and the snapshot has no custody. Otherwise it never appends an
-        event or writes `state.json`: under the lease lock it judges the records
-        again at the same clock reading, so a key a successor took after the
-        lock-free check is `StaleCustody` with nothing written; it then extends
-        every record by its recorded TTL only when the earliest remaining validity
-        is inside the renewal margin, and writes nothing at all outside it.
+        from the transition that entered the parked run, and no action is observed
+        in flight (`open`, or last read `in_progress`; `unknown` and `diverged` hold
+        nothing), it quiesces instead: `lease_released` reason `quiesced` in
+        `state.json`, then the records are cleared, and the snapshot has no custody.
+        Otherwise, an observed action included, it never appends an event or writes
+        `state.json`: under the lease lock it judges the records again at the same
+        clock reading, so a key a successor took after the lock-free check is
+        `StaleCustody` with nothing written; it then extends every record by its
+        recorded TTL only when the earliest remaining validity is inside the renewal
+        margin, and writes nothing at all outside it.
         """
         require_custody_shape(custody)
         transaction_id = custody.transaction_id
@@ -472,8 +484,9 @@ class TransactionStore:
             now = self._now()
             self._check_custody(prior, custody, now)
             with self._leases.locked():
-                if prior["state"] in PARKINGS \
-                        and now - parked_since(prior["events"]) > PARKED_CUSTODY_WINDOW_MS:
+                if (prior["state"] in PARKINGS
+                        and now - parked_since(prior["events"]) > PARKED_CUSTODY_WINDOW_MS
+                        and not observed(fold_actions(prior["events"]))):
                     return self._released(prior, now, "quiesced")
                 if not self._leases.extend_if_due(prior["custody"]["fence"], now):
                     raise StaleCustody(f"{transaction_id}: renew: custody lapsed before the "
