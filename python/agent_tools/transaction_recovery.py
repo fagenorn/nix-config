@@ -1,8 +1,9 @@
 """Recovery (#208): the closed `RecoveryRefused` reasons and their one construction path, the
 anchor and compatibility check requests and their result check, the effect classes, the
 selection and which actions it admits (`selection_refusal`), the admission and decision
-halves of `verify_anchors` and `begin_recovery`, the recovery event and pairing rules, the
-gates and the derived `recovery` view.
+halves of `verify_anchors` and `begin_recovery`, the decision of `settle_recovery`
+(`recovery_settlement`, `settled_citations`), the recovery event and pairing rules, the gates
+and the derived `recovery` view.
 
 A check request is a read-only mapping naming the unit by action id, the check, its
 predicate and parameters, the unit's proof collector and the held fence; its result is the
@@ -18,15 +19,20 @@ An action's `effect_class` comes from its #206 fold: `no_effect` with no intende
 refuses with `begin_refusal`'s first reason in D8's order, else asks one compatibility check
 per affected `restorable` unit; `begin_events` refuses `restore_incompatible`, else yields
 `recovery_started` (the `effect_snapshot`, the `selection` of every affected unit's edges and
-the checks) and the transition into `recovering`. `agent_tools.transaction_history` hands every
+the checks) and the transition into `recovering`. `recovery_settlement` judges the latest
+selection in one write (D9): every edge `satisfied` yields `recovery_settled`, citing
+`settled_citations`' restored units and declared residue, and `recovering -> rolled_back`; a
+`diverged`, `unknown` or unretryable edge yields `recovery_incomplete` and its park; anything
+else is `recovery_pending`. `agent_tools.transaction_history` hands every
 `RECOVERY_EVENT_KEYS` event to `recovery_event_violation`, which re-derives a
-`recovery_started` through the same functions, every event pair to
-`recovery_pairing_violation`, and every transition to `recovery_transition_violation`, which
+`recovery_started` and a `recovery_settled`'s citations through the same functions, every
+event pair to `recovery_pairing_violation`, and every transition to
+`recovery_transition_violation`, which
 refuses `abandoned` while `effecting_action` names an action and `ready -> publishing` for a
 plan with a `restorable` unit unless an `anchors_verified` carries the open span's fence;
 `agent_tools.transaction_core`'s `advance` applies the same gates through
-`recovery_advance_violation` with the held fence, and refuses `recovering` and the
-`RESERVED_RECOVERY_REASONS` (D7, D10, D22).
+`recovery_advance_violation` with the held fence, and refuses `recovering`, `rolled_back` and
+the `RESERVED_RECOVERY_REASONS` (D7, D9, D10, D22).
 
 `recovery_view` reads the `created` event's `recovery_plan_digest` and `recovers`
 back-link, the latest `recovery_started` event's `effect_snapshot` and `selected` units,
@@ -41,9 +47,10 @@ from types import MappingProxyType
 from typing import Any
 
 from agent_tools.transaction_custody import fence_violation
-from agent_tools.transaction_invocation import ActionFold, fold_actions
+from agent_tools.transaction_invocation import (
+    ActionFold, fold_actions, refusal, satisfied, status, unresolved)
 from agent_tools.transaction_proof import closed_result_violation
-from agent_tools.transaction_storage import RecoveryRefused
+from agent_tools.transaction_storage import RecoveryRefused, TransitionRefused
 
 RECOVERY_REFUSAL_REASONS = (
     "state_not_ready", "state_not_attention", "state_not_recovering", "history_changed",
@@ -61,9 +68,15 @@ RECOVERY_EVENT_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
     "anchors_verified": _ENVELOPE_KEYS | {"anchors", "fence"},
     "recovery_started": _ENVELOPE_KEYS | {"grant_id", "effect_snapshot", "selected", "checks",
                                           "fence"},
+    "recovery_settled": _ENVELOPE_KEYS | {"restored", "residue", "fence"},
+    "recovery_incomplete": _ENVELOPE_KEYS | {"actions", "fence"},
 })
 _ANCHOR_KEYS = frozenset({"unit", "reference"})
 _ENTERED = ("attention_required", "recovering", "recovery_started", "known")
+_SETTLED = ("recovering", "rolled_back", "recovery_settled", "known")
+_EVENT_STATES = MappingProxyType({"anchors_verified": "ready", "recovery_settled": "recovering",
+                                  "recovery_incomplete": "recovering"})
+_UNRETRYABLE = ("not_retryable", "budget_exhausted", "window_closed")
 
 
 def recovery_refused(transaction_id: str, reason: str, detail: str) -> RecoveryRefused:
@@ -268,6 +281,99 @@ def begin_events(document: dict, grant_id: str, requests: Sequence[Mapping],
                      ("transitioned", *_ENTERED)))]
 
 
+def _selected(events: Sequence[Mapping]) -> list[str]:
+    return [event for event in events if event["type"] == "recovery_started"][-1]["selected"]
+
+
+def settled_citations(plan: Mapping, selected: list[str]) -> tuple[list[str], list[dict]]:
+    """`(restored, residue)` for the `selected` edges, in selection order: the unit action id
+    of each `restore` edge, and `{unit, residue}` with the unit action id and the declared
+    residue of each `compensate` edge (D4, D9)."""
+    edges = {edge["action_id"]: (unit["action_id"], edge)
+             for unit in plan["units"] for edge in unit["edges"]}
+    restored, residue = [], []
+    for identity in selected:
+        unit, edge = edges[identity]
+        if edge["action"] == "restore":
+            restored.append(unit)
+        else:
+            residue.append({"unit": unit, "residue": edge["residue"]})
+    return restored, residue
+
+
+def _stuck(entry: ActionFold | None, held: dict, now_ms: int) -> bool:
+    if entry is None or entry.open:
+        return False
+    return (status(entry) in ("diverged", "unknown")
+            or refusal(entry, held_fence=held, now_ms=now_ms) in _UNRETRYABLE)
+
+
+def recovery_settlement(document: dict, now_ms: int) -> list[dict]:
+    """`settle_recovery`'s decision at `now_ms` under the held fence, the first matching case
+    over the latest `recovery_started`'s `selected` edges (D9): `state_not_recovering` outside
+    `recovering`; with every edge `satisfied`, `TransitionRefused` while `unresolved` names an
+    action, else `recovery_settled` citing `settled_citations` and `recovering -> rolled_back`;
+    with an edge `diverged`, `unknown`, or `absent` under the held fence and refused
+    `not_retryable`, `budget_exhausted` or `window_closed`, `recovery_incomplete` listing those
+    edges in selection order and the park `recovering -> attention_required`, external state
+    `unknown` when a listed edge is; else `recovery_pending`."""
+    transaction_id, state = document["transaction_id"], document["state"]
+    if state != "recovering":
+        raise recovery_refused(transaction_id, "state_not_recovering",
+                               f"settle_recovery runs in recovering, not {state}")
+    events, held = document["events"], document["custody"]["fence"]
+    selected, actions = _selected(events), fold_actions(events)
+    fence = copy.deepcopy(held)
+    if all(satisfied(actions.get(identity)) for identity in selected):
+        blocker = unresolved(actions)
+        if blocker is not None:
+            raise TransitionRefused(f"{transaction_id}: settle_recovery: rolled_back over "
+                                    f"unresolved action {blocker.action_id} ({status(blocker)})")
+        restored, residue = settled_citations(document["recovery_plan"], selected)
+        return [{"type": "recovery_settled", "restored": restored, "residue": residue,
+                 "fence": fence},
+                dict(zip(("type", "from", "to", "reason", "external_state"),
+                         ("transitioned", *_SETTLED)))]
+    stuck = [identity for identity in selected if _stuck(actions.get(identity), held, now_ms)]
+    if not stuck:
+        raise recovery_refused(transaction_id, "recovery_pending",
+                               "a selected edge is not yet settled and may still be driven")
+    unknown = any(status(actions[identity]) == "unknown" for identity in stuck)
+    return [{"type": "recovery_incomplete", "actions": stuck, "fence": fence},
+            {"type": "transitioned", "from": "recovering", "to": "attention_required",
+             "reason": "recovery_incomplete",
+             "external_state": "unknown" if unknown else "known"}]
+
+
+def _settled_violation(event: dict, events_before: Sequence[Mapping],
+                       document: dict) -> str | None:
+    selected, actions = _selected(events_before), fold_actions(events_before)
+    for identity in selected:
+        entry = actions.get(identity)
+        if not satisfied(entry):
+            return (f"recovery_settled needs every selected edge satisfied; edge {identity} is "
+                    f"{'undeclared' if entry is None else status(entry)}")
+    restored, residue = settled_citations(document["recovery_plan"], selected)
+    if event["restored"] != restored:
+        return "recovery_settled restored is not the selected restore edges' units"
+    if event["residue"] != residue:
+        return "recovery_settled residue is not the selected compensate edges' declared residue"
+    return None
+
+
+def _incomplete_violation(event: dict, events_before: Sequence[Mapping]) -> str | None:
+    listed, selected = event["actions"], _selected(events_before)
+    if (type(listed) is not list or not listed
+            or listed != [identity for identity in selected if identity in listed]):
+        return ("recovery_incomplete actions are not a non-empty list of selected edges in "
+                "selection order")
+    actions = fold_actions(events_before)
+    for identity in listed:
+        if satisfied(actions.get(identity)):
+            return f"recovery_incomplete actions list the satisfied edge {identity}"
+    return None
+
+
 def _started_violation(event: dict, events_before: Sequence[Mapping], document: dict,
                        open_fence: dict, state: str) -> str | None:
     before = {**document, "events": list(events_before), "state": state,
@@ -300,10 +406,15 @@ def recovery_event_violation(event: dict, events_before: Sequence[Mapping], docu
     the `restorable` units' action ids in plan order, each with a non-empty reference (D7).
     A `recovery_started` re-derives from the history before it, in `state`, under
     `open_fence`, through the writer's functions: `begin_refusal` is None, and its
-    `effect_snapshot`, `selected` and `checks` units are the writer's (D10)."""
+    `effect_snapshot`, `selected` and `checks` units are the writer's (D10). A
+    `recovery_settled` and a `recovery_incomplete` happen in `recovering`: the first needs
+    every selected edge `satisfied` in the fold before it and `restored` and `residue` equal
+    to `settled_citations`; the second needs `actions` to be a non-empty list of selected
+    edges in selection order, none `satisfied`, and does not re-judge the retry window (D9,
+    D10)."""
     kind = event["type"]
-    if kind == "anchors_verified" and state != "ready":
-        return f"{kind} happens in {state}, not ready"
+    if kind in _EVENT_STATES and state != _EVENT_STATES[kind]:
+        return f"{kind} happens in {state}, not {_EVENT_STATES[kind]}"
     if open_fence is None:
         return f"{kind} sits outside an open custody span"
     violation = fence_violation(event["fence"], keys)
@@ -313,6 +424,10 @@ def recovery_event_violation(event: dict, events_before: Sequence[Mapping], docu
         return f"{kind} fence does not equal the open span's fence"
     if kind == "recovery_started":
         return _started_violation(event, events_before, document, open_fence, state)
+    if kind == "recovery_settled":
+        return _settled_violation(event, events_before, document)
+    if kind == "recovery_incomplete":
+        return _incomplete_violation(event, events_before)
     anchors = event["anchors"]
     if (type(anchors) is not list
             or any(type(entry) is not dict or set(entry) != _ANCHOR_KEYS
@@ -347,10 +462,13 @@ def recovery_transition_violation(document: dict, events_before: Sequence[Mappin
 
 def recovery_advance_violation(document: dict, target: str, reason: str) -> str | None:
     """Why `advance` may not take `document` to `target` with `reason`, or None: `recovering`
-    is `begin_recovery`'s, a reserved reason is the recovery operations', and the
-    `recovery_transition_violation` gates apply under the held fence (D7, D10, D22)."""
+    is `begin_recovery`'s, `rolled_back` is `settle_recovery`'s, a reserved reason is the
+    recovery operations', and the `recovery_transition_violation` gates apply under the held
+    fence (D7, D9, D10, D22)."""
     if target == "recovering":
         return "recovering is entered only through begin_recovery"
+    if target == "rolled_back":
+        return "rolled_back is entered only through settle_recovery"
     if reason in RESERVED_RECOVERY_REASONS:
         return f"reserved reason {reason} is written only by the recovery operations"
     held = document["custody"]
@@ -362,8 +480,11 @@ def recovery_pairing_violation(previous: Mapping | None, event: Mapping | None) 
     """How `event`, the one after `previous` (None past the end), breaks a recovery pairing,
     or None (D10): `recovery_started` comes immediately before `attention_required ->
     recovering` with reason `recovery_started` and external state `known`, every transition
-    into `recovering` immediately after it, and a transition with a reserved reason
-    immediately after its event."""
+    into `recovering` immediately after it; `recovery_settled` immediately before `recovering
+    -> rolled_back` with reason `recovery_settled` and external state `known`, every
+    transition into `rolled_back` immediately after it; `recovery_incomplete` immediately
+    before `recovering -> attention_required` with reason `recovery_incomplete`; and a
+    transition with a reserved reason immediately after its event."""
     kind = None if previous is None else previous.get("type")
     edge = None
     if event is not None and event.get("type") == "transitioned":
@@ -373,6 +494,15 @@ def recovery_pairing_violation(previous: Mapping | None, event: Mapping | None) 
                 "recovering with reason recovery_started and external state known")
     if edge is not None and edge[1] == "recovering" and kind != "recovery_started":
         return "transition into recovering does not immediately follow recovery_started"
+    if kind == "recovery_settled" and edge != _SETTLED:
+        return ("recovery_settled is not immediately followed by recovering -> rolled_back "
+                "with reason recovery_settled and external state known")
+    if edge is not None and edge[1] == "rolled_back" and kind != "recovery_settled":
+        return "transition into rolled_back does not immediately follow recovery_settled"
+    if kind == "recovery_incomplete" and (edge is None or edge[:3] != (
+            "recovering", "attention_required", "recovery_incomplete")):
+        return ("recovery_incomplete is not immediately followed by recovering -> "
+                "attention_required with reason recovery_incomplete")
     if edge is not None and edge[2] in RESERVED_RECOVERY_REASONS and kind != edge[2]:
         return f"reserved reason {edge[2]} does not immediately follow its event"
     return None

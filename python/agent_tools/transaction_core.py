@@ -40,7 +40,8 @@ declaration (#208); this module re-exports its constants and those three functio
 `verify_anchors` observes every restorable unit's rollback anchor in `ready` around the pure
 halves in `agent_tools.transaction_recovery`, whose refusal reasons and effect classes this
 module re-exports; `begin_recovery` enters `recovering` under a fresh grant around that module's
-admission, and `advance` applies its gates. The module has no command and no caller yet.
+admission, `settle_recovery` judges it into `rolled_back` or a `recovery_incomplete` park,
+and `advance` applies its gates. The module has no command and no caller yet.
 """
 
 import contextlib
@@ -82,7 +83,7 @@ from agent_tools.transaction_proof import (
 from agent_tools.transaction_recovery import (
     EFFECT_CLASSES, RECOVERY_REFUSAL_REASONS, anchor_requests, anchors_events, begin_events,
     begin_requests, check_result_violation, recovery_advance_violation, recovery_refused,
-    selection_refusal)
+    recovery_settlement, selection_refusal)
 from agent_tools.transaction_recovery_plan import (
     EDGE_ACTIONS, POSTURES, RECOVERY_PLAN_SCHEMA, RECOVERY_REJECTION_REASONS, bind_recovery,
     compile_recovery, materialize_recovery)
@@ -846,6 +847,12 @@ class TransactionStore:
         return self._observed(
             custody, "begin_recovery", observer, lambda prior: begin_requests(prior, grant_id),
             lambda prior, requests, results: begin_events(prior, grant_id, requests, results))
+
+    def settle_recovery(self, custody: Custody) -> Transaction:
+        """Judge the recovery in one write, `recovery_settlement`'s first matching case:
+        rolled back (with the terminal `lease_released`), incomplete, else `recovery_pending`
+        (#208 D9)."""
+        return self._decide(custody, "settle_recovery", recovery_settlement)
 
     def _observed(self, custody: Custody, operation: str, observer: Any,
                   admit: Callable[[dict], list[Mapping]],

@@ -15,7 +15,8 @@ declaration bound to the proof plan's, through `agent_tools.transaction_recovery
 `agent_tools.transaction_recovery`'s `recovery_view` derives the snapshot's `recovery` view
 on every load (#208 D6, D12), its `recovery_event_violation` checks each recovery event, its
 `recovery_transition_violation` gates each transition and its `recovery_pairing_violation`
-binds `recovery_started` to the entry into `recovering` (#208 D7, D10). It reads no file, lock
+binds `recovery_started` to the entry into `recovering`, `recovery_settled` to the entry into
+`rolled_back` and `recovery_incomplete` to its park (#208 D7, D9, D10). It reads no file, lock
 or clock: `validate_state` takes the creation-key index lookup as a callable, which
 `agent_tools.transaction_core` binds to its store root. It also composes what a reap
 appends to a lapsed span (`reaped`) and a late owner result's event (`owner_result_event`),
@@ -459,9 +460,9 @@ def validate_state(document: Any, transaction_id: str,
     after it, and each reserved parking reason and `succeeded` to the event right before it
     (#207 D10); every transition passes `gate_violation` over the actions before it (D12) and,
     after the terminal check, `recovery_transition_violation` with the open span's fence; each
-    recovery event is checked by `recovery_event_violation`, and `recovery_pairing_violation`
-    binds each recovery event and reserved recovery reason as `pairing_violation` does (#208
-    D7, D10, D22)."""
+    recovery event, `recovery_settled` and `recovery_incomplete` included, is checked by
+    `recovery_event_violation`, and `recovery_pairing_violation` binds each recovery event and
+    reserved recovery reason as `pairing_violation` does (#208 D7, D9, D10, D22)."""
     def refuse(rule: str) -> StateInvalid:
         return StateInvalid(f"{transaction_id}: {rule}")
 
