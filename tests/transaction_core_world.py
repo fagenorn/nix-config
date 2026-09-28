@@ -3,7 +3,8 @@
 Test fixture ported from prototype-release-transactions/world.py at dc98ba9 (#204 D6). It stays under tests/: provider names belong in fixtures, never in the core.
 
 Nothing in here touches a real provider. `invoke` writes into `World.effects`, an
-in-memory dict; `inspect` reads it back. That is deliberate: the prototype is a
+in-memory dict, and counts every call it sees in `World.invokes`; `inspect` reads the
+effects back. That is deliberate: the prototype is a
 no-mutation dry run, so "the provider" is a dictionary and the interesting content is
 *which typed observation* each adapter is able to return.
 
@@ -29,7 +30,12 @@ FAULTS = (
     "smoke_fail",               # interval product smoke fails
     "restore_incompatible",     # prior subject incompatible with current schema/data epoch
     "crash_after_invoke",       # executor dies between invoke and observation
+    "crash_before_invoke",      # executor dies between its recorded intent and the call
 )
+
+
+class ExecutorCrash(Exception):
+    """The executor died mid-phase; carries the action id whose call never happened."""
 
 
 class World:
@@ -38,6 +44,7 @@ class World:
         self.faults: set[str] = set()
         self.effects: dict[str, dict] = {}
         self.throttled: dict[str, int] = {}
+        self.invokes: dict[str, int] = {}
         self.crash_pending = False
         self.notes: list[str] = []
 
@@ -109,10 +116,14 @@ class SimAdapter:
 
     # -- 3. invoke: one predeclared effect, never a truth claim -----------
     def invoke(self, op: str, env: dict) -> dict:
+        key = env["action_id"]
+        if "crash_before_invoke" in self.world.faults and self.world.crash_pending:
+            self.world.crash_pending = False
+            raise ExecutorCrash(key)
+        self.world.invokes[key] = self.world.invokes.get(key, 0) + 1
         if self.modes.get(op) not in ("supported", None) and op in EFFECT_MODES \
                 and op in self.modes and self.modes[op] != "supported":
             return {"result": "rejected", "error_class": "unsupported_operation"}
-        key = env["action_id"]
         if "throttle_once" in self.world.faults and self.world.throttled.get(key, 0) == 0:
             self.world.throttled[key] = 1
             return {"result": "rejected", "error_class": "provider_throttled"}
