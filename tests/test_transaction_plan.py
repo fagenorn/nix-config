@@ -18,6 +18,8 @@ from agent_tools.transaction_core import (
     ProofPlanRejected, StateInvalid, TransactionError, TransactionStore, action_id,
     compile_proof, materialize_plan)
 
+from .test_transaction_recovery_plan import EMPTY_RECOVERY, inert_recovery
+
 TID = "rel_01890a5d-ac96-7abc-8def-0123456789ab"
 EMPTY_PROOF = {"units": [], "obligations": [], "collectors": {}}
 PUB, ACT = "published_artifact_identity", "running_subject_identity"
@@ -270,7 +272,8 @@ class CreationTest(unittest.TestCase):
         self.store = TransactionStore(self.root)
 
     def create(self, proof, key="k"):
-        return self.store.create(key, {"s": 1}, concurrency_keys=["key:a"], proof=proof)
+        return self.store.create(key, {"s": 1}, concurrency_keys=["key:a"], proof=proof,
+                                 recovery=inert_recovery(proof))
 
     def tree(self):
         return sorted(str(p.relative_to(self.root)) for p in self.root.rglob("*"))
@@ -284,18 +287,20 @@ class CreationTest(unittest.TestCase):
     def test_the_plan_is_stored_once_with_its_digest_pinned_in_created(self):
         created = self.create(FULL)
         document = json.loads(self.state(created.transaction_id).read_text())
-        self.assertEqual(document["schema"], "transaction-state/v4")
+        self.assertEqual(document["schema"], "transaction-state/v5")
         self.assertEqual(document["proof_plan"],
                          materialize_plan(compile_proof(FULL), created.transaction_id))
         first = document["events"][0]
-        self.assertEqual(set(first), {"seq", "type", "at", "proof_plan_digest"})
+        self.assertEqual(set(first), {"seq", "type", "at", "proof_plan_digest",
+                                      "recovery_plan_digest", "recovers"})
         self.assertEqual(first["proof_plan_digest"], telemetry_digest(document["proof_plan"]))
         self.assertEqual(dict(created.proof_plan), document["proof_plan"])
         self.assertEqual(TransactionStore(self.root).load(created.transaction_id), created)
 
     def test_proof_has_no_default(self):
         with self.assertRaises(TypeError):
-            self.store.create("k", {"s": 1}, concurrency_keys=["key:a"])
+            self.store.create("k", {"s": 1}, concurrency_keys=["key:a"],
+                              recovery=EMPTY_RECOVERY)
         self.assertEqual(self.tree(), [])
 
     def test_every_rejection_writes_nothing(self):
@@ -358,7 +363,7 @@ class CreationTest(unittest.TestCase):
                 ("extra key", extra_key, materialization),
                 ("dropped floor", dropped_floor, materialization),
                 ("digest", digest, "proof_plan_digest is not the digest of proof_plan"),
-                ("missing", missing, "closed transaction-state/v4 key set"),
+                ("missing", missing, "closed transaction-state/v5 key set"),
                 ("v3", version, "transaction-state/v3")):
             with self.subTest(edit=name):
                 document = copy.deepcopy(pristine)

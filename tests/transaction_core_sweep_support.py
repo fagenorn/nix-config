@@ -1,39 +1,41 @@
 """Scenario fixture and fixture executor for the transaction core sweep (#204 D6, D17;
 #206 D12, D18; #207 D14-D17, D29).
 
-The executor is a happy-path walker over the simulated world that asks the shipped core
-to advance at each lifecycle boundary through the public store API, on a store whose
-clock is the world clock (#205 D22, D29). It creates each transaction with the proof
-declaration its shape implies (`proof_declaration`): every publication and activation node
-is a unit whose collector is its binding, every profile `proof` entry an obligation, and
-every binding a deterministic collector of its adapter's supported predicates with a 30 s
-collection bound. It acquires custody before publishing and presents it on every later
-advance. Every node is an action driven through the core: one effect per binding wraps
-that binding's adapter, action `name` is the node id and `parameters` its mode and
-expected subject, and no adapter effect is called outside `inspect_action` /
-`invoke_action`. Each node is pre-inspected, then invoked until its view reads
-`satisfied`; before each retry the world clock moves 30 seconds, so the core's retry
-budget and window run on the world clock. Proof is collected through the core: one
-`_Observer` per binding is the only caller of the adapter's proof predicates. A first
-pass collects every plan obligation in plan order through `collect_obligation`, skipping
-one whose latest evidence is still admissible and one refused `unsupported_obligation` or
-`dependency_not_accepted`. Then each convergence cohort is started, its members collected
-with custody renewed after each, and `settle_proof` either seals into `succeeded` or parks
-with its typed reason (`proof_rejected`, `proof_did_not_converge`); the executor repeats
-while it leaves the transaction in `proving`, tolerating a `start_cohort` refused
-`proof_incomplete` or `convergence_exhausted` so that `settle_proof` judges, and never
-advances past a park. Under the `slow_collection` fault every observation made inside a
-cohort first moves the world clock 250 seconds, so a cohort with members outlives its
-window (`expired_snapshot`). Scenario hooks move the world clock: `lease_renewal` renews
-in place twice; `lease_lapse` lets the lease expire before the last required obligation,
-has the reaper park the transaction, reacquires, resumes proving and recollects what the
-new fence voided; `resume_after_crash` kills the executor between the first publication
-action's recorded intent and its call, lets the lease expire, reaps, reacquires, checks
-that a blind invoke is refused `inspection_required`, and resumes publication through a
-fresh inspection. It carries none of the prototype's authorization or recovery logic. Any
-action view other than `absent` or `satisfied`, and any invocation or proof refusal not
-named above, parks the transaction in attention_required with the observation or the
-refusal's reason.
+The executor is a happy-path walker over the simulated world that asks the shipped core to
+advance at each lifecycle boundary through the public store API, on a store whose clock is
+the world clock (#205 D22, D29). It creates each transaction with the proof declaration its
+shape implies (`proof_declaration`): every publication and activation node is a unit whose
+collector is its binding, every profile `proof` entry an obligation, and every binding a
+deterministic collector of its adapter's supported predicates with a 30 s collection bound.
+Beside it goes the recovery declaration the shape implies (`recovery_declaration`, #208):
+every such node is a unit whose effect is its binding and whose posture, anchor and edges
+come from the profile's `recovery` entry for it, and every binding an effect offering its
+adapter's supported modes. It acquires custody before publishing and presents it on every
+later advance. Every node is an action driven through the core: one effect per binding wraps
+that binding's adapter, action `name` is the node id and `parameters` its mode and expected
+subject, and no adapter effect is called outside `inspect_action` / `invoke_action`. Each
+node is pre-inspected, then invoked until its view reads `satisfied`; before each retry the
+world clock moves 30 seconds, so the core's retry budget and window run on the world clock.
+Proof is collected through the core: one `_Observer` per binding is the only caller of the
+adapter's proof predicates. A first pass collects every plan obligation in plan order
+through `collect_obligation`, skipping one whose latest evidence is still admissible and one
+refused `unsupported_obligation` or `dependency_not_accepted`. Then each convergence cohort
+is started, its members collected with custody renewed after each, and `settle_proof` either
+seals into `succeeded` or parks with its typed reason (`proof_rejected`,
+`proof_did_not_converge`); the executor repeats while it leaves the transaction in
+`proving`, tolerating a `start_cohort` refused `proof_incomplete` or `convergence_exhausted`
+so that `settle_proof` judges, and never advances past a park. Under the `slow_collection`
+fault every observation made inside a cohort first moves the world clock 250 seconds, so a
+cohort with members outlives its window (`expired_snapshot`). Scenario hooks move the world
+clock: `lease_renewal` renews in place twice; `lease_lapse` lets the lease expire before the
+last required obligation, has the reaper park the transaction, reacquires, resumes proving
+and recollects what the new fence voided; `resume_after_crash` kills the executor between
+the first publication action's recorded intent and its call, lets the lease expire, reaps,
+reacquires, checks that a blind invoke is refused `inspection_required`, and resumes
+publication through a fresh inspection. It carries none of the prototype's authorization or
+recovery logic. Any action view other than `absent` or `satisfied`, and any invocation or
+proof refusal not named above, parks the transaction in attention_required with the
+observation or the refusal's reason.
 """
 
 from agent_tools.transaction_core import (
@@ -135,6 +137,41 @@ def shape_declaration(shape):
     return proof_declaration(profile, registry)
 
 
+def recovery_declaration(profile, registry):
+    """The recovery declaration a shape's profile implies (#208, spec "Sweep fixture")."""
+    activation = [] if profile["activation"] == "none" else profile["activation"]
+    entries = profile["recovery"]["units"]
+    effects = {alias: {"operations": sorted(mode for mode, support
+                                            in registry[binding["adapter"]].modes.items()
+                                            if support == "supported")}
+               for alias, binding in profile["bindings"].items() if not alias.startswith("_")}
+    units = []
+    for node in [*profile["publication"], *activation]:
+        entry = entries[node["id"]]
+        anchor = entry.get("anchor")
+        restorable = entry["posture"] == "restorable"
+        units.append({
+            "name": node["id"],
+            "parameters": {"mode": node["mode"], "expected_subject": node["expected_subject"]},
+            "effect": node["binding"], "operation": node["mode"], "posture": entry["posture"],
+            "anchor": ({"predicate": "rollback_anchor",
+                        "parameters": {"expected_subject": anchor}} if restorable else None),
+            "compatibility": ({"predicate": "compatibility",
+                               "parameters": {"expected_subject": anchor}}
+                              if restorable else None),
+            "edges": [{"action": e["action"], "operation": e["op"],
+                       "parameters": {"mode": e["op"], "unit": node["id"],
+                                      "expected_subject": anchor or {}},
+                       "residue": e.get("residue")} for e in entry.get("edges", [])]})
+    return {"effects": effects, "units": units}
+
+
+def shape_recovery(shape):
+    """The recovery declaration `drive` passes for `shape`."""
+    _, profile, registry = SHAPES[shape](World())
+    return recovery_declaration(profile, registry)
+
+
 def _in_dependency_order(nodes):
     """Stable topological order: repeatedly take the first node whose deps are done."""
     done, ordered, pending = set(), [], list(nodes)
@@ -208,7 +245,8 @@ def drive(root, shape, scenario, world=None):
     keys = profile["target"]["concurrency_keys"]
     transaction_id = store.create(
         f"{shape}:{scenario}", subject, concurrency_keys=keys,
-        proof=proof_declaration(profile, registry)).transaction_id
+        proof=proof_declaration(profile, registry),
+        recovery=recovery_declaration(profile, registry)).transaction_id
     definite = {"all": True}
     held = {"custody": None}
 

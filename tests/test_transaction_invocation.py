@@ -164,9 +164,9 @@ class ProtocolCase(CustodyCase):
 
 
 class SchemaTest(ProtocolCase):
-    def test_new_state_is_v4_and_a_v3_document_fails_closed_naming_its_version(self):
+    def test_new_state_is_v5_and_a_v3_document_fails_closed_naming_its_version(self):
         document = self.state_doc(self.transaction_id)
-        self.assertEqual(document["schema"], "transaction-state/v4")
+        self.assertEqual(document["schema"], "transaction-state/v5")
         self.assertRuleRefuses(self.transaction_id,
                                {**document, "schema": "transaction-state/v3"},
                                "transaction-state/v3")

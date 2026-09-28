@@ -132,7 +132,7 @@ def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
 
 def _require_creatable(root: Path, creation_key: Any, subject: Any,
                        concurrency_keys: Any) -> None:
-    """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v4 document."""
+    """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v5 document."""
     where = f"{root}: creation_key {creation_key!r}"
     if type(creation_key) is not str or not creation_key:
         raise StateInvalid(f"{where}: not a non-empty string")
@@ -294,28 +294,42 @@ class TransactionStore:
             "external_state": external_state}])
 
     def create(self, creation_key: str, subject: dict, *, concurrency_keys: Collection[str],
-               proof: dict) -> Transaction:
+               proof: dict, recovery: dict) -> Transaction:
         """Create the transaction for `creation_key`, or return the one it already names.
 
         The concurrency key set is fixed here, stored sorted, and compared with the
-        subject when the key already names a transaction (D4). The `proof` declaration
-        has no default and is compiled before any lock, so a rejected one
-        (`ProofPlanRejected`) leaves nothing behind; the plan it materializes under the
-        transaction id is stored with its digest on the `created` event, and a same-key
-        create whose plan digest differs is a `CreationConflict` (#207 D2, D3).
+        subject when the key already names a transaction (D4). Neither the `proof` nor the
+        `recovery` declaration has a default; before any lock the recovery declaration is
+        compiled, then the proof declaration, then the two are bound unit for unit, so a
+        rejected one (`RecoveryPlanRejected`, `ProofPlanRejected`) leaves nothing behind.
+        The two plans they materialize under the transaction id are stored with their
+        digests on the `created` event, whose `recovers` is null here; a same-key create
+        whose subject, key set, proof plan digest or recovery plan digest differs is a
+        `CreationConflict` (#207 D2, D3; #208 D2, D5, D6).
         """
+        return self._create(creation_key, subject, concurrency_keys, proof, recovery, None)
+
+    def _create(self, creation_key: str, subject: dict, concurrency_keys: Collection[str],
+                proof: dict, recovery: dict, recovers: str | None) -> Transaction:
+        """`create`, with the `created` event's `recovers` back-link set to `recovers`, which
+        a same-key create must match too (#208 D11)."""
         _require_creatable(self.root, creation_key, subject, concurrency_keys)
-        compiled = compile_proof(proof, where=f"{self.root}: creation_key {creation_key!r}")
+        where = f"{self.root}: creation_key {creation_key!r}"
+        compiled_recovery = compile_recovery(recovery, where=where)
+        compiled = compile_proof(proof, where=where)
+        bound = bind_recovery(compiled_recovery, compiled, where=where)
         keys = sorted(concurrency_keys)
         at = format_at(self._now())
         descriptor = open_lock(self.root / "creation.lock")
         try:
-            return self._create_locked(creation_key, subject, keys, compiled, at)
+            return self._create_locked(creation_key, subject, keys, compiled, bound, recovers,
+                                       at)
         finally:
             os.close(descriptor)
 
     def _create_locked(self, creation_key: str, subject: dict, keys: list[str],
-                       compiled: dict, at: str) -> Transaction:
+                       compiled: dict, bound: dict, recovers: str | None,
+                       at: str) -> Transaction:
         transaction_id = _read_index(self.root, creation_key)
         if transaction_id is None:
             transaction_id = _mint_id()
@@ -333,6 +347,7 @@ class TransactionStore:
             require_directory(directory, missing_ok=False)
             fsync_directory(self.root)
         plan = materialize_plan(compiled, transaction_id)
+        recovery_plan = materialize_recovery(bound, transaction_id)
         descriptor = open_lock(directory / "lock")
         try:
             if lstat_mode(directory / "state.json") is not None:
@@ -346,7 +361,10 @@ class TransactionStore:
                      != telemetry_digest(subject)),
                     ("concurrency key set", document["concurrency_keys"] != keys),
                     ("proof plan", telemetry_digest(plan)
-                     != document["events"][0]["proof_plan_digest"])) if differ]
+                     != document["events"][0]["proof_plan_digest"]),
+                    ("recovery plan", telemetry_digest(recovery_plan)
+                     != document["events"][0]["recovery_plan_digest"]),
+                    ("recovers", document["events"][0]["recovers"] != recovers)) if differ]
                 if differs:
                     raise CreationConflict(
                         f"{transaction_id}: creation_key {creation_key!r} already names a "
@@ -357,8 +375,11 @@ class TransactionStore:
                 "creation_key": creation_key, "subject": copy.deepcopy(subject),
                 "state": "created", "parked_from": None, "revision": 1,
                 "events": [{"seq": 1, "type": "created", "at": at,
-                            "proof_plan_digest": telemetry_digest(plan)}],
+                            "proof_plan_digest": telemetry_digest(plan),
+                            "recovery_plan_digest": telemetry_digest(recovery_plan),
+                            "recovers": recovers}],
                 "concurrency_keys": keys, "custody": None, "proof_plan": plan,
+                "recovery_plan": recovery_plan,
             }
             _validate_state(document, transaction_id, self.root)
             atomic_write(directory, directory / "state.json", document)

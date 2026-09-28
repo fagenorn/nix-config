@@ -9,9 +9,11 @@ import unittest
 from agent_tools import transaction_core, transaction_recovery_plan
 from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_core import (
-    EDGE_ACTIONS, POSTURES, RECOVERY_PLAN_SCHEMA, RECOVERY_REJECTION_REASONS,
-    RecoveryPlanRejected, TransactionError, action_id, bind_recovery, compile_proof,
-    compile_recovery, materialize_recovery)
+    EDGE_ACTIONS, POSTURES, RECOVERY_PLAN_SCHEMA, RECOVERY_REJECTION_REASONS, CreationConflict,
+    ProofPlanRejected, RecoveryPlanRejected, TransactionError, action_id, bind_recovery,
+    compile_proof, compile_recovery, materialize_recovery)
+
+from .test_transaction_custody import KEYS, SUBJECT, CustodyCase
 
 TID = "rel_01890a5d-ac96-7abc-8def-0123456789ab"
 C = {"basis": "deterministic", "max_collection_latency_ms": 30_000,
@@ -82,6 +84,20 @@ REJECTIONS = {
 
 def bound(declaration=RECOVERY, proof=PROOF):
     return bind_recovery(compile_recovery(declaration), compile_proof(proof))
+
+
+def inert_recovery(proof):
+    """Every unit of a compilable `proof` as a `manual_only` recovery unit, with no anchor
+    and no edge; empty when `proof` is itself rejected, so its own rejection still wins."""
+    try:
+        compile_proof(proof)
+    except ProofPlanRejected:
+        return EMPTY_RECOVERY
+    return {"effects": {"inert": {"operations": ["make"]}},
+            "units": [{"name": unit["name"], "parameters": unit["parameters"],
+                       "effect": "inert", "operation": "make", "posture": "manual_only",
+                       "anchor": None, "compatibility": None, "edges": []}
+                      for unit in proof["units"]]}
 
 
 class CompileTest(unittest.TestCase):
@@ -175,6 +191,77 @@ class VocabularyTest(unittest.TestCase):
                                     "manual_only"))
         self.assertEqual(EDGE_ACTIONS, ("restore", "compensate"))
         self.assertTrue(issubclass(RecoveryPlanRejected, TransactionError))
+
+
+class CreationTest(CustodyCase):
+    def create(self, key="k", recovery=RECOVERY, proof=PROOF):
+        return self.store.create(key, SUBJECT, concurrency_keys=KEYS, proof=proof,
+                                 recovery=recovery)
+
+    def test_the_plan_is_stored_and_pinned_on_the_created_event(self):
+        created = self.create()
+        document = self.state_doc(created.transaction_id)
+        self.assertEqual(document["schema"], "transaction-state/v5")
+        plan = document["recovery_plan"]
+        self.assertEqual(plan, materialize_recovery(bound(), created.transaction_id))
+        first = document["events"][0]
+        self.assertEqual((first["recovery_plan_digest"], first["recovers"]),
+                         (telemetry_digest(plan), None))
+        self.assertEqual(dict(created.recovery), {
+            "plan_digest": telemetry_digest(plan), "recovers": None,
+            "effect_snapshot": None, "selected": [], "children": []})
+        self.assertEqual(created.recovery_plan["units"][0]["name"], "build")
+        with self.assertRaises(TypeError):
+            created.recovery_plan["schema"] = "x"
+
+    def test_recovery_is_required(self):
+        with self.assertRaises(TypeError):
+            self.store.create("k", SUBJECT, concurrency_keys=KEYS, proof=PROOF)
+
+    def test_a_rejected_declaration_leaves_the_root_untouched(self):
+        for declaration in (with_unit(0, operation="promote"),
+                            {**RECOVERY, "units": RECOVERY["units"][:2]}):
+            with self.subTest(declaration=declaration):
+                self.assertRefusedUnchanged(RecoveryPlanRejected,
+                                            lambda: self.create(recovery=declaration))
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_recovery_compiles_before_proof(self):
+        with self.assertRaises(RecoveryPlanRejected):
+            self.create(recovery=with_unit(0, operation="promote"), proof={"units": "bad"})
+
+    def test_a_same_key_create_with_another_recovery_declaration_conflicts(self):
+        created = self.create()
+        before = self.files()
+        other = with_unit(0, edges=[edge("compensate", "build", "a different residue")])
+        with self.assertRaises(CreationConflict) as caught:
+            self.create(recovery=other)
+        self.assertIn("recovery plan", str(caught.exception))
+        self.assertEqual(self.files(), before)
+        self.assertEqual(self.create().transaction_id, created.transaction_id)
+
+    def test_a_hand_edited_plan_digest_or_backlink_is_state_invalid(self):
+        transaction_id = self.create().transaction_id
+        document = self.state_doc(transaction_id)
+
+        def reidentified(d):
+            d["recovery_plan"]["units"][0]["action_id"] = "act_" + "0" * 32
+            d["events"][0]["recovery_plan_digest"] = telemetry_digest(d["recovery_plan"])
+
+        cases = (
+            (reidentified, "recovery_plan is not the materialization of its own declaration"),
+            (lambda d: d["recovery_plan"]["units"][0]["edges"][0].update(residue="none"),
+             "recovery_plan_digest"),
+            (lambda d: d["events"][0].update(recovery_plan_digest="sha256:" + "0" * 64),
+             "recovery_plan_digest"),
+            (lambda d: d["events"][0].update(recovers=transaction_id), "recovers"),
+            (lambda d: d["events"][0].update(recovers="not-an-id"), "recovers"),
+            (lambda d: d.update(schema="transaction-state/v4"), "transaction-state/v4"))
+        for edit, fragment in cases:
+            with self.subTest(fragment=fragment):
+                edited = copy.deepcopy(document)
+                edit(edited)
+                self.assertRuleRefuses(transaction_id, edited, fragment)
 
 
 if __name__ == "__main__":

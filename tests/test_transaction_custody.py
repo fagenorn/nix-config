@@ -23,6 +23,7 @@ TTL = 600_000
 KEYS = ("target:alpha", "project:alpha")
 SUBJECT = {"candidate": "sha256:abc"}
 EMPTY_PROOF = {"units": [], "obligations": [], "collectors": {}}
+EMPTY_RECOVERY = {"effects": {}, "units": []}
 PATH = "/work/alpha"
 INSTANCE = re.compile(r"lin_[0-9a-f]{32}")
 
@@ -57,7 +58,7 @@ class CustodyCase(unittest.TestCase):
 
     def new(self, key="k", keys=KEYS):
         return self.store.create(key, SUBJECT, concurrency_keys=keys,
-                                 proof=EMPTY_PROOF).transaction_id
+                                 proof=EMPTY_PROOF, recovery=EMPTY_RECOVERY).transaction_id
 
     def acquire(self, transaction_id, executor="exec-a", path=PATH, ttl=TTL):
         return self.store.acquire(transaction_id, executor_id=executor, subject_path=path,
