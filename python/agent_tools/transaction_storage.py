@@ -37,7 +37,8 @@ class TransitionRefused(TransactionError):
 
 
 class CreationConflict(TransactionError):
-    """The same creation key was requested with a different subject or concurrency key set."""
+    """The same creation key was requested with a different subject, concurrency key set or
+    proof plan."""
 
 
 class UnknownTransaction(TransactionError):

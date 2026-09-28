@@ -118,7 +118,7 @@ def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
 
 def _require_creatable(root: Path, creation_key: Any, subject: Any,
                        concurrency_keys: Any) -> None:
-    """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v3 document."""
+    """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v4 document."""
     where = f"{root}: creation_key {creation_key!r}"
     if type(creation_key) is not str or not creation_key:
         raise StateInvalid(f"{where}: not a non-empty string")
@@ -300,24 +300,29 @@ class TransactionStore:
             atomic_write(directory, directory / "state.json", candidate)
         return snapshot(candidate)
 
-    def create(self, creation_key: str, subject: dict, *,
-               concurrency_keys: Collection[str]) -> Transaction:
+    def create(self, creation_key: str, subject: dict, *, concurrency_keys: Collection[str],
+               proof: dict) -> Transaction:
         """Create the transaction for `creation_key`, or return the one it already names.
 
         The concurrency key set is fixed here, stored sorted, and compared with the
-        subject when the key already names a transaction (D4).
+        subject when the key already names a transaction (D4). The `proof` declaration
+        has no default and is compiled before any lock, so a rejected one
+        (`ProofPlanRejected`) leaves nothing behind; the plan it materializes under the
+        transaction id is stored with its digest on the `created` event, and a same-key
+        create whose plan digest differs is a `CreationConflict` (#207 D2, D3).
         """
         _require_creatable(self.root, creation_key, subject, concurrency_keys)
+        compiled = compile_proof(proof, where=f"{self.root}: creation_key {creation_key!r}")
         keys = sorted(concurrency_keys)
         at = format_at(self._now())
         descriptor = open_lock(self.root / "creation.lock")
         try:
-            return self._create_locked(creation_key, subject, keys, at)
+            return self._create_locked(creation_key, subject, keys, compiled, at)
         finally:
             os.close(descriptor)
 
     def _create_locked(self, creation_key: str, subject: dict, keys: list[str],
-                       at: str) -> Transaction:
+                       compiled: dict, at: str) -> Transaction:
         transaction_id = _read_index(self.root, creation_key)
         if transaction_id is None:
             transaction_id = _mint_id()
@@ -334,6 +339,7 @@ class TransactionStore:
             directory.mkdir(exist_ok=True)
             require_directory(directory, missing_ok=False)
             fsync_directory(self.root)
+        plan = materialize_plan(compiled, transaction_id)
         descriptor = open_lock(directory / "lock")
         try:
             if lstat_mode(directory / "state.json") is not None:
@@ -345,7 +351,9 @@ class TransactionStore:
                 differs = [name for name, differ in (
                     ("subject", telemetry_digest(document["subject"])
                      != telemetry_digest(subject)),
-                    ("concurrency key set", document["concurrency_keys"] != keys)) if differ]
+                    ("concurrency key set", document["concurrency_keys"] != keys),
+                    ("proof plan", telemetry_digest(plan)
+                     != document["events"][0]["proof_plan_digest"])) if differ]
                 if differs:
                     raise CreationConflict(
                         f"{transaction_id}: creation_key {creation_key!r} already names a "
@@ -355,8 +363,9 @@ class TransactionStore:
                 "schema": SCHEMA, "transaction_id": transaction_id,
                 "creation_key": creation_key, "subject": copy.deepcopy(subject),
                 "state": "created", "parked_from": None, "revision": 1,
-                "events": [{"seq": 1, "type": "created", "at": at}],
-                "concurrency_keys": keys, "custody": None,
+                "events": [{"seq": 1, "type": "created", "at": at,
+                            "proof_plan_digest": telemetry_digest(plan)}],
+                "concurrency_keys": keys, "custody": None, "proof_plan": plan,
             }
             _validate_state(document, transaction_id, self.root)
             atomic_write(directory, directory / "state.json", document)

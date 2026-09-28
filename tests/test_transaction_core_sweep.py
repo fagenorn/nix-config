@@ -181,7 +181,8 @@ class SweepTableTest(unittest.TestCase):
             store = TransactionStore(Path(tmp))
             persisted = store.load(first)
             again = store.create("library:success", dict(persisted.subject),
-                                 concurrency_keys=list(persisted.concurrency_keys))
+                                 concurrency_keys=list(persisted.concurrency_keys),
+                                 proof={"units": [], "obligations": [], "collectors": {}})
             self.assertEqual(again.transaction_id, first)
             self.assertEqual(len(again.events), len(persisted.events))
 

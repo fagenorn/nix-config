@@ -1,15 +1,17 @@
-"""The transaction-state/v3 document model of the transaction core (#205 D33, #206 D2): the
-lifecycle vocabularies, the `Custody` credential and `Transaction` snapshot types, the
-credential shape checks, the pure history validator and the snapshot fold. The validator
-hands each action event to `agent_tools.transaction_invocation`, whose fold also derives the
-snapshot's per-action `actions` view on every load. It reads no
-file, lock or clock: `validate_state` takes the creation-key index lookup as a callable,
-which `agent_tools.transaction_core` binds to its store root. It also composes what a reap
-appends to a lapsed span (`reaped`) and a late owner result's event (`owner_result_event`),
-and answers whether an executor and fence were ever issued a span (`span_issued`). The
-`at`-timestamp codec (`format_at`, `parse_at`) and the strict JSON object rule
-(`json_object_violation`) that a created `subject` and a late `result` share are imported
-from `agent_tools.transaction_storage`, not held here.
+"""The transaction-state/v4 document model of the transaction core (#205 D33, #206 D2,
+#207 D13): the lifecycle vocabularies, the `Custody` credential and `Transaction` snapshot
+types, the credential shape checks, the pure history validator and the snapshot fold. The
+validator hands each action event to `agent_tools.transaction_invocation`, whose fold also
+derives the snapshot's per-action `actions` view on every load. It accepts the stored
+`proof_plan` only as the materialization of its own declaration, through
+`agent_tools.transaction_plan`'s `plan_violation`, and only when the `created` event pins its
+`telemetry_digest` (#207 D3, D24). It reads no file, lock or clock: `validate_state` takes
+the creation-key index lookup as a callable, which `agent_tools.transaction_core` binds to
+its store root. It also composes what a reap appends to a lapsed span (`reaped`) and a late
+owner result's event (`owner_result_event`), and answers whether an executor and fence were
+ever issued a span (`span_issued`). The `at`-timestamp codec (`format_at`, `parse_at`) and
+the strict JSON object rule (`json_object_violation`) that a created `subject` and a late
+`result` share are imported from `agent_tools.transaction_storage`, not held here.
 """
 
 import copy
@@ -21,15 +23,17 @@ from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
+from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_custody import (
     CUSTODY_EVENTS, EVIDENCE_FORMS, admissibility, fence_violation)
 from agent_tools.transaction_invocation import (
     ACTION_EVENT_KEYS, action_event_violation, action_views, apply_action_event, status,
     unresolved)
+from agent_tools.transaction_plan import plan_violation
 from agent_tools.transaction_storage import (
     StateInvalid, format_at, json_object_violation, parse_at, serialize)
 
-SCHEMA = "transaction-state/v3"
+SCHEMA = "transaction-state/v4"
 
 FORWARD = ("created", "awaiting_verification", "ready", "publishing", "published",
            "activating", "proving")
@@ -59,9 +63,10 @@ _ID_PATTERN = re.compile(
     r"rel_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 _AT_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z")
 _STATE_KEYS = frozenset({"schema", "transaction_id", "creation_key", "subject", "state",
-                         "parked_from", "revision", "events", "concurrency_keys", "custody"})
+                         "parked_from", "revision", "events", "concurrency_keys", "custody",
+                         "proof_plan"})
 _KEY_COLLECTIONS = (list, tuple, set, frozenset)
-_CREATED_KEYS = frozenset({"seq", "type", "at"})
+_CREATED_KEYS = frozenset({"seq", "type", "at", "proof_plan_digest"})
 _TRANSITIONED_KEYS = frozenset({"seq", "type", "at", "from", "to", "reason",
                                 "external_state"})
 _ENVELOPE_KEYS = frozenset({"seq", "type", "at"})
@@ -110,6 +115,8 @@ class Transaction:
     them cannot reach disk. `evidence` and `grants` entries carry verdicts
     derived from the history on every load, and `actions` holds one read-only view per
     declared action, in declaration order (#206 D2); none of them is ever stored.
+    `proof_plan` is the stored plan fixed at creation, a read-only view over a deep copy
+    (#207 D3, D13).
     """
 
     transaction_id: str
@@ -124,6 +131,7 @@ class Transaction:
     evidence: tuple[Mapping[str, Any], ...]
     grants: tuple[Mapping[str, Any], ...]
     actions: tuple[Mapping[str, Any], ...]
+    proof_plan: Mapping[str, Any]
 
 
 def edge_allowed(source: str, parked_from: str | None, target: str) -> bool:
@@ -410,9 +418,11 @@ def _fold_custody(event: dict, seq: int, fold: _CustodyFold, state: str,
 
 def validate_state(document: Any, transaction_id: str,
                    indexed: Callable[[str], str | None]) -> None:
-    """Refuse (StateInvalid) any document that is not a valid transaction-state/v3; each
-    action event is checked by `action_event_violation` against the actions before it, and
-    a transition into a terminal while `unresolved` names an action is refused (#206 D20)."""
+    """Refuse (StateInvalid) any document that is not a valid transaction-state/v4. The stored
+    `proof_plan` must be the materialization of its own declaration for `transaction_id`, and
+    the `created` event must pin its `telemetry_digest` (#207 D3, D24); each action event is
+    checked by `action_event_violation` against the actions before it, and a transition into
+    a terminal while `unresolved` names an action is refused (#206 D20)."""
     def refuse(rule: str) -> StateInvalid:
         return StateInvalid(f"{transaction_id}: {rule}")
 
@@ -424,6 +434,9 @@ def validate_state(document: Any, transaction_id: str,
         raise refuse(f"state.json is not the closed {SCHEMA} key set")
     if not is_id(document["transaction_id"]) or document["transaction_id"] != transaction_id:
         raise refuse("transaction_id is not a rel_ UUIDv7 equal to its directory name")
+    violation = plan_violation(document["proof_plan"], transaction_id)
+    if violation is not None:
+        raise refuse(f"proof_plan {violation}")
     creation_key = document["creation_key"]
     if type(creation_key) is not str or not creation_key:
         raise refuse("creation_key is not a non-empty string")
@@ -453,6 +466,8 @@ def validate_state(document: Any, transaction_id: str,
         raise refuse("event 1 is not seq 1 of type created")
     if not _is_timestamp(first["at"]):
         raise refuse("event 1 at is not a YYYY-MM-DDTHH:MM:SS.mmmZ timestamp")
+    if first["proof_plan_digest"] != telemetry_digest(document["proof_plan"]):
+        raise refuse("event 1 proof_plan_digest is not the digest of proof_plan")
     state, parked, entered_terminal = "created", None, None
     fold = _CustodyFold(keys)
     actions: dict = {}
@@ -533,6 +548,7 @@ def snapshot(document: dict) -> Transaction:
         evidence=tuple(MappingProxyType(entry) for entry in evidence),
         grants=tuple(MappingProxyType(entry) for entry in grants),
         actions=tuple(MappingProxyType(view) for view in action_views(document["events"])),
+        proof_plan=MappingProxyType(copy.deepcopy(document["proof_plan"])),
     )
 
 

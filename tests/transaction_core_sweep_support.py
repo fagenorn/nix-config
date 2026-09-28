@@ -101,8 +101,9 @@ def drive(root, shape, scenario, world=None):
     store = TransactionStore(root, clock=lambda: world.clock * 1000)
     subject, profile, registry = SHAPES[shape](world)
     keys = profile["target"]["concurrency_keys"]
-    transaction_id = store.create(f"{shape}:{scenario}", subject,
-                                  concurrency_keys=keys).transaction_id
+    transaction_id = store.create(
+        f"{shape}:{scenario}", subject, concurrency_keys=keys,
+        proof={"units": [], "obligations": [], "collectors": {}}).transaction_id
     definite = {"all": True}
     held = {"custody": None}
 

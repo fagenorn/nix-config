@@ -26,6 +26,7 @@ ID_PATTERN = re.compile(
 AT_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 SUBJECT = {"candidate": "sha256:abc", "n": 1}
 KEYS = ["project:demo", "target:demo"]
+EMPTY_PROOF = {"units": [], "obligations": [], "collectors": {}}
 FORWARD = ("created", "awaiting_verification", "ready", "publishing", "published",
            "activating", "proving")
 EXPECTED_EDGES = {
@@ -119,7 +120,8 @@ class RootTest(unittest.TestCase):
 class CreateTest(StoreCase):
     def test_create_mints_a_rel_uuid7_id_and_writes_state_and_index(self):
         before = time.time_ns() // 1_000_000
-        created = self.store.create("demo:success", SUBJECT, concurrency_keys=KEYS)
+        created = self.store.create("demo:success", SUBJECT, concurrency_keys=KEYS,
+                                    proof=EMPTY_PROOF)
         after = time.time_ns() // 1_000_000
         transaction_id = created.transaction_id
         self.assertRegex(transaction_id, ID_PATTERN)
@@ -134,8 +136,8 @@ class CreateTest(StoreCase):
         self.assertEqual(raw, serialize(document))
         self.assertEqual(set(document), {"schema", "transaction_id", "creation_key", "subject",
                                          "state", "parked_from", "revision", "events",
-                                         "concurrency_keys", "custody"})
-        self.assertEqual(document["schema"], "transaction-state/v3")
+                                         "concurrency_keys", "custody", "proof_plan"})
+        self.assertEqual(document["schema"], "transaction-state/v4")
         self.assertEqual((document["concurrency_keys"], document["custody"]), (KEYS, None))
         self.assertEqual(created.concurrency_keys, tuple(KEYS))
         self.assertEqual(document["transaction_id"], transaction_id)
@@ -143,7 +145,7 @@ class CreateTest(StoreCase):
         self.assertEqual((document["state"], document["parked_from"], document["revision"]),
                          ("created", None, 1))
         [event] = document["events"]
-        self.assertEqual(set(event), {"seq", "type", "at"})
+        self.assertEqual(set(event), {"seq", "type", "at", "proof_plan_digest"})
         self.assertEqual((event["seq"], event["type"]), (1, "created"))
         self.assertRegex(event["at"], AT_PATTERN)
         index = self.index_path("demo:success").read_text()
@@ -154,37 +156,38 @@ class CreateTest(StoreCase):
         self.assertEqual(created.events[0]["type"], "created")
 
     def test_same_key_and_subject_returns_the_same_id_and_writes_nothing(self):
-        first = self.store.create("k", SUBJECT, concurrency_keys=KEYS)
+        first = self.store.create("k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF)
         before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
         again = TransactionStore(self.root).create("k", copy.deepcopy(SUBJECT),
-                                                   concurrency_keys=KEYS)
+                                                   concurrency_keys=KEYS, proof=EMPTY_PROOF)
         after = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
         self.assertEqual(again.transaction_id, first.transaction_id)
         self.assertEqual(before, after)
         self.assertEqual(len(again.events), 1)
 
     def test_same_key_with_a_different_subject_is_a_conflict(self):
-        self.store.create("k", {"n": 1}, concurrency_keys=KEYS)
+        self.store.create("k", {"n": 1}, concurrency_keys=KEYS, proof=EMPTY_PROOF)
         for other in ({"n": 1.0}, {"n": True}, {"n": 2}):
             with self.subTest(other=other), self.assertRaises(CreationConflict):
-                self.store.create("k", other, concurrency_keys=KEYS)
+                self.store.create("k", other, concurrency_keys=KEYS, proof=EMPTY_PROOF)
 
     def test_an_index_naming_another_keys_transaction_is_state_invalid_and_unchanged(self):
-        other = self.store.create("b", SUBJECT, concurrency_keys=KEYS)
+        other = self.store.create("b", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF)
         self.index_path("a").write_text(serialize({
             "schema": "transaction-creation-key/v1", "creation_key": "a",
             "transaction_id": other.transaction_id}))
         before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
         with self.assertRaises(StateInvalid) as caught:
-            self.store.create("a", copy.deepcopy(SUBJECT), concurrency_keys=KEYS)
+            self.store.create("a", copy.deepcopy(SUBJECT), concurrency_keys=KEYS,
+                              proof=EMPTY_PROOF)
         after = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
         self.assertIn(other.transaction_id, str(caught.exception))
         self.assertEqual(before, after)
 
     def test_an_index_without_state_is_completed_under_the_indexed_id(self):
-        first = self.store.create("k", SUBJECT, concurrency_keys=KEYS)
+        first = self.store.create("k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF)
         shutil.rmtree(self.root / first.transaction_id)
-        resumed = self.store.create("k", SUBJECT, concurrency_keys=KEYS)
+        resumed = self.store.create("k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF)
         self.assertEqual(resumed.transaction_id, first.transaction_id)
         self.assertEqual([e["type"] for e in resumed.events], ["created"])
         self.assertTrue((self.root / first.transaction_id / "lock").is_file())
@@ -194,13 +197,13 @@ class CreateTest(StoreCase):
                              ("k", {"x": float("nan")}), ("k", {1: "int key"}),
                              ("k", {"t": (1, 2)}), ("\ud800", SUBJECT)):
             with self.subTest(key=key, subject=subject), self.assertRaises(StateInvalid):
-                self.store.create(key, subject, concurrency_keys=KEYS)
+                self.store.create(key, subject, concurrency_keys=KEYS, proof=EMPTY_PROOF)
         self.assertEqual(self.tree(), [])
 
 
 class LoadTest(StoreCase):
     def test_load_returns_a_read_only_snapshot_of_the_persisted_state(self):
-        created = self.store.create("k", SUBJECT, concurrency_keys=KEYS)
+        created = self.store.create("k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF)
         loaded = TransactionStore(self.root).load(created.transaction_id)
         self.assertEqual(loaded, created)
         with self.assertRaises(TypeError):
@@ -210,7 +213,7 @@ class LoadTest(StoreCase):
         self.assertEqual(self.document(created.transaction_id)["subject"], SUBJECT)
 
     def test_unknown_or_malformed_ids_are_unknown_and_nothing_is_created(self):
-        self.store.create("k", SUBJECT, concurrency_keys=KEYS)
+        self.store.create("k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF)
         before = self.tree()
         for transaction_id in ("rel_0190f0e0-0000-7000-8000-000000000000", "rel_../../etc",
                                "rel_0190F0E0-0000-7000-8000-000000000000", "creation-keys",
@@ -220,7 +223,8 @@ class LoadTest(StoreCase):
         self.assertEqual(self.tree(), before)
 
     def test_a_valid_hand_built_history_loads(self):
-        transaction_id = self.store.create("k", SUBJECT, concurrency_keys=KEYS).transaction_id
+        transaction_id = self.store.create(
+            "k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF).transaction_id
         base = self.document(transaction_id)
         for targets in (("attention_required", "created", "abandoned"),
                         ("attention_required", "recovering", "rolled_back"),
@@ -230,7 +234,8 @@ class LoadTest(StoreCase):
                 self.assertEqual(self.store.load(transaction_id).state, targets[-1])
 
     def test_documents_violating_the_closed_schema_are_state_invalid(self):
-        transaction_id = self.store.create("k", SUBJECT, concurrency_keys=KEYS).transaction_id
+        transaction_id = self.store.create(
+            "k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF).transaction_id
         base = self.document(transaction_id)
 
         def gap(doc):
@@ -270,7 +275,8 @@ class LoadTest(StoreCase):
                 self.assertEqual(self.state_path(transaction_id).read_bytes(), raw)
 
     def test_duplicate_keys_and_nonfinite_literals_are_state_invalid(self):
-        transaction_id = self.store.create("k", SUBJECT, concurrency_keys=KEYS).transaction_id
+        transaction_id = self.store.create(
+            "k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF).transaction_id
         raw = self.state_path(transaction_id).read_text()
         for text in ('{"schema":"x",' + raw[1:], raw.replace('"n":1', '"n":NaN'),
                      raw.replace('"n":1', '"n":1e400'), raw.replace('"n":1', '"n":-1e400')):
@@ -280,7 +286,8 @@ class LoadTest(StoreCase):
                     self.store.load(transaction_id)
 
     def test_layout_damage_is_state_invalid(self):
-        transaction_id = self.store.create("k", SUBJECT, concurrency_keys=KEYS).transaction_id
+        transaction_id = self.store.create(
+            "k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF).transaction_id
         good = self.state_path(transaction_id).read_bytes()
         (self.root / transaction_id / "lock").unlink()
         with self.assertRaises(StateInvalid):
@@ -315,7 +322,7 @@ class AdvanceCase(StoreCase):
 
     def reach(self, key, path):
         transaction_id = self.store.create(
-            key, SUBJECT, concurrency_keys=[f"key:{key}"]).transaction_id
+            key, SUBJECT, concurrency_keys=[f"key:{key}"], proof=EMPTY_PROOF).transaction_id
         self.held[transaction_id] = self.store.acquire(
             transaction_id, executor_id="exec", subject_path="/work/demo",
             ttl_ms=3_600_000).custody
@@ -428,7 +435,7 @@ class LockAndSchemaGuardTest(AdvanceCase):
         with open(self.root / "creation.lock", "a+") as holder:
             fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
             with self.assertRaises(TransactionBusy):
-                self.store.create("k", SUBJECT, concurrency_keys=KEYS)
+                self.store.create("k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF)
             self.assertEqual(self.tree(), ["creation.lock"])
 
     def test_a_schema_invalid_state_refuses_advance_before_any_write(self):
@@ -486,7 +493,7 @@ class ClockTest(unittest.TestCase):
         clock = FakeClock()
         store = TransactionStore(self.root, clock=clock)
         before = time.time_ns() // 1_000_000
-        created = store.create("k", SUBJECT, concurrency_keys=KEYS)
+        created = store.create("k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF)
         after = time.time_ns() // 1_000_000
         self.assertEqual(created.events[0]["at"], "2027-01-15T08:00:00.000Z")
         millis = int(created.transaction_id[4:].replace("-", "")[:12], 16)
@@ -500,14 +507,14 @@ class ClockTest(unittest.TestCase):
             with self.subTest(reading=reading), tempfile.TemporaryDirectory() as tmp:
                 store = TransactionStore(Path(tmp), clock=lambda value=reading: value)
                 with self.assertRaises(TransactionError) as caught:
-                    store.create("k", SUBJECT, concurrency_keys=KEYS)
+                    store.create("k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF)
                 self.assertIn(tmp, str(caught.exception))
                 self.assertEqual(list(Path(tmp).rglob("state.json")), [])
 
     def test_the_default_clock_is_the_wall_clock(self):
         before = time.time_ns() // 1_000_000
         at = TransactionStore(self.root).create(
-            "k", SUBJECT, concurrency_keys=KEYS).events[0]["at"]
+            "k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF).events[0]["at"]
         after = time.time_ns() // 1_000_000
         stamp = datetime.datetime.strptime(at, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
             tzinfo=datetime.timezone.utc)
@@ -515,7 +522,8 @@ class ClockTest(unittest.TestCase):
 
     def test_the_largest_representable_reading_is_accepted(self):
         store = TransactionStore(self.root, clock=lambda: 253_402_300_799_999)
-        self.assertEqual(store.create("k", SUBJECT, concurrency_keys=KEYS).events[0]["at"],
+        self.assertEqual(store.create("k", SUBJECT, concurrency_keys=KEYS,
+                                      proof=EMPTY_PROOF).events[0]["at"],
                          "9999-12-31T23:59:59.999Z")
 
 
@@ -537,29 +545,31 @@ class StorageModuleTest(unittest.TestCase):
 
 class ConcurrencyKeysTest(StoreCase):
     def test_keys_are_stored_sorted_and_deduplication_compares_them(self):
-        created = self.store.create("k", SUBJECT, concurrency_keys={"b:2", "a:1"})
+        created = self.store.create("k", SUBJECT, concurrency_keys={"b:2", "a:1"},
+                                    proof=EMPTY_PROOF)
         self.assertEqual(created.concurrency_keys, ("a:1", "b:2"))
-        again = self.store.create("k", SUBJECT, concurrency_keys=("b:2", "a:1"))
+        again = self.store.create("k", SUBJECT, concurrency_keys=("b:2", "a:1"), proof=EMPTY_PROOF)
         self.assertEqual(again.transaction_id, created.transaction_id)
         before = {p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
         for keys in (["a:1"], ["a:1", "b:2", "c:3"]):
             with self.subTest(keys=keys), self.assertRaises(CreationConflict):
-                self.store.create("k", SUBJECT, concurrency_keys=keys)
+                self.store.create("k", SUBJECT, concurrency_keys=keys, proof=EMPTY_PROOF)
         self.assertEqual({p: p.read_bytes() for p in self.root.rglob("*") if p.is_file()},
                          before)
 
     def test_malformed_key_sets_are_refused_before_anything_exists(self):
         for keys in ((), [], "ab", ["a", "a"], [""], [1], ["\ud800"], None):
             with self.subTest(keys=keys), self.assertRaises(StateInvalid):
-                self.store.create("k", SUBJECT, concurrency_keys=keys)
+                self.store.create("k", SUBJECT, concurrency_keys=keys, proof=EMPTY_PROOF)
         self.assertEqual(self.tree(), [])
 
     def test_keys_are_required(self):
         with self.assertRaises(TypeError):
-            self.store.create("k", SUBJECT)
+            self.store.create("k", SUBJECT, proof=EMPTY_PROOF)
 
     def test_a_v1_document_fails_closed_naming_its_version(self):
-        transaction_id = self.store.create("k", SUBJECT, concurrency_keys=KEYS).transaction_id
+        transaction_id = self.store.create(
+            "k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF).transaction_id
         document = self.document(transaction_id)
         v1 = {key: value for key, value in document.items()
               if key not in ("concurrency_keys", "custody")}
@@ -570,7 +580,8 @@ class ConcurrencyKeysTest(StoreCase):
         self.assertIn(transaction_id, str(caught.exception))
 
     def test_an_unknown_event_type_is_refused_by_name(self):
-        transaction_id = self.store.create("k", SUBJECT, concurrency_keys=KEYS).transaction_id
+        transaction_id = self.store.create(
+            "k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF).transaction_id
         document = self.document(transaction_id)
         document["events"].append({"seq": 2, "type": "lease_renewed",
                                    "at": document["events"][0]["at"]})
