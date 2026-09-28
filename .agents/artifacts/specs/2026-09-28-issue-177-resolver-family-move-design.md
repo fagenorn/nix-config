@@ -488,6 +488,10 @@ Seam 3, the guard's registered hook, is untouched.
   reads it.
 - **Changing any command's argv, help or error vocabulary** beyond D3's
   unreachable codes and D4's unset-`HOME` answer.
+- **Composing `agent_tools.canonical`'s strict-load hooks** in
+  `resolve_project`, `agent_platform` and `host_admission` (shard rule 4):
+  their local hooks raise the typed errors that carry each command's refusal
+  vocabulary (D16).
 - **Splitting oversized functions**, relocating test files, or switching the
   recipe to discovery (parent Out of scope).
 
@@ -510,3 +514,4 @@ Seam 3, the guard's registered hook, is untouched.
 | D13 | `tests/test_agent_tools_launchers.py` exempts `workflow-state`, by name, from "an `.agents/bin` entry naming `agent_tools` is a generated launcher" while it carries D6's lookups; the exemption lands with them and #178 deletes both | D6 puts the text `agent_tools` into the flat installed `workflow-state`, which the enumeration would otherwise reject; #175 D8; the-bar Tests that can fail | Selecting entries by the launcher pattern instead of the package bytes stops catching a hand-written entry that names the package. Spelling the module name so the bytes never appear hides the dependency |
 | D14 | Prose the move makes false is corrected in the move's own commit: the registry's promotion-literal comment drops its "installed standalone, imports no package module" clause (refines D1's "comment unchanged"); `EvaluatorResolutionTest` drops its second `load_module()` and its fresh-instance docstring; `PromotionLiteralPinTest`'s docstring drops #127 D27 | the-bar Moves keep their history (living text stays true); D2, D7 | Leaving the sentences as they are keeps comments and test docstrings that describe a loader that no longer exists |
 | D15 | Task 1's real `-m` run of `sibling_argv` targets the already-packaged `diff_scope`, not `resolve_project` (refines D9), so the helper's commit is green before the move; the adopt suites and the demo cover the resolver child | D12 (every commit green); D9 | Targeting `resolve_project` fails until the move lands, or ties the helper's test to the atomic move |
+| D16 | The three moved modules keep their local strict-load hooks (`resolve_project.reject_non_finite`, `agent_platform._reject_non_finite`, `host_admission._unique_object`/`_reject_non_finite`) instead of composing `agent_tools.canonical`'s `reject_duplicate_keys`/`reject_nonfinite_literal`; shard rule 4 for them is left to a later change that may alter the refusal wording | Out of scope (no error-vocabulary change); the-bar Moves keep their history; each hook raises the module's typed error (`NonFiniteNumber`, `_NonFiniteNumber`, `DeclarationError`) whose code and detail are the command's contract | Composing the canonical hooks now raises a bare `ValueError` with different wording, which either changes the refusal detail or needs a translating wrapper that is itself a local hook |

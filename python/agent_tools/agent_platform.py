@@ -341,8 +341,9 @@ def _reject_non_finite(token: str) -> object:
     Python's decoder accepts them as an extension, RFC 8259 has none, and a
     caller that republishes a manifest member verbatim would otherwise hand
     one to an emit guard (`allow_nan=False`) only after part of its response
-    was already written (#147 D12). This library sits below the resolver, so
-    it carries its own hook rather than importing `reject_non_finite`.
+    was already written (#147 D12). It stays local rather than composing
+    `agent_tools.canonical.reject_nonfinite_literal` because its typed error
+    carries this module's refusal vocabulary (#177 D16).
     """
     raise _NonFiniteNumber(token)
 
