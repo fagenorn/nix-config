@@ -97,6 +97,7 @@ REGISTERED_CHECK_IDS = (
     "repository.release_profile.restore_anchor",
     "repository.release_profile.rolled_back_reachable",
     "repository.residue.nested_ledger",
+    "repository.residue.promoted_duplicate",
     "repository.residue.root_scratch",
     "verification.commands.no_shell_indirection",
 )
@@ -122,7 +123,7 @@ PURPOSE_SELECTION = {
 
 
 class RegistryClosureTest(unittest.TestCase):
-    def test_the_registry_is_exactly_the_eighteen_declared_checks(self):
+    def test_the_registry_is_exactly_the_nineteen_declared_checks(self):
         module = load_module()
         self.assertEqual(sorted(c.id for c in module.REGISTRY),
                          sorted(REGISTERED_CHECK_IDS))
@@ -194,6 +195,30 @@ class RegistryClosureTest(unittest.TestCase):
                 self.assertEqual(len(ids), len(set(ids)))
 
 
+class PromotionLiteralPinTest(unittest.TestCase):
+    """#127 D10, D27: the engine's promotion literals are the package's constants,
+    and no installed engine file names the package."""
+
+    def test_registry_literals_equal_the_promotion_schema(self):
+        from agent_tools import promotion_schema as schema
+        registry = load_module().registry
+        self.assertEqual(
+            [registry.PROMOTION_CANDIDATES_RELATIVE, registry.PROMOTION_CANDIDATE_KIND,
+             registry.PROMOTION_PROMOTED_STATE, registry.PROMOTION_DUPLICATES_MEMBER,
+             registry.PROMOTION_DUPLICATE_MEMBERS, registry.PROMOTION_REMOVE_DISPOSITION,
+             registry.PROMOTION_PROJECT_ONLY_RESIDUE, registry.PROMOTION_REPAIR_MODULE],
+            [schema.CANDIDATES_RELATIVE, schema.CANDIDATE_KIND, schema.PROMOTED,
+             schema.LOCAL_DUPLICATES_MEMBER, schema.DUPLICATE_MEMBERS,
+             schema.REMOVE_DISPOSITION, schema.PROJECT_ONLY_RESIDUE, schema.COMMAND_NAME])
+        self.assertIn(registry.PROMOTION_REPAIR_MODULE, registry.REPAIR_MODULES)
+
+    def test_no_installed_engine_file_names_the_package(self):
+        scripts = Path(__file__).resolve().parents[1] / "scripts"
+        for name in ("conformance.py", "conformance-registry.py", "conformance-checks.py"):
+            with self.subTest(name=name):
+                self.assertNotIn(b"agent_tools", (scripts / name).read_bytes())
+
+
 class AcceptanceDemoTest(ReportAssertions, unittest.TestCase):
     """D22: the demo the issue names, against this repository's committed root."""
 
@@ -221,6 +246,9 @@ class AcceptanceDemoTest(ReportAssertions, unittest.TestCase):
         for repair in report["repairs"]:
             self.assertNotEqual(repair["safety_class"], "destructive")
         self.assert_validates(report)
+        promoted = by_id["repository.residue.promoted_duplicate"]
+        self.assertEqual([promoted["status"], promoted["facts"]], ["passed", {
+            "duplicates": [], "count": 0, "deferred_count": 0, "retained_count": 0}])
 
     def test_workflow_entry_on_a_broken_contract_stops_at_one_root_cause(self):
         with fixture() as tmp:
