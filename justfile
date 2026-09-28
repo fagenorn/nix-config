@@ -101,6 +101,7 @@ agent-workflow-tests:
     tests/test_promotion_documents.py \
     tests/test_promotion_lifecycle.py \
     tests/test_promotion_deployment.py \
+    tests/test_promotion_demo.py \
     tests/test_context_map_lint.py \
     tests/test_branch_protection.py
 
@@ -125,7 +126,8 @@ agent-installed-skill-tests: build
       home/common/agent-skills/tests/test_dispatch_contracts.py \
       home/common/agent-skills/tests/test_shell_example_contracts.py \
       home/common/agent-skills/tests/test_workflow_skill_contracts.py \
-      tests/test_agent_tools_launchers.py
+      tests/test_agent_tools_launchers.py \
+      tests/test_promotion_installed.py
 
 ## claude code
 # Print the Nix-generated ~/.claude/settings.json exactly as the next switch will write it.
