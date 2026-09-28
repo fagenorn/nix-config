@@ -8,7 +8,7 @@ from typing import Any
 from ._canonical import (canonical_bytes, canonical_digest, _boolean, _members,
     _object, _reject, _sorted_unique, _utc)
 from ._objects import (_POSTCONDITIONS, _STAGE_ACTIONS, _authority, _contract,
-    _delivery_observation, _intent, _postcondition_observation_matches,
+    _current_selections, _delivery_observation, _intent, _postcondition_observation_matches,
     _reevaluation, _scope, _selected, _stage_observation_matches, _stage_scope_matches,
     validate_custody_ref)
 from ._wire import validate_delivery_object
@@ -71,22 +71,31 @@ def match_scope(contract: object, intent: object, requested: object, *, selected
     now = _time(at_time)
     if now < _time(i["issued_at"]) or (i["expires_at"] is not None and now > _time(i["expires_at"])): return {"matched": False, "scope_id": None, "reason_code": "intent_expired"}
     if any(item["authority_kind"] == "intent_revocation" and item["revocation_subject"] == {"intent_id": i["id"], "revocation_key": i["revocation_key"]} for item in revocations): return {"matched": False, "scope_id": None, "reason_code": "intent_revoked"}
+    current = _current_selections(c, canonical_digest(c), selections)
     for declared in i["scopes"]:
         slot_ref = declared["target"]["output_ref"]
         if slot_ref["kind"] == "slot" and r["target"]["output_ref"] != slot_ref:
             contract_slots = [stage["target_ref"] for stage in c["stages"] if stage["target_ref"].get("kind") == "slot" and stage["target_ref"]["slot_id"] == slot_ref["slot_id"]]
             bound = [item for item in selections if item["slot_id"] == slot_ref["slot_id"]]
-            if not contract_slots or len(bound) != 1 or any(item != contract_slots[0] for item in contract_slots[1:]):
+            if not contract_slots or not bound or any(item != contract_slots[0] for item in contract_slots[1:]):
                 return {"matched": False, "scope_id": None, "reason_code": "slot_constraint_mismatch"}
-            constraints, selected = contract_slots[0]["constraints"], bound[0]
+            constraints = contract_slots[0]["constraints"]
             expected = (canonical_digest(c), contract_slots[0]["subject_kind"], constraints["repository_id"], constraints["branch"], constraints["base"])
-            actual = (selected["contract_digest"], selected["subject_kind"], selected["repository_id"], selected["branch"], selected["base"])
-            if actual != expected:
+            if any((selected["contract_digest"], selected["subject_kind"], selected["repository_id"], selected["branch"], selected["base"]) != expected
+                   for selected in bound):
                 return {"matched": False, "scope_id": None, "reason_code": "slot_constraint_mismatch"}
-        reason = _scope_mismatch(declared, r, selections)
+        reason = _scope_mismatch(declared, r, current)
         if reason is None: return {"matched": True, "scope_id": declared["id"], "reason_code": "matched"}
-    reason = _scope_mismatch(i["scopes"][0], r, selections)
+    reason = _scope_mismatch(i["scopes"][0], r, current)
     return {"matched": False, "scope_id": None, "reason_code": reason or "scope_tuple_required"}
+
+
+def current_selection(delivery: object) -> dict[str, Any] | None:
+    """The current selection of a delivery's reviewed slot: its chain's tip, or None (#192 D25)."""
+    d = validate_delivery_object(delivery, expected_kind="delivery", notes_max_characters=1_000_000)
+    tips = _current_selections(d["contract"], d["contract_digest"], d["selected_outputs"])
+    if len(tips) > 1: _reject("conflicting selected outputs")
+    return copy.deepcopy(tips[0]) if tips else None
 
 
 def _merge_by_id(existing: list[dict[str, Any]], candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -95,6 +104,28 @@ def _merge_by_id(existing: list[dict[str, Any]], candidates: list[dict[str, Any]
         if item["id"] in result and canonical_bytes(result[item["id"]]) != canonical_bytes(item): _reject()
         result[item["id"]] = copy.deepcopy(item)
     return sorted(result.values(), key=lambda item: item["id"])
+
+
+def _stage_facts(contract: dict[str, Any], contract_digest: str,
+                 stage_observation: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """One stage fact per contract stage, observed where ``stage_observation`` names one."""
+    facts = []
+    for stage in contract["stages"]:
+        observed = stage_observation.get(stage["id"])
+        fact = {"schema_version": 1, "kind": "delivery-stage-fact", "id": "",
+                "contract_digest": contract_digest, "stage_id": stage["id"],
+                "state": "observed" if observed else "pending",
+                "observation_id": observed["id"] if observed else None}
+        fact["id"] = canonical_digest(fact, omit_derived="id")
+        facts.append(fact)
+    return facts
+
+
+def _pending_postconditions(contract: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {name: {"state": ("not_applicable"
+                             if contract["deliverable"]["obligations"][name] == "not_applicable"
+                             else "pending"), "observation_id": None}
+            for name in _POSTCONDITIONS}
 
 
 def reduce_delivery(contract: object, delivery: object, *, evaluation: object) -> dict[str, object]:
@@ -134,6 +165,10 @@ def reduce_delivery(contract: object, delivery: object, *, evaluation: object) -
         if item["observation_kind"] == "selected_output":
             selected = item["subject"]["selected_output"]
             next_delivery["selected_outputs"] = _merge_by_id(next_delivery["selected_outputs"], [selected])
+    # A sync selection un-matches facts observed at the prior head, so the merged
+    # delivery is validated with pending facts; they are recomputed below (#192 D20).
+    next_delivery["stage_facts"] = _stage_facts(c, d["contract_digest"], {})
+    next_delivery["postconditions"] = _pending_postconditions(c)
     validate_delivery_object(next_delivery, expected_kind="delivery", notes_max_characters=1_000_000)
     stage_observation: dict[str, dict[str, Any]] = {}
     for stage in c["stages"]:
@@ -141,27 +176,21 @@ def reduce_delivery(contract: object, delivery: object, *, evaluation: object) -
         matches = [item for item in next_delivery["delivery_observations"] if item["observation_kind"] == expected and _stage_observation_matches(c, next_delivery, stage, item)]
         if len({canonical_bytes(item["subject"]) for item in matches}) > 1: _reject()
         if matches: stage_observation[stage["id"]] = max(matches, key=lambda item: (item["observed_at"], item["id"]))
-    facts = []
-    for stage in c["stages"]:
-        observed = stage_observation.get(stage["id"])
-        state = "observed" if observed else "pending"
-        facts.append({"schema_version": 1, "kind": "delivery-stage-fact", "id": "", "contract_digest": d["contract_digest"], "stage_id": stage["id"], "state": state, "observation_id": observed["id"] if observed else None})
-        facts[-1]["id"] = canonical_digest(facts[-1], omit_derived="id")
+    facts = _stage_facts(c, d["contract_digest"], stage_observation)
     next_delivery["stage_facts"] = facts
-    post = {name: {"state": "pending", "observation_id": None} for name in _POSTCONDITIONS}
+    post = _pending_postconditions(c)
     for name in _POSTCONDITIONS:
-        if c["deliverable"]["obligations"][name] == "not_applicable": post[name] = {"state": "not_applicable", "observation_id": None}
+        if post[name]["state"] == "not_applicable": continue
+        if name == "pr_merged":
+            matches = [stage_observation[stage["id"]] for stage in c["stages"] if stage["kind"] == "merge_pr" and stage["id"] in stage_observation]
         else:
-            if name == "pr_merged":
-                matches = [stage_observation[stage["id"]] for stage in c["stages"] if stage["kind"] == "merge_pr" and stage["id"] in stage_observation]
-            else:
-                matches = [item for item in next_delivery["delivery_observations"]
-                           if item["observation_kind"] == name
-                           and _postcondition_observation_matches(c, next_delivery, name, item)]
-            if len({canonical_bytes(item["subject"]) for item in matches}) > 1: _reject()
-            if matches:
-                chosen = max(matches, key=lambda item: (item["observed_at"], item["id"]))
-                post[name] = {"state": "observed", "observation_id": chosen["id"]}
+            matches = [item for item in next_delivery["delivery_observations"]
+                       if item["observation_kind"] == name
+                       and _postcondition_observation_matches(c, next_delivery, name, item)]
+        if len({canonical_bytes(item["subject"]) for item in matches}) > 1: _reject()
+        if matches:
+            chosen = max(matches, key=lambda item: (item["observed_at"], item["id"]))
+            post[name] = {"state": "observed", "observation_id": chosen["id"]}
     next_delivery["postconditions"] = post
     observed_ids = {fact["stage_id"] for fact in facts if fact["state"] != "pending"}
     pending = [stage["id"] for stage in c["stages"] if stage["id"] not in observed_ids]
