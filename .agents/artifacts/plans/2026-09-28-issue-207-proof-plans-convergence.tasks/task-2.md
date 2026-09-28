@@ -3,6 +3,7 @@
 **Files:**
 - Modify: `python/agent_tools/transaction_history.py`
 - Modify: `python/agent_tools/transaction_core.py`
+- Modify: `python/agent_tools/transaction_storage.py` (one docstring)
 - Modify: `tests/test_transaction_plan.py` (append one class)
 - Modify: `tests/test_transaction_core.py`, `tests/test_transaction_custody.py`,
   `tests/test_transaction_invocation.py` (the required `proof` argument and schema strings)
@@ -155,16 +156,16 @@ class CreationTest(unittest.TestCase):
                     self.assertIn("transaction-state/v3", str(caught.exception))
 ```
 
-  Update the earlier tests. The edits below are exactly what the schema string and the
-  required argument demand:
+  Update the earlier tests, only as the schema string and the required argument demand:
   - `tests/test_transaction_core.py`: define `EMPTY_PROOF = {"units": [], "obligations":
     [], "collectors": {}}` beside `KEYS`, and pass `proof=EMPTY_PROOF` to every `.create(`
     call. In `test_create_mints_a_rel_uuid7_id_and_writes_state_and_index`, add
     `"proof_plan"` to the expected key set, expect `transaction-state/v4`, and expect the
     event keys `{"seq", "type", "at", "proof_plan_digest"}`.
   - `tests/test_transaction_custody.py`: define the same `EMPTY_PROOF`, and pass it in
-    `CustodyCase.new` and in the file's other `.create(` call.
-  - `tests/test_transaction_invocation.py`: in `SchemaTest`, rename the test to
+    `CustodyCase.new`, the file's only `.create(` call.
+  - `tests/test_transaction_invocation.py` creates through `CustodyCase.new` and needs only
+    the schema-string change: in `SchemaTest`, rename the test to
     `test_new_state_is_v4_and_a_v3_document_fails_closed_naming_its_version`, expect
     `transaction-state/v4`, and refuse a `transaction-state/v3` document naming
     `transaction-state/v3`.
@@ -185,9 +186,10 @@ class CreationTest(unittest.TestCase):
      `f"proof_plan {violation}"` when `plan_violation(document["proof_plan"],
      transaction_id)` returns a rule. After event 1's closed-shape checks, refuse `"event 1
      proof_plan_digest is not the digest of proof_plan"` when the digest differs. Add
-     `proof_plan` to `Transaction` and fill it in `snapshot`. Rewrite the module docstring
-     from the resulting code: it validates `transaction-state/v4`, and the stored plan must
-     be the materialization of its own declaration.
+     `proof_plan` to `Transaction` and fill it in `snapshot`. From the resulting code,
+     rewrite the module and `validate_state` docstrings (`transaction-state/v4`; the stored
+     plan is the materialization of its own declaration, and `created` pins its digest) and
+     add `proof_plan`, a read-only view over a deep copy, to the `Transaction` docstring.
   2. Core: `create` gains `proof`. It calls `compile_proof(proof, where=...)` right after
      `_require_creatable` and before `open_lock`, and passes the compiled declaration to
      `_create_locked`. That method materializes the plan once the id is known. For an
@@ -197,25 +199,23 @@ class CreationTest(unittest.TestCase):
      docstring from the resulting code: the proof declaration is compiled before any lock,
      and a same-key create with a different plan digest is a conflict. Replace "v3" in
      `_require_creatable`'s docstring with "v4".
+  3. Storage: `CreationConflict`'s docstring becomes `"""The same creation key was requested
+     with a different subject, concurrency key set or proof plan."""`.
 
 - [ ] **Step 4: Verify.**
   Run: `PYTHONPATH=python python3 -m unittest tests/test_transaction_plan.py tests/test_transaction_core.py tests/test_transaction_custody.py tests/test_transaction_invocation.py tests/test_transaction_core_sweep.py 2>&1 | tail -3`.
   Expected: `OK`.
 
 ```bash
-if grep -q 'transaction-state/v3"' python/agent_tools/transaction_history.py; then exit 1; fi
+if grep -n 'transaction-state/v3' python/agent_tools/transaction_history.py; then exit 1; fi
 grep -q 'proof_plan_digest' python/agent_tools/transaction_core.py || exit 1
 ```
 
   Run: `just build 2>&1 | tail -3`. Expected: success.
 
-- [ ] **Step 5: Commit.**
+- [ ] **Step 5: Commit.** Stage exactly this task's **Files**, then:
 
 ```bash
-git add python/agent_tools/transaction_history.py python/agent_tools/transaction_core.py \
-  tests/test_transaction_plan.py tests/test_transaction_core.py \
-  tests/test_transaction_custody.py tests/test_transaction_invocation.py \
-  tests/transaction_core_sweep_support.py tests/test_transaction_core_sweep.py
 git commit -m "feat(transaction-core): store an immutable proof plan per transaction (#207)"
 ```
 

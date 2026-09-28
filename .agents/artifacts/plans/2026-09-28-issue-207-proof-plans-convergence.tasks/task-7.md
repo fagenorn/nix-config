@@ -23,9 +23,9 @@
     - `expired_snapshot` (`{"slow_collection"}`);
     - `fleet_stall` (`{"member_stale"}`).
 
-    Each gets a `note` (the prototype's where one exists, reworded to what this executor
-    does). Update the comment above `SCENARIOS` to say these five are ported from
-    `dc98ba9` in #207, with `expired_snapshot`'s 250 s tick moved into cohort collection.
+    Each gets a `note` (the prototype's, reworded to this executor). The comment above
+    `SCENARIOS` says these five come from `dc98ba9` in #207, with `expired_snapshot`'s 250 s
+    tick moved into cohort collection.
 
 **Invariants:**
 - The committed landing table below is the spec's `#### Expected landings`, asserted
@@ -171,13 +171,12 @@ LANDINGS = {
   Run: `PYTHONPATH=python python3 -m unittest tests/test_transaction_core_sweep.py 2>&1 | tail -3`.
   Expected: FAIL, `KeyError: 'partial_publication'` (the scenario is not in `SCENARIOS`).
 
-- [ ] **Step 3: Implement** the fixture changes under **Produces**. In `CLAUDE.md`, extend
-  the `agent_tools.transaction_core` sentence so that, after slice 3's clause, it says:
-  slice 4 (#207) adds proof, meaning an immutable proof plan compiled at creation in
-  `agent_tools.transaction_plan`, obligations the core collects itself, and one
-  convergence cohort that `settle_proof` alone seals into `succeeded` or parks as
-  `proof_rejected` or `proof_did_not_converge`, in `agent_tools.transaction_proof`. It
-  should also name `transaction-state/v4` instead of `v3`. Rewrite the support module's
+- [ ] **Step 3: Implement** the fixture changes under **Produces**. In `CLAUDE.md`, after
+  slice 3's clause of the `agent_tools.transaction_core` sentence, add that slice 4 (#207)
+  adds an immutable proof plan compiled at creation (`agent_tools.transaction_plan`),
+  core-collected obligations, and one convergence cohort that `settle_proof` alone seals
+  into `succeeded` or parks (`agent_tools.transaction_proof`); name `transaction-state/v4`
+  instead of `v3`. Rewrite the support module's
   docstring from the implemented executor, adding the slow cohort collection.
 
 - [ ] **Step 4: Verify.**
@@ -195,30 +194,14 @@ grep -q '"slow_collection"' tests/transaction_core_world.py || exit 1
   Run: `just agent-workflow-tests 2>&1 | tail -3`. Expected: `OK`.
   Run: `just build 2>&1 | tail -3`. Expected: success.
 
-- [ ] **Step 5: Commit.**
+- [ ] **Step 5: Commit.** Stage exactly this task's **Files**, then:
 
 ```bash
-git add tests/transaction_core_world.py tests/transaction_core_sweep_support.py \
-  tests/test_transaction_core_sweep.py CLAUDE.md
 git commit -m "test(transaction-core): sweep proof rejection and non-convergence (#207)"
 ```
 
-- [ ] **Step 6: Check the review budget for the whole slice** (after the commit):
-
-```bash
-base=dd9f40b; fail=0
-for f in python/agent_tools/transaction_*.py tests/test_transaction_plan.py \
-    tests/test_transaction_proof.py tests/test_transaction_core.py \
-    tests/test_transaction_custody.py tests/test_transaction_invocation.py \
-    tests/transaction_core_world.py tests/transaction_core_sweep_support.py \
-    tests/test_transaction_core_sweep.py CLAUDE.md justfile; do
-  n=$(git diff -U10 "$base" HEAD -- "$f" | wc -c); printf '%s %s\n' "$n" "$f"
-  [ "$n" -lt 65536 ] || fail=1
-done
-[ "$(wc -c < python/agent_tools/transaction_core.py)" -le 55000 ] || fail=1
-test "$fail" = 0
-```
-
-  Expected: exit 0. A miss means the task is not done.
+- [ ] **Step 6: Check the review budget for the whole slice** (after the commit): run
+  the root's review-budget block with `FILES="python/agent_tools/transaction_*.py tests/test_transaction_plan.py tests/test_transaction_proof.py tests/test_transaction_core.py tests/test_transaction_custody.py tests/test_transaction_invocation.py tests/transaction_core_world.py tests/transaction_core_sweep_support.py tests/test_transaction_core_sweep.py CLAUDE.md justfile"`.
+  Expected: exit 0.
 
 Decisions: per D14, D16, D17, D29.

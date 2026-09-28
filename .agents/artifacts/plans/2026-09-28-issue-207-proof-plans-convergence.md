@@ -21,12 +21,11 @@ the three new store operations (per D1, D22). `transaction_history` moves to
 core → history → proof → plan → invocation → custody → storage. Tasks 1–2 build the plan,
 Tasks 3–4 the proof operations, Task 5 the lifecycle gates, and Tasks 6–7 the sweep.
 
-**Tech stack:** Python 3 standard library (`dataclasses`, `json`, `copy`, `math`, `types`,
-`unittest`), `agent_tools.canonical.telemetry_digest`, `just`, Nix (`lib/agent-tools.nix`
-import check, unchanged).
+**Tech stack:** Python 3 standard library, `agent_tools.canonical.telemetry_digest`, `just`,
+Nix (`lib/agent-tools.nix` import check, unchanged).
 
 Spec (the source of truth, read it whole):
-`.agents/artifacts/specs/2026-09-28-issue-207-proof-plans-convergence-design.md`, D1–D29.
+`.agents/artifacts/specs/2026-09-28-issue-207-proof-plans-convergence-design.md`, D1–D34.
 The code base is commit `dd9f40b` (slices 1–3 as merged; the base for every budget check).
 
 ## Global Constraints
@@ -51,10 +50,11 @@ The code base is commit `dd9f40b` (slices 1–3 as merged; the base for every bu
   `merge`, `switch`, `git`).
 - No lock is held while an observer runs; the core catches nothing an observer raises.
 - Refusals are typed and closed: `ProofPlanRejected.reason` in `PLAN_REJECTION_REASONS`,
-  raised before any lock or write; `ProofRefused.reason` in `PROOF_REFUSAL_REASONS`, raised
-  before any write or call. An out-of-shape observation is `EffectResultInvalid` with nothing
-  recorded (per D18). Every message names the transaction id (or, from `create`, the creation
-  key) and the rule.
+  raised before any lock or write; `ProofRefused.reason` in `PROOF_REFUSAL_REASONS`, at
+  admission before any write or call, or after the call at `collect_obligation`'s second
+  hold. That refusal and an out-of-shape observation (`EffectResultInvalid`) record nothing
+  from the call; an interval's `interval_opened` stays (per D18, D33). Every message names
+  the transaction id (or, from `create`, the creation key) and the rule.
 - Constants, exact (per D19): schema `transaction-state/v4`, plan schema
   `transaction-proof-plan/v1`, `MAX_COLLECTION_LATENCY_MS = 300_000`,
   `MAX_FRESHNESS_MS = 7_200_000`, `MAX_COHORT_ATTEMPTS = 3`, `COHORT_MARGIN_PERCENT = 20`,
@@ -64,22 +64,34 @@ The code base is commit `dd9f40b` (slices 1–3 as merged; the base for every bu
   (per D2); `create` has no default for `proof`.
 - Size caps (per D22, #205 D33): after every task, `transaction_core.py` is at most 55000
   bytes, and each file's cumulative `git diff -U10 dd9f40b` is under 65536 bytes.
+  Tasks 3, 4, 5 and 7 end by running this review-budget block with their `FILES`; a
+  non-zero exit means the task is not done, so move judgment out of the core (per D22):
+
+```bash
+base=dd9f40b; fail=0
+for f in $FILES; do
+  n=$(git diff -U10 "$base" HEAD -- "$f" | wc -c); printf '%s %s\n' "$n" "$f"
+  [ "$n" -lt 65536 ] || fail=1
+done
+[ "$(wc -c < python/agent_tools/transaction_core.py)" -le 55000 ] || fail=1
+test "$fail" = 0
+```
 - Fixtures (provider names allowed) live only under `tests/`.
 - Commits are signed (never `--no-gpg-sign`) and end with the two trailer lines the caller
   supplies.
 
 ## Test seams
 
-- Seam 1: `TransactionStore(root, clock=FakeClock())` under a `tempfile` root, with the
-  invocation tests' fake effects and in-memory **fake observers**. The observable side is
-  each observer's returned outcome and the clock it advances, never a call log (per D20).
-  Tests read returned snapshots (`proof_plan`, `proof`, `evidence`, `actions`), raised error
-  classes and `.reason`, directory listings and `state.json` bytes, and may hand-edit
-  `state.json`. They also call `compile_proof`/`materialize_plan` through their
-  `transaction_core` re-exports.
+- Seam 1: `TransactionStore(root, clock=FakeClock())` under a `tempfile` root, with fake
+  effects and in-memory **fake observers**, observed by returned outcome and clock, never a
+  call log (per D20). Tests read snapshots, error classes and `.reason`, listings and
+  `state.json` bytes, may hand-edit `state.json`, and reach `compile_proof`/
+  `materialize_plan` through the `transaction_core` re-exports.
 - Seam 2: the fixture executor `drive(root, shape, scenario, world=None) -> str`, compared
   through a fresh `TransactionStore(root).load(...)` and the passed world (per D14).
 - Seam 3: `neutrality_findings(source)` over all seven modules.
+- The slice unit command (Tasks 3–5): `PYTHONPATH=python python3 -m unittest
+  tests/test_transaction_{proof,plan,core,custody,invocation,core_sweep}.py 2>&1 | tail -3`.
 - No test calls or patches a `_`-prefixed name. No test imports `transaction_plan`,
   `transaction_proof`, `transaction_history`, `transaction_invocation`,
   `transaction_custody` or `transaction_storage`, except for re-export identity checks and
@@ -87,24 +99,18 @@ The code base is commit `dd9f40b` (slices 1–3 as merged; the base for every bu
 
 ## Delivery estimate and boundaries
 
-These are estimates only. About 15 files change: new `transaction_plan.py` (~350 lines),
-`transaction_proof.py` (~600 lines), `transaction_core.py` (46.7 KB → ~54 KB),
-`transaction_history.py` (+~60 lines), `transaction_custody.py` (+~3),
-`transaction_storage.py` (+~20), new `tests/test_transaction_plan.py` (~30 KB) and
-`tests/test_transaction_proof.py` (~50 KB) (per D23), `tests/test_transaction_core.py`,
-`tests/test_transaction_custody.py`, `tests/test_transaction_invocation.py`,
-`tests/test_transaction_core_sweep.py`, `tests/transaction_core_sweep_support.py`,
-`tests/transaction_core_world.py`, `justfile` (+2) and `CLAUDE.md` (one sentence).
-
-The growth risks are the core cap and the proof test file. Tasks 3, 4, 5 and 7 end with an
-asserting budget step. Every task leaves the suite green: Task 2 passes the empty
-declaration everywhere, and Task 5 moves every existing `succeeded` onto `settle_proof`.
+Estimates only: about 15 files, chiefly new `transaction_plan.py` (~350 lines) and
+`transaction_proof.py` (~600 lines), `transaction_core.py` (46.7 KB → ~54 KB), and the new
+test files `test_transaction_plan.py` (~30 KB) and `test_transaction_proof.py` (~50 KB, per
+D23). The growth risks are the core cap and the proof test file. Every task leaves the suite
+green: Task 2 passes the empty declaration everywhere, and Task 5 moves every existing
+`succeeded` onto `settle_proof`.
 
 ## Task index
 
 Task 1 — Plan vocabulary, compile, materialize and the cohort schedule — `python/agent_tools/transaction_plan.py`, `python/agent_tools/transaction_storage.py`, `python/agent_tools/transaction_core.py`, `tests/test_transaction_plan.py`, `tests/test_transaction_core_sweep.py`, `justfile` — full — [task-1.md](2026-09-28-issue-207-proof-plans-convergence.tasks/task-1.md)
 
-Task 2 — Schema v4: the stored plan, `create(proof=)` and plan validation — `python/agent_tools/transaction_history.py`, `python/agent_tools/transaction_core.py`, `tests/test_transaction_plan.py`, `tests/test_transaction_core.py`, `tests/test_transaction_custody.py`, `tests/test_transaction_invocation.py`, `tests/transaction_core_sweep_support.py`, `tests/test_transaction_core_sweep.py` — full — [task-2.md](2026-09-28-issue-207-proof-plans-convergence.tasks/task-2.md)
+Task 2 — Schema v4: the stored plan, `create(proof=)` and plan validation — `python/agent_tools/transaction_history.py`, `python/agent_tools/transaction_core.py`, `python/agent_tools/transaction_storage.py`, `tests/test_transaction_plan.py`, `tests/test_transaction_core.py`, `tests/test_transaction_custody.py`, `tests/test_transaction_invocation.py`, `tests/transaction_core_sweep_support.py`, `tests/test_transaction_core_sweep.py` — full — [task-2.md](2026-09-28-issue-207-proof-plans-convergence.tasks/task-2.md)
 
 Task 3 — `collect_obligation`, evaluation and the proof view — `python/agent_tools/transaction_proof.py`, `python/agent_tools/transaction_history.py`, `python/agent_tools/transaction_custody.py`, `python/agent_tools/transaction_storage.py`, `python/agent_tools/transaction_core.py`, `tests/test_transaction_proof.py`, `tests/test_transaction_core_sweep.py`, `justfile` — full — [task-3.md](2026-09-28-issue-207-proof-plans-convergence.tasks/task-3.md)
 
@@ -118,8 +124,16 @@ Task 7 — Five new sweep rows, `slow_collection` and CLAUDE.md — `tests/trans
 
 ## Decisions
 
-The spec's `## Decision ledger` owns every decision. Tasks cite D1, D2, D4, D5, D9, D19,
-D26 and D28 (Task 1); D2, D3, D13, D23 and D24 (Task 2); D5–D8, D13, D18, D20, D22,
-D25 and D27 (Task 3); D9–D11, D16, D21, D22, D27 and D28 (Task 4); D10, D12, D27 (Task 5);
-D14, D15 and D29 (Task 6); and D14, D16, D17 and D29 (Task 7). Planning added D22–D29; D23
-amends D20.
+The spec's `## Decision ledger` owns every decision; each task ends with the rows it cites.
+Planning added D22–D29 and the standards review D30–D34; D23 amends D20, D30 amends D10's
+seal case and D33 amends D18.
+
+## Standards review provenance
+
+Reviewer of record: `Claude fallback` (isolated, read-only) at base
+`488e95f963352eed1cb1ca9647b0553ce8813feb`. Fallback reason: the Codex run's JSONL lacked the
+runtime model/effort selection event, so it failed metadata validation; its findings were
+verified against the worktree and folded in as supplementary input. Dispositions: 8 accepted
+(D30–D34, plus Task 2's docstrings, guard grep and `.create(` reference, and Task 4's
+re-collecting cohort test), 0 rejected, 1 deferred (an explicit gated-edge table for Task 5:
+low confidence and speculative, since `gate_violation` already names its three gated edges).

@@ -5,10 +5,9 @@
 - Modify: `tests/test_transaction_core_sweep.py`
 
 **Interfaces:**
-- Consumes (Tasks 1–5): `TransactionStore.create(..., proof=)`, `collect_obligation`,
-  `start_cohort`, `settle_proof`, `ProofRefused.reason`, and the `Transaction.proof_plan`
-  fields (`obligations[*].obligation_id`, `collector` and `required`;
-  `cohort.members`), plus `Transaction.proof`. From the fixtures, it uses
+- Consumes (Tasks 1–5): `create(..., proof=)`, `collect_obligation`, `start_cohort`,
+  `settle_proof`, `ProofRefused.reason`, `Transaction.proof_plan` and `Transaction.proof`.
+  From the fixtures, it uses
   `SimAdapter.inspect(op, env)` (whose predicate hooks return `{outcome, reason,
   observed_subject, payload_ref}`) and `SimAdapter.predicates` (predicate →
   `"supported"` or `"unsupported: …"`).
@@ -118,9 +117,8 @@
     `_Observer` per non-`_` binding.
   - Replace `prove` and the final `start_cohort`/`settle_proof` pair with the proving stage
     above.
-  - Rewrite the module docstring from the implemented executor: it passes each shape's
-    proof declaration, collects every obligation through the core, converges through
-    cohorts, and lets `settle_proof` seal or park.
+  - Rewrite the module docstring from the implemented executor (declaration, collection
+    through the core, cohorts, `settle_proof` seals or parks).
 
 - [ ] **Step 4: Verify.**
   Run: `PYTHONPATH=python python3 -m unittest tests/test_transaction_core_sweep.py 2>&1 | tail -3`.
@@ -132,10 +130,9 @@ if grep -nE "record_evidence|open_interval|advance\(\"succeeded\"" tests/transac
 
   Run: `just agent-workflow-tests 2>&1 | tail -3`. Expected: `OK`.
 
-- [ ] **Step 5: Commit.**
+- [ ] **Step 5: Commit.** Stage exactly this task's **Files**, then:
 
 ```bash
-git add tests/transaction_core_sweep_support.py tests/test_transaction_core_sweep.py
 git commit -m "test(transaction-core): drive the sweep's proof through the core (#207)"
 ```
 

@@ -7,12 +7,9 @@
 - Modify: `tests/test_transaction_proof.py` (append)
 
 **Interfaces:**
-- Consumes (Tasks 1–3): the plan's `cohort` (`members`, `makespan_ms`, `margin_ms`,
-  `governing_window_ms`), `convergence_window_ms`, `MAX_COHORT_ATTEMPTS`, `evaluate`,
-  `proof_refused`, `open_cohort`, `PROOF_EVENT_KEYS`, `ProofFold`, `proof_event_violation`,
-  `apply_proof_event` and `proof_view`; `transaction_invocation.fold_actions`, `unresolved`
-  and `status`; `transaction_storage.TransitionRefused` and `parse_at`; and the Task 3
-  test helpers `ProofCase`, `Observer`, `FakeEffect` and `renumbered`.
+- Consumes (Tasks 1–3): the plan's `cohort` and `convergence_window_ms`,
+  `MAX_COHORT_ATTEMPTS`, Task 3's `transaction_proof` names, `fold_actions`, `unresolved`,
+  `status`, `admissibility`, `TransitionRefused`, `parse_at`, and Task 3's test helpers.
 - Produces (`agent_tools.transaction_proof`):
   - `COHORT_FAILURE_REASONS = ("fence_changed", "cohort_expired", "member_missing",
     "collection_bound_exceeded", "member_indeterminate")`,
@@ -31,6 +28,12 @@
     now returns the open cohort's number when its fence equals `fence`, else None.
   - `convergence_start_ms(events) -> int | None`: the `at` of the first transition whose
     `to` is `proving`.
+  - `seal_violation(plan, events, cohort: int) -> str | None` (per D30, D31), shared by
+    `settlement` and the validator: the rule string of the first failing fact, else None.
+    The facts: every member has an `obligation_observed` in `cohort`; each member's latest
+    one there has `latency_ms` ≤ its collector's `max_collection_latency_ms`; every required
+    obligation's latest `obligation_observed` is `satisfied` and admissible under
+    `admissibility(events)`.
   - `cohort_start(document: dict, now_ms: int) -> list[dict]`: the events to append
     (without `seq`/`at`), or raises `ProofRefused`.
   - `settlement(document: dict, now_ms: int) -> list[dict]`: the events to append,
@@ -62,7 +65,7 @@
      proving → attention_required`, reason `proof_rejected`, external state `known`.
   2. **Seal.** This case applies when all of the following hold:
      - cohort n is open under the held fence;
-     - every member has an `obligation_observed` with `cohort == n`;
+     - `seal_violation(plan, events, n)` is None;
      - `governing_window_ms` is None or `now_ms - started_ms <= governing_window_ms`;
      - `now_ms <= window_end`;
      - every required obligation evaluates `accepted`.
@@ -95,7 +98,7 @@
      `proving`.
 
   Every non-transition event carries the held fence. `settlement` never produces
-  `recovering`, `failed`, `rolled_back`, `abandoned` or any invocation.
+  `recovering`, `failed`, `rolled_back`, `abandoned` or an invocation.
 - The validator rules, each a `StateInvalid` naming the event seq:
   - every cohort event is in `proving`, with a fence inside and equal to the open span;
   - `proof_cohort_started.cohort == len(cohorts) + 1 <= MAX_COHORT_ATTEMPTS`, with no
@@ -108,10 +111,10 @@
     MAX_COHORT_ATTEMPTS`;
   - `proof_rejected.obligations` is a non-empty, duplicate-free list of required plan ids,
     in plan order;
-  - `proof_sealed` names the cohort open under its fence, every plan member has an
-    observation in that cohort, `proof_cutoff_at == at`, `makespan_ms` and
+  - `proof_sealed` names the cohort open under its fence, `seal_violation(plan,
+    events_before, cohort)` is None (per D31), `proof_cutoff_at == at`, `makespan_ms` and
     `governing_window_ms` equal the plan's, and `advisory_warnings` is a duplicate-free
-    list of advisory plan ids in plan order.
+    list of advisory plan ids in plan order. Windows and freshness are not re-checked.
 - `pairing_violation` (per D10, D27), called by `validate_state` before each event after the
   first with `(events[seq - 2], event)` and once after the loop with `(events[-1], None)`:
   - `proof_rejected` must be immediately followed by `transitioned proving →
@@ -179,7 +182,8 @@ class CohortTest(CohortCase):
         self.proving()
         self.collect(self.pub)
         self.refused("proof_incomplete", self.start)
-        self.collect_required()
+        for obligation_id in (self.act, "migrated", "health", "smoke"):
+            self.collect(obligation_id)
         after = self.start()
         self.assertEqual({k: v for k, v in after.events[-1].items() if k not in ("seq", "at")},
                          {"type": "proof_cohort_started", "cohort": 1,
@@ -389,6 +393,32 @@ class CohortValidatorTest(CohortCase):
             with self.subTest(edit=name):
                 self.assertEditRefused(edit(change))
 
+    def test_a_seal_over_unproved_required_evidence_is_state_invalid(self):
+        pristine = self.sealed()
+        seal = next(i for i, e in enumerate(pristine["events"]) if e["type"] == "proof_sealed")
+
+        def latest(events, obligation_id):
+            return next(e for e in reversed(events[:seal])
+                        if e["type"] == "obligation_observed"
+                        and e["obligation_id"] == obligation_id)
+
+        def without_smoke(events):
+            events[:] = [e for e in events if not e.get("evidence_id", "").startswith("smoke@")]
+
+        cases = {
+            "rejected": lambda ev: latest(ev, "health").update(outcome="unsatisfied",
+                                                               reason="flaky"),
+            "unknown": lambda ev: latest(ev, "health").update(outcome="unknown",
+                                                              reason="unreachable"),
+            "over latency": lambda ev: latest(ev, "health").update(latency_ms=30_001),
+            "missing": without_smoke,
+        }
+        for name, change in cases.items():
+            with self.subTest(edit=name):
+                document = copy.deepcopy(pristine)
+                change(document["events"])
+                self.assertEditRefused(renumbered(document))
+
     def test_reserved_reasons_and_their_events_come_in_pairs(self):
         self.proving()
         self.collect(self.act, self.observer({self.act: "unsatisfied"}))
@@ -408,8 +438,8 @@ class CohortValidatorTest(CohortCase):
 
 OBSERVED_PROOF_REASONS = {
     "state_not_proving", "unknown_obligation", "unsupported_obligation",
-    "dependency_not_accepted", "already_accepted", "not_cohort_member", "proof_incomplete",
-    "cohort_open", "convergence_exhausted", "no_open_cohort"}
+    "dependency_not_accepted", "already_accepted", "not_cohort_member", "clock_regressed",
+    "proof_incomplete", "cohort_open", "convergence_exhausted", "no_open_cohort"}
 ```
 
   The replacement for `test_the_refusal_reasons_are_fixed` in `ProofVocabularyTest`:
@@ -427,12 +457,12 @@ OBSERVED_PROOF_REASONS = {
 - [ ] **Step 3: Implement** the invariants. In `validate_state`, call `pairing_violation`
   before the `match` for every event after the first, and once after the loop. Rewrite the
   docstrings of `transaction_proof`, `start_cohort` and `settle_proof` from the finished
-  code; `settle_proof`'s names its five cases in order. Extend the `transaction_core`
-  module docstring by one sentence on the cohort operations.
+  code; `settle_proof`'s names its five cases in order. Extend `validate_state`'s docstring
+  by the cohort, seal and pairing rules, and the core module docstring by one sentence on
+  the cohort operations.
 
 - [ ] **Step 4: Verify.**
-  Run: `PYTHONPATH=python python3 -m unittest tests/test_transaction_proof.py tests/test_transaction_plan.py tests/test_transaction_core.py tests/test_transaction_custody.py tests/test_transaction_invocation.py tests/test_transaction_core_sweep.py 2>&1 | tail -3`.
-  Expected: `OK`.
+  Run the root's slice unit command. Expected: `OK`.
 
 ```bash
 for word in recovering rolled_back abandoned; do
@@ -442,28 +472,13 @@ done
 
   Run: `just build 2>&1 | tail -3`. Expected: success.
 
-- [ ] **Step 5: Commit.**
+- [ ] **Step 5: Commit.** Stage exactly this task's **Files**, then:
 
 ```bash
-git add python/agent_tools/transaction_proof.py python/agent_tools/transaction_history.py \
-  python/agent_tools/transaction_core.py tests/test_transaction_proof.py
 git commit -m "feat(transaction-core): settle proof through one convergence cohort (#207)"
 ```
 
-- [ ] **Step 6: Check the review budget** (after the commit): run the Task 3 Step 6 block
-  unchanged. Here it is in full:
-
-```bash
-base=dd9f40b; fail=0
-for f in python/agent_tools/transaction_*.py tests/test_transaction_proof.py \
-    tests/test_transaction_plan.py tests/test_transaction_core.py; do
-  n=$(git diff -U10 "$base" HEAD -- "$f" | wc -c); printf '%s %s\n' "$n" "$f"
-  [ "$n" -lt 65536 ] || fail=1
-done
-[ "$(wc -c < python/agent_tools/transaction_core.py)" -le 55000 ] || fail=1
-test "$fail" = 0
-```
-
+- [ ] **Step 6: Check the review budget** (after the commit): run the root's review-budget block with `FILES="python/agent_tools/transaction_*.py tests/test_transaction_proof.py tests/test_transaction_plan.py tests/test_transaction_core.py"`.
   Expected: exit 0.
 
-Decisions: per D9–D11, D16, D21, D22, D27, D28.
+Decisions: per D9–D11, D16, D21, D22, D27, D28, D30, D31.

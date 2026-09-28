@@ -38,8 +38,8 @@
   - The nine D19 constants, exactly as named in the root's Global Constraints.
   - `PLAN_REJECTION_REASONS = ("malformed", "derived_class_named", "reserved_predicate",
     "unknown_collector", "duplicate_id", "unknown_dependency", "dependency_cycle",
-    "required_unsupported", "required_model_judgment", "latency_out_of_bounds",
-    "infeasible_cohort")`.
+    "advisory_prerequisite", "required_unsupported", "required_model_judgment",
+    "latency_out_of_bounds", "infeasible_cohort")`.
   - `plan_rejected(where: str, reason: str, detail: str) -> ProofPlanRejected`: the one
     construction path, with message `f"{where}: proof plan rejected: {reason}: {detail}"`.
     A reason outside the tuple is `ValueError` (the #206 D21 pattern).
@@ -92,15 +92,17 @@
      `derived:<class>:<unit name>` where exactly one unit has that name and
      `PHASE_CLASS[unit.phase] == class`.
   7. `dependency_cycle` among declared obligations.
-  8. `required_unsupported`: a required obligation whose collector's `predicates` lacks
+  8. `advisory_prerequisite`: a required obligation with a dep naming a declared advisory
+     one, detail `f"{required id} -> {advisory id}"` (per D32).
+  9. `required_unsupported`: a required obligation whose collector's `predicates` lacks
      its predicate, or a unit whose collector lacks `RESERVED_PREDICATES[PHASE_CLASS[phase]]`.
-  9. `required_model_judgment`: a required obligation, or any unit, whose collector has
+  10. `required_model_judgment`: a required obligation, or any unit, whose collector has
      basis `model`.
-  10. `latency_out_of_bounds`: a collector latency that is absent or outside
+  11. `latency_out_of_bounds`: a collector latency that is absent or outside
       `[1, MAX_COLLECTION_LATENCY_MS]`; a snapshot `freshness_ms` that is absent, None or
       outside `[1, MAX_FRESHNESS_MS]`; or a `convergence_window_ms` outside
       `[1, MAX_CONVERGENCE_WINDOW_MS]`.
-  11. `infeasible_cohort`: the schedule's `makespan_ms + margin_ms` exceeds a non-null
+  12. `infeasible_cohort`: the schedule's `makespan_ms + margin_ms` exceeds a non-null
       `governing_window_ms` or the convergence window (per D9, D28).
 - The normalized output has exactly the keys `units`, `obligations`, `collectors` and
   `convergence_window_ms` (the default when absent). Every obligation carries
@@ -248,6 +250,11 @@ REJECTIONS = {
         edit(units=[unit("start", phase="activation"),
                     {**unit("start", phase="activation"), "parameters": {"n": 2}}])],
     "dependency_cycle": [with_obligation(0, deps=["health"])],
+    "advisory_prerequisite": [
+        with_obligation(1, deps=["vibe"]),
+        edit(obligations=[obligation("soft", predicate="ready", required=False),
+                          obligation("mid", predicate="ready", deps=["soft"]),
+                          obligation("top", deps=["mid"])])],
     "required_unsupported": [with_obligation(1, collector="m"),
                              edit(units=[unit("build", collector="d"),
                                          unit("start", phase="activation")])],
@@ -296,6 +303,12 @@ class RejectionTest(unittest.TestCase):
     def test_the_error_is_a_transaction_error_homed_in_storage(self):
         self.assertIs(ProofPlanRejected, transaction_storage.ProofPlanRejected)
         self.assertTrue(issubclass(ProofPlanRejected, TransactionError))
+
+    def test_an_advisory_obligation_may_depend_on_required_proof(self):
+        compiled = compile_proof(edit(obligations=[
+            obligation("h"), obligation("soft", predicate="ready", required=False,
+                                        deps=["h", f"derived:{PUB}:build"])]))
+        self.assertEqual(compiled["obligations"][1]["deps"], ["h", f"derived:{PUB}:build"])
 
     def test_the_empty_declaration_and_the_full_one_compile(self):
         self.assertEqual(compile_proof(EMPTY_PROOF)["convergence_window_ms"],
@@ -402,9 +415,6 @@ if __name__ == "__main__":
   add `    tests/test_transaction_plan.py \` directly after the
   `tests/test_transaction_invocation.py \` line.
 
-  Before relying on a table case, check that it is single-fault under the precedence above;
-  if one also trips an earlier rule, fix the case, never the precedence.
-
 - [ ] **Step 2: Run the tests and watch them fail.**
   Run: `PYTHONPATH=python python3 -m unittest tests/test_transaction_plan.py 2>&1 | tail -3`.
   Expected: FAIL, `ImportError: cannot import name 'COHORT_MARGIN_FLOOR_MS'`.
@@ -434,13 +444,10 @@ if grep -nE "^(from|import) .*transaction_(core|history|proof)" python/agent_too
 
   Run: `git add -A python tests justfile && just build 2>&1 | tail -3`. Expected: success.
 
-- [ ] **Step 5: Commit.**
+- [ ] **Step 5: Commit.** Stage exactly this task's **Files**, then:
 
 ```bash
-git add python/agent_tools/transaction_plan.py python/agent_tools/transaction_storage.py \
-  python/agent_tools/transaction_core.py tests/test_transaction_plan.py \
-  tests/test_transaction_core_sweep.py justfile
 git commit -m "feat(transaction-core): compile and materialize proof plans (#207)"
 ```
 
-Decisions: per D1, D2, D4, D5, D9, D19, D24, D26, D28.
+Decisions: per D1, D2, D4, D5, D9, D19, D24, D26, D28, D32.

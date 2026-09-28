@@ -116,6 +116,9 @@ before any index, directory or state file exists. A refusal is `ProofPlanRejecte
 - `reserved_predicate`: a declared obligation whose predicate is `publication_visible` or
   `running_subject_identity`.
 - `unknown_collector`, `duplicate_id`, `unknown_dependency`, `dependency_cycle`.
+- `advisory_prerequisite`: a required obligation whose `deps` names an advisory (non-required)
+  one. Checking each direct edge covers every chain, because any path from a required
+  obligation to an advisory one leaves the required set through such an edge (D32).
 - `required_unsupported`: a required obligation whose collector does not list its predicate, or
   a unit whose collector does not list its phase's reserved predicate (#91 conformance per
   capable mode).
@@ -202,14 +205,18 @@ The operation takes the lock twice, like `inspect_action` (#206 D3):
   `{outcome, reason, reference}`: `outcome` in `satisfied | unsatisfied | unknown`, and
   `reason` and `reference` non-empty, secret-free strings. For a derived obligation, a
   non-`satisfied` reason must belong to its class's closed space from #91. Anything else is
-  `EffectResultInvalid` with nothing recorded (D18).
-- **Second hold.** Repeat the terminal refusal and the fenced check. Then append
+  `EffectResultInvalid`, and nothing from the call is recorded (D18, D33).
+- **Second hold.** Repeat the terminal refusal and the fenced check. A clock reading earlier
+  than `started` is `ProofRefused` `clock_regressed`, because the latency cannot be measured
+  (D34); a re-run admission rule or a changed open cohort (`not_cohort_member`, D27) is refused
+  the same way. Each of these follows the call and records nothing from it. Then append
   `obligation_observed`: `obligation_id`, `evidence_id` (`<obligation_id>@<n>`, numbered by the
   core), `form`, `outcome`, `reason`, `reference`, `fence`, `cohort` and
   `latency_ms = now − started`.
 
-Whatever the observer raises propagates; an interval it leaves open reads
-`fence_discontinuity` or stays unclosed, and the next collection mints a new id.
+Whatever the observer raises propagates. An interval whose collection does not reach its
+observation, for any of the reasons above, keeps its `interval_opened` from the first hold: it
+reads `fence_discontinuity` or stays unclosed, and the next collection mints a new id (D33).
 
 Admission, as `ProofRefused` with a closed `reason` before any write or call:
 
@@ -244,7 +251,9 @@ one reason (D8). It walks the plan's topological order:
      reason, and `unknown` is `indeterminate` with `unreachable`.
 
 `not_applicable` stays in the closed vocabulary but nothing in this slice produces it: #88
-reserves it for phase receipts, which are slice 6's. Advisory evaluations never park or block.
+reserves it for phase receipts, which are slice 6's. Advisory evaluations never park or block,
+and none can gate required proof: compilation refuses an advisory prerequisite of a required
+obligation (D32).
 The seal lists those that are not `accepted` as `advisory_warnings`, and a `model`-basis
 collector can only ever sit behind an advisory obligation (D5).
 
@@ -270,8 +279,10 @@ first attempt is cohort 1. It is refused (`ProofRefused`) in these cases:
    `proving → attention_required` with reason `proof_rejected` and external state `known`.
    Authoritative disproval dominates whether or not a cohort is open.
 2. **Seal.** A cohort is open under the held fence. Every member has an observation recorded in
-   this cohort, the cutoff is no more than `governing_window_ms` past the cohort's start and
-   inside the convergence window, and every required obligation evaluates `accepted`. It then
+   this cohort, each member's latest in-cohort `latency_ms` is within its collector's
+   `max_collection_latency_ms` (D30), the cutoff is no more than `governing_window_ms` past the
+   cohort's start and inside the convergence window, and every required obligation evaluates
+   `accepted`. It then
    appends `proof_sealed {cohort, proof_cutoff_at, makespan_ms, governing_window_ms,
    advisory_warnings, fence}`, the transition `proving → succeeded` with external state `known`,
    and #205's terminal `lease_released`.
@@ -332,10 +343,14 @@ clock:
 - `obligation_observed` only in `proving`, of a plan obligation, with the core's evidence
   numbering;
 - cohort numbering from 1, at most `MAX_COHORT_ATTEMPTS`, one open at a time;
-- seal membership: every member observed in the sealing cohort;
+- the seal's clock-free facts, through the predicate settlement also uses (D31): every member
+  observed in the sealing cohort, each member's latest in-cohort latency within its bound, and
+  every required obligation's latest observation before the seal `satisfied` and admissible
+  (no rejected, unknown or missing required evidence);
 - the reserved-reason pairings and the phase gates.
 
-Freshness is judged at write time on the store clock, because `at` is not monotonic (#205 D3).
+Freshness and the governing and convergence windows are judged at write time on the store
+clock, because `at` is not monotonic (#205 D3), and the validator does not re-check them.
 
 `Transaction` gains `proof_plan` (a read-only mapping) and `proof`, which is derived on every
 load and never stored: `{"plan_digest", "obligations", "cohorts", "proof_cutoff_at"}`.
@@ -467,8 +482,12 @@ The three seams of #204–#206 stay, and none is added (D20):
    - Stale health: a satisfied snapshot recorded before the cohort makes `settle_proof` fail the
      cohort `member_missing`, and a cohort member older than its freshness at the cutoff fails
      it `cohort_expired`. Neither can seal.
-   - Every `ProofRefused` reason; the gates on `published`/`proving`/`succeeded`; the advisory
-     model obligation that warns but never blocks; latency and `collection_bound_exceeded`;
+   - Every `ProofRefused` reason, including `clock_regressed` from a backwards clock; an
+     invalid interval result that keeps its `interval_opened`; the gates on
+     `published`/`proving`/`succeeded`; the advisory model obligation that warns but never
+     blocks, and `advisory_prerequisite` for a required obligation depending on an advisory one;
+     latency and `collection_bound_exceeded`; a sealed history hand-edited to a rejected, unknown
+     or missing required observation, or an over-bound member latency;
      reacquisition failing an open cohort `fence_changed` without resetting the budget;
      `EffectResultInvalid` for a bad observation or an out-of-space derived reason; the v4
      validator by hand-edited documents; v3 refused.
@@ -535,3 +554,8 @@ Proof tests live in a new test file beside the invocation tests, which joins
 | D27 | Plan: `settle_proof`'s transitions carry the reasons `proof_sealed`, `proof_rejected` and `proof_did_not_converge`; `advance` refuses `TransitionRefused` a `proving → attention_required` carrying either reserved reason, mirroring the validator. An observation made while only a cohort opened under an older fence is open records `cohort: null`. The collection's second hold re-runs the admission rules and refuses `not_cohort_member` when the open cohort changed during the call, recording nothing from it. | D10, D11; #206 D19/D20 (advance mirrors the validator; post-call refusals record nothing). | Letting `advance` write the reserved reason and fail at validation (a caller error surfacing as `StateInvalid`). |
 | D28 | Plan: `cohort_expired` also covers a cutoff past the convergence window's end, and an empty cohort's seal checks only the convergence window. When budget and window are both spent, `exhausted_by` is `budget`. The infeasible-cohort seam uses two serial 290 s members against a 600 s freshness (580 s + 116 s margin), because D19's 300 s cap makes a single 590 s latency `latency_out_of_bounds`. Evaluation reasons: `accepted`/`rejected` carry the observer's reason, `unsupported` carries `predicate_unsupported`. | D19; the landing table (platform exhausts both at once); #91 reason space. | A sixth cohort failure reason, or raising the latency cap to fit the seam. |
 | D29 | Plan: the sweep observer maps a declared obligation's outcome to its own word as the reason and a derived non-`satisfied` one to `subject_mismatch` (unsatisfied) or the class's unobservable code (`store_unreachable`, `identity_unobservable`). The executor's first pass skips any obligation whose latest evidence entry is admissible, so a resume re-collects only voided evidence and never meets `already_accepted`. It renews custody after every cohort collection. `lease_lapse` lapses just before the first pass's last required obligation. | D14, D15; #205 D29 (the lapse row); #206 D18. | Parking on any non-`satisfied` observation, as the old executor did (it would pre-empt `settle_proof`'s typed judgment). |
+| D30 | Review (Codex B-1, Claude B1): the seal also requires every cohort member's latest in-cohort `latency_ms` to be at most its collector's `max_collection_latency_ms`; otherwise case 3 fails the cohort with the existing precedence, so `collection_bound_exceeded` is reachable. Amends case 2 of D10. | #93 `collection_bound_exceeded` (a collection over its declared bound cannot certify the cohort); without it an over-bound but fresh cohort seals and case 3's reason is dead. | Leaving latency a failure-only reason (unreachable while freshness holds) or refusing the observation at collection (loses a real, if slow, reading and duplicates the cohort judgment). |
+| D31 | Review (Codex B-3, Claude D1): one clock-free predicate in `transaction_proof`, `seal_violation(plan, events, cohort)`, holds the seal's history facts (member observed in the cohort, member latency within bound, every required obligation's latest observation `satisfied` and admissible); settlement's case 2 and the validator's `proof_sealed` rule both call it. The validator does not re-check freshness or the governing or convergence window, because those compare `at` values. | Spec "the validator re-checks everything that needs no clock"; #206 D20 (validator mirrors the writer); #205 D3 `at` not monotonic; the-bar DRY. | Re-checking the windows from stored `at` (a clock step would invalidate honest history, as #206 D6 rejected) or checking only seal membership (a hand-edited unknown or rejected required observation would still validate under `succeeded`). |
+| D32 | Review (Codex B-2): compile refuses `advisory_prerequisite`, a required obligation with a direct dep on an advisory one, checked after `dependency_cycle`; the direct check suffices for every chain. Advisory obligations may still depend on required ones. | #88 model judgments advise only; #93 advisory obligations never gate; collection's `dependency_not_accepted` would otherwise let an advisory rejection block required proof. | Ignoring advisory deps at evaluation (a required obligation would be judged over an unproved prerequisite, against #88's topological order) or a runtime suppression rule (a second advisory path to keep in step with compile). |
+| D33 | Review (Codex SF-2): amends D18. A `ProofRefused` admission refusal comes before any write or observer call; a refusal at `collect_obligation`'s second hold, and an `EffectResultInvalid` result, follow the call and record nothing from it, but an interval's first-hold `interval_opened` stays in the history, unclosed, and the next collection mints a new id. | #206 D7/D19 and the live `InvocationRefused` docstring (admission versus post-call refusal); #205 D15 core-witnessed intervals. | Deleting or closing the opened marker (the history is append-only) or claiming "nothing written" for every refusal (false for intervals). |
+| D34 | Review (Claude S2): when the second hold's clock reading is earlier than `started`, `collect_obligation` refuses `ProofRefused` `clock_regressed` and records nothing from the call; `PROOF_REFUSAL_REASONS` gains it. | #205 D3 (one injected clock, `at` not monotonic by contract); #93 latency is core-measured; the-bar fail loud. | Clamping the latency to 0 (would certify an unmeasured collection as within its bound, D30) or writing a negative latency (the validator's `latency_ms ≥ 0` rule would turn a clock step into `StateInvalid`). |

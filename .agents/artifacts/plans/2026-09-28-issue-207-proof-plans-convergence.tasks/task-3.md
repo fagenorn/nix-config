@@ -17,16 +17,17 @@
   `EffectResultInvalid`, and the core's `_fenced`/`_append`, `require_texts`.
 - Produces (`agent_tools.transaction_storage`): `class ProofRefused(TransactionError)`, with
   `__init__(self, message: str, *, reason: str)` storing `self.reason`. Its docstring:
-  `"""A proof operation the core refuses; `reason` is one of the closed proof refusal
-  reasons, and it comes before any write or observer call (#207 D18)."""`.
+  `"""A proof operation the core refuses; `reason` names the closed rule. An admission
+  refusal precedes any write or observer call; one at `collect_obligation`'s second hold
+  follows the call and records nothing from it (#207 D18, D33)."""`.
 - Produces (`agent_tools.transaction_proof`; Tasks 4–5 extend these exact names):
   - `OUTCOMES = ("satisfied", "unsatisfied", "unknown")`;
     `EVALUATIONS = ("accepted", "rejected", "indeterminate", "not_applicable",
     "unsupported")`;
     `PROOF_REFUSAL_REASONS = ("state_not_proving", "unknown_obligation",
     "unsupported_obligation", "dependency_not_accepted", "already_accepted",
-    "not_cohort_member", "proof_incomplete", "cohort_open", "convergence_exhausted",
-    "no_open_cohort")`, the whole vocabulary, fixed now;
+    "not_cohort_member", "clock_regressed", "proof_incomplete", "cohort_open",
+    "convergence_exhausted", "no_open_cohort")`, the whole vocabulary, fixed now;
     `PROOF_EVENT_KEYS: Mapping[str, frozenset[str]]`, which in this task holds only
     `"obligation_observed": {seq, type, at, obligation_id, evidence_id, form, outcome,
     reason, reference, fence, cohort, latency_ms}`.
@@ -106,7 +107,7 @@
   - `outcome`, `reason` and `reference` pass the `observation_violation` rules;
   - `latency_ms` is an int ≥ 0 and not a bool;
   - `cohort` equals `open_cohort(events_before, fence)`.
-- `collect_obligation` (per D6, D22, D27):
+- `collect_obligation` (per D6, D22, D27, D33, D34):
   - It refuses `StateInvalid` before any lock for a malformed credential or id, or an
     observer without a callable `observe`.
   - **First hold** (`_fenced`, `writes=True`), with `now` read once: `collection_refusal`
@@ -115,14 +116,19 @@
     `interval_opened` under `next_evidence_id` and keeps that id. It then builds the
     request with `started = now`.
   - **Call**: `observer.observe(request)` runs with no lock held. Whatever the observer
-    raises propagates. A result failing `observation_violation` is `EffectResultInvalid`
-    with nothing written.
+    raises propagates. A result failing `observation_violation` is `EffectResultInvalid`,
+    and nothing from the call is written.
   - **Second hold** (`_fenced` again: a terminal is `TransitionRefused` and a lapse is
-    `StaleCustody`, with nothing written). `collection_refusal` is re-run at the new `now`,
-    and `not_cohort_member` is refused when `open_cohort` now differs from the request's
-    `cohort`. The core then appends `obligation_observed`, whose evidence id is the opened
-    interval id or a fresh `next_evidence_id`, whose `fence` is the held one and whose
-    `latency_ms` is `now - started`.
+    `StaleCustody`, with nothing written). A `now` earlier than `started` is refused
+    `clock_regressed` (per D34). Then `collection_refusal` is re-run at the new `now`, and
+    `not_cohort_member` is refused when `open_cohort` now differs from the request's
+    `cohort`. None of these records anything from the call. The core then appends
+    `obligation_observed`, whose evidence id is the opened interval id or a fresh
+    `next_evidence_id`, whose `fence` is the held one and whose `latency_ms` is
+    `now - started`.
+  - Any other exit after the first hold leaves an interval's `interval_opened` unclosed,
+    and the next collection mints a new id (per D33); `collect_obligation`'s docstring
+    says so.
 - The `proof_view` obligations follow plan order, each keyed exactly `obligation_id,
   obligation_kind, semantic, derived_class, form, required, observations` (the count of
   `obligation_observed`), `latest_outcome` (None when unobserved) and `latest_admissible`
@@ -316,6 +322,23 @@ class CollectTest(ProofCase):
                                  ("obligation_observed", "smoke@2")])
         self.assertEqual(self.entry("smoke")["latest_admissible"], True)
 
+    def test_an_invalid_interval_result_keeps_its_opened_marker(self):
+        self.proving()
+        self.collect(self.act)
+        with self.assertRaises(EffectResultInvalid):
+            self.collect("smoke", self.observer(result={"outcome": "maybe", "reason": "ok",
+                                                        "reference": "r"}))
+        self.assertEqual([(e["type"], e.get("evidence_id")) for e in self.store.load(
+            self.transaction_id).events][-1], ("interval_opened", "smoke@1"))
+        self.assertEqual(self.entry("smoke")["observations"], 0)
+        self.assertEqual(self.collect("smoke").events[-1]["evidence_id"], "smoke@2")
+
+    def test_a_clock_that_runs_backwards_during_the_call_records_nothing(self):
+        self.proving()
+        error = self.assertRefusedUnchanged(ProofRefused, lambda: self.collect(
+            self.pub, self.observer(step_ms=-5_000)))
+        self.assertEqual(error.reason, "clock_regressed")
+
     def test_admission_refusals_come_before_any_write_or_call(self):
         slow = self.observer(step_ms=1)
         self.refused("state_not_proving", lambda: self.collect(self.pub, slow))
@@ -409,7 +432,7 @@ class ProofVocabularyTest(unittest.TestCase):
         self.assertTrue(issubclass(ProofRefused, TransactionError))
 
     def test_the_refusal_reasons_are_fixed(self):
-        self.assertEqual(len(set(PROOF_REFUSAL_REASONS)), 10)
+        self.assertEqual(len(set(PROOF_REFUSAL_REASONS)), 11)
 
 
 if __name__ == "__main__":
@@ -432,13 +455,13 @@ if __name__ == "__main__":
     `apply_proof_event`.
   - Add `obligation_observed` to the types `fenced_id_violation` folds.
   - Write docstrings from the finished code: the new module's (what it holds; no file,
-    lock or clock); history's, which now hands proof events to `transaction_proof` and
-    derives `proof`; and `collect_obligation`'s, which describes the two holds as built.
+    lock or clock); history's and `validate_state`'s, which now hand proof events to
+    `transaction_proof`; `Transaction`'s, which adds `proof`, derived on every load and
+    never stored; and `collect_obligation`'s, which describes the two holds as built.
   - Core: re-export `PROOF_REFUSAL_REASONS` and `ProofRefused`.
 
 - [ ] **Step 4: Verify.**
-  Run: `PYTHONPATH=python python3 -m unittest tests/test_transaction_proof.py tests/test_transaction_plan.py tests/test_transaction_core.py tests/test_transaction_custody.py tests/test_transaction_invocation.py tests/test_transaction_core_sweep.py 2>&1 | tail -3`.
-  Expected: `OK`.
+  Run the root's slice unit command. Expected: `OK`.
 
 ```bash
 if grep -nE "^(from|import) .*transaction_(core|history)" python/agent_tools/transaction_proof.py; then exit 1; fi
@@ -447,30 +470,13 @@ if grep -nE "^(from|import) .*transaction_(core|history)" python/agent_tools/tra
 
   Run: `git add -A python tests justfile && just build 2>&1 | tail -3`. Expected: success.
 
-- [ ] **Step 5: Commit.**
+- [ ] **Step 5: Commit.** Stage exactly this task's **Files**, then:
 
 ```bash
-git add python/agent_tools/transaction_proof.py python/agent_tools/transaction_history.py \
-  python/agent_tools/transaction_custody.py python/agent_tools/transaction_storage.py \
-  python/agent_tools/transaction_core.py tests/test_transaction_proof.py \
-  tests/test_transaction_core_sweep.py justfile
 git commit -m "feat(transaction-core): collect obligations through the core (#207)"
 ```
 
-- [ ] **Step 6: Check the review budget** (after the commit).
+- [ ] **Step 6: Check the review budget** (after the commit): run the root's review-budget block with `FILES="python/agent_tools/transaction_*.py tests/test_transaction_proof.py tests/test_transaction_plan.py tests/test_transaction_core.py"`.
+  Expected: exit 0.
 
-```bash
-base=dd9f40b; fail=0
-for f in python/agent_tools/transaction_*.py tests/test_transaction_proof.py \
-    tests/test_transaction_plan.py tests/test_transaction_core.py; do
-  n=$(git diff -U10 "$base" HEAD -- "$f" | wc -c); printf '%s %s\n' "$n" "$f"
-  [ "$n" -lt 65536 ] || fail=1
-done
-[ "$(wc -c < python/agent_tools/transaction_core.py)" -le 55000 ] || fail=1
-test "$fail" = 0
-```
-
-  Expected: exit 0. A miss means the task is not done; move judgment out of the core
-  (per D22).
-
-Decisions: per D5–D8, D13, D18, D20, D22, D25, D27.
+Decisions: per D5–D8, D13, D18, D20, D22, D25, D27, D33, D34.

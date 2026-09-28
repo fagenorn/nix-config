@@ -38,9 +38,8 @@
   `proof_sealed` (e.g. `"transition to succeeded does not immediately follow
   proof_sealed"`). `validate_state` applies `gate_violation`
   to every `transitioned` event, using the actions folded before it.
-- Existing tests change only where the `succeeded` gate demands it (per D23). The paths,
-  transitions and custody assertions stay. Only event counts grow by the two cohort
-  events.
+- Existing tests change only where the `succeeded` gate demands it (per D23); only event
+  counts grow, by the two cohort events.
 
 - [ ] **Step 1: Write the failing tests.** Append to `tests/test_transaction_proof.py`
   (above `OBSERVED_PROOF_REASONS`):
@@ -182,8 +181,7 @@ class GateTest(ProofCase):
   gates.
 
 - [ ] **Step 4: Verify.**
-  Run: `PYTHONPATH=python python3 -m unittest tests/test_transaction_proof.py tests/test_transaction_plan.py tests/test_transaction_core.py tests/test_transaction_custody.py tests/test_transaction_invocation.py tests/test_transaction_core_sweep.py 2>&1 | tail -3`.
-  Expected: `OK`.
+  Run the root's slice unit command. Expected: `OK`.
 
 ```bash
 if grep -n 'advance("succeeded"' tests/transaction_core_sweep_support.py; then exit 1; fi
@@ -192,30 +190,13 @@ grep -q "def gate_violation" python/agent_tools/transaction_proof.py || exit 1
 
   Run: `just build 2>&1 | tail -3`. Expected: success.
 
-- [ ] **Step 5: Commit.**
+- [ ] **Step 5: Commit.** Stage exactly this task's **Files**, then:
 
 ```bash
-git add python/agent_tools/transaction_proof.py python/agent_tools/transaction_history.py \
-  python/agent_tools/transaction_core.py tests/test_transaction_proof.py \
-  tests/test_transaction_core.py tests/test_transaction_custody.py \
-  tests/transaction_core_sweep_support.py
 git commit -m "feat(transaction-core): gate publication, proving and success on the plan (#207)"
 ```
 
-- [ ] **Step 6: Check the review budget** (after the commit):
-
-```bash
-base=dd9f40b; fail=0
-for f in python/agent_tools/transaction_*.py tests/test_transaction_proof.py \
-    tests/test_transaction_plan.py tests/test_transaction_core.py \
-    tests/test_transaction_custody.py; do
-  n=$(git diff -U10 "$base" HEAD -- "$f" | wc -c); printf '%s %s\n' "$n" "$f"
-  [ "$n" -lt 65536 ] || fail=1
-done
-[ "$(wc -c < python/agent_tools/transaction_core.py)" -le 55000 ] || fail=1
-test "$fail" = 0
-```
-
+- [ ] **Step 6: Check the review budget** (after the commit): run the root's review-budget block with `FILES="python/agent_tools/transaction_*.py tests/test_transaction_proof.py tests/test_transaction_plan.py tests/test_transaction_core.py tests/test_transaction_custody.py"`.
   Expected: exit 0.
 
 Decisions: per D10, D12, D23, D27.
