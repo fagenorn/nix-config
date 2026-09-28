@@ -10,16 +10,13 @@ snapshot of a `ResolvedProject`, no capability verdict kept anywhere. What
 registration persists is exactly an identity and a location.
 
 The resolver is not reached from this module. `adopt-project` owns the one
-seam it is consumed through — invoked as a child process at the absolute path
-`$HOME/.agents/bin/resolve-project`, never imported (D26) — and hands that
+seam it is consumed through — invoked as a child process through
+`agent_tools.siblings.sibling_argv`, never imported (D26) — and hands that
 call in.
 
 Like its sibling libraries it is imported, never run: no `main` and no
-argparse. It is installed at `$HOME/.agents/lib/python/` behind the entry
-point's member guard, and every name it reads from `adopt_inspection` is named
-in the `from` import below, so an installation pairing an older library with a
-newer binary refuses as `adopt.library.missing` through the D12 error object
-rather than as an `AttributeError`.
+argparse. It is a module of the `agent_tools` package, and every name it reads
+from `adopt_inspection` is named in the `from` import below.
 """
 
 from __future__ import annotations
@@ -27,8 +24,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-import agent_platform
-from adopt_inspection import (
+from agent_tools import agent_platform
+from agent_tools.adopt_inspection import (
     AdoptError,
     EVIDENCE_RECORD_DIR,
     VERIFY_RESULTS,

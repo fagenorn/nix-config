@@ -11,14 +11,10 @@ import fcntl
 import hashlib
 import json
 import os
-import sys
 import unittest
 from pathlib import Path
 
-# The suite modules are imported by path, so the tests directory is not
-# already on sys.path; the shared support module lives beside them.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from conformance_test_support import (  # noqa: E402
+from .conformance_test_support import (
     REPO_ROOT, ReportAssertions, doctor, fixture, load_module, make_root, run,
 )
 

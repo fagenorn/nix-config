@@ -2,7 +2,7 @@
 
 Holds the fixture builders, the hermetic subprocess runner, the stub-`PATH`
 bin, the shared report assertion, the rebinding cleanup and the S3 module
-loader that `test_conformance`, `test_conformance_checks` and
+accessor that `test_conformance`, `test_conformance_checks` and
 `test_conformance_registry` all reach for (D40). It declares no TestCase, so
 it is support rather than a suite and is not listed as one.
 
@@ -13,9 +13,10 @@ one exit-0 script per tool the contract names; a case that needs a different
 tool outcome builds its own bin with make_stub_bin and overrides PATH.
 
 HERMETIC_ENV's HOME also holds the platform installation the resolver ladder
-binds first — the committed manifest and library, installed by the resolver
-family's own `install_home` (#147 D7). A case that needs another manifest, or
-no library, runs under `platform_env` instead.
+binds first — the committed manifest and host declaration, installed by the
+resolver family's own `install_home` (#147 D7). A case that needs another
+manifest or declaration runs under `platform_env` instead. HERMETIC_ENV's
+PYTHONPATH is the recipe's, made absolute.
 """
 
 from __future__ import annotations
@@ -30,8 +31,9 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+from agent_tools import conformance
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "conformance.py"
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 STUB_TOOLS = ("codex", "gh", "git", "just")
 
@@ -54,10 +56,8 @@ def make_stub_bin(directory: Path, exits: dict | None = None) -> str:
 # The resolver family's installer is the one home of the installed layout
 # (#147 D7), so this module lends it to the conformance suites rather than
 # copying it. Only the named helpers are imported, so no resolver TestCase
-# enters a conformance suite's namespace. The directory has to be importable
-# however this module was reached.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_resolve_project import (  # noqa: E402
+# enters a conformance suite's namespace.
+from .test_resolve_project import (
     COMMITTED, MANIFEST, install_home, mutated_manifest,
 )
 
@@ -68,15 +68,18 @@ HERMETIC_ENV = {
     "HOME": _HERMETIC_HOME,
     "TMPDIR": _HERMETIC_HOME,
     "LANG": "C",
+    # Absolute, so an engine child with its own `cwd` still imports the
+    # package under test (parent D8). Outside a recipe this raises at import.
+    "PYTHONPATH": os.pathsep.join(os.path.abspath(entry) for entry
+                                  in os.environ["PYTHONPATH"].split(os.pathsep)),
 }
 
 
-def run(*args: str, env: dict | None = None, cwd: str | Path | None = None,
-        script: str | Path | None = None) -> tuple[int, str, str]:
-    """One S1 subprocess run of the engine. `script` names a copy of the entry
-    module elsewhere, which is how the bootstrap boundary is reached (D40)."""
+def run(*args: str, env: dict | None = None,
+        cwd: str | Path | None = None) -> tuple[int, str, str]:
+    """One S1 subprocess run of the engine."""
     proc = subprocess.run(
-        [sys.executable, str(SCRIPT if script is None else script), *args],
+        [sys.executable, "-m", "agent_tools.conformance", *args],
         capture_output=True, text=True, timeout=60,
         env=HERMETIC_ENV if env is None else env, cwd=None if cwd is None else str(cwd),
     )
@@ -130,26 +133,8 @@ def make_root(tmp: Path) -> Path:
 
 
 def load_module():
-    """The engine as an imported module, loaded by path (its name is hyphenated).
-
-    Registered under its spec name before exec_module: the module uses
-    postponed annotations, and dataclass construction resolves them through
-    sys.modules, so an unregistered module fails to import at all (D36).
-    """
-    import importlib.util
-    from importlib.machinery import SourceFileLoader
-
-    fullname = "conformance_engine"
-    spec = importlib.util.spec_from_loader(
-        fullname, SourceFileLoader(fullname, str(SCRIPT)))
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[fullname] = module
-    try:
-        spec.loader.exec_module(module)
-    except BaseException:
-        sys.modules.pop(fullname, None)
-        raise
-    return module
+    """The engine module, `agent_tools.conformance`, for the S3 seams."""
+    return conformance
 
 
 class ReportAssertions:
@@ -174,15 +159,15 @@ class Rebinding:
 
 
 def platform_env(tmp: Path, manifest: object = COMMITTED, *,
-                 library: bool = True, declaration: object = COMMITTED) -> dict:
+                 declaration: object = COMMITTED) -> dict:
     """HERMETIC_ENV with `HOME` at a platform installation built under `tmp`.
 
-    `manifest`, `library` and `declaration` are `install_home`'s override
+    `manifest` and `declaration` are `install_home`'s override
     hooks, unchanged: `COMMITTED` copies the repository's manifest (or host
     declaration), `None` installs none, any other value is written in its
-    place, and `library=False` leaves the library uninstalled.
+    place.
     """
-    home = install_home(tmp / "home", manifest, library=library,
+    home = install_home(tmp / "home", manifest,
                         declaration=declaration)
     return {**HERMETIC_ENV, "HOME": str(home)}
 
@@ -190,13 +175,10 @@ def platform_env(tmp: Path, manifest: object = COMMITTED, *,
 class PlatformHome:
     """S3 cases run the ladder in this process, so `HOME` is pinned (#147 D7).
 
-    In process the ladder binds `agent_platform` from this process's own
-    `$HOME/.agents/lib/python`. Pinned to the hermetic installation, a case's
+    In process the ladder loads the platform manifest from this process's own
+    `$HOME/.agents/share`. Pinned to the hermetic installation, a case's
     outcome no longer depends on whether the machine has switched to a
-    generation that installs the platform. The library caches in
-    `sys.modules` under its one name, and the resolver's origin guard refuses
-    a copy imported from any other `HOME`, so the cached module is evicted on
-    the way in and again on the way out.
+    generation that installs the platform.
     """
 
     def setUp(self) -> None:
@@ -204,5 +186,3 @@ class PlatformHome:
         patcher = mock.patch.dict(os.environ, {"HOME": HERMETIC_ENV["HOME"]})
         patcher.start()
         self.addCleanup(patcher.stop)
-        sys.modules.pop("agent_platform", None)
-        self.addCleanup(sys.modules.pop, "agent_platform", None)

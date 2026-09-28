@@ -5,7 +5,7 @@ writer.
 This module is imported, never run: it has no `main`, no argparse, and no
 adoption or resolver logic. It exists so that every binary reads one manifest
 through one loader and writes through one atomic writer (D37) — `adopt-project`
-must not import `resolve-project.py` (D26), and a second copy of either helper
+must not import `agent_tools.resolve_project` (D26), and a second copy of either helper
 is the duplication the plan forbids.
 
 The manifest is authored data installed at exactly `$HOME/.agents/share/
@@ -341,8 +341,9 @@ def _reject_non_finite(token: str) -> object:
     Python's decoder accepts them as an extension, RFC 8259 has none, and a
     caller that republishes a manifest member verbatim would otherwise hand
     one to an emit guard (`allow_nan=False`) only after part of its response
-    was already written (#147 D12). This library sits below the resolver, so
-    it carries its own hook rather than importing `reject_non_finite`.
+    was already written (#147 D12). It stays local rather than composing
+    `agent_tools.canonical.reject_nonfinite_literal` because its typed error
+    carries this module's refusal vocabulary (#177 D16).
     """
     raise _NonFiniteNumber(token)
 
@@ -367,7 +368,14 @@ def load_manifest() -> tuple[dict, Path]:
     The second member is `Path.resolve()` of the file actually loaded, which
     under Home Manager is the content-addressed store path — the deployment
     identity, observed rather than authored, so it cannot lie (D2, R1.4).
+
+    An unset or empty `HOME` names no installed manifest, so it refuses as
+    `platform.manifest.missing` before any filesystem read (#177 D4).
     """
+    if not os.environ.get("HOME"):
+        raise _refuse([_violation(
+            "", "the installed platform manifest was not found",
+            "platform.manifest.missing")])
     path = manifest_path()
     try:
         resolved = path.resolve(strict=True)
@@ -569,7 +577,7 @@ def registry_transaction() -> Iterator[list[dict]]:
 # Atomic writing
 #
 # D37: this module is the single owner of both helpers below. `adopt-project`
-# may not import `resolve-project.py` (D26) and both binaries must write
+# may not import `agent_tools.resolve_project` (D26) and both binaries must write
 # atomically, so a second copy anywhere is a defect.
 # --------------------------------------------------------------------------
 

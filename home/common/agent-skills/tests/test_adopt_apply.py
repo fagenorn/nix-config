@@ -23,16 +23,10 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 import unittest
 from pathlib import Path
 
-# The sibling suite is imported as a module, so its directory has to be
-# importable however this file was invoked — `python3 <path>` supplies it,
-# `python3 -m unittest <path>` does not.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from test_adopt_project import (
+from .test_adopt_project import (
     GITIGNORE_WITH_COMMENT,
     commit,
     fixture_contract,

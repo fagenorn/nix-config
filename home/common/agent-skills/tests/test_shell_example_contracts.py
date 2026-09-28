@@ -47,8 +47,8 @@ AMBIGUOUS_FENCE_INFO = frozenset({"", "text"})
 COMMAND_VOCABULARY = frozenset({
     "[", "adopt-project", "agent-evidence", "agent-model-matrix",
     "artifact-budget", "awk", "bash", "brew", "bun", "cargo", "cat", "cd",
-    "chmod", "claude", "codex", "conformance", "conformance-checks",
-    "conformance-registry", "context-map-lint", "cp", "curl",
+    "chmod", "claude", "codex", "conformance",
+    "context-map-lint", "cp", "curl",
     "darwin-rebuild", "devenv", "diff", "diff-scope", "docker", "dotnet",
     "echo", "env", "eval", "export", "find", "gh", "git", "glab", "go",
     "grep", "head", "jq", "just", "kubectl", "ls", "make", "mkdir", "mktemp",

@@ -23,14 +23,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-# The sibling suites are imported as modules, so their directory has to be
-# importable however this file was invoked — `python3 <path>` supplies it,
-# `python3 -m unittest <path>` does not.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from test_adopt_project import (
+from .test_adopt_project import (
     EVIDENCE_RECORD_MEMBERS,
-    RESOLVER,
     commit,
     adopted_repo,
     fixture_contract,
@@ -44,7 +38,7 @@ from test_adopt_project import (
     write,
     write_adoption_records,
 )
-from test_adopt_apply import apply_repo, readoption_repo
+from .test_adopt_apply import apply_repo, readoption_repo
 
 VERIFY_MEMBERS = ["adoption_commit", "blockers", "checks", "evidence_record",
                   "migration_map", "project_id", "registered", "result",
@@ -118,7 +112,7 @@ class VerifyTestCase(unittest.TestCase):
 
     def fleet(self) -> list[dict]:
         proc = subprocess.run(
-            [sys.executable, str(RESOLVER), "platform-status", "--fleet"],
+            [sys.executable, "-m", "agent_tools.resolve_project", "platform-status", "--fleet"],
             capture_output=True, text=True, timeout=120,
             env={**os.environ, "HOME": str(self.home)})
         self.assertEqual(proc.returncode, 0, proc.stdout)
@@ -374,9 +368,7 @@ class RegistrationTest(VerifyTestCase):
         environment = {**os.environ, "HOME": str(self.home)}
         processes = [
             subprocess.Popen(
-                [sys.executable,
-                 str(Path(__file__).resolve().parents[1] / "scripts"
-                     / "adopt-project.py"),
+                [sys.executable, "-m", "agent_tools.adopt_project",
                  "verify", "--repo-root", str(root), "--register"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 env=environment)
