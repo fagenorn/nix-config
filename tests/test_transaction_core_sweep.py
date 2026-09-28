@@ -108,12 +108,19 @@ def neutrality_findings(source):
     return findings
 
 
+from agent_tools import transaction_storage
+
+NEUTRAL_MODULES = (transaction_core, transaction_storage)
+
+
 class NeutralityTest(unittest.TestCase):
     def setUp(self):
         self.source = inspect.getsource(transaction_core)
 
-    def test_the_shipped_module_names_no_project_provider_or_provider_verb(self):
-        self.assertEqual(neutrality_findings(self.source), [])
+    def test_the_shipped_modules_name_no_project_provider_or_provider_verb(self):
+        for module in NEUTRAL_MODULES:
+            with self.subTest(module=module.__name__):
+                self.assertEqual(neutrality_findings(inspect.getsource(module)), [])
 
     def test_a_provider_verb_planted_in_code_is_found(self):
         planted = self.source + "\n\ndef deploy_everything():\n    return None\n"

@@ -4,6 +4,7 @@ Run: just agent-workflow-tests
 """
 
 import copy
+import datetime
 import fcntl
 import hashlib
 import json
@@ -14,6 +15,7 @@ import time
 import unittest
 from pathlib import Path
 
+from agent_tools import transaction_core, transaction_storage
 from agent_tools.transaction_core import (
     STATES, TERMINALS, TRANSITIONS, CreationConflict, StateInvalid, Transaction,
     TransactionBusy, TransactionError, TransactionStore, TransitionRefused,
@@ -437,6 +439,68 @@ class LockAndSchemaGuardTest(AdvanceCase):
                 self.assertIn(transaction_id, str(caught.exception))
             self.assertEqual((moved / "state.json").read_bytes(), raw)
             self.assertEqual(sorted(p.name for p in moved.iterdir()), listing)
+
+
+T0 = 1_800_000_000_000  # 2027-01-15T08:00:00.000Z
+
+
+class FakeClock:
+    def __init__(self, now=T0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+class ClockTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def test_event_times_come_from_the_injected_clock_and_ids_from_the_wall(self):
+        clock = FakeClock()
+        store = TransactionStore(self.root, clock=clock)
+        before = time.time_ns() // 1_000_000
+        created = store.create("k", SUBJECT)
+        after = time.time_ns() // 1_000_000
+        self.assertEqual(created.events[0]["at"], "2027-01-15T08:00:00.000Z")
+        millis = int(created.transaction_id[4:].replace("-", "")[:12], 16)
+        self.assertTrue(before <= millis <= after)
+        clock.now = T0 + 1234
+        moved = store.advance(created.transaction_id, "awaiting_verification", reason="r")
+        self.assertEqual(moved.events[-1]["at"], "2027-01-15T08:00:01.234Z")
+
+    def test_a_malformed_clock_reading_is_refused_before_any_state_exists(self):
+        for reading in (1.5, True, -1, "0", None, 253_402_300_800_000):
+            with self.subTest(reading=reading), tempfile.TemporaryDirectory() as tmp:
+                store = TransactionStore(Path(tmp), clock=lambda value=reading: value)
+                with self.assertRaises(TransactionError) as caught:
+                    store.create("k", SUBJECT)
+                self.assertIn(tmp, str(caught.exception))
+                self.assertEqual(list(Path(tmp).rglob("state.json")), [])
+
+    def test_the_default_clock_is_the_wall_clock(self):
+        before = time.time_ns() // 1_000_000
+        at = TransactionStore(self.root).create("k", SUBJECT).events[0]["at"]
+        after = time.time_ns() // 1_000_000
+        stamp = datetime.datetime.strptime(at, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            tzinfo=datetime.timezone.utc)
+        self.assertTrue(before <= int(stamp.timestamp() * 1000 + 0.5) <= after)
+
+    def test_the_largest_representable_reading_is_accepted(self):
+        store = TransactionStore(self.root, clock=lambda: 253_402_300_799_999)
+        self.assertEqual(store.create("k", SUBJECT).events[0]["at"],
+                         "9999-12-31T23:59:59.999Z")
+
+
+class StorageModuleTest(unittest.TestCase):
+    def test_the_core_re_exports_the_storage_error_hierarchy(self):
+        for name in ("TransactionError", "StateInvalid", "TransactionBusy",
+                     "TransitionRefused", "CreationConflict", "UnknownTransaction"):
+            with self.subTest(name=name):
+                self.assertIs(getattr(transaction_core, name),
+                              getattr(transaction_storage, name))
 
 
 if __name__ == "__main__":

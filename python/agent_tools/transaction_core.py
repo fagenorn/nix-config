@@ -1,34 +1,40 @@
-"""The transaction core's first slice (#204).
+"""The transaction core (#204, #205).
 
 A caller-rooted store of closed-schema transactions with a closed lifecycle:
-`TransactionStore(root)` creates deduplicated transactions under an absolute,
-pre-existing root and loads validated snapshots of them. Each transaction's
-whole state and typed event history live in one `state.json` whose
-`state`/`parked_from`/`revision` are a projection the validator re-folds from
-the events. The module has no command and no caller yet.
+`TransactionStore(root, clock=...)` creates deduplicated transactions under an
+absolute, pre-existing root and loads validated snapshots of them. Each
+transaction's whole state and typed event history live in one `state.json`
+whose `state`/`parked_from`/`revision` are a projection the validator re-folds
+from the events. Every event `at` is read from the injected clock (integer
+epoch milliseconds, the wall clock by default); transaction ids still come from
+the wall clock. The durable-file primitives and the refusal hierarchy live in
+`agent_tools.transaction_storage`, whose error classes this module re-exports.
+The module has no command and no caller yet.
 """
 
+import calendar
+import contextlib
 import copy
 import dataclasses
 import datetime
 import fcntl
 import hashlib
-import json
-import math
 import os
 import re
 import secrets
 import stat
-import tempfile
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from agent_tools.canonical import (
-    reject_duplicate_keys, reject_nonfinite_literal, telemetry_digest)
+from agent_tools.canonical import telemetry_digest
+from agent_tools.transaction_storage import (
+    CreationConflict, StateInvalid, TransactionBusy, TransactionError, TransitionRefused,
+    UnknownTransaction, atomic_write, fsync_directory, lstat_mode, open_lock, read_json,
+    require_directory, serialize, strict_loads)
 
 SCHEMA = "transaction-state/v1"
 INDEX_SCHEMA = "transaction-creation-key/v1"
@@ -66,30 +72,7 @@ _CREATED_KEYS = frozenset({"seq", "type", "at"})
 _TRANSITIONED_KEYS = frozenset({"seq", "type", "at", "from", "to", "reason",
                                 "external_state"})
 _EXTERNAL_STATES = ("known", "unknown", None)
-
-
-class TransactionError(Exception):
-    """Base of every refusal the transaction core raises."""
-
-
-class StateInvalid(TransactionError):
-    """A stored file, the layout, or a create argument fails the closed schema."""
-
-
-class TransactionBusy(TransactionError):
-    """A lock the call needs is held elsewhere."""
-
-
-class TransitionRefused(TransactionError):
-    """An illegal edge, a terminal source, or an ungrounded terminal."""
-
-
-class CreationConflict(TransactionError):
-    """The same creation key was requested with a different subject."""
-
-
-class UnknownTransaction(TransactionError):
-    """No transaction with that id exists under this root."""
+_MAX_CLOCK_MS = 253_402_300_799_999  # 9999-12-31T23:59:59.999Z, the last `at` that fits
 
 
 @dataclasses.dataclass(frozen=True)
@@ -132,10 +115,17 @@ def _is_id(value: object) -> bool:
     return type(value) is str and _ID_PATTERN.fullmatch(value) is not None
 
 
-def _timestamp() -> str:
-    """UTC now as `YYYY-MM-DDTHH:MM:SS.mmmZ`."""
-    now = datetime.datetime.now(datetime.timezone.utc)
-    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+def _format_at(ms: int) -> str:
+    """Epoch milliseconds as UTC `YYYY-MM-DDTHH:MM:SS.mmmZ`."""
+    seconds = datetime.datetime.fromtimestamp(ms // 1000, tz=datetime.timezone.utc)
+    return seconds.strftime("%Y-%m-%dT%H:%M:%S") + f".{ms % 1000:03d}Z"
+
+
+def _parse_at(at: str) -> int:
+    """Epoch milliseconds of a `YYYY-MM-DDTHH:MM:SS.mmmZ` stamp; `_format_at`'s inverse."""
+    seconds, millis = at[:-1].split(".")
+    parsed = datetime.datetime.strptime(seconds, "%Y-%m-%dT%H:%M:%S")
+    return calendar.timegm(parsed.timetuple()) * 1000 + int(millis)
 
 
 def _is_timestamp(value: object) -> bool:
@@ -148,113 +138,20 @@ def _is_timestamp(value: object) -> bool:
     return True
 
 
-def _serialize(document: dict) -> str:
-    return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-                      allow_nan=False) + "\n"
-
-
-def _finite_float(literal: str) -> float:
-    """`parse_float` hook: an overflowing literal such as `1e400` decodes to infinity."""
-    value = float(literal)
-    if not math.isfinite(value):
-        raise ValueError(f"JSON number {literal} is not finite")
-    return value
-
-
-def _strict_loads(text: str) -> Any:
-    return json.loads(text, object_pairs_hook=reject_duplicate_keys,
-                      parse_constant=reject_nonfinite_literal, parse_float=_finite_float)
-
-
-def _lstat_mode(path: Path) -> int | None:
-    """The `lstat` mode of `path`, or None when nothing is there."""
-    try:
-        return os.lstat(path).st_mode
-    except FileNotFoundError:
-        return None
-
-
-def _read_json(path: Path) -> Any:
-    """Strictly load one regular, non-symlinked JSON file, else StateInvalid."""
-    mode = _lstat_mode(path)
-    if mode is None:
-        raise StateInvalid(f"{path}: file is missing")
-    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-        raise StateInvalid(f"{path}: not a regular file")
-    try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        with open(descriptor, "rb") as handle:
-            raw = handle.read()
-    except OSError as error:
-        raise StateInvalid(f"{path}: unreadable ({error.strerror})") from error
-    try:
-        return _strict_loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as error:
-        raise StateInvalid(f"{path}: not strict JSON ({error})") from error
-
-
-def _fsync_directory(directory: Path) -> None:
-    descriptor = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _atomic_write(directory: Path, path: Path, document: dict) -> None:
-    """Replace `path` by a fsynced temporary sibling, then fsync `directory`."""
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=directory,
-            prefix="." + path.name + ".",
-            suffix=".tmp",
-            delete=False,
-        ) as output:
-            temporary_path = Path(output.name)
-            output.write(_serialize(document))
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary_path, path)
-        temporary_path = None
-        _fsync_directory(directory)
-    except BaseException as original_error:
-        if temporary_path is not None:
-            try:
-                temporary_path.unlink(missing_ok=True)
-            except OSError as cleanup_error:
-                raise cleanup_error from original_error
-        raise
-
-
 def _index_path(root: Path, creation_key: str) -> Path:
     digest = hashlib.sha256(creation_key.encode("utf-8")).hexdigest()
     return root / "creation-keys" / f"{digest}.json"
 
 
-def _require_directory(path: Path, missing_ok: bool) -> bool:
-    """Refuse a symlinked or non-directory `path` by `lstat`; report whether it exists."""
-    mode = _lstat_mode(path)
-    if mode is None:
-        if missing_ok:
-            return False
-        raise StateInvalid(f"{path}: directory is missing")
-    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
-        raise StateInvalid(f"{path}: not a directory")
-    return True
-
-
 def _read_index(root: Path, creation_key: str) -> str | None:
     """The id the key's index entry names, or None when there is no entry."""
     index_directory = root / "creation-keys"
-    if not _require_directory(index_directory, missing_ok=True):
+    if not require_directory(index_directory, missing_ok=True):
         return None
     path = _index_path(root, creation_key)
-    if _lstat_mode(path) is None:
+    if lstat_mode(path) is None:
         return None
-    entry = _read_json(path)
+    entry = read_json(path)
     if type(entry) is not dict or set(entry) != _INDEX_KEYS:
         raise StateInvalid(f"{path}: index entry is not the closed {INDEX_SCHEMA} object")
     if entry["schema"] != INDEX_SCHEMA:
@@ -354,26 +251,6 @@ def _snapshot(document: dict) -> Transaction:
     )
 
 
-def _open_lock(path: Path) -> int:
-    """Open (creating) a regular, non-symlinked lock file and take it non-blocking."""
-    mode = _lstat_mode(path)
-    if mode is not None and (stat.S_ISLNK(mode) or not stat.S_ISREG(mode)):
-        raise StateInvalid(f"{path}: lock is not a regular file")
-    try:
-        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    except OSError as error:
-        raise StateInvalid(f"{path}: lock cannot be opened ({error.strerror})") from error
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as error:
-        os.close(descriptor)
-        raise TransactionBusy(f"{path}: lock is held elsewhere") from error
-    except BaseException:
-        os.close(descriptor)
-        raise
-    return descriptor
-
-
 def _require_creatable(root: Path, creation_key: Any, subject: Any) -> None:
     """Refuse (StateInvalid) arguments that cannot form a valid v1 state (D16)."""
     where = f"{root}: creation_key {creation_key!r}"
@@ -386,7 +263,7 @@ def _require_creatable(root: Path, creation_key: Any, subject: Any) -> None:
     if type(subject) is not dict:
         raise StateInvalid(f"{where}: subject is not a JSON object")
     try:
-        loaded = _strict_loads(_serialize(subject))
+        loaded = strict_loads(serialize(subject))
     except (TypeError, ValueError) as error:
         raise StateInvalid(f"{where}: subject is not strict JSON ({error})") from error
     if loaded != subject or telemetry_digest(loaded) != telemetry_digest(subject):
@@ -396,17 +273,28 @@ def _require_creatable(root: Path, creation_key: Any, subject: Any) -> None:
 class TransactionStore:
     """Transactions under one absolute, pre-existing `root` the caller owns (D2)."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, clock: Callable[[], int] | None = None) -> None:
         if not isinstance(root, Path) or not root.is_absolute() or not root.is_dir():
             raise TransactionError(f"{root}: store root is not an absolute existing directory")
+        if clock is not None and not callable(clock):
+            raise TransactionError(f"{root}: clock is not callable")
         self.root = root
+        self._clock = clock if clock is not None else lambda: time.time_ns() // 1_000_000
+
+    def _now(self) -> int:
+        """One clock reading, refused unless an int in [0, _MAX_CLOCK_MS] (D3, D32)."""
+        reading = self._clock()
+        if type(reading) is not int or not 0 <= reading <= _MAX_CLOCK_MS:
+            raise TransactionError(f"{self.root}: clock reading {reading!r} is not an integer "
+                                   f"millisecond count in [0, {_MAX_CLOCK_MS}]")
+        return reading
 
     def _existing_directory(self, transaction_id: str) -> Path:
         """The transaction's real directory, else UnknownTransaction; creates nothing (D16)."""
         if not _is_id(transaction_id):
             raise UnknownTransaction(f"{transaction_id!r}: not a rel_ UUIDv7 transaction id")
         directory = self.root / transaction_id
-        mode = _lstat_mode(directory)
+        mode = lstat_mode(directory)
         if mode is None or stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
             raise UnknownTransaction(f"{transaction_id}: no transaction directory under "
                                      f"{self.root}")
@@ -415,10 +303,10 @@ class TransactionStore:
     def _validated_document(self, transaction_id: str) -> dict:
         """Read and fully validate `state.json` without writing or locking (D13, D16)."""
         directory = self._existing_directory(transaction_id)
-        lock_mode = _lstat_mode(directory / "lock")
+        lock_mode = lstat_mode(directory / "lock")
         if lock_mode is None or stat.S_ISLNK(lock_mode) or not stat.S_ISREG(lock_mode):
             raise StateInvalid(f"{transaction_id}: lock file is missing or not a regular file")
-        document = _read_json(directory / "state.json")
+        document = read_json(directory / "state.json")
         _validate_state(document, transaction_id, self.root)
         return document
 
@@ -432,9 +320,15 @@ class TransactionStore:
 
         Every refusal happens before any write; the lock file is never created.
         """
+        with self._transaction_locked(transaction_id):
+            return self._advance_locked(transaction_id, target, reason, external_state)
+
+    @contextlib.contextmanager
+    def _transaction_locked(self, transaction_id: str):
+        """Hold the transaction's existing lock, taken non-blocking; never creates it."""
         directory = self._existing_directory(transaction_id)
         lock = directory / "lock"
-        mode = _lstat_mode(lock)
+        mode = lstat_mode(lock)
         if mode is None or stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
             raise StateInvalid(f"{transaction_id}: lock file {lock} is missing or not a "
                                f"regular file")
@@ -449,7 +343,7 @@ class TransactionStore:
             except BlockingIOError as error:
                 raise TransactionBusy(f"{transaction_id}: lock file {lock} is held "
                                       f"elsewhere") from error
-            return self._advance_locked(transaction_id, target, reason, external_state)
+            yield
         finally:
             os.close(descriptor)
 
@@ -473,7 +367,7 @@ class TransactionStore:
             raise TransitionRefused(f"{where}: terminal target needs known external state")
         candidate = copy.deepcopy(prior)
         candidate["events"].append({
-            "seq": prior["revision"] + 1, "type": "transitioned", "at": _timestamp(),
+            "seq": prior["revision"] + 1, "type": "transitioned", "at": _format_at(self._now()),
             "from": source, "to": target, "reason": reason,
             "external_state": external_state})
         if target == "attention_required":
@@ -487,38 +381,39 @@ class TransactionStore:
                                f"prefix")
         _validate_state(candidate, transaction_id, self.root)
         directory = self.root / transaction_id
-        _atomic_write(directory, directory / "state.json", candidate)
+        atomic_write(directory, directory / "state.json", candidate)
         return _snapshot(candidate)
 
     def create(self, creation_key: str, subject: dict) -> Transaction:
         """Create the transaction for `creation_key`, or return the one it already names."""
         _require_creatable(self.root, creation_key, subject)
-        descriptor = _open_lock(self.root / "creation.lock")
+        at = _format_at(self._now())
+        descriptor = open_lock(self.root / "creation.lock")
         try:
-            return self._create_locked(creation_key, subject)
+            return self._create_locked(creation_key, subject, at)
         finally:
             os.close(descriptor)
 
-    def _create_locked(self, creation_key: str, subject: dict) -> Transaction:
+    def _create_locked(self, creation_key: str, subject: dict, at: str) -> Transaction:
         transaction_id = _read_index(self.root, creation_key)
         if transaction_id is None:
             transaction_id = _mint_id()
             index_directory = self.root / "creation-keys"
-            if not _require_directory(index_directory, missing_ok=True):
+            if not require_directory(index_directory, missing_ok=True):
                 index_directory.mkdir(exist_ok=True)
-                _require_directory(index_directory, missing_ok=False)
-                _fsync_directory(self.root)
-            _atomic_write(index_directory, _index_path(self.root, creation_key), {
+                require_directory(index_directory, missing_ok=False)
+                fsync_directory(self.root)
+            atomic_write(index_directory, _index_path(self.root, creation_key), {
                 "schema": INDEX_SCHEMA, "creation_key": creation_key,
                 "transaction_id": transaction_id})
         directory = self.root / transaction_id
-        if not _require_directory(directory, missing_ok=True):
+        if not require_directory(directory, missing_ok=True):
             directory.mkdir(exist_ok=True)
-            _require_directory(directory, missing_ok=False)
-            _fsync_directory(self.root)
-        descriptor = _open_lock(directory / "lock")
+            require_directory(directory, missing_ok=False)
+            fsync_directory(self.root)
+        descriptor = open_lock(directory / "lock")
         try:
-            if _lstat_mode(directory / "state.json") is not None:
+            if lstat_mode(directory / "state.json") is not None:
                 document = self._validated_document(transaction_id)
                 if document["creation_key"] != creation_key:
                     raise StateInvalid(
@@ -533,10 +428,10 @@ class TransactionStore:
                 "schema": SCHEMA, "transaction_id": transaction_id,
                 "creation_key": creation_key, "subject": copy.deepcopy(subject),
                 "state": "created", "parked_from": None, "revision": 1,
-                "events": [{"seq": 1, "type": "created", "at": _timestamp()}],
+                "events": [{"seq": 1, "type": "created", "at": at}],
             }
             _validate_state(document, transaction_id, self.root)
-            _atomic_write(directory, directory / "state.json", document)
+            atomic_write(directory, directory / "state.json", document)
             return _snapshot(document)
         finally:
             os.close(descriptor)
