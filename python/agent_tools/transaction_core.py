@@ -17,7 +17,9 @@ custody is held, and entering a terminal releases custody. `record_evidence`,
 custody, `check_grant` checks one read-only, and every snapshot re-derives their
 verdicts from the history. `reap` records a lapsed span's lapse and synthesized stop,
 parking the transaction unless it is already parked, and `record_owner_result` keeps an
-authentic late owner result beside that stop without changing state or custody. The
+authentic late owner result beside that stop without changing state or custody.
+`inspect_action` observes one declared action through a caller-passed effect with no lock
+held across the call, and records the observation fence-stamped (#206). The
 durable-file
 primitives and the refusal hierarchy live in `agent_tools.transaction_storage`, and
 the document model — vocabularies, `Custody`, `Transaction`, the validator and the
@@ -51,7 +53,8 @@ from agent_tools.transaction_history import (
     parked_since, reaped, require_custody_shape, require_texts, snapshot, span_issued,
     validate_state)
 from agent_tools.transaction_invocation import (
-    MAX_ATTEMPTS, REFUSAL_REASONS, RETRY_WINDOW_MS, action_id)
+    MAX_ATTEMPTS, REFUSAL_REASONS, RETRY_WINDOW_MS, action_id, action_violation,
+    effect_request, fold_actions, inspect_result_violation)
 from agent_tools.transaction_storage import (
     CreationConflict, CustodyMisbound, EffectResultInvalid, FenceViolation, GrantInvalid,
     InvocationRefused, LeaseUnavailable, StaleCustody, StateInvalid, TransactionBusy,
@@ -104,7 +107,7 @@ def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
 
 def _require_creatable(root: Path, creation_key: Any, subject: Any,
                        concurrency_keys: Any) -> None:
-    """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v2 document."""
+    """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v3 document."""
     where = f"{root}: creation_key {creation_key!r}"
     if type(creation_key) is not str or not creation_key:
         raise StateInvalid(f"{where}: not a non-empty string")
@@ -530,19 +533,79 @@ class TransactionStore:
     def _append_fenced(self, prior: dict, now: int, operation: str,
                        fields: dict) -> Transaction:
         """Append one record stamped with the held fence to `state.json` alone (D8, D27)."""
-        transaction_id = prior["transaction_id"]
-        event = {"seq": prior["revision"] + 1, "at": format_at(now), **fields,
-                 "fence": prior["custody"]["fence"]}
+        event = {**fields, "fence": prior["custody"]["fence"]}
         violation = fenced_id_violation(prior["events"], event)
         if violation is not None:
-            raise StateInvalid(f"{transaction_id}: {operation}: {violation}")
+            raise StateInvalid(f"{prior['transaction_id']}: {operation}: {violation}")
+        return self._append(prior, now, [event])
+
+    def _append(self, prior: dict, now: int, events: list[dict]) -> Transaction:
+        """Append `events` numbered from `prior`'s revision, each stamped `at` `now`, in one
+        validated `state.json` write; the caller holds the transaction lock."""
+        transaction_id = prior["transaction_id"]
         candidate = copy.deepcopy(prior)
-        candidate["events"].append(event)
+        at = format_at(now)
+        for fields in events:
+            candidate["events"].append(
+                {"seq": len(candidate["events"]) + 1, "at": at, **fields})
         candidate["revision"] = len(candidate["events"])
         _validate_state(candidate, transaction_id, self.root)
         directory = self.root / transaction_id
         atomic_write(directory, directory / "state.json", candidate)
         return snapshot(candidate)
+
+    @staticmethod
+    def _action_arguments(custody: Any, operation: str, name: Any, parameters: Any,
+                          effect: Any) -> str:
+        """The action id, after refusing (StateInvalid), before any lock, a malformed
+        credential, name or parameters, or an effect without callable `inspect` and
+        `invoke` (#206 D3, D4)."""
+        require_custody_shape(custody)
+        where = f"{custody.transaction_id}: {operation}"
+        violation = action_violation(name, parameters)
+        if violation is not None:
+            raise StateInvalid(f"{where}: {violation}")
+        if not (callable(getattr(effect, "inspect", None))
+                and callable(getattr(effect, "invoke", None))):
+            raise StateInvalid(f"{where}: effect has no callable inspect and invoke")
+        return action_id(custody.transaction_id, name, parameters)
+
+    def inspect_action(self, custody: Custody, *, name: str, parameters: dict,
+                       effect: Any) -> Transaction:
+        """Observe one action through `effect.inspect` and record what it saw (#206 D3, D5,
+        D8).
+
+        Argument shapes are refused first, before any lock. The first lock hold refuses a
+        terminal (`TransitionRefused`), runs the fenced check and builds the request, whose
+        `attempt` is the action's latest attempt or 0; the lock is then released and
+        `effect.inspect` runs with no lock held. A result outside the closed shape is
+        `EffectResultInvalid` with nothing written. The second lock hold repeats the
+        terminal refusal and the fenced check, so a lapse during the call is `StaleCustody`
+        with nothing written, then appends, in one `state.json` write, `action_declared`
+        when the history has no event of this action yet and `action_inspected` stamped
+        with the held fence. Any state but a terminal may inspect, parkings included.
+        Whatever the effect raises propagates.
+        """
+        identity = self._action_arguments(custody, "inspect_action", name, parameters,
+                                          effect)
+        with self._fenced(custody, "inspect_action", writes=True) as (prior, _):
+            entry = fold_actions(prior["events"]).get(identity)
+            request = effect_request(prior, identity, name, parameters,
+                                     0 if entry is None else entry.attempts)
+        result = effect.inspect(request)
+        violation = inspect_result_violation(result)
+        if violation is not None:
+            raise EffectResultInvalid(f"{custody.transaction_id}: inspect_action: "
+                                      f"{violation}")
+        with self._fenced(custody, "inspect_action", writes=True) as (prior, now):
+            events = []
+            if identity not in fold_actions(prior["events"]):
+                events.append({"type": "action_declared", "action_id": identity,
+                               "name": name, "parameters": copy.deepcopy(parameters)})
+            events.append({"type": "action_inspected", "action_id": identity,
+                           "outcome": result["outcome"], "reference": result["reference"],
+                           "fence": prior["custody"]["fence"]})
+            return self._append(prior, now, events)
 
     def _check_custody(self, prior: dict, custody: Custody, now: int) -> None:
         """The fenced check (D12, D25): credential, then path, then live records at `now`.

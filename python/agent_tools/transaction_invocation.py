@@ -1,14 +1,24 @@
-"""The administrative protocol's vocabulary for the transaction core (#206 D1, D4): the
-inspection outcomes, effect results, error classes and refusal reasons, the retry budget
-(`MAX_ATTEMPTS` attempts within `RETRY_WINDOW_MS`), the action name and parameter rule
-(`action_violation`) and the deterministic action id (`action_id`) that is also the
-idempotency key an effect receives. It reads no file, lock or clock.
+"""The administrative protocol's document rules for the transaction core (#206 D1): the
+vocabularies (inspection outcomes, effect results, error classes, refusal reasons), the retry
+budget (`MAX_ATTEMPTS` attempts within `RETRY_WINDOW_MS`), the action name and parameter rule
+(`action_violation`), the deterministic action id (`action_id`) that is also the idempotency
+key an effect receives, the closed action event key sets (`ACTION_EVENT_KEYS`), the rule an
+action event breaks against the fold before it (`action_event_violation`), the fold itself
+(`apply_action_event`, `fold_actions`, `ActionFold`), the inspect result check
+(`inspect_result_violation`), the request an effect receives (`effect_request`) and the
+per-action view a snapshot derives (`action_views`). It reads no file, lock or clock.
 """
 
+import copy
+import dataclasses
+from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from typing import Any
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_storage import StateInvalid, json_object_violation
+from agent_tools.transaction_custody import fence_violation
+from agent_tools.transaction_storage import (
+    StateInvalid, format_at, json_object_violation, parse_at)
 
 OUTCOMES = ("absent", "in_progress", "satisfied", "diverged", "unknown")
 RESULTS = ("accepted", "rejected", "unknown")
@@ -22,6 +32,32 @@ EFFECT_STATES = ("publishing", "activating")
 REFUSAL_REASONS = ("inspection_required", "not_absent", "not_retryable",
                    "budget_exhausted", "window_closed", "state_not_effectful",
                    "attempt_in_flight")
+
+_ENVELOPE_KEYS = frozenset({"seq", "type", "at"})
+ACTION_EVENT_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
+    "action_declared": _ENVELOPE_KEYS | {"action_id", "name", "parameters"},
+    "action_inspected": _ENVELOPE_KEYS | {"action_id", "outcome", "reference", "fence"},
+})
+_INSPECT_RESULT_KEYS = frozenset({"outcome", "reference"})
+
+
+@dataclasses.dataclass
+class ActionFold:
+    """What the history says about one declared action (#206 D2, D6).
+
+    `returned` is the latest attempt's `invocation_returned`, `inspection` the latest
+    `action_inspected` as `{outcome, fence, at}`, and `first_failure_ms` the `at` of the
+    first `absent` inspection after attempt 1, in epoch milliseconds.
+    """
+
+    action_id: str
+    name: str
+    attempts: int = 0
+    open: bool = False
+    intent_fence: dict | None = None
+    returned: dict | None = None
+    inspection: dict | None = None
+    first_failure_ms: int | None = None
 
 
 def action_violation(name: Any, parameters: Any) -> str | None:
@@ -46,3 +82,130 @@ def action_id(transaction_id: str, name: str, parameters: dict) -> str:
     if violation is not None:
         raise StateInvalid(f"{transaction_id}: action_id: {violation}")
     return "act_" + telemetry_digest([transaction_id, name, parameters])[7:39]
+
+
+def _outcome_violation(outcome: Any) -> str | None:
+    if type(outcome) is not str or outcome not in OUTCOMES:
+        return "outcome is not absent, in_progress, satisfied, diverged or unknown"
+    return None
+
+
+def _reference_violation(reference: Any) -> str | None:
+    if type(reference) is not str or not reference:
+        return "reference is not a non-empty string"
+    return None
+
+
+def inspect_result_violation(result: Any) -> str | None:
+    """The first rule an `inspect` result breaks, or None: the closed
+    `{outcome, reference}` object (#206 D11)."""
+    if type(result) is not dict or set(result) != _INSPECT_RESULT_KEYS:
+        return "inspect result is not the closed {outcome, reference} object"
+    return _outcome_violation(result["outcome"]) or _reference_violation(result["reference"])
+
+
+def action_event_violation(event: dict, actions: dict[str, ActionFold], *,
+                           transaction_id: str, keys: list[str], open_fence: dict | None,
+                           state: str) -> str | None:
+    """The rule one envelope-checked action event breaks against the actions folded before
+    it, the open span's fence (None outside a span) and the folded `state`, or None
+    (#206 D2, D17)."""
+    event_type = event["type"]
+    identity = event["action_id"]
+    if type(identity) is not str:
+        return "action_id is not a string"
+    if event_type == "action_declared":
+        if identity in actions:
+            return f"action_id {identity!r} is declared twice"
+        violation = action_violation(event["name"], event["parameters"])
+        if violation is not None:
+            return violation
+        if identity != action_id(transaction_id, event["name"], event["parameters"]):
+            return f"action_id {identity!r} does not re-derive from its name and parameters"
+        return None
+    if identity not in actions:
+        return f"{event_type} action_id {identity!r} has no earlier action_declared"
+    if "fence" in event:
+        violation = fence_violation(event["fence"], keys)
+        if violation is not None:
+            return violation
+        if open_fence is None:
+            return f"{event_type} sits outside an open custody span"
+        if event["fence"] != open_fence:
+            return f"{event_type} fence does not equal the open span's fence"
+    if event_type == "action_inspected":
+        return (_outcome_violation(event["outcome"])
+                or _reference_violation(event["reference"]))
+    raise ValueError(f"action_event_violation: unhandled action event type {event_type!r}")
+
+
+def apply_action_event(event: dict, actions: dict[str, ActionFold]) -> None:
+    """Fold one valid action event into `actions` (#206 D2, D6)."""
+    event_type = event["type"]
+    if event_type == "action_declared":
+        actions[event["action_id"]] = ActionFold(event["action_id"], event["name"])
+        return
+    entry = actions[event["action_id"]]
+    if event_type == "action_inspected":
+        entry.inspection = {"outcome": event["outcome"], "fence": event["fence"],
+                            "at": event["at"]}
+        entry.open = False
+        if (event["outcome"] == "absent" and entry.attempts >= 1
+                and entry.first_failure_ms is None):
+            entry.first_failure_ms = parse_at(event["at"])
+        return
+    raise ValueError(f"apply_action_event: unhandled action event type {event_type!r}")
+
+
+def fold_actions(events: Sequence[Mapping[str, Any]]) -> dict[str, ActionFold]:
+    """Every declared action of a valid history, in declaration order."""
+    actions: dict[str, ActionFold] = {}
+    for event in events:
+        if event["type"] in ACTION_EVENT_KEYS:
+            apply_action_event(event, actions)
+    return actions
+
+
+def retry_safe(entry: ActionFold) -> bool:
+    """Whether the latest attempt returned a non-`accepted` result of a retry-safe class
+    (#206 D6)."""
+    returned = entry.returned
+    return (returned is not None and returned["result"] != "accepted"
+            and returned["error_class"] in RETRY_SAFE_CLASSES)
+
+
+def status(entry: ActionFold) -> str:
+    """`open` while an attempt awaits inspection, else the latest inspection's outcome,
+    else `declared` (#206 D2)."""
+    if entry.open:
+        return "open"
+    return "declared" if entry.inspection is None else entry.inspection["outcome"]
+
+
+def action_views(events: Sequence[Mapping[str, Any]]) -> list[dict]:
+    """One view per declared action, in declaration order; derived, never stored
+    (#206 D2, D17)."""
+    views = []
+    for entry in fold_actions(events).values():
+        current = status(entry)
+        views.append({
+            "action_id": entry.action_id, "name": entry.name, "attempts": entry.attempts,
+            "status": current,
+            "last_error_class": None if entry.returned is None
+            else entry.returned["error_class"],
+            "retry_eligible": (current == "absent" and entry.attempts < MAX_ATTEMPTS
+                               and (entry.attempts == 0 or retry_safe(entry))),
+            "retry_deadline_at": None if entry.first_failure_ms is None
+            else format_at(entry.first_failure_ms + RETRY_WINDOW_MS),
+        })
+    return views
+
+
+def effect_request(document: dict, identity: str, name: str, parameters: dict,
+                   attempt: int) -> Mapping[str, Any]:
+    """The read-only request an effect receives, carrying deep copies of `parameters` and
+    the held fence (#206 D3)."""
+    return MappingProxyType({
+        "transaction_id": document["transaction_id"], "action_id": identity, "name": name,
+        "parameters": copy.deepcopy(parameters),
+        "fence": copy.deepcopy(document["custody"]["fence"]), "attempt": attempt})
