@@ -2,8 +2,9 @@
 anchor and compatibility check requests and their result check, the effect classes, the
 selection and which actions it admits (`selection_refusal`), the admission and decision
 halves of `verify_anchors` and `begin_recovery`, the decision of `settle_recovery`
-(`recovery_settlement`, `settled_citations`), the recovery event and pairing rules, the gates
-and the derived `recovery` view.
+(`recovery_settlement`, `settled_citations`), the admission and link of `roll_forward`
+(`roll_forward_refusal`, `link_events`), the recovery event and pairing rules, the gates and
+the derived `recovery` view.
 
 A check request is a read-only mapping naming the unit by action id, the check, its
 predicate and parameters, the unit's proof collector and the held fence; its result is the
@@ -23,13 +24,15 @@ the checks) and the transition into `recovering`. `recovery_settlement` judges t
 selection in one write (D9): every edge `satisfied` yields `recovery_settled`, citing
 `settled_citations`' restored units and declared residue, and `recovering -> rolled_back`; a
 `diverged`, `unknown` or unretryable edge yields `recovery_incomplete` and its park; anything
-else is `recovery_pending`. `agent_tools.transaction_history` hands every
-`RECOVERY_EVENT_KEYS` event to `recovery_event_violation`, which re-derives a
+else is `recovery_pending`. `roll_forward_refusal` refuses `state_not_attention`, then
+`grant_required`, as `begin_refusal` does, and `link_events` yields one `roll_forward_linked`
+naming a child, or nothing once a link names it (D11). `agent_tools.transaction_history`
+hands every `RECOVERY_EVENT_KEYS` event to `recovery_event_violation`, which re-derives a
 `recovery_started` and a `recovery_settled`'s citations through the same functions, every
 event pair to `recovery_pairing_violation`, and every transition to
-`recovery_transition_violation`, which
-refuses `abandoned` while `effecting_action` names an action and `ready -> publishing` for a
-plan with a `restorable` unit unless an `anchors_verified` carries the open span's fence;
+`recovery_transition_violation`, which refuses `abandoned` while `effecting_action` names an
+action and `ready -> publishing` for a plan with a `restorable` unit unless an
+`anchors_verified` carries the open span's fence;
 `agent_tools.transaction_core`'s `advance` applies the same gates through
 `recovery_advance_violation` with the held fence, and refuses `recovering`, `rolled_back` and
 the `RESERVED_RECOVERY_REASONS` (D7, D9, D10, D22).
@@ -70,12 +73,15 @@ RECOVERY_EVENT_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
                                           "fence"},
     "recovery_settled": _ENVELOPE_KEYS | {"restored", "residue", "fence"},
     "recovery_incomplete": _ENVELOPE_KEYS | {"actions", "fence"},
+    "roll_forward_linked": _ENVELOPE_KEYS | {"child_transaction_id", "grant_id", "reason",
+                                             "fence"},
 })
 _ANCHOR_KEYS = frozenset({"unit", "reference"})
 _ENTERED = ("attention_required", "recovering", "recovery_started", "known")
 _SETTLED = ("recovering", "rolled_back", "recovery_settled", "known")
 _EVENT_STATES = MappingProxyType({"anchors_verified": "ready", "recovery_settled": "recovering",
-                                  "recovery_incomplete": "recovering"})
+                                  "recovery_incomplete": "recovering",
+                                  "roll_forward_linked": "attention_required"})
 _UNRETRYABLE = ("not_retryable", "budget_exhausted", "window_closed")
 
 
@@ -208,17 +214,24 @@ def fresh_grant(events: Sequence[Mapping], grant_id: Any, fence: Any) -> bool:
                and event["fence"] == fence and event["seq"] > parked for event in events)
 
 
+def _parked_refusal(document: dict, grant_id: Any, operation: str) -> tuple[str, str] | None:
+    state = document["state"]
+    if state != "attention_required":
+        return "state_not_attention", f"{operation} runs in attention_required, not {state}"
+    if not fresh_grant(document["events"], grant_id, document["custody"]["fence"]):
+        return "grant_required", (f"grant {grant_id!r} was not issued under the held fence "
+                                  f"since the latest parking")
+    return None
+
+
 def begin_refusal(document: dict, grant_id: Any) -> tuple[str, str] | None:
     """`begin_recovery`'s first refusal `(reason, detail)` under the held fence, in D8's
     order, or None: `state_not_attention`, `grant_required`, `reconciliation_required`,
     `undeclared_effect`, `effect_uncertain`, `no_effect`, `unit_not_restorable`."""
-    state = document["state"]
-    if state != "attention_required":
-        return "state_not_attention", f"begin_recovery runs in attention_required, not {state}"
+    parked = _parked_refusal(document, grant_id, "begin_recovery")
+    if parked is not None:
+        return parked
     held = document["custody"]["fence"]
-    if not fresh_grant(document["events"], grant_id, held):
-        return "grant_required", (f"grant {grant_id!r} was not issued under the held fence "
-                                  f"since the latest parking")
     actions = fold_actions(document["events"])
     for entry in actions.values():
         if entry.attempts and (entry.open or entry.inspection["fence"] != held):
@@ -345,6 +358,45 @@ def recovery_settlement(document: dict, now_ms: int) -> list[dict]:
              "external_state": "unknown" if unknown else "known"}]
 
 
+def roll_forward_refusal(document: dict, grant_id: Any) -> None:
+    """`roll_forward`'s admission under the held fence, run in both holds: refuse
+    `state_not_attention`, then `grant_required`, with `begin_refusal`'s meanings (D8, D11,
+    D19)."""
+    parked = _parked_refusal(document, grant_id, "roll_forward")
+    if parked is not None:
+        raise recovery_refused(document["transaction_id"], *parked)
+
+
+def link_events(document: dict, child_id: str, grant_id: str, reason: str) -> list[dict]:
+    """`roll_forward`'s link: nothing when a `roll_forward_linked` already names `child_id`,
+    so a retry links its child once; else one `roll_forward_linked` under the held fence
+    (D11)."""
+    if child_id in _children(document["events"]):
+        return []
+    return [{"type": "roll_forward_linked", "child_transaction_id": child_id,
+             "grant_id": grant_id, "reason": reason,
+             "fence": copy.deepcopy(document["custody"]["fence"])}]
+
+
+def _children(events: Sequence[Mapping]) -> list[Any]:
+    return [event["child_transaction_id"] for event in events
+            if event["type"] == "roll_forward_linked"]
+
+
+def _linked_violation(event: dict, events_before: Sequence[Mapping],
+                      document: dict) -> str | None:
+    if not fresh_grant(events_before, event["grant_id"], event["fence"]):
+        return (f"roll_forward_linked grant {event['grant_id']!r} was not issued under its "
+                f"fence since the latest parking")
+    child = event["child_transaction_id"]
+    if child == document["transaction_id"] or child in _children(events_before):
+        return ("roll_forward_linked child_transaction_id is the transaction's own or an "
+                "earlier link's")
+    if type(event["reason"]) is not str or not event["reason"]:
+        return "roll_forward_linked reason is not a non-empty string"
+    return None
+
+
 def _settled_violation(event: dict, events_before: Sequence[Mapping],
                        document: dict) -> str | None:
     selected, actions = _selected(events_before), fold_actions(events_before)
@@ -411,7 +463,9 @@ def recovery_event_violation(event: dict, events_before: Sequence[Mapping], docu
     every selected edge `satisfied` in the fold before it and `restored` and `residue` equal
     to `settled_citations`; the second needs `actions` to be a non-empty list of selected
     edges in selection order, none `satisfied`, and does not re-judge the retry window (D9,
-    D10)."""
+    D10). A `roll_forward_linked` happens in `attention_required` under a `fresh_grant`, and
+    names a child that is neither the transaction nor an earlier link, with a non-empty
+    `reason`; `agent_tools.transaction_history` checks the child is a transaction id (D11)."""
     kind = event["type"]
     if kind in _EVENT_STATES and state != _EVENT_STATES[kind]:
         return f"{kind} happens in {state}, not {_EVENT_STATES[kind]}"
@@ -428,6 +482,8 @@ def recovery_event_violation(event: dict, events_before: Sequence[Mapping], docu
         return _settled_violation(event, events_before, document)
     if kind == "recovery_incomplete":
         return _incomplete_violation(event, events_before)
+    if kind == "roll_forward_linked":
+        return _linked_violation(event, events_before, document)
     anchors = event["anchors"]
     if (type(anchors) is not list
             or any(type(entry) is not dict or set(entry) != _ANCHOR_KEYS
@@ -521,6 +577,5 @@ def recovery_view(document: dict) -> dict[str, Any]:
         "recovers": created["recovers"],
         "effect_snapshot": None if latest is None else copy.deepcopy(latest["effect_snapshot"]),
         "selected": [] if latest is None else copy.deepcopy(latest["selected"]),
-        "children": [event["child_transaction_id"] for event in events
-                     if event["type"] == "roll_forward_linked"],
+        "children": _children(events),
     }

@@ -16,7 +16,8 @@ declaration bound to the proof plan's, through `agent_tools.transaction_recovery
 on every load (#208 D6, D12), its `recovery_event_violation` checks each recovery event, its
 `recovery_transition_violation` gates each transition and its `recovery_pairing_violation`
 binds `recovery_started` to the entry into `recovering`, `recovery_settled` to the entry into
-`rolled_back` and `recovery_incomplete` to its park (#208 D7, D9, D10). It reads no file, lock
+`rolled_back` and `recovery_incomplete` to its park (#208 D7, D9, D10); a
+`roll_forward_linked` must also name a transaction id (#208 D11). It reads no file, lock
 or clock: `validate_state` takes the creation-key index lookup as a callable, which
 `agent_tools.transaction_core` binds to its store root. It also composes what a reap
 appends to a lapsed span (`reaped`) and a late owner result's event (`owner_result_event`),
@@ -460,9 +461,11 @@ def validate_state(document: Any, transaction_id: str,
     after it, and each reserved parking reason and `succeeded` to the event right before it
     (#207 D10); every transition passes `gate_violation` over the actions before it (D12) and,
     after the terminal check, `recovery_transition_violation` with the open span's fence; each
-    recovery event, `recovery_settled` and `recovery_incomplete` included, is checked by
-    `recovery_event_violation`, and `recovery_pairing_violation` binds each recovery event and
-    reserved recovery reason as `pairing_violation` does (#208 D7, D9, D10, D22)."""
+    recovery event, `recovery_settled`, `recovery_incomplete` and `roll_forward_linked`
+    included, is checked by `recovery_event_violation`, after a `roll_forward_linked`'s child
+    is checked to be a transaction id (#208 D11), and `recovery_pairing_violation` binds each
+    recovery event and reserved recovery reason as `pairing_violation` does (#208 D7, D9, D10,
+    D22)."""
     def refuse(rule: str) -> StateInvalid:
         return StateInvalid(f"{transaction_id}: {rule}")
 
@@ -585,6 +588,10 @@ def validate_state(document: Any, transaction_id: str,
                 apply_proof_event(event, proof_fold)
             case str() if event_type in RECOVERY_EVENT_KEYS:
                 _check_envelope(event, seq, RECOVERY_EVENT_KEYS[event_type], refuse)
+                if (event_type == "roll_forward_linked"
+                        and not is_id(event["child_transaction_id"])):
+                    raise refuse(f"event {seq} roll_forward_linked child_transaction_id is "
+                                 f"not a rel_ UUIDv7")
                 violation = recovery_event_violation(
                     event, events[:seq - 1], document, keys=keys,
                     open_fence=None if fold.custody is None else fold.custody["fence"],

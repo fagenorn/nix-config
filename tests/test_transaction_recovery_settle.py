@@ -4,13 +4,16 @@ Run: just agent-workflow-tests
 """
 
 import copy
+import hashlib
 import unittest
 
-from agent_tools.transaction_core import RecoveryRefused, TransitionRefused
+from agent_tools.transaction_core import (
+    CreationConflict, RecoveryRefused, StaleCustody, TransactionStore, TransitionRefused)
 
+from .test_transaction_custody import KEYS, SUBJECT, TTL, plain
 from .test_transaction_invocation import FakeEffect, renumbered
 from .test_transaction_recovery import RecoveryCase
-from .test_transaction_recovery_plan import RECOVERY
+from .test_transaction_recovery_plan import PROOF, RECOVERY
 
 
 class SettleCase(RecoveryCase):
@@ -168,6 +171,92 @@ class SettleTest(SettleCase):
         dropped = copy.deepcopy(document)
         del dropped["events"][index]
         self.assertRuleRefuses(self.transaction_id, renumbered(dropped), "recovery_incomplete")
+
+
+class RollForwardTest(SettleCase):
+    def forward(self, key="forward", grant_id="g-1", store=None,
+                subject={**SUBJECT, "candidate": "sha256:def"}):
+        return (store or self.store).roll_forward(
+            self.custody, grant_id=grant_id, reason="unit_not_restorable", creation_key=key,
+            subject=subject, concurrency_keys=KEYS, proof=PROOF, recovery=RECOVERY)
+
+    def test_the_child_has_its_own_id_and_the_parent_records_the_link_without_rewrite(self):
+        self.parked()
+        self.grant()
+        before = self.state_doc(self.transaction_id)
+        child = self.forward()
+        parent = self.state_doc(self.transaction_id)
+        self.assertNotEqual(child.transaction_id, self.transaction_id)
+        self.assertEqual((child.state, child.creation_key), ("created", "forward"))
+        self.assertEqual((child.events[0]["recovers"], child.recovery["recovers"]),
+                         (self.transaction_id, self.transaction_id))
+        self.assertEqual(parent["events"][:len(before["events"])], before["events"])
+        link = parent["events"][-1]
+        self.assertEqual(link, {
+            "seq": len(before["events"]) + 1, "type": "roll_forward_linked", "at": link["at"],
+            "child_transaction_id": child.transaction_id, "grant_id": "g-1",
+            "reason": "unit_not_restorable", "fence": plain(self.custody.fence)})
+        self.assertEqual({k: parent[k] for k in ("state", "parked_from", "custody")},
+                         {k: before[k] for k in ("state", "parked_from", "custody")})
+        self.assertEqual(list(self.store.load(self.transaction_id).recovery["children"]),
+                         [child.transaction_id])
+
+    def test_roll_forward_outside_attention_or_without_a_fresh_grant_creates_nothing(self):
+        self.to("awaiting_verification")
+        self.grant("early")
+        self.refused("state_not_attention", lambda: self.forward(grant_id="early"))
+        self.to("attention_required")
+        self.refused("grant_required", lambda: self.forward(grant_id="early"))
+
+    def test_the_parents_own_key_can_never_become_its_child(self):
+        self.parked()
+        self.grant()
+        error = self.assertRefusedUnchanged(
+            CreationConflict, lambda: self.forward(key="recovery", subject=SUBJECT))
+        self.assertTrue(str(error).endswith("with a different recovers"), str(error))
+
+    def test_a_retry_after_dying_between_child_and_link_links_once(self):
+        self.parked()
+        self.grant()
+        index = self.root / "creation-keys" / f"{hashlib.sha256(b'forward').hexdigest()}.json"
+        lapsing = TransactionStore(self.root,
+                                   clock=lambda: self.clock() + (TTL if index.exists() else 0))
+        with self.assertRaises(StaleCustody):
+            self.forward(store=lapsing)
+        self.assertTrue(index.exists())
+        self.assertNotIn("roll_forward_linked", self.types(self.transaction_id))
+        self.clock.advance(TTL)
+        self.store.reap(self.transaction_id, reason="executor lost")
+        self.custody = self.acquire(self.transaction_id)
+        self.grant("g-2")
+        child = self.forward(grant_id="g-2")
+        self.assertEqual(self.types(self.transaction_id).count("roll_forward_linked"), 1)
+        before = self.files()
+        self.assertEqual(self.forward(grant_id="g-2").transaction_id, child.transaction_id)
+        self.assertEqual(self.files(), before)
+
+    def test_hand_built_link_breaches_are_state_invalid(self):
+        self.parked()
+        self.grant()
+        child = self.forward()
+        document = self.state_doc(self.transaction_id)
+        duplicate = copy.deepcopy(document)
+        duplicate["events"].append({**copy.deepcopy(document["events"][-1]),
+                                    "seq": len(document["events"]) + 1})
+        duplicate["revision"] += 1
+        for edited, fragment in (
+                (lambda d: d["events"][-1].update(child_transaction_id=self.transaction_id),
+                 "child_transaction_id"),
+                (lambda d: d["events"][-1].update(child_transaction_id="not-an-id"),
+                 "child_transaction_id"),
+                (lambda d: d["events"][-1].update(grant_id="never-issued"), "grant"),
+                (lambda d: d["events"][-1].update(reason=""), "reason")):
+            with self.subTest(fragment=fragment):
+                changed = copy.deepcopy(document)
+                edited(changed)
+                self.assertRuleRefuses(self.transaction_id, changed, fragment)
+        self.assertRuleRefuses(self.transaction_id, duplicate, "child_transaction_id")
+        self.assertEqual(child.recovery["recovers"], self.transaction_id)
 
 
 if __name__ == "__main__":

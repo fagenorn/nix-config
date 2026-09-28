@@ -41,7 +41,8 @@ declaration (#208); this module re-exports its constants and those three functio
 halves in `agent_tools.transaction_recovery`, whose refusal reasons and effect classes this
 module re-exports; `begin_recovery` enters `recovering` under a fresh grant around that module's
 admission, `settle_recovery` judges it into `rolled_back` or a `recovery_incomplete` park,
-and `advance` applies its gates. The module has no command and no caller yet.
+`roll_forward` creates a linked child without holding the parent lock across it, and
+`advance` applies its gates. The module has no command and no caller yet.
 """
 
 import contextlib
@@ -82,8 +83,8 @@ from agent_tools.transaction_proof import (
     proof_refused, settlement)
 from agent_tools.transaction_recovery import (
     EFFECT_CLASSES, RECOVERY_REFUSAL_REASONS, anchor_requests, anchors_events, begin_events,
-    begin_requests, check_result_violation, recovery_advance_violation, recovery_refused,
-    recovery_settlement, selection_refusal)
+    begin_requests, check_result_violation, link_events, recovery_advance_violation,
+    recovery_refused, recovery_settlement, roll_forward_refusal, selection_refusal)
 from agent_tools.transaction_recovery_plan import (
     EDGE_ACTIONS, POSTURES, RECOVERY_PLAN_SCHEMA, RECOVERY_REJECTION_REASONS, bind_recovery,
     compile_recovery, materialize_recovery)
@@ -853,6 +854,28 @@ class TransactionStore:
         rolled back (with the terminal `lease_released`), incomplete, else `recovery_pending`
         (#208 D9)."""
         return self._decide(custody, "settle_recovery", recovery_settlement)
+
+    def roll_forward(self, custody: Custody, *, grant_id: str, reason: str,
+                     creation_key: str, subject: dict, concurrency_keys: Collection[str],
+                     proof: dict, recovery: dict) -> Transaction:
+        """Create the child whose `recovers` is this transaction, link it, return its snapshot
+        (#208 D11). Before any lock a malformed credential, `grant_id` or `reason` refuses.
+        The parent's first hold runs `roll_forward_refusal` and writes nothing; with no parent
+        lock held, `_create` then makes the child or returns the one `creation_key` names,
+        under every `create` rule (a differing `recovers` is a `CreationConflict`); the second
+        hold repeats the refusal and appends `link_events`, if any. A retry after a death
+        between child and link finds that child and links it once."""
+        require_texts(custody, "roll_forward", grant_id=grant_id, reason=reason)
+        with self._fenced(custody, "roll_forward", writes=True) as (prior, _):
+            roll_forward_refusal(prior, grant_id)
+        child = self._create(creation_key, subject, concurrency_keys, proof, recovery,
+                             custody.transaction_id)
+        with self._fenced(custody, "roll_forward", writes=True) as (prior, now):
+            roll_forward_refusal(prior, grant_id)
+            events = link_events(prior, child.transaction_id, grant_id, reason)
+            if events:
+                self._append(prior, now, events)
+        return child
 
     def _observed(self, custody: Custody, operation: str, observer: Any,
                   admit: Callable[[dict], list[Mapping]],
