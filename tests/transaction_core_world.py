@@ -31,6 +31,7 @@ FAULTS = (
     "restore_incompatible",     # prior subject incompatible with current schema/data epoch
     "crash_after_invoke",       # executor dies between invoke and observation
     "crash_before_invoke",      # executor dies between its recorded intent and the call
+    "slow_collection",          # every collection inside a cohort takes 250 s
 )
 
 

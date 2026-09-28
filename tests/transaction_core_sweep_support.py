@@ -1,5 +1,5 @@
 """Scenario fixture and fixture executor for the transaction core sweep (#204 D6, D17;
-#206 D12, D18; #207 D14, D15, D29).
+#206 D12, D18; #207 D14-D17, D29).
 
 The executor is a happy-path walker over the simulated world that asks the shipped core
 to advance at each lifecycle boundary through the public store API, on a store whose
@@ -19,8 +19,12 @@ pass collects every plan obligation in plan order through `collect_obligation`, 
 one whose latest evidence is still admissible and one refused `unsupported_obligation` or
 `dependency_not_accepted`. Then each convergence cohort is started, its members collected
 with custody renewed after each, and `settle_proof` either seals into `succeeded` or parks
-with its typed reason; the executor repeats while it leaves the transaction in `proving`
-and never advances past it. Scenario hooks move the world clock: `lease_renewal` renews
+with its typed reason (`proof_rejected`, `proof_did_not_converge`); the executor repeats
+while it leaves the transaction in `proving`, tolerating a `start_cohort` refused
+`proof_incomplete` or `convergence_exhausted` so that `settle_proof` judges, and never
+advances past a park. Under the `slow_collection` fault every observation made inside a
+cohort first moves the world clock 250 seconds, so a cohort with members outlives its
+window (`expired_snapshot`). Scenario hooks move the world clock: `lease_renewal` renews
 in place twice; `lease_lapse` lets the lease expire before the last required obligation,
 has the reaper park the transaction, reacquires, resumes proving and recollects what the
 new fence voided; `resume_after_crash` kills the executor between the first publication
@@ -43,7 +47,8 @@ TTL_MS = 600_000
 # `success` is ported from prototype-release-transactions/scenarios.py at dc98ba9;
 # `lease_renewal` and `lease_lapse` are new in #205 (D22, D29); `throttled_retry` and
 # `resume_after_crash` are ported from dc98ba9 in #206 (D12), the crash moved to between
-# the recorded intent and the call.
+# the recorded intent and the call. The last five come from dc98ba9 in #207 (D14), with
+# `expired_snapshot`'s 250 s tick moved into cohort collection.
 SCENARIOS = {
     "success": {"faults": frozenset(),
                 "note": "clean path: publish, activate, prove, seal a terminal receipt."},
@@ -59,6 +64,27 @@ SCENARIOS = {
                            "note": "the executor dies between the first publication "
                                    "action's intent and its call; reap, reacquire, the "
                                    "blind invoke is refused, inspect, retry."},
+    "partial_publication": {"faults": frozenset({"partial_publication"}),
+                            "note": "an index/channel target already holds a different "
+                                    "identity: the action inspects diverged, the executor "
+                                    "parks, nothing is clobbered or re-invoked."},
+    "failed_activation": {"faults": frozenset({"activation_failure"}),
+                          "note": "the invoke is accepted but the provider's terminal state "
+                                  "is failure: the activation action inspects diverged and "
+                                  "the executor parks."},
+    "stale_false_positive_health": {"faults": frozenset({"stale_health"}),
+                                    "note": "liveness is satisfied while the running subject "
+                                            "is the previous code; the derived identity "
+                                            "floor rejects it and settle_proof parks "
+                                            "proof_rejected."},
+    "expired_snapshot": {"faults": frozenset({"slow_collection"}),
+                         "note": "every collection inside a cohort takes 250 s, so a cohort "
+                                 "outlives its window and fails; settle_proof parks "
+                                 "proof_did_not_converge, never extending a snapshot."},
+    "fleet_stall": {"faults": frozenset({"member_stale"}),
+                    "note": "one frozen member of a convergent unit never reports the "
+                            "desired digest, so activation stays in_progress and nothing "
+                            "is re-invoked."},
 }
 
 
@@ -156,6 +182,8 @@ class _Observer:
         self.unit = unit
 
     def observe(self, request):
+        if "slow_collection" in self.unit.world.faults and request["cohort"] is not None:
+            self.unit.world.tick(250)
         identity = request["obligation_id"]
         derived = identity.split(":")[1] if identity.startswith("derived:") else None
         parameters = request["parameters"]
