@@ -2,7 +2,11 @@
 lifecycle vocabularies, the `Custody` credential and `Transaction` snapshot types, the
 credential shape checks, the pure history validator and the snapshot fold. It reads no
 file, lock or clock: `validate_state` takes the creation-key index lookup as a callable,
-which `agent_tools.transaction_core` binds to its store root.
+which `agent_tools.transaction_core` binds to its store root. It also composes what a reap
+appends to a lapsed span (`reaped`) and a late owner result's event (`owner_result_event`),
+answers whether an executor and fence were ever issued a span (`span_issued`), and holds the
+strict JSON object rule (`json_object_violation`) that a created `subject` and a late `result`
+share.
 """
 
 import calendar
@@ -15,9 +19,10 @@ from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
+from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_custody import (
     CUSTODY_EVENTS, EVIDENCE_FORMS, admissibility, fence_violation)
-from agent_tools.transaction_storage import StateInvalid, serialize
+from agent_tools.transaction_storage import StateInvalid, serialize, strict_loads
 
 SCHEMA = "transaction-state/v2"
 
@@ -65,8 +70,13 @@ _EVENT_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
     "evidence_recorded": _ENVELOPE_KEYS | {"evidence_id", "form", "reference", "fence"},
     "interval_opened": _ENVELOPE_KEYS | {"evidence_id", "fence"},
     "grant_issued": _ENVELOPE_KEYS | {"grant_id", "actor", "fence"},
+    "stop_synthesized": _ENVELOPE_KEYS | {"fence", "executor_id", "reason"},
+    "owner_result": _ENVELOPE_KEYS | {"executor_id", "fence", "custody", "supersedes",
+                                      "result"},
 })
 _FENCED_EVENTS = frozenset({"evidence_recorded", "interval_opened", "grant_issued"})
+_OUTCOME_EVENTS = frozenset({"stop_synthesized", "owner_result"})
+_OPENING_EVENTS = ("lease_acquired", "lease_reacquired")
 _RELEASE_REASONS = ("released", "quiesced", "terminal")
 
 
@@ -232,6 +242,7 @@ class _CustodyFold:
     last_close: str | None = None
     evidence_ids: dict[str, str] = dataclasses.field(default_factory=dict)
     grant_ids: set[str] = dataclasses.field(default_factory=set)
+    stops: list[tuple[int, dict]] = dataclasses.field(default_factory=list)
 
 
 def _id_violation(event: dict, fold: _CustodyFold) -> str | None:
@@ -355,6 +366,40 @@ def _fold_fenced(event: dict, seq: int, fold: _CustodyFold,
     _note_id(event, fold)
 
 
+def _fold_outcome(event: dict, seq: int, previous: Any, fold: _CustodyFold,
+                  refuse: Callable[[str], StateInvalid]) -> None:
+    """Check one stop_synthesized or owner_result event; neither opens nor closes a span
+    (D17, D18, D30)."""
+    event_type = event["type"]
+    _check_envelope(event, seq, _EVENT_KEYS[event_type], refuse)
+    violation = fence_violation(event["fence"], fold.keys)
+    if violation is not None:
+        raise refuse(f"event {seq} {violation}")
+    pair = (event["executor_id"], event["fence"])
+    if event_type == "stop_synthesized":
+        if not (type(previous) is dict and previous.get("type") == "lease_lapse_detected"
+                and (previous["executor_id"], previous["fence"]) == pair):
+            raise refuse(f"event {seq} stop_synthesized does not follow a "
+                         f"lease_lapse_detected of its fence and executor")
+        if type(event["reason"]) is not str or not event["reason"]:
+            raise refuse(f"event {seq} reason is not a non-empty string")
+        fold.stops.append((seq, event["fence"]))
+        return
+    if pair not in fold.spans:
+        raise refuse(f"event {seq} owner_result names no custody span of that executor "
+                     f"and fence")
+    if type(event["custody"]) is not str or event["custody"] not in ("current", "stale"):
+        raise refuse(f"event {seq} owner_result custody is not current or stale")
+    supersedes = event["supersedes"]
+    if supersedes is not None and (type(supersedes) is not int or (
+            supersedes, event["fence"]) not in fold.stops):
+        raise refuse(f"event {seq} owner_result supersedes names no earlier "
+                     f"stop_synthesized of its fence")
+    violation = json_object_violation(event["result"])
+    if violation is not None:
+        raise refuse(f"event {seq} owner_result result {violation}")
+
+
 def _fold_custody(event: dict, seq: int, fold: _CustodyFold, state: str,
                   entered_terminal: int | None, refuse: Callable[[str], StateInvalid]) -> None:
     """Check one custody event's envelope and fence, then fold it (D11)."""
@@ -363,7 +408,7 @@ def _fold_custody(event: dict, seq: int, fold: _CustodyFold, state: str,
     violation = fence_violation(event["fence"], fold.keys)
     if violation is not None:
         raise refuse(f"event {seq} {violation}")
-    if event_type in ("lease_acquired", "lease_reacquired"):
+    if event_type in _OPENING_EVENTS:
         _fold_opening(event, seq, fold, refuse)
     else:
         _fold_closing(event, seq, fold, state, entered_terminal, refuse)
@@ -431,6 +476,8 @@ def validate_state(document: Any, transaction_id: str,
                 _fold_custody(event, seq, fold, state, entered_terminal, refuse)
             case str() if event_type in _FENCED_EVENTS:
                 _fold_fenced(event, seq, fold, refuse)
+            case str() if event_type in _OUTCOME_EVENTS:
+                _fold_outcome(event, seq, events[seq - 2], fold, refuse)
             case _:
                 raise refuse(f"event {seq} has unknown event type {event_type!r}")
     custody = fold.custody
@@ -509,3 +556,66 @@ def bound_path(document: dict) -> str | None:
         if event["type"] == "lease_acquired":
             return event["subject_path"]
     return None
+
+
+def json_object_violation(value: Any) -> str | None:
+    """How `value` fails to be a JSON object that survives a strict JSON round trip, or
+    None: the rule a created `subject` and a late owner `result` share (D34)."""
+    if type(value) is not dict:
+        return "is not a JSON object"
+    try:
+        loaded = strict_loads(serialize(value))
+    except (TypeError, ValueError) as error:
+        return f"is not strict JSON ({error})"
+    if loaded != value or telemetry_digest(loaded) != telemetry_digest(value):
+        return "does not survive a strict JSON round trip"
+    return None
+
+
+def reaped(document: dict, at: str, reason: str) -> dict:
+    """A deep-copied candidate recording the lapse of `document`'s held span at `at`: the
+    lapse, a synthesized stop and, outside a parking, a park to `attention_required` with
+    unknown external state; custody cleared (D17). The caller has checked the lapse."""
+    candidate = copy.deepcopy(document)
+    events = candidate["events"]
+    held = candidate["custody"]
+    for event_type, extra in (("lease_lapse_detected", {}),
+                              ("stop_synthesized", {"reason": reason})):
+        events.append({"seq": len(events) + 1, "type": event_type, "at": at,
+                       "fence": copy.deepcopy(held["fence"]),
+                       "executor_id": held["executor_id"], **extra})
+    source = candidate["state"]
+    if source not in PARKINGS:
+        events.append({"seq": len(events) + 1, "type": "transitioned", "at": at,
+                       "from": source, "to": "attention_required", "reason": reason,
+                       "external_state": "unknown"})
+        candidate["parked_from"] = source
+        candidate["state"] = "attention_required"
+    candidate["custody"] = None
+    candidate["revision"] = len(events)
+    return candidate
+
+
+def span_issued(events: Sequence[Mapping[str, Any]], executor_id: str, fence: Any) -> bool:
+    """Whether some opening event carries `executor_id` and a fence equal to `fence` (D18)."""
+    return any(event["type"] in _OPENING_EVENTS and event["executor_id"] == executor_id
+               and event["fence"] == fence for event in events)
+
+
+def owner_result_event(document: dict, *, at: str, executor_id: str, fence: dict,
+                       result: dict, lapsed: bool) -> dict:
+    """The `owner_result` event a late result appends to `document` (D18, D34).
+
+    `custody` is `current` only when the projection holds this executor and fence and
+    `lapsed` is false, else `stale`; `supersedes` is the seq of the latest
+    `stop_synthesized` with an equal fence, else None.
+    """
+    held = document["custody"]
+    current = (held is not None and held["executor_id"] == executor_id
+               and held["fence"] == fence and not lapsed)
+    stops = [event["seq"] for event in document["events"]
+             if event["type"] == "stop_synthesized" and event["fence"] == fence]
+    return {"seq": document["revision"] + 1, "type": "owner_result", "at": at,
+            "executor_id": executor_id, "fence": copy.deepcopy(fence),
+            "custody": "current" if current else "stale",
+            "supersedes": stops[-1] if stops else None, "result": copy.deepcopy(result)}

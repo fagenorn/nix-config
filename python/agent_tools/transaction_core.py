@@ -15,7 +15,10 @@ and the live lease records; `advance` is fenced from `publishing` on and while
 custody is held, and entering a terminal releases custody. `record_evidence`,
 `open_interval` and `issue_grant` append fence-stamped records under the held
 custody, `check_grant` checks one read-only, and every snapshot re-derives their
-verdicts from the history. The durable-file
+verdicts from the history. `reap` records a lapsed span's lapse and synthesized stop,
+parking the transaction unless it is already parked, and `record_owner_result` keeps an
+authentic late owner result beside that stop without changing state or custody. The
+durable-file
 primitives and the refusal hierarchy live in `agent_tools.transaction_storage`, and
 the document model — vocabularies, `Custody`, `Transaction`, the validator and the
 snapshot fold — in `agent_tools.transaction_history`; this module re-exports the
@@ -37,17 +40,19 @@ from types import MappingProxyType
 from typing import Any
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_custody import EVIDENCE_FORMS, LeaseAuthority, admissibility
+from agent_tools.transaction_custody import (
+    EVIDENCE_FORMS, LeaseAuthority, admissibility, fence_violation)
 from agent_tools.transaction_history import (
     EXTERNAL_STATES, FORWARD, PARKINGS, SCHEMA, STATES, TERMINALS, TRANSITIONS, Custody,
     Transaction, bound_path, edge_allowed, fenced_id_violation, format_at, is_id,
-    is_subject_path, key_set_violation, parked_since, require_custody_shape, require_texts,
-    snapshot, validate_state)
+    is_subject_path, json_object_violation, key_set_violation, owner_result_event,
+    parked_since, reaped, require_custody_shape, require_texts, snapshot, span_issued,
+    validate_state)
 from agent_tools.transaction_storage import (
     CreationConflict, CustodyMisbound, FenceViolation, GrantInvalid, LeaseUnavailable,
     StaleCustody, StateInvalid, TransactionBusy, TransactionError, TransitionRefused,
     UnknownTransaction, atomic_write, fsync_directory, lstat_mode, open_lock, read_json,
-    require_directory, serialize, strict_loads)
+    require_directory)
 
 INDEX_SCHEMA = "transaction-creation-key/v1"
 PARKED_CUSTODY_WINDOW_MS = 900_000  # the core cap on custody held through a parking (D19)
@@ -103,14 +108,9 @@ def _require_creatable(root: Path, creation_key: Any, subject: Any,
         creation_key.encode("utf-8")
     except UnicodeEncodeError as error:
         raise StateInvalid(f"{where}: not encodable as UTF-8") from error
-    if type(subject) is not dict:
-        raise StateInvalid(f"{where}: subject is not a JSON object")
-    try:
-        loaded = strict_loads(serialize(subject))
-    except (TypeError, ValueError) as error:
-        raise StateInvalid(f"{where}: subject is not strict JSON ({error})") from error
-    if loaded != subject or telemetry_digest(loaded) != telemetry_digest(subject):
-        raise StateInvalid(f"{where}: subject does not survive a strict JSON round trip")
+    violation = json_object_violation(subject)
+    if violation is not None:
+        raise StateInvalid(f"{where}: subject {violation}")
     violation = key_set_violation(concurrency_keys)
     if violation is not None:
         raise StateInvalid(f"{where}: {violation}")
@@ -560,6 +560,83 @@ class TransactionStore:
                                   f"differs from the bound path {held['subject_path']!r}")
         if self._leases.span_lapsed(held["fence"], now):
             raise StaleCustody(f"{transaction_id}: custody has lapsed")
+
+    def reap(self, transaction_id: str, *, reason: str) -> Transaction:
+        """The reaper's entry: record a lapsed span, taking no custody (D17, D24).
+
+        With no held custody, a terminal, or a span still live on one clock reading,
+        it writes nothing and returns the unchanged snapshot, so a sweep may call it
+        on every transaction. On a lapsed span one `state.json` write appends
+        `lease_lapse_detected`, `stop_synthesized` with `reason` and, outside a
+        parking, a transition to `attention_required` with `reason` and external
+        state `unknown`; custody becomes None. Lease records are not touched: an
+        expired or re-held record is already inert.
+        """
+        if type(reason) is not str or not reason:
+            raise StateInvalid(f"{transaction_id}: reap: reason {reason!r} is not a "
+                               f"non-empty string")
+        with self._transaction_locked(transaction_id):
+            prior = self._validated_document(transaction_id)
+            if prior["state"] in TERMINALS or prior["custody"] is None:
+                return snapshot(prior)
+            now = self._now()
+            if not self._leases.span_lapsed(prior["custody"]["fence"], now):
+                return snapshot(prior)
+            candidate = reaped(prior, format_at(now), reason)
+            _validate_state(candidate, transaction_id, self.root)
+            directory = self.root / transaction_id
+            atomic_write(directory, directory / "state.json", candidate)
+        return snapshot(candidate)
+
+    def record_owner_result(self, transaction_id: str, *, executor_id: str,
+                            subject_path: str, fence: Mapping[str, Mapping[str, Any]],
+                            result: dict) -> Transaction:
+        """Keep a late owner result as evidence, never as authority (D18, D27, D34).
+
+        A terminal is `TransitionRefused` first; then the executor and fence must
+        equal some span's opening event (else `StaleCustody`: the core never issued
+        that credential), and the path the bound one (else `CustodyMisbound`). One
+        `state.json` write appends `owner_result` with `custody` `current` when the
+        projection holds that executor and fence and the span has not lapsed, else
+        `stale`, and `supersedes` naming the latest `stop_synthesized` of that fence
+        or None. It never changes state, `parked_from` or custody, and never
+        touches lease records.
+        """
+        where = f"{transaction_id}: record_owner_result"
+        if type(executor_id) is not str or not executor_id:
+            raise StateInvalid(f"{where}: executor_id {executor_id!r} is not a non-empty "
+                               f"string")
+        if not is_subject_path(subject_path):
+            raise StateInvalid(f"{where}: subject_path {subject_path!r} is not an absolute "
+                               f"normalized path")
+        violation = fence_violation(fence)
+        if violation is not None:
+            raise StateInvalid(f"{where}: {violation}")
+        violation = json_object_violation(result)
+        if violation is not None:
+            raise StateInvalid(f"{where}: result {violation}")
+        presented = {key: dict(entry) for key, entry in fence.items()}
+        with self._transaction_locked(transaction_id):
+            prior = self._validated_document(transaction_id)
+            if prior["state"] in TERMINALS:
+                raise TransitionRefused(f"{where}: state {prior['state']} is terminal")
+            if not span_issued(prior["events"], executor_id, presented):
+                raise StaleCustody(f"{where}: executor {executor_id!r} and the presented "
+                                   f"fence name no custody span the core issued")
+            bound = bound_path(prior)
+            if subject_path != bound:
+                raise CustodyMisbound(f"{where}: subject_path {subject_path!r} differs from "
+                                      f"the bound path {bound!r}")
+            now = self._now()
+            candidate = copy.deepcopy(prior)
+            candidate["events"].append(owner_result_event(
+                prior, at=format_at(now), executor_id=executor_id, fence=presented,
+                result=result, lapsed=self._leases.span_lapsed(presented, now)))
+            candidate["revision"] = len(candidate["events"])
+            _validate_state(candidate, transaction_id, self.root)
+            directory = self.root / transaction_id
+            atomic_write(directory, directory / "state.json", candidate)
+        return snapshot(candidate)
 
     def inspect_lease(self, key: str) -> Mapping[str, Any] | None:
         """A read-only view of `key`'s lease record, or None; no lock, no write (D6)."""

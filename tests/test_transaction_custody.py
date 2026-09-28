@@ -640,5 +640,150 @@ class EvidenceTest(CustodyCase):
                 self.assertRuleRefuses(transaction_id, copy.deepcopy(document), fragment)
 
 
+class ReapTest(CustodyCase):
+    def proving(self):
+        transaction_id = self.new()
+        custody = self.acquire(transaction_id)
+        for target in ("awaiting_verification", "ready", "publishing", "published",
+                       "proving"):
+            self.store.advance(transaction_id, target, reason="r", external_state="known",
+                               custody=custody)
+        return transaction_id, custody
+
+    def test_reap_writes_nothing_without_a_lapse(self):
+        bare = self.new("bare", keys=("project:bare",))
+        transaction_id, _ = self.proving()
+        before = self.files()
+        for candidate in (bare, transaction_id):
+            self.assertEqual(self.store.reap(candidate, reason="sweep"),
+                             self.store.load(candidate))
+        self.assertEqual(self.files(), before)
+
+    def test_reaping_a_lapse_parks_with_a_synthesized_stop_once(self):
+        transaction_id, custody = self.proving()
+        self.clock.advance(TTL)
+        reaped = self.store.reap(transaction_id, reason="lease expired")
+        tail = [dict(e) for e in reaped.events[-3:]]
+        self.assertEqual([e["type"] for e in tail],
+                         ["lease_lapse_detected", "stop_synthesized", "transitioned"])
+        self.assertEqual((tail[1]["fence"], tail[1]["executor_id"], tail[1]["reason"]),
+                         (plain(custody.fence), "exec-a", "lease expired"))
+        self.assertEqual((tail[2]["to"], tail[2]["external_state"], tail[2]["reason"]),
+                         ("attention_required", "unknown", "lease expired"))
+        self.assertEqual((reaped.state, reaped.parked_from, reaped.custody),
+                         ("attention_required", "proving", None))
+        before = self.files()
+        self.assertEqual(self.store.reap(transaction_id, reason="again"), reaped)
+        self.assertEqual(self.files(), before)
+        for call in (
+                lambda: self.store.advance(transaction_id, "proving", reason="r",
+                                           custody=custody),
+                lambda: self.store.record_evidence(custody, evidence_id="x",
+                                                   form="snapshot", reference="r")):
+            self.assertRefusedUnchanged(StaleCustody, call)
+        fresh = self.acquire(transaction_id, executor="exec-b")
+        for call in (
+                lambda: self.store.advance(transaction_id, "proving", reason="r",
+                                           custody=custody),
+                lambda: self.store.record_evidence(custody, evidence_id="x",
+                                                   form="snapshot", reference="r"),
+                lambda: self.store.renew(custody),
+                lambda: self.store.release(custody)):
+            self.assertRefusedUnchanged(StaleCustody, call)  # epoch 1 after epoch 2
+        self.assertEqual(self.store.advance(transaction_id, "proving", reason="r",
+                                            custody=fresh).state, "proving")
+
+    def test_reaping_a_parked_lapse_adds_no_transition(self):
+        transaction_id = self.new()
+        custody = self.acquire(transaction_id)
+        self.store.advance(transaction_id, "attention_required", reason="r", custody=custody)
+        self.clock.advance(TTL)
+        reaped = self.store.reap(transaction_id, reason="lease expired")
+        self.assertEqual([e["type"] for e in reaped.events[-2:]],
+                         ["lease_lapse_detected", "stop_synthesized"])
+        self.assertEqual(reaped.state, "attention_required")
+
+
+class OwnerResultTest(ReapTest):
+    def late(self, transaction_id, custody, **overrides):
+        arguments = {"executor_id": custody.executor_id,
+                     "subject_path": custody.subject_path, "fence": plain(custody.fence),
+                     "result": {"status": "done", "items": [1, 2]}, **overrides}
+        return self.store.record_owner_result(transaction_id, **arguments)
+
+    def test_a_late_authentic_result_is_kept_beside_the_synthesized_stop(self):
+        transaction_id, custody = self.proving()
+        self.clock.advance(TTL)
+        reaped = self.store.reap(transaction_id, reason="lease expired")
+        stop = next(e for e in reaped.events if e["type"] == "stop_synthesized")
+        after = self.late(transaction_id, custody)
+        event = dict(after.events[-1])
+        self.assertEqual(event, {
+            "seq": reaped.revision + 1, "type": "owner_result", "at": event["at"],
+            "executor_id": "exec-a", "fence": plain(custody.fence), "custody": "stale",
+            "supersedes": stop["seq"], "result": {"status": "done", "items": [1, 2]}})
+        self.assertEqual((after.state, after.parked_from, after.custody),
+                         (reaped.state, reaped.parked_from, None))
+        self.assertIn("stop_synthesized", [e["type"] for e in after.events])
+        self.assertRefusedUnchanged(StaleCustody, lambda: self.store.advance(
+            transaction_id, "proving", reason="r", custody=custody))
+
+    def test_a_result_under_live_custody_is_current(self):
+        transaction_id, custody = self.proving()
+        event = self.late(transaction_id, custody).events[-1]
+        self.assertEqual((event["custody"], event["supersedes"]), ("current", None))
+        self.assertEqual(self.store.load(transaction_id).custody, custody)
+
+    def test_unissued_misbound_or_malformed_results_are_refused_before_any_write(self):
+        transaction_id, custody = self.proving()
+        bumped = {k: {**v, "epoch": v["epoch"] + 1} for k, v in plain(custody.fence).items()}
+        for overrides in ({"fence": bumped}, {"executor_id": "exec-z"}):
+            with self.subTest(overrides=overrides):
+                self.assertRefusedUnchanged(
+                    StaleCustody, lambda: self.late(transaction_id, custody, **overrides))
+        self.assertRefusedUnchanged(CustodyMisbound, lambda: self.late(
+            transaction_id, custody, subject_path="/work/beta"))
+        for result in (["not", "an", "object"], {"x": float("nan")}, {1: "int key"},
+                       {"t": (1, 2)}):
+            with self.subTest(result=result):
+                self.assertRefusedUnchanged(
+                    StateInvalid, lambda: self.late(transaction_id, custody, result=result))
+
+    def test_a_terminal_transaction_refuses_late_results(self):
+        transaction_id, custody = self.proving()
+        self.store.advance(transaction_id, "succeeded", reason="r", external_state="known",
+                           custody=custody)
+        self.assertRefusedUnchanged(TransitionRefused,
+                                    lambda: self.late(transaction_id, custody))
+
+    def test_hand_edited_stop_and_result_histories_fail_the_named_rule(self):
+        transaction_id, custody = self.proving()
+        self.clock.advance(TTL)
+        self.store.reap(transaction_id, reason="lease expired")
+        self.late(transaction_id, custody)
+        base = self.state_doc(transaction_id)
+        _, acquired, *middle, lapse, stop, park, result = base["events"]
+        early = [acquired, *middle]
+        unlapsed = history(base, *early, stop, park, result, custody=span(acquired))
+        unlapsed["events"][-1]["supersedes"] = unlapsed["events"][-3]["seq"]
+        cases = {
+            "stop without lapse": (unlapsed, "does not follow a lease_lapse_detected"),
+            "result names no span": (
+                history(base, *early, lapse, stop, park,
+                        {**result, "executor_id": "exec-z"}, custody=None),
+                "names no custody span"),
+            "supersedes no stop": (
+                history(base, *early, lapse, stop, park,
+                        {**result, "supersedes": park["seq"]}, custody=None),
+                "supersedes names no earlier stop_synthesized"),
+            "unknown custody word": (
+                history(base, *early, lapse, stop, park, {**result, "custody": "maybe"},
+                        custody=None), "custody is not current or stale"),
+        }
+        for name, (document, fragment) in cases.items():
+            with self.subTest(case=name):
+                self.assertRuleRefuses(transaction_id, copy.deepcopy(document), fragment)
+
+
 if __name__ == "__main__":
     unittest.main()
