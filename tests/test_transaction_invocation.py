@@ -520,5 +520,67 @@ class InvokeActionTest(InvokeCase):
                                "attempt 4 exceeds 3")
 
 
+class CrashSeamTest(InvokeCase):
+    def crash(self, where):
+        self.inspect()
+        with self.assertRaises(Crash):
+            self.invoke(self.effect(crash=where))
+
+    def reacquire(self):
+        self.store.release(self.custody)
+        self.custody = self.acquire(self.transaction_id)
+
+    def test_a_crash_before_the_call_leaves_an_open_intent_and_resumes_as_attempt_2(self):
+        self.crash("before")
+        self.assertEqual(self.state_doc(self.transaction_id)["events"][-1]["type"],
+                         "invocation_intended")
+        self.assertEqual((self.world.invokes, self.world.applied), ({}, {}))
+        self.assertEqual(self.view()["status"], "open")
+        self.refused("inspection_required", lambda: self.invoke(self.effect(during=self.fail)))
+        self.refused("attempt_in_flight", lambda: self.inspect(self.effect(during=self.fail)))
+        self.reacquire()
+        self.assertEqual(self.inspect().events[-1]["outcome"], "absent")
+        self.assertTrue(self.view()["retry_eligible"])
+        self.invoke()
+        self.assertEqual((self.attempts(), self.world.invokes), ([1, 2], {self.act(): 1}))
+        self.assertEqual(self.view()["status"], "satisfied")
+
+    def test_an_effect_that_applied_then_raised_is_settled_without_a_second_call(self):
+        self.crash("after")
+        self.refused("attempt_in_flight", lambda: self.inspect(self.effect(during=self.fail)))
+        self.reacquire()
+        self.assertEqual(self.inspect().events[-1]["outcome"], "satisfied")
+        self.invoke(self.effect(during=self.fail))
+        self.assertEqual((self.attempts(), self.world.invokes), ([1], {self.act(): 1}))
+
+    def test_an_observation_made_before_a_newer_attempt_is_not_recorded(self):
+        self.inspect()
+        with self.assertRaises(InvocationRefused) as caught:
+            self.inspect(self.effect(inspect_outcome="absent", during=lambda: self.invoke()))
+        self.assertEqual(caught.exception.reason, "attempt_in_flight")
+        self.assertEqual(self.store.load(self.transaction_id).events[-1]["outcome"],
+                         "satisfied")
+        self.assertEqual((self.view()["status"], self.world.invokes),
+                         ("satisfied", {self.act(): 1}))
+
+    def test_a_return_less_attempt_closed_under_its_own_fence_is_refused(self):
+        self.crash("before")
+        document = self.state_doc(self.transaction_id)
+        intent = document["events"][-1]
+        document["events"].append({
+            "type": "action_inspected", "at": intent["at"], "action_id": self.act(),
+            "outcome": "absent", "reference": "r", "fence": intent["fence"]})
+        self.assertRuleRefuses(self.transaction_id, renumbered(document),
+                               "closes a return-less attempt under its intent's fence")
+
+    def test_a_malformed_post_invoke_inspection_leaves_the_attempt_open(self):
+        self.inspect()
+        with self.assertRaises(EffectResultInvalid):
+            self.invoke(self.effect(inspect_outcome="done"))
+        self.assertEqual(self.action_types()[-1], "invocation_intended")
+        self.assertEqual((self.view()["status"], self.world.invokes),
+                         ("open", {self.act(): 1}))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -139,7 +139,7 @@ def action_event_violation(event: dict, actions: dict[str, ActionFold], *,
                            state: str) -> str | None:
     """The rule one envelope-checked action event breaks against the actions folded before
     it, the open span's fence (None outside a span) and the folded `state`, or None
-    (#206 D2, D17)."""
+    (#206 D2, D14, D17)."""
     event_type = event["type"]
     identity = event["action_id"]
     if type(identity) is not str:
@@ -163,10 +163,14 @@ def action_event_violation(event: dict, actions: dict[str, ActionFold], *,
             return f"{event_type} sits outside an open custody span"
         if event["fence"] != open_fence:
             return f"{event_type} fence does not equal the open span's fence"
-    if event_type == "action_inspected":
-        return (_outcome_violation(event["outcome"])
-                or _reference_violation(event["reference"]))
     entry = actions[identity]
+    if event_type == "action_inspected":
+        violation = (_outcome_violation(event["outcome"])
+                     or _reference_violation(event["reference"]))
+        if (violation is None and entry.open and entry.returned is None
+                and event["fence"] == entry.intent_fence):
+            return "action_inspected closes a return-less attempt under its intent's fence"
+        return violation
     attempt, latest = event["attempt"], entry.attempts
     if event_type == "invocation_intended":
         if type(attempt) is not int or attempt != latest + 1:
@@ -230,11 +234,11 @@ def fold_actions(events: Sequence[Mapping[str, Any]]) -> dict[str, ActionFold]:
 
 
 def retry_safe(entry: ActionFold) -> bool:
-    """Whether the latest attempt returned a non-`accepted` result of a retry-safe class
-    (#206 D6)."""
+    """Whether the latest attempt was interrupted (it has no recorded return) or returned a
+    non-`accepted` result of a retry-safe class (#206 D6)."""
     returned = entry.returned
-    return (returned is not None and returned["result"] != "accepted"
-            and returned["error_class"] in RETRY_SAFE_CLASSES)
+    return returned is None or (returned["result"] != "accepted"
+                                and returned["error_class"] in RETRY_SAFE_CLASSES)
 
 
 def satisfied(entry: ActionFold | None) -> bool:

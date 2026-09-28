@@ -54,7 +54,7 @@ from agent_tools.transaction_history import (
     parked_since, reaped, require_custody_shape, require_texts, snapshot, span_issued,
     validate_state)
 from agent_tools.transaction_invocation import (
-    EFFECT_STATES, MAX_ATTEMPTS, REFUSAL_REASONS, RETRY_WINDOW_MS, action_id,
+    EFFECT_STATES, MAX_ATTEMPTS, REFUSAL_REASONS, RETRY_WINDOW_MS, ActionFold, action_id,
     action_violation, effect_request, fold_actions, inspect_result_violation,
     invoke_result_violation, refusal, refused_error, satisfied)
 from agent_tools.transaction_storage import (
@@ -123,6 +123,17 @@ def _require_creatable(root: Path, creation_key: Any, subject: Any,
     violation = key_set_violation(concurrency_keys)
     if violation is not None:
         raise StateInvalid(f"{where}: {violation}")
+
+
+def _refuse_in_flight(prior: dict, identity: str, entry: ActionFold | None,
+                      attempts: int | None = None) -> None:
+    """Refuse `attempt_in_flight` when the action's latest attempt is open under the held
+    fence or, given the count an earlier hold read, its attempt count changed (D14, D16)."""
+    count = 0 if entry is None else entry.attempts
+    if ((attempts is not None and count != attempts)
+            or (entry is not None and entry.open
+                and entry.intent_fence == prior["custody"]["fence"])):
+        raise refused_error(prior["transaction_id"], identity, "attempt_in_flight")
 
 
 class TransactionStore:
@@ -575,33 +586,41 @@ class TransactionStore:
     def inspect_action(self, custody: Custody, *, name: str, parameters: dict,
                        effect: Any) -> Transaction:
         """Observe one action through `effect.inspect` and record what it saw (#206 D3, D5,
-        D8).
+        D8, D14, D16).
 
         Argument shapes are refused first, before any lock. The first lock hold refuses a
-        terminal (`TransitionRefused`), runs the fenced check and builds the request, whose
-        `attempt` is the action's latest attempt or 0; the lock is then released and
-        `effect.inspect` runs with no lock held. A result outside the closed shape is
-        `EffectResultInvalid` with nothing written. The second lock hold repeats the
-        terminal refusal and the fenced check, so a lapse during the call is `StaleCustody`
-        with nothing written, then appends, in one `state.json` write, `action_declared`
-        when the history has no event of this action yet and `action_inspected` stamped
-        with the held fence. Any state but a terminal may inspect, parkings included.
-        Whatever the effect raises propagates.
+        terminal (`TransitionRefused`), runs the fenced check, then refuses an action whose
+        latest attempt is open under the held fence (`InvocationRefused`
+        `attempt_in_flight`) before any call, reads the action's attempt count (0 when
+        undeclared) and builds the request, whose `attempt` is that count; the lock is then
+        released and `effect.inspect` runs with no lock held. A result outside the closed
+        shape is `EffectResultInvalid` with nothing written. The second lock hold repeats
+        the terminal refusal and the fenced check, so a lapse during the call is
+        `StaleCustody` with nothing written, then re-folds the action and refuses
+        `attempt_in_flight` when its attempt count differs from the first hold's or an
+        attempt is open under the held fence: that refusal follows the read-only
+        `effect.inspect` call and records nothing from it. Otherwise it appends, in one
+        `state.json` write, `action_declared` when the history has no event of this action
+        yet and `action_inspected` stamped with the held fence. Any state but a terminal
+        may inspect, parkings included. Whatever the effect raises propagates.
         """
         identity = self._action_arguments(custody, "inspect_action", name, parameters,
                                           effect)
         with self._fenced(custody, "inspect_action", writes=True) as (prior, _):
             entry = fold_actions(prior["events"]).get(identity)
-            request = effect_request(prior, identity, name, parameters,
-                                     0 if entry is None else entry.attempts)
+            _refuse_in_flight(prior, identity, entry)
+            attempts = 0 if entry is None else entry.attempts
+            request = effect_request(prior, identity, name, parameters, attempts)
         result = effect.inspect(request)
         violation = inspect_result_violation(result)
         if violation is not None:
             raise EffectResultInvalid(f"{custody.transaction_id}: inspect_action: "
                                       f"{violation}")
         with self._fenced(custody, "inspect_action", writes=True) as (prior, now):
+            entry = fold_actions(prior["events"]).get(identity)
+            _refuse_in_flight(prior, identity, entry, attempts)
             events = []
-            if identity not in fold_actions(prior["events"]):
+            if entry is None:
                 events.append({"type": "action_declared", "action_id": identity,
                                "name": name, "parameters": copy.deepcopy(parameters)})
             events.append({"type": "action_inspected", "action_id": identity,
