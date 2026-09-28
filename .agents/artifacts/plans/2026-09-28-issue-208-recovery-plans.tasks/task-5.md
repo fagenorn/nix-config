@@ -7,7 +7,8 @@
 - Modify: `python/agent_tools/transaction_history.py` (the validator applies it)
 - Modify: `python/agent_tools/transaction_core.py` (`invoke_action`)
 - Modify: `tests/test_transaction_recovery.py` (append)
-- Modify: `tests/test_transaction_invocation.py` (the pinned vocabulary and one message key)
+- Modify: `tests/test_transaction_invocation.py` (the pinned vocabulary, one message key
+  and one test name)
 
 **Interfaces:**
 - Consumes (Tasks 1–4): `begin_recovery`, the latest `recovery_started`'s `selected`, the
@@ -88,11 +89,25 @@ class EdgeTest(RecoveryCase):
             "action_id": self.act("compensate", unit="build"), "attempt": 1,
             "fence": plain(self.custody.fence)})
         self.assertRuleRefuses(self.transaction_id, renumbered(document), "not_selected")
+
+    def test_a_hand_built_intent_of_an_unselected_action_in_recovering_is_state_invalid(self):
+        self.recovering()
+        self.store.inspect_action(self.custody, name="pin", parameters={"n": 3},
+                                  effect=FakeEffect(self.world))
+        document = self.state_doc(self.transaction_id)
+        document["events"].append({
+            "seq": 0, "type": "invocation_intended", "at": document["events"][-1]["at"],
+            "action_id": self.act("pin", n=3), "attempt": 1,
+            "fence": plain(self.custody.fence)})
+        self.assertRuleRefuses(self.transaction_id, renumbered(document),
+                               "is not_selected in recovering")
 ```
 
   In `tests/test_transaction_invocation.py`, add `"not_selected"` to `OBSERVED_REASONS`
   with a trailing comment `# asserted in test_transaction_recovery.py`. Rename the case key
-  `"invocation_intended sits outside publishing and activating"` to the new message.
+  `"invocation_intended sits outside publishing and activating"` to the new message, and
+  rename `test_only_publishing_and_activating_may_invoke` to
+  `test_only_effect_states_may_invoke`, since `recovering` now invokes too.
 
 - [ ] **Step 2: Run the tests and watch them fail.**
   Run: `PYTHONPATH=python python3 -m unittest tests/test_transaction_recovery.py 2>&1 | tail -3`.
@@ -120,4 +135,4 @@ git commit -m "feat(transaction-core): drive only selected recovery edges in rec
 - [ ] **Step 6: Check the review budget** with `FILES="python/agent_tools/transaction_invocation.py python/agent_tools/transaction_recovery.py python/agent_tools/transaction_history.py python/agent_tools/transaction_core.py tests/test_transaction_recovery.py"`.
   Expected: exit 0.
 
-Decisions: per D15, D22.
+Decisions: per D15, D22, D25.

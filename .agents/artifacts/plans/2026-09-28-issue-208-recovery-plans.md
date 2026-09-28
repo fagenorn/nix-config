@@ -26,7 +26,7 @@ Task 8 the sweep.
 Nix (`lib/agent-tools.nix` import check, unchanged).
 
 Spec (the source of truth, read it whole):
-`.agents/artifacts/specs/2026-09-28-issue-208-recovery-plans-design.md`, D1–D24.
+`.agents/artifacts/specs/2026-09-28-issue-208-recovery-plans-design.md`, D1–D27.
 The code base is commit `f999226` (slices 1–4 as merged; the base for every budget check).
 
 ## Global Constraints
@@ -65,7 +65,9 @@ The code base is commit `f999226` (slices 1–4 as merged; the base for every bu
 - Size caps (per D20): after every task, `transaction_core.py` is at most 64000 bytes and
   each touched file's cumulative `git diff -U10 f999226` is under 65536 bytes. Every task
   ends by running this review-budget block with its `FILES`. A non-zero exit means the task
-  is not done: move judgment out of the core.
+  is not done. If `transaction_core.py` would pass 64000 bytes, the first remedy is
+  docstring economy: a core wrapper's docstring points to its pure function's docstring
+  instead of restating it. Only then move judgment out of the core (per D27).
 
 ```bash
 base=f999226; fail=0
@@ -115,7 +117,7 @@ Task 1 — Recovery declaration: compile, bind and materialize — `python/agent
 
 Task 2 — Schema v5: the stored plan, `create(recovery=)` and `recovers` — `python/agent_tools/transaction_recovery.py`, `python/agent_tools/transaction_history.py`, `python/agent_tools/transaction_core.py`, `tests/test_transaction_recovery_plan.py`, `tests/test_transaction_core.py`, `tests/test_transaction_custody.py`, `tests/test_transaction_invocation.py`, `tests/test_transaction_plan.py`, `tests/test_transaction_proof.py`, `tests/transaction_core_sweep_support.py`, `tests/test_transaction_core_sweep.py` — full — [task-2.md](2026-09-28-issue-208-recovery-plans.tasks/task-2.md)
 
-Task 3 — `verify_anchors` and the publication gate — `python/agent_tools/transaction_recovery.py`, `python/agent_tools/transaction_history.py`, `python/agent_tools/transaction_storage.py`, `python/agent_tools/transaction_core.py`, `tests/test_transaction_recovery.py`, `tests/transaction_core_sweep_support.py`, `tests/test_transaction_core_sweep.py`, `justfile` — full — [task-3.md](2026-09-28-issue-208-recovery-plans.tasks/task-3.md)
+Task 3 — `verify_anchors` and the publication gate — `python/agent_tools/transaction_recovery.py`, `python/agent_tools/transaction_history.py`, `python/agent_tools/transaction_storage.py`, `python/agent_tools/transaction_proof.py`, `python/agent_tools/transaction_core.py`, `tests/test_transaction_recovery.py`, `tests/transaction_core_sweep_support.py`, `tests/test_transaction_core_sweep.py`, `justfile` — full — [task-3.md](2026-09-28-issue-208-recovery-plans.tasks/task-3.md)
 
 Task 4 — `begin_recovery`, effect classes and the `abandoned` gate — `python/agent_tools/transaction_recovery.py`, `python/agent_tools/transaction_history.py`, `python/agent_tools/transaction_core.py`, `tests/test_transaction_recovery.py`, `tests/test_transaction_core.py`, `tests/test_transaction_custody.py` — full — [task-4.md](2026-09-28-issue-208-recovery-plans.tasks/task-4.md)
 
@@ -132,3 +134,24 @@ Task 8 — Five recovery rows in the sweep, and CLAUDE.md — `tests/transaction
 The spec's `## Decision ledger` owns every decision, and each task ends with the rows it
 cites. Planning added D20–D24: the core budget and shared two-hold helper, the compile rule
 classification, `not_selected` precedence, id-named units in events, and the test split.
+Standards review added D25–D27: test seams that isolate the rule under test, one shared
+observation-result shape, and the core-budget fallback.
+
+## Standards review provenance
+
+- Reviewer: Claude fallback. Codex ran, but its runtime metadata carried no event
+  confirming the model and effort selection, so the Codex route was not established.
+- Base `e1b303132805fdf54b62151cd1b6ac4a5051482e`; isolated and read-only.
+- Accepted 7 (S1–S6, D1), rejected 0, deferred 1 (D2).
+- S1: Task 2 updates the two exact `created` key-set assertions.
+- S2: Task 7's own-key test differs from the parent only by `recovers` (D25).
+- S3: Task 2's re-identified plan re-pins its digest and asserts the materialization rule
+  (D25).
+- S4: Tasks 5–6 add hand-edited `recovering` and `recovery_incomplete` breaches (D25).
+- S5: Task 3 reuses `transaction_proof.OUTCOMES` and one shared shape check (D26).
+- S6: stale v4 docstrings, test names, the sweep docstring and CLAUDE.md wording are
+  updated in their owning tasks.
+- D1: docstring economy is the first remedy at the core cap (D27).
+- D2 deferred: admission may re-select an `unknown` edge; `invoke_action` still refuses
+  `not_absent`, and the spec's "an affected unit" wording stands.
+- D3 no action: quiescence past 900 s while parked is intended (D19, D24).

@@ -65,7 +65,9 @@
   of `materialize_recovery(bind_recovery(compile_recovery(recovery_declaration_of(plan)),
   compile_proof(declaration_of(proof_plan))), transaction_id)`. Otherwise it returns a rule
   string that starts with `recovery_plan`, including when a rejection or `TypeError`
-  occurs. It is the validator's single rule home (per D6).
+  occurs; a readable plan that merely differs returns exactly `"recovery_plan is not the
+  materialization of its own declaration"`, which Task 2 asserts (per D25). It is the
+  validator's single rule home (per D6).
 - The module is pure: no file, lock or clock.
 
 - [ ] **Step 1: Write the failing tests.** Create `tests/test_transaction_recovery_plan.py`
@@ -290,4 +292,4 @@ git commit -m "feat(transaction-core): compile and materialize recovery declarat
 - [ ] **Step 6: Check the review budget** with `FILES="python/agent_tools/transaction_recovery_plan.py python/agent_tools/transaction_storage.py python/agent_tools/transaction_core.py tests/test_transaction_recovery_plan.py"`.
   Expected: exit 0.
 
-Decisions: per D1, D2, D3, D4, D5, D6, D21.
+Decisions: per D1, D2, D3, D4, D5, D6, D21, D25.

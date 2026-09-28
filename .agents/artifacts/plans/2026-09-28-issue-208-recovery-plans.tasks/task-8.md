@@ -195,7 +195,7 @@ RECOVERIES = {
   \`agent_tools.transaction_history\`, over the durable-file primitives in
   \`agent_tools.transaction_storage\`.` with:
 
-  `; slice 5 (#208) adds an immutable recovery plan compiled at creation beside it (\`agent_tools.transaction_recovery_plan\`), rollback anchors verified in \`ready\` before publication, \`abandoned\` only while no action has had an effect, and \`begin_recovery\`, \`settle_recovery\` and \`roll_forward\` as the only ways into \`recovering\`, into \`rolled_back\` and to a linked child transaction (\`agent_tools.transaction_recovery\`), with the \`transaction-state/v5\` validator and snapshot fold in \`agent_tools.transaction_history\`, over the durable-file primitives in \`agent_tools.transaction_storage\`.`
+  `; slice 5 (#208) adds an immutable recovery plan compiled at creation beside the proof plan (\`agent_tools.transaction_recovery_plan\`), rollback anchors verified in \`ready\` before publication, \`abandoned\` only while no action has had an effect, and \`begin_recovery\`, \`settle_recovery\` and \`roll_forward\` as the only ways into \`recovering\`, into \`rolled_back\` and to a linked child transaction (\`agent_tools.transaction_recovery\`), with the \`transaction-state/v5\` validator and snapshot fold in \`agent_tools.transaction_history\`, over the durable-file primitives in \`agent_tools.transaction_storage\`.`
 
 - [ ] **Step 4: Verify.**
   Run the slice unit command with all three recovery test files. Expected: `OK`.

@@ -7,7 +7,8 @@
 - Modify: `tests/test_transaction_recovery_plan.py` (append)
 - Modify: `tests/test_transaction_core.py`, `tests/test_transaction_custody.py`,
   `tests/test_transaction_invocation.py`, `tests/test_transaction_plan.py`,
-  `tests/test_transaction_proof.py` (the required argument and the schema string only)
+  `tests/test_transaction_proof.py` (the required argument, the schema string, the
+  `created` key sets and one test name only)
 - Modify: `tests/transaction_core_sweep_support.py`, `tests/test_transaction_core_sweep.py`
 
 **Interfaces:**
@@ -42,20 +43,32 @@
 - A same-key `create` computes the materialized recovery plan under the stored id and adds
   two conflicts to the existing `differs` list, after `proof plan`: `recovery plan` (the
   digest differs from `recovery_plan_digest`) and `recovers` (the stored `recovers`
-  differs). Nothing is written (per D6, D11).
+  differs). Nothing is written (per D6, D11). Task 7 pins the `recovers` conflict alone:
+  the parent's own key, subject, proof and recovery, differing only by `recovers` (per D25).
 - `recovery_view(document)` returns exactly `{"plan_digest": created recovery_plan_digest,
   "recovers": created recovers, "effect_snapshot": <the latest recovery_started's
   effect_snapshot, else None>, "selected": <its selected, else []>, "children": [every
   roll_forward_linked's child_transaction_id, in order]}`. Those events do not exist yet,
   so the view reads them by type only (per D12).
-- Existing tests change only by the added `recovery=` argument and
-  `transaction-state/v4` → `v5`. A create whose proof has units passes
-  `inert_recovery(<that proof>)`, because the unit sets must match (per D2). Those creates are
-  in `tests/test_transaction_proof.py` (two) and `tests/test_transaction_plan.py`
-  (`CreationTest.create`). Every other create passes `EMPTY_RECOVERY`. `tests/test_transaction_core.py` also adds
+- Existing tests change only by the added `recovery=` argument, `transaction-state/v4` →
+  `v5` and the two edits after this one. A create whose proof has units passes
+  `inert_recovery(<that proof>)`, because the unit sets must match (per D2). Those creates
+  are in `tests/test_transaction_proof.py` (two) and `tests/test_transaction_plan.py`
+  (`CreationTest.create`). Every other create passes `EMPTY_RECOVERY`.
+  `tests/test_transaction_core.py` also adds
   `recovery_plan` to its asserted key set and defines its own `EMPTY_RECOVERY` beside
   `EMPTY_PROOF`. `tests/test_transaction_custody.py` does the same, and the files that
   import from it reuse its constant. The `v3`-fails-closed tests keep `v3`.
+- The two exact `created` key-set assertions become `{"seq", "type", "at",
+  "proof_plan_digest", "recovery_plan_digest", "recovers"}`:
+  `tests/test_transaction_core.py` (`set(event)`, ~line 148) and
+  `tests/test_transaction_plan.py` (`set(first)`, ~line 291).
+- Stale v4 text moves to v5: the `_require_creatable` docstring
+  (`transaction_core.py:130`), the `validate_state` docstring and module docstring in
+  `transaction_history.py`, and `tests/test_transaction_invocation.py`'s
+  `test_new_state_is_v4_and_a_v3_document_fails_closed_naming_its_version`, renamed
+  `test_new_state_is_v5_and_…`. The sweep support's module docstring gains the recovery
+  declaration beside its sentence on the proof declaration.
 
 - [ ] **Step 1: Write the failing tests.** Append to `tests/test_transaction_recovery_plan.py`
   (add `from agent_tools.transaction_core import CreationConflict` and
@@ -112,9 +125,13 @@ class CreationTest(CustodyCase):
     def test_a_hand_edited_plan_digest_or_backlink_is_state_invalid(self):
         transaction_id = self.create().transaction_id
         document = self.state_doc(transaction_id)
+
+        def reidentified(d):
+            d["recovery_plan"]["units"][0]["action_id"] = "act_" + "0" * 32
+            d["events"][0]["recovery_plan_digest"] = telemetry_digest(d["recovery_plan"])
+
         cases = (
-            (lambda d: d["recovery_plan"]["units"][0].update(action_id="act_" + "0" * 32),
-             "recovery_plan"),
+            (reidentified, "recovery_plan is not the materialization of its own declaration"),
             (lambda d: d["recovery_plan"]["units"][0]["edges"][0].update(residue="none"),
              "recovery_plan_digest"),
             (lambda d: d["events"][0].update(recovery_plan_digest="sha256:" + "0" * 64),
@@ -128,6 +145,9 @@ class CreationTest(CustodyCase):
                 edit(edited)
                 self.assertRuleRefuses(transaction_id, edited, fragment)
 ```
+
+  The re-identified case re-pins the digest (as #207's `redigest` does), so only the
+  re-materialization rule can fire (per D25).
 
   Add this helper beside `bound` (import `ProofPlanRejected` from `transaction_core`):
 
@@ -207,7 +227,7 @@ def shape_recovery(shape):
   Run the slice unit command with `tests/test_transaction_recovery_plan.py`. Expected: `OK`.
 
 ```bash
-if grep -rn "transaction-state/v4" tests/test_transaction_core.py tests/test_transaction_invocation.py tests/test_transaction_plan.py; then exit 1; fi
+if grep -rn "transaction-state/v4\|is_v4" tests/test_transaction_core.py tests/test_transaction_invocation.py tests/test_transaction_plan.py python/agent_tools/transaction_*.py; then exit 1; fi
 grep -q 'SCHEMA = "transaction-state/v5"' python/agent_tools/transaction_history.py || exit 1
 ```
 
@@ -222,4 +242,4 @@ git commit -m "feat(transaction-core): store the recovery plan under transaction
 - [ ] **Step 6: Check the review budget** with `FILES="python/agent_tools/transaction_recovery.py python/agent_tools/transaction_history.py python/agent_tools/transaction_core.py tests/test_transaction_recovery_plan.py tests/test_transaction_core.py tests/test_transaction_custody.py tests/transaction_core_sweep_support.py"`.
   Expected: exit 0.
 
-Decisions: per D2, D5, D6, D11, D12, D16.
+Decisions: per D2, D5, D6, D11, D12, D16, D25.

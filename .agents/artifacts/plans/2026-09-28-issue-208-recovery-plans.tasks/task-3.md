@@ -4,6 +4,7 @@
 - Modify: `python/agent_tools/transaction_recovery.py` (refusals, check requests, anchors)
 - Modify: `python/agent_tools/transaction_history.py` (dispatch recovery events and the gate)
 - Modify: `python/agent_tools/transaction_storage.py` (`RecoveryRefused`)
+- Modify: `python/agent_tools/transaction_proof.py` (extract `closed_result_violation`)
 - Modify: `python/agent_tools/transaction_core.py` (`verify_anchors`, `_observed`, `advance`)
 - Create: `tests/test_transaction_recovery.py`
 - Modify: `tests/transaction_core_sweep_support.py`, `tests/test_transaction_core_sweep.py`
@@ -15,13 +16,19 @@
   `PROOF`, `RECOVERY`, `with_unit`.
 - Produces (`agent_tools.transaction_storage`): `class RecoveryRefused(TransactionError)`,
   shaped like `ProofRefused` (keyword `reason`, `.reason`).
+- Produces (`agent_tools.transaction_proof`, per D26):
+  `closed_result_violation(result: Any, label: str) -> str | None`, the closed
+  `{outcome, reason, reference}` shape check lifted verbatim out of `observation_violation`
+  (lines 147-157): exactly `_RESULT_KEYS`, `outcome` in the existing `OUTCOMES`, `reason`
+  and `reference` non-empty strings, each message starting with `label`.
+  `observation_violation` calls it with `"observation"`, so its messages are unchanged, and
+  keeps only the derived-reason rule.
 - Produces (`agent_tools.transaction_recovery`, re-exported by `transaction_core`:
   `RECOVERY_REFUSAL_REASONS`, `RecoveryRefused`):
   - `RECOVERY_REFUSAL_REASONS`, exactly the spec's thirteen reasons in the spec's order.
   - `recovery_refused(transaction_id, reason, detail) -> RecoveryRefused`, with the message
     `f"{transaction_id}: recovery refused: {reason}: {detail}"`; an unknown reason raises
     `ValueError`.
-  - `CHECK_OUTCOMES = ("satisfied", "unsatisfied", "unknown")`.
   - `RECOVERY_EVENT_KEYS: Mapping[str, frozenset]`, holding `anchors_verified`: envelope
     plus `{anchors, fence}`. Later tasks add their events here.
   - `unit_label(document, identity: str) -> str` returns `f"{name} ({identity})"` for a
@@ -31,9 +38,9 @@
     `predicate`, `collector`, `parameters` (a deep copy) and `fence` (a deep copy of the
     held fence). `check` is `"anchor"` or `"compatibility"`, and it names the unit field
     read.
-  - `check_result_violation(result: Any) -> str | None`: exactly `{outcome, reason,
-    reference}`, `outcome` in `CHECK_OUTCOMES`, `reason` and `reference` non-empty strings
-    (per D21).
+  - `check_result_violation(result: Any) -> str | None`:
+    `closed_result_violation(result, "check result")`, so a check outcome is one of
+    `transaction_proof.OUTCOMES` and no second outcome vocabulary exists (per D21, D26).
   - `anchor_requests(document) -> list[Mapping]`: `state_not_ready` outside `ready`, else
     the anchor requests of every `restorable` unit, in plan order.
   - `anchors_events(document, requests, results) -> list[dict]`: `[]` when there are no
@@ -344,7 +351,7 @@ grep -q "def _observed" python/agent_tools/transaction_core.py || exit 1
 git commit -m "feat(transaction-core): verify rollback anchors before publication (#208)"
 ```
 
-- [ ] **Step 6: Check the review budget** with `FILES="python/agent_tools/transaction_recovery.py python/agent_tools/transaction_history.py python/agent_tools/transaction_core.py tests/test_transaction_recovery.py tests/transaction_core_sweep_support.py"`.
+- [ ] **Step 6: Check the review budget** with `FILES="python/agent_tools/transaction_recovery.py python/agent_tools/transaction_proof.py python/agent_tools/transaction_history.py python/agent_tools/transaction_core.py tests/test_transaction_recovery.py tests/transaction_core_sweep_support.py"`.
   Expected: exit 0.
 
-Decisions: per D7, D12, D16, D20, D21, D22, D23.
+Decisions: per D7, D12, D16, D20, D21, D22, D23, D26.

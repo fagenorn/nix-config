@@ -71,7 +71,7 @@ import unittest
 
 from agent_tools.transaction_core import RecoveryRefused, TransitionRefused
 
-from .test_transaction_invocation import FakeEffect
+from .test_transaction_invocation import FakeEffect, renumbered
 from .test_transaction_recovery import RecoveryCase
 from .test_transaction_recovery_plan import RECOVERY
 
@@ -214,6 +214,24 @@ class SettleTest(SettleCase):
         dropped["revision"] = len(dropped["events"])
         self.assertRuleRefuses(self.transaction_id, dropped, "recovery_settled")
 
+    def test_hand_built_incomplete_breaches_are_state_invalid(self):
+        self.recovering()
+        self.edge("compensate", "build")
+        self.edge("restore", "start", "diverged")
+        self.settle()
+        document = self.state_doc(self.transaction_id)
+        index = next(i for i, e in enumerate(document["events"])
+                     if e["type"] == "recovery_incomplete")
+        for name, actions in (("empty", []),
+                              ("satisfied", [self.act("compensate", unit="build")])):
+            with self.subTest(actions=name):
+                edited = copy.deepcopy(document)
+                edited["events"][index]["actions"] = actions
+                self.assertRuleRefuses(self.transaction_id, edited, "actions")
+        dropped = copy.deepcopy(document)
+        del dropped["events"][index]
+        self.assertRuleRefuses(self.transaction_id, renumbered(dropped), "recovery_incomplete")
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -245,4 +263,4 @@ git commit -m "feat(transaction-core): judge recovery into rolled_back or recove
 - [ ] **Step 6: Check the review budget** with `FILES="python/agent_tools/transaction_recovery.py python/agent_tools/transaction_history.py python/agent_tools/transaction_core.py tests/test_transaction_recovery_settle.py"`.
   Expected: exit 0.
 
-Decisions: per D4, D9, D10, D19, D20.
+Decisions: per D4, D9, D10, D19, D20, D25.

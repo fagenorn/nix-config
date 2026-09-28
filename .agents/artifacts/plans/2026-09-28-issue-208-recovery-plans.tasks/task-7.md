@@ -48,11 +48,11 @@
 
 ```python
 class RollForwardTest(SettleCase):
-    def forward(self, key="forward", grant_id="g-1", store=None):
+    def forward(self, key="forward", grant_id="g-1", store=None,
+                subject={**SUBJECT, "candidate": "sha256:def"}):
         return (store or self.store).roll_forward(
             self.custody, grant_id=grant_id, reason="unit_not_restorable", creation_key=key,
-            subject={**SUBJECT, "candidate": "sha256:def"}, concurrency_keys=KEYS,
-            proof=PROOF, recovery=RECOVERY)
+            subject=subject, concurrency_keys=KEYS, proof=PROOF, recovery=RECOVERY)
 
     def test_the_child_has_its_own_id_and_the_parent_records_the_link_without_rewrite(self):
         self.parked()
@@ -85,7 +85,9 @@ class RollForwardTest(SettleCase):
     def test_the_parents_own_key_can_never_become_its_child(self):
         self.parked()
         self.grant()
-        self.assertRefusedUnchanged(CreationConflict, lambda: self.forward(key="recovery"))
+        error = self.assertRefusedUnchanged(
+            CreationConflict, lambda: self.forward(key="recovery", subject=SUBJECT))
+        self.assertTrue(str(error).endswith("with a different recovers"), str(error))
 
     def test_a_retry_after_dying_between_child_and_link_links_once(self):
         self.parked()
@@ -147,6 +149,9 @@ grep -q "def roll_forward" python/agent_tools/transaction_core.py || exit 1
 test "$(wc -c < python/agent_tools/transaction_core.py)" -le 64000 || exit 1
 ```
 
+  If the size test fails, first shorten the core wrappers' docstrings to point at their
+  pure functions' docstrings; only then move judgment out of the core (per D27).
+
   Run: `just build 2>&1 | tail -3`. Expected: success.
 
 - [ ] **Step 5: Commit.** Stage exactly this task's **Files**, then:
@@ -158,4 +163,4 @@ git commit -m "feat(transaction-core): roll forward into a linked child transact
 - [ ] **Step 6: Check the review budget** with `FILES="python/agent_tools/transaction_recovery.py python/agent_tools/transaction_history.py python/agent_tools/transaction_core.py tests/test_transaction_recovery_settle.py"`.
   Expected: exit 0.
 
-Decisions: per D11, D12, D19, D20, D24.
+Decisions: per D11, D12, D19, D20, D24, D25, D27.
