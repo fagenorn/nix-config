@@ -126,7 +126,8 @@ The four #92 mechanism operations, all over the transaction's whole key set as o
   max(ttl_ms // 2, 60000))` (#92's default: half the TTL, floor 60 s); outside the margin it is a
   no-op that writes nothing. A lapsed lease is never renewed: renewal fails rather than silently
   reacquiring.
-- **release** — sets `holder` to null, keeping `epoch`.
+- **release** — sets `holder` to null, keeping `epoch`, on exactly the records that still name the
+  releasing span's `instance`; a record another transaction has since taken is never touched (D24).
 - **inspect** — `store.inspect_lease(key)` returns a read-only view of the record, or `None` for a
   key never acquired. It is the only public window onto `term`, expiry and renewal counts.
 
@@ -185,7 +186,8 @@ The validator folds these into the stored `custody` projection exactly as it fol
 additionally requires: a custody span opens only when none is open; `lease_reacquired`'s
 `prior_fence` equals the last span's fence and every key's epoch strictly increases; every span
 carries the subject path the first one bound; no custody is open after a terminal; `evidence_id`
-is unique among `evidence_recorded` events and an interval's close follows exactly one open
+is unique across `evidence_recorded` and `interval_opened` events except for an interval's own
+open/close pair, whose close follows exactly one open
 `interval_opened` of the same id; `grant_id` is unique; and every fence, evidence, grant and owner
 result sits inside an open custody span whose fence it equals, except `owner_result`, whose fence
 must equal some span's fence. `reference`, `actor`, `reason` and the opaque `result` object are
@@ -205,7 +207,15 @@ or any difference, is `StaleCustody`); the presented `subject_path` must equal t
 (`CustodyMisbound`); and every key's lease record must name that `instance` and still be live on
 the clock (`StaleCustody`). Only then do the operation's own rules run. A refusal writes nothing to
 either store; in particular a write under a lease that silently expired is refused without
-recording the lapse — recording it is the reaper's or the next acquirer's job (D12).
+recording the lapse — recording it is the reaper's or the next acquirer's job (D12). The check
+reads lease records without the lease lock and judges liveness at one clock reading taken under the
+transaction lock; the write is ordered at that instant. Another holder can acquire only once that
+clock reaches `expires_at`, so a write accepted at a live instant precedes every successor epoch,
+and fenced writes across transactions never contend on one global lock (D25).
+
+A span has **lapsed** when any key's record is expired on the clock or no longer names the span's
+`instance` (another transaction acquired it after expiry); reap and acquisition use this one
+predicate.
 
 ### Store operations
 
@@ -225,8 +235,8 @@ Every mutation returns the resulting `Transaction`; every refusal happens before
 - `release(custody)` — voluntary release: `lease_released` reason `released`, records cleared.
 - `advance(transaction_id, target, *, reason, external_state=None, custody=None)` — slice 1's
   transition, now fenced from `publishing` on (D14): a transition whose target is `publishing`, or
-  on a transaction whose history has entered `publishing`, requires a valid `custody`; earlier
-  transitions take none, so verification of transactions sharing keys still runs concurrently
+  on a transaction whose history has entered `publishing`, or on one that currently holds custody,
+  requires a valid `custody` (D26); other transitions take none, so verification of transactions sharing keys still runs concurrently
   (#82). A custody presented where none is required is still checked, never ignored. Entering a
   terminal appends `lease_released` reason `terminal` in the same write and clears the records: a
   terminal holds no custody.
@@ -241,7 +251,7 @@ Every mutation returns the resulting `Transaction`; every refusal happens before
   unchanged, so a grant survives it; a reacquisition changes it, so an older grant is refused and
   is never re-stamped (the prototype's bug, D16).
 - `reap(transaction_id, *, reason)` — the reaper's core-authority entry; takes no custody. When
-  custody is held and any key has lapsed on the clock, one write appends `lease_lapse_detected`,
+  custody is held and has lapsed, one write appends `lease_lapse_detected`,
   `stop_synthesized` and, from an unparked nonterminal state, a transition to `attention_required`
   with `external_state` `unknown`. With no custody, or live custody, it writes nothing and returns
   the unchanged snapshot, so a sweep may call it on every transaction (D17).
@@ -389,3 +399,6 @@ command-table row, Nix or host change; state cleanup.
 | D21 | New refusals `FenceViolation` (base of `StaleCustody`, `CustodyMisbound`, `GrantInvalid`) and `LeaseUnavailable`, all under `TransactionError`; argument shape errors stay `StateInvalid` before any lock. | #204 D9, D16 typed refusals; #117 misbinding is a fencing violation, not a write conflict. | Message parsing, or reusing `TransactionBusy` for a live lease (a lock race and a live holder are different). |
 | D22 | The sweep gains `lease_renewal` and `lease_lapse` rows for all four shapes, with a voided-forms column; the executor acquires custody and records evidence by each obligation's declared temporal form. | #205 "the sweep gains a lease renewal/lapse fixture"; #204 D6 the executor grows as the core does. | One synthetic single-shape fixture (misses shapes whose obligations mix event, snapshot and interval). |
 | D23 | Keep slice 1's three seams; custody behavior is tested through the store and lease inspection only. | design skill "prefer existing seams"; the-bar tests assert observable behavior. | Unit tests over the custody module's internals (bind the tests to the module split). |
+| D24 | Release, quiesce and terminal release clear only lease records still naming the span's instance; lapse means any key expired or re-held by another instance, one predicate for reap and acquisition. | Grill scenario: A lapses unreaped, B acquires a shared key, A then reaps or ends — clearing by key would evict B's live lease; #92 fencing orders handovers. | Clearing every record of the key set (a stale transaction releases a successor's custody). |
+| D25 | The fenced check reads lease records lock-free and judges liveness at one clock reading under the transaction lock; fenced writes never take the lease lock. | #92 expiry only on the authority clock; acquisition needs `clock >= expires_at`; #204 D10 non-blocking locks. | Holding the global lease lock across every fenced write (serializes all transactions and turns routine writes into `TransactionBusy`). |
+| D26 | Amends D14: a transaction that currently holds custody requires it on every advance, whatever the region, so a pre-publishing terminal cannot end or release someone's live custody uncredentialed. | Grill scenario: custody acquired at `ready`, then an uncredentialed `abandoned` would release it; #117 every mutation validates the binding. | D14's region rule alone (a caller without custody could end a held transaction before `publishing`). |
