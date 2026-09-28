@@ -58,7 +58,8 @@ D1–D15. It is a slice of
 - Run the full suite as `WORKFLOW_POLICY_SURFACE=source just agent-workflow-tests`,
   which is CI's mode. On this machine the activated `~/.agents/skills` predates
   the source. In this mode the base reports `Ran NBASE tests` and
-  `OK (skipped=2)`, where `NBASE` is the count Task 1 Step 0 records. Expect
+  `OK (skipped=4)`, where `NBASE` is the count Task 1 Step 0 records (a planning run at
+  `dc183ff` measured 1612). Expect
   `NBASE+3` after Task 1 and `NBASE-17` after Task 2 (21 tests deleted, 1
   added), unchanged after that. A run takes about 10–20 minutes. Write the log
   to a file and summarize any failure to its failing test ids.

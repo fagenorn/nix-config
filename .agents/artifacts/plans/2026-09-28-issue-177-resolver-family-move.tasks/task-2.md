@@ -713,7 +713,7 @@ Expected: `OK`. The hostile run and the controls now include `adopt-project`,
 `…/workflow-state names agent_tools but is not a generated launcher`.
 
 Run: `WORKFLOW_POLICY_SURFACE=source just agent-workflow-tests > "$B/t2.log" 2>&1; tail -3 "$B/t2.log"`
-Expected: `Ran NBASE-17 tests` and `OK (skipped=2)`. Twenty-one tests are
+Expected: `Ran NBASE-17 tests` and `OK (skipped=4)`. Twenty-one tests are
 deleted and one is added.
 
 - [ ] **Step 11: Commit**

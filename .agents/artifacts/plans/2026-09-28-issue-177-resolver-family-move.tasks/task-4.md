@@ -107,7 +107,7 @@ Record the three outputs in the task handback.
 - [ ] **Step 5: Full suite, then commit**
 
 Run: `WORKFLOW_POLICY_SURFACE=source just agent-workflow-tests > "$B/t4.log" 2>&1; tail -3 "$B/t4.log"`
-Expected: `Ran NBASE-17 tests` and `OK (skipped=2)`.
+Expected: `Ran NBASE-17 tests` and `OK (skipped=4)`.
 
 ```bash
 git add CLAUDE.md

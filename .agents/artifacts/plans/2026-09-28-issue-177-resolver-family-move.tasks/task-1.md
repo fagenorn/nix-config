@@ -33,7 +33,7 @@ Substitute both printed values literally wherever later steps write `${START}`
 or `$B`.
 
 Run: `WORKFLOW_POLICY_SURFACE=source just agent-workflow-tests > "$B/base.log" 2>&1; tail -3 "$B/base.log"`
-Expected: `Ran NBASE tests` and `OK (skipped=2)`. Record `NBASE`. The plan's
+Expected: `Ran NBASE tests` and `OK (skipped=4)`. Record `NBASE`. The plan's
 Global Constraints derive every later count from it. Report it in this
 task's handback.
 
@@ -131,7 +131,7 @@ Expected: success with no `error:` line. The build's `pythonImportsCheck` now
 includes `agent_tools.siblings`.
 
 Run: `WORKFLOW_POLICY_SURFACE=source just agent-workflow-tests > "$B/t1.log" 2>&1; tail -3 "$B/t1.log"`
-Expected: `Ran NBASE+3 tests` and `OK (skipped=2)`.
+Expected: `Ran NBASE+3 tests` and `OK (skipped=4)`.
 
 - [ ] **Step 5: Commit**
 
