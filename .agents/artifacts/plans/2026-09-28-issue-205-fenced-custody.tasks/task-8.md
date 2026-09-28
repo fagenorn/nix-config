@@ -201,3 +201,19 @@ four modules).
 git add tests/transaction_core_sweep_support.py tests/test_transaction_core_sweep.py CLAUDE.md
 git commit -m "test(transaction-core): sweep lease renewal and lapse across shapes (#205)"
 ```
+
+- [ ] **Step 6: Check the review budget** (after the commit)
+
+Run:
+
+```bash
+base=66ccba5844eab2af9c68962c54a28f874585ee80; fail=0
+for f in $(git diff --name-only "$base" HEAD); do
+  n=$(git diff -U10 "$base" HEAD -- "$f" | wc -c); printf '%s %s\n' "$n" "$f"
+  [ "$n" -lt 65536 ] || fail=1
+done
+test "$fail" = 0
+```
+
+Expected: exit 0 (estimates: sweep files ~10000 each, `CLAUDE.md` ~6300). A miss means
+the task is not done.

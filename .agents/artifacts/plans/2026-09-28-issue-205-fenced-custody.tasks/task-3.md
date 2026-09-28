@@ -384,7 +384,7 @@ if __name__ == "__main__":
 
 Each case keeps seqs, `revision` and the `custody` projection honest (`history`), so only
 the named rule can fire; the fragment is part of that rule's message (step 3.4). `span`,
-`history` and `CustodyCase.assertRuleRefuses` are reused by Tasks 5 and 6.
+`history` and `CustodyCase.assertRuleRefuses` are reused by Tasks 5 and 7.
 
 - [ ] **Step 2: Run the tests and watch them fail**
 

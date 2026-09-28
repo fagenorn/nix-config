@@ -29,7 +29,7 @@ Task 7 adds reap and late results; Task 8 grows the sweep.
 check, unchanged).
 
 Spec (source of truth, read it whole):
-`.agents/artifacts/specs/2026-09-28-issue-205-fenced-custody-design.md`, D1–D33.
+`.agents/artifacts/specs/2026-09-28-issue-205-fenced-custody-design.md`, D1–D34.
 Slice 1: `.agents/artifacts/specs/2026-09-27-issue-204-transaction-core-skeleton-design.md`
 and `python/agent_tools/transaction_core.py` at the base commit.
 
@@ -83,7 +83,7 @@ and `python/agent_tools/transaction_core.py` at the base commit.
 
 Estimates only: ~10 changed files — `transaction_core.py` (542 at base; 1053 after
 Task 5; ~590 after Task 6; ~650 after Task 7), new `transaction_history.py` (~420 after
-Task 6; ~490 after Task 7), `transaction_storage.py` (~200, mostly moved),
+Task 6; ~510 after Task 7), `transaction_storage.py` (~200, mostly moved),
 `transaction_custody.py` (~300), new `tests/test_transaction_custody.py` (~800 after
 Task 7), `tests/test_transaction_core.py` (+~70), sweep support and sweep test (+~150),
 `justfile` (+1), `CLAUDE.md` (1 sentence).
@@ -91,9 +91,12 @@ Task 7), `tests/test_transaction_core.py` (+~70), sweep support and sweep test (
 Review-package boundary (per D33): the whole-branch package caps each member's
 cumulative `git diff -U10` from the base at 65536 bytes. After Task 5 the core's diff
 was 65625 bytes. A dry run of Task 6's move puts it at ~49000 bytes and the new module
-at ~24000; Task 7 is estimated to bring them to ~54000 and ~29000 and the custody test
-file to ~43000. Tasks 6 and 7 each end with a budget step that measures every touched
-Python file against a ≤ 55000 cap (≤ 50000 for the core after Task 6).
+at ~24000; Task 7, which homes its pure compositions in the new module (per D34), is
+estimated to bring them to ~52000 and ~31000 and the custody test file to ~43000.
+Tasks 6, 7 and 8 each end with an asserting budget step over every file the branch
+changes (each < 65536), plus tighter caps: after Task 6 the core ≤ 50000, the new module
+≤ 30000 and each touched test file ≤ 55000; after Task 7 the core, the new module and
+the custody test file ≤ 55000 each.
 
 Each task leaves the suite green, with one known gap: between Tasks 3 and 4 an advance
 into a terminal while custody is held raises `StateInvalid` (the validator forbids open
@@ -123,8 +126,9 @@ Task 8 — Renewal and lapse sweep rows, voided-forms column, CLAUDE.md — `tes
 The spec's `## Decision ledger` owns every decision. Tasks cite: D1, D3, D31, D32 (Task 1);
 D4, D9, D32 (Task 2); D2, D5–D8, D10–D12, D21, D24, D25, D27, D30 (Task 3); D13, D14, D19,
 D26, D27, D28 (Task 4); D10, D15, D16, D20, D27, D30 (Task 5); D1, D23, D33 (Task 6);
-D17, D18, D27, D30, D33 (Task 7); D22, D29, D33 (Task 8). Planning added D27–D31; the
-standards review added D32; the execution back-up added D33.
+D17, D18, D27, D30, D33, D34 (Task 7); D22, D29, D33 (Task 8). Planning added D27–D31;
+the standards review added D32; the execution back-up added D33 and its amendment review
+D34.
 
 ---
 
@@ -140,3 +144,15 @@ standards review added D32; the execution back-up added D33.
   as D32; the rest are routine corrections: rule-specific validator cases, a grant issued
   before renewal, stale-epoch writes after reacquisition, scheduled docstring rewrites,
   the lease-lock wording and the Task 3→4 gap note.
+
+### Amendment review (Task 6 insertion)
+
+- Reviewer: Claude fallback (isolated, read-only). Codex ran, but its JSONL carried no
+  runtime-selection event naming the model and effort, so its identity was not
+  established; its two findings duplicated S5(a) and DI1.
+- Base SHA: 66ccba5844eab2af9c68962c54a28f874585ee80; amendment: 61db9be.
+- Counts: 10 accepted (B1, B2; S1–S6; DI1, DI2), 0 rejected, 0 deferred. S2 and S3's
+  pure owner-result composition and shared strict-JSON rule are recorded as D34; the
+  rest are routine corrections: staging the new module before `just build`, exact
+  docstring text for Task 7, the productive budget remediation, missed renumbering,
+  interface precision, and asserting budget and import-direction checks.

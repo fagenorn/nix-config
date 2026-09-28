@@ -124,7 +124,7 @@ Expected: FAIL — `TypeError: … unexpected keyword argument 'concurrency_keys
    `state, parked` and, after the loop, refuse unless `document["custody"] == custody`
    (compare with `type(...) is dict or is None` first so `False`/`0` never equal `None`),
    with a message containing `custody does not equal the folded custody`. Turn the event
-   loop into a per-type dispatch keyed by `event["type"]` so Tasks 3, 5 and 6 slot new
+   loop into a per-type dispatch keyed by `event["type"]` so Tasks 3, 5 and 7 slot new
    types in; its default branch refuses with `f"event {seq} has unknown event type
    {event_type!r}"` (fail loud, per D32) before any key-set check.
 6. Docstrings: `CreationConflict` (in `transaction_storage`) → "The same creation key was requested with a

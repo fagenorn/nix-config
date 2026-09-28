@@ -13,7 +13,7 @@ refusal keeps its class, message and order, and every byte the store writes is u
 **Interfaces:**
 - Consumes (Tasks 1–5, `transaction_core`): `SCHEMA`, `FORWARD`, `PARKINGS`,
   `TERMINALS`, `STATES`, `TRANSITIONS`, `Custody`, `Transaction`, `_ID_PATTERN`,
-  `_AT_PATTERN`, `_STATE_KEYS`, `_CREATED_KEYS`, `_TRANSITIONED_KEYS`, `_ENVELOPE_KEYS`,
+  `_AT_PATTERN`, `_KEY_COLLECTIONS`, `_STATE_KEYS`, `_CREATED_KEYS`, `_TRANSITIONED_KEYS`, `_ENVELOPE_KEYS`,
   `_OPENING_KEYS`, `_EVENT_KEYS`, `_FENCED_EVENTS`, `_RELEASE_REASONS`,
   `_EXTERNAL_STATES`, `_edge_allowed`, `_is_id`, `_format_at`, `_parse_at`,
   `_parked_since`, `_is_timestamp`, `_key_set_violation`, `_fold_transitioned`,
@@ -23,8 +23,7 @@ refusal keeps its class, message and order, and every byte the store writes is u
 - Produces (`agent_tools.transaction_history`, bodies moved verbatim except as stated):
   - public, moved with their names: `SCHEMA`, `FORWARD`, `PARKINGS`, `TERMINALS`,
     `STATES`, `TRANSITIONS`, `Custody`, `Transaction`;
-  - public, the leading underscore dropped: `EVENT_KEYS`, `EXTERNAL_STATES`,
-    `edge_allowed`, `is_id`, `format_at`, `parked_since`, `key_set_violation`,
+  - public, the leading underscore dropped: `EXTERNAL_STATES`, `edge_allowed`, `is_id`, `format_at`, `parked_since`, `key_set_violation`,
     `is_subject_path`, `bound_path`, `snapshot`, `require_custody_shape`,
     `require_texts`;
   - `validate_state(document: Any, transaction_id: str, indexed: Callable[[str], str | None]) -> None`
@@ -34,7 +33,8 @@ refusal keeps its class, message and order, and every byte the store writes is u
   - `fenced_id_violation(events: Sequence[Mapping[str, Any]], event: Mapping[str, Any]) -> str | None`
     — the id fold `_append_fenced` builds inline (note the id of every earlier
     evidence, interval and grant record, then `_id_violation`);
-  - private: `_parse_at`, `_is_timestamp`, the patterns and key sets, `_CustodyFold`,
+  - private: `_parse_at`, `_is_timestamp`, the patterns and key sets (`_EVENT_KEYS`
+    included: nothing outside the module reads it), `_CustodyFold`,
     `_id_violation`, `_note_id`, the `_fold_*` functions, and a new
     `_check_envelope(event, seq, keys, refuse)` that holds the closed-key-set, `seq` and
     `at` checks `_fold_transitioned`, `_fold_fenced` and `_fold_custody` each repeat.
@@ -52,7 +52,8 @@ refusal keeps its class, message and order, and every byte the store writes is u
 - Import direction is core → history → custody → storage: `transaction_history` imports
   only the standard library, `agent_tools.transaction_custody` (`CUSTODY_EVENTS`,
   `EVIDENCE_FORMS`, `admissibility`, `fence_violation`) and
-  `agent_tools.transaction_storage` (`StateInvalid`, `serialize`); nothing imports
+  `agent_tools.transaction_storage` (`StateInvalid`, `serialize`) — Task 7 adds
+  `agent_tools.canonical`; nothing imports
   `transaction_core` or `transaction_history` except the modules to its left and tests.
 - `transaction_history` reads no file, no lock and no clock.
 - `_check_envelope` raises exactly the messages the three copies raise today
@@ -101,11 +102,13 @@ Expected: FAIL — `ImportError: cannot import name 'transaction_history'`.
    it per the Interfaces list; delete them from `transaction_core` (no second copy).
 2. Extract `_check_envelope` and call it from `_fold_transitioned` (with
    `_TRANSITIONED_KEYS`), `_fold_fenced` and `_fold_custody` (with
-   `EVENT_KEYS[event_type]`) in place of their three inline copies.
+   `_EVENT_KEYS[event_type]`) in place of their three inline copies.
 3. `_append_fenced` calls `fenced_id_violation(prior["events"], event)` in place of its
    inline fold; the refusal message stays `f"{transaction_id}: {operation}: {violation}"`.
 4. `transaction_core` imports what it uses from `transaction_history` by the public names
-   and updates its call sites; it does not import any `_`-prefixed name from a sibling.
+   and updates its call sites; it does not import any `_`-prefixed name from a sibling,
+   and drops each sibling import it no longer uses (`fence_violation` and
+   `CUSTODY_EVENTS` among them, since only the moved code read them).
 5. In `transaction_core`'s module docstring, replace the last two sentences with: "The
    durable-file primitives and the refusal hierarchy live in
    `agent_tools.transaction_storage`, and the document model — vocabularies, `Custody`,
@@ -123,13 +126,24 @@ Run: `if grep -nE '^(def|class) (_?(snapshot|edge_allowed|format_at|parse_at|par
 Expected: no output, exit 0 (the moved bodies are gone; the `_validate_state` binding
 stays).
 
-Run: `grep -nE '^from agent_tools\.' python/agent_tools/transaction_history.py`
-Expected: exactly the `transaction_custody` and `transaction_storage` imports.
+Run (import direction, both ways):
+
+```bash
+test -z "$(grep -hoE '^(from|import) agent_tools\.[a-z_]+' python/agent_tools/transaction_history.py \
+  | grep -vE 'agent_tools\.(canonical|transaction_custody|transaction_storage)$')" \
+  && ! grep -nE 'agent_tools\.transaction_(history|core)' \
+       python/agent_tools/transaction_custody.py python/agent_tools/transaction_storage.py
+```
+
+Expected: exit 0 — `transaction_history` imports no sibling but `transaction_custody`,
+`transaction_storage` (and `agent_tools.canonical`, which Task 7 adds), and neither of
+those two names `transaction_history` or `transaction_core`.
 
 Run: `just agent-workflow-tests 2>&1 | tail -3` — Expected: `OK`.
 
-Run: `just build 2>&1 | tail -3` — Expected: success (the Nix import check loads the new
-module).
+Run: `git add python/agent_tools/transaction_history.py && just build 2>&1 | tail -3`
+Expected: success (the flake copies only git-tracked files, so the new module is staged
+first; the Nix import check then loads it).
 
 - [ ] **Step 5: Commit**
 
@@ -141,16 +155,28 @@ git commit -m "refactor(transaction-core): move the state document model to tran
 
 - [ ] **Step 6: Check the review budget** (after the commit)
 
-Run:
+Run (every file the branch changes, plus this task's tighter caps):
 
 ```bash
-for f in python/agent_tools/transaction_core.py python/agent_tools/transaction_history.py \
-    tests/test_transaction_core.py tests/test_transaction_core_sweep.py; do
-  printf '%s %s\n' "$(git diff -U10 66ccba5844eab2af9c68962c54a28f874585ee80 HEAD -- "$f" | wc -c)" "$f"
+base=66ccba5844eab2af9c68962c54a28f874585ee80; fail=0
+size() { git diff -U10 "$base" HEAD -- "$1" | wc -c; }
+for f in $(git diff --name-only "$base" HEAD); do
+  n=$(size "$f"); printf '%s %s\n' "$n" "$f"; [ "$n" -lt 65536 ] || fail=1
 done
+[ "$(size python/agent_tools/transaction_core.py)" -le 50000 ] || fail=1
+[ "$(size python/agent_tools/transaction_history.py)" -le 30000 ] || fail=1
+for f in tests/test_transaction_core.py tests/test_transaction_core_sweep.py; do
+  [ "$(size "$f")" -le 55000 ] || fail=1
+done
+test "$fail" = 0
 ```
 
-Expected (estimates from a dry run of the move: core ~49000, history ~24000):
-`transaction_core.py` ≤ 50000, `transaction_history.py` ≤ 30000, each test file ≤ 55000.
-A cap missed means the task is not done: move further pure history code (never a
-`TransactionStore` method) in a follow-up commit and re-run this step.
+Expected: exit 0 (estimates from a dry run of the move: core ~49000, history ~24000).
+A miss means the task is not done. Moving a function that already existed at the base
+commit (`_mint_id`, `_index_path`, `_read_index`, `_require_creatable`) makes the core's
+diff larger, because its unchanged base lines become deletions. The productive moves
+are the pure candidate compositions inside the store methods, each into a
+`transaction_history` function the method calls: the transitioned and terminal-release
+build in `_advance_locked`, the `lease_released` candidate that `release` and `renew`'s
+quiesce each build (one shared function), and the opening-event build in
+`_acquisition`. Make them in a follow-up commit and re-run this step.
