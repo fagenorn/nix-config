@@ -15,7 +15,7 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_tools import transaction_core, transaction_storage
+from agent_tools import transaction_core, transaction_history, transaction_storage
 from agent_tools.transaction_core import (
     STATES, TERMINALS, TRANSITIONS, CreationConflict, StateInvalid, Transaction,
     TransactionBusy, TransactionError, TransactionStore, TransitionRefused,
@@ -526,6 +526,13 @@ class StorageModuleTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIs(getattr(transaction_core, name),
                               getattr(transaction_storage, name))
+
+    def test_the_core_re_exports_the_history_surface(self):
+        for name in ("SCHEMA", "FORWARD", "PARKINGS", "TERMINALS", "STATES",
+                     "TRANSITIONS", "Custody", "Transaction"):
+            with self.subTest(name=name):
+                self.assertIs(getattr(transaction_core, name),
+                              getattr(transaction_history, name))
 
 
 class ConcurrencyKeysTest(StoreCase):

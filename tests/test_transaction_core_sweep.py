@@ -113,9 +113,10 @@ def neutrality_findings(source):
     return findings
 
 
-from agent_tools import transaction_custody, transaction_storage
+from agent_tools import transaction_custody, transaction_history, transaction_storage
 
-NEUTRAL_MODULES = (transaction_core, transaction_custody, transaction_storage)
+NEUTRAL_MODULES = (transaction_core, transaction_history, transaction_custody,
+                   transaction_storage)
 
 
 class NeutralityTest(unittest.TestCase):
