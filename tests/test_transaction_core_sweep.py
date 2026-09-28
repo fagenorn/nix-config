@@ -34,8 +34,12 @@ SWEEP = {
 }
 
 
+def transitions(transaction):
+    return [event for event in transaction.events if event["type"] == "transitioned"]
+
+
 def states_passed(transaction):
-    return ("created",) + tuple(event["to"] for event in transaction.events[1:])
+    return ("created",) + tuple(event["to"] for event in transitions(transaction))
 
 
 class SweepTableTest(unittest.TestCase):
@@ -53,7 +57,7 @@ class SweepTableTest(unittest.TestCase):
                 self.assertEqual(persisted.creation_key, f"{shape}:{scenario}")
                 self.assertEqual(persisted.state, final)
                 self.assertEqual(states_passed(persisted), path)
-                self.assertEqual({e["external_state"] for e in persisted.events[1:]},
+                self.assertEqual({e["external_state"] for e in transitions(persisted)},
                                  {"known"})
 
     def test_recreating_a_driven_cell_returns_its_transaction(self):

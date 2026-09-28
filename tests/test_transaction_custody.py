@@ -14,8 +14,9 @@ import unittest
 from pathlib import Path
 
 from agent_tools.transaction_core import (
-    Custody, CustodyMisbound, FenceViolation, GrantInvalid, LeaseUnavailable, StaleCustody,
-    StateInvalid, TransactionBusy, TransactionError, TransactionStore, TransitionRefused)
+    PARKED_CUSTODY_WINDOW_MS, Custody, CustodyMisbound, FenceViolation, GrantInvalid,
+    LeaseUnavailable, StaleCustody, StateInvalid, TransactionBusy, TransactionError,
+    TransactionStore, TransitionRefused)
 
 T0 = 1_800_000_000_000
 TTL = 600_000
@@ -312,6 +313,163 @@ class CustodyValidatorTest(CustodyCase):
         for name, (document, fragment) in cases.items():
             with self.subTest(case=name):
                 self.assertRuleRefuses(transaction_id, copy.deepcopy(document), fragment)
+
+
+class RenewTest(CustodyCase):
+    def test_outside_the_margin_renewal_writes_nothing(self):
+        custody = self.acquire(self.new())
+        self.clock.advance(TTL // 2 - 1)
+        before = self.files()
+        self.assertEqual(self.store.renew(custody).custody, custody)
+        self.assertEqual(self.files(), before)
+
+    def test_inside_the_margin_renewal_extends_in_place_without_history(self):
+        transaction_id = self.new()
+        custody = self.acquire(transaction_id)
+        state = (self.root / transaction_id / "state.json").read_bytes()
+        for turn in (1, 2):
+            self.clock.advance(TTL // 2 + 1)
+            after = self.store.renew(custody)
+            self.assertEqual((after.custody, after.revision), (custody, 2))
+            for key in KEYS:
+                record = self.store.inspect_lease(key)
+                holder = record["holder"]
+                self.assertEqual(record["epoch"], 1)
+                self.assertEqual(
+                    (holder["instance"], holder["term"], holder["renewal_count"],
+                     holder["last_renewed_at"], holder["expires_at"], holder["acquired_at"]),
+                    (custody.fence[key]["instance"], 1 + turn, turn, self.clock.now,
+                     self.clock.now + TTL, T0))
+        self.assertEqual((self.root / transaction_id / "state.json").read_bytes(), state)
+
+    def test_the_margin_is_half_the_ttl_floored_at_a_minute_and_capped_at_the_ttl(self):
+        for ttl, quiet, due in ((90_000, 29_999, 2), (30_000, 0, 1), (200_000, 99_999, 2)):
+            with self.subTest(ttl=ttl):
+                key = f"key:{ttl}"
+                custody = self.acquire(self.new(key, keys=(key,)), ttl=ttl)
+                self.clock.advance(quiet)
+                self.store.renew(custody)
+                self.assertEqual(self.store.inspect_lease(key)["holder"]["term"], 1)
+                self.clock.advance(due)
+                self.store.renew(custody)
+                self.assertEqual(self.store.inspect_lease(key)["holder"]["term"], 2)
+
+    def test_a_lapsed_lease_is_never_renewed(self):
+        custody = self.acquire(self.new())
+        self.clock.advance(TTL)
+        self.assertRefusedUnchanged(StaleCustody, lambda: self.store.renew(custody))
+
+
+class QuiesceTest(CustodyCase):
+    def park(self):
+        transaction_id = self.new()
+        custody = self.acquire(transaction_id)
+        self.store.advance(transaction_id, "attention_required", reason="wait",
+                           custody=custody)
+        return transaction_id, custody
+
+    def test_parked_custody_is_renewed_up_to_the_window_then_quiesced(self):
+        self.assertEqual(PARKED_CUSTODY_WINDOW_MS, 900_000)
+        transaction_id, custody = self.park()
+        for step in (400_000, 400_000, 100_000):
+            self.clock.advance(step)
+            self.assertEqual(self.store.renew(custody).custody, custody)
+        self.clock.advance(1)
+        after = self.store.renew(custody)
+        self.assertIsNone(after.custody)
+        self.assertEqual((after.events[-1]["type"], after.events[-1]["reason"]),
+                         ("lease_released", "quiesced"))
+        self.assertEqual({self.store.inspect_lease(k)["holder"] is None for k in KEYS}, {True})
+        resumed = self.acquire(transaction_id)
+        self.assertEqual(self.store.load(transaction_id).events[-1]["reason"], "released")
+        self.assertEqual({entry["epoch"] for entry in resumed.fence.values()}, {2})
+
+    def test_moving_between_parkings_does_not_restart_the_window(self):
+        transaction_id, custody = self.park()
+        self.clock.advance(400_000)
+        self.store.renew(custody)
+        self.store.advance(transaction_id, "recovering", reason="try", custody=custody)
+        self.clock.advance(400_000)
+        self.store.renew(custody)
+        self.clock.advance(100_001)
+        self.assertIsNone(self.store.renew(custody).custody)
+
+    def test_an_unparked_transaction_is_never_quiesced(self):
+        custody = self.acquire(self.new())
+        for _ in range(4):
+            self.clock.advance(400_000)
+            self.assertEqual(self.store.renew(custody).custody, custody)
+
+
+class FencedAdvanceTest(CustodyCase):
+    def step(self, transaction_id, *targets, custody=None):
+        for target in targets:
+            after = self.store.advance(transaction_id, target, reason="r",
+                                       external_state="known", custody=custody)
+        return after
+
+    def test_publishing_and_everything_after_it_requires_custody(self):
+        transaction_id = self.new()
+        self.step(transaction_id, "awaiting_verification", "ready")
+        self.assertRefusedUnchanged(StaleCustody, lambda: self.step(transaction_id,
+                                                                    "publishing"))
+        custody = self.acquire(transaction_id)
+        self.step(transaction_id, "publishing", "attention_required", custody=custody)
+        self.store.release(custody)
+        self.assertRefusedUnchanged(StaleCustody, lambda: self.step(transaction_id,
+                                                                    "publishing"))
+        again = self.acquire(transaction_id)
+        self.assertEqual(self.step(transaction_id, "publishing", custody=again).state,
+                         "publishing")
+
+    def test_held_custody_is_required_even_before_publishing(self):
+        transaction_id = self.new()
+        custody = self.acquire(transaction_id)
+        self.assertRefusedUnchanged(StaleCustody, lambda: self.step(transaction_id,
+                                                                    "abandoned"))
+        self.assertEqual(self.step(transaction_id, "awaiting_verification",
+                                   custody=custody).state, "awaiting_verification")
+
+    def test_a_presented_custody_is_checked_where_none_is_required(self):
+        transaction_id = self.new()
+        foreign = self.acquire(self.new("o", keys=("project:other",)))
+        forged = dataclasses.replace(foreign, transaction_id=transaction_id)
+        self.assertRefusedUnchanged(StaleCustody, lambda: self.step(
+            transaction_id, "awaiting_verification", custody=forged))
+        self.assertRefusedUnchanged(StateInvalid, lambda: self.step(
+            transaction_id, "awaiting_verification", custody="not custody"))
+
+    def test_a_stale_or_misbound_holder_is_refused_and_no_lapse_is_recorded(self):
+        transaction_id = self.new()
+        custody = self.acquire(transaction_id)
+        moved = dataclasses.replace(custody, subject_path="/work/beta")
+        self.assertRefusedUnchanged(CustodyMisbound, lambda: self.step(
+            transaction_id, "awaiting_verification", custody=moved))
+        self.clock.advance(TTL)
+        self.assertRefusedUnchanged(StaleCustody, lambda: self.step(
+            transaction_id, "awaiting_verification", custody=custody))
+        self.assertEqual(self.types(transaction_id), ["created", "lease_acquired"])
+
+    def test_entering_a_terminal_releases_custody_in_the_same_write(self):
+        for terminal, path in (
+                ("succeeded", ("awaiting_verification", "ready", "publishing", "published",
+                               "proving", "succeeded")),
+                ("abandoned", ("abandoned",))):
+            with self.subTest(terminal=terminal):
+                key = f"key:{terminal}"
+                transaction_id = self.new(terminal, keys=(key,))
+                custody = self.acquire(transaction_id)
+                after = self.step(transaction_id, *path, custody=custody)
+                self.assertIsNone(after.custody)
+                self.assertEqual([e["type"] for e in after.events[-2:]],
+                                 ["transitioned", "lease_released"])
+                self.assertEqual(after.events[-1]["reason"], "terminal")
+                self.assertIsNone(self.store.inspect_lease(key)["holder"])
+                for call in (lambda: self.step(transaction_id, "created", custody=custody),
+                             lambda: self.store.renew(custody),
+                             lambda: self.store.release(custody),
+                             lambda: self.acquire(transaction_id)):
+                    self.assertRefusedUnchanged(TransitionRefused, call)
 
 
 if __name__ == "__main__":

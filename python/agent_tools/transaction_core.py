@@ -10,9 +10,11 @@ creation. Every event `at` is read from the injected clock (integer
 epoch milliseconds, the wall clock by default); transaction ids still come from
 the wall clock. `acquire` takes custody of the whole key set from the lease
 authority in `agent_tools.transaction_custody`, returning a `Custody` credential
-that `release` and every fenced write check against the stored projection and the
-live lease records. The durable-file primitives and the refusal hierarchy live in
-`agent_tools.transaction_storage`, whose error classes this module re-exports.
+that `renew`, `release` and every fenced write check against the stored projection
+and the live lease records; `advance` is fenced from `publishing` on and while
+custody is held, and entering a terminal releases custody. The durable-file
+primitives and the refusal hierarchy live in `agent_tools.transaction_storage`,
+whose error classes this module re-exports.
 The module has no command and no caller yet.
 """
 
@@ -44,6 +46,7 @@ from agent_tools.transaction_storage import (
 
 SCHEMA = "transaction-state/v2"
 INDEX_SCHEMA = "transaction-creation-key/v1"
+PARKED_CUSTODY_WINDOW_MS = 900_000  # the core cap on custody held through a parking (D19)
 
 FORWARD = ("created", "awaiting_verification", "ready", "publishing", "published",
            "activating", "proving")
@@ -161,6 +164,20 @@ def _parse_at(at: str) -> int:
     seconds, millis = at[:-1].split(".")
     parsed = datetime.datetime.strptime(seconds, "%Y-%m-%dT%H:%M:%S")
     return calendar.timegm(parsed.timetuple()) * 1000 + int(millis)
+
+
+def _parked_since(events: list[dict]) -> int | None:
+    """Epoch ms of the transition that entered the current parked run from an unparked
+    state, or None when the history is not parked (D28)."""
+    start = None
+    for event in events:
+        if event["type"] != "transitioned":
+            continue
+        if event["to"] in PARKINGS and event["from"] not in PARKINGS:
+            start = _parse_at(event["at"])
+        elif event["to"] not in PARKINGS:
+            start = None
+    return start
 
 
 def _is_timestamp(value: object) -> bool:
@@ -538,13 +555,25 @@ class TransactionStore:
         return _snapshot(self._validated_document(transaction_id))
 
     def advance(self, transaction_id: str, target: str, *, reason: str,
-                external_state: str | None = None) -> Transaction:
-        """Move one transaction along one allowed edge under its lock (D5, D7-D10, D13).
+                external_state: str | None = None,
+                custody: Custody | None = None) -> Transaction:
+        """Move one transaction along one allowed edge under its lock (#204; #205 D14,
+        D26, D27).
 
+        A terminal source is `TransitionRefused` before any custody check. Custody
+        is required when the target is `publishing`, when the history has ever
+        entered `publishing`, or when the transaction holds custody; a required
+        custody that is None is `StaleCustody`. A presented custody is always
+        fenced-checked, required or not, before the lifecycle refusals. Entering a
+        terminal while custody is held appends the transition and a `lease_released`
+        reason `terminal` in one `state.json` write, then clears the lease records.
         Every refusal happens before any write; the lock file is never created.
         """
+        if custody is not None:
+            _require_custody_shape(custody)
         with self._transaction_locked(transaction_id):
-            return self._advance_locked(transaction_id, target, reason, external_state)
+            return self._advance_locked(transaction_id, target, reason, external_state,
+                                        custody)
 
     @contextlib.contextmanager
     def _transaction_locked(self, transaction_id: str):
@@ -571,12 +600,20 @@ class TransactionStore:
             os.close(descriptor)
 
     def _advance_locked(self, transaction_id: str, target: Any, reason: Any,
-                        external_state: Any) -> Transaction:
+                        external_state: Any, custody: Custody | None) -> Transaction:
         prior = self._validated_document(transaction_id)
         source = prior["state"]
         where = f"{transaction_id}: {source} -> {target!r}"
         if source in TERMINALS:
             raise TransitionRefused(f"{where}: source is terminal")
+        now = self._now()
+        required = (target == "publishing" or prior["custody"] is not None
+                    or any(event["type"] == "transitioned" and event["to"] == "publishing"
+                           for event in prior["events"]))
+        if required and custody is None:
+            raise StaleCustody(f"{where}: custody is required and none was presented")
+        if custody is not None:
+            self._check_custody(prior, custody, now)
         if type(target) is not str or target not in STATES:
             raise TransitionRefused(f"{where}: target is not a known state")
         if not _edge_allowed(source, prior["parked_from"], target):
@@ -588,9 +625,10 @@ class TransactionStore:
             raise TransitionRefused(f"{where}: external_state is not known, unknown or None")
         if target in TERMINALS and external_state != "known":
             raise TransitionRefused(f"{where}: terminal target needs known external state")
+        at = _format_at(now)
         candidate = copy.deepcopy(prior)
         candidate["events"].append({
-            "seq": prior["revision"] + 1, "type": "transitioned", "at": _format_at(self._now()),
+            "seq": prior["revision"] + 1, "type": "transitioned", "at": at,
             "from": source, "to": target, "reason": reason,
             "external_state": external_state})
         if target == "attention_required":
@@ -598,13 +636,24 @@ class TransactionStore:
         elif source == "attention_required":
             candidate["parked_from"] = None
         candidate["state"] = target
+        fence = prior["custody"]["fence"] if prior["custody"] is not None else None
+        if target in TERMINALS and fence is not None:
+            candidate["events"].append({
+                "seq": len(candidate["events"]) + 1, "type": "lease_released", "at": at,
+                "fence": fence, "reason": "terminal"})
+            candidate["custody"] = None
         candidate["revision"] = len(candidate["events"])
-        if candidate["events"][:-1] != prior["events"]:
+        if candidate["events"][:len(prior["events"])] != prior["events"]:
             raise StateInvalid(f"{transaction_id}: prior events are not the new history's "
                                f"prefix")
         _validate_state(candidate, transaction_id, self.root)
         directory = self.root / transaction_id
-        atomic_write(directory, directory / "state.json", candidate)
+        if candidate["custody"] is None and fence is not None:
+            with self._leases.locked():
+                atomic_write(directory, directory / "state.json", candidate)
+                self._leases.clear(fence)
+        else:
+            atomic_write(directory, directory / "state.json", candidate)
         return _snapshot(candidate)
 
     def create(self, creation_key: str, subject: dict, *,
@@ -764,6 +813,46 @@ class TransactionStore:
                 atomic_write(directory, directory / "state.json", candidate)
                 self._leases.clear(fence)
         return _snapshot(candidate)
+
+    def renew(self, custody: Custody) -> Transaction:
+        """The core's renewal duty, a tick the holder's host loop calls (D13, D19, D27, D28).
+
+        A terminal transaction is `TransitionRefused` before the fenced check; a
+        failed check (a lapsed lease included) refuses without reacquiring. While
+        the transaction is parked longer than `PARKED_CUSTODY_WINDOW_MS`, measured
+        from the transition that entered the parked run, it quiesces instead:
+        `lease_released` reason `quiesced` in `state.json`, then the records are
+        cleared, and the snapshot has no custody. Otherwise it never appends an
+        event or writes `state.json`: it extends every record by its recorded TTL
+        only when the earliest remaining validity is inside the renewal margin,
+        and writes nothing at all outside it.
+        """
+        _require_custody_shape(custody)
+        transaction_id = custody.transaction_id
+        with self._transaction_locked(transaction_id):
+            prior = self._validated_document(transaction_id)
+            if prior["state"] in TERMINALS:
+                raise TransitionRefused(f"{transaction_id}: renew: state {prior['state']} "
+                                        f"is terminal")
+            now = self._now()
+            self._check_custody(prior, custody, now)
+            fence = prior["custody"]["fence"]
+            with self._leases.locked():
+                if prior["state"] in PARKINGS \
+                        and now - _parked_since(prior["events"]) > PARKED_CUSTODY_WINDOW_MS:
+                    candidate = copy.deepcopy(prior)
+                    candidate["events"].append({
+                        "seq": prior["revision"] + 1, "type": "lease_released",
+                        "at": _format_at(now), "fence": fence, "reason": "quiesced"})
+                    candidate["custody"] = None
+                    candidate["revision"] = len(candidate["events"])
+                    _validate_state(candidate, transaction_id, self.root)
+                    directory = self.root / transaction_id
+                    atomic_write(directory, directory / "state.json", candidate)
+                    self._leases.clear(fence)
+                    return _snapshot(candidate)
+                self._leases.extend_if_due(fence, now)
+        return _snapshot(prior)
 
     def _check_custody(self, prior: dict, custody: Custody, now: int) -> None:
         """The fenced check (D12, D25): credential, then path, then live records at `now`.

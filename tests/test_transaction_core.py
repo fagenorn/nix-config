@@ -309,11 +309,19 @@ PATHS_TO_TERMINAL = {
 
 
 class AdvanceCase(StoreCase):
+    def setUp(self):
+        super().setUp()
+        self.held = {}
+
     def reach(self, key, path):
-        transaction_id = self.store.create(key, SUBJECT, concurrency_keys=KEYS).transaction_id
+        transaction_id = self.store.create(
+            key, SUBJECT, concurrency_keys=[f"key:{key}"]).transaction_id
+        self.held[transaction_id] = self.store.acquire(
+            transaction_id, executor_id="exec", subject_path="/work/demo",
+            ttl_ms=3_600_000).custody
         for target in path:
             self.store.advance(transaction_id, target, reason=f"to {target}",
-                               external_state="known")
+                               external_state="known", custody=self.held[transaction_id])
         return transaction_id
 
     def assertRefusedUnchanged(self, error, transaction_id, target, **kwargs):
@@ -321,6 +329,7 @@ class AdvanceCase(StoreCase):
         listing = self.tree()
         with self.assertRaises(error) as caught:
             self.store.advance(transaction_id, target, reason=kwargs.pop("reason", "try"),
+                               custody=kwargs.pop("custody", self.held.get(transaction_id)),
                                **kwargs)
         self.assertIn(transaction_id, str(caught.exception))
         self.assertEqual(self.state_path(transaction_id).read_bytes(), raw)
@@ -331,13 +340,14 @@ class AdvanceTest(AdvanceCase):
     def test_the_forward_chain_persists_one_event_per_transition(self):
         transaction_id = self.reach("k", PATHS_TO_TERMINAL["succeeded"])
         persisted = TransactionStore(self.root).load(transaction_id)
+        transitions = [e for e in persisted.events if e["type"] == "transitioned"]
         self.assertEqual(persisted.state, "succeeded")
-        self.assertEqual(persisted.revision, 8)
-        self.assertEqual([e["seq"] for e in persisted.events], list(range(1, 9)))
-        self.assertEqual([e["to"] for e in persisted.events[1:]],
-                         list(PATHS_TO_TERMINAL["succeeded"]))
-        self.assertEqual(persisted.events[-1]["external_state"], "known")
-        self.assertEqual(persisted.events[1]["reason"], "to awaiting_verification")
+        self.assertEqual(persisted.revision, 10)
+        self.assertEqual([e["seq"] for e in persisted.events], list(range(1, 11)))
+        self.assertEqual([e["to"] for e in transitions], list(PATHS_TO_TERMINAL["succeeded"]))
+        self.assertEqual(transitions[-1]["external_state"], "known")
+        self.assertEqual(transitions[0]["reason"], "to awaiting_verification")
+        self.assertEqual(persisted.events[-1]["type"], "lease_released")
 
     def test_the_library_path_skips_activation(self):
         transaction_id = self.reach("k", FORWARD[1:5] + ("proving", "succeeded"))
@@ -353,7 +363,8 @@ class AdvanceTest(AdvanceCase):
                     transaction_id = self.reach(f"{source}->{target}", path)
                     if target in allowed:
                         after = self.store.advance(transaction_id, target, reason="edge",
-                                                   external_state="known")
+                                                   external_state="known",
+                                                   custody=self.held[transaction_id])
                         self.assertEqual(after.state, target)
                     else:
                         self.assertRefusedUnchanged(TransitionRefused, transaction_id,
@@ -366,7 +377,8 @@ class AdvanceTest(AdvanceCase):
                          ("attention_required", "publishing"))
         self.assertRefusedUnchanged(TransitionRefused, transaction_id, "ready")
         self.assertRefusedUnchanged(TransitionRefused, transaction_id, "published")
-        resumed = self.store.advance(transaction_id, "publishing", reason="resume")
+        resumed = self.store.advance(transaction_id, "publishing", reason="resume",
+                                     custody=self.held[transaction_id])
         self.assertEqual((resumed.state, resumed.parked_from), ("publishing", None))
 
 
@@ -390,7 +402,8 @@ class TerminalTest(AdvanceCase):
             source = (("created",) + path[:-1])[-1]
             self.assertEqual(self.store.load(transaction_id).state, source)  # no reroute
             done = self.store.advance(transaction_id, terminal, reason="grounded",
-                                      external_state="known")
+                                      external_state="known",
+                                      custody=self.held[transaction_id])
             self.assertEqual(done.state, terminal)
 
     def test_malformed_reason_or_external_state_is_refused(self):
@@ -408,7 +421,8 @@ class LockAndSchemaGuardTest(AdvanceCase):
             fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.assertRefusedUnchanged(TransactionBusy, transaction_id,
                                         "awaiting_verification")
-        self.store.advance(transaction_id, "awaiting_verification", reason="now free")
+        self.store.advance(transaction_id, "awaiting_verification", reason="now free",
+                           custody=self.held[transaction_id])
 
     def test_a_held_creation_lock_refuses_create_before_any_write(self):
         with open(self.root / "creation.lock", "a+") as holder:

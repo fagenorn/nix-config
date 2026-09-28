@@ -170,6 +170,27 @@ class LeaseAuthority:
                     "acquired_at": now, "expires_at": now + ttl_ms, "renewal_count": 0,
                     "last_renewed_at": None}})
 
+    def extend_if_due(self, fence: Mapping[str, Mapping[str, Any]], now: int) -> bool:
+        """Renew the span in place once its earliest remaining validity is inside the
+        margin; caller holds `locked()` and has passed the fenced check (D13).
+
+        Outside the margin it writes nothing and returns False. Inside it, every
+        record keeps its epoch and instance and gains one term and one renewal,
+        renewed at `now` and valid for its recorded TTL from `now`.
+        """
+        records = {key: self.record(key) for key in fence}
+        holders = [record["holder"] for record in records.values()]
+        remaining = min(holder["expires_at"] for holder in holders) - now
+        if remaining >= min(renewal_margin_ms(holder["ttl_ms"]) for holder in holders):
+            return False
+        for key, record in records.items():
+            holder = record["holder"]
+            atomic_write(self.directory, self._path(key), {**record, "holder": {
+                **holder, "term": holder["term"] + 1,
+                "renewal_count": holder["renewal_count"] + 1, "last_renewed_at": now,
+                "expires_at": now + holder["ttl_ms"]}})
+        return True
+
     def clear(self, fence: Mapping[str, Mapping[str, Any]]) -> None:
         """Null the holder, keeping the epoch, on each record still naming the fence's
         instance; caller holds `locked()` (D24)."""

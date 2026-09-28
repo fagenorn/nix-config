@@ -45,6 +45,7 @@ def drive(store, shape, scenario):
         f"{shape}:{scenario}", subject,
         concurrency_keys=profile["target"]["concurrency_keys"]).transaction_id
     definite = {"all": True}
+    held = {"custody": None}
 
     def adapter(alias):
         return registry[profile["bindings"][alias]["adapter"]]
@@ -53,7 +54,8 @@ def drive(store, shape, scenario):
         return "known" if definite["all"] else "unknown"
 
     def advance(target, reason):
-        store.advance(transaction_id, target, reason=reason, external_state=external_state())
+        store.advance(transaction_id, target, reason=reason, external_state=external_state(),
+                      custody=held["custody"])
 
     def observe(result, what):
         if result["outcome"] == "unknown":
@@ -83,6 +85,9 @@ def drive(store, shape, scenario):
                                                   {"expected_subject": subject}),
                 "candidate verification")
         advance("ready", "candidate verification satisfied")
+        held["custody"] = store.acquire(transaction_id, executor_id="fixture-executor",
+                                        subject_path=f"/fixture/{shape}",
+                                        ttl_ms=600_000).custody
         advance("publishing", "publication started")
         run_phase(profile["publication"])
         advance("published", "every publication unit satisfied")
