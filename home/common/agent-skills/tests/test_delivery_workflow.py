@@ -18,7 +18,7 @@ from ._delivery_model_fixtures import (
     contract_and_delivery_for_stage, observation, pr_subject, seal, selection,
     stage_scope,
 )
-from .test_resolve_project import make_home, make_project_root, run as run_resolver, source_contract
+from .test_resolve_project import git, make_home, make_project_root, run as run_resolver, source_contract
 
 
 ROOT = Path(__file__).parents[4]
@@ -30,6 +30,18 @@ ARTIFACT_BUDGET = SCRIPTS / "artifact_budget.py"
 NOW = "2026-09-21T00:00:00Z"
 WORKTREE_NAME = "worktree-issue-171-delivery-contract-source"
 LATER = "2026-09-21T00:10:00Z"
+SLUGLESS = "worktree-issue-171"
+
+
+def authored_policy():
+    """The seven sealed members of this repo's authored contract, by provenance key."""
+    authored = source_contract()
+    vcs, tracker = authored["bindings"]["vcs"], authored["bindings"]["tracker"]
+    return {"project_id": authored["project"]["id"], "tracker_kind": tracker["kind"],
+            "repository_slug": tracker["repo_slug"], "branch_pattern": vcs["branch_pattern"],
+            "worktree_prefix": vcs["worktree"]["prefix"],
+            "integration_branch": vcs["integration_branch"],
+            "delete_branch": vcs["merge"]["delete_branch"]}
 
 
 class FakeProvider:
@@ -1453,6 +1465,21 @@ class BuilderHarness:
             mutate(contract)
         return make_project_root(contract).rename(self.worktree)
 
+    def linked_worktree(self, name, branch):
+        """A real `git worktree add` of the committed synthetic project (#192 D14).
+
+        The project is committed once per root with the hermetic `git` helper,
+        so the worktree carries `.agents/project.json` and resolves exactly as
+        the root does. Returns the worktree's absolute path.
+        """
+        if getattr(self, "committed_root", None) != self.root:
+            git(self.root, "add", "-A")
+            git(self.root, "commit", "--quiet", "-m", "synthetic project")
+            self.committed_root = self.root
+        path = self.root / ".worktrees" / name
+        git(self.root, "worktree", "add", "--quiet", "-b", branch, str(path))
+        return str(path)
+
     def contract_input(self, **changes):
         value = {"issue": 171, "worktree": self.worktree, "source_kind": "explicit_user",
                  "source_reference": "invocation:/from-issue 171 --auto", "now": NOW}
@@ -1659,6 +1686,69 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
         self.assertEqual((refused.returncode, refused.stdout), (2, b""))
         self.assertIn(b"authorization chain", refused.stderr)
 
+    def test_sync_selection_seals_one_link_and_refuses_each_malformed_input(self):
+        self.project()
+        contract = self.build("contract", self.contract_input())["contract"]
+        h0, h1, m1, m2 = "a" * 40, "e" * 40, "d" * 40, "f" * 40
+        prior = self.build("selected-output", {"contract": contract, "head": h0,
+            "tree": "c" * 40, "acceptance_ref": ".claude/specs/issue-171.md",
+            "review_ref": "clean", "test_ref": "checks"})
+        value = {"contract": contract, "prior_selection": prior, "head": h1,
+                 "tree": "8" * 40, "parents": [h0, m1], "review_ref": "merge-delta-clean",
+                 "test_ref": "checks"}
+        raw = json.dumps(value).encode()
+        first = self.cli("build-delivery", "--repo-root", self.root, "--kind",
+                         "sync-selection", "--input", "-", stdin=raw).stdout
+        self.assertEqual(first, self.cli("build-delivery", "--repo-root", self.root, "--kind",
+                                         "sync-selection", "--input", "-", stdin=raw).stdout)
+        link = json.loads(first)
+        self.assertEqual(first, self.model.canonical_bytes(link))
+        self.validate(link, "selected-output")
+        sync = {"prior_selection_id": prior["id"], "first_parent": h0,
+                "integration_parent": m1}
+        self.assertEqual({key: link[key] for key in (
+            "schema_version", "subject_kind", "subject_value", "branch", "base", "sync")},
+            {"schema_version": 2, "subject_kind": "commit", "subject_value": h1,
+             "branch": WORKTREE_NAME, "base": "main", "sync": sync})
+        self.assertEqual(link["data_identity_digest"], self.model.canonical_digest(
+            {"kind": "git-tree", "value": "8" * 40}))
+        self.assertEqual(link["evidence_digest"], self.model.canonical_digest(
+            {"head": h1, "review_ref": "merge-delta-clean", "test_ref": "checks",
+             "sync": sync}))
+        self.assertEqual((link["acceptance_evidence_ids"], link["review_evidence_ids"],
+                          link["test_evidence_ids"]),
+                         (prior["acceptance_evidence_ids"],
+                          [f"review:clean@{h0}", f"review:merge-delta-clean@{h1}"],
+                          [f"test:checks@{h0}", f"test:checks@{h1}"]))
+        other = self.build("contract", self.contract_input(now=LATER))["contract"]
+        foreign = self.build("selected-output", {"contract": other, "head": h0,
+            "tree": "c" * 40, "acceptance_ref": "spec", "review_ref": "clean",
+            "test_ref": "checks"})
+        invalid = b"prior_selection is not a valid selection of this contract"
+        parents = b"parents must be two distinct non-empty strings other than head"
+        for label, changes, reason in (
+                ("foreign prior", {"prior_selection": foreign}, invalid),
+                ("tampered prior", {"prior_selection": {**prior, "subject_value": m2}},
+                 invalid),
+                ("head unchanged", {"head": h0}, b"head equals the prior selection's head"),
+                ("one parent", {"parents": [h0]}, parents),
+                ("equal parents", {"parents": [h0, h0]}, parents),
+                ("empty parent", {"parents": [h0, ""]}, parents),
+                ("head as a parent", {"parents": [h0, h1]}, parents),
+                ("not a list", {"parents": f"{h0} {m1}"}, parents),
+                ("first parent off the chain", {"parents": [m2, m1]},
+                 b"parents[0] is not the prior selection's head")):
+            with self.subTest(label=label):
+                refused = self.build("sync-selection", {**value, **changes}, ok=False)
+                self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                 (2, b"", b"workflow-state: build-delivery refused: "
+                                  b"sync selection: " + reason + b"\n"))
+        missing = dict(value)
+        missing.pop("test_ref")
+        refused = self.build("sync-selection", missing, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+        self.assertIn(b"builder input keys", refused.stderr)
+
 
 class WorktreePolicyTest(BuilderHarness, unittest.TestCase):
     """D3, D4, D7: an existing contract worktree can veto a build, never supply policy."""
@@ -1719,9 +1809,122 @@ class WorktreePolicyTest(BuilderHarness, unittest.TestCase):
                 "It takes no lock, reads no clock and writes nothing.",
                 "A contract the builder cannot re-derive is served only when a ledger under "
                 "--repo-root has installed it, and then against that ledger's stored initial "
-                "intent; that is the only time it reads a ledger."):
+                "intent.",
+                "--kind current-selection serves the current selection of the contract's "
+                "reviewed slot from the one ledger that installed the contract. Those are "
+                "the only times it reads a ledger.",
+                "--kind sync-selection seals a selection that extends --input's "
+                "prior_selection by one sync merge commit whose first parent is that "
+                "selection's head.",
+                "The contract's branch is the worktree path's final component when that "
+                "name matches the issue branch pattern; otherwise it is the branch "
+                "checked out at that path, which must be the top level of a git "
+                "worktree, and that branch must match the pattern."):
             with self.subTest(clause=clause[:40]):
                 self.assertIn("".join(clause.split()), text)
+
+
+class LegacyWorktreeTest(BuilderHarness, unittest.TestCase):
+    """#192 A1, T1-T3: a slugless worktree takes its contract branch from its checkout."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = load(MODEL, "delivery_model_legacy_worktree", package=True)
+
+    def slugless_input(self):
+        return self.contract_input(worktree=str(self.root / ".worktrees" / SLUGLESS))
+
+    def refusal(self, clause):
+        return (b"workflow-state: build-delivery refused: worktree name "
+                b"'worktree-issue-171' does not match the issue branch pattern, and "
+                + clause + b"\n")
+
+    def test_a_slugless_worktree_builds_from_its_live_branch(self):
+        self.project()
+        path = self.linked_worktree(SLUGLESS, WORKTREE_NAME)
+        value = self.slugless_input()
+        self.assertEqual(value["worktree"], path)
+        built = self.build("contract", value)
+        contract = built["contract"]
+        literals = {stage["id"]: stage["target_ref"].get("value")
+                    for stage in contract["stages"]}
+        self.assertEqual(contract["stages"][0]["target_ref"]["constraints"]["branch"],
+                         WORKTREE_NAME)
+        self.assertEqual((literals["delete_remote_branch"], literals["delete_local_branch"],
+                          literals["remove_worktree"]), (WORKTREE_NAME, WORKTREE_NAME, path))
+        self.assertEqual(contract["provenance"]["digest"], self.model.canonical_digest({
+            "policy": authored_policy(), "issue": 171, "worktree": path,
+            "source": {"kind": value["source_kind"], "reference": value["source_reference"]},
+            "branch": WORKTREE_NAME}))
+        git(self.root, "worktree", "remove", path)
+        self.assertFalse(os.path.lexists(path))
+        served = self.cli("build-delivery", "--repo-root", self.root, "--kind",
+                          "initial-intent", "--input", "-",
+                          stdin=json.dumps({"contract": contract}).encode()).stdout
+        self.assertEqual(served, self.model.canonical_bytes(built["initial_intent"]))
+        declared = {item["id"]: item for item in built["initial_intent"]["scopes"]}
+        for stage in contract["stages"]:
+            with self.subTest(stage=stage["id"]):
+                scope = self.build("scope", {"contract": contract, "stage_id": stage["id"]})
+                self.assertEqual(declared[scope["id"]], scope)
+
+    def test_a_slugless_worktree_without_a_patterned_live_branch_refuses(self):
+        def regular_file(path):
+            Path(path).write_text("not a worktree\n", encoding="utf-8")
+
+        def symlink(path):
+            Path(path).symlink_to(self.linked_worktree("linked", WORKTREE_NAME),
+                                  target_is_directory=True)
+
+        def plain_directory(path):
+            Path(path).mkdir()
+
+        def detached(path):
+            self.linked_worktree(SLUGLESS, WORKTREE_NAME)
+            git(Path(path), "checkout", "--quiet", "--detach")
+
+        def feature_branch(path):
+            self.linked_worktree(SLUGLESS, "feature-x")
+
+        def broken_gitdir(path):
+            Path(path).mkdir()
+            (Path(path) / ".git").write_text(f"gitdir: {self.root / 'missing'}\n",
+                                             encoding="utf-8")
+
+        for label, arrange, clause in (
+                ("absent", None, lambda: b"the worktree is absent"),
+                ("regular file", regular_file, lambda: b"it is not a directory"),
+                ("symlink to a worktree", symlink, lambda: b"it is not a directory"),
+                ("plain subdirectory of the checkout", plain_directory,
+                 lambda: b"it is not the top level of a git worktree"),
+                ("detached HEAD", detached, lambda: b"its HEAD is detached"),
+                ("unpatterned branch", feature_branch,
+                 lambda: b"its checked-out branch 'feature-x' does not match either"),
+                ("git failure", broken_gitdir,
+                 lambda: b"git failed: fatal: not a git repository: "
+                         + str(self.root / "missing").encode())):
+            with self.subTest(label=label):
+                self.project()
+                value = self.slugless_input()
+                if arrange is not None:
+                    arrange(value["worktree"])
+                refused = self.build("contract", value, ok=False)
+                self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                 (2, b"", self.refusal(clause())))
+
+    def test_a_patterned_name_reads_no_git(self):
+        """T3: rule 1 never runs git, so a patterned directory with broken git builds."""
+        self.project()
+        raw = json.dumps(self.contract_input()).encode()
+        absent = self.cli("build-delivery", "--repo-root", self.root, "--kind", "contract",
+                          "--input", "-", stdin=raw).stdout
+        self.worktree_project()
+        shutil.rmtree(Path(self.worktree) / ".git")
+        (Path(self.worktree) / ".git").write_text(f"gitdir: {self.root / 'missing'}\n",
+                                                  encoding="utf-8")
+        present = self.cli("build-delivery", "--repo-root", self.root, "--kind", "contract",
+                           "--input", "-", stdin=raw).stdout
+        self.assertEqual(present, absent)
 
 
 class HelperInputTest(BuilderHarness, unittest.TestCase):
@@ -2148,6 +2351,238 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
                 self.assertEqual((refused.returncode, refused.stdout), (2, b""))
                 self.assertIn(reason, refused.stderr)
 
+    H0, H1, H2, M1, M2 = "a" * 40, "e" * 40, "9" * 40, "d" * 40, "f" * 40
+    CLEANUP = {"close_tracker": ("tracker_closed", {
+                   "close_reason": "completed",
+                   "observation_identity": "github:issue:171:closed"}),
+               "delete_remote_branch": ("remote_branch_absent", {}),
+               "remove_worktree": ("worktree_absent", {}),
+               "delete_local_branch": ("local_branch_absent", {})}
+
+    def sync_checkpoint(self, observations, authority, scope):
+        """One checkpoint whose reply must pass the workflow-response boundary too (T7)."""
+        reply = self.checkpoint(observations, authority, scope)
+        self.validated("workflow-response", reply)
+        return reply
+
+    def scope_of(self, stage_id):
+        return self.build("scope", {"contract": self.contract, "stage_id": stage_id})
+
+    def allowed(self, scope, evidence):
+        return self.build("authority-observation", {"contract": self.contract,
+            "scope_id": scope["id"], "launch_id": self.custody["action_id"],
+            "authority_kind": "native_guard", "verdict": "allowed",
+            "reason_code": "guard_allowed", "observed_at": LATER, "evidence": evidence})
+
+    def sync(self, prior, head, integration_parent):
+        """The sync selection extending `prior` by one merge, as the route builds it."""
+        return self.build("sync-selection", {"contract": self.contract,
+            "prior_selection": prior, "head": head, "tree": "8" * 40,
+            "parents": [prior["subject_value"], integration_parent],
+            "review_ref": "merge-delta-clean", "test_ref": "checks"})
+
+    def at_head(self, selected):
+        """`selected`'s selected_output, then branch_published and pr_opened (PR 5) at its head."""
+        head = selected["subject_value"]
+        return [self.observed("selected_output", selection=selected),
+                self.observed("branch_published", head=head),
+                self.observed("pr_opened", pr_number=5, pr_url=URL, head=head)]
+
+    def installed(self):
+        """A fresh project whose contract one direct owner installs; this test holds its custody."""
+        self.project()
+        built = self.build("contract", self.contract_input())
+        self.contract = built["contract"]
+        self.digest = self.model.canonical_digest(self.contract)
+        owner = self.acquire(self.contract, built["initial_intent"])
+        self.custody = owner["custody"]
+        self.run_args = ("--repo-root", self.root, "--run-id", owner["run_id"])
+        self.ledger = self.root / f".superpowers/workflows/{owner['run_id']}/state.json"
+
+    def current(self):
+        """The ledger's current selection, as an owner that did not build it reads it (D24)."""
+        return self.build("current-selection", {"contract": self.contract})
+
+    def selected_at_h0(self):
+        """One implementation custody checkpoints H0's selection with the merge_pr scope."""
+        self.installed()
+        h0 = self.build("selected-output", {"contract": self.contract, "head": self.H0,
+            "tree": "c" * 40, "acceptance_ref": ".claude/specs/issue-171.md",
+            "review_ref": "clean", "test_ref": "checks"})
+        echoed = self.sync_checkpoint(self.at_head(h0), [], self.scope_of("merge_pr"))
+        self.assertEqual(echoed["requirements"][0]["reason_code"], "native_evaluation_required")
+        return h0
+
+    def remainder_after_stop(self):
+        """The custody stops `terminal_failed`; remainder 1 takes over and synchronizes."""
+        historical = {"issue": 171, "state": "stopped", "pr_url": URL, "merge_sha": None,
+            "issue_closed": False, "discussion_items": [], "detail_state": "none",
+            "report_path": None, "notes": "The PR conflicts with main after review."}
+        summary = {"interface_version": 2, "issue": 171, "state": "terminal_failed",
+            "custody": self.custody, "historical_owner_result": historical,
+            "delivery_contract_digest": self.digest, "delivery_observations": [],
+            "authority_observations": [], "reevaluation_evidence": [],
+            "detail_state": "none", "report_path": None, "notes": "stopped"}
+        remainder = json.loads(self.cli("finish", *self.run_args, "--now", LATER,
+            "--summary-file", "-", stdin=self.validated("ship-summary", summary)).stdout)
+        self.validated("workflow-response", remainder)
+        self.assertEqual((remainder["kind"], remainder["custody"]["action_id"]),
+                         ("delivery_remainder", "171:r1:1"))
+        self.custody = remainder["custody"]
+        synced = self.sync_checkpoint([], [], None)
+        self.assertEqual(synced["pending_stage_ids"][0], "merge_pr")
+
+    def cycles(self, stages, pending, authority):
+        """Propose each stage with the previous effect's facts; return the last effect's."""
+        absent = {}
+        for stage in stages:
+            scope = self.scope_of(stage)
+            echoed = self.sync_checkpoint(pending, authority, scope)
+            self.assertEqual((echoed["requested_scope"], echoed["requirements"][0]["reason_code"]),
+                             (scope, "native_evaluation_required"))
+            kind, facts = self.CLEANUP[stage]
+            pending, authority = [self.observed(kind, **facts)], [self.allowed(scope, stage)]
+            absent[kind] = pending[0]["id"]
+        return pending, authority, absent
+
+    def finish_delivered(self, selected, merged, pending, authority, absent):
+        """Finish `delivery_complete` with `implementation_delivered` over `selected`."""
+        completing = pending + [
+            self.observed("implementation_delivered", selection=selected,
+                          merge_sha=merged["subject"]["merge_sha"],
+                          integrated_ref="refs/heads/main", merge_observation_id=merged["id"]),
+            self.observed("cleanup_complete",
+                          remote_branch_observation_ids=[absent["remote_branch_absent"]],
+                          local_branch_observation_ids=[absent["local_branch_absent"]],
+                          worktree_observation_ids=[absent["worktree_absent"]],
+                          detail_pointer=".superpowers/issue-delivery/171/detail.json",
+                          read_evidence="detail read")]
+        historical = {"issue": 171, "state": "merged", "pr_url": URL,
+            "merge_sha": merged["subject"]["merge_sha"], "issue_closed": True,
+            "discussion_items": [], "detail_state": "none", "report_path": None,
+            "notes": "delivered"}
+        summary = {"interface_version": 2, "issue": 171, "state": "delivery_complete",
+            "custody": self.custody, "historical_owner_result": historical,
+            "delivery_contract_digest": self.digest,
+            "delivery_observations": sorted(completing, key=lambda item: item["id"]),
+            "authority_observations": authority, "reevaluation_evidence": [],
+            "detail_state": "none", "report_path": None, "notes": "delivered"}
+        finished = json.loads(self.cli("finish", *self.run_args, "--now", LATER,
+            "--summary-file", "-", stdin=self.validated("ship-summary", summary)).stdout)
+        self.validated("workflow-response", finished)
+        self.assertEqual((finished["kind"], finished["pending_stage_ids"]),
+                         ("delivery_complete", []))
+        return json.loads(self.ledger.read_text(encoding="utf-8"))["issues"]["171"]["delivery"]
+
+    def merge_fact(self, delivery):
+        return next(item for item in delivery["stage_facts"] if item["stage_id"] == "merge_pr")
+
+    def test_current_selection_is_read_from_the_one_installing_ledger(self):
+        """T12 (D24, D25): the installing ledger's tip, or a named refusal."""
+        def refused(reason):
+            completed = self.build("current-selection", {"contract": self.contract}, ok=False)
+            self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
+                             (2, b"", b"workflow-state: build-delivery refused: " + reason + b"\n"))
+
+        self.project()
+        self.contract = self.build("contract", self.contract_input())["contract"]
+        refused(b"current selection: no ledger under the repo root installs this contract")
+        self.installed()
+        refused(b"current selection: the installing ledger holds no selection of the "
+                b"contract's reviewed slot")
+        h0 = self.selected_at_h0()
+        self.assertEqual(self.current(), h0)
+        h1 = self.sync(h0, self.H1, self.M1)
+        self.sync_checkpoint(self.at_head(h1), [], self.scope_of("merge_pr"))
+        self.assertEqual(self.current(), h1)
+        shutil.copytree(self.ledger.parent, self.ledger.parent.with_name("zz-copy"))
+        refused(b"the contract is installed by more than one ledger: "
+                + self.ledger.parent.name.encode() + b", zz-copy")
+
+    def test_a_remainder_merges_after_a_post_selection_sync(self):
+        """T7: the remainder reads H0 from the ledger; publish, open and merge follow H1."""
+        h0 = self.selected_at_h0()
+        self.remainder_after_stop()
+        prior = self.current()
+        self.assertEqual(prior, h0)
+        h1 = self.sync(prior, self.H1, self.M1)
+        merge = self.scope_of("merge_pr")
+        echoed = self.sync_checkpoint(self.at_head(h1), [], merge)
+        self.assertEqual((echoed["requested_scope"], echoed["pending_stage_ids"][0],
+                          echoed["requirements"][0]["reason_code"]),
+                         (merge, "merge_pr", "native_evaluation_required"))
+        merged = self.observed("pr_merged", pr_number=5, pr_url=URL, head=self.H1,
+                               merge_sha="b" * 40)
+        cleaned = self.cycles(tuple(self.CLEANUP), [merged], [self.allowed(merge, "merge_pr")])
+        tip = self.current()
+        self.assertEqual(tip, h1)
+        stored = self.finish_delivered(tip, merged, *cleaned)
+        self.assertEqual([item["id"] for item in stored["selected_outputs"]],
+                         sorted([h0["id"], h1["id"]]))
+        self.assertEqual(self.merge_fact(stored)["observation_id"], merged["id"])
+
+    def test_a_merge_landed_at_a_sync_run_folds_into_the_chain(self):
+        """T8, the #150 shape: the PR merged out of band at H2, two syncs above H0.
+
+        The merge folds before the chain, or in the chain's one checkpoint as
+        CI-MERGE.md says; both shapes fold.
+        """
+        for together in (False, True):
+            with self.subTest(one_checkpoint=together):
+                h0 = self.selected_at_h0()
+                self.remainder_after_stop()
+                merged = self.observed("pr_merged", pr_number=5, pr_url=URL, head=self.H2,
+                                       merge_sha="b" * 40)
+                if not together:
+                    early = self.sync_checkpoint([merged], [], None)
+                    self.assertEqual(early["pending_stage_ids"][0], "merge_pr")
+                h1 = self.sync(self.current(), self.H1, self.M1)
+                h2 = self.sync(h1, self.H2, self.M2)
+                close = self.scope_of("close_tracker")
+                folded = self.sync_checkpoint(([merged] if together else [])
+                    + [self.observed("selected_output", selection=h1)] + self.at_head(h2),
+                    [], close)
+                self.assertEqual((folded["requested_scope"], folded["pending_stage_ids"][0]),
+                                 (close, "close_tracker"))
+                kind, facts = self.CLEANUP["close_tracker"]
+                cleaned = self.cycles(tuple(self.CLEANUP)[1:], [self.observed(kind, **facts)],
+                                      [self.allowed(close, "close_tracker")])
+                stored = self.finish_delivered(self.current(), merged, *cleaned)
+                self.assertEqual([item["id"] for item in stored["selected_outputs"]],
+                                 sorted([h0["id"], h1["id"], h2["id"]]))
+                self.assertEqual(self.merge_fact(stored)["observation_id"], merged["id"])
+
+    def test_chain_violations_leave_the_ledger_byte_identical(self):
+        """T9: every refused fold exits 2 and writes nothing."""
+        h0 = self.selected_at_h0()
+        merge = self.scope_of("merge_pr")
+
+        def refused(observations, authority, scope):
+            before = self.ledger.read_bytes()
+            completed = self.checkpoint(observations, authority, scope, ok=False)
+            self.assertEqual((completed.returncode, completed.stdout, self.ledger.read_bytes()),
+                             (2, b"", before))
+
+        second_root = self.build("selected-output", {"contract": self.contract,
+            "head": self.H1, "tree": "c" * 40, "acceptance_ref": ".claude/specs/issue-171.md",
+            "review_ref": "clean", "test_ref": "checks"})
+        h1 = self.sync(h0, self.H1, self.M1)
+        with self.subTest(refusal="a second v1 root"):
+            refused([self.observed("selected_output", selection=second_root)], [], None)
+        with self.subTest(refusal="a merge_pr scope without the tip's observations"):
+            refused([self.observed("selected_output", selection=h1)], [], merge)
+        self.sync_checkpoint(self.at_head(h1), [], merge)
+        with self.subTest(refusal="a fork of H0"):
+            refused([self.observed("selected_output",
+                                   selection=self.sync(h0, self.H2, self.M2))], [], None)
+        merged = self.observed("pr_merged", pr_number=5, pr_url=URL, head=self.H1,
+                               merge_sha="b" * 40)
+        self.sync_checkpoint([merged], [self.allowed(merge, "merge_pr")],
+                             self.scope_of("close_tracker"))
+        with self.subTest(refusal="a sync selection after the merge at the tip"):
+            refused([self.observed("selected_output",
+                                   selection=self.sync(h1, self.H2, self.M2))], [], None)
+
 
 TRACKER = {"issue": 171, "state": "open", "open_blockers": [], "decision_blockers": []}
 NO_PR = {"state": "none", "url": None, "merge_sha": None}
@@ -2203,9 +2638,9 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
             "route": "claude-code", "releases": 0, "claims": claims})
         self.assertEqual(json.loads(path.read_bytes()), expected)
 
-    def attempt(self, issue, number=1, **changes):
+    def attempt(self, issue, number=1, *, worktree=None, **changes):
         value = self.workflow.new_control_attempt(issue=issue, attempt_number=number,
-            worktree=self.worktree, now=NOW, deadline_at="2026-09-21T01:00:00Z")
+            worktree=worktree or self.worktree, now=NOW, deadline_at="2026-09-21T01:00:00Z")
         value.update(changes)
         return value
 
@@ -2385,6 +2820,50 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
                             authorization_intents=[built["initial_intent"]], **facts)
         self.assertEqual((owner["kind"], owner["launch_kind"], owner["attempt"],
                           owner["worktree"]), ("owner", "retry", 2, self.worktree))
+
+    def test_control_resumes_a_legacy_slugless_attempt_with_its_built_contract(self):
+        """T4: a suspended schema-2 attempt at a slugless live worktree resumes in place."""
+        self.project()
+        path = self.linked_worktree(SLUGLESS, WORKTREE_NAME)
+        suspended = self.attempt(171, worktree=path)
+        self.workflow.suspend_attempt(suspended, blocked_on="external", now=NOW)
+        state = self.write_run("legacy", [suspended], schema=2)
+        recorded = [{"issue": 171, "recorded": {"path": path,
+                     "state": "matching_issue_branch"}, "candidate": None}]
+        asked = self.control("legacy", self.control_request([171], now=LATER,
+                                                            worktrees=recorded))
+        self.assertEqual((asked["summaries"][0]["contract_digest"],
+                          asked["summaries"][0]["requirements"]), (None, CONTRACT_REQUIRED))
+        self.assertEqual([item for item in asked["actions"] if item.get("issue") == 171], [])
+        built = self.build("contract", self.contract_input(worktree=path))
+        digest = self.model.canonical_digest(built["contract"])
+        resumed = self.control("legacy", self.control_request([171], now=LATER,
+            worktrees=recorded, contracts={"171": built["contract"]},
+            intents={"171": [built["initial_intent"]]}))
+        action = resumed["actions"][0]
+        self.assertEqual((action["kind"], action["worktree"], action["contract_digest"]),
+                         ("resume", path, digest))
+        self.assertEqual(
+            json.loads(state.read_text())["issues"]["171"]["delivery"]["contract_digest"],
+            digest)
+
+    def test_direct_retries_a_legacy_slugless_attempt_in_place(self):
+        """T5: a failed schema-2 direct attempt at a slugless live worktree retries in place."""
+        self.project()
+        path = self.linked_worktree(SLUGLESS, WORKTREE_NAME)
+        self.write_run("direct-171-000001", [self.attempt(
+            171, worktree=path, state="failed", result_source="owner", finished_at=NOW,
+            result=self.workflow.terminal_result(171, "failed", "one"))], schema=2)
+        facts = {"tracker": TRACKER, "forge": NO_PR, "worktree": {"issue": 171,
+                 "recorded": {"path": path, "state": "matching_issue_branch"},
+                 "candidate": None}}
+        self.assertEqual(self.direct(**facts), {"interface_version": 2, "kind": "observe",
+            "issue": 171, "run_id": "direct-171-000001", "requirements": CONTRACT_REQUIRED})
+        built = self.build("contract", self.contract_input(worktree=path))
+        owner = self.direct(delivery_contract=built["contract"],
+                            authorization_intents=[built["initial_intent"]], **facts)
+        self.assertEqual((owner["kind"], owner["launch_kind"], owner["attempt"],
+                          owner["worktree"]), ("owner", "retry", 2, path))
 
     def mismatched(self, candidate):
         other = {"path": str(self.root / ".worktrees/worktree-issue-171-other"), "state": "absent"}

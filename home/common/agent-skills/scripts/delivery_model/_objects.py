@@ -22,6 +22,7 @@ _STAGE_ACTIONS = {
 }
 STAGE_ACTIONS = MappingProxyType(_STAGE_ACTIONS)
 _POSTCONDITIONS = ("implementation_delivered", "pr_merged", "tracker_closed", "cleanup_complete")
+_EVIDENCE_IDS = ("acceptance_evidence_ids", "review_evidence_ids", "test_evidence_ids")
 
 
 def _recovery_proof(value: Any, kind: str) -> dict[str, Any]:
@@ -131,14 +132,23 @@ def _intent(value: Any) -> dict[str, Any]:
 
 
 def _selected(value: Any) -> dict[str, Any]:
-    value = _object(value, _members("schema_version kind id contract_digest slot_id subject_kind subject_value data_identity_digest repository_id branch base evidence_digest acceptance_evidence_ids review_evidence_ids test_evidence_ids"))
-    if type(value["schema_version"]) is not int or value["schema_version"] != 1 or value["kind"] != "selected-output": _reject()
+    v1 = _members("schema_version kind id contract_digest slot_id subject_kind subject_value data_identity_digest repository_id branch base evidence_digest acceptance_evidence_ids review_evidence_ids test_evidence_ids")
+    sync = isinstance(value, dict) and type(value.get("schema_version")) is int \
+        and value.get("schema_version") == 2
+    value = _object(value, (v1 | {"sync"}) if sync else v1)
+    if type(value["schema_version"]) is not int or value["schema_version"] not in {1, 2} or value["kind"] != "selected-output": _reject()
     for key in ("contract_digest", "data_identity_digest", "evidence_digest"): _digest(value[key], key)
     for key in ("slot_id", "subject_kind", "subject_value", "repository_id", "branch", "base"): _string(value[key], key)
-    for name in ("acceptance_evidence_ids", "review_evidence_ids", "test_evidence_ids"):
+    for name in _EVIDENCE_IDS:
         _sorted_unique(value[name], name)
         if not value[name]: _reject()
         for item in value[name]: _string(item, name)
+    if sync:
+        link = _object(value["sync"], _members("prior_selection_id first_parent integration_parent"), "sync")
+        _digest(link["prior_selection_id"], "prior selection")
+        _string(link["first_parent"], "first parent"); _string(link["integration_parent"], "integration parent")
+        if value["subject_kind"] != "commit" or link["first_parent"] == link["integration_parent"] \
+                or value["subject_value"] in {link["first_parent"], link["integration_parent"]}: _reject()
     _derived(value, "selected output")
     return value
 
@@ -336,7 +346,7 @@ def _delivery_observation(value: Any, notes_max: int) -> dict[str, Any]:
         if (presence["selected_value"], presence["integration_value"]) != (subject["selected_subject"]["value"], subject["integration_subject"]["value"]): _reject()
         if _boolean(presence["succeeded"], "presence succeeded") is not True: _reject()
         if subject["merge_observation_id"] is not None: _digest(subject["merge_observation_id"], "merge observation")
-        for name in ("acceptance_evidence_ids", "review_evidence_ids", "test_evidence_ids"):
+        for name in _EVIDENCE_IDS:
             _sorted_unique(subject[name], name)
             if not subject[name]: _reject()
             for item in subject[name]: _string(item, name)
@@ -351,20 +361,80 @@ def _delivery_observation(value: Any, notes_max: int) -> dict[str, Any]:
     _derived(value, "delivery observation"); return value
 
 
-def _selection_for_stage(contract: dict[str, Any], delivery: dict[str, Any],
-                         stage: dict[str, Any]) -> dict[str, Any] | None:
-    target = stage["target_ref"]
-    if target.get("kind") != "slot": return None
+def _selection_chain(selections: list[dict[str, Any]], *, contract_digest: str,
+                     target: dict[str, Any]) -> list[dict[str, Any]]:
+    """One slot's selection chain, root first; its last member is the current selection.
+
+    Only selections that pass the slot filter take part: the contract digest,
+    and the slot target's slot, subject kind, repository, branch and base. They
+    must form one chain from a single v1 root in which each sync selection
+    extends the selection its ``prior_selection_id`` names from that
+    selection's head, no selection is extended twice, every member is reached
+    from the root, no head repeats, and each link's evidence contains its
+    prior's. Anything else rejects ``conflicting selected outputs`` (#192 §4).
+    """
     constraints = target["constraints"]
-    matches = [item for item in delivery["selected_outputs"]
-               if item["contract_digest"] == delivery["contract_digest"]
+    members = [item for item in selections
+               if item["contract_digest"] == contract_digest
                and item["slot_id"] == target["slot_id"]
                and item["subject_kind"] == target["subject_kind"]
                and item["repository_id"] == constraints["repository_id"]
                and item["branch"] == constraints["branch"]
                and item["base"] == constraints["base"]]
-    if len(matches) > 1: _reject("conflicting selected outputs")
-    return matches[0] if matches else None
+    if not members:
+        return []
+    roots = [item for item in members if "sync" not in item]
+    links: dict[str, list[dict[str, Any]]] = {}
+    for item in members:
+        if "sync" in item:
+            links.setdefault(item["sync"]["prior_selection_id"], []).append(item)
+    if len(roots) != 1 or any(len(items) > 1 for items in links.values()):
+        _reject("conflicting selected outputs")
+    chain = [roots[0]]
+    while chain[-1]["id"] in links:
+        prior, link = chain[-1], links[chain[-1]["id"]][0]
+        if link["sync"]["first_parent"] != prior["subject_value"] or any(
+                not set(prior[name]) <= set(link[name]) for name in _EVIDENCE_IDS):
+            _reject("conflicting selected outputs")
+        chain.append(link)
+    if (len(chain) != len(members)
+            or len({item["subject_value"] for item in chain}) != len(chain)):
+        _reject("conflicting selected outputs")
+    return chain
+
+
+def _selection_chains(contract: dict[str, Any], contract_digest: str,
+                      selections: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Every select stage's chain; rejects a selection that sits in none of them."""
+    chains = [_selection_chain(selections, contract_digest=contract_digest,
+                               target=stage["target_ref"])
+              for stage in contract["stages"]
+              if stage["kind"] == "select_reviewed_output"
+              and stage["target_ref"].get("kind") == "slot"]
+    members = {item["id"] for chain in chains for item in chain}
+    if any(item["contract_digest"] != contract_digest or item["id"] not in members
+           for item in selections):
+        _reject()
+    return chains
+
+
+def _current_selections(contract: dict[str, Any], contract_digest: str,
+                        selections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each select stage's current selection, deduplicated by id, in stage order."""
+    delivery = {"contract_digest": contract_digest, "selected_outputs": selections}
+    tips = (_selection_for_stage(contract, delivery, stage) for stage in contract["stages"]
+            if stage["kind"] == "select_reviewed_output")
+    return list({tip["id"]: tip for tip in tips if tip is not None}.values())
+
+
+def _selection_for_stage(contract: dict[str, Any], delivery: dict[str, Any],
+                         stage: dict[str, Any]) -> dict[str, Any] | None:
+    """The stage slot's current selection: the tip of its chain, or None."""
+    target = stage["target_ref"]
+    if target.get("kind") != "slot": return None
+    chain = _selection_chain(delivery["selected_outputs"],
+                             contract_digest=delivery["contract_digest"], target=target)
+    return chain[-1] if chain else None
 
 
 def _stage_scope_matches(contract: dict[str, Any], delivery: dict[str, Any],
@@ -514,7 +584,11 @@ def _postcondition_observation_matches(contract: dict[str, Any], delivery: dict[
                     and candidate["subject_value"] == subject["selected_subject"]["value"]
                     and candidate["repository_id"] == subject["presence"]["repository_id"]]
         if len(selected) != 1: return False
-        for name in ("acceptance_evidence_ids", "review_evidence_ids", "test_evidence_ids"):
+        tips = (_selection_for_stage(contract, delivery, stage) for stage in contract["stages"]
+                if stage["kind"] == "select_reviewed_output")
+        if not any(tip is not None and tip["id"] == selected[0]["id"] for tip in tips):
+            return False
+        for name in _EVIDENCE_IDS:
             if not set(selected[0][name]) <= set(subject[name]): return False
         if selected[0]["subject_kind"] == "record" \
                 and subject["integration_subject"]["value"] != selected[0]["subject_value"]:

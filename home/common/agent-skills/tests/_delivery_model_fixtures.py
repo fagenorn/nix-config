@@ -543,3 +543,34 @@ def ship_checkpoint(model, contract, requested=None):
         "reevaluation_evidence": [], "requested_scope": copy.deepcopy(requested),
         "detail_state": "none", "report_path": None, "notes": "simulated",
     }
+
+
+def sync_selection(model, prior, *, head, integration_parent,
+                   review_ref="merge-delta-clean"):
+    """A sealed selected-output/v2 extending `prior` by one sync merge (#192 D6, D15).
+
+    Its first parent is `prior`'s head. Acceptance is inherited, and review and
+    test evidence add this head's, as the `sync-selection` builder kind seals.
+    """
+    value = copy.deepcopy(prior)
+    value.pop("sync", None)
+    link = {"prior_selection_id": prior["id"], "first_parent": prior["subject_value"],
+            "integration_parent": integration_parent}
+    value.update(
+        schema_version=2, id="", subject_value=head, sync=link,
+        data_identity_digest=model.canonical_digest({"kind": "git-tree", "value": "t" + head}),
+        evidence_digest=model.canonical_digest({"head": head, "review_ref": review_ref,
+                                                "test_ref": "checks", "sync": link}),
+        review_evidence_ids=sorted({*prior["review_evidence_ids"],
+                                    f"review:{review_ref}@{head}"}),
+        test_evidence_ids=sorted({*prior["test_evidence_ids"], f"test:checks@{head}"}))
+    return seal(model, value)
+
+
+def at_head(model, contract, selected):
+    """`selected`'s selected_output, then branch_published and pr_opened (PR 17) at its head."""
+    head = selected["subject_value"]
+    return [observation(model, contract, "selected_output", {"selected_output": selected}),
+            observation(model, contract, "branch_published", {
+                "repository_id": "sim-repo", "branch": "feature", "selected_head": head}),
+            observation(model, contract, "pr_opened", pr_subject("pr_opened", head=head))]

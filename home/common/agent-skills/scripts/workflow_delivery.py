@@ -91,13 +91,19 @@ class DeliveryRuntime:
     _BUILD_OUTPUT_KINDS = {"initial-intent": "authorization-intent", "scope": "scope-tuple",
                            "selected-output": "selected-output",
                            "observation": "delivery-observation",
-                           "authority-observation": "authority-observation"}
+                           "authority-observation": "authority-observation",
+                           "sync-selection": "selected-output",
+                           "current-selection": "selected-output"}
 
     def build_delivery(self, kind: str, value: object, *, policy: dict[str, Any] | None,
-                       installed_intent: object = None) -> object:
+                       installed_intent: object = None,
+                       worktree_branch: str | None = None,
+                       installed_delivery: object = None) -> object:
         """Build one sealed delivery value and validate every object it carries."""
         result = self._builder.build(kind, value, policy=policy,
-                                     installed_intent=installed_intent)
+                                     installed_intent=installed_intent,
+                                     worktree_branch=worktree_branch,
+                                     installed_delivery=installed_delivery)
         if kind == "contract":
             if not isinstance(result, dict) or set(result) != {"contract", "initial_intent"}:
                 raise ValueError("builder returned an invalid contract result")
@@ -117,6 +123,14 @@ class DeliveryRuntime:
     def requires_installed_intent(self, contract: object) -> bool:
         """Whether ``contract`` is model-valid but does not re-derive (#193 D5)."""
         return self._builder.requires_installed_intent(contract)
+
+    def requires_worktree_branch(self, value: object, policy: object) -> bool:
+        """Whether a contract input needs the branch its live checkout has (#192 D3)."""
+        return self._builder.requires_worktree_branch(value, policy)
+
+    def worktree_pattern_refusal(self, worktree: str, clause: str | None = None) -> str:
+        """The kept pattern refusal for ``worktree``, with ``clause`` appended (#192 D19)."""
+        return self._builder.worktree_pattern_refusal(worktree, clause)
 
     def check_worktree_policy(self, repo_root_policy: dict[str, Any],
                               worktree_policy: dict[str, Any]) -> None:

@@ -9,7 +9,7 @@ from ._canonical import (canonical_bytes, canonical_digest, _boolean, _digest,
 from ._objects import (_POSTCONDITIONS, _STAGE_ACTIONS, _authority, _consumption,
     _contract, _custody_issue, _delivery_observation, _intent, _reevaluation,
     _recovery,
-    _postcondition_observation_matches, _scope, _selected, _selection_for_stage,
+    _postcondition_observation_matches, _scope, _selected, _selection_chains,
     _stage_fact, _stage_observation_matches, validate_custody_ref)
 
 def _v2(value: dict[str, Any]) -> None:
@@ -380,11 +380,7 @@ def _ship_handoff(value: Any, notes_max: int) -> dict[str, Any]:
     _sorted_unique(value["selected_outputs"], "handoff selections", key=lambda item: item.get("id", ""))
     for item in value["selected_outputs"]:
         _selected(item)
-        if item["contract_digest"] != digest or not any(
-                _selection_for_stage(contract, {"contract_digest": digest,
-                    "selected_outputs": [item]}, stage) is not None
-                for stage in contract["stages"] if stage["kind"] == "select_reviewed_output"):
-            _reject()
+    _selection_chains(contract, digest, value["selected_outputs"])
     return value
 
 
@@ -475,12 +471,15 @@ def _delivery(value: Any, notes_max: int) -> dict[str, Any]:
                 or not scope_exists_at(item["scope_id"], item["observed_at"]): _reject()
     for item in value["delivery_observations"]:
         if item["contract_digest"] != digest or item["project"] != contract["project"]: _reject()
-    for item in value["selected_outputs"]:
-        if item["contract_digest"] != digest or not any(
-                _selection_for_stage(contract, value, stage) is not None
-                and _selection_for_stage(contract, value, stage)["id"] == item["id"]
-                for stage in contract["stages"] if stage["kind"] == "select_reviewed_output"):
-            _reject()
+    chains = _selection_chains(contract, digest, value["selected_outputs"])
+    superseded = {(item["repository_id"], item["base"], item["subject_value"])
+                  for chain in chains for item in chain[:-1]}
+    if any(item["observation_kind"] == "pr_merged" and item["subject"]["merged"] is True
+           and (item["subject"]["provider_repository_id"], item["subject"]["base"],
+                item["subject"]["expected_head"]) in superseded
+           for item in value["delivery_observations"]):
+        # Only a landed merge of this repository into the slot's base is final (D28).
+        _reject("a merged selection chain cannot be extended")
     delivery_by_id = {item["id"]: item for item in value["delivery_observations"]}
     _sorted_unique(value["authority_evaluation_consumptions"], "consumptions", key=lambda item: item.get("id", ""))
     uses = set()

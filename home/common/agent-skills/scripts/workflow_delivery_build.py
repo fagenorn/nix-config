@@ -5,11 +5,17 @@ workflow-state resolves project policy and hands it in, and
 ``check_worktree_policy`` compares the members a contract seals across two such
 snapshots; every sealed object this module returns is validated again by
 DeliveryRuntime before it is printed.
+The one observed input a contract takes is ``worktree_branch``: the branch a
+worktree whose name is not an issue branch has checked out, which
+workflow-state reads only when ``requires_worktree_branch`` says so.
 The ``authorization-chain`` kind seals the handoff's chain digest over the intents
 an owner holds. Every kind that takes a contract works from its reference
 initial intent: the one derived from the contract when it re-derives, else the
 intent a ledger installed with it, which workflow-state finds and hands in as
-``installed_intent``. Declared scopes (in that intent) and actual scopes (kind
+``installed_intent``.
+The ``current-selection`` kind serves the current selection from the delivery
+that ledger holds, which workflow-state hands in as ``installed_delivery``.
+Declared scopes (in that intent) and actual scopes (kind
 ``scope``) come from the one reference intent, so exact matching can only
 disagree when the inputs differ. Selections and observations take only what a probe returns;
 every member the contract determines is filled from the contract, so an owner
@@ -38,6 +44,7 @@ _SLOT_STAGES = ("select_reviewed_output", "publish_branch", "open_pr", "merge_pr
 _PR_STAGES = frozenset({"open_pr", "merge_pr"})
 _CONTRACT_INPUT = {"issue", "worktree", "source_kind", "source_reference", "now"}
 _SELECTION_INPUT = {"contract", "head", "tree", "acceptance_ref", "review_ref", "test_ref"}
+_SYNC_INPUT = {"contract", "prior_selection", "head", "tree", "parents", "review_ref", "test_ref"}
 _OBSERVATION_INPUT = {"contract", "observation_kind", "source_kind", "source_reference",
                       "observed_at", "evidence"}
 _OBSERVATION_SOURCES = frozenset({"provider", "tracker", "repository", "filesystem",
@@ -192,6 +199,36 @@ def _sealed_policy(policy: object) -> dict[str, Any]:
     return {key: _policy_member(policy, path, kind) for key, path, kind in _SEALED_POLICY}
 
 
+def _contract_input(value: object, policy: object
+                    ) -> tuple[int, str, dict[str, Any], re.Pattern[str]]:
+    """Check one contract input and derive its issue branch regex (#192 §1).
+
+    The regex is the binding's pattern with `<num>` the decimal issue and
+    `<slug>` `[a-z0-9][a-z0-9-]*`, and the worktree prefix optional. The
+    refusals, in order, are the contract build's own.
+    """
+    value = _closed(value, _CONTRACT_INPUT)
+    issue, worktree = value["issue"], value["worktree"]
+    if (type(issue) is not int or issue < 1 or not isinstance(worktree, str)
+            or not isinstance(value["source_kind"], str)
+            or not isinstance(value["source_reference"], str)
+            or not value["source_reference"] or not isinstance(value["now"], str)
+            or _UTC.fullmatch(value["now"]) is None):
+        _refuse("builder input keys: mistyped contract input")
+    if value["source_kind"] not in _SOURCE_KINDS:
+        _refuse(f"source kind {value['source_kind']!r} cannot source an initial intent")
+    if not os.path.isabs(worktree) or os.path.normpath(worktree) != worktree:
+        _refuse("worktree must be absolute and normalized")
+    facts = _sealed_policy(policy)
+    if facts["tracker_kind"] != "github":
+        _refuse(f"tracker kind {facts['tracker_kind']!r} is unsupported")
+    pattern = "".join(
+        str(issue) if part == "<num>" else _SLUG if part == "<slug>" else re.escape(part)
+        for part in _PLACEHOLDER.split(facts["branch_pattern"]))
+    return issue, worktree, facts, re.compile(
+        f"(?:{re.escape(facts['worktree_prefix'])})?{pattern}")
+
+
 class DeliveryBuilder:
     """Derive sealed delivery objects from resolved policy and invocation facts."""
 
@@ -206,9 +243,11 @@ class DeliveryBuilder:
                               if kind in _OBSERVATIONS}
 
     def build(self, kind: str, value: object, *, policy: dict | None,
-              installed_intent: object = None) -> object:
+              installed_intent: object = None,
+              worktree_branch: str | None = None,
+              installed_delivery: object = None) -> object:
         if kind == "contract":
-            return self._build_contract(value, policy)
+            return self._build_contract(value, policy, worktree_branch)
         if kind == "initial-intent":
             _, intent = self._checked_contract(_closed(value, {"contract"})["contract"],
                                                installed_intent)
@@ -236,6 +275,10 @@ class DeliveryBuilder:
             return self._authority(value, installed_intent)
         if kind == "authorization-chain":
             return self._chain(value, installed_intent)
+        if kind == "sync-selection":
+            return self._sync_selection(value, installed_intent)
+        if kind == "current-selection":
+            return self._current_selection(value, installed_intent, installed_delivery)
         _refuse(f"unknown builder kind: {kind!r}")
 
     def requires_installed_intent(self, value: object) -> bool:
@@ -250,6 +293,26 @@ class DeliveryBuilder:
             return self._derivation(self._valid_contract(value))[1] is not None
         except Exception:
             return False
+
+    def requires_worktree_branch(self, value: object, policy: object) -> bool:
+        """Whether a contract input needs the branch its live checkout has (#192 D3).
+
+        True only for an input the build would accept up to the pattern check
+        whose worktree name the issue branch regex rejects. Anything else answers
+        False whatever it raises, and then meets its own refusal in ``build``.
+        """
+        try:
+            _, worktree, _, branch_regex = _contract_input(value, policy)
+        except Exception:
+            return False
+        return branch_regex.fullmatch(PurePosixPath(worktree).name) is None
+
+    @staticmethod
+    def worktree_pattern_refusal(worktree: str, clause: str | None = None) -> str:
+        """The kept pattern refusal for ``worktree``, plus ``, and <clause>`` (#192 D19)."""
+        refusal = (f"worktree name {PurePosixPath(worktree).name!r} "
+                   "does not match the issue branch pattern")
+        return refusal if clause is None else f"{refusal}, and {clause}"
 
     def check_worktree_policy(self, repo_root_policy: object,
                               worktree_policy: object) -> None:
@@ -272,28 +335,21 @@ class DeliveryBuilder:
         value["id"] = self._model.canonical_digest(value, omit_derived="id")
         return value
 
-    def _build_contract(self, value: object, policy: object) -> dict[str, Any]:
-        value = _closed(value, _CONTRACT_INPUT)
-        issue, worktree = value["issue"], value["worktree"]
-        if (type(issue) is not int or issue < 1 or not isinstance(worktree, str)
-                or not isinstance(value["source_kind"], str)
-                or not isinstance(value["source_reference"], str)
-                or not value["source_reference"] or not isinstance(value["now"], str)
-                or _UTC.fullmatch(value["now"]) is None):
-            _refuse("builder input keys: mistyped contract input")
-        if value["source_kind"] not in _SOURCE_KINDS:
-            _refuse(f"source kind {value['source_kind']!r} cannot source an initial intent")
-        if not os.path.isabs(worktree) or os.path.normpath(worktree) != worktree:
-            _refuse("worktree must be absolute and normalized")
-        facts = _sealed_policy(policy)
-        if facts["tracker_kind"] != "github":
-            _refuse(f"tracker kind {facts['tracker_kind']!r} is unsupported")
-        branch = PurePosixPath(worktree).name
-        pattern = "".join(
-            str(issue) if part == "<num>" else _SLUG if part == "<slug>" else re.escape(part)
-            for part in _PLACEHOLDER.split(facts["branch_pattern"]))
-        if re.fullmatch(f"(?:{re.escape(facts['worktree_prefix'])})?{pattern}", branch) is None:
-            _refuse(f"worktree name {branch!r} does not match the issue branch pattern")
+    def _build_contract(self, value: object, policy: object,
+                        worktree_branch: object) -> dict[str, Any]:
+        issue, worktree, facts, branch_regex = _contract_input(value, policy)
+        name = PurePosixPath(worktree).name
+        live = None
+        if branch_regex.fullmatch(name) is None:
+            if worktree_branch is None:
+                _refuse(self.worktree_pattern_refusal(worktree))
+            if (not isinstance(worktree_branch, str)
+                    or branch_regex.fullmatch(worktree_branch) is None):
+                _refuse(self.worktree_pattern_refusal(
+                    worktree,
+                    f"its checked-out branch {worktree_branch!r} does not match either"))
+            live = worktree_branch
+        branch = name if live is None else live
         slug = facts["repository_slug"]
         project = {"project_id": facts["project_id"], "provider": facts["tracker_kind"],
                    "repository_id": slug, "repository_slug": slug}
@@ -333,8 +389,8 @@ class DeliveryBuilder:
             "initial_authorization_intent_id": None,
             "initial_authorization_intent_digest": None,
             "provenance": {**source, "digest": self._model.canonical_digest({
-                "policy": dict(facts),
-                "issue": issue, "worktree": worktree, "source": source}),
+                "policy": dict(facts), "issue": issue, "worktree": worktree,
+                "source": source, **({} if live is None else {"branch": live})}),
                 "created_at": value["now"]},
         }
         intent = self._intent(contract)
@@ -363,6 +419,77 @@ class DeliveryBuilder:
             "review_evidence_ids": [f"review:{refs['review_ref']}@{head}"],
             "test_evidence_ids": [f"test:{refs['test_ref']}@{head}"],
         })
+
+    def _sync_selection(self, value: object, installed_intent: object) -> dict[str, Any]:
+        """Seal one sync selection extending ``prior_selection`` by one merge (#192 §5)."""
+        value = _closed(value, _SYNC_INPUT)
+        refs = {name: _text(value[name], name) for name in (
+            "head", "tree", "review_ref", "test_ref")}
+        contract, _ = self._checked_contract(value["contract"], installed_intent)
+        digest = self._model.canonical_digest(contract)
+        _, _, branch, base, _ = self._contract_facts(contract)
+        repository = contract["project"]["repository_id"]
+        try:
+            prior = self._model.validate_delivery_object(
+                value["prior_selection"], expected_kind="selected-output",
+                notes_max_characters=self._notes_max)
+        except Exception:
+            # A null nested member raises AttributeError, not ValueError (#193 D14).
+            prior = None
+        if prior is None or (prior["contract_digest"], prior["slot_id"], prior["subject_kind"],
+                             prior["repository_id"], prior["branch"], prior["base"]) != (
+                digest, _SLOT, "commit", repository, branch, base):
+            _refuse("sync selection: prior_selection is not a valid selection of this contract")
+        head = refs["head"]
+        if head == prior["subject_value"]:
+            _refuse("sync selection: head equals the prior selection's head")
+        parents = value["parents"]
+        if (not isinstance(parents, list) or len(parents) != 2
+                or not all(isinstance(item, str) and item for item in parents)
+                or parents[0] == parents[1] or head in parents):
+            _refuse("sync selection: parents must be two distinct non-empty strings "
+                    "other than head")
+        if parents[0] != prior["subject_value"]:
+            _refuse("sync selection: parents[0] is not the prior selection's head")
+        sync = {"prior_selection_id": prior["id"], "first_parent": parents[0],
+                "integration_parent": parents[1]}
+        return self._seal({
+            "schema_version": 2, "kind": "selected-output", "contract_digest": digest,
+            "slot_id": _SLOT, "subject_kind": "commit", "subject_value": head,
+            "data_identity_digest": self._model.canonical_digest(
+                {"kind": "git-tree", "value": refs["tree"]}),
+            "repository_id": repository, "branch": branch, "base": base,
+            "evidence_digest": self._model.canonical_digest({
+                "head": head, "review_ref": refs["review_ref"],
+                "test_ref": refs["test_ref"], "sync": sync}),
+            "acceptance_evidence_ids": list(prior["acceptance_evidence_ids"]),
+            "review_evidence_ids": sorted({*prior["review_evidence_ids"],
+                                           f"review:{refs['review_ref']}@{head}"}),
+            "test_evidence_ids": sorted({*prior["test_evidence_ids"],
+                                         f"test:{refs['test_ref']}@{head}"}),
+            "sync": sync,
+        })
+
+    def _current_selection(self, value: object, installed_intent: object,
+                           installed_delivery: object) -> dict[str, Any]:
+        """The contract's current selection, from the ledger that installed it (#192 D24)."""
+        contract, _ = self._checked_contract(_closed(value, {"contract"})["contract"],
+                                             installed_intent)
+        if installed_delivery is None:
+            _refuse("current selection: no ledger under the repo root installs this contract")
+        try:
+            if installed_delivery["contract_digest"] != self._model.canonical_digest(contract):
+                raise ValueError("the delivery belongs to another contract")
+            current = self._model.current_selection(installed_delivery)
+        except Exception:
+            # A null nested member raises AttributeError, not ValueError (#193 D14).
+            current = False
+        if current is False:
+            _refuse("current selection: the installed delivery is invalid")
+        if current is None:
+            _refuse("current selection: the installing ledger holds no selection of the "
+                    "contract's reviewed slot")
+        return current
 
     def _observation(self, value: object, installed_intent: object) -> dict[str, Any]:
         if not isinstance(value, dict) or not isinstance(value.get("observation_kind"), str):

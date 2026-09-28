@@ -15,7 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 
 SCHEMA_VERSION = 4
@@ -3514,6 +3514,40 @@ def _non_symlink(path: Path, kind: Callable[[int], bool]) -> bool:
     return status is not None and not stat.S_ISLNK(status.st_mode) and kind(status.st_mode)
 
 
+def _installing_runs(repo_root: Path, issue: str, digest: str) -> Iterator[Path]:
+    """Each run under repo_root whose raw state records digest for issue, sorted (#193 D3)."""
+    workflows = repo_root / ".superpowers" / "workflows"
+    if not all(_non_symlink(path, stat.S_ISDIR) for path in (workflows.parent, workflows)):
+        return
+    for run_dir in sorted(workflows.iterdir(), key=lambda path: path.name):
+        state_path = run_dir / "state.json"
+        try:
+            if (not RUN_ID_PATTERN.fullmatch(run_dir.name)
+                    or not _non_symlink(run_dir, stat.S_ISDIR)
+                    or not _non_symlink(state_path, stat.S_ISREG)):
+                continue
+            raw_state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        if _stored_contract_digest(raw_state, issue) == digest:
+            yield run_dir
+
+
+def _installed_delivery(runtime: Any, run_dir: Path, issue: str, digest: str) -> dict[str, Any]:
+    """The validated delivery an installing run holds, re-read unlocked, or a refusal (#193 D14)."""
+    invalid = f"build-delivery refused: installing ledger {run_dir.name} is invalid"
+    try:
+        state = read_state_unlocked(run_dir / "state.json", run_dir.name)
+        delivery = state["issues"][issue]["delivery"]
+        # Validation already ties contract_digest to the contract, so this
+        # only fires when the file was replaced between the two unlocked reads.
+        if runtime.model.canonical_digest(delivery["contract"]) != digest:
+            raise WorkflowError(invalid)
+    except Exception as error:
+        raise WorkflowError(invalid) from error
+    return delivery
+
+
 def installed_initial_intent(runtime: Any, repo_root_value: str,
                              contract: dict[str, Any]) -> dict[str, Any] | None:
     """The root intent a ledger under the repo root installed with ``contract``, or None.
@@ -3529,41 +3563,48 @@ def installed_initial_intent(runtime: Any, repo_root_value: str,
     run (D14).
     """
     repo_root = resolve_repo_root(repo_root_value)
-    workflows = repo_root / ".superpowers" / "workflows"
-    if not all(_non_symlink(path, stat.S_ISDIR) for path in (workflows.parent, workflows)):
-        return None
     try:
         digest = runtime.model.canonical_digest(contract)
     except ValueError:
         # A contract without canonical bytes cannot be recorded by any ledger.
         return None
     issue = str(contract["issue"])
-    for run_dir in sorted(workflows.iterdir(), key=lambda path: path.name):
-        state_path = run_dir / "state.json"
-        try:
-            if (not RUN_ID_PATTERN.fullmatch(run_dir.name)
-                    or not _non_symlink(run_dir, stat.S_ISDIR)
-                    or not _non_symlink(state_path, stat.S_ISREG)):
-                continue
-            raw_state = json.loads(state_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, RecursionError):
-            continue
-        if _stored_contract_digest(raw_state, issue) != digest:
-            continue
-        invalid = f"build-delivery refused: installing ledger {run_dir.name} is invalid"
-        try:
-            state = read_state_unlocked(state_path, run_dir.name)
-            delivery = state["issues"][issue]["delivery"]
-            # Validation already ties contract_digest to the contract, so this
-            # only fires when the file was replaced between the two unlocked reads.
-            if runtime.model.canonical_digest(delivery["contract"]) != digest:
-                raise WorkflowError(invalid)
-            root = next(item for item in delivery["authorization_intents"]
-                        if item["predecessor_intent_id"] is None)
-        except Exception as error:
-            raise WorkflowError(invalid) from error
-        return copy.deepcopy(root)
-    return None
+    run_dir = next(_installing_runs(repo_root, issue, digest), None)
+    if run_dir is None:
+        return None
+    delivery = _installed_delivery(runtime, run_dir, issue, digest)
+    try:
+        root = next(item for item in delivery["authorization_intents"]
+                    if item["predecessor_intent_id"] is None)
+    except Exception as error:
+        raise WorkflowError(
+            f"build-delivery refused: installing ledger {run_dir.name} is invalid") from error
+    return copy.deepcopy(root)
+
+
+def installing_ledger_delivery(runtime: Any, repo_root_value: str,
+                               contract: object) -> dict[str, Any] | None:
+    """The validated delivery the one ledger that installed ``contract`` holds, or None.
+
+    Read-only like ``installed_initial_intent``, over the same scan (#192 D25).
+    A selection can differ between ledgers where a root intent cannot, so two
+    raw matches refuse naming both runs instead of taking the first. A value
+    with no canonical bytes or issue matches no ledger and meets the builder's
+    own contract refusal.
+    """
+    repo_root = resolve_repo_root(repo_root_value)
+    try:
+        digest = runtime.model.canonical_digest(contract)
+        issue = str(contract["issue"])
+    except Exception:
+        return None
+    runs = list(_installing_runs(repo_root, issue, digest))
+    if len(runs) > 1:
+        raise WorkflowError("build-delivery refused: the contract is installed by more "
+                            "than one ledger: " + ", ".join(run.name for run in runs))
+    if not runs:
+        return None
+    return copy.deepcopy(_installed_delivery(runtime, runs[0], issue, digest))
 
 
 def command_check_launch(args: argparse.Namespace) -> int:
@@ -3730,25 +3771,94 @@ def check_contract_worktree(runtime: Any, policy: dict[str, Any], worktree: str)
         raise WorkflowError(f"build-delivery refused: {error}") from error
 
 
+GIT_TIMEOUT_SECONDS = 60
+
+
+class WorktreeBranchUnavailable(Exception):
+    """The live checkout names no branch; the message is the reason clause (#192 D19)."""
+
+
+def _worktree_git(path: str, *args: str) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(["git", "-C", path, *args], capture_output=True,
+                              check=False, timeout=GIT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        raise WorktreeBranchUnavailable(
+            f"git failed: timed out after {GIT_TIMEOUT_SECONDS} seconds") from error
+    except OSError as error:
+        raise WorktreeBranchUnavailable(f"git failed: {error}") from error
+
+
+def _git_failed(completed: subprocess.CompletedProcess) -> WorktreeBranchUnavailable:
+    lines = [line.strip() for line in
+             completed.stderr.decode("utf-8", "replace").splitlines() if line.strip()]
+    return WorktreeBranchUnavailable(
+        "git failed: " + (lines[0] if lines else f"exit {completed.returncode}"))
+
+
+def live_worktree_branch(path: str) -> str:
+    """The branch checked out at ``path``, a git worktree's top level (#192 §1, D3).
+
+    Read-only: ``git`` by name on PATH with a 60-second timeout, and no lock.
+    ``lexists`` counts a dangling symlink as present, so it is refused as not a
+    directory. Any other outcome raises ``WorktreeBranchUnavailable`` carrying
+    the reason clause.
+    """
+    if not os.path.lexists(path):
+        raise WorktreeBranchUnavailable("the worktree is absent")
+    if not _non_symlink(Path(path), stat.S_ISDIR):
+        raise WorktreeBranchUnavailable("it is not a directory")
+    toplevel = _worktree_git(path, "rev-parse", "--show-toplevel")
+    if toplevel.returncode != 0:
+        raise _git_failed(toplevel)
+    top = toplevel.stdout.decode("utf-8", "replace").rstrip("\n")
+    if os.path.realpath(top) != os.path.realpath(path):
+        raise WorktreeBranchUnavailable("it is not the top level of a git worktree")
+    head = _worktree_git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if head.returncode == 1 and not head.stderr.strip():
+        raise WorktreeBranchUnavailable("its HEAD is detached")
+    branch = head.stdout.decode("utf-8", "replace").rstrip("\n")
+    if head.returncode != 0 or not branch or "\n" in branch:
+        raise _git_failed(head)
+    return branch
+
+
 def command_build_delivery(args: argparse.Namespace) -> int:
     """Print one sealed delivery value; read-only (no lock, clock or write).
 
     A contract the builder cannot re-derive is served only against the initial
     intent a ledger under --repo-root installed with it, which
-    ``installed_initial_intent`` finds; that is the only ledger read (#193 D2).
+    ``installed_initial_intent`` finds, and --kind current-selection is served
+    the current selection of the one ledger ``installing_ledger_delivery``
+    finds (#192 D24); those are the only ledger reads (#193 D2).
+    For --kind contract, a worktree whose name is not an issue branch is probed for
+    the branch it has checked out (#192 D3); that is the command's only git read.
     """
     if not Path(args.repo_root).is_absolute():
         raise WorkflowError("repository root path must be absolute")
     runtime = _delivery()
     value = load_json_request(args.input, "builder input")
     policy = resolve_project_policy(args.repo_root, "repo-root") if args.kind == "contract" else None
+    worktree_branch = None
+    if args.kind == "contract" and runtime.requires_worktree_branch(value, policy):
+        try:
+            worktree_branch = live_worktree_branch(value["worktree"])
+        except WorktreeBranchUnavailable as unavailable:
+            raise WorkflowError("build-delivery refused: " + runtime.worktree_pattern_refusal(
+                value["worktree"], str(unavailable))) from unavailable
     installed = None
     if (args.kind != "contract" and isinstance(value, dict) and "contract" in value
             and runtime.requires_installed_intent(value["contract"])):
         installed = installed_initial_intent(runtime, args.repo_root, value["contract"])
+    installed_delivery = None
+    if args.kind == "current-selection" and isinstance(value, dict) and "contract" in value:
+        installed_delivery = installing_ledger_delivery(runtime, args.repo_root,
+                                                        value["contract"])
     try:
         result = runtime.build_delivery(args.kind, value, policy=policy,
-                                        installed_intent=installed)
+                                        installed_intent=installed,
+                                        worktree_branch=worktree_branch,
+                                        installed_delivery=installed_delivery)
     except Exception as error:
         raise WorkflowError(f"build-delivery refused: {error}") from error
     if args.kind == "contract":
@@ -3842,11 +3952,20 @@ def build_parser() -> argparse.ArgumentParser:
         "It takes no lock, reads no clock and writes nothing. "
         "A contract the builder cannot re-derive is served only when a ledger under "
         "--repo-root has installed it, and then against that ledger's stored initial "
-        "intent; that is the only time it reads a ledger. "
+        "intent. --kind current-selection serves the current selection of the "
+        "contract's reviewed slot from the one ledger that installed the contract. "
+        "Those are the only times it reads a ledger. "
         "--kind contract resolves project policy with resolve-project at --repo-root, "
-        "the ledger repository root, and seals only that policy. When the input's "
+        "the ledger repository root, and seals only that policy. "
+        "The contract's branch is the worktree path's final component when that name "
+        "matches the issue branch pattern; otherwise it is the branch checked out at that "
+        "path, which must be the top level of a git worktree, and that branch must match "
+        "the pattern. When the input's "
         "worktree path already exists, it also resolves there and refuses if any "
-        "sealed policy member differs. The other kinds resolve no project policy. Every refusal "
+        "sealed policy member differs. The other kinds resolve no project policy. "
+        "--kind sync-selection seals a selection that extends --input's "
+        "prior_selection by one sync merge commit whose first parent is that "
+        "selection's head. Every refusal "
         "after argument parsing exits 2 with empty stdout and one stderr line; when "
         "resolve-project refuses, that line ends with the resolver's error document as "
         "one line of canonical JSON."))
@@ -3854,8 +3973,9 @@ def build_parser() -> argparse.ArgumentParser:
         "absolute ledger repository root; --kind contract resolves the policy it seals here"))
     build_delivery.add_argument(
         "--kind", required=True,
-        choices=("contract", "initial-intent", "scope", "selected-output", "observation",
-                 "authority-observation", "authorization-chain"))
+        choices=("contract", "initial-intent", "scope", "selected-output", "sync-selection",
+                 "current-selection", "observation", "authority-observation",
+                 "authorization-chain"))
     build_delivery.add_argument("--input", required=True)
     build_delivery.set_defaults(handler=command_build_delivery)
 

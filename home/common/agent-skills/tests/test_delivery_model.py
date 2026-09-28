@@ -42,6 +42,8 @@ from ._delivery_model_fixtures import (
     ship_checkpoint,
     direct_delivery_request,
     issue_with_attempt,
+    sync_selection,
+    at_head,
 )
 
 ROOT = Path(__file__).parents[4]
@@ -130,7 +132,7 @@ class DeliveryModelTest(unittest.TestCase):
             self.assertEqual(set(module.__all__), {
                 "MODEL_INTERFACE_VERSION", "DeliveryModelError", "canonical_bytes",
                 "canonical_digest", "validate_delivery_object", "validate_custody_ref",
-                "match_scope", "reduce_delivery", "STAGE_ACTIONS",
+                "match_scope", "current_selection", "reduce_delivery", "STAGE_ACTIONS",
             })
             self.assertEqual(set(Path(raw).iterdir()), before)
             self.assertFalse(hasattr(module, "main"))
@@ -1139,6 +1141,191 @@ class DeliveryModelTest(unittest.TestCase):
         self.assert_invalid(bad, "ship-handoff")
         bad = copy.deepcopy(handoff); bad["branch"] = "other"
         self.assert_invalid(bad, "ship-handoff")
+
+    SYNC_H1, SYNC_H2 = "e" * 40, "9" * 40
+    INTEGRATION_1, INTEGRATION_2 = "d" * 40, "f" * 40
+
+    def selected_at_h0(self):
+        """The fixtures' head H0 (`a` * 40) selected, published and opened, then folded."""
+        contract, delivery = contract_and_delivery(self.model)
+        delivery = with_observed(self.model, contract, delivery, ["select", "publish", "open"])
+        folded = self.model.reduce_delivery(contract, delivery, evaluation=evaluation())
+        return contract, folded["next_delivery"], folded["next_delivery"]["selected_outputs"][0]
+
+    def fold(self, contract, delivery, observations):
+        return self.model.reduce_delivery(contract, delivery, evaluation=evaluation(
+            delivery_observations=sorted(observations, key=lambda item: item["id"])))
+
+    def link(self, prior, head, integration_parent):
+        return sync_selection(self.model, prior, head=head,
+                              integration_parent=integration_parent)
+
+    def test_a_sync_selection_is_selected_output_v2(self):
+        _, _, h0 = self.selected_at_h0()
+        h1 = self.link(h0, self.SYNC_H1, self.INTEGRATION_1)
+        self.assertEqual(self.validate(h1, "selected-output"), h1)
+
+        def resealed(change):
+            bad = copy.deepcopy(h1)
+            change(bad)
+            return seal(self.model, bad)
+
+        for label, bad in (
+                ("tree subject", resealed(lambda value: value.update(subject_kind="tree"))),
+                ("equal parents", resealed(lambda value: value["sync"].update(
+                    integration_parent=value["sync"]["first_parent"]))),
+                ("head as first parent", resealed(lambda value: value["sync"].update(
+                    first_parent=value["subject_value"]))),
+                ("head as integration parent", resealed(lambda value: value["sync"].update(
+                    integration_parent=value["subject_value"]))),
+                ("empty parent", resealed(lambda value: value["sync"].update(
+                    integration_parent=""))),
+                ("prior not a digest", resealed(lambda value: value["sync"].update(
+                    prior_selection_id="h0"))),
+                ("extra sync member", resealed(lambda value: value["sync"].update(merge="m"))),
+                ("no sync member", resealed(lambda value: value.pop("sync"))),
+                ("v1 carrying sync", resealed(lambda value: value.update(schema_version=1))),
+                ("schema 3", resealed(lambda value: value.update(schema_version=3)))):
+            with self.subTest(label=label):
+                self.assert_invalid(bad, "selected-output")
+
+    def test_the_tip_of_the_chain_drives_every_slot_stage(self):
+        contract, delivery, h0 = self.selected_at_h0()
+        h1 = self.link(h0, self.SYNC_H1, self.INTEGRATION_1)
+        selected = observation(self.model, contract, "selected_output", {"selected_output": h1})
+        bare = self.fold(contract, delivery, [selected])
+        facts = {fact["stage_id"]: fact for fact in bare["next_delivery"]["stage_facts"]}
+        self.assertEqual((bare["next_stage_id"], facts["select"]["observation_id"],
+                          facts["publish"]["state"], facts["open"]["state"]),
+                         ("publish", selected["id"], "pending", "pending"))
+        self.assertEqual([item["id"] for item in bare["next_delivery"]["selected_outputs"]],
+                         sorted([h0["id"], h1["id"]]))
+        opened = self.fold(contract, bare["next_delivery"],
+                           at_head(self.model, contract, h1)[1:])
+        self.assertEqual(opened["next_stage_id"], "merge")
+        h2 = self.link(h1, self.SYNC_H2, self.INTEGRATION_2)
+        again = self.fold(contract, opened["next_delivery"], at_head(self.model, contract, h2))
+        self.assertEqual((again["next_stage_id"], len(again["next_delivery"]["selected_outputs"])),
+                         ("merge", 3))
+
+    def test_selection_sets_that_are_not_one_chain_are_rejected(self):
+        contract, delivery, h0 = self.selected_at_h0()
+        h1 = self.link(h0, self.SYNC_H1, self.INTEGRATION_1)
+        stray = selection(self.model, self.model.canonical_digest(contract),
+                          subject_value="c" * 40)
+        off_chain = copy.deepcopy(h1)
+        off_chain["sync"]["first_parent"] = "c" * 40
+        narrowed = copy.deepcopy(h1)
+        narrowed["review_evidence_ids"] = [f"review:merge-delta-clean@{self.SYNC_H1}"]
+        for label, links in (
+                ("second v1 root", [stray]),
+                ("dangling prior", [self.link(stray, self.SYNC_H1, self.INTEGRATION_1)]),
+                ("fork", [h1, self.link(h0, self.SYNC_H2, self.INTEGRATION_2)]),
+                ("first parent off the chain", [seal(self.model, off_chain)]),
+                ("evidence not a superset", [seal(self.model, narrowed)]),
+                ("repeated head", [h1, self.link(h1, h0["subject_value"], self.INTEGRATION_2)])):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(self.model.DeliveryModelError,
+                                            "conflicting selected outputs"):
+                    self.fold(contract, delivery, [
+                        observation(self.model, contract, "selected_output",
+                                    {"selected_output": item}) for item in links])
+
+    def test_a_merge_at_the_tip_is_final(self):
+        contract, delivery, h0 = self.selected_at_h0()
+        merged = self.fold(contract, delivery, [
+            observation(self.model, contract, "pr_merged", pr_subject("pr_merged"))])
+        self.assertEqual(post_state(merged, "pr_merged"), "observed")
+        with self.assertRaisesRegex(self.model.DeliveryModelError,
+                                    "a merged selection chain cannot be extended"):
+            self.fold(contract, merged["next_delivery"], at_head(
+                self.model, contract, self.link(h0, self.SYNC_H1, self.INTEGRATION_1)))
+        # A merge at a head the chain has not reached yet is history until it does.
+        early = self.fold(contract, delivery, [observation(
+            self.model, contract, "pr_merged", pr_subject("pr_merged", head=self.SYNC_H2))])
+        self.assertEqual((early["next_stage_id"], post_state(early, "pr_merged")),
+                         ("merge", "pending"))
+        # Only a landed merge of this repository into the slot's base is final (D28).
+        for label, subject in (
+                ("not merged", pr_subject("pr_merged", merged=False)),
+                ("another repository", pr_subject("pr_merged", repository="other-repo")),
+                ("another base", pr_subject("pr_merged", base="release"))):
+            with self.subTest(label=label):
+                stray = self.fold(contract, delivery, [
+                    observation(self.model, contract, "pr_merged", subject)])
+                extended = self.fold(contract, stray["next_delivery"], at_head(
+                    self.model, contract, self.link(h0, self.SYNC_H1, self.INTEGRATION_1)))
+                self.assertEqual(extended["next_stage_id"], "merge")
+
+    def test_match_scope_binds_the_tip_and_refuses_a_superseded_head(self):
+        contract, delivery, declared = contract_and_delivery_for_stage(self.model, "merge")
+        h0 = selection(self.model, self.model.canonical_digest(contract))
+        h1 = self.link(h0, self.SYNC_H1, self.INTEGRATION_1)
+
+        def match(selected):
+            return self.model.match_scope(
+                contract, delivery["authorization_intents"][0],
+                requested_scope(self.model, declared, selected), selected_outputs=[h0, h1],
+                at_time="2026-09-21T00:00:00Z", revocation_observations=[])
+
+        self.assertEqual(match(h1), {"matched": True, "scope_id": declared["id"],
+                                     "reason_code": "matched"})
+        self.assertEqual(match(h0), {"matched": False, "scope_id": None,
+                                     "reason_code": "scope_target_mismatch"})
+
+    def test_only_the_current_selection_is_delivered(self):
+        contract, delivery, h0 = self.selected_at_h0()
+        h1 = self.link(h0, self.SYNC_H1, self.INTEGRATION_1)
+        opened = self.fold(contract, delivery, at_head(self.model, contract, h1))["next_delivery"]
+        merge = observation(self.model, contract, "pr_merged",
+                            pr_subject("pr_merged", head=self.SYNC_H1))
+
+        def delivered(selected):
+            head = selected["subject_value"]
+            return observation(self.model, contract, "implementation_delivered", {
+                "selected_subject": {"kind": "commit", "value": head},
+                "integration_subject": {"kind": "commit", "value": "b" * 40},
+                "presence": {"kind": "reachability", "repository_id": "sim-repo",
+                             "selected_value": head, "integration_value": "b" * 40,
+                             "integrated_ref": "refs/heads/main", "succeeded": True},
+                "merge_observation_id": merge["id"],
+                **{name: list(selected[name]) for name in (
+                    "acceptance_evidence_ids", "review_evidence_ids", "test_evidence_ids")}})
+
+        superseded = self.fold(contract, opened, [merge, delivered(h0)])
+        self.assertEqual((post_state(superseded, "pr_merged"),
+                          post_state(superseded, "implementation_delivered")),
+                         ("observed", "pending"))
+        current = self.fold(contract, opened, [merge, delivered(h1)])
+        self.assertEqual(post_state(current, "implementation_delivered"), "observed")
+
+    def test_current_selection_is_the_reviewed_slot_tip(self):
+        _, empty = contract_and_delivery(self.model)
+        self.assertIsNone(self.model.current_selection(empty))
+        contract, delivery, h0 = self.selected_at_h0()
+        self.assertEqual(self.model.current_selection(delivery), h0)
+        h1 = self.link(h0, self.SYNC_H1, self.INTEGRATION_1)
+        synced = self.fold(contract, delivery, at_head(self.model, contract, h1))
+        self.assertEqual(self.model.current_selection(synced["next_delivery"]), h1)
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.current_selection({**synced["next_delivery"], "selected_outputs": [h1]})
+
+    def test_a_handoff_carries_a_whole_selection_chain_or_none(self):
+        contract, delivery = contract_and_delivery(self.model)
+        h0 = selection(self.model, self.model.canonical_digest(contract))
+        h1 = self.link(h0, self.SYNC_H1, self.INTEGRATION_1)
+        handoff = ship_handoff(self.model, contract, delivery)
+        chained = copy.deepcopy(handoff)
+        chained["selected_outputs"] = sorted([h0, h1], key=lambda item: item["id"])
+        self.assertEqual(self.validate(chained, "ship-handoff"), chained)
+        stray = selection(self.model, self.model.canonical_digest(contract),
+                          subject_value="c" * 40)
+        for label, selections in (("a link without its root", [h1]),
+                                  ("two roots", [h0, stray])):
+            bad = copy.deepcopy(handoff)
+            bad["selected_outputs"] = sorted(selections, key=lambda item: item["id"])
+            with self.subTest(label=label):
+                self.assert_invalid(bad, "ship-handoff")
     def test_source_and_generated_installed_layout_load_same_model(self):
         source = load_model(SOURCE, "delivery_model_source_layout")
         with tempfile.TemporaryDirectory() as raw:

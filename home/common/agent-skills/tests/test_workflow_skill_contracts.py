@@ -35,6 +35,7 @@ SDD_DIR = REPO_ROOT / "home/common/agent-skills/skills/sdd"
 FROM_ISSUE_DIR = REPO_ROOT / "home/common/agent-skills/skills/from-issue"
 SHIP_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/SKILL.md"
 SHIP_ISSUE_REVIEW = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/REVIEW.md"
+SHIP_ISSUE_CI_MERGE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/CI-MERGE.md"
 SHIP_ISSUE_HUMAN_GATE = (
     REPO_ROOT / "home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md"
 )
@@ -1026,6 +1027,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.worktrees = WORKTREES.read_text(encoding="utf-8")
         cls.ship_issue = SHIP_ISSUE.read_text(encoding="utf-8")
         cls.ship_review = SHIP_ISSUE_REVIEW.read_text(encoding="utf-8")
+        cls.ship_ci_merge = SHIP_ISSUE_CI_MERGE.read_text(encoding="utf-8")
         cls.ship_human_gate = SHIP_ISSUE_HUMAN_GATE.read_text(encoding="utf-8")
         cls.ship_issue_evals = json.loads(SHIP_ISSUE_EVALS.read_text(encoding="utf-8"))
         cls.writing_plans = WRITING_PLANS.read_text(encoding="utf-8")
@@ -1166,6 +1168,45 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertIn("re-entry line", normalized(text))
         for appendix in (self.ship_review, self.ship_human_gate):
             self.assertIn("## Delivery loop", appendix)
+
+    def test_ship_issue_post_selection_sync_route(self):
+        """#192 T11: CI-MERGE.md owns the route; SKILL.md points to it from four places."""
+        route = normalized(self.ship_ci_merge.split("## Post-selection sync", 1)[1])
+        self.assert_ordered(route, "**sync selection**", "whoever holds the merge gate",
+            "**current selection**", "`--kind current-selection`",
+            "`implementation_delivered`", "*sync run*",
+            "`git merge-base --is-ancestor", "one sync selection, oldest first",
+            "`gh pr view <pr-num> --json state,headRefOid,mergeable`",
+            "`mergeable: CONFLICTING`", "merely behind", "resume at step 3",
+            "`mergeable: UNKNOWN`", "proceed to the merge",
+            "not an authority denial", "no `authority-observation`")
+        self.assert_ordered(route, "**Sync.**", "[`SYNC.md`](./SYNC.md)", "**Verify.**",
+            "Phase 2 verification", "**Review.**", "`git show --cc", "merge-delta reviewer",
+            "re-run the Phase 2 verification commands before the push",
+            "`merge-delta-empty`", "`merge-delta-clean`", "**Push.**", "`check-launch`",
+            "`git push origin <branch>`", "**Wait for CI.**", "Phase 6's CI wait",
+            "**Select.**", "--kind sync-selection", "`git rev-list --parents -n 1",
+            "`test_ref` `checks`", "`branch_published` and `pr_opened`",
+            "`--kind scope` for `merge_pr`", "**Merge.**")
+        self.assert_ordered(route, "**A merge that already landed.**",
+            "without a push or a CI wait", "`pr_merged` observation", "**Stops.**",
+            "genuinely-blocked stop", "In `--auto`, a step-1 conflict", "`git merge --abort`",
+            "Should-fix", "`terminal_failed` `ship-summary/v2`", "`stopped` row",
+            "its own `finish`")
+        self.assertNotIn("Agent(", self.ship_ci_merge)
+        self.assertEqual(self.ship_issue.count("`## Post-selection sync`"), 4)
+        loop = normalized(self.section(self.ship_issue, "## Delivery loop", "## Remainder mode"))
+        self.assert_ordered(loop, "**The pre-merge selection gate.**",
+            "`## Post-selection sync`", "**Denials.**", "cannot merge into its base",
+            "no authority observation", "`## Post-selection sync`",
+            "A guard, host or provider denial", "the current selection, merge SHA")
+        remainder = normalized(self.ship_issue.split("## Remainder mode", 1)[1])
+        self.assert_ordered(remainder, "start at the merge gate", "`## Post-selection sync`",
+                            "already landed", "`--kind current-selection`")
+        phase_six = normalized(self.section(self.ship_issue, "## Phase 6 — Wait for CI",
+                                            "## Phase 7 — Merge"))
+        self.assert_ordered(phase_six, "unreviewed commits", "`## Post-selection sync`",
+                            "genuinely-blocked stop")
 
     def test_ship_issue_probes_reviewer_dispatch_before_any_write(self):
         # The probe is Phase 0's first step, so a context that cannot launch
@@ -2079,14 +2120,17 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "Before reading either artifact",
             "caller-passed `bindings.vcs` branch and",
             "decimal `owner.issue`",
-            "final path component",
+            "`owner.contract`'s reviewed-slot `constraints.branch`",
             "binding-derived accepted branch regex",
             "`expected_branch`",
+            "normalized `owner.worktree` to",
+            "`remove_worktree` stage",
             "`git -C owner.worktree branch --show-current`",
             "equal `expected_branch`",
             "mismatch is a contract failure",
             "both roots are tracked",
         )
+        self.assertNotIn("final path component", delegated)
         self.assert_ordered(
             delegated,
             "mismatch is a contract failure",
