@@ -3,11 +3,13 @@ D21, D22, D25, D27-D31): the observation and evaluation vocabularies, the closed
 `ProofRefused` reasons and their one construction path, the core-minted evidence ids,
 collection admission, the observer's request and result check, the pure evaluation at a
 cutoff, the cohort table, the seal's clock-free facts (`seal_violation`), the decision halves
-of `start_cohort` (`cohort_start`) and `settle_proof` (`settlement`), the validator's proof
-event and reserved-reason pairing rules, and the derived `proof` view.
+of `start_cohort` (`cohort_start`) and `settle_proof` (`settlement`), the lifecycle gates
+(`gate_violation`) and what `advance` may not write (`advance_violation`), the validator's
+proof event and reserved-reason pairing rules, and the derived `proof` view.
 
 `agent_tools.transaction_history` hands every proof event to `proof_event_violation` and
-`apply_proof_event` and every adjacent pair of events to `pairing_violation`, and
+`apply_proof_event`, every adjacent pair of events to `pairing_violation` and every
+transition to `gate_violation`, and
 `agent_tools.transaction_core` keeps only the locks, the clock, the observer call and the
 writes around the pure halves held here. Every function here is pure: the module reads no
 file, lock or clock.
@@ -21,7 +23,7 @@ from types import MappingProxyType
 from typing import Any
 
 from agent_tools.transaction_custody import EVIDENCE_EVENTS, admissibility, fence_violation
-from agent_tools.transaction_invocation import fold_actions, status, unresolved
+from agent_tools.transaction_invocation import ActionFold, fold_actions, status, unresolved
 from agent_tools.transaction_plan import DERIVED_REASONS, MAX_COHORT_ATTEMPTS
 from agent_tools.transaction_storage import ProofRefused, TransitionRefused, format_at, parse_at
 
@@ -39,6 +41,8 @@ _PAIRED = MappingProxyType({"proof_rejected": ("attention_required", "proof_reje
                             "proof_convergence_exhausted": ("attention_required",
                                                             "proof_did_not_converge"),
                             "proof_sealed": ("succeeded", None)})
+_GATES = MappingProxyType({("publishing", "published"): "publication",
+                           ("activating", "proving"): "activation"})
 
 _ENVELOPE_KEYS = frozenset({"seq", "type", "at"})
 PROOF_EVENT_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
@@ -395,6 +399,41 @@ def settlement(document: dict, now_ms: int) -> list[dict]:
     return appended
 
 
+def gate_violation(plan: Mapping, actions: Mapping[str, ActionFold], source: str,
+                   target: str) -> str | None:
+    """The lifecycle gate `source -> target` breaks against `actions`, or None (D12):
+    `publishing -> published` needs every publication unit's action `satisfied`,
+    `activating -> proving` every activation unit's, and `published -> proving` a plan with
+    no activation unit. Every other edge, a resume to `parked_from` included, is ungated."""
+    if (source, target) == ("published", "proving"):
+        return next((f"published -> proving needs a plan with no activation unit, and "
+                     f"{unit['name']} is one"
+                     for unit in plan["units"] if unit["phase"] == "activation"), None)
+    phase = _GATES.get((source, target))
+    for unit in plan["units"]:
+        if unit["phase"] != phase:
+            continue
+        entry = actions.get(unit["action_id"])
+        state = None if entry is None else status(entry)
+        if state != "satisfied":
+            return (f"{phase} unit {unit['name']} ({unit['action_id']}) is "
+                    f"{state or 'undeclared'}")
+    return None
+
+
+def advance_violation(document: dict, target: str, reason: str) -> str | None:
+    """Why `advance` may not take `document` to `target` with `reason`, or None (D10, D12,
+    D27): `succeeded` is `settle_proof`'s, as is a parking from `proving` with a reserved
+    reason, and every lifecycle gate applies."""
+    source = document["state"]
+    if target == "succeeded":
+        return "succeeded is entered only through settle_proof"
+    if (source, target) == ("proving", "attention_required") and reason in RESERVED_REASONS:
+        return f"reserved reason {reason} is written only by settle_proof"
+    return gate_violation(document["proof_plan"], fold_actions(document["events"]), source,
+                          target)
+
+
 @dataclasses.dataclass
 class ProofFold:
     """What the validator folds from the proof events before the one it checks: the
@@ -503,8 +542,8 @@ def pairing_violation(previous: Mapping | None, event: Mapping | None) -> str | 
     """How `event`, the one after `previous` (None past the end), breaks a reserved pairing,
     or None (D10, D27): `proof_rejected` and `proof_convergence_exhausted` come immediately
     before their `proving -> attention_required` parking and `proof_sealed` immediately
-    before the transition to `succeeded`; a parking with a reserved reason comes
-    immediately after its event."""
+    before the transition to `succeeded`; a parking with a reserved reason and a transition
+    to `succeeded` come immediately after their event."""
     kind = None if previous is None else previous.get("type")
     edge = None
     if event is not None and event.get("type") == "transitioned":
@@ -517,6 +556,8 @@ def pairing_violation(previous: Mapping | None, event: Mapping | None) -> str | 
     if edge is not None and edge[:2] == ("proving", "attention_required") \
             and edge[2] in RESERVED_REASONS and _PAIRED.get(kind, ("", ""))[1] != edge[2]:
         return f"reserved reason {edge[2]} does not immediately follow its event"
+    if edge is not None and edge[1] == "succeeded" and kind != SEAL_REASON:
+        return "transition to succeeded does not immediately follow proof_sealed"
     return None
 
 

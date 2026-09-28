@@ -451,8 +451,12 @@ class QuiesceTest(CustodyCase):
 class FencedAdvanceTest(CustodyCase):
     def step(self, transaction_id, *targets, custody=None):
         for target in targets:
-            after = self.store.advance(transaction_id, target, reason="r",
-                                       external_state="known", custody=custody)
+            if target == "succeeded":
+                self.store.start_cohort(custody)
+                after = self.store.settle_proof(custody)
+            else:
+                after = self.store.advance(transaction_id, target, reason="r",
+                                           external_state="known", custody=custody)
         return after
 
     def test_publishing_and_everything_after_it_requires_custody(self):
@@ -798,8 +802,8 @@ class OwnerResultTest(ReapTest):
 
     def test_a_terminal_transaction_refuses_late_results(self):
         transaction_id, custody = self.proving()
-        self.store.advance(transaction_id, "succeeded", reason="r", external_state="known",
-                           custody=custody)
+        self.store.start_cohort(custody)
+        self.store.settle_proof(custody)
         self.assertRefusedUnchanged(TransitionRefused,
                                     lambda: self.late(transaction_id, custody))
 

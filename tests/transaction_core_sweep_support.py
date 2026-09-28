@@ -252,7 +252,8 @@ def drive(root, shape, scenario, world=None):
         if scenario == "lease_renewal" and any(
                 store.inspect_lease(key)["holder"]["term"] != 3 for key in keys):
             raise _Parked("lease was not renewed to term 3 before sealing")
-        advance("succeeded", "every required obligation satisfied")
+        store.start_cohort(held["custody"])
+        store.settle_proof(held["custody"])
     except _Parked as parked:
         advance("attention_required", str(parked))
     return transaction_id

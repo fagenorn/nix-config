@@ -24,7 +24,9 @@ operations are that and `invoke_action`, which calls the effect only after a fre
 inspection, behind a durable intent and within the retry budget. An action observed in
 flight (`open`, or last read `in_progress`) keeps `renew` from quiescing a parked
 transaction, and `advance` enters no terminal while an action is `open`, `in_progress` or
-`unknown`. The durable-file primitives and the refusal hierarchy live in
+`unknown`; it never enters `succeeded` nor writes a reserved parking reason, and applies
+the publication and activation gates of `agent_tools.transaction_proof`. The durable-file
+primitives and the refusal hierarchy live in
 `agent_tools.transaction_storage`, and the document model — vocabularies, `Custody`,
 `Transaction`, the validator and the snapshot fold — in `agent_tools.transaction_history`;
 this module re-exports the errors and the public model names. `action_id` and the retry
@@ -69,8 +71,9 @@ from agent_tools.transaction_plan import (
     PLAN_REJECTION_REASONS, PLAN_SCHEMA, RUNNING_IDENTITY_FRESHNESS_MS, compile_proof,
     materialize_plan)
 from agent_tools.transaction_proof import (
-    PROOF_REFUSAL_REASONS, cohort_start, collection_refusal, next_evidence_id, obligation,
-    observation_request, observation_violation, open_cohort, proof_refused, settlement)
+    PROOF_REFUSAL_REASONS, advance_violation, cohort_start, collection_refusal,
+    next_evidence_id, obligation, observation_request, observation_violation, open_cohort,
+    proof_refused, settlement)
 from agent_tools.transaction_storage import (
     LAST_AT_MS, CreationConflict, CustodyMisbound, EffectResultInvalid, FenceViolation,
     GrantInvalid, InvocationRefused, LeaseUnavailable, ProofPlanRejected, ProofRefused,
@@ -210,7 +213,10 @@ class TransactionStore:
         fenced-checked, required or not, before the lifecycle refusals. The last of
         those refuses a terminal target while some action is `open`, `in_progress` or
         `unknown` (`TransitionRefused` naming the first such action and its status),
-        whatever `external_state` the caller passes. Entering a terminal while custody
+        whatever `external_state` the caller passes. Before it, `advance_violation` refuses
+        `succeeded` (entered only through `settle_proof`), a `proving -> attention_required`
+        with a reserved reason, and a failing publication or activation gate (#207 D10, D12,
+        D27). Entering a terminal while custody
         is held appends the transition and a `lease_released` reason `terminal` in one
         `state.json` write, then clears the lease records. Every refusal happens
         before any write; the lock file is never created.
@@ -271,6 +277,9 @@ class TransactionStore:
             raise TransitionRefused(f"{where}: external_state is not known, unknown or None")
         if target in TERMINALS and external_state != "known":
             raise TransitionRefused(f"{where}: terminal target needs known external state")
+        rule = advance_violation(prior, target, reason)
+        if rule is not None:
+            raise TransitionRefused(f"{where}: {rule}")
         blocker = unresolved(fold_actions(prior["events"])) if target in TERMINALS else None
         if blocker is not None:
             raise TransitionRefused(f"{where}: terminal target over unresolved action "

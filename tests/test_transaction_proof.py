@@ -582,6 +582,99 @@ class CohortValidatorTest(CohortCase):
         self.assertEditRefused(renumbered(trailing))
 
 
+class GateTest(ProofCase):
+    def test_succeeded_is_reachable_only_through_settle_proof(self):
+        self.proving()
+        self.collect_required()
+        error = self.assertRefusedUnchanged(TransitionRefused, lambda: self.to("succeeded"))
+        self.assertIn("settle_proof", str(error))
+
+    def test_published_needs_every_publication_unit_satisfied(self):
+        self.to("awaiting_verification", "ready", "publishing")
+        error = self.assertRefusedUnchanged(TransitionRefused, lambda: self.to("published"))
+        self.assertIn("undeclared", str(error))
+        self.store.inspect_action(self.custody, name="build", parameters={"n": 1},
+                                  effect=FakeEffect(self.world))
+        error = self.assertRefusedUnchanged(TransitionRefused, lambda: self.to("published"))
+        self.assertIn("absent", str(error))
+        self.satisfy("build", {"n": 1})
+        self.assertEqual(self.to("published").state, "published")
+
+    def test_proving_after_activation_needs_every_activation_unit_satisfied(self):
+        self.to("awaiting_verification", "ready", "publishing")
+        self.satisfy("build", {"n": 1})
+        self.to("published", "activating")
+        self.assertRefusedUnchanged(TransitionRefused, lambda: self.to("proving"))
+        self.satisfy("start", {"n": 2})
+        self.assertEqual(self.to("proving").state, "proving")
+
+    def test_proving_straight_from_published_needs_no_activation_unit(self):
+        self.to("awaiting_verification", "ready", "publishing")
+        self.satisfy("build", {"n": 1})
+        self.to("published")
+        error = self.assertRefusedUnchanged(TransitionRefused, lambda: self.to("proving"))
+        self.assertIn("activation", str(error))
+        self.transaction_id = self.store.create(
+            "no-activation", SUBJECT, concurrency_keys=("key:solo",),
+            proof={**DECLARATION, "units": UNITS[:1], "obligations": []}).transaction_id
+        self.custody = self.acquire(self.transaction_id)
+        self.to("awaiting_verification", "ready", "publishing")
+        self.satisfy("build", {"n": 1})
+        self.assertEqual(self.to("published", "proving").state, "proving")
+
+    def test_a_resume_to_the_parked_state_is_ungated(self):
+        self.to("awaiting_verification", "ready", "publishing")
+        self.satisfy("build", {"n": 1})
+        self.to("published")
+        self.store.inspect_action(self.custody, name="build", parameters={"n": 1},
+                                  effect=FakeEffect(self.world, inspect_outcome="diverged"))
+        self.to("attention_required")
+        self.assertEqual(self.to("published").state, "published")
+
+    def test_advance_never_writes_a_reserved_reason(self):
+        self.proving()
+        for reason in ("proof_rejected", "proof_did_not_converge"):
+            with self.subTest(reason=reason):
+                self.assertRefusedUnchanged(TransitionRefused, lambda: self.store.advance(
+                    self.transaction_id, "attention_required", reason=reason,
+                    custody=self.custody))
+        after = self.store.advance(self.transaction_id, "attention_required",
+                                   reason="operator asked", custody=self.custody)
+        self.assertEqual(after.state, "attention_required")
+
+    def test_hand_built_gate_breaches_are_state_invalid(self):
+        def appended(document, source, target):
+            document = copy.deepcopy(document)
+            document["events"].append({
+                "seq": 0, "type": "transitioned", "at": document["events"][-1]["at"],
+                "from": source, "to": target, "reason": "r", "external_state": "known"})
+            document.update(state=target, parked_from=None)
+            return renumbered(document)
+
+        self.to("awaiting_verification", "ready", "publishing")
+        self.store.inspect_action(self.custody, name="build", parameters={"n": 1},
+                                  effect=FakeEffect(self.world))
+        publishing = self.state_doc(self.transaction_id)
+        self.assertRuleRefuses(self.transaction_id,
+                               appended(publishing, "publishing", "published"),
+                               "publication unit build")
+        (self.root / self.transaction_id / "state.json").write_text(serialize(publishing))
+        self.store.invoke_action(self.custody, name="build", parameters={"n": 1},
+                                 effect=FakeEffect(self.world))
+        self.to("published", "activating")
+        self.satisfy("start", {"n": 2})
+        self.to("proving")
+        self.collect_required()
+        proving = self.state_doc(self.transaction_id)
+        unsealed = appended(proving, "proving", "succeeded")
+        unsealed["events"].append({
+            "seq": len(unsealed["events"]) + 1, "type": "lease_released",
+            "at": unsealed["events"][-1]["at"], "fence": proving["custody"]["fence"],
+            "reason": "terminal"})
+        unsealed.update(custody=None, revision=len(unsealed["events"]))
+        self.assertRuleRefuses(self.transaction_id, unsealed, "proof_sealed")
+
+
 OBSERVED_PROOF_REASONS = {
     "state_not_proving", "unknown_obligation", "unsupported_obligation",
     "dependency_not_accepted", "already_accepted", "not_cohort_member", "clock_regressed",

@@ -34,8 +34,8 @@ from agent_tools.transaction_invocation import (
     unresolved)
 from agent_tools.transaction_plan import plan_violation
 from agent_tools.transaction_proof import (
-    PROOF_EVENT_KEYS, ProofFold, apply_proof_event, pairing_violation, proof_event_violation,
-    proof_view)
+    PROOF_EVENT_KEYS, ProofFold, apply_proof_event, gate_violation, pairing_violation,
+    proof_event_violation, proof_view)
 from agent_tools.transaction_storage import (
     StateInvalid, format_at, json_object_violation, parse_at, serialize)
 
@@ -437,7 +437,8 @@ def validate_state(document: Any, transaction_id: str,
     at most `MAX_COHORT_ATTEMPTS`, one open at a time; a seal names the cohort open under
     its fence and passes `seal_violation`, which settlement also uses (#207 D31); and
     `pairing_violation` binds each rejection, exhaustion and seal to the transition right
-    after it, and each reserved parking reason to the event right before it (#207 D10)."""
+    after it, and each reserved parking reason and `succeeded` to the event right before it
+    (#207 D10); every transition passes `gate_violation` over the actions before it (D12)."""
     def refuse(rule: str) -> StateInvalid:
         return StateInvalid(f"{transaction_id}: {rule}")
 
@@ -501,6 +502,9 @@ def validate_state(document: Any, transaction_id: str,
         match event_type:
             case "transitioned":
                 state, parked = _fold_transitioned(event, seq, state, parked, refuse)
+                violation = gate_violation(document["proof_plan"], actions, event["from"], state)
+                if violation is not None:
+                    raise refuse(f"event {seq} {violation}")
                 if state in TERMINALS:
                     blocker = unresolved(actions)
                     if blocker is not None:

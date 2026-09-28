@@ -227,11 +227,19 @@ class LoadTest(StoreCase):
             "k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF).transaction_id
         base = self.document(transaction_id)
         for targets in (("attention_required", "created", "abandoned"),
-                        ("attention_required", "recovering", "rolled_back"),
-                        FORWARD[1:] + ("succeeded",)):
+                        ("attention_required", "recovering", "rolled_back")):
             with self.subTest(targets=targets):
                 self.write(transaction_id, with_history(base, *targets))
                 self.assertEqual(self.store.load(transaction_id).state, targets[-1])
+
+    def test_a_hand_built_succeeded_without_a_seal_is_refused(self):
+        transaction_id = self.store.create("k", SUBJECT, concurrency_keys=KEYS,
+                                           proof=EMPTY_PROOF).transaction_id
+        self.write(transaction_id, with_history(self.document(transaction_id),
+                                                *FORWARD[1:], "succeeded"))
+        with self.assertRaises(StateInvalid) as caught:
+            self.store.load(transaction_id)
+        self.assertIn("proof_sealed", str(caught.exception))
 
     def test_documents_violating_the_closed_schema_are_state_invalid(self):
         transaction_id = self.store.create(
@@ -327,9 +335,16 @@ class AdvanceCase(StoreCase):
             transaction_id, executor_id="exec", subject_path="/work/demo",
             ttl_ms=3_600_000).custody
         for target in path:
-            self.store.advance(transaction_id, target, reason=f"to {target}",
-                               external_state="known", custody=self.held[transaction_id])
+            if target == "succeeded":
+                self.settle(transaction_id)
+            else:
+                self.store.advance(transaction_id, target, reason=f"to {target}",
+                                   external_state="known", custody=self.held[transaction_id])
         return transaction_id
+
+    def settle(self, transaction_id):
+        self.store.start_cohort(self.held[transaction_id])
+        return self.store.settle_proof(self.held[transaction_id])
 
     def assertRefusedUnchanged(self, error, transaction_id, target, **kwargs):
         raw = self.state_path(transaction_id).read_bytes()
@@ -349,8 +364,8 @@ class AdvanceTest(AdvanceCase):
         persisted = TransactionStore(self.root).load(transaction_id)
         transitions = [e for e in persisted.events if e["type"] == "transitioned"]
         self.assertEqual(persisted.state, "succeeded")
-        self.assertEqual(persisted.revision, 10)
-        self.assertEqual([e["seq"] for e in persisted.events], list(range(1, 11)))
+        self.assertEqual(persisted.revision, 12)
+        self.assertEqual([e["seq"] for e in persisted.events], list(range(1, 13)))
         self.assertEqual([e["to"] for e in transitions], list(PATHS_TO_TERMINAL["succeeded"]))
         self.assertEqual(transitions[-1]["external_state"], "known")
         self.assertEqual(transitions[0]["reason"], "to awaiting_verification")
@@ -365,6 +380,7 @@ class AdvanceTest(AdvanceCase):
             allowed = EXPECTED_EDGES[source]
             if source == "attention_required":
                 allowed = {"created", "recovering", "abandoned", "failed"}
+            allowed = allowed - {"succeeded"}
             for target in sorted(STATES | {"not_a_state"}):
                 with self.subTest(source=source, target=target):
                     transaction_id = self.reach(f"{source}->{target}", path)
@@ -408,9 +424,12 @@ class TerminalTest(AdvanceCase):
             self.assertRefusedUnchanged(TransitionRefused, transaction_id, terminal)
             source = (("created",) + path[:-1])[-1]
             self.assertEqual(self.store.load(transaction_id).state, source)  # no reroute
-            done = self.store.advance(transaction_id, terminal, reason="grounded",
-                                      external_state="known",
-                                      custody=self.held[transaction_id])
+            if terminal == "succeeded":
+                done = self.settle(transaction_id)
+            else:
+                done = self.store.advance(transaction_id, terminal, reason="grounded",
+                                          external_state="known",
+                                          custody=self.held[transaction_id])
             self.assertEqual(done.state, terminal)
 
     def test_malformed_reason_or_external_state_is_refused(self):
