@@ -392,8 +392,8 @@ class TransactionStore:
             raise TransactionError(f"{root}: store root is not an absolute existing directory")
         self.root = root
 
-    def _validated_document(self, transaction_id: str) -> dict:
-        """Read and fully validate `state.json` without writing or locking (D13, D16)."""
+    def _existing_directory(self, transaction_id: str) -> Path:
+        """The transaction's real directory, else UnknownTransaction; creates nothing (D16)."""
         if not _is_id(transaction_id):
             raise UnknownTransaction(f"{transaction_id!r}: not a rel_ UUIDv7 transaction id")
         directory = self.root / transaction_id
@@ -401,6 +401,11 @@ class TransactionStore:
         if mode is None or stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
             raise UnknownTransaction(f"{transaction_id}: no transaction directory under "
                                      f"{self.root}")
+        return directory
+
+    def _validated_document(self, transaction_id: str) -> dict:
+        """Read and fully validate `state.json` without writing or locking (D13, D16)."""
+        directory = self._existing_directory(transaction_id)
         lock_mode = _lstat_mode(directory / "lock")
         if lock_mode is None or stat.S_ISLNK(lock_mode) or not stat.S_ISREG(lock_mode):
             raise StateInvalid(f"{transaction_id}: lock file is missing or not a regular file")
@@ -411,6 +416,70 @@ class TransactionStore:
     def load(self, transaction_id: str) -> Transaction:
         """A validated snapshot; writes nothing, creates nothing, takes no lock."""
         return _snapshot(self._validated_document(transaction_id))
+
+    def advance(self, transaction_id: str, target: str, *, reason: str,
+                external_state: str | None = None) -> Transaction:
+        """Move one transaction along one allowed edge under its lock (D5, D7-D10, D13).
+
+        Every refusal happens before any write; the lock file is never created.
+        """
+        directory = self._existing_directory(transaction_id)
+        lock = directory / "lock"
+        mode = _lstat_mode(lock)
+        if mode is None or stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+            raise StateInvalid(f"{transaction_id}: lock file {lock} is missing or not a "
+                               f"regular file")
+        try:
+            descriptor = os.open(lock, os.O_RDWR | os.O_NOFOLLOW)
+        except OSError as error:
+            raise StateInvalid(f"{transaction_id}: lock file {lock} cannot be opened "
+                               f"({error.strerror})") from error
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise TransactionBusy(f"{transaction_id}: lock file {lock} is held "
+                                      f"elsewhere") from error
+            return self._advance_locked(transaction_id, target, reason, external_state)
+        finally:
+            os.close(descriptor)
+
+    def _advance_locked(self, transaction_id: str, target: Any, reason: Any,
+                        external_state: Any) -> Transaction:
+        prior = self._validated_document(transaction_id)
+        source = prior["state"]
+        where = f"{transaction_id}: {source} -> {target!r}"
+        if source in TERMINALS:
+            raise TransitionRefused(f"{where}: source is terminal")
+        if type(target) is not str or target not in STATES:
+            raise TransitionRefused(f"{where}: target is not a known state")
+        if not _edge_allowed(source, prior["parked_from"], target):
+            raise TransitionRefused(f"{where}: edge is not allowed")
+        if type(reason) is not str or not reason:
+            raise TransitionRefused(f"{where}: reason is not a non-empty string")
+        if external_state is not None and (type(external_state) is not str
+                                           or external_state not in _EXTERNAL_STATES):
+            raise TransitionRefused(f"{where}: external_state is not known, unknown or None")
+        if target in TERMINALS and external_state != "known":
+            raise TransitionRefused(f"{where}: terminal target needs known external state")
+        candidate = copy.deepcopy(prior)
+        candidate["events"].append({
+            "seq": prior["revision"] + 1, "type": "transitioned", "at": _timestamp(),
+            "from": source, "to": target, "reason": reason,
+            "external_state": external_state})
+        if target == "attention_required":
+            candidate["parked_from"] = source
+        elif source == "attention_required":
+            candidate["parked_from"] = None
+        candidate["state"] = target
+        candidate["revision"] = len(candidate["events"])
+        if candidate["events"][:-1] != prior["events"]:
+            raise StateInvalid(f"{transaction_id}: prior events are not the new history's "
+                               f"prefix")
+        _validate_state(candidate, transaction_id, self.root)
+        directory = self.root / transaction_id
+        _atomic_write(directory, directory / "state.json", candidate)
+        return _snapshot(candidate)
 
     def create(self, creation_key: str, subject: dict) -> Transaction:
         """Create the transaction for `creation_key`, or return the one it already names."""

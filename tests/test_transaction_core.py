@@ -270,5 +270,161 @@ class LoadTest(StoreCase):
         self.assertEqual(self.state_path(transaction_id).read_bytes(), good)
 
 
+PATHS_TO = {  # a legal path from `created` to each nonterminal source
+    **{state: FORWARD[1:i + 1] for i, state in enumerate(FORWARD)},
+    "attention_required": ("attention_required",),
+    "recovering": ("attention_required", "recovering"),
+}
+PATHS_TO_TERMINAL = {
+    "succeeded": FORWARD[1:] + ("succeeded",),
+    "abandoned": ("abandoned",),
+    "failed": ("attention_required", "failed"),
+    "rolled_back": ("attention_required", "recovering", "rolled_back"),
+}
+
+
+class AdvanceCase(StoreCase):
+    def reach(self, key, path):
+        transaction_id = self.store.create(key, SUBJECT).transaction_id
+        for target in path:
+            self.store.advance(transaction_id, target, reason=f"to {target}",
+                               external_state="known")
+        return transaction_id
+
+    def assertRefusedUnchanged(self, error, transaction_id, target, **kwargs):
+        raw = self.state_path(transaction_id).read_bytes()
+        listing = self.tree()
+        with self.assertRaises(error) as caught:
+            self.store.advance(transaction_id, target, reason=kwargs.pop("reason", "try"),
+                               **kwargs)
+        self.assertIn(transaction_id, str(caught.exception))
+        self.assertEqual(self.state_path(transaction_id).read_bytes(), raw)
+        self.assertEqual(self.tree(), listing)
+
+
+class AdvanceTest(AdvanceCase):
+    def test_the_forward_chain_persists_one_event_per_transition(self):
+        transaction_id = self.reach("k", PATHS_TO_TERMINAL["succeeded"])
+        persisted = TransactionStore(self.root).load(transaction_id)
+        self.assertEqual(persisted.state, "succeeded")
+        self.assertEqual(persisted.revision, 8)
+        self.assertEqual([e["seq"] for e in persisted.events], list(range(1, 9)))
+        self.assertEqual([e["to"] for e in persisted.events[1:]],
+                         list(PATHS_TO_TERMINAL["succeeded"]))
+        self.assertEqual(persisted.events[-1]["external_state"], "known")
+        self.assertEqual(persisted.events[1]["reason"], "to awaiting_verification")
+
+    def test_the_library_path_skips_activation(self):
+        transaction_id = self.reach("k", FORWARD[1:5] + ("proving", "succeeded"))
+        self.assertEqual(self.store.load(transaction_id).state, "succeeded")
+
+    def test_every_allowed_edge_is_accepted_and_every_other_target_refused(self):
+        for source, path in PATHS_TO.items():
+            allowed = EXPECTED_EDGES[source]
+            if source == "attention_required":
+                allowed = {"created", "recovering", "abandoned", "failed"}
+            for target in sorted(STATES | {"not_a_state"}):
+                with self.subTest(source=source, target=target):
+                    transaction_id = self.reach(f"{source}->{target}", path)
+                    if target in allowed:
+                        after = self.store.advance(transaction_id, target, reason="edge",
+                                                   external_state="known")
+                        self.assertEqual(after.state, target)
+                    else:
+                        self.assertRefusedUnchanged(TransitionRefused, transaction_id,
+                                                    target, external_state="known")
+
+    def test_a_park_resumes_only_where_it_left(self):
+        transaction_id = self.reach("k", FORWARD[1:4] + ("attention_required",))
+        parked = self.store.load(transaction_id)
+        self.assertEqual((parked.state, parked.parked_from),
+                         ("attention_required", "publishing"))
+        self.assertRefusedUnchanged(TransitionRefused, transaction_id, "ready")
+        self.assertRefusedUnchanged(TransitionRefused, transaction_id, "published")
+        resumed = self.store.advance(transaction_id, "publishing", reason="resume")
+        self.assertEqual((resumed.state, resumed.parked_from), ("publishing", None))
+
+
+class TerminalTest(AdvanceCase):
+    def test_every_terminal_refuses_every_target(self):
+        for terminal, path in PATHS_TO_TERMINAL.items():
+            transaction_id = self.reach(terminal, path)
+            for target in sorted(STATES | {"not_a_state"}):
+                with self.subTest(terminal=terminal, target=target):
+                    self.assertRefusedUnchanged(TransitionRefused, transaction_id, target,
+                                                external_state="known")
+
+    def test_a_terminal_target_requires_known_external_state(self):
+        for terminal, path in PATHS_TO_TERMINAL.items():
+            transaction_id = self.reach(terminal, path[:-1])
+            for external_state in ("unknown", None):
+                with self.subTest(terminal=terminal, external_state=external_state):
+                    self.assertRefusedUnchanged(TransitionRefused, transaction_id, terminal,
+                                                external_state=external_state)
+            self.assertRefusedUnchanged(TransitionRefused, transaction_id, terminal)
+            source = (("created",) + path[:-1])[-1]
+            self.assertEqual(self.store.load(transaction_id).state, source)  # no reroute
+            done = self.store.advance(transaction_id, terminal, reason="grounded",
+                                      external_state="known")
+            self.assertEqual(done.state, terminal)
+
+    def test_malformed_reason_or_external_state_is_refused(self):
+        transaction_id = self.reach("k", ())
+        for kwargs in ({"reason": ""}, {"reason": "ok", "external_state": "maybe"}):
+            with self.subTest(kwargs=kwargs):
+                self.assertRefusedUnchanged(TransitionRefused, transaction_id,
+                                            "awaiting_verification", **kwargs)
+
+
+class LockAndSchemaGuardTest(AdvanceCase):
+    def test_a_held_transaction_lock_refuses_advance_before_any_write(self):
+        transaction_id = self.reach("k", ())
+        with open(self.root / transaction_id / "lock", "r+") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertRefusedUnchanged(TransactionBusy, transaction_id,
+                                        "awaiting_verification")
+        self.store.advance(transaction_id, "awaiting_verification", reason="now free")
+
+    def test_a_held_creation_lock_refuses_create_before_any_write(self):
+        with open(self.root / "creation.lock", "a+") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(TransactionBusy):
+                self.store.create("k", SUBJECT)
+            self.assertEqual(self.tree(), ["creation.lock"])
+
+    def test_a_schema_invalid_state_refuses_advance_before_any_write(self):
+        transaction_id = self.reach("k", ())
+        self.write(transaction_id, {**self.document(transaction_id), "extra": 1})
+        self.assertRefusedUnchanged(StateInvalid, transaction_id, "awaiting_verification")
+
+    def test_unknown_ids_and_missing_locks_create_nothing(self):
+        transaction_id = self.reach("k", ())
+        listing = self.tree()
+        for unknown in ("rel_0190f0e0-0000-7000-8000-000000000000", "rel_../x"):
+            with self.subTest(id=unknown), self.assertRaises(UnknownTransaction):
+                self.store.advance(unknown, "awaiting_verification", reason="x")
+        self.assertEqual(self.tree(), listing)
+        (self.root / transaction_id / "lock").unlink()
+        self.assertRefusedUnchanged(StateInvalid, transaction_id, "awaiting_verification")
+        self.assertFalse((self.root / transaction_id / "lock").exists())
+
+    def test_a_symlinked_transaction_directory_is_never_followed(self):
+        transaction_id = self.reach("k", ())
+        with tempfile.TemporaryDirectory() as outside:
+            moved = Path(outside) / "moved"
+            (self.root / transaction_id).rename(moved)
+            (self.root / transaction_id).symlink_to(moved, target_is_directory=True)
+            raw = (moved / "state.json").read_bytes()
+            listing = sorted(p.name for p in moved.iterdir())
+            for call in (lambda: self.store.load(transaction_id),
+                         lambda: self.store.advance(transaction_id, "awaiting_verification",
+                                                    reason="x", external_state="known")):
+                with self.assertRaises(UnknownTransaction) as caught:
+                    call()
+                self.assertIn(transaction_id, str(caught.exception))
+            self.assertEqual((moved / "state.json").read_bytes(), raw)
+            self.assertEqual(sorted(p.name for p in moved.iterdir()), listing)
+
+
 if __name__ == "__main__":
     unittest.main()
