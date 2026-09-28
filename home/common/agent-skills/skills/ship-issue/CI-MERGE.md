@@ -116,6 +116,10 @@ stale head, not an authority denial: record no `authority-observation` for it.
 
 **Steps.**
 
+Step 3 dispatches a reviewer. An owner that did not run SKILL.md's Phase-0
+reviewer-dispatch probe, such as a remainder owner, runs it before step 1, or
+before step 3 when the merge already landed.
+
 1. **Sync.** Make one merge of `origin/<integration>` into the current
    selection's head under [`SYNC.md`](./SYNC.md), so its first parent is that
    head, and fold its conflict resolutions and sweeps into that merge commit.
@@ -163,7 +167,8 @@ paths, then run `git merge --abort` so the worktree is back at the current
 selection's head. So is a Blocking or Should-fix finding on a merge that is
 already pushed or already landed, which no amend can apply, a PR head that is
 not a sync run from the current selection (a non-merge commit, a first parent
-off the chain, or an unconfirmed integration parent), and red CI that needs a
-fix commit. The ship owner returns a `terminal_failed` `ship-summary/v2` whose
+off the chain, or an unconfirmed integration parent), red CI that needs a fix
+commit, and a failed reviewer-dispatch probe on either path, which the sync
+path takes before step 1 makes any merge. The ship owner returns a `terminal_failed` `ship-summary/v2` whose
 legacy `stopped` row's notes name the cause; a remainder owner writes that
 summary with its own `finish`, as `## Remainder mode` says.

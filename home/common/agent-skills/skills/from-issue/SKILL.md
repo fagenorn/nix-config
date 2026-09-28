@@ -613,7 +613,7 @@ run: with lifecycle identity follow the suspension procedure with `<value>` =
 `agent_dispatch`, making no `finish` call; ledger-free, report the gap to the
 user and stop, keeping the worktree. The fallback covers only the
 review-bearing ship launch: a `delivery_remainder` launch runs remainder mode,
-which never probes and never returns the gap line.
+which probes only before a post-selection sync and never returns the gap line.
 
 ## Notes
 

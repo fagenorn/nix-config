@@ -165,7 +165,7 @@ keeps its existing failure handling. It runs in every review-bearing
 invocation — a `ship-handoff/v2` or legacy handoff, or a standalone
 `/ship-issue <num>` — even when the merge delta may turn out empty, because the
 delta is unknown until the sync this probe precedes. Remainder mode skips
-Phases 0–5 and never probes.
+Phases 0–5 and probes only before a post-selection sync, per CI-MERGE.md.
 
 When the probe fails, stop with nothing launched or written. From a handoff,
 your whole return is exactly this closed line, with no ship summary and no
