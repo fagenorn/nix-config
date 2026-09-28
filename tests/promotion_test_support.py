@@ -8,9 +8,13 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
+from agent_tools import agent_gate_bundle as gate
 from agent_tools.canonical import telemetry_digest
+
+from .test_agent_gate_bundle import context, flat, stratum
 
 # An authored `null` sha256. Fixtures pass this sentinel, never `digest or computed` (D16).
 NULL_DIGEST = object()
@@ -118,3 +122,69 @@ def evaluation_document(**overrides):
                 "commands": ["rg -n Investigate ."], "candidates": [], "outcome": "empty"}
     document.update(overrides)
     return document
+
+
+EVIDENCE = {"approved": lambda: flat(stratum(context(1000, 800))),
+            "rejected": lambda: flat(stratum(context(1000, 999))),
+            "unmeasured": lambda: None}
+
+
+def write_bundle(root: Path, relative: str, state: str) -> Path:
+    """A real `assemble_bundle` output in `state`, written at `root/relative`."""
+    manifest = {"identity": {"bound": {}, "pinned": {}},
+                "expansion": {"expanded": False, "checkpoint_ref": None}}
+    return write_json(root / relative,
+                      gate.assemble_bundle(manifest, EVIDENCE[state](), [], None, state))
+
+
+class LifecycleFixture:
+    """Mixin for a unittest.TestCase: a fixture root, capture() and advance()."""
+
+    BUNDLE = ".agents/artifacts/evidence/b.json"
+
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.tmp = Path(scratch.name).resolve()
+        self.root = self.tmp / "project"
+        self.root.mkdir()
+        self.env = make_env(self.tmp, resolved_project(self.root))
+
+    def capture(self, document=None, name="c.json"):
+        source = write_json(self.tmp / "draft.json", document or draft())
+        target = self.root / ".agents/knowledge/promotions/candidates" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        code, payload, err = run(self.env, "capture", "--input", str(source),
+                                 "--output", str(target))
+        self.assertEqual(code, 0, (payload, err))
+        return target
+
+    def advance(self, path, target, *flags):
+        return run(self.env, "advance", "--candidate", str(path), "--to", target, *flags)
+
+    def step(self, path, target, *flags):
+        code, payload, err = self.advance(path, target, *flags)
+        self.assertEqual(code, 0, (payload, err))
+        return payload
+
+    def walk(self, path, to, bundle_state="approved"):
+        """captured -> evaluating -> decision_ready -> authorized, stopping at `to`."""
+        self.step(path, "evaluating", "--tracker-ref", "7")
+        if to == "evaluating":
+            return
+        write_bundle(self.root, self.BUNDLE, bundle_state)
+        self.step(path, "decision_ready", "--bundle", self.BUNDLE)
+        if to == "decision_ready":
+            return
+        self.step(path, "authorized", "--authorized-by", "fagenorn")
+
+    def assert_refused(self, path, target, code, *flags, exit_code=3):
+        before = path.read_bytes()
+        got, payload, err = self.advance(path, target, *flags)
+        self.assertEqual(got, exit_code, (payload, err))
+        if code is None:
+            self.assertIsNone(payload)
+        else:
+            self.assertEqual(payload["error"]["code"], code)
+        self.assertEqual(path.read_bytes(), before)
+        return payload

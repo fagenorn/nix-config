@@ -1,10 +1,13 @@
-"""The `promotion` command: capture, evaluate and validate promotion documents (#127).
+"""The `promotion` command: capture, advance, evaluate and validate promotion documents.
 
 `promotion capture` turns an authored draft into a `captured` candidate and
 prints the labelled `gh issue create` argv inside it as data; the tracker is
 never touched (D1). `promotion evaluate` records a sweep's commands verbatim and
 runs none of them (D19). Both resolve the project through `resolve-project` on
 `PATH` (D5) and create `--output` exclusively under `project.root` (D14, D25).
+`promotion advance` moves one candidate along the lifecycle through
+`promotion_lifecycle.advance` and rewrites `--candidate` atomically in place;
+a refusal leaves the file byte-identical (D14).
 `promotion validate --input <path>` reads one document, judges its shape with
 `promotion_schema.validate_document` and prints `{"valid":true}`. It resolves
 nothing and writes nothing.
@@ -18,14 +21,18 @@ exception boundary (D12). Policy lives in `promotion_schema`, not here (D2).
 import argparse
 import json
 import os
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import NamedTuple
 
-from agent_tools.promotion_schema import (COMMAND_NAME, DRAFT_KIND, INTERNAL_FAILURE_MESSAGE,
-                                          Refusal, load_strict, mint_candidate,
-                                          mint_evaluation, validate_document, violation)
+from agent_tools.promotion_lifecycle import ARGUMENT_TARGETS, Arguments, advance
+from agent_tools.promotion_schema import (CANDIDATE_KIND, COMMAND_NAME, DRAFT_KIND,
+                                          INTERNAL_FAILURE_MESSAGE, STATES, Refusal,
+                                          load_strict, mint_candidate, mint_evaluation,
+                                          validate_document, violation)
 
 RESOLVER = "resolve-project"
 RESOLVER_TIMEOUT = 60
@@ -126,6 +133,26 @@ def write_new(target: Path, document: dict) -> None:
         raise
 
 
+def write_in_place(path: Path, document: dict) -> None:
+    """Replace `path` atomically with the rendered document (D14).
+
+    A temp file in the same directory takes the original mode, then
+    `os.replace`s the original; on any failure the temp is unlinked and the
+    original is untouched. No lock.
+    """
+    data = render(document).encode("utf-8")
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    descriptor, temp = tempfile.mkstemp(dir=path.parent, prefix=".promotion-", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+        os.chmod(temp, mode)
+        os.replace(temp, path)
+    except BaseException:
+        Path(temp).unlink(missing_ok=True)
+        raise
+
+
 def read_document(path: str) -> dict:
     """The JSON object at `path`, strictly loaded (D30); raises `Refusal`."""
     try:
@@ -189,6 +216,31 @@ def run_evaluate(args) -> int:
     return emit(evaluation)
 
 
+def _flag(member: str) -> str:
+    return "--" + member.replace("_", "-")
+
+
+def run_advance(args) -> int:
+    parser = args.parser
+    for member, targets in ARGUMENT_TARGETS.items():
+        if getattr(args, member) is not None and args.to not in targets:
+            parser.error(f"{_flag(member)} has no meaning for --to {args.to}")
+    project = resolve(args.repo_root)
+    candidate = read_document(args.candidate)
+    violations = validate_document(candidate)
+    if not violations and candidate["kind"] != CANDIDATE_KIND:
+        violations = [violation("/kind", f"must be {CANDIDATE_KIND}")]
+    if violations:
+        raise Refusal("invalid_document", violations)
+    if args.tracker_ref is not None and candidate["state"] != "captured":
+        parser.error("--tracker-ref binds once, on captured -> evaluating")
+    result = advance(candidate, args.to, project.root, project.id,
+                     Arguments(**{member: getattr(args, member)
+                                  for member in ARGUMENT_TARGETS}))
+    write_in_place(Path(args.candidate), result)
+    return emit(result)
+
+
 def run_validate(args) -> int:
     document = read_document(args.input)
     violations = validate_document(document)
@@ -197,9 +249,20 @@ def run_validate(args) -> int:
     return emit({"valid": True})
 
 
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be an integer of at least 1: {text!r}")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog=COMMAND_NAME, description="Capture, evaluate and validate promotion documents.")
+        prog=COMMAND_NAME,
+        description="Capture, advance, evaluate and validate promotion documents.")
     subcommands = parser.add_subparsers(dest="subcommand", required=True)
     capture = subcommands.add_parser(
         "capture", help="turn a draft into a captured candidate; the tracker is not touched")
@@ -223,6 +286,25 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--repo-root", metavar="PATH",
                           help="passed on to resolve-project resolve")
     evaluate.set_defaults(handler=run_evaluate)
+    advance_parser = subcommands.add_parser(
+        "advance", help="move a candidate along its lifecycle, rewriting it in place")
+    advance_parser.add_argument("--candidate", required=True, metavar="PATH",
+                                help="the candidate file, rewritten atomically")
+    advance_parser.add_argument("--to", required=True, choices=STATES, metavar="STATE",
+                                help="the target state: " + ", ".join(STATES))
+    advance_parser.add_argument("--repo-root", metavar="PATH",
+                                help="passed on to resolve-project resolve")
+    advance_parser.add_argument("--tracker-ref", type=_positive_int, metavar="N",
+                                help="the tracker issue number; binds captured -> evaluating")
+    advance_parser.add_argument("--bundle", metavar="PATH",
+                                help="the agent-gate bundle, relative to project.root")
+    advance_parser.add_argument("--authorized-by", metavar="NAME",
+                                help="the human authorizing the promotion")
+    advance_parser.add_argument("--rationale", metavar="TEXT",
+                                help="why the candidate is rejected or withdrawn")
+    advance_parser.add_argument("--superseded-by", metavar="ID",
+                                help="the candidate_id that supersedes this one")
+    advance_parser.set_defaults(handler=run_advance, parser=advance_parser)
     validate = subcommands.add_parser(
         "validate", help="judge one document's shape; resolves and writes nothing")
     validate.add_argument("--input", required=True, metavar="PATH",
