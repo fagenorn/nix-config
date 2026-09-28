@@ -264,22 +264,25 @@ _HOST_ADMISSION = None
 
 
 def _host_admission():
-    """The host admission library, loaded once (D18).
+    """The host admission library, loaded once (D18; #177 D6, deleted by #178).
 
-    A source sibling in the repository, the installed copy otherwise -- the
-    same resolution `_delivery()` uses.
+    From the repository's `scripts` directory it is `agent_tools.host_admission`,
+    imported from the caller's `PYTHONPATH`. Installed, it is the copy at
+    `~/.agents/lib/python/host_admission.py`. Either must declare interface 1.
     """
     global _HOST_ADMISSION
     if _HOST_ADMISSION is not None:
         return _HOST_ADMISSION
-    src = Path(__file__).parent
-    entry = src / "host_admission.py" if src.name == "scripts" else Path.home() / ".agents/lib/python/host_admission.py"
     try:
-        spec = importlib.util.spec_from_file_location("_workflow_host_admission", entry)
-        if spec is None or spec.loader is None:
-            raise ValueError(f"cannot load {entry}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        if Path(__file__).parent.name == "scripts":
+            from agent_tools import host_admission as module
+        else:
+            entry = Path.home() / ".agents/lib/python/host_admission.py"
+            spec = importlib.util.spec_from_file_location("_workflow_host_admission", entry)
+            if spec is None or spec.loader is None:
+                raise ValueError(f"cannot load {entry}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
         if getattr(module, "HOST_ADMISSION_INTERFACE_VERSION", None) != 1:
             raise ValueError("interface")
     except Exception as exc:
@@ -3678,10 +3681,15 @@ def command_check_launch(args: argparse.Namespace) -> int:
 
 
 def resolve_project_argv() -> list[str]:
-    """Resolve resolve-project the way ``artifact_budget_paths`` resolves its sibling."""
-    source = Path(__file__).resolve().parent / "resolve-project.py"
-    if source.is_file():
-        return [sys.executable, str(source)]
+    """How this script runs resolve-project (#177 D6; #178 deletes this lookup).
+
+    From the repository's `scripts` directory it runs `agent_tools.resolve_project`
+    under this interpreter, which finds the package on the caller's `PYTHONPATH`.
+    Installed, it runs the `resolve-project` launcher beside it, else the one in
+    `~/.agents/bin`.
+    """
+    if Path(__file__).parent.name == "scripts":
+        return [sys.executable, "-m", "agent_tools.resolve_project"]
     installed = Path(__file__).parent / "resolve-project"
     if not installed.is_file():
         installed = Path.home() / ".agents/bin/resolve-project"

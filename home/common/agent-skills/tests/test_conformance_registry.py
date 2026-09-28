@@ -8,14 +8,9 @@ acceptance demo the issue's gate names."""
 from __future__ import annotations
 
 import json
-import sys
 import unittest
-from pathlib import Path
 
-# The suite modules are imported by path, so the tests directory is not
-# already on sys.path; the shared support module lives beside them.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from conformance_test_support import (  # noqa: E402
+from .conformance_test_support import (
     MANIFEST, REPO_ROOT, ReportAssertions, doctor, fixture, load_module,
     make_root, run,
 )
@@ -196,8 +191,7 @@ class RegistryClosureTest(unittest.TestCase):
 
 
 class PromotionLiteralPinTest(unittest.TestCase):
-    """#127 D10, D27: the engine's promotion literals are the package's constants,
-    and no installed engine file names the package."""
+    """#127 D10: the engine's promotion literals are the package's constants."""
 
     def test_registry_literals_equal_the_promotion_schema(self):
         from agent_tools import promotion_schema as schema
@@ -211,12 +205,6 @@ class PromotionLiteralPinTest(unittest.TestCase):
              schema.LOCAL_DUPLICATES_MEMBER, schema.DUPLICATE_MEMBERS,
              schema.REMOVE_DISPOSITION, schema.PROJECT_ONLY_RESIDUE, schema.COMMAND_NAME])
         self.assertIn(registry.PROMOTION_REPAIR_MODULE, registry.REPAIR_MODULES)
-
-    def test_no_installed_engine_file_names_the_package(self):
-        scripts = Path(__file__).resolve().parents[1] / "scripts"
-        for name in ("conformance.py", "conformance-registry.py", "conformance-checks.py"):
-            with self.subTest(name=name):
-                self.assertNotIn(b"agent_tools", (scripts / name).read_bytes())
 
 
 class AcceptanceDemoTest(ReportAssertions, unittest.TestCase):

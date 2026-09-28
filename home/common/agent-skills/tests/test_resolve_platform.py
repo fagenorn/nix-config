@@ -1,8 +1,8 @@
 """Contract tests for the resolver's platform gate: the manifest and the interval.
 
 Two questions, both answered before the resolver looks at anything else. The
-platform installation — the manifest under `$HOME/.agents/share` and the
-library under `$HOME/.agents/lib/python` — has to be present and well formed
+platform installation — the manifest under `$HOME/.agents/share` — has
+to be present and well formed
 (R1.3, D12, D36), and the contract's `platform` interval has to parse as a
 shape before its bounds can be compared against the installed platform version
 (R2.1-R2.5, D7, D8, D9).
@@ -22,33 +22,22 @@ import contextlib
 import io
 import json
 import os
-import re
-import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-# The sibling suite is imported as a module, so its directory has to be
-# importable however this file was invoked — `python3 <path>` supplies it,
-# `python3 -m unittest <path>` does not.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from test_resolve_project import (
+from .test_resolve_project import (
     COMMITTED,
-    LIBRARY,
     MANIFEST_MEMBERS,
     REPO_ROOT,
-    SCRIPT,
     SUBCOMMANDS,
     InProcessTestCase,
     ResolverTestCase,
     assert_read_only,
     committed_manifest,
-    library_members,
     load_module,
-    make_home,
     make_stub_bin,
     mutated_manifest,
     run,
@@ -276,6 +265,21 @@ class ManifestGateTest(ResolverTestCase):
         self.assertEqual(err, "")
         self.assertEqual(json.loads(out)["error"]["code"], "resolver_failure")
 
+    def test_an_unset_home_refuses_as_a_missing_manifest(self):
+        """#177 D4: with no `HOME` there is no installed manifest to load."""
+        env = {key: value for key, value in os.environ.items() if key != "HOME"}
+        proc = subprocess.run(
+            [sys.executable, "-m", "agent_tools.resolve_project", "resolve",
+             "--repo-root", str(self.make_root())],
+            capture_output=True, text=True, timeout=60, env=env)
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertEqual(proc.stderr, "")
+        self.assertEqual(json.loads(proc.stdout), {"error": {
+            "code": "resolver_failure",
+            "repair_id": "platform.manifest.missing",
+            "violations": [{"pointer": "", "message":
+                            "the installed platform manifest was not found"}]}})
+
 
 class ManifestLifecycleArrayTest(ResolverTestCase):
     """D36: `migrations` is validated strictly; `deprecations` and `removals`
@@ -409,141 +413,6 @@ class SemverBoundaryTest(ResolverTestCase):
                 code, out, err = run("resolve", "--repo-root",
                                      str(self.make_root()), home=self.home)
                 self.assertEqual(code, 0, err or out)
-
-
-class PlatformLibraryTest(ResolverTestCase):
-    """R1.3 / D12: the library half of the installation refuses like the
-    manifest half.
-
-    Every case here runs a copy of the script from `$HOME/.agents/bin`, the
-    deployed layout, because in the repository checkout the script's own
-    directory holds `agent_platform.py` as a sibling — so a run from `scripts/`
-    imports the library whatever `HOME` says and could never observe an
-    uninstalled one.
-    """
-
-    def deployed(self, home: Path) -> Path:
-        binary = home / ".agents" / "bin" / "resolve-project"
-        binary.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(SCRIPT, binary)
-        return binary
-
-    def run_deployed(self, home: Path, *args: str, unset_home: bool = False,
-                     pythonpath: str | None = None) -> tuple[int, str, str]:
-        binary = self.deployed(home)
-        env = {**os.environ, "HOME": str(home)}
-        # `PYTHONPATH` would be a second lookup path the deployed machine does
-        # not have; the runner's own may carry one, so each case states the one
-        # it means to present.
-        env.pop("PYTHONPATH", None)
-        if pythonpath is not None:
-            env["PYTHONPATH"] = pythonpath
-        if unset_home:
-            env.pop("HOME", None)
-        proc = subprocess.run(
-            [sys.executable, str(binary), *args],
-            capture_output=True, text=True, timeout=60,
-            cwd=str(home), env=env)
-        return proc.returncode, proc.stdout, proc.stderr
-
-    def assert_library_refusal(self, code: int, out: str, err: str) -> None:
-        self.assertEqual(code, 2, err or out)
-        self.assertEqual(err, "")
-        payload = json.loads(out)
-        self.assertEqual(sorted(payload), ["error"])
-        error = payload["error"]
-        self.assertEqual(sorted(error), ["code", "repair_id", "violations"])
-        self.assertEqual(error["code"], "resolver_failure")
-        self.assertEqual(error["repair_id"], "platform.library.missing")
-        self.assertTrue(error["violations"])
-        for entry in error["violations"]:
-            self.assertEqual(sorted(entry), ["message", "pointer"])
-
-    def test_an_uninstalled_library_refuses_on_stdout(self):
-        """A valid manifest is installed, so only the missing library can refuse."""
-        home = make_home(library=False)
-        root = self.make_root()
-        for subcommand in SUBCOMMANDS:
-            with self.subTest(subcommand=subcommand):
-                self.assert_library_refusal(
-                    *self.run_deployed(home, subcommand, "--repo-root", str(root)))
-
-    def test_a_library_missing_one_member_refuses_the_same_way(self):
-        """The library and the binary are installed separately, so an older
-        library can pair with a newer resolver. Every member the resolver uses
-        must therefore refuse as `platform.library.missing`, not as an
-        `AttributeError` swallowed into `resolver.internal` (R1.3, D12).
-        """
-        root = self.make_root()
-        source = LIBRARY.read_text("utf-8")
-        for name in library_members():
-            with self.subTest(member=name):
-                home = make_home()
-                # A module-level `del` after the definitions: the module still
-                # imports, and only this one attribute is gone.
-                (home / ".agents" / "lib" / "python"
-                 / "agent_platform.py").write_text(
-                    source + f"\n\ndel {name}\n", encoding="utf-8")
-                self.assert_library_refusal(
-                    *self.run_deployed(home, "resolve", "--repo-root", str(root)))
-
-    def test_the_declared_members_are_exactly_the_members_used(self):
-        """The guard is only as wide as its tuple: a member the resolver reads
-        but does not declare is a hole this case closes."""
-        used = set(re.findall(r"\bagent_platform\.([A-Za-z_][A-Za-z0-9_]*)",
-                              SCRIPT.read_text("utf-8")))
-        # `agent_platform.py` appears inside the refusal message, not as an
-        # attribute read.
-        used.discard("py")
-        self.assertEqual(sorted(library_members()), sorted(used))
-
-    def test_an_unset_home_refuses_on_stdout(self):
-        home = make_home()
-        code, out, err = self.run_deployed(
-            home, "resolve", "--repo-root", str(self.make_root()),
-            unset_home=True)
-        self.assert_library_refusal(code, out, err)
-
-    def test_the_refusal_bytes_are_stable_across_runs(self):
-        home = make_home(library=False)
-        root = self.make_root()
-        first = self.run_deployed(home, "resolve", "--repo-root", str(root))
-        second = self.run_deployed(home, "resolve", "--repo-root", str(root))
-        self.assertEqual(first[0], 2)
-        self.assertEqual(first[1], second[1])
-
-    def test_an_importable_library_is_not_an_installed_one(self):
-        """The guard is about *which* file answered the import, not about
-        whether the name imports at all.
-
-        With nothing installed at the one path, an `agent_platform` the
-        interpreter can still reach — through `PYTHONPATH` here, through
-        site-packages on another machine — must not answer in its place, or
-        "an uninstalled one is caught here" is not true of any machine whose
-        environment carries one.
-        """
-        home = make_home(library=False)
-        elsewhere = Path(tempfile.mkdtemp()).resolve()
-        shutil.copy(LIBRARY, elsewhere / "agent_platform.py")
-        self.assert_library_refusal(*self.run_deployed(
-            home, "resolve", "--repo-root", str(self.make_root()),
-            pythonpath=str(elsewhere)))
-
-    def test_the_installed_library_answers_in_the_deployed_layout(self):
-        """The control: the same shape with the library installed resolves."""
-        home = make_home()
-        code, out, err = self.run_deployed(
-            home, "resolve", "--repo-root", str(self.make_root()))
-        self.assertEqual(code, 0, err or out)
-        self.assertEqual(json.loads(out)["schema_version"], 1)
-
-    def test_a_usage_error_still_belongs_to_argparse(self):
-        """D16: the library guard runs after parsing, so no JSON appears here."""
-        home = make_home(library=False)
-        code, out, err = self.run_deployed(home)
-        self.assertEqual(code, 2)
-        self.assertEqual(out, "")
-        self.assertNotEqual(err, "")
 
 
 class CommittedManifestTest(ResolverTestCase):
@@ -811,7 +680,6 @@ class SchemaReasonDispatchTest(InProcessTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.module = load_module()
-        self.assertTrue(self.module.bootstrap_platform_library())
         self.codes = self.module.agent_platform.SCHEMA_REASON_CODES
 
     def test_the_closed_set_is_exactly_the_four_members(self):

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """The conformance engine: judge a project against the closed check registry.
 
 This module owns the `ConformanceReport` — its exact member sets and the
@@ -7,13 +6,10 @@ prints one. `validate-report` is the schema validator every consumer and every
 test checks a report against, so the schema has exactly one executable
 definition and no consumer re-derives it.
 
-The engine ships as three co-located modules, each installed extensionless
-under `.agents/bin/` exactly like `resolve-project` (D40): the vocabulary and
-the registry in `conformance-registry`, the evaluators in `conformance-checks`,
-and this entry module. This is the only one that loads a sibling, and it does
-so through `load_sibling`, the helper generalised from `load_resolver` (D2).
-A load that fails is captured, not raised, so it reaches `main`'s single
-boundary as the refusal shape rather than a traceback (D15).
+The engine is three modules of the `agent_tools` package: the vocabulary and
+the registry in `agent_tools.conformance_registry`, the evaluators in
+`agent_tools.conformance_checks`, and this entry module, which imports both
+and the resolver `agent_tools.resolve_project` by name (#177 D1, D2).
 
 A schema refusal prints the resolver's refusal shape — one JSON object
 carrying an `error` member — on stdout and exits 2. An argparse usage error
@@ -27,97 +23,32 @@ none can be added later without the validator refusing it.
 from __future__ import annotations
 
 import argparse
-import importlib.util
-from importlib.machinery import SourceFileLoader
 import json
 from pathlib import Path
 import platform
 import sys
 
+from agent_tools import conformance_checks as CHECKS_MODULE
+from agent_tools import conformance_registry as registry
+from agent_tools import resolve_project
+from agent_tools.conformance_checks import bounded_run
+from agent_tools.conformance_registry import (
+    CHECK_MEMBERS, Check, Context, DOMAINS, FORBIDDEN_MEMBER_NAMES,
+    HEX_DIGITS, MAX_FACT_KEYS, MAX_FACT_LIST, MAX_FACT_STRING,
+    OPERATION_MEMBERS, OUTCOME_MEMBERS, OUTCOME_STATUSES, Outcome,
+    PLATFORM_MEMBERS, PURPOSES, REGISTRY, REGISTRY_BY_ID, REPAIRS,
+    REPAIR_MEMBERS, REPAIR_MODULES, REPORT_MEMBERS, REQUEST_MEMBERS,
+    REQUIREMENTS, REVISION_LENGTH, SAFETY_CLASSES, SCHEMA_VERSION,
+    STATUSES, SUBJECT_KINDS, SUBJECT_MEMBERS, select,
+)
+
 
 ENGINE_FAILURE_MESSAGE = "the conformance engine failed unexpectedly"
 
 
-# --------------------------------------------------------------------------
-# The siblings, in process
-#
-# `load_sibling` is `load_resolver` generalised over the name-candidate tuple
-# and the module name (D40). Its three candidates are tried in that order so
-# an extensionless Nix-installed link loads identically to the repository
-# file, whose `main()` is `__main__`-guarded — executing the module therefore
-# runs nothing. The directory is `__file__`'s parent resolved, because the
-# installed binary is a symlink into the store while its siblings are not.
-# --------------------------------------------------------------------------
-
-
-REGISTRY_NAMES = ("conformance-registry.py", "conformance_registry.py",
-                  "conformance-registry")
-REGISTRY_MODULE_NAME = "conformance_registry"
-CHECKS_NAMES = ("conformance-checks.py", "conformance_checks.py",
-                "conformance-checks")
-CHECKS_MODULE_NAME = "conformance_checks"
-RESOLVER_NAMES = ("resolve-project.py", "resolve_project.py", "resolve-project")
-RESOLVER_MODULE_NAME = "conformance_resolve_project"
-_RESOLVER = None
-
-
-def load_sibling(names: tuple[str, ...], module_name: str):
-    """Contract: the sibling module `names` finds, executed under `module_name`.
-
-    Registered in `sys.modules` before `exec_module` and popped again if the
-    load raises: a module using postponed annotations has its dataclasses
-    resolved through `sys.modules[cls.__module__]`, so an unregistered module
-    fails to import at all (D36).
-    """
-    directory = Path(__file__).parent.resolve()
-    for name in names:
-        path = directory / name
-        if path.is_file():
-            break
-    else:
-        raise RuntimeError(f"no {names[-1]} module beside {directory}")
-    spec = importlib.util.spec_from_loader(
-        module_name, SourceFileLoader(module_name, str(path)))
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    try:
-        spec.loader.exec_module(module)
-    except BaseException:
-        sys.modules.pop(module_name, None)
-        raise
-    return module
-
-
 def load_resolver():
-    """Contract: the sibling `resolve-project` module, imported once (D2)."""
-    global _RESOLVER
-    if _RESOLVER is None:
-        _RESOLVER = load_sibling(RESOLVER_NAMES, RESOLVER_MODULE_NAME)
-    return _RESOLVER
-
-
-# The registry is loaded first so the evaluators' own `from conformance_registry
-# import` resolves against this instance rather than loading a second one. A
-# failure is captured rather than raised: `main` re-raises it inside the single
-# boundary, where it becomes the D15 refusal on stdout (D40). The refusal's own
-# vocabulary — `violation`, `emit_error`, ENGINE_FAILURE_MESSAGE — is declared
-# here, so no sibling has to load for the engine to refuse.
-BOOTSTRAP_ERROR: Exception | None = None
-try:
-    registry = load_sibling(REGISTRY_NAMES, REGISTRY_MODULE_NAME)
-    CHECKS_MODULE = load_sibling(CHECKS_NAMES, CHECKS_MODULE_NAME)
-    from conformance_registry import (
-        CHECK_MEMBERS, Check, Context, DOMAINS, FORBIDDEN_MEMBER_NAMES,
-        HEX_DIGITS, MAX_FACT_KEYS, MAX_FACT_LIST, MAX_FACT_STRING,
-        OPERATION_MEMBERS, OUTCOME_MEMBERS, OUTCOME_STATUSES, Outcome,
-        PLATFORM_MEMBERS, PURPOSES, REGISTRY, REGISTRY_BY_ID, REPAIRS,
-        REPAIR_MEMBERS, REPAIR_MODULES, REPORT_MEMBERS, REQUEST_MEMBERS,
-        REQUIREMENTS, REVISION_LENGTH, SAFETY_CLASSES, SCHEMA_VERSION,
-        STATUSES, SUBJECT_KINDS, SUBJECT_MEMBERS, select,
-    )
-    from conformance_checks import bounded_run
-except Exception as error:  # re-raised inside main's boundary (D15)
-    BOOTSTRAP_ERROR = error
+    """Contract: the resolver module, `agent_tools.resolve_project` (D2)."""
+    return resolve_project
 
 
 class ReportError(Exception):
@@ -546,13 +477,10 @@ def emit_error(code: str, repair_id: str, violations: list[dict]) -> int:
 def evaluator(name: str):
     """The evaluator a check declares, resolved through the checks module.
 
-    `CHECKS_MODULE` — this instance's own sibling — rather than
-    `sys.modules[CHECKS_MODULE_NAME]`: the S3 loader builds a fresh engine
-    instance per call, each loading a sibling under one shared name, so
-    resolving through `sys.modules` would fetch the newest sibling's function
-    and silently bypass a rebind made on the instance under test. The lookup
-    is deferred to call time for the same reason. The name is shouted because
-    three functions here bind a local `checks` holding a list of check objects.
+    Looked up on `CHECKS_MODULE` at call time rather than bound at import, so a
+    rebind made on that module under test is the function `evaluate` calls. The
+    name is shouted because three functions here bind a local `checks` holding
+    a list of check objects.
     """
     return getattr(CHECKS_MODULE, name)
 
@@ -792,17 +720,11 @@ def dispatch(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     """The engine's one exception boundary (D15, D29).
 
-    A sibling that would not load reaches it here: the bootstrap captured the
-    failure rather than raising at import, so it refuses in this shape too.
-    Resolver loading, parser construction and dispatch all sit inside it —
-    `--require`'s choices come from the resolver, so a resolver that will not
-    load refuses in this shape rather than tracebacking. The violation is the
+    Parser construction and dispatch both sit inside it. The violation is the
     fixed sentence, never the exception text, which can name a path. The one
     declared exception is the ladder's own catch (D17).
     """
     try:
-        if BOOTSTRAP_ERROR is not None:
-            raise BOOTSTRAP_ERROR
         return dispatch(build_parser().parse_args(argv))
     except SystemExit:
         raise                      # argparse usage: exit 2, no JSON

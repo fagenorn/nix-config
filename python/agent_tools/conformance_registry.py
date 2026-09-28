@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """The conformance registry: the vocabulary every other module reads.
 
 This module is the engine's leaf (D40). It owns the closed vocabularies the
@@ -6,7 +5,7 @@ This module is the engine's leaf (D40). It owns the closed vocabularies the
 passes through, the `Check` declarations that make up the registry, the
 purpose table that selects from it, and the repair catalogue those checks name.
 It declares no evaluator and imports no sibling, so the dependency order
-`conformance-registry` -> `conformance-checks` -> `conformance` stays acyclic.
+`conformance_registry` -> `conformance_checks` -> `conformance` stays acyclic.
 
 Nothing here reads a clock: no report member and no source line carries a
 timestamp, and `FORBIDDEN_MEMBER_NAMES` is what the validator refuses at every
@@ -60,8 +59,7 @@ CHILD_TIMEOUT_SECONDS = 15
 
 # The promotion-candidate vocabulary the promoted-duplicate check reads. These
 # literals mirror the helper package's `promotion_schema` module and are pinned
-# to it by test_conformance_registry: the engine is installed standalone and
-# imports no package module, so it restates them rather than importing them.
+# to it by test_conformance_registry.
 PROMOTION_CANDIDATES_RELATIVE = (".agents", "knowledge", "promotions", "candidates")
 PROMOTION_CANDIDATE_KIND = "promotion-candidate"
 PROMOTION_PROMOTED_STATE = "promoted"
@@ -367,8 +365,7 @@ REGISTRY: tuple[Check, ...] = (
     # broken contract never suppresses it (#150 D13, D24).
     Check("host.admission.declaration", "host", "capability", "optional", (),
           (("declaration_missing", "host.admission.declare"),
-           ("declaration_invalid", "host.admission.declare"),
-           ("library_unavailable", "host.admission.declare")),
+           ("declaration_invalid", "host.admission.declare")),
           "check_admission_declaration"),
     Check("repository.paths.classified", "repository", "path", "required",
           ("repository.contract.valid",),

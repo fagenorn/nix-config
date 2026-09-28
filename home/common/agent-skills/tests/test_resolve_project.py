@@ -1,4 +1,4 @@
-"""Contract tests for scripts/resolve-project.
+"""Contract tests for `resolve-project` (`agent_tools.resolve_project`).
 
 Runs the resolver as a subprocess against temporary repository roots and parses
 its stdout, the seam established by test_resolve_bindings.py and
@@ -22,7 +22,6 @@ import copy
 import io
 import json
 import os
-import re
 import shutil
 import stat
 import subprocess
@@ -31,8 +30,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "resolve-project.py"
-LIBRARY = Path(__file__).resolve().parents[1] / "scripts" / "agent_platform.py"
+from agent_tools import resolve_project
+
 MANIFEST = Path(__file__).resolve().parents[1] / "platform-manifest.json"
 DECLARATION = Path(__file__).resolve().parents[1] / "host-declaration.json"
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -52,31 +51,23 @@ CAPABILITY_STATES = ("available", "unsupported", "blocked")
 
 
 def install_home(home: Path, manifest: object = COMMITTED, *,
-                 library: bool = True, declaration: object = COMMITTED) -> Path:
+                 declaration: object = COMMITTED) -> Path:
     """Populate `home` as the platform installation the resolver reads (D23).
 
     Every invocation in this suite runs under a temporary `HOME`, so the
-    library and the manifest have to be materialized there: the resolver
-    imports `agent_platform` from `$HOME/.agents/lib/python` and loads the
-    manifest from `$HOME/.agents/share`, with no fallback path either side.
+    manifest has to be materialized there: the resolver loads it from
+    `$HOME/.agents/share`, with no fallback path.
 
     `manifest` is the override hook: `COMMITTED` copies the repository's own
     manifest byte for byte, `None` installs none at all, a `str` is written
     verbatim (for the malformed-JSON cases) and anything else is serialized as
-    JSON. `library=False` leaves the library uninstalled, which only a script
-    run from the deployed layout can observe (see `PlatformLibraryTest`).
+    JSON.
 
     `declaration` is the third hook, for the host agent-slot declaration at
     `$HOME/.agents/share/host-declaration.json` (#150 D24), with `manifest`'s
     semantics: `COMMITTED` copies the repository's own declaration, `None`
     installs none, a `str` is written verbatim and anything else as JSON.
     """
-    library_dir = home / ".agents" / "lib" / "python"
-    library_dir.mkdir(parents=True, exist_ok=True)
-    installed_library = library_dir / "agent_platform.py"
-    installed_library.unlink(missing_ok=True)
-    if library:
-        shutil.copy(LIBRARY, installed_library)
     share = home / ".agents" / "share"
     share.mkdir(parents=True, exist_ok=True)
     target = share / "platform-manifest.json"
@@ -102,9 +93,8 @@ def install_home(home: Path, manifest: object = COMMITTED, *,
     return home
 
 
-def make_home(manifest: object = COMMITTED, *, library: bool = True) -> Path:
-    return install_home(Path(tempfile.mkdtemp()).resolve(), manifest,
-                        library=library)
+def make_home(manifest: object = COMMITTED) -> Path:
+    return install_home(Path(tempfile.mkdtemp()).resolve(), manifest)
 
 
 def registry(*entries: dict) -> dict:
@@ -133,17 +123,6 @@ def install_registry(home: Path, content: object) -> Path:
     return path
 
 
-def library_members() -> tuple[str, ...]:
-    """The resolver's declared `PLATFORM_LIBRARY_MEMBERS`, read from its source.
-
-    Read rather than copied: a second literal here would drift from the one
-    the guard actually enforces, which is the failure this suite is about.
-    """
-    text = SCRIPT.read_text("utf-8")
-    body = text.split("PLATFORM_LIBRARY_MEMBERS = (", 1)[1].split(")", 1)[0]
-    return tuple(re.findall(r'"([^"]+)"', body))
-
-
 def committed_manifest() -> dict:
     return json.loads(MANIFEST.read_text("utf-8"))
 
@@ -164,7 +143,7 @@ SUBCOMMANDS = ("resolve", "check-projections", "write-projections",
 
 def run(*args: str, home: Path) -> tuple[int, str, str]:
     proc = subprocess.run(
-        [sys.executable, str(SCRIPT), *args],
+        [sys.executable, "-m", "agent_tools.resolve_project", *args],
         capture_output=True, text=True, timeout=60,
         env={**os.environ, "HOME": str(home)},
     )
@@ -769,7 +748,7 @@ class DiscoveryTest(ResolverTestCase):
 
     def resolve_from(self, cwd: Path) -> tuple[int, object, str]:
         proc = subprocess.run(
-            [sys.executable, str(SCRIPT), "resolve"],
+            [sys.executable, "-m", "agent_tools.resolve_project", "resolve"],
             capture_output=True, text=True, timeout=60, cwd=str(cwd),
             env={**os.environ, "HOME": str(self.home)})
         try:
@@ -813,33 +792,21 @@ class UsageErrorTest(ResolverTestCase):
 
 
 def load_module():
-    """The resolver as an imported module, loaded by path (its name is hyphenated).
+    """The resolver module, `agent_tools.resolve_project`.
 
     Reserved for the seams no subprocess run can reach: the generic failure
     wrapper, and the emit-side guard that the parse-side guard keeps unreachable
-    from any authored contract. The importing case must already have pointed
-    `HOME` at an installed platform, because the module resolves
-    `agent_platform` from `$HOME/.agents/lib/python` as it loads.
+    from any authored contract.
     """
-    import importlib.util
-    # `agent_platform` caches in `sys.modules` under its one name, while every
-    # case here runs under a temporary `HOME` of its own. The binding guard
-    # checks *which* file answered the import, so a copy left behind by the
-    # previous case's `HOME` would fail it; a deployed run has one `HOME` and
-    # imports the library once.
-    sys.modules.pop("agent_platform", None)
-    spec = importlib.util.spec_from_file_location("resolve_project", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return resolve_project
 
 
 class InProcessTestCase(unittest.TestCase):
     """A temporary `HOME` for the two cases that import the resolver in process.
 
     `HOME` is patched on this process rather than a child's environment, and
-    restored afterwards, because both the load-time library import and the
-    manifest load inside `main` read it directly.
+    restored afterwards, because the manifest load inside `main` reads it
+    directly.
     """
 
     def setUp(self) -> None:
@@ -945,7 +912,7 @@ def run_with_path(path_value: str, *args: str, home: Path) -> tuple[int, str, st
     """
     env = dict(os.environ, PATH=path_value, HOME=str(home))
     proc = subprocess.run(
-        [sys.executable, str(SCRIPT), *args],
+        [sys.executable, "-m", "agent_tools.resolve_project", *args],
         capture_output=True, text=True, timeout=60, env=env,
     )
     return proc.returncode, proc.stdout, proc.stderr

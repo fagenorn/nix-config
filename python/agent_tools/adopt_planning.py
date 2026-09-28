@@ -8,7 +8,7 @@ content-addressed `plan_id` (D15).
 Every closed set, hash and path predicate it works over comes from
 `adopt_inspection`, so the two halves cannot disagree about the vocabulary.
 Like that module it is imported, never run, imports no resolver (D26), and is
-installed at `$HOME/.agents/lib/python/` behind the entry point's member guard.
+a module of the `agent_tools` package.
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ import hashlib
 import json
 from pathlib import Path
 
-import agent_platform
-from adopt_inspection import (
+from agent_tools import agent_platform
+from agent_tools.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
     APPROVAL_CLASSES,
     AdoptError,

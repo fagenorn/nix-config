@@ -2,7 +2,8 @@
 
 Run: just agent-installed-skill-tests. That recipe builds first and passes the
 built home-manager-files tree as AGENT_SKILLS_INSTALLED_HOME. Every
-`.agents/bin` entry that names the package must be a generated launcher, and
+`.agents/bin` entry that names the package, other than `NOT_LAUNCHERS`, must be a
+generated launcher, and
 each launcher must run its store module even with a fake `agent_tools` on the
 `PYTHONPATH`, `NIX_PYTHONPATH` (with a `.pth` file) and working-directory
 channels.
@@ -28,6 +29,11 @@ LAUNCHER = re.compile(
 MARKER = "HOSTILE agent_tools IMPORTED"
 HOSTILE_EXIT = 97
 TIMEOUT_SECONDS = 60
+# Flat installed scripts that name the package without being launchers: only
+# `workflow-state`, whose transitional lookups run `agent_tools.resolve_project`
+# and import `agent_tools.host_admission` from source (#177 D6, D13). #178
+# deletes this entry with them.
+NOT_LAUNCHERS = ("workflow-state",)
 # The commands #175 and #179 accepted as launchers: a floor, not the full set,
 # which the command table in lib/agent-tools.nix owns (#175 D8).
 LAUNCHER_FLOOR = ("agent-evidence", "agent-model-matrix", "context-map-lint", "diff-scope")
@@ -76,6 +82,10 @@ class AgentToolsLauncherTest(unittest.TestCase):
         found = {}
         for entry in sorted((self.root / ".agents" / "bin").iterdir()):
             data = entry.read_bytes()
+            if entry.name in NOT_LAUNCHERS:
+                self.assertIsNone(LAUNCHER.fullmatch(data),
+                                  f"{entry} is a generated launcher; drop it from NOT_LAUNCHERS")
+                continue
             if PACKAGE_BYTES not in data:
                 continue
             match = LAUNCHER.fullmatch(data)

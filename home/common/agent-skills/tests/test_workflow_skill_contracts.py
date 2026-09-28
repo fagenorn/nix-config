@@ -278,7 +278,7 @@ POLICY_GATE_PATTERN_FILES = frozenset({
 # files, and an entry that no longer matches fails it, so the allowance cannot
 # outlive its use or widen silently.
 LEGACY_MIGRATION_INPUTS = {
-    "home/common/agent-skills/scripts/adopt_inspection.py": frozenset({
+    "python/agent_tools/adopt_inspection.py": frozenset({
         ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
     }),
     "home/common/agent-skills/tests/test_adopt_apply.py": frozenset({
@@ -543,7 +543,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         }
         helpers["context-map-lint"].parent.mkdir(parents=True)
         shutil.copy2(
-            REPO_ROOT / "home/common/agent-skills/scripts/resolve-project.py",
+            REPO_ROOT / "python/agent_tools/resolve_project.py",
             helpers["resolve-project"],
         )
         shutil.copyfile(REPO_ROOT / "python/agent_tools/context_map_lint.py",

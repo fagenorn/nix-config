@@ -358,7 +358,9 @@ class DeliveryAdmissionTest(unittest.TestCase):
                              store / "workflow_delivery_wire.py")
                 shutil.copy2(SCRIPTS / "workflow_delivery_build.py",
                              store / "workflow_delivery_build.py")
-                shutil.copy2(SCRIPTS / "host_admission.py", store / "host_admission.py")
+                if layout == "installed":
+                    shutil.copy2(ROOT / "python/agent_tools/host_admission.py",
+                                 store / "host_admission.py")
                 shutil.copy2(SCRIPTS / "artifact_budget.py", store / "artifact_budget.py")
                 shutil.copy2(SCRIPTS / "artifact-budget", store / "artifact-budget")
                 shutil.copy2(POLICY, store / "artifact-budget-policy.json")
@@ -428,14 +430,15 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     self.assertEqual(before, {str(path.relative_to(repo)): path.read_bytes()
                         for path in repo.rglob("*") if path.is_file()})
                     builder.write_bytes(builder_bytes)
-                library_file = store / "host_admission.py"
-                library_bytes = library_file.read_bytes(); library_file.unlink()
-                refused = subprocess.run([sys.executable, str(cli), "host-route",
-                    "--route", "claude-code"], capture_output=True, text=True,
-                    env=env, check=False)
-                self.assertEqual((refused.returncode, refused.stdout), (2, ""))
-                self.assertIn("host admission library", refused.stderr)
-                library_file.write_bytes(library_bytes)
+                if layout == "installed":
+                    library_file = store / "host_admission.py"
+                    library_bytes = library_file.read_bytes(); library_file.unlink()
+                    refused = subprocess.run([sys.executable, str(cli), "host-route",
+                        "--route", "claude-code"], capture_output=True, text=True,
+                        env=env, check=False)
+                    self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+                    self.assertIn("host admission library", refused.stderr)
+                    library_file.write_bytes(library_bytes)
 
     def test_direct_checkpoint_and_failure_remainder_round_trip(self):
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "select")
