@@ -6,10 +6,16 @@ asserts it against persisted history. Only the success row exists in this slice.
 Run: just agent-workflow-tests
 """
 
+import ast
+import inspect
+import io
+import re
 import tempfile
+import tokenize
 import unittest
 from pathlib import Path
 
+from agent_tools import transaction_core
 from agent_tools.transaction_core import TransactionStore
 
 from .transaction_core_shapes import SHAPES
@@ -58,6 +64,68 @@ class SweepTableTest(unittest.TestCase):
             again = store.create("library:success", subject)
             self.assertEqual(again.transaction_id, first)
             self.assertEqual(len(again.events), len(store.load(first).events))
+
+
+PROJECT_NAMES = frozenset({"nix", "nixos", "darwin", "fagenorn", "palmier", "nodo", "argus"})
+PROVIDER_NAMES = frozenset({
+    "github", "gitlab", "gh", "git", "ghcr", "docker", "oci", "railway", "launchd",
+    "launchctl", "plist", "homebrew", "brew", "cachix", "sops", "anthropic", "claude",
+    "codex"})
+PROVIDER_VERBS = frozenset({
+    "push", "merge", "tag", "deploy", "switch", "restart", "rebuild", "upload", "rebase",
+    "checkout"})
+FORBIDDEN_WORDS = PROJECT_NAMES | PROVIDER_NAMES | PROVIDER_VERBS
+_NOT_CODE = frozenset({tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT,
+                       tokenize.DEDENT, tokenize.ENCODING, tokenize.ENDMARKER})
+
+
+def _docstring_starts(source):
+    starts = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                starts.add((first.value.lineno, first.value.col_offset))
+    return starts
+
+
+def neutrality_findings(source):
+    """Every forbidden whole word in `source`'s code, comments and docstrings excluded."""
+    docstrings = _docstring_starts(source)
+    findings = []
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type in _NOT_CODE:
+            continue
+        if token.type == tokenize.STRING and token.start in docstrings:
+            continue
+        for word in re.split(r"[^0-9a-z]+", token.string.lower()):
+            if word in FORBIDDEN_WORDS:
+                findings.append((token.start[0], word))
+    return findings
+
+
+class NeutralityTest(unittest.TestCase):
+    def setUp(self):
+        self.source = inspect.getsource(transaction_core)
+
+    def test_the_shipped_module_names_no_project_provider_or_provider_verb(self):
+        self.assertEqual(neutrality_findings(self.source), [])
+
+    def test_a_provider_verb_planted_in_code_is_found(self):
+        planted = self.source + "\n\ndef deploy_everything():\n    return None\n"
+        self.assertEqual([word for _, word in neutrality_findings(planted)], ["deploy"])
+
+    def test_the_same_word_in_a_comment_or_docstring_is_not_code(self):
+        for planted in ("\n# deploy the candidate\n",
+                        '\n\ndef neutral():\n    """Deploy nothing."""\n    return None\n'):
+            with self.subTest(planted=planted):
+                self.assertEqual(neutrality_findings(self.source + planted), [])
+
+    def test_matching_is_by_whole_word_and_covers_string_literals(self):
+        self.assertEqual(neutrality_findings("associated = 'pushed'\n"), [])
+        self.assertEqual(neutrality_findings("where = 'git-tag'\n"), [(1, "git"), (1, "tag")])
 
 
 if __name__ == "__main__":
