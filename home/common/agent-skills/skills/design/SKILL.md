@@ -28,8 +28,8 @@ Ask the whole frontier in one numbered round:
 
 **Facts are your job, never the user's.** When a frontier question needs a sharply bounded fact from the environment — filesystem, tooling, library behavior, prior art in the codebase — resolve it yourself. Keep a small direct grep or file check inline: a trivial repository fact (does the file exist, what is the symbol's signature) is answered locally, not delegated. Only when the result set needs a sharply bounded read-only exploration pass, use the explorer below. When the answer needs cited primary sources, invoke `research`; that skill owns its own marked background launch.
 
-<!-- agent-dispatch: id=design-bounded-fact-lookup role=explorer model=haiku effort=medium -->
-Agent(subagent_type="Explore", model="haiku", effort="medium") performs one sharply bounded read-only fact lookup without making the design decision.
+<!-- agent-dispatch: id=design-bounded-fact-lookup role=explorer model=sonnet effort=medium -->
+Agent(subagent_type="Explore", model="sonnet", effort="medium") performs one sharply bounded read-only fact lookup without making the design decision.
 
 Don't block on it: an in-flight lookup is an unsettled prerequisite, so only the questions downstream of it wait; ask the rest of the frontier now. The *decisions* are the user's. If the lookup becomes open-ended, ambiguous, or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and selected role in the phase's existing fixed-schema report.
 

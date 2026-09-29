@@ -23,8 +23,8 @@ round and wait for an answer in words, however many rounds it costs.
 
 If a question can be answered by a sharply bounded read-only lookup in the codebase or docs, explore instead of asking:
 
-<!-- agent-dispatch: id=grill-bounded-fact-lookup role=explorer model=haiku effort=medium -->
-Agent(subagent_type="Explore", model="haiku", effort="medium") performs one sharply bounded read-only fact lookup without making the design decision.
+<!-- agent-dispatch: id=grill-bounded-fact-lookup role=explorer model=sonnet effort=medium -->
+Agent(subagent_type="Explore", model="sonnet", effort="medium") performs one sharply bounded read-only fact lookup without making the design decision.
 
 Do not block the round; only questions downstream of the lookup wait. The decisions are mine; the facts are yours. If the lookup becomes open-ended, ambiguous, or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and selected role in the phase's existing fixed-schema report.
 

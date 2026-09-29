@@ -16,6 +16,7 @@ AGENTS = REPO_ROOT / "home/common/claude-code/agents"
 
 EXPECTED_TIERS = {
     "issue-owner": ("opus", "high"),
+    "auto-owner": ("opus", "xhigh"),
     "ship-owner": ("opus", "high"),
     "implementer": ("opus", "high"),
     "reviewer": ("opus", "high"),
@@ -23,13 +24,14 @@ EXPECTED_TIERS = {
     "reviewer-lite": ("sonnet", "medium"),
     "mechanic": ("sonnet", "high"),
     "bookkeeper": ("haiku", "low"),
-    "explorer": ("haiku", "medium"),
+    "explorer": ("sonnet", "medium"),
     "researcher": ("sonnet", "medium"),
     "codex-transport": ("sonnet", "medium"),
 }
 
 EXPECTED_SUBAGENT_TYPES = {
     "issue-owner": {"general-purpose"},
+    "auto-owner": {"general-purpose"},
     "ship-owner": {"general-purpose"},
     "implementer": {"implementer"},
     "reviewer": {"reviewer"},
@@ -57,15 +59,15 @@ EXPECTED_OWNER_SITES = {
     ),
     "from-issue-design-grill": (
         "home/common/agent-skills/skills/from-issue/AUTO.md",
-        "issue-owner",
+        "auto-owner",
         "opus",
-        "high",
+        "xhigh",
     ),
     "from-issue-planning": (
         "home/common/agent-skills/skills/from-issue/AUTO.md",
-        "issue-owner",
+        "auto-owner",
         "opus",
-        "high",
+        "xhigh",
     ),
     "from-issue-plan-review": (
         "home/common/agent-skills/skills/from-issue/standards-review.md",
@@ -106,25 +108,25 @@ EXPECTED_OWNER_SITES = {
     "design-bounded-fact-lookup": (
         "home/common/agent-skills/skills/design/SKILL.md",
         "explorer",
-        "haiku",
+        "sonnet",
         "medium",
     ),
     "grill-bounded-fact-lookup": (
         "home/common/agent-skills/skills/grill-with-docs/SKILL.md",
         "explorer",
-        "haiku",
+        "sonnet",
         "medium",
     ),
     "planning-bounded-fact-lookup": (
         "home/common/agent-skills/skills/writing-plans/SKILL.md",
         "explorer",
-        "haiku",
+        "sonnet",
         "medium",
     ),
     "doc-grounded-bounded-code-lookup": (
         "home/common/agent-skills/skills/doc-grounded-questions/SKILL.md",
         "explorer",
-        "haiku",
+        "sonnet",
         "medium",
     ),
     "research-background-researcher": (

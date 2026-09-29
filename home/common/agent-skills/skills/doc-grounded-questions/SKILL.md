@@ -27,8 +27,8 @@ For every clarifying question or option set you're about to surface, do this pas
 
 5. **Grep the codebase** for the central concept. Keep a small direct grep inline; when the result set needs a sharply bounded read-only exploration pass, use the explicit explorer dispatch instead:
 
-<!-- agent-dispatch: id=doc-grounded-bounded-code-lookup role=explorer model=haiku effort=medium -->
-Agent(subagent_type="Explore", model="haiku", effort="medium") performs one sharply bounded read-only central-concept lookup without resolving the question.
+<!-- agent-dispatch: id=doc-grounded-bounded-code-lookup role=explorer model=sonnet effort=medium -->
+Agent(subagent_type="Explore", model="sonnet", effort="medium") performs one sharply bounded read-only central-concept lookup without resolving the question.
 
    If the codebase already commits to a pattern, the default option should be "match the existing pattern" and you must justify any divergence. If the lookup becomes open-ended, ambiguous, or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and selected role in the caller's existing ledger or fixed-schema report.
 
