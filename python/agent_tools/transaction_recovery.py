@@ -16,7 +16,8 @@ verification in `ready` only, one request per `restorable` unit in plan order, a
 naming a unit says `<name> (<action id>)` (D23).
 
 An action's `effect_class` comes from its #206 fold: `no_effect` with no intended attempt, else
-`in_progress` while open, else its latest inspection's outcome (D8, D19). `begin_requests`
+`in_progress` while open, else its latest inspection's outcome (D8, D19); a unit is affected
+while its forward action or any of its edges is not `no_effect`. `begin_requests`
 refuses with `begin_refusal`'s first reason in D8's order, else asks one compatibility check
 per affected `restorable` unit; `begin_events` refuses `restore_incompatible`, else yields
 `recovery_started` (the `effect_snapshot`, the `selection` of every affected unit's edges and
@@ -171,8 +172,12 @@ def effect_snapshot(plan: Mapping, actions: Mapping[str, ActionFold]) -> dict[st
 
 
 def _affected(plan: Mapping, actions: Mapping[str, ActionFold]) -> list[dict]:
+    """The plan units whose forward action or any recovery edge is not `no_effect`, in plan
+    order: an edge an earlier recovery drove keeps its unit affected, so a re-begun recovery
+    never drops an outstanding edge and `no_effect` agrees with the `abandoned` gate (D8)."""
     return [unit for unit in plan["units"]
-            if effect_class(actions.get(unit["action_id"])) != "no_effect"]
+            if any(effect_class(actions.get(identity)) != "no_effect" for identity in
+                   [unit["action_id"], *(edge["action_id"] for edge in unit["edges"])])]
 
 
 def selection(plan: Mapping, actions: Mapping[str, ActionFold]) -> list[str]:

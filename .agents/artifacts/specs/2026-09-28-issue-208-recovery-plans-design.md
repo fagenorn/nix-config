@@ -216,7 +216,7 @@ A unit's effect class is derived from the #206 action fold of its action (D8):
 | open attempt, or latest inspection `in_progress` | `in_progress` |
 | latest inspection `unknown` | `unknown` |
 
-A unit is **affected** unless it is `no_effect`. #83's `effect_present` has no source in #206's
+A unit is **affected** unless its forward action and every one of its edges are `no_effect`: an edge an earlier recovery drove keeps its unit affected after reconciliation reads the forward action `absent`, so a re-begun recovery re-selects that unit's outstanding edges instead of dropping them, and the `no_effect` refusal holds exactly when the `abandoned` gate would admit. #83's `effect_present` has no source in #206's
 inspection vocabulary, so it is not produced. An action with no intended attempt is `no_effect`
 whatever its inspection reads: the core reaches an effect only through `invoke_action`, behind a
 durable intent (#206 D5), so a target already holding the expected subject without an intent was

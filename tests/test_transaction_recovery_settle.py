@@ -118,6 +118,26 @@ class SettleTest(SettleCase):
         self.assertEqual(kept.revision, again.revision)
         self.assertEqual(self.world.invokes[self.act("compensate", unit="build")], 1)
 
+    def test_a_re_begun_recovery_keeps_an_edge_driven_before_forward_reads_absent(self):
+        self.recovering()
+        self.edge("compensate", "build")
+        self.edge("restore", "start")
+        self.edge("compensate", "start", "diverged")
+        self.settle()
+        for name, n in (("build", 1), ("start", 2)):
+            self.store.inspect_action(self.custody, name=name, parameters={"n": n},
+                                      effect=FakeEffect(self.world, inspect_outcome="absent"))
+        self.assertRefusedUnchanged(TransitionRefused, lambda: self.to("abandoned"))
+        self.grant("g-2")
+        again = self.begin("g-2")
+        diverged = self.act("compensate", unit="start")
+        self.assertIn(diverged, again.recovery["selected"])
+        after = self.settle()
+        incomplete = next(dict(e) for e in reversed(after.events)
+                          if e["type"] == "recovery_incomplete")
+        self.assertEqual(incomplete["actions"], [diverged])
+        self.assertEqual(after.state, "attention_required")
+
     def test_advance_never_enters_rolled_back_nor_writes_a_reserved_reason(self):
         self.recovering()
         self.all_edges()
