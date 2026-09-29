@@ -3,13 +3,16 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
-from .test_delivery_workflow import (ARTIFACT_BUDGET, MODEL, NOW, POLICY, SOURCES,
-                                     BuilderHarness, load)
+from .test_delivery_workflow import (ARTIFACT_BUDGET, MODEL, NOW, POLICY, SCRIPTS,
+                                     SOURCES, BuilderHarness, load)
 
 DELIVERED, LIVE = 207, 209
 ISSUES = (DELIVERED, LIVE)
@@ -329,6 +332,55 @@ class DeliveredControlTest(BuilderHarness, unittest.TestCase):
         self.assert_only_live_resumed(self.after_delivery(
             275, live, contracts=True, recoveries={DELIVERED: proof}), before)
         self.assertEqual(len(self.records(DELIVERED)[1]), 1)
+
+    def isolated_workflow(self, wire_max_bytes):
+        """A source-layout copy of the scripts tree beside a policy of its own.
+
+        The copy resolves `artifact_budget.py` and `../artifact-budget-policy.json`
+        exactly as the source tree does, so its control reply meets the real
+        boundary under `workflow_responses.wire_max_bytes` = ``wire_max_bytes``.
+        """
+        tree = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, tree, True)
+        shutil.copytree(SCRIPTS, tree / "agent-skills/scripts",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        policy = json.loads(POLICY.read_text(encoding="utf-8"))
+        policy["workflow_responses"]["wire_max_bytes"] = wire_max_bytes
+        (tree / "agent-skills/artifact-budget-policy.json").write_text(
+            json.dumps(policy), encoding="utf-8")
+        return tree / "agent-skills/scripts/workflow-state.py"
+
+    def test_a_rejected_reply_leaves_the_ledger_byte_identical(self):
+        """Acceptance 2: a reply the boundary rejects commits nothing and prints nothing."""
+        self.project()
+        built = self.build("contract", self.contract_input())
+        workflow = self.isolated_workflow(64)
+        env = {**os.environ, "HOME": str(self.home), "PYTHONDONTWRITEBYTECODE": "1"}
+        run_args = ("--repo-root", str(self.root), "--run-id", "atomic")
+        initialized = subprocess.run(
+            [sys.executable, str(workflow), "init-run", *run_args, "--now", NOW],
+            capture_output=True, check=False, env=env)
+        self.assertEqual(initialized.returncode, 0, initialized.stderr.decode())
+        state = self.root / ".superpowers/workflows/atomic/state.json"
+        before = state.read_bytes()
+        request = json.dumps(self.control_request(
+            [171], contracts={"171": built["contract"]},
+            intents={"171": [built["initial_intent"]]},
+            worktrees=[{"issue": 171, "recorded": None,
+                        "candidate": {"path": self.worktree, "state": "absent"}}])).encode()
+        refused = subprocess.run(
+            [sys.executable, str(workflow), "control", *run_args, "--request-file", "-"],
+            input=request, capture_output=True, check=False, env=env)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, refused.stderr),
+            (2, b"", b"workflow-state: artifact-budget validate-report rejected the "
+                     b"workflow-response boundary\n"))
+        self.assertEqual(state.read_bytes(), before)
+        # Under the real policy the same request spawns and commits.
+        admitted = self.cli("control", *run_args, "--request-file", "-", stdin=request)
+        self.assertEqual([a["kind"] for a in json.loads(admitted.stdout)["actions"]],
+                         ["spawn", "wait"])
+        self.assertNotEqual(state.read_bytes(), before)
 
 
 if __name__ == "__main__":

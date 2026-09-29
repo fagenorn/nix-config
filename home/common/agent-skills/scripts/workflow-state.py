@@ -422,7 +422,8 @@ def artifact_budget_validate(
         argv.extend(("--policy", str(policy)))
     completed = subprocess.run(argv, input=input_bytes, capture_output=True, check=False)
     if completed.returncode != 0 or not completed.stdout:
-        raise WorkflowError(f"artifact-budget {command} rejected the terminal result")
+        subject = "detail input" if boundary is None else f"{boundary} boundary"
+        raise WorkflowError(f"artifact-budget {command} rejected the {subject}")
     try:
         canonical = json.loads(completed.stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -1844,7 +1845,9 @@ def control_summary(
 ) -> dict[str, Any]:
     return _delivery().control_summary(
         issue=issue, tracker=tracker, issue_state=issue_state, reduction=reduction,
-        blockers=control_blockers(tracker), result_fields=RESULT_FIELDS,
+        blockers=sorted(control_blockers(tracker),
+                        key=lambda item: (item["kind"], item["issue"])),
+        result_fields=RESULT_FIELDS,
         contract_required=contract_required, unresumable=unresumable)
 
 
@@ -2299,7 +2302,7 @@ def command_control(args: argparse.Namespace) -> int:
         return {"holder": holder, "roles": dict(roles), "acquired_at": now,
                 "released_at": None, "release_event": None, "release_seq": None}
 
-    def control(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+    def control(state: dict[str, Any] | None) -> tuple[bytes, bool]:
         assert state is not None
         if now_value < parse_utc(state["updated_at"], "run update time"):
             raise WorkflowError("control time must not move backward")
@@ -2843,7 +2846,7 @@ def command_control(args: argparse.Namespace) -> int:
                 declared_slots=declared_slots,
                 available=max(0, declared_slots - sum(reserved.values())),
                 waiting=[issue for issue in request["issues"] if issue in waiting])
-        return {
+        reply = render_json({
             "interface_version": CONTROL_INTERFACE_VERSION,
             "run_id": args.run_id,
             "now": now,
@@ -2852,11 +2855,17 @@ def command_control(args: argparse.Namespace) -> int:
             "actions": actions,
             "next_deadline": next_deadline,
             "admission": report,
-        }, changed
+        })
+        # The reply is the only source of action order, so a reply the boundary
+        # rejects must not commit: validation raises before `transact` commits,
+        # and the validated bytes are the bytes printed (#220 D5).
+        artifact_budget_validate(
+            "validate-report", boundary="workflow-response", input_bytes=reply)
+        return reply, changed
 
-    response = transact(args.repo_root, args.run_id, control,
-                        migration_contracts=migration_contracts)
-    print_json(response)
+    reply = transact(args.repo_root, args.run_id, control,
+                     migration_contracts=migration_contracts)
+    sys.stdout.buffer.write(reply)
     return 0
 
 
@@ -3936,9 +3945,13 @@ def command_host_route(args: argparse.Namespace) -> int:
     print_json(route_verdict(args.route))
     return 0
 
+def render_json(value: Any) -> bytes:
+    """The wire rendering of ``value``: what `print_json` writes and control validates."""
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
 def print_json(value: Any) -> None:
-    json.dump(value, sys.stdout, sort_keys=True, separators=(",", ":"))
-    sys.stdout.write("\n")
+    sys.stdout.write(render_json(value).decode("utf-8"))
 
 
 def build_parser() -> argparse.ArgumentParser:
