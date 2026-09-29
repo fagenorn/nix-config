@@ -221,7 +221,7 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
     if any(action.get("issue") in missing_contracts | unresumable for action in value["actions"]): _reject()
     waiting = _admission_report(value["admission"], order)
     requests = [action for action in value["actions"] if action["kind"] == "delivery_contract"]
-    if requests and (len(requests) != 1 or value["actions"][-1] is not requests[0] or value["next_deadline"] is not None
+    if requests and (value["actions"][-1] is not requests[0] or value["next_deadline"] is not None
                      or any(action["kind"] in {"wait", "finalize"} for action in value["actions"])
                      or set(requests[0]["issues"]) & waiting): _reject()
     if any(action.get("issue") in waiting for action in value["actions"]): _reject()

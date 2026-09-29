@@ -1179,6 +1179,7 @@ class DeliveryModelTest(unittest.TestCase):
                 "empty": lambda value: action(value).update(issues=[]),
                 "not_a_list": lambda value: action(value).update(issues=151),
                 "boolean_issue": lambda value: action(value).update(issues=[True]),
+                "float_issue": lambda value: action(value).update(issues=[152.0]),
                 "duplicate": lambda value: action(value).update(issues=[152, 152]),
                 "out_of_order": lambda value: action(value).update(issues=[151, 152]),
                 "unknown_issue": lambda value: action(value).update(issues=[152, 153]),
