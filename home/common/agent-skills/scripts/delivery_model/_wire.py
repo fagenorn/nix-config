@@ -174,7 +174,7 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
     if type(value["interface_version"]) is not int or value["interface_version"] != 3: _reject()
     if value["next_deadline"] is not None: _utc(value["next_deadline"], "next deadline")
     if not all(isinstance(value[name], list) for name in ("summaries", "deltas", "actions")): _reject()
-    issues = set(); missing_contracts = set(); unresumable = set(); order = []
+    issues = set(); missing_contracts = set(); asking = set(); unresumable = set(); order = []
     for item in value["summaries"]:
         item = _object(item, _members("issue state custody owner worktree deadline_at blocked_on blockers result contract_digest pending_stage_ids requirements"))
         issue = _integer(item["issue"], "summary issue", minimum=1)
@@ -197,6 +197,7 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
                         "reason_code": "delivery_contract_required", "detail_pointer": None}
             remaining = [entry for entry in item["requirements"] if entry["kind"] != "worktree_fact"]
             if item["pending_stage_ids"] or remaining not in ([], [expected]): _reject()
+            if expected in remaining: asking.add(issue)
             missing_contracts.add(issue)
     for item in value["deltas"]:
         item = _object(item, _members("issue custody kind state")); issue = _integer(item["issue"], "delta issue", minimum=1)
@@ -211,9 +212,18 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
             if any(event not in {"owner_notification", "tracker_change", "deadline"} for event in item["wake_on"]): _reject()
         elif item["kind"] == "finalize": _object(item, _members("id kind")); _string(item["id"], "finalize id")
         elif item["kind"] == "delivery_remainder": _remainder(item, notes_max)
+        elif item["kind"] == "delivery_contract":
+            _object(item, _members("id kind issues"))
+            if item["id"] != "delivery_contract" or not isinstance(item["issues"], list) or not item["issues"]: _reject()
+            for issue in item["issues"]: _integer(issue, "contract issue", minimum=1)
+            if item["issues"] != [issue for issue in order if issue in item["issues"]] or not set(item["issues"]) <= asking: _reject()
         else: _reject()
     if any(action.get("issue") in missing_contracts | unresumable for action in value["actions"]): _reject()
     waiting = _admission_report(value["admission"], order)
+    requests = [action for action in value["actions"] if action["kind"] == "delivery_contract"]
+    if requests and (len(requests) != 1 or value["actions"][-1] is not requests[0] or value["next_deadline"] is not None
+                     or any(action["kind"] in {"wait", "finalize"} for action in value["actions"])
+                     or set(requests[0]["issues"]) & waiting): _reject()
     if any(action.get("issue") in waiting for action in value["actions"]): _reject()
     return value
 

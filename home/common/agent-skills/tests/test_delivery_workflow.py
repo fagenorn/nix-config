@@ -2776,6 +2776,18 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         self.assertEqual(asked["actions"], [
             {"id": "delivery_contract", "kind": "delivery_contract", "issues": [172]}])
 
+    def test_a_contract_request_passes_the_workflow_response_boundary(self):
+        """#221 D6: the T1 reply is what the adapter's pipe accepts, byte for byte."""
+        _, request, _ = self.contract_chain()
+        raw = self.cli("control", "--repo-root", self.root, "--run-id", "chain",
+                       "--request-file", "-", stdin=json.dumps(request).encode()).stdout
+        self.assertEqual(json.loads(raw)["actions"][-1]["kind"], "delivery_contract")
+        wire = subprocess.run([sys.executable, str(ARTIFACT_BUDGET), "validate-report",
+            "--boundary", "workflow-response", "--input", "-", "--policy", str(POLICY)],
+            input=raw, capture_output=True, check=False)
+        self.assertEqual((wire.returncode, wire.stderr), (0, b""))
+        self.assertEqual(wire.stdout, raw)
+
     def test_direct_acquisition_asks_for_the_contract_last(self):
         self.project()
         facts = {}

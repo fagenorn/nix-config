@@ -1124,6 +1124,77 @@ class DeliveryModelTest(unittest.TestCase):
             with self.subTest(rejected=name):
                 self.assert_invalid(value, "workflow-response")
 
+    def test_control_delivery_contract_is_coupled_to_its_summaries(self):
+        """#221 D6: `delivery_contract` lists only asking issues, last and alone."""
+        fixtures = workflow_responses(self.model)
+
+        def asking(issue):
+            return {"kind": "delivery_contract", "subject_id": str(issue),
+                    "reason_code": "delivery_contract_required", "detail_pointer": None}
+
+        def reply():
+            value = copy.deepcopy(fixtures["control"])
+            template = value["summaries"][0]
+            value["summaries"] = [{**copy.deepcopy(template), "issue": issue, "state": "queued",
+                "custody": None, "owner": None, "worktree": None, "deadline_at": None,
+                "contract_digest": None, "pending_stage_ids": [],
+                "requirements": [asking(issue)]} for issue in (152, 151)]
+            value.update(deltas=[], next_deadline=None, actions=[
+                {"id": "delivery_contract", "kind": "delivery_contract", "issues": [152, 151]}])
+            value["admission"].update(available=7, reserved={
+                "controller": 0, "owner": 0, "worker": 0, "reviewer": 0})
+            return value
+
+        def mutated(change):
+            value = reply(); change(value); return value
+
+        def action(value):
+            return value["actions"][-1]
+
+        def not_last(value):
+            # Only the last-position rule may reject this (Phase-5 SF-2): the
+            # fixture's contracted, dispatched issue 151 (its summary, spawn
+            # delta, `control_owner` action and admission reservation) is put
+            # first, the asking issues move to 152 and 153, and the non-terminal
+            # spawn follows the request; `next_deadline` stays null.
+            dispatched = copy.deepcopy(fixtures["control"])
+            for summary, issue in zip(value["summaries"], (152, 153)):
+                summary.update(issue=issue, requirements=[asking(issue)])
+            value["summaries"].insert(0, dispatched["summaries"][0])
+            value.update(deltas=dispatched["deltas"], admission=dispatched["admission"],
+                         actions=[{"id": "delivery_contract", "kind": "delivery_contract",
+                                   "issues": [152, 153]}, *dispatched["actions"]])
+
+        self.assertEqual(self.validate(reply(), "workflow-response"), reply())
+        only_152 = mutated(lambda value: action(value).update(issues=[152]))
+        self.assertEqual(self.validate(only_152, "workflow-response"), only_152)
+        digest = fixtures["control"]["summaries"][0]["contract_digest"]
+        finalize = {"id": "finalize", "kind": "finalize"}
+        wait = {"id": "wait:2026-09-21T01:00:00Z", "kind": "wait", "wake_on": ["deadline"],
+                "deadline_at": "2026-09-21T01:00:00Z"}
+        for name, change in {
+                "extra_member": lambda value: action(value).update(issue=151),
+                "missing_issues": lambda value: action(value).pop("issues"),
+                "other_id": lambda value: action(value).update(id="delivery_contract:151"),
+                "empty": lambda value: action(value).update(issues=[]),
+                "not_a_list": lambda value: action(value).update(issues=151),
+                "boolean_issue": lambda value: action(value).update(issues=[True]),
+                "duplicate": lambda value: action(value).update(issues=[152, 152]),
+                "out_of_order": lambda value: action(value).update(issues=[151, 152]),
+                "unknown_issue": lambda value: action(value).update(issues=[152, 153]),
+                "not_asking": lambda value: value["summaries"][1].update(requirements=[]),
+                "contracted": lambda value: value["summaries"][0].update(
+                    contract_digest=digest, requirements=[]),
+                "waiting": lambda value: value["admission"].update(waiting=[152]),
+                "not_last": not_last,
+                "with_finalize": lambda value: value["actions"].insert(0, copy.deepcopy(finalize)),
+                "with_wait": lambda value: value["actions"].insert(0, copy.deepcopy(wait)),
+                "deadline_armed": lambda value: value.update(next_deadline="2026-09-21T01:00:00Z"),
+                "twice": lambda value: value["actions"].insert(0, copy.deepcopy(action(value))),
+        }.items():
+            with self.subTest(rejected=name):
+                self.assert_invalid(mutated(change), "workflow-response")
+
     def test_ship_handoff_cross_references_and_contract_order(self):
         contract, delivery = contract_and_delivery(self.model)
         handoff = ship_handoff(self.model, contract, delivery)
