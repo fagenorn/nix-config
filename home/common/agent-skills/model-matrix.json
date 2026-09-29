@@ -11,6 +11,18 @@
         "mechanical-only work"
       ]
     },
+    "auto-owner": {
+      "model": "opus",
+      "effort": "xhigh",
+      "eligible": [
+        "autonomous design and grill ownership",
+        "autonomous planning ownership"
+      ],
+      "prohibited": [
+        "mechanical-only work",
+        "long-running issue ownership"
+      ]
+    },
     "ship-owner": {
       "model": "opus",
       "effort": "high",
@@ -97,7 +109,7 @@
       ]
     },
     "explorer": {
-      "model": "haiku",
+      "model": "sonnet",
       "effort": "medium",
       "eligible": [
         "sharply bounded read-only exploration"
@@ -158,21 +170,21 @@
     {
       "id": "from-issue-design-grill",
       "path": "home/common/agent-skills/skills/from-issue/AUTO.md",
-      "marker": "<!-- agent-dispatch: id=from-issue-design-grill role=issue-owner model=opus effort=high -->",
-      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\") launches the autonomous design-and-grill owner.",
-      "role": "issue-owner",
+      "marker": "<!-- agent-dispatch: id=from-issue-design-grill role=auto-owner model=opus effort=xhigh -->",
+      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"xhigh\") launches the autonomous design-and-grill owner.",
+      "role": "auto-owner",
       "model": "opus",
-      "effort": "high",
+      "effort": "xhigh",
       "requires": []
     },
     {
       "id": "from-issue-planning",
       "path": "home/common/agent-skills/skills/from-issue/AUTO.md",
-      "marker": "<!-- agent-dispatch: id=from-issue-planning role=issue-owner model=opus effort=high -->",
-      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\") launches the autonomous planning owner.",
-      "role": "issue-owner",
+      "marker": "<!-- agent-dispatch: id=from-issue-planning role=auto-owner model=opus effort=xhigh -->",
+      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"xhigh\") launches the autonomous planning owner.",
+      "role": "auto-owner",
       "model": "opus",
-      "effort": "high",
+      "effort": "xhigh",
       "requires": []
     },
     {
@@ -238,40 +250,40 @@
     {
       "id": "design-bounded-fact-lookup",
       "path": "home/common/agent-skills/skills/design/SKILL.md",
-      "marker": "<!-- agent-dispatch: id=design-bounded-fact-lookup role=explorer model=haiku effort=medium -->",
-      "call": "Agent(subagent_type=\"Explore\", model=\"haiku\", effort=\"medium\") performs one sharply bounded read-only fact lookup without making the design decision.",
+      "marker": "<!-- agent-dispatch: id=design-bounded-fact-lookup role=explorer model=sonnet effort=medium -->",
+      "call": "Agent(subagent_type=\"Explore\", model=\"sonnet\", effort=\"medium\") performs one sharply bounded read-only fact lookup without making the design decision.",
       "role": "explorer",
-      "model": "haiku",
+      "model": "sonnet",
       "effort": "medium",
       "requires": []
     },
     {
       "id": "grill-bounded-fact-lookup",
       "path": "home/common/agent-skills/skills/grill-with-docs/SKILL.md",
-      "marker": "<!-- agent-dispatch: id=grill-bounded-fact-lookup role=explorer model=haiku effort=medium -->",
-      "call": "Agent(subagent_type=\"Explore\", model=\"haiku\", effort=\"medium\") performs one sharply bounded read-only fact lookup without making the design decision.",
+      "marker": "<!-- agent-dispatch: id=grill-bounded-fact-lookup role=explorer model=sonnet effort=medium -->",
+      "call": "Agent(subagent_type=\"Explore\", model=\"sonnet\", effort=\"medium\") performs one sharply bounded read-only fact lookup without making the design decision.",
       "role": "explorer",
-      "model": "haiku",
+      "model": "sonnet",
       "effort": "medium",
       "requires": []
     },
     {
       "id": "planning-bounded-fact-lookup",
       "path": "home/common/agent-skills/skills/writing-plans/SKILL.md",
-      "marker": "<!-- agent-dispatch: id=planning-bounded-fact-lookup role=explorer model=haiku effort=medium -->",
-      "call": "Agent(subagent_type=\"Explore\", model=\"haiku\", effort=\"medium\") performs one sharply bounded read-only repository lookup without choosing task boundaries.",
+      "marker": "<!-- agent-dispatch: id=planning-bounded-fact-lookup role=explorer model=sonnet effort=medium -->",
+      "call": "Agent(subagent_type=\"Explore\", model=\"sonnet\", effort=\"medium\") performs one sharply bounded read-only repository lookup without choosing task boundaries.",
       "role": "explorer",
-      "model": "haiku",
+      "model": "sonnet",
       "effort": "medium",
       "requires": []
     },
     {
       "id": "doc-grounded-bounded-code-lookup",
       "path": "home/common/agent-skills/skills/doc-grounded-questions/SKILL.md",
-      "marker": "<!-- agent-dispatch: id=doc-grounded-bounded-code-lookup role=explorer model=haiku effort=medium -->",
-      "call": "Agent(subagent_type=\"Explore\", model=\"haiku\", effort=\"medium\") performs one sharply bounded read-only central-concept lookup without resolving the question.",
+      "marker": "<!-- agent-dispatch: id=doc-grounded-bounded-code-lookup role=explorer model=sonnet effort=medium -->",
+      "call": "Agent(subagent_type=\"Explore\", model=\"sonnet\", effort=\"medium\") performs one sharply bounded read-only central-concept lookup without resolving the question.",
       "role": "explorer",
-      "model": "haiku",
+      "model": "sonnet",
       "effort": "medium",
       "requires": []
     },

@@ -131,10 +131,10 @@
       ],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 28256,
-        "codex": 28256
+        "claude": 28262,
+        "codex": 28262
       },
-      "note": "Phases 2–3 from AUTO.md's prompt: design, grill-with-docs and doc-grounded-questions. Their producer-report and explorer-escalation blocks stay per skill (#155 D5)."
+      "note": "Phases 2–3 from AUTO.md's prompt: design, grill-with-docs and doc-grounded-questions. Their producer-report and explorer-escalation blocks stay per skill (#155 D5). Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10)."
     },
     {
       "id": "planning-owner",
@@ -156,10 +156,10 @@
       ],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 22322,
-        "codex": 22322
+        "claude": 22326,
+        "codex": 22326
       },
-      "note": "Phase 4 from AUTO.md's prompt: writing-plans and doc-grounded-questions, plus the review contract for a mechanical-only self-grade. The producer-report block stays per skill (#155 D5)."
+      "note": "Phase 4 from AUTO.md's prompt: writing-plans and doc-grounded-questions, plus the review contract for a mechanical-only self-grade. The producer-report block stays per skill (#155 D5). Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10)."
     },
     {
       "id": "implementation-owner",
@@ -312,10 +312,10 @@
       ],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 12945,
-        "codex": 12945
+        "claude": 12947,
+        "codex": 12947
       },
-      "note": "The read-only scan from improve-codebase-architecture's prompt. The codebase-design vocabulary and the grounding pass are ambiguous between caller and scan owner, so they count as hot."
+      "note": "The read-only scan from improve-codebase-architecture's prompt. The codebase-design vocabulary and the grounding pass are ambiguous between caller and scan owner, so they count as hot. Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10)."
     },
     {
       "id": "research",
@@ -360,10 +360,10 @@
       ],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 20356,
-        "codex": 20356
+        "claude": 20358,
+        "codex": 20358
       },
-      "note": "One decision session. Grilling is the default mode; research and prototype sessions are conditional."
+      "note": "One decision session. Grilling is the default mode; research and prototype sessions are conditional. Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10)."
     },
     {
       "id": "to-issues",
