@@ -2368,8 +2368,28 @@ def command_control(args: argparse.Namespace) -> int:
                     release_claim(admission, claim, event="owner_unavailable", at=now)
             admission_changed = admission_changed or admission["releases"] != releases_before
 
+        # A delivered issue has nothing left to launch: its persisted ledger is
+        # delivery-complete after the opening settle, so no lane plans it and the
+        # one-issue policy never runs for it here (#220 D1, D2, D9).
+        delivered = frozenset(
+            issue for issue in request["issues"]
+            if str(issue) in state["issues"]
+            and runtime.delivery_complete(state["issues"][str(issue)]))
+
+        def delivered_verdict(issue: int) -> dict[str, Any]:
+            """The fixed verdict for a delivered issue: terminal, unchanged, no dispatch."""
+            issue_state = state["issues"][str(issue)]
+            return {"operation": "terminal", "changed": False,
+                    "issue_state": copy.deepcopy(issue_state),
+                    "attempt": issue_state["attempts"][-1] if issue_state["attempts"] else None,
+                    "requirements": [], "uses_candidate": False, "desired": "terminal",
+                    "expired": False}
+
         analysis: dict[int, dict[str, Any]] = {}
         for issue in request["issues"]:
+            if issue in delivered:
+                analysis[issue] = delivered_verdict(issue)
+                continue
             issue_state = state["issues"].get(str(issue))
             analysis[issue] = _apply_one_issue_policy(
                 ledger_issue=copy.deepcopy(issue_state),
@@ -2500,6 +2520,9 @@ def command_control(args: argparse.Namespace) -> int:
             return True
 
         def apply_policy(issue: int, dispatch_permitted: bool) -> dict[str, Any]:
+            if issue in delivered:
+                planned[issue] = delivered_verdict(issue)
+                return planned[issue]
             issue_state = state["issues"].get(str(issue))
             result = _apply_one_issue_policy(
                 ledger_issue=copy.deepcopy(issue_state),
@@ -2653,7 +2676,7 @@ def command_control(args: argparse.Namespace) -> int:
         actionless_replay = not dispatch_results
         for issue in request["issues"]:
             issue_state = state["issues"].get(str(issue))
-            if issue_state is None or not issue_state["attempts"]:
+            if issue_state is None or not issue_state["attempts"] or issue in delivered:
                 continue
             if "remainder" in (analysis[issue].get("custody_kind"),
                                planned.get(issue, {}).get("custody_kind")):
