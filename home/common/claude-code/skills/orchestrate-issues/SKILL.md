@@ -204,7 +204,9 @@ EOF
   `authorization_intents` on the sweep the rule above builds it for, then only
   while its latest summary carries `delivery_contract_required`; otherwise send
   null and `[]`. A non-null summary `contract_digest` means a contract is
-  installed, and from then on null means the installed contract governs.
+  installed, and from then on null means the installed contract governs. A
+  `delivery_contract` action asks for exactly the contracts of the issues it
+  lists; §4 holds its rule.
 - The built pair is process-local request data: never persist it. After a
   restart, the new bootstrap's null `contract_digest` values and each later
   summary's `delivery_contract_required` say which issues still need one.
@@ -238,8 +240,8 @@ values only for rendering and action execution; do not rebuild policy from them.
 ## 4. Execute control actions
 
 Validate each action as one of the closed kinds `spawn`, `resume`, `retry`,
-`delivery_remainder`, `wait`, or `finalize`, and execute actions in
-returned order. Any other kind is a contract error: stop without executing it and surface the unknown kind; fail loudly.
+`delivery_remainder`, `delivery_contract`, `wait`, or `finalize`, and execute
+actions in returned order. Any other kind is a contract error: stop without executing it and surface the unknown kind; fail loudly.
 
 For `spawn`, `resume`, and `retry`, project the action into the interface-2
 owner object: rename `id` to `action_id` and `kind` to `launch_kind`, add
@@ -284,7 +286,8 @@ call carrying a `launch_refused` owner observation for that action's `custody`,
 and execute that response. The runtime parks the refused owner and dispatches it
 again only after some later claim release other than a refusal — another
 owner's, or the controller's `finalized` release, so an issue left in
-`admission.waiting` resumes on the next orchestrate invocation.
+`admission.waiting` resumes on the next orchestrate invocation, or on the
+follow-up call a `delivery_contract` action asks for.
 
 <!-- agent-dispatch: id=orchestration-issue-owner role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_background=true) launches the issue owner in a fresh context with this entire prompt:
@@ -337,7 +340,7 @@ For `wait`, adapter state consists only of `current_wait_id` and
   a stale wake cannot trigger control or disturb the replacement observer.
 
 Arm the one-shot observer for the returned wake conditions and its `deadline_at`.
-control never returns a deadline-less wait; every wait carries deadline_at, and when nothing can proceed without a human, control returns finalize instead.
+control never returns a deadline-less wait; every wait carries deadline_at, and when nothing can proceed without a human, control returns finalize instead, or `delivery_contract` when a missing contract is all that stops an issue.
 No polling or repeated short sleeps are allowed.
 
 For `finalize`, first clear `current_wait_id`, then cancel the outstanding handle
@@ -345,9 +348,20 @@ For `finalize`, first clear `current_wait_id`, then cancel the outstanding handl
 `current_wait_handle`. Do not issue another control call merely to prepare the
 report.
 
+For `delivery_contract`, a missing delivery contract is all that stops each
+issue in its `issues` list, and nothing else will wake the run: control armed
+no deadline. This is the one rule for such an issue. Send each listed issue's
+contract as §3 describes (the pair built for it earlier in this invocation,
+else build it now) and make the next control call at once; that response
+takes over from this one. Never rebuild an issue whose build this invocation
+refused: send null and `[]` for it. When the builder has refused every listed
+issue in this invocation, the action ends the run as `finalize` does: clear
+the wait state as for `finalize` and render §5 from this response.
+
 ## 5. Final report
 
-Render a `finalize` action from the bounded summaries in the same
+Render a `finalize` action, or a `delivery_contract` action that ends the run
+because every listed build was refused, from the bounded summaries in the same
 interface_version 3 control response. Produce a per-issue table with issue,
 state, custody, PR, one-line reason, `blocked_on`, open delivery stages, and a re-entry line —
 `/from-issue <issue> --auto` for an issue suspended on a cause that a `--label`
@@ -380,7 +394,8 @@ too many times in a row, the expiry ends the work instead of parking it: that
 delta's own state reads `stopped`, the attempt is a `stopped(stalled)`
 terminal, and no resume follows in this or any later sweep. A parked
 suspension arms no deadline of its own, so once nothing else in the run is
-still running the sweep renders `finalize` and the later sweep is the one a
+still running the sweep renders `finalize` (or `delivery_contract` when a
+missing contract is all that stops some issue) and the later sweep is the one a
 re-invocation starts; report such an issue as paused, not as progressing, and
 report a `stopped(stalled)` issue as finished. An expiry is never `retried`
 and never `retry_refused`, so never report it as a spent attempt.
