@@ -110,12 +110,27 @@ Add to `ContractLifecycleTest`:
         self.assertEqual(json.loads(after)["admission"]["claims"], [])
         self.assertEqual(self.control("chain", request), first)
         self.assertEqual(path.read_bytes(), after)
+
+    def test_a_contract_request_releases_a_held_controller_claim(self):
+        """T7 (#221 D4, Phase-5 SF-3): the real chain shape, where the sweep before
+        171 closes ends in `wait` holding the controller claim, and the next
+        sweep's `delivery_contract` releases it `finalized` as `finalize` would."""
+        # TODO(implementer): start from T4's shape (171 live, 172 asking), sweep
+        # once and assert the reply is `wait` with a held controller claim in the
+        # ledger; then move 171 to its merged, closed state (tracker closed, forge
+        # merged, and 171's attempt recorded merged — through the same ledger seam
+        # contract_chain uses, keeping the ledger's admission block as the first
+        # sweep left it) and sweep again. Assert the reply's actions are exactly
+        # `[{"id": "delivery_contract", "kind": "delivery_contract", "issues": [172]}]`
+        # and that the ledger's controller claim now has `release_event ==
+        # "finalized"` with no unreleased controller claim left (mirror
+        # `assert_controller_finalized` in test_workflow_state.py:727).
 ```
 
 - [ ] **Step 2: Run the tests and watch T1 fail at base**
 
-Run: `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_delivery_workflow.py -k unblocked_issue_without_a_contract -k asked_contract_spawns -k cannot_progress_still -k armed_deadline_keeps_wait -k replaying_a_contract_request 2>&1 | tail -15`
-Expected: exactly one failure, `test_an_unblocked_issue_without_a_contract_is_asked_for_it_not_finalized`, whose diff shows the actions are `[{'id': 'finalize', 'kind': 'finalize'}]`. T2, T3, T4 and T6 pass at base (they pin behavior that must survive the change; a scratch run at base confirmed each).
+Run: `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_delivery_workflow.py -k unblocked_issue_without_a_contract -k asked_contract_spawns -k cannot_progress_still -k armed_deadline_keeps_wait -k replaying_a_contract_request -k releases_a_held_controller_claim 2>&1 | tail -15`
+Expected: exactly two failures, T1 (`test_an_unblocked_issue_without_a_contract_is_asked_for_it_not_finalized`) and T7 (`test_a_contract_request_releases_a_held_controller_claim`), each diff showing the actions are `[{'id': 'finalize', 'kind': 'finalize'}]`; T7's claim assertion already holds at base (write it before the action assertion to confirm). T2, T3, T4 and T6 pass at base (they pin behavior that must survive the change; a scratch run at base confirmed each).
 
 - [ ] **Step 3: Write the minimal implementation**
 
@@ -145,11 +160,13 @@ In the `control` sweep of `workflow-state.py`, replace the terminal-action block
             actions.append({"id": "finalize", "kind": "finalize"})
 ```
 
+Compute `contract_requests` once, before the `summaries` list (Phase-5 D-5), and have `control_summary(..., contract_required=...)` use `issue in contract_requests or (issue in waiting and contract_missing(issue))` so "every listed issue's summary asks" holds by construction; the block above then only reads it.
+
 Change the admission comment at line ~2756 from "a sweep ending in `finalize` keeps no controller claim (D19, D20)." to "a sweep with no deadline armed, ending in `finalize` or `delivery_contract`, keeps no controller claim (D19, D20; #221 D4)." Do not change the `if next_deadline is None:` release logic itself.
 
 - [ ] **Step 4: Verify**
 
-Run the Step 2 command. Expected: 5 tests, `OK`.
+Run the Step 2 command. Expected: 6 tests, `OK`.
 Run: `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_delivery_workflow.py home/common/agent-skills/tests/test_workflow_state.py home/common/agent-skills/tests/test_host_admission.py home/common/agent-skills/tests/test_admission_replay.py 2>&1 | tail -4`
 Expected: `OK` (in particular `test_contractless_retry_on_an_absent_path_asks_for_its_contract` stays green: its `asked` sweep now returns `delivery_contract` and still keeps no controller claim).
 Falsifiable gate: `grep -c '"id": "delivery_contract"' home/common/agent-skills/scripts/workflow-state.py` prints `1` (it prints `0` at base, where the command exits 1).

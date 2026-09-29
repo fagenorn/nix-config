@@ -3,6 +3,7 @@
 **Files:**
 - Modify: `home/common/claude-code/skills/orchestrate-issues/SKILL.md` (§3 line ~204-207, §4 lines ~240 and ~340-345, §5 line ~350)
 - Modify: `home/common/claude-code/skills/orchestrate-issues/evals/evals.json` (the two closed-kind enumerations, lines 10 and 18)
+- Modify: `home/common/agent-skills/skills/from-issue/SKILL.md` (`### Explicit durable interactive acquisition`, one sentence; Phase-5 SF-1, per D12)
 - Modify: `home/common/agent-skills/instruction-load.json` (profile `orchestration-dispatcher`, `ceiling_bytes.claude` and `note`, lines ~54-57)
 - Test: `home/common/agent-skills/tests/test_workflow_skill_contracts.py` (class `WorkflowSkillContractsTest`)
 
@@ -29,8 +30,8 @@ Add to `WorkflowSkillContractsTest`:
         execute = normalized(self.section(self.orchestrate, "## 4. Execute control actions",
                                           "## 5. Final report"))
         final = normalized(self.section(self.orchestrate, "## 5. Final report", "## Notes"))
-        self.assertIn("A `delivery_contract` action asks for exactly these contracts; "
-                      "§4 holds its rule.", decide)
+        self.assertIn("A `delivery_contract` action asks for exactly the contracts of the "
+                      "issues it lists; §4 holds its rule.", decide)
         self.assert_ordered(execute, "For `delivery_contract`",
                             "This is the one rule for such an issue.",
                             "Send each listed issue's contract as §3 describes",
@@ -41,6 +42,18 @@ Add to `WorkflowSkillContractsTest`:
         self.assertEqual(normalized(self.orchestrate).count(
             "This is the one rule for such an issue."), 1)
         self.assertIn("or a `delivery_contract` action that ends the run", final)
+        # Phase-5 SF-4: the refused-launch and parked-suspension passages name the
+        # new no-deadline sweep too.
+        self.assert_ordered(execute, "resumes on the next orchestrate invocation",
+                            "or on the follow-up call a `delivery_contract` action asks for")
+        self.assertIn("the sweep renders `finalize` (or `delivery_contract` when a missing "
+                      "contract is all that stops some issue)", execute)
+        # Phase-5 SF-1 (D12): the durable interactive route answers the same action.
+        durable = normalized(self.section(self.from_issue,
+            "### Explicit durable interactive acquisition", "## The flow"))
+        self.assert_ordered(durable, "A `delivery_contract` reply naming this issue",
+                            "build this issue's contract", "call `workflow-state control` once more",
+                            "orchestrate-issues §4")
         for text in (self.orchestrate, json.dumps(self.orchestrate_evals)):
             self.assertNotIn("override", text.lower())
         expected = " ".join(case["expected_output"] for case in self.orchestrate_evals["evals"])
@@ -64,7 +77,7 @@ Expected: 4 failures (the new anchors are absent from SKILL.md and evals.json at
 
 SKILL.md (every sentence below is dictated verbatim; hard-wrap at ~80 columns except where noted):
 
-1. §3, the bullet starting "On success the builder prints": append after "…null means the installed contract governs." the sentence: `A `delivery_contract` action asks for exactly these contracts; §4 holds its rule.`
+1. §3, the bullet starting "On success the builder prints": append after "…null means the installed contract governs." the sentence: `A `delivery_contract` action asks for exactly the contracts of the issues it lists; §4 holds its rule.`
 2. §4, first sentence: the closed kinds become `` `spawn`, `resume`, `retry`, `delivery_remainder`, `delivery_contract`, `wait`, or `finalize` ``.
 3. §4, replace the one-line sentence "control never returns a deadline-less wait; every wait carries deadline_at, and when nothing can proceed without a human, control returns finalize instead." with, on one physical line: `control never returns a deadline-less wait; every wait carries deadline_at, and when nothing can proceed without a human, control returns finalize instead, or `delivery_contract` when a missing contract is all that stops an issue.`
 4. §4, after the `finalize` paragraph (ending "Do not issue another control call merely to prepare the report.") and before `## 5. Final report`, add this paragraph (it describes control as Task 1 implements it: the action appears only with no deadline armed, listing issues that planned a contract):
@@ -80,13 +93,17 @@ SKILL.md (every sentence below is dictated verbatim; hard-wrap at ~80 columns ex
    issue in this invocation, the action ends the run as `finalize` does: clear
    the wait state as for `finalize` and render §5 from this response.
    ```
-5. §5, first sentence becomes: `Render a `finalize` action, or a `delivery_contract` action that ends the run because every listed build was refused, from the bounded summaries in the same interface_version 3 control response.` (hard-wrapped).
+5. §4, the refused-launch paragraph: extend its last sentence "…so an issue left in `admission.waiting` resumes on the next orchestrate invocation." to end "…resumes on the next orchestrate invocation, or on the follow-up call a `delivery_contract` action asks for." (Phase-5 SF-4, per D4).
+6. §4, the parked-suspension paragraph: "once nothing else in the run is still running the sweep renders `finalize` and the later sweep…" becomes "…still running the sweep renders `finalize` (or `delivery_contract` when a missing contract is all that stops some issue) and the later sweep…" (Phase-5 SF-4).
+7. §5, first sentence becomes: `Render a `finalize` action, or a `delivery_contract` action that ends the run because every listed build was refused, from the bounded summaries in the same interface_version 3 control response.` (hard-wrapped).
+
+from-issue SKILL.md, `### Explicit durable interactive acquisition` (Phase-5 SF-1, per D12): after the sentence ending "…and on a reused run only once a control summary carries `delivery_contract_required` (send null until then).", insert: `A `delivery_contract` reply naming this issue is that ask, not a missing dispatch: build this issue's contract then and call `workflow-state control` once more, as orchestrate-issues §4 describes; only that follow-up reply is held to the dispatch rule below.` Check this against the live helper after Task 1: on a reused run with no installed contract, the first `direct`-route control call must indeed return `delivery_contract` for the issue; if it does not, write a TODO in the task report instead of the sentence and surface it.
 
 evals.json (keep valid JSON; change only these substrings):
 - line 10: `from the closed set spawn, resume, retry, delivery_remainder, wait, finalize;` → `from the closed set spawn, resume, retry, delivery_remainder, delivery_contract, wait, finalize;`
 - line 18: `may return spawn, resume, retry, delivery_remainder, wait, or finalize` → `may return spawn, resume, retry, delivery_remainder, delivery_contract, wait, or finalize`
 
-instruction-load.json, profile `orchestration-dispatcher` (per D10): set `ceiling_bytes.claude` to the new `wc -c < home/common/claude-code/skills/orchestrate-issues/SKILL.md` value, and append to its `note`: ` Ceiling raised for #221: §4's `delivery_contract` rule (#221 D10).`
+instruction-load.json, profile `orchestration-dispatcher` (per D10) — and likewise any profile covering from-issue's SKILL.md that `test_the_live_tree_breaches_no_ceiling` then names: set `ceiling_bytes.claude` to the new `wc -c < home/common/claude-code/skills/orchestrate-issues/SKILL.md` value, and append to its `note`: ` Ceiling raised for #221: §4's `delivery_contract` rule (#221 D10).`
 
 - [ ] **Step 4: Verify**
 
@@ -100,7 +117,7 @@ Then the plan's final verification: `just agent-workflow-tests 2>&1 | tail -5` (
 - [ ] **Step 5: Commit**
 
 ```bash
-git add home/common/claude-code/skills/orchestrate-issues/SKILL.md home/common/claude-code/skills/orchestrate-issues/evals/evals.json home/common/agent-skills/instruction-load.json home/common/agent-skills/tests/test_workflow_skill_contracts.py
+git add home/common/claude-code/skills/orchestrate-issues/SKILL.md home/common/claude-code/skills/orchestrate-issues/evals/evals.json home/common/agent-skills/skills/from-issue/SKILL.md home/common/agent-skills/instruction-load.json home/common/agent-skills/tests/test_workflow_skill_contracts.py
 git commit -m "docs(orchestrate-issues): answer control's delivery_contract with one rule (#221)
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"

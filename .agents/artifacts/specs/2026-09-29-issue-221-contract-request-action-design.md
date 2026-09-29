@@ -127,8 +127,9 @@ No new seam is introduced (per D9).
   keeps `wait`, and the contract goes out on the next wake (per D2).
 - The #125 transaction-core migration, and moving `workflow-state` into
   `agent_tools`.
-- `direct-owner` and `from-issue` direct acquisition, which already ask with
-  `observe`.
+- `direct-owner` and `from-issue` direct autonomous acquisition, which already
+  ask with `observe`. From-issue's explicit durable interactive route does call
+  `control` and gets one sentence answering the action (D12).
 - The Codex `orchestrate-issues` stub, which only relays `host-route` and never
   sees a control reply.
 - Any change to the control request, the bootstrap, admission accounting or
@@ -160,3 +161,5 @@ No new seam is introduced (per D9).
 | D9 | Test seams: the `control` CLI through the `ContractLifecycleTest` harness, the workflow-response fixture tests, and the skill-contract anchors. T1 must fail at base | the-bar *Tests that can fail*; existing harnesses | A new unit seam inside the `control` closure (it is not importable, so the test would need a patch-in seam) |
 | D10 | Raise the `orchestration-dispatcher` profile's `ceiling_bytes.claude` in `instruction-load.json` to the grown `orchestrate-issues/SKILL.md` byte count, with a note naming #221 | `test_the_live_tree_breaches_no_ceiling` pins the ceiling at the current byte count (22559); earlier issues raised it with a note (#198, #155 D10) | Cut unrelated SKILL.md prose to offset the growth (rewording churn outside this issue's scope) |
 | D11 | T1–T4 and T6 seed issue 171's delivery as a merged attempt written straight into the ledger, with a closed tracker, instead of driving 171 through spawn, finish and forge reconcile. The control change lands before the validator change, so T1 runs against the unchanged `workflow-state.py` and fails there | A scratch run at base showed that a merged forge leaves live custody untouched (the reply is `wait`), while the seeded ledger reproduces `[finalize]` with 172 asking; the harness already seeds ledgers with `write_run` | Drive 171 through the full owner lifecycle (dozens of fixture steps that do not exercise this change) |
+| D12 | From-issue's explicit durable interactive acquisition, the one other interface-3 `control` consumer, answers a `delivery_contract` naming its issue by building the contract and calling control once more; one prose sentence, no code (narrows D7's "direct acquisition is unchanged") | Phase-5 review SF-1: that route requires exactly one dispatch action and fails loudly otherwise, so without a rule it would reopen the adapter-judgment gap #221 closes | Keep it out of scope (the route would fail loudly on its own documented reused-run path) |
+| D13 | Every validator and admission guard this change adds has a test only it turns red: a non-numeric summary order, a `not_last` case rejected only by position, order equality replacing a separate duplicate clause, and T7 pinning a held controller claim's `finalized` release on a `delivery_contract` sweep | Phase-5 review SF-2/SF-3; the-bar *Tests that can fail* | Rely on the subtests as planned (deleting the last-position or numeric-order guard turned nothing red) |
