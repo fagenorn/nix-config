@@ -2753,8 +2753,9 @@ def command_control(args: argparse.Namespace) -> int:
 
         next_deadline=runtime.next_deadline(state,request["issues"])
         if not direct:
-            # Release every claim whose launch this sweep ended; a sweep ending
-            # in `finalize` keeps no controller claim (D19, D20).
+            # Release every claim whose launch this sweep ended; a sweep with no
+            # deadline armed, ending in `finalize` or `delivery_contract`, keeps
+            # no controller claim (D19, D20; #221 D4).
             releases_before = admission["releases"]
             settle_admission(state, at=now)
             if next_deadline is None:
@@ -2775,6 +2776,10 @@ def command_control(args: argparse.Namespace) -> int:
             issue_state = state["issues"].get(str(issue))
             return issue_state is None or issue_state["delivery"]["contract"] is None
 
+        contract_requests = [
+            issue for issue in request["issues"]
+            if issue in planned and planned[issue]["operation"] == "contract"
+        ]
         summaries = [
             control_summary(
                 issue=issue,
@@ -2782,7 +2787,7 @@ def command_control(args: argparse.Namespace) -> int:
                 issue_state=state["issues"].get(str(issue)),
                 reduction=reductions.get(issue),
                 contract_required=(
-                    (issue in planned and planned[issue]["operation"] == "contract")
+                    issue in contract_requests
                     or (issue in waiting and contract_missing(issue))
                 ),
                 unresumable=unresumable.get(issue),
@@ -2790,18 +2795,23 @@ def command_control(args: argparse.Namespace) -> int:
             for issue in request["issues"]
         ]
 
-        # A wait must name the instant it ends. With no deadline armed there is
-        # nothing left for this sweep to wake up for, so control renders the
-        # summaries and returns to the caller instead of parking forever on a
-        # notification that may never arrive (per D9, D12).
-        if next_deadline is None:
-            actions.append({"id": "finalize", "kind": "finalize"})
-        else:
+        # A wait must name the instant it ends, so with a deadline armed control
+        # waits and any contract a summary asks for goes out on the next wake
+        # (per D9, D12; #221 D2). With no deadline armed nothing will wake the
+        # run: when some issue is stopped only by its missing delivery contract,
+        # control asks for those contracts instead of ending the run (#221 D1);
+        # otherwise it renders the summaries and returns `finalize`.
+        if next_deadline is not None:
             actions.append({
                 "id": f"wait:{next_deadline}", "kind": "wait",
                 "wake_on": sorted(CONTROL_WAKE_EVENTS),
                 "deadline_at": next_deadline,
             })
+        elif contract_requests:
+            actions.append({"id": "delivery_contract", "kind": "delivery_contract",
+                            "issues": contract_requests})
+        else:
+            actions.append({"id": "finalize", "kind": "finalize"})
         runtime.decorate_control(
             state, deltas, actions, reductions, CONTROL_DISPATCH_KINDS,
             ledger_repo_root=str(resolve_repo_root(args.repo_root)))
