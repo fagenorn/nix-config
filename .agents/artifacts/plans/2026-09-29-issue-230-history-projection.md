@@ -84,4 +84,16 @@ The specification's ledger is authoritative: D1 and D2 govern the shared walk
 and constructor; D3 governs operation recipes and their ownership; D4 governs
 verification. This plan introduces no additional non-obvious decision.
 
+## Review provenance
+
+Phase 5 completed through the native review route, with no runtime fallback.
+Reviewer and job: `/root/plan_review`; reviewed head:
+`e7bf9eebb715c9985bd08d09e17b32fa2e243550`; implementation base:
+`6d7a0b3a47d5a480e1540ce1931dd012f5f1ad0b`. Disposition: zero Blocking,
+Should-fix or Discussion findings; no plan or design change was requested.
+The reviewer executed all 15 planned Python blocks in memory at the specified
+fixture points: all 10 affected scenarios passed against unchanged production
+code. This validates the baseline characterizations, not the implementation.
+This provenance entry is the sole post-review bookkeeping change.
+
 ---
