@@ -251,6 +251,46 @@ class DeliveredControlTest(BuilderHarness, unittest.TestCase):
         before = self.records(DELIVERED)
         self.assert_only_live_resumed(self.after_delivery(275, live), before)
 
+    def test_a_stale_delivered_custody_is_reported_not_dispatched(self):
+        """Acceptance 3: a pre-fix sweep's extra r1 launch is reported, never dispatched."""
+        live = self.delivered_shape()
+        pristine = self.ledger.read_bytes()
+        stored = json.loads(pristine)
+        remainder = stored["issues"][str(DELIVERED)]["delivery_remainders"][0]
+        # The launch a pre-fix sweep committed: a resume at the ledger's last write.
+        remainder["launches"].append({"kind": "resume", "owner": remainder["owner"],
+                                      "worktree": remainder["worktree"],
+                                      "at": stored["updated_at"]})
+        self.ledger.write_text(json.dumps(stored), encoding="utf-8")
+        loaded = json.loads(self.cli("current-launch", *self.run_args, "--action-id",
+                                     f"{DELIVERED}:r1:2").stdout)
+        self.assertFalse(loaded["current"])
+        before = self.records(DELIVERED)
+        stale = self.after_delivery(251, live)
+        self.assertEqual(stale.returncode, 0, stale.stderr.decode())
+        self.validated("workflow-response", stale.stdout)
+        response = json.loads(stale.stdout)
+        self.assertFalse([a for a in response["actions"] if a.get("issue") == DELIVERED])
+        self.assertFalse([d for d in response["deltas"] if d["issue"] == DELIVERED])
+        summary = next(s for s in response["summaries"] if s["issue"] == DELIVERED)
+        self.assertEqual(summary["custody"], {"kind": "remainder", "remainder": 1,
+                                              "launch": 2, "action_id": f"{DELIVERED}:r1:2"})
+        self.assertEqual((summary["state"], summary["pending_stage_ids"]), ("closed", []))
+        self.assertIsNotNone(summary["contract_digest"])
+        # The delivered signature (per D13): live custody with every stage observed
+        # also has empty pending stages, but owes postconditions and names an owner.
+        self.assertEqual(summary["requirements"], [])
+        self.assertIsNone(summary["owner"])
+        self.assertEqual(self.records(DELIVERED), before)
+        # The same sweep over the unamended ledger differs only in the named launch.
+        self.ledger.write_bytes(pristine)
+        clean = self.after_delivery(251, live)
+        self.assertEqual(clean.returncode, 0, clean.stderr.decode())
+        baseline = next(s for s in json.loads(clean.stdout)["summaries"]
+                        if s["issue"] == DELIVERED)
+        self.assertEqual(baseline["custody"]["action_id"], f"{DELIVERED}:r1:1")
+        self.assertEqual({**baseline, "custody": summary["custody"]}, summary)
+
     def test_a_delivered_candidate_observation_is_skipped(self):
         """The post-restart shape: the adapter reports only 207's candidate worktree.
 

@@ -360,7 +360,11 @@ still open, and the PR and `discussion_items` come from the summary's `result`.
 A null `contract_digest` means the issue ran lifecycle-only: say so, and name
 the builder refusal from §3 when there was one; a summary still carrying
 `delivery_contract_required` is an issue that never received a contract. A
-summary whose `worktree_fact` requirement reads `recorded_worktree_absent` or
+summary with a non-null `contract_digest`, an empty `pending_stage_ids`, an
+empty `requirements`, a null `owner` and a non-null `custody` is a delivered
+issue whose `custody` names a stale record that control will never dispatch:
+report it as delivered with that stale custody, never as an active or
+progressing owner. A summary whose `worktree_fact` requirement reads `recorded_worktree_absent` or
 `recorded_worktree_mismatch` is an issue that cannot resume, because its
 recorded worktree is gone or is not on the issue branch: report it as unable
 to resume for that reason, never as progressing. Then group every
