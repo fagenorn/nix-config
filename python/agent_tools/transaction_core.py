@@ -157,6 +157,16 @@ def _require_creatable(root: Path, creation_key: Any, subject: Any,
         raise StateInvalid(f"{where}: {violation}")
 
 
+def _capture_result(result: Any, validator: Callable[[Any], str | None], *,
+                    where: str) -> dict:
+    """Own accepted fields before later adapter calls can rewrite the returned dictionary."""
+    captured = dict.copy(result) if type(result) is dict else result
+    violation = validator(captured)
+    if violation is not None:
+        raise EffectResultInvalid(f"{where}: {violation}")
+    return captured
+
+
 def _refuse_in_flight(prior: dict, identity: str, entry: ActionFold | None,
                       latest_seq: int | None = None) -> None:
     """Refuse `attempt_in_flight` when the action's latest attempt is open under the held
@@ -691,11 +701,9 @@ class TransactionStore:
             attempts = 0 if entry is None else entry.attempts
             latest_seq = 0 if entry is None else entry.latest_seq
             request = effect_request(prior, identity, name, parameters, attempts)
-        result = effect.inspect(request)
-        violation = inspect_result_violation(result)
-        if violation is not None:
-            raise EffectResultInvalid(f"{custody.transaction_id}: inspect_action: "
-                                      f"{violation}")
+        result = _capture_result(
+            effect.inspect(request), inspect_result_violation,
+            where=f"{custody.transaction_id}: inspect_action")
         with self._fenced(custody, "inspect_action", writes=True) as (prior, now):
             entry = fold_actions(prior["events"]).get(identity)
             _refuse_in_flight(prior, identity, entry, latest_seq)
@@ -751,13 +759,12 @@ class TransactionStore:
             self._append(prior, now, [{"type": "invocation_intended", "action_id": identity,
                                        "attempt": attempt, "fence": fence}])
             request = effect_request(prior, identity, name, parameters, attempt)
-        returned = effect.invoke(request)
-        violation = invoke_result_violation(returned)
-        if violation is None:
-            inspected = effect.inspect(request)
-            violation = inspect_result_violation(inspected)
-        if violation is not None:
-            raise EffectResultInvalid(f"{transaction_id}: invoke_action: {violation}")
+        returned = _capture_result(
+            effect.invoke(request), invoke_result_violation,
+            where=f"{transaction_id}: invoke_action")
+        inspected = _capture_result(
+            effect.inspect(request), inspect_result_violation,
+            where=f"{transaction_id}: invoke_action")
         with self._fenced(custody, "invoke_action", writes=True) as (prior, now):
             fence = prior["custody"]["fence"]
             return self._append(prior, now, [
@@ -803,10 +810,9 @@ class TransactionStore:
                                                "evidence_id": evidence_id,
                                                "fence": prior["custody"]["fence"]}])
             request = observation_request(prior, entry, cohort)
-        result = observer.observe(request)
-        violation = observation_violation(result, entry)
-        if violation is not None:
-            raise EffectResultInvalid(f"{transaction_id}: collect_obligation: {violation}")
+        result = _capture_result(
+            observer.observe(request), lambda captured: observation_violation(captured, entry),
+            where=f"{transaction_id}: collect_obligation")
         with self._fenced(custody, "collect_obligation", writes=True) as (prior, now):
             fence = prior["custody"]["fence"]
             reason = "clock_regressed" if now < started else collection_refusal(
@@ -884,8 +890,8 @@ class TransactionStore:
         credential or no callable `observer.observe` is `StateInvalid`. The first hold
         (`_fenced`) runs `admit`, which may refuse; with no request it appends what
         `conclude(prior, [], [])` yields, if anything, and returns. Each request then goes to
-        `observer.observe` with no lock held; what it raises propagates, a copy of each result
-        is what is validated and kept, and one failing `check_result_violation` is
+        `observer.observe` with no lock held; what it raises propagates, each accepted result
+        is captured and validated before the next request, and a failing check is
         `EffectResultInvalid`. The second hold refuses
         `history_changed` when the revision moved, else appends `conclude`'s events."""
         require_custody_shape(custody)
@@ -901,10 +907,9 @@ class TransactionStore:
             revision = prior["revision"]
         results = []
         for request in requests:
-            result = copy.deepcopy(observer.observe(request))
-            violation = check_result_violation(result)
-            if violation is not None:
-                raise EffectResultInvalid(f"{transaction_id}: {operation}: {violation}")
+            result = _capture_result(
+                observer.observe(request), check_result_violation,
+                where=f"{transaction_id}: {operation}")
             results.append(result)
         with self._fenced(custody, operation, writes=True) as (prior, now):
             if prior["revision"] != revision:

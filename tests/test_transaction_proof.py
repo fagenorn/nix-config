@@ -10,10 +10,10 @@ import unittest
 from agent_tools import transaction_storage
 from agent_tools.transaction_core import (
     PROOF_REFUSAL_REASONS, EffectResultInvalid, ProofRefused, StaleCustody, StateInvalid,
-    TransactionError, TransitionRefused, action_id)
+    TransactionError, TransactionStore, TransitionRefused, action_id)
 
 from .test_transaction_custody import KEYS, SUBJECT, TTL, CustodyCase, plain, serialize
-from .test_transaction_invocation import FakeEffect, FakeWorld, renumbered
+from .test_transaction_invocation import FakeEffect, FakeWorld, malformed_results, renumbered
 from .test_transaction_recovery_plan import inert_recovery
 
 PUB, ACT = "published_artifact_identity", "running_subject_identity"
@@ -693,6 +693,62 @@ class ProofVocabularyTest(unittest.TestCase):
 
     def test_the_refusal_reasons_are_exactly_the_observed_ones(self):
         self.assertEqual(set(PROOF_REFUSAL_REASONS), OBSERVED_PROOF_REASONS)
+
+
+class ProofOwnershipTest(ProofCase):
+    def test_collection_keeps_the_observers_returned_fields(self):
+        class Retaining(Observer):
+            def observe(self, request):
+                reply = super().observe(request)
+                reply["reference"] = "proof:original"
+                self.clock.on_next_read(lambda: reply.update(
+                    outcome="unsatisfied", reason="subject_mismatch", reference="proof:changed"))
+                return reply
+
+        self.proving()
+        before = self.clock.now
+        after = self.collect(self.pub, Retaining(self.clock))
+        self.assertEqual(self.clock.now, before)
+        for transaction in (after, TransactionStore(self.root).load(self.transaction_id)):
+            event = transaction.events[-1]
+            self.assertEqual((event["type"], event["obligation_id"], event["outcome"],
+                              event["reason"], event["reference"], event["latency_ms"]),
+                             ("obligation_observed", self.pub, "satisfied", "ok",
+                              "proof:original", 0))
+            [entry] = [e for e in transaction.proof["obligations"]
+                       if e["obligation_id"] == self.pub]
+            self.assertEqual((entry["observations"], entry["latest_outcome"],
+                              entry["latest_admissible"]), (1, "satisfied", True))
+
+
+class ProofResultCompatibilityTest(ProofCase):
+    def malformed_collection(self, interval):
+        self.proving()
+        if interval:
+            self.collect(self.act)
+        identity = "smoke" if interval else self.pub
+        valid = {"outcome": "satisfied", "reason": "ok", "reference": "proof:original"}
+        for index, (label, bad) in enumerate(malformed_results(valid), start=1):
+            with self.subTest(result=label):
+                before = self.store.load(self.transaction_id)
+                with self.assertRaises(EffectResultInvalid) as caught:
+                    self.collect(identity, self.observer(result=bad))
+                self.assertTrue(str(caught.exception).startswith(
+                    f"{self.transaction_id}: collect_obligation: "))
+                loaded = TransactionStore(self.root).load(self.transaction_id)
+                self.assertEqual(loaded.events[:len(before.events)], before.events)
+                added = loaded.events[len(before.events):]
+                self.assertEqual([(e["type"], e.get("evidence_id")) for e in added],
+                                 [("interval_opened", f"smoke@{index}")] if interval else [])
+                [entry] = [e for e in loaded.proof["obligations"]
+                           if e["obligation_id"] == identity]
+                self.assertEqual((entry["observations"], entry["latest_outcome"]), (0, None))
+
+    def test_malformed_event_observation_records_nothing(self):
+        self.malformed_collection(False)
+
+    def test_malformed_interval_observation_keeps_only_its_marker(self):
+        self.malformed_collection(True)
 
 
 if __name__ == "__main__":

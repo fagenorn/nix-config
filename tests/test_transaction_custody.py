@@ -31,8 +31,15 @@ INSTANCE = re.compile(r"lin_[0-9a-f]{32}")
 class FakeClock:
     def __init__(self, now=T0):
         self.now = now
+        self.next_read = None
+
+    def on_next_read(self, callback):
+        self.next_read = callback
 
     def __call__(self):
+        callback, self.next_read = self.next_read, None
+        if callback is not None:
+            callback()
         return self.now
 
     def advance(self, ms):
