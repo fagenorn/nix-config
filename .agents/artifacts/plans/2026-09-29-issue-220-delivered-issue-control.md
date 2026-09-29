@@ -22,7 +22,7 @@ boundary inside the ledger transaction, before `commit_state` (per D5, D6).
 validator (`home/common/agent-skills/scripts/artifact_budget.py`).
 
 Spec (source of truth, read it whole):
-`.agents/artifacts/specs/2026-09-29-issue-220-delivered-issue-control-design.md`, D1–D12.
+`.agents/artifacts/specs/2026-09-29-issue-220-delivered-issue-control-design.md`, D1–D15.
 The code base is commit `3081d23`.
 
 ## Global Constraints
@@ -59,7 +59,7 @@ The code base is commit `3081d23`.
 ## Delivery estimate and boundaries
 
 Estimates only. About six changed files: `workflow-state.py` (about +50/−10 lines),
-`workflow_delivery_wire.py` (about +10), one new test file (about 330 lines),
+`workflow_delivery_wire.py` (about +10), one new test file (about 400 lines),
 `test_workflow_state.py` (a 4-line reorder), the `justfile` (+1) and the
 `orchestrate-issues` skill (+1 sentence). The new test file is the aggregate-growth risk; the
 whole change is one reviewable slice well inside a review-package boundary, so no further
@@ -79,7 +79,25 @@ Task 4 — Run the full workflow suite and the Nix build (acceptance 4) — no f
 
 The spec's `## Decision ledger` owns every row. Tasks cite D1–D9 from the design and the
 planning rows D10 (control sorts its blockers into the wire's closed order), D11 (the pinned
-issue-207 regression fixture) and D12 (delivered issues also skip the remainder-1 lane's slot
-check and the candidate-worktree replay check).
+issue-207 regression fixture), D12 (delivered issues also skip the candidate-worktree replay
+check), and the plan-review rows D13 (the delivered summary signature adds empty
+`requirements` and null `owner`, amending D4), D14 (no remainder-lane guard; the replay skip
+and D9's recovery proof each get a regression, amending D12) and D15 (`print_json` writes
+`render_json`, amending D5).
+
+## Standards review provenance
+
+The plan-review reviewer was the Claude fallback (native Opus reviewer). The Codex run
+(gpt-6-astra/xhigh, read-only, ephemeral) completed, but its JSONL lacked the required
+runtime-selection model/effort event, so it failed metadata validation and triggered exactly
+one native fallback; its single should-fix (PR220-01) duplicated SF-3. Base SHA
+`93bf5fd2cdff5bb6ca347dc38a14767ebd6d4176`; the review ran isolated and read-only.
+
+- Accepted: 4 should-fix, 0 blocking — SF-1 (D13), SF-2 and SF-3 with PR220-01 merged into
+  SF-3 (D14), SF-4 (D15).
+- Discussion: D-1 kept as-is (the `apply_policy` gate stays the single entry, per D1); D-2
+  recorded in D10 (direct-owner blocker order); D-3 recorded in the spec's `## Out of scope`
+  (a delivered issue's `launch_refused`).
+- Rejected: none.
 
 ---

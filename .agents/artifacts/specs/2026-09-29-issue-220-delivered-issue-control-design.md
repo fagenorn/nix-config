@@ -75,10 +75,13 @@ launch and renders the newest one, and nothing else can name an older launch
    summary of a delivered issue is unchanged except `custody`. When the ledger
    still holds exactly one nonterminal record for that issue, `custody` names
    that record's current launch. Otherwise it stays null, as today. A delivered
-   summary is one with a non-null `contract_digest` and an empty
-   `pending_stage_ids`. It never carried a custody before, so a non-null one
-   can only mean a stale custody that control will never dispatch. The
-   wire shape and its vocabulary are unchanged (D4).
+   summary is one with a non-null `contract_digest`, an empty
+   `pending_stage_ids`, an empty `requirements` and a null `owner`. It never
+   carried a custody before, so a non-null one can only mean a stale custody
+   that control will never dispatch. The first two alone do not suffice: live
+   custody whose stages are all observed but whose postconditions are pending
+   has them too, but it owes postcondition observations and names its owner
+   (D13). The wire shape and its vocabulary are unchanged (D4).
 3. **Control validates its reply before it commits.** Inside the ledger
    transaction, after the reply is built and before the mutation is returned
    for commit, control renders the reply to the exact bytes it will print. It
@@ -148,7 +151,10 @@ validator or policy function is mocked.
    The test asserts that the
    reply passes the `workflow-response` boundary and carries no action for A,
    and that B's resume is still emitted. At the base commit this test fails:
-   the boundary rejects the reply (D3).
+   the boundary rejects the reply (D3). Two variants of that sweep observe A
+   only by its candidate worktree, as after an adapter restart, and carry a
+   structurally valid recovery proof for A. Each asserts the same reply, no
+   `admission.waiting` entry for A, and A's records unchanged (D9, D14).
 2. **Atomic refusal (acceptance 2).** The test copies the source `scripts`
    tree beside a copy of the artifact-budget policy whose
    `workflow_responses.wire_max_bytes` is too small for any control reply,
@@ -176,6 +182,12 @@ validator or policy function is mocked.
 - `direct-owner`'s handling of a delivered issue. Its remainder re-entry path
   reads the latest remainder the same way, so it may share the defect. That
   belongs in its own issue (D1).
+- A `launch_refused` owner observation naming a delivered issue's stale
+  custody. The masked projection reports no custody, so it refuses the whole
+  sweep with `launch_refused is not applicable`. It is believed unreachable:
+  the only such custody is one a pre-fix sweep committed, and its reply failed
+  the adapter's own boundary check, so no owner was ever launched on it.
+- `direct-owner`'s terminal blocker order (D10).
 - An issue whose delivery is completed by this same sweep's delivery-
   observation fold after a lane has already planned its launch. Guarantee 2
   refuses such a sweep atomically, and it is not otherwise special-cased (D2).
@@ -197,6 +209,9 @@ validator or policy function is mocked.
 | D7 | No migration or repair of existing ledgers; stale records stay as written | Stale records already pass `validate_state`; remainder states have no success terminal; issue asks for reporting, not healing | Terminalise on delivery or during a sweep: a schema and result-semantics change outside scope |
 | D8 | Acceptance 2 forces a real boundary rejection with a copied script tree and a too-small `workflow_responses.wire_max_bytes` policy | The Bar: assert observable behavior, no mock of the validator; `ArtifactBudgetPolicyResolutionTest` copies the tree the same way | Mock `artifact_budget_validate` to raise: tests the mock, not the boundary; seed a bad ledger: no post-fix ledger yields an invalid reply |
 | D9 | A recovery proof or other launch input for a delivered issue gets the terminal verdict: it is not consumed and nothing is refused | #194's lesson that one issue's input must not take down the sweep; delivery completion leaves nothing for a recovery to do | Refuse the sweep (fail loud on a protocol input): one issue's stale proof would then block every other issue's dispatch |
-| D10 | Control sorts each summary's blockers by `(kind, issue)`, the wire's closed order; `control_blockers` and the direct-owner terminal it feeds stay unchanged | D5's in-transaction validation exposed it: a tracker with both open and decision blockers made control emit `issue` before `decision`, a reply the boundary always rejected; D1 keeps `direct-owner` out of scope | Relax the wire's blocker order: widens a closed public contract; sort inside `control_blockers`: silently changes `direct-owner`'s terminal output |
+| D10 | Control sorts each summary's blockers by `(kind, issue)`, the wire's closed order; `control_blockers` and the direct-owner terminal it feeds stay unchanged | D5's in-transaction validation exposed it: a tracker with both open and decision blockers made control emit `issue` before `decision`, a reply the boundary always rejected; D1 keeps `direct-owner` out of scope. Known out-of-scope defect for a follow-up: the direct-owner terminal still gets `control_blockers`' issue-then-decision order, which the wire's terminal `blockers` check rejects | Relax the wire's blocker order: widens a closed public contract; sort inside `control_blockers`: silently changes `direct-owner`'s terminal output |
 | D11 | The acceptance-1 fixture is pinned: 207 runs alone through launches 1–4 (minutes 0, 31, 62, 93), fails after selection at 94 (r1 deadline 274), delivers through r1 at 95; 209 spawns at 250; the sweep at 275 carries 209's `unavailable` owner and observes 207 `closed` with its recorded worktree `absent` | Spec test seam 1 asks the plan to pin the base-reproducing observation; run at base, this exact sequence yields the rejected `207:1:2` resume with null custody | Spawn both issues at minute 0: 209's own fourth expiry trips the stall bound and stops it, so no live custody remains past r1's deadline |
 | D12 | Delivered issues also skip the remainder-1 lane before its slot check and the candidate-worktree replay check | D1's "no capacity or slot charge" and D9's "candidate worktree gets the terminal verdict"; the verdict carries no `custody_kind`, so the replay check would otherwise raise for a delivered remainder issue observed with a candidate | Rely on the verdict alone: the replay loop raises `current control action requires a recorded worktree observation` and the remainder lane can add the issue to `waiting` |
+| D13 | Amends D4: a delivered summary is recognised by non-null `contract_digest`, empty `pending_stage_ids`, empty `requirements` and null `owner`; the Task 2 test pins the last two | Plan review SF-1: live custody with every stage observed and postconditions pending also has a digest, no pending stages and a custody, but carries `postcondition_observation_required` requirements and its record's owner; `control_summary` takes no latest record for a delivered issue | Digest and pending stages alone: misreports that live custody as delivered with stale custody |
+| D14 | Amends D12: no remainder-1-lane guard, since its existing `historical_requested` filter is already False under `delivery_complete`; the replay-loop skip stays, pinned by a candidate-only post-restart regression, and D9 gets a recovery-proof regression | Plan review SF-2, SF-3 and Codex PR220-01: the guard was dead code; without the skip, a delivered issue observed only by candidate raises the replay error; at base `recovery_policy` refuses a proof against the active r1 | Keep the dead guard; leave the replay skip and D9 untested |
+| D15 | Amends D5: `print_json` writes `render_json`, so the wire rendering has one home, and control's inner function returns `tuple[bytes, bool]` | Plan review SF-4: two renderings could drift apart, and a validated reply must match every printed one | Keep `print_json`'s own `json.dump` beside `render_json` |

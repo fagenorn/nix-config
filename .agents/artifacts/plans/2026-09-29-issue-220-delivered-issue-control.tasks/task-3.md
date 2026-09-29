@@ -1,10 +1,10 @@
 # Task 3: Validate control's reply bytes before commit
 
-Acceptance 2 of #220. Per D5, D6, D8, D10.
+Acceptance 2 of #220. Per D5, D6, D8, D10, D15.
 
 **Files:**
 - Modify: `home/common/agent-skills/scripts/workflow-state.py` (`artifact_budget_validate`,
-  `control_summary`, `command_control`, new `render_json`)
+  `control_summary`, `command_control`, `print_json`, new `render_json`)
 - Modify: `home/common/agent-skills/tests/test_delivered_control.py` (imports, one helper,
   one test)
 - Modify: `home/common/agent-skills/tests/test_workflow_state.py`
@@ -18,8 +18,8 @@ Acceptance 2 of #220. Per D5, D6, D8, D10.
   `artifact_budget_validate(command, input_path=None, *, boundary=None, input_bytes=None)
   -> dict` and `transact(repo_root, run_id, mutation, *, allow_missing=False,
   migration_contracts=None) -> Any`, which commits only after `mutation` returns.
-- Produces: `render_json(value: Any) -> bytes` in `workflow-state.py` — exactly the bytes
-  `print_json(value)` writes; the refusal text
+- Produces: `render_json(value: Any) -> bytes` in `workflow-state.py` — the one home of the
+  wire format, which `print_json(value)` now writes (per D15); the refusal text
   `artifact-budget <command> rejected the <boundary> boundary` (or
   `... rejected the detail input` when `boundary` is None).
 
@@ -135,21 +135,29 @@ In `home/common/agent-skills/scripts/workflow-state.py`:
 ```
 
    (`validate-detail-input` is the only caller without a boundary.)
-2. Directly above `print_json`, add
+2. Replace `print_json` with `render_json` and a `print_json` that writes it, so the wire
+   format has a single home (per D15):
 
 ```python
 def render_json(value: Any) -> bytes:
-    """The exact bytes `print_json` writes for ``value``."""
+    """The wire rendering of ``value``: what `print_json` writes and control validates."""
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def print_json(value: Any) -> None:
+    sys.stdout.write(render_json(value).decode("utf-8"))
 ```
 
-   `print_json` stays as it is.
+   The bytes are unchanged for every caller: `json.dumps` escapes non-ASCII by default, so
+   the decoded text is ASCII and `json.dump` plus `"\n"` wrote the same characters.
 3. `control_summary`: pass
    `blockers=sorted(control_blockers(tracker), key=lambda item: (item["kind"], item["issue"]))`
    instead of `blockers=control_blockers(tracker)`. Do not edit `control_blockers`: its
    other two callers feed `direct-owner`'s terminal, which is out of scope (per D1, D10).
-4. `command_control`, end of the inner `control(state)`: render the reply dict to bytes,
-   validate, and return the bytes instead of the dict:
+4. `command_control`: change the inner `def control(state: dict[str, Any] | None) ->
+   tuple[dict[str, Any], bool]` annotation to `-> tuple[bytes, bool]`. At the end of that
+   function, render the reply dict to bytes, validate, and return the bytes instead of the
+   dict:
 
 ```python
         reply = render_json({
@@ -179,7 +187,7 @@ def render_json(value: Any) -> bytes:
 - [ ] **Step 4: Verify**
 
 Run: `cd /Users/anis/tmp/nix-config/.worktrees/worktree-issue-220-orchestrated && PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_delivered_control.py 2>&1 | tail -3`
-Expected: `OK`, 3 tests.
+Expected: `OK`, 5 tests.
 
 Run: `cd /Users/anis/tmp/nix-config/.worktrees/worktree-issue-220-orchestrated && PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py home/common/agent-skills/tests/test_delivery_workflow.py home/common/agent-skills/tests/test_admission_replay.py > "${TMPDIR:-/tmp}/issue-220-task3.log" 2>&1; tail -3 "${TMPDIR:-/tmp}/issue-220-task3.log"; grep -E '^(FAIL|ERROR):' "${TMPDIR:-/tmp}/issue-220-task3.log"`
 Expected: `OK` and no `FAIL:`/`ERROR:` lines. Every existing control test now also passes the

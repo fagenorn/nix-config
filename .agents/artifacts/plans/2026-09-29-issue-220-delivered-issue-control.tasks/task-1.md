@@ -1,6 +1,6 @@
 # Task 1: Gate delivered issues out of control's launch lanes
 
-Acceptance 1 of #220, test-first. Per D1, D2, D3, D9, D11, D12.
+Acceptance 1 of #220, test-first. Per D1, D2, D3, D9, D11, D12, D14.
 
 **Files:**
 - Create: `home/common/agent-skills/tests/test_delivered_control.py`
@@ -16,7 +16,8 @@ Acceptance 1 of #220, test-first. Per D1, D2, D3, D9, D11, D12.
   - module constants `DELIVERED = 207`, `LIVE = 209`, `ISSUES`, `DISPATCH`, and `at(minute) -> str`;
   - `DeliveredControlTest(BuilderHarness, unittest.TestCase)` with helpers
     `boundary(name, raw) -> CompletedProcess`, `validated(name, value) -> bytes`,
-    `request(minute, *, recorded, owners=(), contracts=False, closed=()) -> bytes`,
+    `request(minute, *, recorded, owners=(), contracts=False, closed=(), recoveries=None)
+    -> bytes`,
     `control(minute, **kwargs) -> dict`, `delivered_shape() -> dict` (returns 209's custody
     reference `209:1:1`), `records(issue) -> (attempts, delivery_remainders)`,
     `after_delivery(minute, live) -> CompletedProcess`, and the attributes `self.ledger`
@@ -30,9 +31,9 @@ Acceptance 1 of #220, test-first. Per D1, D2, D3, D9, D11, D12.
   not in the analysis pass and not through `apply_policy` (per D1, D2).
 - Such an issue gets no action, no delta (no `expired`), no `max_parallel` charge, no admission
   claim and no `admission.waiting` entry, and its ledger records are unchanged by the sweep
-  (per D1, D12).
+  (per D1, D12, D14).
 - A recovery proof or a candidate worktree observation for a delivered issue neither raises
-  nor is consumed (per D9, D12).
+  nor is consumed, and no second remainder is allocated (per D9, D12, D14).
 - `direct-owner` and `_apply_one_issue_policy` are not edited (per D1).
 - Delivery folding (`runtime.control_transitions`), admission settlement and summary
   rendering still run for delivered issues, unchanged.
@@ -102,12 +103,14 @@ class DeliveredControlTest(BuilderHarness, unittest.TestCase):
             issue=n, worktree=self.worktrees[n], now=at(0),
             source_reference="invocation:/orchestrate-issues 207 209")) for n in ISSUES}
 
-    def request(self, minute, *, recorded, owners=(), contracts=False, closed=()):
+    def request(self, minute, *, recorded, owners=(), contracts=False, closed=(),
+                recoveries=None):
         """One control request over the issues ``recorded`` names, in its order.
 
         ``recorded`` maps each issue to its recorded worktree state, or to None
         for a spawn at the absent candidate path. Issues in ``closed`` are
         observed with a closed tracker, as the adapter sees a delivered issue.
+        ``recoveries`` maps an issue to the recovery proof its request carries.
         """
         issues = list(recorded)
         def fact(n):
@@ -124,6 +127,8 @@ class DeliveredControlTest(BuilderHarness, unittest.TestCase):
                      for n in issues},
             worktrees=[fact(n) for n in issues])
         request["owners"] = list(owners)
+        for n, proof in (recoveries or {}).items():
+            request["recoveries"][str(n)] = proof
         for item in request["tracker"]:
             if item["issue"] in closed:
                 item["state"] = "closed"
@@ -255,14 +260,31 @@ class DeliveredControlTest(BuilderHarness, unittest.TestCase):
         stored = json.loads(self.ledger.read_text(encoding="utf-8"))["issues"][str(issue)]
         return stored["attempts"], stored["delivery_remainders"]
 
-    def after_delivery(self, minute, live):
+    def after_delivery(self, minute, live, *, recorded=None, **kwargs):
         """The sweep that follows delivery: 209's owner is reported unavailable."""
         return self.cli("control", *self.run_args, "--request-file", "-", ok=False,
-            stdin=self.request(minute, recorded={DELIVERED: "absent",
-                                                 LIVE: "matching_issue_branch"},
+            stdin=self.request(minute, recorded=recorded or {
+                                   DELIVERED: "absent", LIVE: "matching_issue_branch"},
                                closed={DELIVERED},
                                owners=[{"event_id": "209-unavailable", "issue": LIVE,
-                                        "custody": live, "state": "unavailable"}]))
+                                        "custody": live, "state": "unavailable"}],
+                               **kwargs))
+
+    def assert_only_live_resumed(self, completed, before):
+        """Exit 0, a boundary-valid reply, 209's resume only, 207 untouched."""
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        checked = self.boundary("workflow-response", completed.stdout)
+        self.assertEqual((checked.returncode, checked.stderr), (0, b""))
+        self.assertEqual(checked.stdout, completed.stdout)
+        response = json.loads(completed.stdout)
+        dispatched = [a for a in response["actions"] if a["kind"] in DISPATCH]
+        self.assertEqual([(a["issue"], a["custody"]["action_id"]) for a in dispatched],
+                         [(LIVE, f"{LIVE}:1:2")])
+        self.assertFalse([a for a in response["actions"] if a.get("issue") == DELIVERED])
+        self.assertEqual([d for d in response["deltas"] if d["issue"] == DELIVERED], [])
+        self.assertNotIn(DELIVERED, response["admission"]["waiting"])
+        self.assertEqual(self.records(DELIVERED), before)
+        return response
 
     def test_a_delivered_issue_is_never_relaunched(self):
         """Acceptance 1: past r1's deadline, control plans nothing for delivered 207.
@@ -273,17 +295,46 @@ class DeliveredControlTest(BuilderHarness, unittest.TestCase):
         """
         live = self.delivered_shape()
         before = self.records(DELIVERED)
-        completed = self.after_delivery(275, live)
-        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
-        checked = self.boundary("workflow-response", completed.stdout)
-        self.assertEqual((checked.returncode, checked.stderr), (0, b""))
-        self.assertEqual(checked.stdout, completed.stdout)
-        response = json.loads(completed.stdout)
-        dispatched = [a for a in response["actions"] if a["kind"] in DISPATCH]
-        self.assertEqual([(a["issue"], a["custody"]["action_id"]) for a in dispatched],
-                         [(LIVE, f"{LIVE}:1:2")])
-        self.assertEqual([d for d in response["deltas"] if d["issue"] == DELIVERED], [])
-        self.assertEqual(self.records(DELIVERED), before)
+        self.assert_only_live_resumed(self.after_delivery(275, live), before)
+
+    def test_a_delivered_candidate_observation_is_skipped(self):
+        """The post-restart shape: the adapter reports only 207's candidate worktree.
+
+        Delivered 207's verdict carries no `custody_kind`, so without the replay
+        loop's delivered skip (Step 3 item 4) this sweep raises `current control
+        action requires a recorded worktree observation` (per D12, D14).
+        """
+        live = self.delivered_shape()
+        before = self.records(DELIVERED)
+        self.assert_only_live_resumed(self.after_delivery(
+            275, live, recorded={DELIVERED: None, LIVE: "matching_issue_branch"}), before)
+
+    def test_a_delivered_recovery_proof_is_not_consumed(self):
+        """A structurally valid recovery proof for 207 is ignored, not refused (per D9).
+
+        At the base commit `recovery_policy` refuses the whole sweep, since r1 is
+        not a terminal failed first remainder; the gate never reaches it.
+        """
+        live = self.delivered_shape()
+        before = self.records(DELIVERED)
+        contract = self.built[DELIVERED]["contract"]
+        scope = self.build("scope", {"contract": contract, "stage_id": "merge_pr"})
+        evidence = lambda kind, when, digit: {"source_kind": kind,
+            "reference": f"{kind}:probe", "observed_at": at(when),
+            "evidence_digest": "sha256:" + digit * 64}
+        proof = {"schema_version": 1, "kind": "delivery-recovery", "id": "",
+            "contract_digest": self.model.canonical_digest(contract),
+            "stage_id": "merge_pr", "requested_scope": scope,
+            "failure": {"kind": "effect_failure", "effect_attempted": True,
+                        "classification": "transient", **evidence("host", 260, "4")},
+            "effect_absence": {"kind": "effect_absence", "absent": True,
+                               "probe_succeeded": True, **evidence("filesystem", 261, "5")},
+            "basis": {"kind": "changed_relevant_evidence", "scope_id": scope["id"],
+                      **evidence("tracker", 261, "6")}}
+        proof["id"] = self.model.canonical_digest(proof, omit_derived="id")
+        self.assert_only_live_resumed(self.after_delivery(
+            275, live, contracts=True, recoveries={DELIVERED: proof}), before)
+        self.assertEqual(len(self.records(DELIVERED)[1]), 1)
 
 
 if __name__ == "__main__":
@@ -297,11 +348,14 @@ Register it in the `justfile`'s `agent-workflow-tests` recipe: add the line
 - [ ] **Step 2: Run the test and watch it fail**
 
 Run: `cd /Users/anis/tmp/nix-config/.worktrees/worktree-issue-220-orchestrated && PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_delivered_control.py 2>&1 | tail -8`
-Expected: FAIL in `test_a_delivered_issue_is_never_relaunched` at the boundary assertion,
+Expected: 3 tests, all FAIL in `assert_only_live_resumed`, never in `delivered_shape`.
+`test_a_delivered_issue_is_never_relaunched` fails at the boundary assertion,
 `(2, b'artifact-budget: invalid report\n') != (0, b'')`. Control exits 0 but its reply
 carries a `resume` for 207 with id `207:1:2` and null custody, which the boundary rejects.
-Any other failure (a harness step asserting, a CLI exit) means the fixture drifted from the
-base commit: stop and report it, do not adjust the fixture to pass.
+The candidate and recovery-proof tests fail at the exit-status or boundary assertion; their
+exact base failure is not pinned. A failure inside `delivered_shape` or its helpers means
+the fixture drifted from the base commit: stop and report it, do not adjust the fixture to
+pass.
 
 - [ ] **Step 3: Write the minimal implementation**
 
@@ -340,23 +394,24 @@ All edits are inside `command_control`'s inner `control(state)` in
 3. In `apply_policy`, first statement: `if issue in delivered:` set
    `planned[issue] = delivered_verdict(issue)` and return it. This is the single entry every
    dispatch lane goes through (per D1).
-4. In the remainder-1 lane's skip condition (the `if (issue_state is None or ... ): continue`
-   block before `slot_withheld`), add `or issue in delivered` right after
-   `issue_state is None`, so a delivered issue is never counted in `waiting` (per D12).
-5. In the candidate-worktree replay loop (the one that begins
+4. In the candidate-worktree replay loop (the one that begins
    `actionless_replay = not dispatch_results`), extend the first skip to
    `if issue_state is None or not issue_state["attempts"] or issue in delivered: continue`.
    Without it a delivered remainder issue observed with a candidate raises
    `current control action requires a recorded worktree observation`, because the verdict no
-   longer carries `custody_kind` `remainder` (per D9, D12).
+   longer carries `custody_kind` `remainder` (per D9, D12). The test
+   `test_a_delivered_candidate_observation_is_skipped` fails if this item is omitted (per D14).
 
 No other lane needs an edit: with `desired` `terminal` and `expired` False, the recover,
-resume, refuse/retry, expired-reap and spawn lanes skip the issue.
+resume, refuse/retry, expired-reap and spawn lanes skip the issue. The remainder-1 lane
+needs no guard: its existing skip condition already drops a delivered issue, because
+`runtime.historical_requested(...)` returns False whenever `delivery_complete` holds, so it
+never reaches `slot_withheld` or `waiting` (per D14).
 
 - [ ] **Step 4: Verify**
 
 Run: `cd /Users/anis/tmp/nix-config/.worktrees/worktree-issue-220-orchestrated && PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_delivered_control.py 2>&1 | tail -3`
-Expected: `OK`, 1 test.
+Expected: `OK`, 3 tests.
 
 Run: `cd /Users/anis/tmp/nix-config/.worktrees/worktree-issue-220-orchestrated && PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_delivery_workflow.py home/common/agent-skills/tests/test_admission_replay.py 2>&1 | tail -3`
 Expected: `OK` (the remainder, recovery and replay tests stay green).

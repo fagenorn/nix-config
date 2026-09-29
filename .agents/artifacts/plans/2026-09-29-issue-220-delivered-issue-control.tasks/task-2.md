@@ -1,6 +1,6 @@
 # Task 2: Report a delivered issue's stale custody in its summary
 
-Acceptance 3 of #220. Per D4, D7.
+Acceptance 3 of #220. Per D4, D7, D13.
 
 **Files:**
 - Modify: `home/common/agent-skills/scripts/workflow_delivery_wire.py` (`DeliveryProjection`)
@@ -67,6 +67,10 @@ Append this method to `DeliveredControlTest` in
                                               "launch": 2, "action_id": f"{DELIVERED}:r1:2"})
         self.assertEqual((summary["state"], summary["pending_stage_ids"]), ("closed", []))
         self.assertIsNotNone(summary["contract_digest"])
+        # The delivered signature (per D13): live custody with every stage observed
+        # also has empty pending stages, but owes postconditions and names an owner.
+        self.assertEqual(summary["requirements"], [])
+        self.assertIsNone(summary["owner"])
         self.assertEqual(self.records(DELIVERED), before)
         # The same sweep over the unamended ledger differs only in the named launch.
         self.ledger.write_bytes(pristine)
@@ -128,12 +132,17 @@ In `DeliveryProjection` (`home/common/agent-skills/scripts/workflow_delivery_wir
 3. In `home/common/claude-code/skills/orchestrate-issues/SKILL.md` §5 ("Final report"),
    directly after the sentence ending `an issue that never received a contract.`, insert:
 
-   > A summary with a non-null `contract_digest`, an empty `pending_stage_ids` and a non-null
-   > `custody` is a delivered issue whose `custody` names a stale record that control will
-   > never dispatch: report it as delivered with that stale custody, never as an active or
-   > progressing owner.
+   > A summary with a non-null `contract_digest`, an empty `pending_stage_ids`, an empty
+   > `requirements`, a null `owner` and a non-null `custody` is a delivered issue whose
+   > `custody` names a stale record that control will never dispatch: report it as delivered
+   > with that stale custody, never as an active or progressing owner.
 
-   §4's per-object `workflow-response` validation is not touched (per D6).
+   Every clause is load-bearing (per D13): live custody whose stages are all observed but
+   whose postconditions are pending also has a non-null digest, empty `pending_stage_ids`
+   and non-null `custody`, but it carries `postcondition_observation_required` requirements
+   and its record's `owner`; a delivered summary has neither, because `control_summary`
+   takes no `latest` record for a delivered issue. §4's per-object `workflow-response`
+   validation is not touched (per D6).
 
 - [ ] **Step 4: Verify**
 
