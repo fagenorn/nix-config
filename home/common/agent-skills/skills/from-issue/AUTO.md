@@ -95,7 +95,7 @@ config bindings, and each phase's returned report.** Brainstorm and grill conver
 enter this context. Don't ask a subagent to "show its reasoning"; the reasoning belongs in the
 committed artifact.
 
-Both dispatches select the `issue-owner` matrix role on Opus/high explicitly;
+Both dispatches select the `auto-owner` matrix role on Opus/xhigh;
 design quality is worth paying for here. Purely mechanical dispatches elsewhere
 in the flow use `mechanic` on Sonnet/high; reviewer-shaped first passes use
 `reviewer` on Opus/high.
@@ -120,8 +120,8 @@ installed, it uses the inline fallback named in the corresponding `SKILL.md` pha
 
 ### Design subagent — Phases 2 + 3
 
-<!-- agent-dispatch: id=from-issue-design-grill role=issue-owner model=opus effort=high -->
-Agent(subagent_type="general-purpose", model="opus", effort="high") launches the autonomous design-and-grill owner.
+<!-- agent-dispatch: id=from-issue-design-grill role=auto-owner model=opus effort=xhigh -->
+Agent(subagent_type="general-purpose", model="opus", effort="xhigh") launches the autonomous design-and-grill owner.
 
 One dispatch covering brainstorm and grill. It produces the design doc under `bindings.paths.artifacts.specs`, applies the
 grill's refinements to it, and writes any context-doc updates and ADRs — all committed in the
@@ -151,8 +151,8 @@ choices stay in the spec.
 
 ### Plan subagent — Phase 4 (+ mechanical Phase 5)
 
-<!-- agent-dispatch: id=from-issue-planning role=issue-owner model=opus effort=high -->
-Agent(subagent_type="general-purpose", model="opus", effort="high") launches the autonomous planning owner.
+<!-- agent-dispatch: id=from-issue-planning role=auto-owner model=opus effort=xhigh -->
+Agent(subagent_type="general-purpose", model="opus", effort="xhigh") launches the autonomous planning owner.
 
 Writes the implementation plan package under `bindings.paths.artifacts.plans`, committed in the worktree, with a `## Task index`
 carrying each task's risk lane; it cites decision-ledger rows by ID and appends new non-obvious
