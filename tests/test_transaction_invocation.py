@@ -7,6 +7,7 @@ import copy
 import dataclasses
 import fcntl
 import unittest
+from types import MappingProxyType
 
 from agent_tools import transaction_history, transaction_storage
 from agent_tools.canonical import telemetry_digest
@@ -317,6 +318,50 @@ class InvokeCase(ProtocolCase):
             self.clock.advance(step)
             ms -= step
             self.store.renew(self.custody)
+
+
+class InvocationOwnershipTest(InvokeCase):
+    def retained_invocation(self, mutate):
+        class Retaining(FakeEffect):
+            def invoke(self, request):
+                self.reply = super().invoke(request)
+                self.reply["reference"] = "invoke:original"
+                return self.reply
+
+            def inspect(self, request):
+                mutate(self.reply)
+                result = super().inspect(request)
+                result["reference"] = "inspect:own"
+                return result
+
+        self.inspect()
+        after = self.invoke(Retaining(self.world))
+        loaded = TransactionStore(self.root).load(self.transaction_id)
+        for transaction in (after, loaded):
+            with self.subTest(snapshot=transaction.revision):
+                events = [e for e in transaction.events
+                          if e.get("action_id") == self.act()]
+                self.assertEqual([e["type"] for e in events[-3:]],
+                                 ["invocation_intended", "invocation_returned",
+                                  "action_inspected"])
+                intended, returned, inspected = events[-3:]
+                self.assertEqual((intended["attempt"], returned["attempt"]), (1, 1))
+                self.assertEqual(
+                    {key: returned[key] for key in ("result", "error_class", "reference")},
+                    {"result": "accepted", "error_class": None,
+                     "reference": "invoke:original"})
+                self.assertEqual((inspected["outcome"], inspected["reference"]),
+                                 ("satisfied", "inspect:own"))
+                [action] = transaction.actions
+                self.assertEqual((action["status"], action["attempts"],
+                                  action["last_error_class"]), ("satisfied", 1, None))
+
+    def test_inspect_cannot_rewrite_the_invocation_return(self):
+        self.retained_invocation(lambda reply: reply.update(
+            result="rejected", error_class="provider_throttled", reference="inspect:changed"))
+
+    def test_inspect_cannot_clear_the_invocation_return(self):
+        self.retained_invocation(lambda reply: reply.clear())
 
 
 class InvokeActionTest(InvokeCase):
@@ -704,6 +749,126 @@ OBSERVED_REASONS = {"inspection_required", "not_absent", "not_retryable", "budge
 class RefusalVocabularyTest(unittest.TestCase):
     def test_the_refusal_reasons_are_exactly_the_observed_ones(self):
         self.assertEqual(set(REFUSAL_REASONS), OBSERVED_REASONS)
+
+
+class InspectionOwnershipTest(ProtocolCase):
+    def test_standalone_inspection_keeps_its_returned_fields(self):
+        clock = self.clock
+
+        class Retaining(FakeEffect):
+            def inspect(self, request):
+                reply = super().inspect(request)
+                reply["reference"] = "inspect:original"
+                clock.on_next_read(lambda: reply.update(
+                    outcome="satisfied", reference="inspect:changed"))
+                return reply
+
+        before = clock.now
+        after = self.inspect(Retaining(self.world))
+        self.assertEqual(clock.now, before)
+        for transaction in (after, TransactionStore(self.root).load(self.transaction_id)):
+            event = transaction.events[-1]
+            self.assertEqual((event["type"], event["outcome"], event["reference"]),
+                             ("action_inspected", "absent", "inspect:original"))
+            [action] = transaction.actions
+            self.assertEqual((action["status"], action["attempts"]), ("absent", 0))
+
+
+class PostInvokeInspectionOwnershipTest(InvokeCase):
+    def test_post_invoke_inspection_keeps_its_returned_fields(self):
+        clock = self.clock
+
+        class Retaining(FakeEffect):
+            def inspect(self, request):
+                reply = super().inspect(request)
+                reply["reference"] = "inspect:original"
+                clock.on_next_read(lambda: reply.update(
+                    outcome="absent", reference="inspect:changed"))
+                return reply
+
+        self.inspect()
+        before = clock.now
+        after = self.invoke(Retaining(self.world))
+        self.assertEqual(clock.now, before)
+        for transaction in (after, TransactionStore(self.root).load(self.transaction_id)):
+            returned, inspected = transaction.events[-2:]
+            self.assertEqual((returned["type"], returned["result"], returned["error_class"],
+                              returned["reference"]),
+                             ("invocation_returned", "accepted", None, "call:1"))
+            self.assertEqual((inspected["type"], inspected["outcome"], inspected["reference"]),
+                             ("action_inspected", "satisfied", "inspect:original"))
+            [action] = transaction.actions
+            self.assertEqual((action["status"], action["attempts"]), ("satisfied", 1))
+
+
+def malformed_results(valid):
+    class Copying:
+        def __copy__(self):
+            return dict.copy(valid)
+
+        def __deepcopy__(self, memo):
+            return dict.copy(valid)
+
+    return (("mapping", MappingProxyType(dict.copy(valid))),
+            ("field", {**valid, "reference": memoryview(b"invalid-reference")}),
+            ("hook", Copying()))
+
+
+class InspectionResultCompatibilityTest(ProtocolCase):
+    def test_malformed_inspection_results_record_nothing(self):
+        valid = {"outcome": "satisfied", "reference": "inspect:original"}
+        for label, bad in malformed_results(valid):
+            with self.subTest(result=label):
+                class Invalid(FakeEffect):
+                    def inspect(self, request):
+                        return bad
+
+                before = self.store.load(self.transaction_id)
+                with self.assertRaises(EffectResultInvalid) as caught:
+                    self.inspect(Invalid(self.world))
+                self.assertTrue(str(caught.exception).startswith(
+                    f"{self.transaction_id}: inspect_action: "))
+                loaded = TransactionStore(self.root).load(self.transaction_id)
+                self.assertEqual((loaded.events, loaded.actions),
+                                 (before.events, before.actions))
+
+
+class InvocationResultCompatibilityTest(InvokeCase):
+    def malformed_attempt(self, post_inspect):
+        valid = ({"outcome": "satisfied", "reference": "inspect:original"}
+                 if post_inspect else {"result": "accepted", "error_class": None,
+                                       "reference": "invoke:original"})
+        for label, bad in malformed_results(valid):
+            with self.subTest(result=label):
+                class Invalid(FakeEffect):
+                    def invoke(self, request):
+                        return super().invoke(request) if post_inspect else bad
+
+                    def inspect(self, request):
+                        if not post_inspect:
+                            raise AssertionError("invalid invocation reached inspection")
+                        return bad
+
+                name = f"build-{label}"
+                self.inspect(name=name)
+                before = self.store.load(self.transaction_id)
+                with self.assertRaises(EffectResultInvalid) as caught:
+                    self.invoke(Invalid(self.world), name=name)
+                self.assertTrue(str(caught.exception).startswith(
+                    f"{self.transaction_id}: invoke_action: "))
+                loaded = TransactionStore(self.root).load(self.transaction_id)
+                self.assertEqual(loaded.events[:len(before.events)], before.events)
+                [event] = loaded.events[len(before.events):]
+                self.assertEqual((event["type"], event["action_id"], event["attempt"]),
+                                 ("invocation_intended", self.act(name), 1))
+                [action] = [a for a in loaded.actions if a["action_id"] == self.act(name)]
+                self.assertEqual((action["status"], action["attempts"]), ("open", 1))
+
+    def test_invalid_invocation_skips_inspection_and_keeps_intent(self):
+        self.malformed_attempt(False)
+
+    def test_invalid_post_invoke_inspection_keeps_intent(self):
+        self.malformed_attempt(True)
 
 
 if __name__ == "__main__":
