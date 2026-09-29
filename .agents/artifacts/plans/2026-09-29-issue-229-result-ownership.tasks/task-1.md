@@ -9,7 +9,8 @@
 
 Read the [plan root](../2026-09-29-issue-229-result-ownership.md) for Global
 Constraints and the [spec](../../specs/2026-09-29-issue-229-result-ownership-design.md)
-for D1–D3 before editing. Work in the issue checkout. Keep tool output bounded:
+for D1–D4 before editing. D4 supersedes D1's unconditional deep-copy choice.
+Work in the issue checkout. Keep tool output bounded:
 targeted searches and reads, quiet tests, long logs in the platform temp directory,
 and only failure lines or final summaries in reports.
 
@@ -20,10 +21,11 @@ and only failure lines or final summaries in reports.
 - Extends the existing test-only `FakeClock` with `on_next_read(callback)`; callback runs once before its next returned clock value, leaving `advance(ms)` and normal readings unchanged.
 
 **Invariants:**
-- Per D1, each external return is copied before validation; all later reads use that same captured value.
+- Per D1 as amended by D4, exact dictionaries are detached with built-in `dict.copy` before validation; all other returns reach the validator unchanged. All accepted later reads use that same captured value, without copy hooks.
 - Per D2, invocation's capture/validation finishes before inspection begins; an invalid invocation prevents inspection. Post-invoke inspection is captured independently.
 - Standalone inspection preserves `_refuse_in_flight` and its latest-event comparison; invoke preserves durable intent and history validation; proof preserves obligation-sensitive validation, clock/admission/cohort checks and interval opening; recovery preserves revision comparison and its no-request fast path.
 - Per D3, returned and freshly loaded snapshots retain each original field and derived action status; a successful attempt has a matching returned event and closing inspection.
+- Per D4, malformed root/field objects raise contextual `EffectResultInvalid` and produce no completion facts; recovery intentionally loses its former incidental copy failure/coercion behavior. Adapter-thrown exceptions propagate unchanged.
 
 - [ ] **Step 1: Add the two baseline-failing invocation regressions.**
 
@@ -83,7 +85,8 @@ Run from this checkout:
 PYTHONPATH=python python3 -m unittest -q tests.test_transaction_invocation.InvocationOwnershipTest
 ```
 
-Required observation at implementation base `3bf2936`: the rewrite case fails
+Required observation against unchanged core at `3bf2936` (also unchanged through
+the spec correction `9e2661e`): the rewrite case fails
 because recorded invocation fields are rejected/provider_throttled/inspect:changed;
 the clear case errors with `KeyError` while recording. This command must be
 nonzero. Save its failure summary before editing core. A missing test/import
@@ -253,14 +256,179 @@ recovery cases. Check the reasons individually; fixture errors are not ownership
 evidence. The already-passing recovery cases protect the existing behavior
 during migration to the shared helper.
 
-- [ ] **Step 8: Implement the private intake sequence and integrate each path.**
+- [ ] **Step 8: Add B1 malformed-result compatibility regressions.**
+
+In `tests/test_transaction_invocation.py`, add `from types import MappingProxyType`
+and the following fixture and tests. The shared fixture supplies all three D4
+families using the caller's operation-appropriate valid-looking shape. Both
+copy hooks deliberately manufacture that shape; assertions exercise only the
+public store's rejection behavior, not hook identities or call counts.
+
+```python
+def malformed_results(valid):
+    class Copying:
+        def __copy__(self):
+            return dict.copy(valid)
+
+        def __deepcopy__(self, memo):
+            return dict.copy(valid)
+
+    return (("mapping", MappingProxyType(dict.copy(valid))),
+            ("field", {**valid, "reference": memoryview(b"invalid-reference")}),
+            ("hook", Copying()))
+
+
+class InspectionResultCompatibilityTest(ProtocolCase):
+    def test_malformed_inspection_results_record_nothing(self):
+        valid = {"outcome": "satisfied", "reference": "inspect:original"}
+        for label, bad in malformed_results(valid):
+            with self.subTest(result=label):
+                class Invalid(FakeEffect):
+                    def inspect(self, request):
+                        return bad
+
+                before = self.store.load(self.transaction_id)
+                with self.assertRaises(EffectResultInvalid) as caught:
+                    self.inspect(Invalid(self.world))
+                self.assertTrue(str(caught.exception).startswith(
+                    f"{self.transaction_id}: inspect_action: "))
+                loaded = TransactionStore(self.root).load(self.transaction_id)
+                self.assertEqual((loaded.events, loaded.actions),
+                                 (before.events, before.actions))
+
+
+class InvocationResultCompatibilityTest(InvokeCase):
+    def malformed_attempt(self, post_inspect):
+        valid = ({"outcome": "satisfied", "reference": "inspect:original"}
+                 if post_inspect else {"result": "accepted", "error_class": None,
+                                       "reference": "invoke:original"})
+        for label, bad in malformed_results(valid):
+            with self.subTest(result=label):
+                class Invalid(FakeEffect):
+                    def invoke(self, request):
+                        return super().invoke(request) if post_inspect else bad
+
+                    def inspect(self, request):
+                        if not post_inspect:
+                            raise AssertionError("invalid invocation reached inspection")
+                        return bad
+
+                name = f"build-{label}"
+                self.inspect(name=name)
+                before = self.store.load(self.transaction_id)
+                with self.assertRaises(EffectResultInvalid) as caught:
+                    self.invoke(Invalid(self.world), name=name)
+                self.assertTrue(str(caught.exception).startswith(
+                    f"{self.transaction_id}: invoke_action: "))
+                loaded = TransactionStore(self.root).load(self.transaction_id)
+                self.assertEqual(loaded.events[:len(before.events)], before.events)
+                [event] = loaded.events[len(before.events):]
+                self.assertEqual((event["type"], event["action_id"], event["attempt"]),
+                                 ("invocation_intended", self.act(name), 1))
+                [action] = [a for a in loaded.actions if a["action_id"] == self.act(name)]
+                self.assertEqual((action["status"], action["attempts"]), ("open", 1))
+
+    def test_invalid_invocation_skips_inspection_and_keeps_intent(self):
+        self.malformed_attempt(False)
+
+    def test_invalid_post_invoke_inspection_keeps_intent(self):
+        self.malformed_attempt(True)
+```
+
+Import `malformed_results` through the existing invocation-fixture import in
+`tests/test_transaction_proof.py`, then add these tests. Event collection writes
+nothing; interval collection retains exactly its pre-call open marker.
+
+```python
+class ProofResultCompatibilityTest(ProofCase):
+    def malformed_collection(self, interval):
+        self.proving()
+        if interval:
+            self.collect(self.act)
+        identity = "smoke" if interval else self.pub
+        valid = {"outcome": "satisfied", "reason": "ok", "reference": "proof:original"}
+        for index, (label, bad) in enumerate(malformed_results(valid), start=1):
+            with self.subTest(result=label):
+                before = self.store.load(self.transaction_id)
+                with self.assertRaises(EffectResultInvalid) as caught:
+                    self.collect(identity, self.observer(result=bad))
+                self.assertTrue(str(caught.exception).startswith(
+                    f"{self.transaction_id}: collect_obligation: "))
+                loaded = TransactionStore(self.root).load(self.transaction_id)
+                self.assertEqual(loaded.events[:len(before.events)], before.events)
+                added = loaded.events[len(before.events):]
+                self.assertEqual([(e["type"], e.get("evidence_id")) for e in added],
+                                 [("interval_opened", f"smoke@{index}")] if interval else [])
+                [entry] = [e for e in loaded.proof["obligations"]
+                           if e["obligation_id"] == identity]
+                self.assertEqual((entry["observations"], entry["latest_outcome"]), (0, None))
+
+    def test_malformed_event_observation_records_nothing(self):
+        self.malformed_collection(False)
+
+    def test_malformed_interval_observation_keeps_only_its_marker(self):
+        self.malformed_collection(True)
+```
+
+Import `malformed_results` through the existing invocation-fixture import in
+`tests/test_transaction_recovery.py`, then add these tests for D4's intentional
+recovery correction:
+
+```python
+class RecoveryResultCompatibilityTest(RecoveryCase):
+    def malformed_checks(self, operation, call):
+        valid = {"outcome": "satisfied", "reason": "ok", "reference": "check:original"}
+        for label, bad in malformed_results(valid):
+            with self.subTest(result=label):
+                before = self.store.load(self.transaction_id)
+                with self.assertRaises(EffectResultInvalid) as caught:
+                    call(Checker(result=bad))
+                self.assertTrue(str(caught.exception).startswith(
+                    f"{self.transaction_id}: {operation}: "))
+                loaded = TransactionStore(self.root).load(self.transaction_id)
+                self.assertEqual((loaded.events, loaded.state, loaded.recovery),
+                                 (before.events, before.state, before.recovery))
+
+    def test_malformed_anchor_results_record_nothing(self):
+        self.to("awaiting_verification", "ready")
+        self.malformed_checks("verify_anchors", self.verify)
+
+    def test_malformed_compatibility_results_record_nothing(self):
+        self.parked()
+        self.grant()
+        self.malformed_checks("begin_recovery", lambda checker: self.begin(checker=checker))
+```
+
+Run before changing core:
+
+```sh
+PYTHONPATH=python python3 -m unittest -q \
+  tests.test_transaction_invocation.InspectionResultCompatibilityTest \
+  tests.test_transaction_invocation.InvocationResultCompatibilityTest \
+  tests.test_transaction_proof.ProofResultCompatibilityTest \
+  tests.test_transaction_recovery.RecoveryResultCompatibilityTest
+```
+
+Expect seven test methods with three result-family subtests each: the five
+invocation/inspection/proof methods pass on baseline; both recovery methods
+report `TypeError` for the mapping/field families and fail to raise
+`EffectResultInvalid` for the copy-hook family. Those recovery failures pin the
+intentional D4 change; the passing cases prevent B1 regressions. The seven
+ownership tests in Step 7 remain unchanged.
+
+- [ ] **Step 9: Implement the private intake sequence and integrate each path.**
 
 Implement the interface declared above using imports already available in
-`transaction_core.py`. Per D1, its ordered operations are: deep-copy the raw
-return; call the supplied validator with the copy; raise the unchanged
-contextual `EffectResultInvalid` on a non-`None` violation; return that copy.
-Do not retain the original result for later field reads. Do not add a registry,
-schema conversion, wrapper, fallback, or exception catch.
+`transaction_core.py`. Per D4, its ordered operations are: if `type(result) is
+dict`, capture with built-in `dict.copy(result)`; otherwise keep the value
+unchanged; call the supplied validator with that captured value; raise the
+existing contextual `EffectResultInvalid` on a non-`None` violation; return the
+accepted capture. This exact-type branch selects capture only; acceptance
+remains entirely with the supplied validator. Accepted field values are exact
+immutable strings or null, so do not recurse into fields or invoke `__copy__`
+or `__deepcopy__` on rejected payloads. Do not retain the original dictionary
+for later field reads, pre-validate the raw dictionary, coerce non-dicts, or add
+a registry, wrapper, fallback, exception catch, or recovery-specific switch.
 
 Wrap the external expression directly at each intake site:
 
@@ -277,13 +445,17 @@ capture calls are sequential, so the first exception prevents the second call.
 Recovery appends each captured result before observing the next request. Keep
 the existing second fenced holds and all their checks; change no event
 construction, pre-call writes, public signature, or pure validation policy.
+Recovery's old copy-time `TypeError` and copy-hook coercion intentionally become
+contextual `EffectResultInvalid`, per D4; exceptions raised by the adapter call
+itself still propagate unchanged in every operation.
 Any edited comments/docstrings must describe the resulting live behavior;
 derive wording from the code rather than copying plan narration into source.
 
-- [ ] **Step 9: Verify the fix and compatibility.**
+- [ ] **Step 10: Verify the fix and compatibility.**
 
 Repeat Step 7: all seven tests must pass, including both issue-mandated failures
-from Step 2. Then run the focused existing suite:
+from Step 2. Repeat Step 8: all seven compatibility methods and their 21 subtests
+must pass. Then run the focused existing suite:
 
 ```sh
 PYTHONPATH=python python3 -m unittest -q \
@@ -311,7 +483,7 @@ Run the scoped whitespace gate:
 git diff --check -- python/agent_tools/transaction_core.py tests/test_transaction_custody.py tests/test_transaction_invocation.py tests/test_transaction_proof.py tests/test_transaction_recovery.py
 ```
 
-- [ ] **Step 10: Commit the implementation and evidence-bearing tests.**
+- [ ] **Step 11: Commit the implementation and evidence-bearing tests.**
 
 ```sh
 git add python/agent_tools/transaction_core.py tests/test_transaction_custody.py tests/test_transaction_invocation.py tests/test_transaction_proof.py tests/test_transaction_recovery.py
