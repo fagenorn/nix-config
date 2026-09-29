@@ -1,7 +1,9 @@
 """The transaction-state/v5 document model of the transaction core (#205 D33, #206 D2, #207
 D13, #208 D12): the lifecycle vocabularies, the `Custody` credential and `Transaction`
-snapshot types, the credential shape checks, the pure history validator and the snapshot
-fold. The validator hands each action event to `agent_tools.transaction_invocation`, whose
+snapshot types, the credential shape checks, shared validating history walk and snapshot
+fold. `append_events` builds detached complete candidates with that walk; `validate_state`
+admits stored metadata and compares its projections with the same walk's results. The
+walk hands each action event to `agent_tools.transaction_invocation`, whose
 fold also derives the snapshot's per-action `actions` view on every load, and each proof
 event to `agent_tools.transaction_proof`, whose `proof_view` derives the snapshot's `proof`
 view on every load too; an `obligation_observed` joins the evidence-id fold exactly as an
@@ -19,8 +21,8 @@ binds `recovery_started` to the entry into `recovering`, `recovery_settled` to t
 `rolled_back` and `recovery_incomplete` to its park (#208 D7, D9, D10); a
 `roll_forward_linked` must also name a transaction id (#208 D11). It reads no file, lock
 or clock: `validate_state` takes the creation-key index lookup as a callable, which
-`agent_tools.transaction_core` binds to its store root. It also composes what a reap
-appends to a lapsed span (`reaped`) and a late owner result's event (`owner_result_event`),
+`agent_tools.transaction_core` binds to its store root. It also composes event fields for
+a lapsed span's reap (`reap_events`) and a late owner result (`owner_result_event`),
 and answers whether an executor and fence were ever issued a span (`span_issued`). The
 `at`-timestamp codec (`format_at`, `parse_at`) and the strict JSON object rule
 (`json_object_violation`) that a created `subject` and a late `result` share are imported
@@ -465,7 +467,8 @@ def validate_state(document: Any, transaction_id: str,
     included, is checked by `recovery_event_violation`, after a `roll_forward_linked`'s child
     is checked to be a transaction id (#208 D11), and `recovery_pairing_violation` binds each
     recovery event and reserved recovery reason as `pairing_violation` does (#208 D7, D9, D10,
-    D22)."""
+    D22). Metadata checks precede `_history_projection`; strict stored-projection
+    comparisons follow it without repairing the document."""
     def refuse(rule: str) -> StateInvalid:
         return StateInvalid(f"{transaction_id}: {rule}")
 
@@ -503,6 +506,32 @@ def validate_state(document: Any, transaction_id: str,
         raise refuse(violation)
     if keys != sorted(keys):
         raise refuse("concurrency_keys is not sorted")
+    state, parked, custody, revision = _history_projection(document, transaction_id)
+    if type(document["state"]) is not str or document["state"] != state:
+        raise refuse(f"state does not equal the folded state {state}")
+    stored_parked = document["parked_from"]
+    if not (stored_parked is None and parked is None
+            or type(stored_parked) is str and stored_parked == parked):
+        raise refuse("parked_from does not equal the folded parked_from")
+    stored_custody = document["custody"]
+    if not (stored_custody is None and custody is None
+            or type(stored_custody) is dict and custody is not None
+            and serialize(stored_custody) == serialize(custody)):
+        raise refuse("custody does not equal the folded custody")
+    if type(document["revision"]) is not int or document["revision"] != revision:
+        raise refuse("revision does not equal the number of events")
+
+
+def _history_projection(document: dict,
+                        transaction_id: str) -> tuple[str, str | None, dict | None, int]:
+    """Validate the complete history of admitted metadata and derive its four projections.
+
+    Stored projections are never inputs; custody, action and proof folds stay local.
+    """
+    def refuse(rule: str) -> StateInvalid:
+        return StateInvalid(f"{transaction_id}: {rule}")
+
+    keys = document["concurrency_keys"]
     events = document["events"]
     if type(events) is not list or not events:
         raise refuse("events is not a non-empty list")
@@ -607,19 +636,23 @@ def validate_state(document: Any, transaction_id: str,
     custody = fold.custody
     if state in TERMINALS and custody is not None:
         raise refuse(f"terminal state {state} still holds custody")
-    if type(document["state"]) is not str or document["state"] != state:
-        raise refuse(f"state does not equal the folded state {state}")
-    stored_parked = document["parked_from"]
-    if not (stored_parked is None and parked is None
-            or type(stored_parked) is str and stored_parked == parked):
-        raise refuse("parked_from does not equal the folded parked_from")
-    stored_custody = document["custody"]
-    if not (stored_custody is None and custody is None
-            or type(stored_custody) is dict and custody is not None
-            and serialize(stored_custody) == serialize(custody)):
-        raise refuse("custody does not equal the folded custody")
-    if type(document["revision"]) is not int or document["revision"] != len(events):
-        raise refuse("revision does not equal the number of events")
+    return state, parked, custody, len(events)
+
+
+def append_events(prior: dict, event_fields: list[dict], *, at: str) -> dict:
+    """Build a detached complete document from a validated prior and event fields.
+
+    The store admits the prior under its transaction lock and supplies one timestamp.
+    Fields omit `seq` and `at`; this constructor owns those envelopes and installs the
+    shared history walk's projection.
+    """
+    candidate = copy.deepcopy(prior)
+    events = candidate["events"]
+    for fields in copy.deepcopy(event_fields):
+        events.append({"seq": len(events) + 1, "at": at, **fields})
+    (candidate["state"], candidate["parked_from"], candidate["custody"],
+     candidate["revision"]) = _history_projection(candidate, candidate["transaction_id"])
+    return candidate
 
 
 def snapshot(document: dict) -> Transaction:
@@ -690,28 +723,24 @@ def bound_path(document: dict) -> str | None:
     return None
 
 
-def reaped(document: dict, at: str, reason: str) -> dict:
-    """A deep-copied candidate recording the lapse of `document`'s held span at `at`: the
-    lapse, a synthesized stop and, outside a parking, a park to `attention_required` with
-    unknown external state; custody cleared (D17). The caller has checked the lapse."""
-    candidate = copy.deepcopy(document)
-    events = candidate["events"]
-    held = candidate["custody"]
+def reap_events(document: dict, reason: str) -> list[dict]:
+    """Fields for a lapse, synthesized stop and, outside a parking, attention transition.
+
+    The store has checked the lapse; `append_events` supplies envelopes and projections.
+    """
+    events = []
+    held = document["custody"]
     for event_type, extra in (("lease_lapse_detected", {}),
                               ("stop_synthesized", {"reason": reason})):
-        events.append({"seq": len(events) + 1, "type": event_type, "at": at,
+        events.append({"type": event_type,
                        "fence": copy.deepcopy(held["fence"]),
                        "executor_id": held["executor_id"], **extra})
-    source = candidate["state"]
+    source = document["state"]
     if source not in PARKINGS:
-        events.append({"seq": len(events) + 1, "type": "transitioned", "at": at,
+        events.append({"type": "transitioned",
                        "from": source, "to": "attention_required", "reason": reason,
                        "external_state": "unknown"})
-        candidate["parked_from"] = source
-        candidate["state"] = "attention_required"
-    candidate["custody"] = None
-    candidate["revision"] = len(events)
-    return candidate
+    return events
 
 
 def span_issued(events: Sequence[Mapping[str, Any]], executor_id: str, fence: Any) -> bool:
@@ -720,9 +749,9 @@ def span_issued(events: Sequence[Mapping[str, Any]], executor_id: str, fence: An
                and event["fence"] == fence for event in events)
 
 
-def owner_result_event(document: dict, *, at: str, executor_id: str, fence: dict,
+def owner_result_event(document: dict, *, executor_id: str, fence: dict,
                        result: dict, lapsed: bool) -> dict:
-    """The `owner_result` event a late result appends to `document` (D18, D34).
+    """The `owner_result` fields for `append_events`, without an envelope (D18, D34).
 
     `custody` is `current` only when the projection holds this executor and fence and
     `lapsed` is false, else `stale`; `supersedes` is the seq of the latest
@@ -733,7 +762,7 @@ def owner_result_event(document: dict, *, at: str, executor_id: str, fence: dict
                and held["fence"] == fence and not lapsed)
     stops = [event["seq"] for event in document["events"]
              if event["type"] == "stop_synthesized" and event["fence"] == fence]
-    return {"seq": document["revision"] + 1, "type": "owner_result", "at": at,
+    return {"type": "owner_result",
             "executor_id": executor_id, "fence": copy.deepcopy(fence),
             "custody": "current" if current else "stale",
             "supersedes": stops[-1] if stops else None, "result": copy.deepcopy(result)}
