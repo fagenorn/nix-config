@@ -17,10 +17,11 @@ import unittest
 from pathlib import Path
 
 from agent_tools import transaction_core
-from agent_tools.transaction_core import TransactionStore
+from agent_tools.transaction_core import RecoveryPlanRejected, TransactionStore
 
 from .transaction_core_shapes import SHAPES
-from .transaction_core_sweep_support import SCENARIOS, drive, shape_declaration
+from .transaction_core_sweep_support import (
+    SCENARIOS, drive, shape_declaration, shape_recovery)
 from .transaction_core_world import World
 
 WITH_ACTIVATION = ("created", "awaiting_verification", "ready", "publishing", "published",
@@ -62,6 +63,9 @@ CUSTODY_EVENTS = {
 PUB_PARK = WITH_ACTIVATION[:4] + ("attention_required",)
 ACT_PARK = WITH_ACTIVATION[:6] + ("attention_required",)
 PROOF_PARK = WITH_ACTIVATION[:7] + ("attention_required",)
+ROLLED = ACT_PARK + ("recovering", "rolled_back")
+ABANDON = WITH_ACTIVATION[:3] + ("attention_required", "abandoned")
+TS, DV, NE = "target_satisfied", "diverged", "no_effect"
 
 
 def succeeded(shape, **expect):
@@ -119,6 +123,55 @@ LANDINGS = {
 }
 
 
+def rolled(snapshot, selected, checked, restored, residue):
+    return ("rolled_back", ROLLED, {"snapshot": snapshot, "selected": selected,
+                                    "checked": checked, "restored": restored,
+                                    "residue": residue})
+
+
+def forward(reason, named, anchors=None):
+    return ("attention_required", ACT_PARK, {"forward": reason, "named": named,
+                                             "anchors": anchors})
+
+
+# (shape, scenario) -> (final, path, expectations): #208's committed recovery landings.
+RECOVERIES = {
+    ("platform", "rollback"): rolled(
+        {"build_closure": TS, "tag_release": TS, "switch_host_a": DV, "switch_host_b": NE},
+        [("build_closure", "compensate"), ("tag_release", "compensate"),
+         ("switch_host_a", "restore"), ("switch_host_a", "compensate")],
+        ["switch_host_a"], ["switch_host_a"], ["build_closure", "tag_release", "switch_host_a"]),
+    ("product", "rollback"): rolled(
+        {"build_image": TS, "index_channel": TS, "deploy_api": DV, "deploy_admin": NE,
+         "converge_fleet": NE},
+        [("build_image", "compensate"), ("index_channel", "restore"), ("deploy_api", "restore")],
+        ["index_channel", "deploy_api"], ["index_channel", "deploy_api"], ["build_image"]),
+    ("daemon", "rollback"): rolled(
+        {"build_helpers": TS, "stage_helpers": TS, "install_job": DV, "restart_job": NE},
+        [("build_helpers", "compensate"), ("stage_helpers", "restore"),
+         ("install_job", "restore")],
+        ["stage_helpers", "install_job"], ["stage_helpers", "install_job"], ["build_helpers"]),
+    ("platform", "irreversible_migration"): forward("unit_not_restorable", "switch_host_a",
+                                                    ["switch_host_b"]),
+    ("product", "irreversible_migration"): forward(
+        "unit_not_restorable", "deploy_api", ["index_channel", "deploy_admin", "converge_fleet"]),
+    ("daemon", "irreversible_migration"): forward("unit_not_restorable", "install_job",
+                                                  ["stage_helpers", "restart_job"]),
+    ("platform", "incompatible_restore"): forward("restore_incompatible", "switch_host_a"),
+    ("product", "incompatible_restore"): forward("restore_incompatible", "index_channel"),
+    ("daemon", "incompatible_restore"): forward("restore_incompatible", "stage_helpers"),
+    **{(shape, "missing_rollback_anchor"): ("abandoned", ABANDON, {"missing": unit})
+       for shape, unit in (("platform", "switch_host_a"), ("product", "index_channel"),
+                           ("daemon", "stage_helpers"))},
+    **{("library", scenario): succeeded("library")
+       for scenario in ("rollback", "irreversible_migration", "incompatible_restore",
+                        "missing_rollback_anchor")},
+    **{(shape, "unsupported_operation"): ("rejected", None, {"binding": binding})
+       for shape, binding in (("platform", "nix"), ("product", "api"), ("daemon", "job"),
+                              ("library", "index"))},
+}
+
+
 def declared_nodes(shape):
     """Every publication and activation node id the shape's profile declares."""
     _, profile, _ = SHAPES[shape](World())
@@ -136,9 +189,12 @@ def states_passed(transaction):
 
 class SweepTableTest(unittest.TestCase):
     def test_the_table_covers_every_shape_for_every_ported_scenario(self):
-        self.assertEqual(set(SWEEP) | set(LANDINGS), {(shape, scenario) for shape in SHAPES
-                                                      for scenario in SCENARIOS})
-        self.assertEqual(set(SWEEP) & set(LANDINGS), set())
+        tables = (set(SWEEP), set(LANDINGS), set(RECOVERIES))
+        self.assertEqual(set().union(*tables), {(shape, scenario) for shape in SHAPES
+                                                for scenario in SCENARIOS})
+        for i, first in enumerate(tables):
+            for second in tables[i + 1:]:
+                self.assertEqual(first & second, set())
 
     def test_every_cell_lands_where_the_table_says(self):
         for (shape, scenario), (final, path, voided, (first, rest)) in SWEEP.items():
@@ -198,6 +254,8 @@ class SweepTableTest(unittest.TestCase):
                              and e["action_id"] == identity],
                             [(1, "rejected", "provider_throttled"), (2, "accepted", None)])
                 types = [e["type"] for e in persisted.events]
+                self.assertEqual(types.count("anchors_verified"),
+                                 0 if shape == "library" else 1)
                 self.assertNotIn("evidence_recorded", types)
                 self.assertEqual((types.count("proof_cohort_started"),
                                   types.count("proof_sealed")), (1, 1))
@@ -264,14 +322,82 @@ class SweepTableTest(unittest.TestCase):
                     park = last["seq"]
                     self.assertFalse([e for e in persisted.events if e["seq"] > park])
 
+    def test_every_recovery_row_lands_where_the_committed_table_says(self):
+        for (shape, scenario), (final, path, expect) in RECOVERIES.items():
+            with self.subTest(shape=shape, scenario=scenario), \
+                    tempfile.TemporaryDirectory() as tmp:
+                root, world = Path(tmp), World()
+                if final == "rejected":
+                    with self.assertRaises(RecoveryPlanRejected) as caught:
+                        drive(root, shape, scenario, world=world)
+                    self.assertEqual(caught.exception.reason, "unsupported_operation")
+                    self.assertIn(f"unit 'unsupported_promote' operation 'promote' is not "
+                                  f"offered by effect {expect['binding']!r}",
+                                  str(caught.exception))
+                    self.assertEqual((list(root.iterdir()), world.invokes), ([], {}))
+                    continue
+                transaction_id = drive(root, shape, scenario, world=world)
+                store = TransactionStore(root)
+                persisted = store.load(transaction_id)
+                types = [e["type"] for e in persisted.events]
+                self.assertEqual((persisted.state, states_passed(persisted)),
+                                 (final, path or WITHOUT_ACTIVATION))
+                self.assertTrue(set(world.invokes.values()) <= {1})
+                if final == "succeeded":
+                    self.assertNotIn("recovery_started", types)
+                    continue
+                plan = persisted.recovery_plan
+                names = {u["action_id"]: u["name"] for u in plan["units"]}
+                edges = {e["action_id"]: (u["name"], e["action"])
+                         for u in plan["units"] for e in u["edges"]}
+                last = {e["type"]: e for e in persisted.events}
+                leases = [t for t in types if t.startswith("lease_")]
+                if final == "rolled_back":
+                    started, settled = last["recovery_started"], last["recovery_settled"]
+                    self.assertEqual({names[i]: c for i, c in started["effect_snapshot"].items()},
+                                     expect["snapshot"])
+                    self.assertEqual([edges[i] for i in started["selected"]], expect["selected"])
+                    self.assertEqual([names[c["unit"]] for c in started["checks"]],
+                                     expect["checked"])
+                    self.assertEqual([names[i] for i in settled["restored"]], expect["restored"])
+                    self.assertEqual([names[r["unit"]] for r in settled["residue"]],
+                                     expect["residue"])
+                    self.assertEqual([world.invokes.get(i) for i in started["selected"]],
+                                     [1] * len(started["selected"]))
+                    self.assertEqual(leases, ["lease_acquired", "lease_released"])
+                elif final == "abandoned":
+                    self.assertIn(f"{expect['missing']} (", transitions(persisted)[-2]["reason"])
+                    self.assertIn("rollback_anchor_missing", world.notes[0])
+                    self.assertIn("no_effect", world.notes[-1])
+                    self.assertEqual((persisted.actions, world.invokes), ((), {}))
+                    self.assertEqual(leases, ["lease_acquired", "lease_released"])
+                else:
+                    link = persisted.events[-1]
+                    self.assertEqual((link["type"], link["reason"]),
+                                     ("roll_forward_linked", expect["forward"]))
+                    self.assertIn(f"{expect['named']} (", world.notes[-1])
+                    self.assertEqual(leases, ["lease_acquired"])
+                    self.assertNotIn("recovery_started", types)
+                    self.assertTrue({a["name"] for a in persisted.actions} <= set(names.values()))
+                    child = store.load(link["child_transaction_id"])
+                    self.assertNotEqual(child.transaction_id, transaction_id)
+                    self.assertEqual((child.state, child.recovery["recovers"], child.creation_key),
+                                     ("created", transaction_id, f"{shape}:{scenario}:forward"))
+                    if expect["anchors"] is not None:
+                        [anchors] = [e for e in persisted.events if e["type"] == "anchors_verified"]
+                        self.assertEqual([names[a["unit"]] for a in anchors["anchors"]],
+                                         expect["anchors"])
+
     def test_every_shape_declares_a_feasible_plan_whose_units_are_its_nodes(self):
         for shape in SHAPES:
             with self.subTest(shape=shape), tempfile.TemporaryDirectory() as tmp:
                 created = TransactionStore(Path(tmp)).create(
                     "probe", {"s": shape}, concurrency_keys=["k"],
-                    proof=shape_declaration(shape))
+                    proof=shape_declaration(shape), recovery=shape_recovery(shape))
                 plan = created.proof_plan
                 self.assertEqual(sorted(u["name"] for u in plan["units"]),
+                                 declared_nodes(shape))
+                self.assertEqual(sorted(u["name"] for u in created.recovery_plan["units"]),
                                  declared_nodes(shape))
                 self.assertLessEqual(plan["cohort"]["makespan_ms"], 90_000)
 
@@ -317,7 +443,8 @@ class SweepTableTest(unittest.TestCase):
             persisted = store.load(first)
             again = store.create("library:success", dict(persisted.subject),
                                  concurrency_keys=list(persisted.concurrency_keys),
-                                 proof=shape_declaration("library"))
+                                 proof=shape_declaration("library"),
+                                 recovery=shape_recovery("library"))
             self.assertEqual(again.transaction_id, first)
             self.assertEqual(len(again.events), len(persisted.events))
 
@@ -365,9 +492,11 @@ def neutrality_findings(source):
 
 
 from agent_tools import (transaction_custody, transaction_history, transaction_invocation,
-                         transaction_plan, transaction_proof, transaction_storage)
+                         transaction_plan, transaction_proof, transaction_recovery,
+                         transaction_recovery_plan, transaction_storage)
 
-NEUTRAL_MODULES = (transaction_core, transaction_history, transaction_proof, transaction_plan,
+NEUTRAL_MODULES = (transaction_core, transaction_history, transaction_recovery,
+                   transaction_recovery_plan, transaction_proof, transaction_plan,
                    transaction_invocation, transaction_custody, transaction_storage)
 
 

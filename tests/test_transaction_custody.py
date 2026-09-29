@@ -23,6 +23,7 @@ TTL = 600_000
 KEYS = ("target:alpha", "project:alpha")
 SUBJECT = {"candidate": "sha256:abc"}
 EMPTY_PROOF = {"units": [], "obligations": [], "collectors": {}}
+EMPTY_RECOVERY = {"effects": {}, "units": []}
 PATH = "/work/alpha"
 INSTANCE = re.compile(r"lin_[0-9a-f]{32}")
 
@@ -57,7 +58,7 @@ class CustodyCase(unittest.TestCase):
 
     def new(self, key="k", keys=KEYS):
         return self.store.create(key, SUBJECT, concurrency_keys=keys,
-                                 proof=EMPTY_PROOF).transaction_id
+                                 proof=EMPTY_PROOF, recovery=EMPTY_RECOVERY).transaction_id
 
     def acquire(self, transaction_id, executor="exec-a", path=PATH, ttl=TTL):
         return self.store.acquire(transaction_id, executor_id=executor, subject_path=path,
@@ -430,16 +431,6 @@ class QuiesceTest(CustodyCase):
         resumed = self.acquire(transaction_id)
         self.assertEqual(self.store.load(transaction_id).events[-1]["reason"], "released")
         self.assertEqual({entry["epoch"] for entry in resumed.fence.values()}, {2})
-
-    def test_moving_between_parkings_does_not_restart_the_window(self):
-        transaction_id, custody = self.park()
-        self.clock.advance(400_000)
-        self.store.renew(custody)
-        self.store.advance(transaction_id, "recovering", reason="try", custody=custody)
-        self.clock.advance(400_000)
-        self.store.renew(custody)
-        self.clock.advance(100_001)
-        self.assertIsNone(self.store.renew(custody).custody)
 
     def test_an_unparked_transaction_is_never_quiesced(self):
         custody = self.acquire(self.new())

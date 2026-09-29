@@ -1,48 +1,80 @@
 """Scenario fixture and fixture executor for the transaction core sweep (#204 D6, D17;
-#206 D12, D18; #207 D14-D17, D29).
+#206 D12, D18; #207 D14-D17, D29; #208 D13, D14, D23).
 
-The executor is a happy-path walker over the simulated world that asks the shipped core
-to advance at each lifecycle boundary through the public store API, on a store whose
-clock is the world clock (#205 D22, D29). It creates each transaction with the proof
-declaration its shape implies (`proof_declaration`): every publication and activation node
-is a unit whose collector is its binding, every profile `proof` entry an obligation, and
-every binding a deterministic collector of its adapter's supported predicates with a 30 s
-collection bound. It acquires custody before publishing and presents it on every later
-advance. Every node is an action driven through the core: one effect per binding wraps
-that binding's adapter, action `name` is the node id and `parameters` its mode and
-expected subject, and no adapter effect is called outside `inspect_action` /
-`invoke_action`. Each node is pre-inspected, then invoked until its view reads
-`satisfied`; before each retry the world clock moves 30 seconds, so the core's retry
-budget and window run on the world clock. Proof is collected through the core: one
-`_Observer` per binding is the only caller of the adapter's proof predicates. A first
-pass collects every plan obligation in plan order through `collect_obligation`, skipping
-one whose latest evidence is still admissible and one refused `unsupported_obligation` or
-`dependency_not_accepted`. Then each convergence cohort is started, its members collected
-with custody renewed after each, and `settle_proof` either seals into `succeeded` or parks
-with its typed reason (`proof_rejected`, `proof_did_not_converge`); the executor repeats
-while it leaves the transaction in `proving`, tolerating a `start_cohort` refused
-`proof_incomplete` or `convergence_exhausted` so that `settle_proof` judges, and never
-advances past a park. Under the `slow_collection` fault every observation made inside a
-cohort first moves the world clock 250 seconds, so a cohort with members outlives its
-window (`expired_snapshot`). Scenario hooks move the world clock: `lease_renewal` renews
-in place twice; `lease_lapse` lets the lease expire before the last required obligation,
-has the reaper park the transaction, reacquires, resumes proving and recollects what the
-new fence voided; `resume_after_crash` kills the executor between the first publication
-action's recorded intent and its call, lets the lease expire, reaps, reacquires, checks
-that a blind invoke is refused `inspection_required`, and resumes publication through a
-fresh inspection. It carries none of the prototype's authorization or recovery logic. Any
-action view other than `absent` or `satisfied`, and any invocation or proof refusal not
-named above, parks the transaction in attention_required with the observation or the
-refusal's reason.
+The executor is a happy-path walker over the simulated world that asks the shipped core to
+advance at each lifecycle boundary through the public store API, on a store whose clock is
+the world clock (#205 D22, D29). It creates each transaction with the proof declaration its
+shape implies (`proof_declaration`): every publication and activation node is a unit whose
+collector is its binding, every profile `proof` entry an obligation, and every binding a
+deterministic collector of its adapter's supported predicates with a 30 s collection bound.
+Beside it goes the recovery declaration the shape implies (`recovery_declaration`, #208):
+every such node is a unit whose effect is its binding and whose posture, anchor and edges
+come from the profile's `recovery` entry for it, and every binding an effect offering its
+adapter's supported modes. It acquires custody before publishing and presents it on every
+later advance. Right after acquiring in `ready` it verifies the rollback anchors through
+`_Router`, which sends each check to its collector binding's adapter hook, and parks on a
+refusal. Every node is an action driven through the core: one effect per binding wraps
+that binding's adapter, action `name` is the node id and `parameters` its mode and expected
+subject, and no adapter effect is called outside `inspect_action` / `invoke_action`. Each
+node is pre-inspected, then invoked until its view reads `satisfied`; before each retry the
+world clock moves 30 seconds, so the core's retry budget and window run on the world clock.
+Proof is collected through the core: one `_Observer` per binding is the only caller of the
+adapter's proof predicates. A first pass collects every plan obligation in plan order
+through `collect_obligation`, skipping one whose latest evidence is still admissible and one
+refused `unsupported_obligation` or `dependency_not_accepted`. Then each convergence cohort
+is started, its members collected with custody renewed after each, and `settle_proof` either
+seals into `succeeded` or parks with its typed reason (`proof_rejected`,
+`proof_did_not_converge`); the executor repeats while it leaves the transaction in
+`proving`, tolerating a `start_cohort` refused `proof_incomplete` or `convergence_exhausted`
+so that `settle_proof` judges, and never advances past a park. Under the `slow_collection`
+fault every observation made inside a cohort first moves the world clock 250 seconds, so a
+cohort with members outlives its window (`expired_snapshot`). Scenario hooks move the world
+clock: `lease_renewal` renews in place twice; `lease_lapse` lets the lease expire before the
+last required obligation, has the reaper park the transaction, reacquires, resumes proving
+and recollects what the new fence voided; `resume_after_crash` kills the executor between
+the first publication action's recorded intent and its call, lets the lease expire, reaps,
+reacquires, checks that a blind invoke is refused `inspection_required`, and resumes
+publication through a fresh inspection. The recovery step runs only in `recover`-flagged
+scenarios, after a park, and `drive` lets a rejected recovery declaration propagate
+(#208 D13, D23). Any action view other than `absent` or `satisfied`, and any invocation or
+proof refusal not named above, parks the transaction in attention_required with the
+observation or the refusal's reason.
 """
 
 from agent_tools.transaction_core import (
-    InvocationRefused, ProofRefused, StaleCustody, TransactionStore)
+    InvocationRefused, ProofRefused, RecoveryRefused, StaleCustody, TransactionStore)
 
 from .transaction_core_shapes import SHAPES
 from .transaction_core_world import ExecutorCrash, World
 
 TTL_MS = 600_000
+
+
+def _add_unsupported_publication(profile, registry):
+    """Port of dc98ba9's mutation: a publication node on the first binding whose adapter
+    does not offer `promote`, with a `manual_only` recovery entry (#208 D14)."""
+    alias = next((alias for alias, binding in profile["bindings"].items()
+                  if not alias.startswith("_")
+                  and registry[binding["adapter"]].modes["promote"] != "supported"), None)
+    if alias is None:
+        raise ValueError("every binding offers promote")
+    profile["publication"].append({
+        "id": "unsupported_promote", "mode": "promote", "binding": alias, "deps": [],
+        "effect_class": "reversible_no_incremental_spend",
+        "expected_subject": {"note": "authored against an unsupported mode"}})
+    profile["recovery"]["units"]["unsupported_promote"] = {"posture": "manual_only",
+                                                           "binding": alias}
+
+
+def _first_activation_supersedable(profile, registry):
+    """A forward-only migration rides the first activation unit: it becomes
+    `supersedable_only`, with no anchor, compatibility or edges (#208 D14)."""
+    if profile["activation"] == "none":
+        return
+    node = profile["activation"][0]
+    profile["recovery"]["units"][node["id"]] = {"posture": "supersedable_only",
+                                                "binding": node["binding"]}
+
 
 # `success` is ported from prototype-release-transactions/scenarios.py at dc98ba9;
 # `lease_renewal` and `lease_lapse` are new in #205 (D22, D29); `throttled_retry` and
@@ -85,6 +117,29 @@ SCENARIOS = {
                     "note": "one frozen member of a convergent unit never reports the "
                             "desired digest, so activation stays in_progress and nothing "
                             "is re-invoked."},
+    # The last five come from dc98ba9 in #208 (D14): `irreversible_migration` is
+    # redefined, and `incompatible_restore` rolls forward instead of disposing `failed`.
+    "rollback": {"faults": frozenset({"activation_failure"}), "recover": True,
+                 "note": "failed_activation recovered: restore and compensate the selected "
+                         "edges, then settle into rolled_back."},
+    "irreversible_migration": {"faults": frozenset({"activation_failure"}), "recover": True,
+                               "mutate": _first_activation_supersedable,
+                               "note": "the failed first activation unit is supersedable "
+                                       "only: recovery is refused and a roll-forward child "
+                                       "is linked."},
+    "incompatible_restore": {"faults": frozenset({"activation_failure",
+                                                  "restore_incompatible"}),
+                             "recover": True,
+                             "note": "the prior subject is incompatible with the current "
+                                     "epoch: recovery is refused and a roll-forward child is "
+                                     "linked."},
+    "missing_rollback_anchor": {"faults": frozenset({"missing_anchor"}), "recover": True,
+                                "note": "a declared anchor is not retained: the transaction "
+                                        "parks in ready and abandons through no_effect."},
+    "unsupported_operation": {"faults": frozenset(), "recover": True,
+                              "mutate": _add_unsupported_publication,
+                              "note": "a unit's operation is not offered by its effect: "
+                                      "creation is rejected and nothing is written."},
 }
 
 
@@ -133,6 +188,41 @@ def shape_declaration(shape):
     """The declaration `drive` passes for `shape`."""
     _, profile, registry = SHAPES[shape](World())
     return proof_declaration(profile, registry)
+
+
+def recovery_declaration(profile, registry):
+    """The recovery declaration a shape's profile implies (#208, spec "Sweep fixture")."""
+    activation = [] if profile["activation"] == "none" else profile["activation"]
+    entries = profile["recovery"]["units"]
+    effects = {alias: {"operations": sorted(mode for mode, support
+                                            in registry[binding["adapter"]].modes.items()
+                                            if support == "supported")}
+               for alias, binding in profile["bindings"].items() if not alias.startswith("_")}
+    units = []
+    for node in [*profile["publication"], *activation]:
+        entry = entries[node["id"]]
+        anchor = entry.get("anchor")
+        restorable = entry["posture"] == "restorable"
+        units.append({
+            "name": node["id"],
+            "parameters": {"mode": node["mode"], "expected_subject": node["expected_subject"]},
+            "effect": node["binding"], "operation": node["mode"], "posture": entry["posture"],
+            "anchor": ({"predicate": "rollback_anchor",
+                        "parameters": {"expected_subject": anchor}} if restorable else None),
+            "compatibility": ({"predicate": "compatibility",
+                               "parameters": {"expected_subject": anchor}}
+                              if restorable else None),
+            "edges": [{"action": e["action"], "operation": e["op"],
+                       "parameters": {"mode": e["op"], "unit": node["id"],
+                                      "expected_subject": anchor or {}},
+                       "residue": e.get("residue")} for e in entry.get("edges", [])]})
+    return {"effects": effects, "units": units}
+
+
+def shape_recovery(shape):
+    """The recovery declaration `drive` passes for `shape`."""
+    _, profile, registry = SHAPES[shape](World())
+    return recovery_declaration(profile, registry)
 
 
 def _in_dependency_order(nodes):
@@ -200,15 +290,36 @@ class _Observer:
         return {"outcome": outcome, "reason": reason, "reference": seen["payload_ref"]}
 
 
+class _Router:
+    """Every anchor or compatibility check goes to its collector binding's adapter hook; an
+    adapter `absent` is `unsatisfied` with reason `anchor_absent` (#208)."""
+
+    def __init__(self, adapters):
+        self.adapters = adapters
+
+    def observe(self, request):
+        seen = self.adapters[request["collector"]].inspect(request["predicate"],
+                                                           request["parameters"])
+        outcome = {"absent": "unsatisfied"}.get(seen["outcome"], seen["outcome"])
+        if outcome not in ("satisfied", "unsatisfied"):
+            outcome = "unknown"
+        reason = "anchor_absent" if seen["outcome"] == "absent" else outcome
+        return {"outcome": outcome, "reason": reason, "reference": seen["payload_ref"]}
+
+
 def drive(root, shape, scenario, world=None):
     world = World() if world is None else world
     world.faults = set(SCENARIOS[scenario]["faults"])
     store = TransactionStore(root, clock=lambda: world.clock * 1000)
     subject, profile, registry = SHAPES[shape](world)
+    mutate = SCENARIOS[scenario].get("mutate")
+    if mutate is not None:
+        mutate(profile, registry)
     keys = profile["target"]["concurrency_keys"]
-    transaction_id = store.create(
-        f"{shape}:{scenario}", subject, concurrency_keys=keys,
-        proof=proof_declaration(profile, registry)).transaction_id
+    proof = proof_declaration(profile, registry)
+    recovery = recovery_declaration(profile, registry)
+    transaction_id = store.create(f"{shape}:{scenario}", subject, concurrency_keys=keys,
+                                  proof=proof, recovery=recovery).transaction_id
     definite = {"all": True}
     held = {"custody": None}
 
@@ -218,6 +329,7 @@ def drive(root, shape, scenario, world=None):
     effects = {alias: _Effect(adapter(alias)) for alias in profile["bindings"]
                if not alias.startswith("_")}
     observers = {alias: _Observer(adapter(alias)) for alias in effects}
+    router = _Router({alias: adapter(alias) for alias in effects})
 
     def external_state():
         return "known" if definite["all"] else "unknown"
@@ -347,6 +459,42 @@ def drive(root, shape, scenario, world=None):
             if settled.state != "proving":
                 return
 
+    def drive_edge(unit, edge):
+        """Drive one selected edge as `run_phase` drives a node, until it reads other than
+        `absent`."""
+        call = {"name": edge["operation"], "parameters": edge["parameters"],
+                "effect": effects[unit["effect"]]}
+        snapshot = store.inspect_action(held["custody"], **call)
+        while True:
+            view = next(v for v in snapshot.actions if v["action_id"] == edge["action_id"])
+            if view["status"] != "absent":
+                return
+            if view["attempts"] > 0:
+                world.tick(30)
+            snapshot = store.invoke_action(held["custody"], **call)
+
+    def recover():
+        """The one recovery step after a park (#208 D13, D14)."""
+        store.issue_grant(held["custody"], grant_id="recovery-1", actor="fixture-operator")
+        try:
+            begun = store.begin_recovery(held["custody"], grant_id="recovery-1", observer=router)
+        except RecoveryRefused as refused:
+            world.notes.append(str(refused))
+            if refused.reason == "no_effect":
+                advance("abandoned", "no release effect exists")
+            elif refused.reason in ("unit_not_restorable", "restore_incompatible"):
+                store.roll_forward(
+                    held["custody"], grant_id="recovery-1", reason=refused.reason,
+                    creation_key=f"{shape}:{scenario}:forward",
+                    subject={**subject, "candidate": subject["candidate"] + "-forward"},
+                    concurrency_keys=keys, proof=proof, recovery=recovery)
+            return
+        edges = {edge["action_id"]: (unit, edge) for unit in begun.recovery_plan["units"]
+                 for edge in unit["edges"]}
+        for edge_id in begun.recovery["selected"]:
+            drive_edge(*edges[edge_id])
+        store.settle_recovery(held["custody"])
+
     try:
         advance("awaiting_verification", "candidate verification requested")
         check = profile["target"]["verification"]
@@ -355,6 +503,11 @@ def drive(root, shape, scenario, world=None):
                 "candidate verification")
         advance("ready", "candidate verification satisfied")
         acquire()
+        try:
+            store.verify_anchors(held["custody"], observer=router)
+        except RecoveryRefused as refused:
+            world.notes.append(str(refused))
+            raise _Parked(f"rollback anchors refused: {refused}") from None
         advance("publishing", "publication started")
         publish()
         advance("published", "every publication unit satisfied")
@@ -378,4 +531,6 @@ def drive(root, shape, scenario, world=None):
         converge()
     except _Parked as parked:
         advance("attention_required", str(parked))
+        if SCENARIOS[scenario].get("recover"):
+            recover()
     return transaction_id

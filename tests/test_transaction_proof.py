@@ -14,6 +14,7 @@ from agent_tools.transaction_core import (
 
 from .test_transaction_custody import KEYS, SUBJECT, TTL, CustodyCase, plain, serialize
 from .test_transaction_invocation import FakeEffect, FakeWorld, renumbered
+from .test_transaction_recovery_plan import inert_recovery
 
 PUB, ACT = "published_artifact_identity", "running_subject_identity"
 C = {"basis": "deterministic", "max_collection_latency_ms": 30_000,
@@ -75,7 +76,8 @@ class ProofCase(CustodyCase):
         super().setUp()
         self.world = FakeWorld()
         self.transaction_id = self.store.create(
-            "proof", SUBJECT, concurrency_keys=KEYS, proof=DECLARATION).transaction_id
+            "proof", SUBJECT, concurrency_keys=KEYS, proof=DECLARATION,
+            recovery=inert_recovery(DECLARATION)).transaction_id
         self.custody = self.acquire(self.transaction_id)
         self.plan = self.store.load(self.transaction_id).proof_plan
         self.ids = [entry["obligation_id"] for entry in self.plan["obligations"]]
@@ -617,7 +619,9 @@ class GateTest(ProofCase):
         self.assertIn("activation", str(error))
         self.transaction_id = self.store.create(
             "no-activation", SUBJECT, concurrency_keys=("key:solo",),
-            proof={**DECLARATION, "units": UNITS[:1], "obligations": []}).transaction_id
+            proof={**DECLARATION, "units": UNITS[:1], "obligations": []},
+            recovery=inert_recovery({**DECLARATION, "units": UNITS[:1],
+                                     "obligations": []})).transaction_id
         self.custody = self.acquire(self.transaction_id)
         self.to("awaiting_verification", "ready", "publishing")
         self.satisfy("build", {"n": 1})

@@ -1,4 +1,4 @@
-"""The transaction core (#204, #205, #206).
+"""The transaction core (#204, #205, #206, #207, #208).
 
 A caller-rooted store of closed-schema transactions with a closed lifecycle:
 `TransactionStore(root, clock=...)` creates deduplicated transactions under an
@@ -35,7 +35,14 @@ constants live in `agent_tools.transaction_invocation`, which this module re-exp
 constants, which this module re-exports as well. `collect_obligation` records one proof
 observation around the pure halves in `agent_tools.transaction_proof` (re-exported too);
 `start_cohort` opens a convergence cohort and `settle_proof` judges it in one write.
-The module has no command and no caller yet.
+`agent_tools.transaction_recovery_plan` compiles, binds and materializes the recovery
+declaration (#208); this module re-exports its constants and those three functions.
+`verify_anchors` observes every restorable unit's rollback anchor in `ready` around the pure
+halves in `agent_tools.transaction_recovery`, whose refusal reasons and effect classes this
+module re-exports; `begin_recovery` enters `recovering` under a fresh grant around that module's
+admission, `settle_recovery` judges it into `rolled_back` or a `recovery_incomplete` park,
+`roll_forward` creates a linked child without holding the parent lock across it, and
+`advance` applies its gates. The module has no command and no caller yet.
 """
 
 import contextlib
@@ -74,10 +81,17 @@ from agent_tools.transaction_proof import (
     PROOF_REFUSAL_REASONS, advance_violation, cohort_start, collection_refusal,
     next_evidence_id, obligation, observation_request, observation_violation, open_cohort,
     proof_refused, settlement)
+from agent_tools.transaction_recovery import (
+    EFFECT_CLASSES, RECOVERY_REFUSAL_REASONS, anchor_requests, anchors_events, begin_events,
+    begin_requests, check_result_violation, link_events, recovery_advance_violation,
+    recovery_refused, recovery_settlement, roll_forward_refusal, selection_refusal)
+from agent_tools.transaction_recovery_plan import (
+    EDGE_ACTIONS, POSTURES, RECOVERY_PLAN_SCHEMA, RECOVERY_REJECTION_REASONS, bind_recovery,
+    compile_recovery, materialize_recovery)
 from agent_tools.transaction_storage import (
     LAST_AT_MS, CreationConflict, CustodyMisbound, EffectResultInvalid, FenceViolation,
     GrantInvalid, InvocationRefused, LeaseUnavailable, ProofPlanRejected, ProofRefused,
-    StaleCustody,
+    RecoveryPlanRejected, RecoveryRefused, StaleCustody,
     StateInvalid, TransactionBusy, TransactionError, TransitionRefused, UnknownTransaction,
     atomic_write, fsync_directory, lstat_mode, open_lock, read_json, require_directory)
 
@@ -127,7 +141,7 @@ def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
 
 def _require_creatable(root: Path, creation_key: Any, subject: Any,
                        concurrency_keys: Any) -> None:
-    """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v4 document."""
+    """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v5 document."""
     where = f"{root}: creation_key {creation_key!r}"
     if type(creation_key) is not str or not creation_key:
         raise StateInvalid(f"{where}: not a non-empty string")
@@ -216,8 +230,10 @@ class TransactionStore:
         whatever `external_state` the caller passes. Before it, `advance_violation` refuses
         `succeeded` (entered only through `settle_proof`), a `proving -> attention_required`
         with a reserved reason, and a failing publication or activation gate (#207 D10, D12,
-        D27). Entering a terminal while custody
-        is held appends the transition and a `lease_released` reason `terminal` in one
+        D27); after it, `recovery_advance_violation` refuses `recovering`, a reserved recovery
+        reason, `abandoned` over an action with effect, and `ready -> publishing` without an
+        `anchors_verified` under the held fence (#208 D7, D10, D22). Entering a terminal while
+        custody is held appends the transition and a `lease_released` reason `terminal` in one
         `state.json` write, then clears the lease records. Every refusal happens
         before any write; the lock file is never created.
         """
@@ -284,33 +300,50 @@ class TransactionStore:
         if blocker is not None:
             raise TransitionRefused(f"{where}: terminal target over unresolved action "
                                     f"{blocker.action_id} ({status(blocker)})")
+        rule = recovery_advance_violation(prior, target, reason)
+        if rule is not None:
+            raise TransitionRefused(f"{where}: {rule}")
         return self._append(prior, now, [{
             "type": "transitioned", "from": source, "to": target, "reason": reason,
             "external_state": external_state}])
 
     def create(self, creation_key: str, subject: dict, *, concurrency_keys: Collection[str],
-               proof: dict) -> Transaction:
+               proof: dict, recovery: dict) -> Transaction:
         """Create the transaction for `creation_key`, or return the one it already names.
 
         The concurrency key set is fixed here, stored sorted, and compared with the
-        subject when the key already names a transaction (D4). The `proof` declaration
-        has no default and is compiled before any lock, so a rejected one
-        (`ProofPlanRejected`) leaves nothing behind; the plan it materializes under the
-        transaction id is stored with its digest on the `created` event, and a same-key
-        create whose plan digest differs is a `CreationConflict` (#207 D2, D3).
+        subject when the key already names a transaction (D4). Neither the `proof` nor the
+        `recovery` declaration has a default; before any lock the recovery declaration is
+        compiled, then the proof declaration, then the two are bound unit for unit, so a
+        rejected one (`RecoveryPlanRejected`, `ProofPlanRejected`) leaves nothing behind.
+        The two plans they materialize under the transaction id are stored with their
+        digests on the `created` event, whose `recovers` is null here; a same-key create
+        whose subject, key set, proof plan digest or recovery plan digest differs is a
+        `CreationConflict` (#207 D2, D3; #208 D2, D5, D6).
         """
+        return self._create(creation_key, subject, concurrency_keys, proof, recovery, None)
+
+    def _create(self, creation_key: str, subject: dict, concurrency_keys: Collection[str],
+                proof: dict, recovery: dict, recovers: str | None) -> Transaction:
+        """`create`, with the `created` event's `recovers` back-link set to `recovers`, which
+        a same-key create must match too (#208 D11)."""
         _require_creatable(self.root, creation_key, subject, concurrency_keys)
-        compiled = compile_proof(proof, where=f"{self.root}: creation_key {creation_key!r}")
+        where = f"{self.root}: creation_key {creation_key!r}"
+        compiled_recovery = compile_recovery(recovery, where=where)
+        compiled = compile_proof(proof, where=where)
+        bound = bind_recovery(compiled_recovery, compiled, where=where)
         keys = sorted(concurrency_keys)
         at = format_at(self._now())
         descriptor = open_lock(self.root / "creation.lock")
         try:
-            return self._create_locked(creation_key, subject, keys, compiled, at)
+            return self._create_locked(creation_key, subject, keys, compiled, bound, recovers,
+                                       at)
         finally:
             os.close(descriptor)
 
     def _create_locked(self, creation_key: str, subject: dict, keys: list[str],
-                       compiled: dict, at: str) -> Transaction:
+                       compiled: dict, bound: dict, recovers: str | None,
+                       at: str) -> Transaction:
         transaction_id = _read_index(self.root, creation_key)
         if transaction_id is None:
             transaction_id = _mint_id()
@@ -328,6 +361,7 @@ class TransactionStore:
             require_directory(directory, missing_ok=False)
             fsync_directory(self.root)
         plan = materialize_plan(compiled, transaction_id)
+        recovery_plan = materialize_recovery(bound, transaction_id)
         descriptor = open_lock(directory / "lock")
         try:
             if lstat_mode(directory / "state.json") is not None:
@@ -341,7 +375,10 @@ class TransactionStore:
                      != telemetry_digest(subject)),
                     ("concurrency key set", document["concurrency_keys"] != keys),
                     ("proof plan", telemetry_digest(plan)
-                     != document["events"][0]["proof_plan_digest"])) if differ]
+                     != document["events"][0]["proof_plan_digest"]),
+                    ("recovery plan", telemetry_digest(recovery_plan)
+                     != document["events"][0]["recovery_plan_digest"]),
+                    ("recovers", document["events"][0]["recovers"] != recovers)) if differ]
                 if differs:
                     raise CreationConflict(
                         f"{transaction_id}: creation_key {creation_key!r} already names a "
@@ -352,8 +389,11 @@ class TransactionStore:
                 "creation_key": creation_key, "subject": copy.deepcopy(subject),
                 "state": "created", "parked_from": None, "revision": 1,
                 "events": [{"seq": 1, "type": "created", "at": at,
-                            "proof_plan_digest": telemetry_digest(plan)}],
+                            "proof_plan_digest": telemetry_digest(plan),
+                            "recovery_plan_digest": telemetry_digest(recovery_plan),
+                            "recovers": recovers}],
                 "concurrency_keys": keys, "custody": None, "proof_plan": plan,
+                "recovery_plan": recovery_plan,
             }
             _validate_state(document, transaction_id, self.root)
             atomic_write(directory, directory / "state.json", document)
@@ -674,8 +714,9 @@ class TransactionStore:
         (#206 D3, D5-D8).
 
         Argument shapes are refused first, before any lock. The first lock hold refuses a
-        terminal (`TransitionRefused`), runs the fenced check, then refuses a state other
-        than `publishing` or `activating` (`InvocationRefused` `state_not_effectful`).
+        terminal (`TransitionRefused`), runs the fenced check, then refuses a state outside
+        `EFFECT_STATES` (`InvocationRefused` `state_not_effectful`) and then `not_selected`
+        (`selection_refusal`, #208 D15, D22).
         An action whose latest inspection reads `satisfied` returns the unchanged snapshot
         with no write and no call. Otherwise the admission rules refuse, in order,
         `inspection_required`, `not_absent`, `not_retryable`, `budget_exhausted` and
@@ -695,6 +736,10 @@ class TransactionStore:
         with self._fenced(custody, "invoke_action", writes=True) as (prior, now):
             if prior["state"] not in EFFECT_STATES:
                 raise refused_error(transaction_id, identity, "state_not_effectful")
+            reason = selection_refusal(prior["recovery_plan"], prior["events"], prior["state"],
+                                       identity)
+            if reason is not None:
+                raise refused_error(transaction_id, identity, reason)
             entry = fold_actions(prior["events"]).get(identity)
             if satisfied(entry):
                 return snapshot(prior)
@@ -787,6 +832,85 @@ class TransactionStore:
         rejected, seal (into `succeeded`), cohort failed, exhausted, else `no_open_cohort`
         (#207 D10, D11, D21, D22)."""
         return self._decide(custody, "settle_proof", settlement)
+
+    def verify_anchors(self, custody: Custody, *, observer: Any) -> Transaction:
+        """Observe every `restorable` unit's rollback anchor in `ready`, then record
+        `anchors_verified`: `_observed` around `anchor_requests` and `anchors_events` (#208
+        D7, D20). Every refusal, `rollback_anchor_missing` included, writes nothing."""
+        return self._observed(custody, "verify_anchors", observer, anchor_requests,
+                              anchors_events)
+
+    def begin_recovery(self, custody: Custody, *, grant_id: str, observer: Any) -> Transaction:
+        """Enter `recovering`: `_observed` around `begin_requests` and `begin_events` for
+        `grant_id` (#208 D8, D20). A malformed credential or `grant_id` refuses before any
+        lock; every refusal writes nothing."""
+        require_texts(custody, "begin_recovery", grant_id=grant_id)
+        return self._observed(
+            custody, "begin_recovery", observer, lambda prior: begin_requests(prior, grant_id),
+            lambda prior, requests, results: begin_events(prior, grant_id, requests, results))
+
+    def settle_recovery(self, custody: Custody) -> Transaction:
+        """Judge the recovery in one write, `recovery_settlement`'s first matching case:
+        rolled back (with the terminal `lease_released`), incomplete, else `recovery_pending`
+        (#208 D9)."""
+        return self._decide(custody, "settle_recovery", recovery_settlement)
+
+    def roll_forward(self, custody: Custody, *, grant_id: str, reason: str,
+                     creation_key: str, subject: dict, concurrency_keys: Collection[str],
+                     proof: dict, recovery: dict) -> Transaction:
+        """Create the child whose `recovers` is this transaction, link it, return its snapshot
+        (#208 D11). Before any lock a malformed credential, `grant_id` or `reason` refuses.
+        The parent's first hold runs `roll_forward_refusal` and writes nothing; with no parent
+        lock held, `_create` then makes the child or returns the one `creation_key` names,
+        under every `create` rule (a differing `recovers` is a `CreationConflict`); the second
+        hold repeats the refusal and appends `link_events`, if any. A retry after a death
+        between child and link finds that child and links it once."""
+        require_texts(custody, "roll_forward", grant_id=grant_id, reason=reason)
+        with self._fenced(custody, "roll_forward", writes=True) as (prior, _):
+            roll_forward_refusal(prior, grant_id)
+        child = self._create(creation_key, subject, concurrency_keys, proof, recovery,
+                             custody.transaction_id)
+        with self._fenced(custody, "roll_forward", writes=True) as (prior, now):
+            roll_forward_refusal(prior, grant_id)
+            events = link_events(prior, child.transaction_id, grant_id, reason)
+            if events:
+                self._append(prior, now, events)
+        return child
+
+    def _observed(self, custody: Custody, operation: str, observer: Any,
+                  admit: Callable[[dict], list[Mapping]],
+                  conclude: Callable[[dict, list, list], list[dict]]) -> Transaction:
+        """The two-hold check pattern (#207 D6; #208 D20). Before any lock, a malformed
+        credential or no callable `observer.observe` is `StateInvalid`. The first hold
+        (`_fenced`) runs `admit`, which may refuse; with no request it appends what
+        `conclude(prior, [], [])` yields, if anything, and returns. Each request then goes to
+        `observer.observe` with no lock held; what it raises propagates, a copy of each result
+        is what is validated and kept, and one failing `check_result_violation` is
+        `EffectResultInvalid`. The second hold refuses
+        `history_changed` when the revision moved, else appends `conclude`'s events."""
+        require_custody_shape(custody)
+        transaction_id = custody.transaction_id
+        if not callable(getattr(observer, "observe", None)):
+            raise StateInvalid(f"{transaction_id}: {operation}: observer has no callable "
+                               f"observe")
+        with self._fenced(custody, operation, writes=True) as (prior, now):
+            requests = admit(prior)
+            if not requests:
+                events = conclude(prior, [], [])
+                return self._append(prior, now, events) if events else snapshot(prior)
+            revision = prior["revision"]
+        results = []
+        for request in requests:
+            result = copy.deepcopy(observer.observe(request))
+            violation = check_result_violation(result)
+            if violation is not None:
+                raise EffectResultInvalid(f"{transaction_id}: {operation}: {violation}")
+            results.append(result)
+        with self._fenced(custody, operation, writes=True) as (prior, now):
+            if prior["revision"] != revision:
+                raise recovery_refused(transaction_id, "history_changed",
+                                       f"{operation}: the history grew during the calls")
+            return self._append(prior, now, conclude(prior, requests, results))
 
     def _decide(self, custody: Custody, operation: str,
                 decide: Callable[[dict, int], list[dict]]) -> Transaction:

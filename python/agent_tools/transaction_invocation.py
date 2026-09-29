@@ -42,10 +42,10 @@ ERROR_CLASSES = ("transient_transport", "provider_throttled", "provider_unavaila
 RETRY_SAFE_CLASSES = frozenset(ERROR_CLASSES[:3])
 MAX_ATTEMPTS = 3
 RETRY_WINDOW_MS = 900_000
-EFFECT_STATES = ("publishing", "activating")
+EFFECT_STATES = ("publishing", "activating", "recovering")
 REFUSAL_REASONS = ("inspection_required", "not_absent", "not_retryable",
                    "budget_exhausted", "window_closed", "state_not_effectful",
-                   "attempt_in_flight")
+                   "attempt_in_flight", "not_selected")
 
 _ENVELOPE_KEYS = frozenset({"seq", "type", "at"})
 ACTION_EVENT_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
@@ -186,7 +186,7 @@ def action_event_violation(event: dict, actions: dict[str, ActionFold], *,
         if attempt > MAX_ATTEMPTS:
             return f"invocation_intended attempt {attempt} exceeds {MAX_ATTEMPTS}"
         if state not in EFFECT_STATES:
-            return "invocation_intended sits outside publishing and activating"
+            return "invocation_intended sits outside publishing, activating and recovering"
         inspection = entry.inspection
         if (entry.open or inspection is None or inspection["outcome"] != "absent"
                 or inspection["fence"] != event["fence"]):

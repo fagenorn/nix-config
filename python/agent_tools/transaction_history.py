@@ -1,20 +1,30 @@
-"""The transaction-state/v4 document model of the transaction core (#205 D33, #206 D2,
-#207 D13): the lifecycle vocabularies, the `Custody` credential and `Transaction` snapshot
-types, the credential shape checks, the pure history validator and the snapshot fold. The
-validator hands each action event to `agent_tools.transaction_invocation`, whose fold also
-derives the snapshot's per-action `actions` view on every load, and each proof event to
-`agent_tools.transaction_proof`, whose `proof_view` derives the snapshot's `proof` view on
-every load too; an `obligation_observed` joins the evidence-id fold exactly as an
-`evidence_recorded` does (#207 D25). It accepts the stored
-`proof_plan` only as the materialization of its own declaration, through
-`agent_tools.transaction_plan`'s `plan_violation`, and only when the `created` event pins its
-`telemetry_digest` (#207 D3, D24). It reads no file, lock or clock: `validate_state` takes
-the creation-key index lookup as a callable, which `agent_tools.transaction_core` binds to
-its store root. It also composes what a reap appends to a lapsed span (`reaped`) and a late
-owner result's event (`owner_result_event`), and answers whether an executor and fence were
-ever issued a span (`span_issued`). The `at`-timestamp codec (`format_at`, `parse_at`) and
-the strict JSON object rule (`json_object_violation`) that a created `subject` and a late
-`result` share are imported from `agent_tools.transaction_storage`, not held here.
+"""The transaction-state/v5 document model of the transaction core (#205 D33, #206 D2, #207
+D13, #208 D12): the lifecycle vocabularies, the `Custody` credential and `Transaction`
+snapshot types, the credential shape checks, the pure history validator and the snapshot
+fold. The validator hands each action event to `agent_tools.transaction_invocation`, whose
+fold also derives the snapshot's per-action `actions` view on every load, and each proof
+event to `agent_tools.transaction_proof`, whose `proof_view` derives the snapshot's `proof`
+view on every load too; an `obligation_observed` joins the evidence-id fold exactly as an
+`evidence_recorded` does (#207 D25). It accepts the stored `proof_plan` only as the
+materialization of its own declaration, through `agent_tools.transaction_plan`'s
+`plan_violation`, and only when the `created` event pins its `telemetry_digest` (#207 D3,
+D24). It accepts the stored `recovery_plan` likewise, only as the materialization of its own
+declaration bound to the proof plan's, through `agent_tools.transaction_recovery_plan`'s
+`recovery_plan_violation`, only when the `created` event pins its digest, and with a
+`recovers` back-link that is null or another transaction's id;
+`agent_tools.transaction_recovery`'s `recovery_view` derives the snapshot's `recovery` view
+on every load (#208 D6, D12), its `recovery_event_violation` checks each recovery event, its
+`recovery_transition_violation` gates each transition and its `recovery_pairing_violation`
+binds `recovery_started` to the entry into `recovering`, `recovery_settled` to the entry into
+`rolled_back` and `recovery_incomplete` to its park (#208 D7, D9, D10); a
+`roll_forward_linked` must also name a transaction id (#208 D11). It reads no file, lock
+or clock: `validate_state` takes the creation-key index lookup as a callable, which
+`agent_tools.transaction_core` binds to its store root. It also composes what a reap
+appends to a lapsed span (`reaped`) and a late owner result's event (`owner_result_event`),
+and answers whether an executor and fence were ever issued a span (`span_issued`). The
+`at`-timestamp codec (`format_at`, `parse_at`) and the strict JSON object rule
+(`json_object_violation`) that a created `subject` and a late `result` share are imported
+from `agent_tools.transaction_storage`, not held here.
 """
 
 import copy
@@ -36,10 +46,14 @@ from agent_tools.transaction_plan import plan_violation
 from agent_tools.transaction_proof import (
     PROOF_EVENT_KEYS, ProofFold, apply_proof_event, gate_violation, pairing_violation,
     proof_event_violation, proof_view)
+from agent_tools.transaction_recovery import (
+    RECOVERY_EVENT_KEYS, recovery_event_violation, recovery_pairing_violation,
+    recovery_transition_violation, recovery_view, selection_refusal)
+from agent_tools.transaction_recovery_plan import recovery_plan_violation
 from agent_tools.transaction_storage import (
     StateInvalid, format_at, json_object_violation, parse_at, serialize)
 
-SCHEMA = "transaction-state/v4"
+SCHEMA = "transaction-state/v5"
 
 FORWARD = ("created", "awaiting_verification", "ready", "publishing", "published",
            "activating", "proving")
@@ -70,9 +84,10 @@ _ID_PATTERN = re.compile(
 _AT_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z")
 _STATE_KEYS = frozenset({"schema", "transaction_id", "creation_key", "subject", "state",
                          "parked_from", "revision", "events", "concurrency_keys", "custody",
-                         "proof_plan"})
+                         "proof_plan", "recovery_plan"})
 _KEY_COLLECTIONS = (list, tuple, set, frozenset)
-_CREATED_KEYS = frozenset({"seq", "type", "at", "proof_plan_digest"})
+_CREATED_KEYS = frozenset({"seq", "type", "at", "proof_plan_digest", "recovery_plan_digest",
+                           "recovers"})
 _TRANSITIONED_KEYS = frozenset({"seq", "type", "at", "from", "to", "reason",
                                 "external_state"})
 _ENVELOPE_KEYS = frozenset({"seq", "type", "at"})
@@ -123,7 +138,8 @@ class Transaction:
     declared action, in declaration order (#206 D2); none of them is ever stored.
     `proof_plan` is the stored plan fixed at creation, a read-only view over a deep copy,
     and `proof` a read-only view over `proof_view`, derived on every load and never stored
-    (#207 D3, D13).
+    (#207 D3, D13). `recovery_plan` and `recovery` are the same pair for the recovery plan,
+    over `recovery_view` (#208 D6, D12).
     """
 
     transaction_id: str
@@ -140,6 +156,8 @@ class Transaction:
     actions: tuple[Mapping[str, Any], ...]
     proof_plan: Mapping[str, Any]
     proof: Mapping[str, Any]
+    recovery_plan: Mapping[str, Any]
+    recovery: Mapping[str, Any]
 
 
 def edge_allowed(source: str, parked_from: str | None, target: str) -> bool:
@@ -427,10 +445,13 @@ def _fold_custody(event: dict, seq: int, fold: _CustodyFold, state: str,
 
 def validate_state(document: Any, transaction_id: str,
                    indexed: Callable[[str], str | None]) -> None:
-    """Refuse (StateInvalid) any document that is not a valid transaction-state/v4. The stored
+    """Refuse (StateInvalid) any document that is not a valid transaction-state/v5. The stored
     `proof_plan` must be the materialization of its own declaration for `transaction_id`, and
-    the `created` event must pin its `telemetry_digest` (#207 D3, D24); each action event is
-    checked by `action_event_violation` against the actions before it, and a transition into
+    the `created` event must pin its `telemetry_digest` (#207 D3, D24); so must the stored
+    `recovery_plan`, bound to the proof plan's declaration, and the `created` event's
+    `recovers` is null or another transaction's id (#208 D6, D12); each action event is
+    checked by `action_event_violation` against the actions before it, and each
+    `invocation_intended` then by `selection_refusal` (#208 D15), and a transition into
     a terminal while `unresolved` names an action is refused (#206 D20). Each proof event is
     checked by `proof_event_violation` against the history before it and then, for an
     `obligation_observed`, by the evidence-id fold (#207 D25). Cohorts are numbered from 1,
@@ -438,7 +459,13 @@ def validate_state(document: Any, transaction_id: str,
     its fence and passes `seal_violation`, which settlement also uses (#207 D31); and
     `pairing_violation` binds each rejection, exhaustion and seal to the transition right
     after it, and each reserved parking reason and `succeeded` to the event right before it
-    (#207 D10); every transition passes `gate_violation` over the actions before it (D12)."""
+    (#207 D10); every transition passes `gate_violation` over the actions before it (D12) and,
+    after the terminal check, `recovery_transition_violation` with the open span's fence; each
+    recovery event, `recovery_settled`, `recovery_incomplete` and `roll_forward_linked`
+    included, is checked by `recovery_event_violation`, after a `roll_forward_linked`'s child
+    is checked to be a transaction id (#208 D11), and `recovery_pairing_violation` binds each
+    recovery event and reserved recovery reason as `pairing_violation` does (#208 D7, D9, D10,
+    D22)."""
     def refuse(rule: str) -> StateInvalid:
         return StateInvalid(f"{transaction_id}: {rule}")
 
@@ -453,6 +480,10 @@ def validate_state(document: Any, transaction_id: str,
     violation = plan_violation(document["proof_plan"], transaction_id)
     if violation is not None:
         raise refuse(f"proof_plan {violation}")
+    violation = recovery_plan_violation(document["recovery_plan"], document["proof_plan"],
+                                        transaction_id)
+    if violation is not None:
+        raise refuse(violation)
     creation_key = document["creation_key"]
     if type(creation_key) is not str or not creation_key:
         raise refuse("creation_key is not a non-empty string")
@@ -484,6 +515,11 @@ def validate_state(document: Any, transaction_id: str,
         raise refuse("event 1 at is not a YYYY-MM-DDTHH:MM:SS.mmmZ timestamp")
     if first["proof_plan_digest"] != telemetry_digest(document["proof_plan"]):
         raise refuse("event 1 proof_plan_digest is not the digest of proof_plan")
+    if first["recovery_plan_digest"] != telemetry_digest(document["recovery_plan"]):
+        raise refuse("event 1 recovery_plan_digest is not the digest of recovery_plan")
+    recovers = first["recovers"]
+    if recovers is not None and (not is_id(recovers) or recovers == transaction_id):
+        raise refuse("event 1 recovers is neither null nor another transaction's rel_ UUIDv7")
     state, parked, entered_terminal = "created", None, None
     fold = _CustodyFold(keys)
     actions: dict = {}
@@ -495,7 +531,8 @@ def validate_state(document: Any, transaction_id: str,
             raise refuse(f"event {seq} follows the terminal state {state}")
         if type(event) is not dict:
             raise refuse(f"event {seq} is not a JSON object")
-        violation = pairing_violation(events[seq - 2], event)
+        violation = (pairing_violation(events[seq - 2], event)
+                     or recovery_pairing_violation(events[seq - 2], event))
         if violation is not None:
             raise refuse(f"event {seq} {violation}")
         event_type = event.get("type")
@@ -511,6 +548,11 @@ def validate_state(document: Any, transaction_id: str,
                         raise refuse(f"event {seq} reaches terminal {state} over unresolved "
                                      f"action {blocker.action_id} ({status(blocker)})")
                     entered_terminal = seq
+                violation = recovery_transition_violation(
+                    document, events[:seq - 1], event["from"], state,
+                    None if fold.custody is None else fold.custody["fence"])
+                if violation is not None:
+                    raise refuse(f"event {seq} {violation}")
             case str() if event_type in CUSTODY_EVENTS:
                 _fold_custody(event, seq, fold, state, entered_terminal, refuse)
             case str() if event_type in _FENCED_EVENTS:
@@ -523,6 +565,11 @@ def validate_state(document: Any, transaction_id: str,
                     event, actions, transaction_id=transaction_id, keys=keys,
                     open_fence=None if fold.custody is None else fold.custody["fence"],
                     state=state)
+                if (violation is None and event_type == "invocation_intended"
+                        and selection_refusal(document["recovery_plan"], events[:seq - 1],
+                                              state, event["action_id"])):
+                    violation = (f"invocation_intended of {event['action_id']} is "
+                                 f"not_selected in {state}")
                 if violation is not None:
                     raise refuse(f"event {seq} {violation}")
                 apply_action_event(event, actions)
@@ -539,9 +586,22 @@ def validate_state(document: Any, transaction_id: str,
                 if event_type == "obligation_observed":
                     _note_id(event, fold)
                 apply_proof_event(event, proof_fold)
+            case str() if event_type in RECOVERY_EVENT_KEYS:
+                _check_envelope(event, seq, RECOVERY_EVENT_KEYS[event_type], refuse)
+                if (event_type == "roll_forward_linked"
+                        and not is_id(event["child_transaction_id"])):
+                    raise refuse(f"event {seq} roll_forward_linked child_transaction_id is "
+                                 f"not a rel_ UUIDv7")
+                violation = recovery_event_violation(
+                    event, events[:seq - 1], document, keys=keys,
+                    open_fence=None if fold.custody is None else fold.custody["fence"],
+                    state=state)
+                if violation is not None:
+                    raise refuse(f"event {seq} {violation}")
             case _:
                 raise refuse(f"event {seq} has unknown event type {event_type!r}")
-    violation = pairing_violation(events[-1], None)
+    violation = (pairing_violation(events[-1], None)
+                 or recovery_pairing_violation(events[-1], None))
     if violation is not None:
         raise refuse(f"event {len(events)} {violation}")
     custody = fold.custody
@@ -589,6 +649,8 @@ def snapshot(document: dict) -> Transaction:
         actions=tuple(MappingProxyType(view) for view in action_views(document["events"])),
         proof_plan=MappingProxyType(copy.deepcopy(document["proof_plan"])),
         proof=MappingProxyType(proof_view(document)),
+        recovery_plan=MappingProxyType(copy.deepcopy(document["recovery_plan"])),
+        recovery=MappingProxyType(recovery_view(document)),
     )
 
 
