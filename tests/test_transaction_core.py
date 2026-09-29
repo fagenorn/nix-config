@@ -213,6 +213,41 @@ class CreateTest(StoreCase):
 
 
 class LoadTest(StoreCase):
+    def test_history_and_projection_faults_keep_their_refusal_order(self):
+        transaction_id = self.store.create(
+            "precedence", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF,
+            recovery=EMPTY_RECOVERY).transaction_id
+        self.store.advance(transaction_id, "attention_required", reason="wait")
+        base = self.document(transaction_id)
+        faults = {"state": "ready", "parked_from": "ready",
+                  "custody": {"executor_id": "forged"}, "revision": True}
+        cases = [
+            ({**faults, "schema": "broken"}, True,
+             "schema 'broken' is not transaction-state/v5"),
+            (faults, True, "event 2 does not carry seq 2"),
+            (faults, False, "state does not equal the folded state attention_required"),
+            ({key: value for key, value in faults.items() if key != "state"},
+             False, "parked_from does not equal the folded parked_from"),
+            ({"custody": faults["custody"], "revision": True},
+             False, "custody does not equal the folded custody"),
+            ({"revision": True}, False, "revision does not equal the number of events"),
+            ({"revision": 99}, False, "revision does not equal the number of events"),
+        ]
+        for updates, gap, message in cases:
+            with self.subTest(message=message, updates=updates):
+                damaged = copy.deepcopy(base)
+                damaged.update(copy.deepcopy(updates))
+                if gap:
+                    damaged["events"][1]["seq"] = 99
+                self.write(transaction_id, damaged)
+                raw = self.state_path(transaction_id).read_bytes()
+                with self.assertRaises(StateInvalid) as caught:
+                    TransactionStore(self.root).load(transaction_id)
+                self.assertEqual(str(caught.exception), f"{transaction_id}: {message}")
+                self.assertEqual(self.state_path(transaction_id).read_bytes(), raw)
+        self.write(transaction_id, base)
+        self.assertEqual(self.store.load(transaction_id).parked_from, "created")
+
     def test_load_returns_a_read_only_snapshot_of_the_persisted_state(self):
         created = self.store.create("k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF,
                                     recovery=EMPTY_RECOVERY)
