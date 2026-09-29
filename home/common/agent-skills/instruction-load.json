@@ -52,9 +52,9 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 22559
+        "claude": 22880
       },
-      "note": "One control-adapter run. It loads only its entry, whose resolver paragraph and lifecycle-call rule stay per entry (#155 D5). Ceiling re-measured after merging origin/main at 382b59c (#155 D19). Ceiling raised for #198: the finalize report routes an `agent_dispatch` suspension to its re-entry line (#155 D10)."
+      "note": "One control-adapter run. It loads only its entry, whose resolver paragraph and lifecycle-call rule stay per entry (#155 D5). Ceiling re-measured after merging origin/main at 382b59c (#155 D19). Ceiling raised for #198: the finalize report routes an `agent_dispatch` suspension to its re-entry line (#155 D10). Ceiling raised for #220: §5's final report names a delivered issue's stale custody (#155 D10)."
     },
     {
       "id": "orchestrated-issue-owner",

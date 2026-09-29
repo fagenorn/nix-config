@@ -364,14 +364,14 @@ summary with a non-null `contract_digest`, an empty `pending_stage_ids`, an
 empty `requirements`, a null `owner` and a non-null `custody` is a delivered
 issue whose `custody` names a stale record that control will never dispatch:
 report it as delivered with that stale custody, never as an active or
-progressing owner. A summary whose `worktree_fact` requirement reads `recorded_worktree_absent` or
-`recorded_worktree_mismatch` is an issue that cannot resume, because its
-recorded worktree is gone or is not on the issue branch: report it as unable
-to resume for that reason, never as progressing. Then group every
-`discussion_items` entry by issue and call out anything needing a human. List
-every issue in that same control response's `admission.waiting` as queued for
-agent slots, with its summary state. Do not perform a second ledger read or
-reconstruct omitted history.
+progressing owner. A summary whose `worktree_fact` requirement reads
+`recorded_worktree_absent` or `recorded_worktree_mismatch` is an issue that
+cannot resume, because its recorded worktree is gone or is not on the issue
+branch: report it as unable to resume for that reason, never as progressing.
+Then group every `discussion_items` entry by issue and call out anything needing
+a human. List every issue in that same control response's `admission.waiting` as
+queued for agent slots, with its summary state. Do not perform a second ledger
+read or reconstruct omitted history.
 
 An `expired` delta is an interruption, not a verdict on the work: it consumes
 no attempt, and the attempt number never advances because of it. Three things
