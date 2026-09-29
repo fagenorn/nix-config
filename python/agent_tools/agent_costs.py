@@ -1271,7 +1271,7 @@ def _declaration(value, reasons):
     subagent_type = value.get("subagent_type")
     # The matrix is deliberately not read here. These are the source's known
     # canonical role spellings; shared transport types remain ambiguous.
-    canonical = {"bookkeeper", "codex-transport", "conformance-reviewer", "explorer",
+    canonical = {"auto-owner", "bookkeeper", "codex-transport", "conformance-reviewer", "explorer",
                  "implementer", "issue-owner", "mechanic", "researcher", "reviewer",
                  "reviewer-lite", "ship-owner"}
     if role in canonical:

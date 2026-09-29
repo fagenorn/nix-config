@@ -32,8 +32,8 @@ Before defining tasks, map which files get created or modified and what each is 
 
 When that map depends on one sharply bounded repository fact, keep the planning judgment in this Opus owner and delegate only the read-only lookup:
 
-<!-- agent-dispatch: id=planning-bounded-fact-lookup role=explorer model=haiku effort=medium -->
-Agent(subagent_type="Explore", model="haiku", effort="medium") performs one sharply bounded read-only repository lookup without choosing task boundaries.
+<!-- agent-dispatch: id=planning-bounded-fact-lookup role=explorer model=sonnet effort=medium -->
+Agent(subagent_type="Explore", model="sonnet", effort="medium") performs one sharply bounded read-only repository lookup without choosing task boundaries.
 
 If the lookup becomes open-ended, ambiguous, or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and selected role in the plan phase's existing fixed-schema report.
 

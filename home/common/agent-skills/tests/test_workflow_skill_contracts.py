@@ -1128,7 +1128,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertIn(anchor, observe)
         execute = normalized(self.section(self.orchestrate, "## 4. Execute control actions",
                                           "## 5. Final report"))
-        for anchor in ("`spawn`, `resume`, `retry`, `delivery_remainder`, `wait`, or `finalize`",
+        for anchor in ("`spawn`, `resume`, `retry`, `delivery_remainder`, `delivery_contract`, "
+                       "`wait`, or `finalize`",
                        "rename `id` to `action_id` and `kind` to `launch_kind`",
                        "`kind: owner`", "`interface_version: 2`", "canonical JSON",
                        "--boundary workflow-response"):
@@ -1529,7 +1530,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         action_section = self.section(
             self.orchestrate, "## 4. Execute control actions", "## 5. Final report"
         )
-        for kind in ("spawn", "resume", "retry", "wait", "finalize"):
+        for kind in ("spawn", "resume", "retry", "delivery_contract", "wait", "finalize"):
             self.assertIn(f"`{kind}`", action_section)
         self.assertIn("returned order", action_section)
         self.assertIn("owner token unchanged", action_section)
@@ -2654,10 +2655,50 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_no_deadline_less_wait_is_armed(self):
         self.assertIn(
             "control never returns a deadline-less wait; every wait carries deadline_at, "
-            "and when nothing can proceed without a human, control returns finalize instead.",
+            "and when nothing can proceed without a human, control returns finalize instead, "
+            "or `delivery_contract` when a missing contract is all that stops an issue.",
             self.orchestrate,
         )
         self.assertNotIn("and optional deadline", self.orchestrate)
+
+    def test_dispatcher_answers_a_contract_request_with_one_rule(self):
+        """#221 D5: `delivery_contract` has one rule, in §4, and no override."""
+        decide = normalized(self.section(self.orchestrate, "## 3. Decide",
+                                         "## 4. Execute control actions"))
+        execute = normalized(self.section(self.orchestrate, "## 4. Execute control actions",
+                                          "## 5. Final report"))
+        final = normalized(self.section(self.orchestrate, "## 5. Final report", "## Notes"))
+        self.assertIn("A `delivery_contract` action asks for exactly the contracts of the "
+                      "issues it lists; §4 holds its rule.", decide)
+        self.assert_ordered(execute, "For `delivery_contract`",
+                            "This is the one rule for such an issue.",
+                            "Send each listed issue's contract as §3 describes",
+                            "make the next control call at once",
+                            "Never rebuild an issue whose build this invocation refused",
+                            "refused every listed issue", "ends the run as `finalize` does",
+                            "render §5 from this response")
+        self.assertEqual(normalized(self.orchestrate).count(
+            "This is the one rule for such an issue."), 1)
+        self.assertIn("or a `delivery_contract` action that ends the run", final)
+        # Phase-5 SF-4: the refused-launch and parked-suspension passages name the
+        # new no-deadline sweep too. The parked-suspension paragraph sits in §5.
+        self.assert_ordered(execute, "resumes on the next orchestrate invocation",
+                            "or on the follow-up call a `delivery_contract` action asks for")
+        self.assertIn("the sweep renders `finalize` (or `delivery_contract` when a missing "
+                      "contract is all that stops some issue)", final)
+        # Phase-5 SF-1 (D12): the durable interactive route answers the same action.
+        durable = normalized(self.section(self.from_issue,
+            "### Explicit durable interactive acquisition", "## The flow"))
+        self.assert_ordered(durable, "A `delivery_contract` reply naming this issue",
+                            "build this issue's contract", "call `workflow-state control` once more",
+                            "orchestrate-issues §4")
+        for text in (self.orchestrate, json.dumps(self.orchestrate_evals)):
+            self.assertNotIn("override", text.lower())
+        expected = " ".join(case["expected_output"] for case in self.orchestrate_evals["evals"])
+        self.assertIn("spawn, resume, retry, delivery_remainder, delivery_contract, wait, finalize",
+                      expected)
+        self.assertIn("spawn, resume, retry, delivery_remainder, delivery_contract, wait, or "
+                      "finalize", expected)
 
     def test_orchestrate_evals_grade_control_and_reject_retired_policy(self):
         expected = " ".join(

@@ -2591,6 +2591,8 @@ TRACKER = {"issue": 171, "state": "open", "open_blockers": [], "decision_blocker
 NO_PR = {"state": "none", "url": None, "merge_sha": None}
 CONTRACT_REQUIRED = [{"kind": "delivery_contract", "subject_id": "171",
                       "reason_code": "delivery_contract_required", "detail_pointer": None}]
+CONTRACT_REQUIRED_172 = [{"kind": "delivery_contract", "subject_id": "172",
+                          "reason_code": "delivery_contract_required", "detail_pointer": None}]
 
 
 class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
@@ -2649,6 +2651,142 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
 
     def direct_runs(self, issue):
         return sorted((self.root / ".superpowers/workflows").glob(f"direct-{issue}-*"))
+
+    FOLLOW_UP = "worktree-issue-172-chained-follow-up"
+
+    def contract_chain(self):
+        """172 was blocked by 171; 171 is delivered and closed, 172 has no contract (#221 D11).
+
+        171's merged attempt is seeded into the ledger, so nothing is live. The
+        tracker reports 171 closed, so 172 has no open blocker left, and 172 has
+        a verified-absent candidate worktree but no installed contract.
+        """
+        self.project()
+        merged = self.workflow.reconciled_result(171, "https://example.invalid/pr/1", "b" * 40)
+        path = self.write_run("chain", [self.attempt(171, state="merged", result=merged,
+                                                     result_source="superseded", finished_at=NOW)])
+        follow_up = str(self.root / ".worktrees" / self.FOLLOW_UP)
+        request = self.control_request([171, 172], now=LATER,
+            worktrees=[{"issue": 172, "recorded": None,
+                        "candidate": {"path": follow_up, "state": "absent"}}],
+            forge={"171": {"state": "merged", "url": "https://example.invalid/pr/1",
+                           "merge_sha": "b" * 40}, "172": copy.deepcopy(NO_PR)})
+        request["tracker"][0]["state"] = "closed"
+        return path, request, follow_up
+
+    def test_an_unblocked_issue_without_a_contract_is_asked_for_it_not_finalized(self):
+        """T1 (#221 AC1): the reply names 172 as needing a contract and never finalizes."""
+        _, request, _ = self.contract_chain()
+        response = self.control("chain", request)
+        self.assertEqual(response["actions"], [
+            {"id": "delivery_contract", "kind": "delivery_contract", "issues": [172]}])
+        self.assertIsNone(response["next_deadline"])
+        summaries = {item["issue"]: item for item in response["summaries"]}
+        self.assertEqual((summaries[171]["state"], summaries[171]["requirements"]),
+                         ("merged", []))
+        self.assertEqual((summaries[172]["state"], summaries[172]["contract_digest"],
+                          summaries[172]["requirements"]),
+                         ("queued", None, CONTRACT_REQUIRED_172))
+
+    def test_sending_the_asked_contract_spawns_the_issue(self):
+        """T2 (#221 AC2): the follow-up call with 172's built contract spawns 172."""
+        _, request, follow_up = self.contract_chain()
+        self.control("chain", request)
+        built = self.build("contract", self.contract_input(issue=172, worktree=follow_up,
+                                                           now=LATER))
+        request["delivery_contracts"]["172"] = built["contract"]
+        request["authorization_intents"]["172"] = [built["initial_intent"]]
+        response = self.control("chain", request)
+        self.assertEqual([(item["kind"], item.get("issue")) for item in response["actions"]],
+                         [("spawn", 172), ("wait", None)])
+        spawn = response["actions"][0]
+        self.assertEqual((spawn["worktree"], spawn["contract"]), (follow_up, built["contract"]))
+
+    def test_a_run_that_cannot_progress_still_finalizes(self):
+        """T3 (#221 AC3): 171 is closed and 172 is blocked, so nothing asks and control finalizes."""
+        _, request, _ = self.contract_chain()
+        request["tracker"][1]["open_blockers"] = [173]
+        response = self.control("chain", request)
+        self.assertEqual(response["actions"], [{"id": "finalize", "kind": "finalize"}])
+        self.assertEqual([(item["issue"], item["state"], item["requirements"])
+                          for item in response["summaries"]],
+                         [(171, "merged", []), (172, "blocked", [])])
+
+    def test_an_armed_deadline_keeps_wait_while_an_issue_asks(self):
+        """T4 (#221 D2): live 171 custody arms a deadline, so 172's ask rides on `wait`."""
+        self.project()
+        self.write_run("chain", [self.attempt(171)])
+        follow_up = str(self.root / ".worktrees" / self.FOLLOW_UP)
+        response = self.control("chain", self.control_request([171, 172], now=LATER,
+            worktrees=[{"issue": 172, "recorded": None,
+                        "candidate": {"path": follow_up, "state": "absent"}}]))
+        self.assertEqual([(item["kind"], item.get("deadline_at")) for item in response["actions"]],
+                         [("wait", "2026-09-21T01:00:00Z")])
+        self.assertEqual(response["summaries"][1]["requirements"], CONTRACT_REQUIRED_172)
+
+    def test_replaying_a_contract_request_changes_nothing(self):
+        """T6 (#221 D4): no controller claim is kept, so a replay is byte-identical."""
+        path, request, _ = self.contract_chain()
+        first = self.control("chain", request)
+        after = path.read_bytes()
+        self.assertEqual(json.loads(after)["admission"]["claims"], [])
+        self.assertEqual(self.control("chain", request), first)
+        self.assertEqual(path.read_bytes(), after)
+
+    def test_a_contract_request_releases_a_held_controller_claim(self):
+        """T7 (#221 D4, Phase-5 SF-3): the real chain shape, where the sweep before
+        171 closes ends in `wait` holding the controller claim, and the next
+        sweep's `delivery_contract` releases it `finalized` as `finalize` would."""
+        self.project()
+        path = self.write_run("chain", [self.attempt(171)])
+        follow_up = str(self.root / ".worktrees" / self.FOLLOW_UP)
+        candidate = [{"issue": 172, "recorded": None,
+                      "candidate": {"path": follow_up, "state": "absent"}}]
+        waited = self.control("chain", self.control_request([171, 172], now=LATER,
+                                                            worktrees=candidate))
+        self.assertEqual([item["kind"] for item in waited["actions"]], ["wait"])
+        state = json.loads(path.read_text())
+        self.assertEqual([claim["released_at"] for claim in state["admission"]["claims"]
+                          if claim["holder"] == "controller"], [None])
+        # 171 is delivered between the sweeps: its attempt is recorded merged as
+        # contract_chain seeds it, in one write that, like every committed write,
+        # settles admission (releasing 171's own owner claim `finished`) and leaves
+        # the held controller claim alone.
+        merged_at = "2026-09-21T00:15:00Z"
+        merged = self.workflow.reconciled_result(171, "https://example.invalid/pr/1", "b" * 40)
+        state["issues"]["171"]["attempts"][0].update(
+            state="merged", result=merged, result_source="superseded", finished_at=merged_at)
+        state["issues"]["171"]["outcome"] = merged
+        self.workflow.settle_admission(state, at=merged_at)
+        state["updated_at"] = merged_at
+        self.assertEqual([(claim["holder"], claim["release_event"])
+                          for claim in state["admission"]["claims"]],
+                         [("171:1:1", "finished"), ("controller", None)])
+        path.write_text(json.dumps(state), encoding="utf-8")
+        closed_at = "2026-09-21T00:20:00Z"
+        request = self.control_request([171, 172], now=closed_at, worktrees=candidate,
+            forge={"171": {"state": "merged", "url": "https://example.invalid/pr/1",
+                           "merge_sha": "b" * 40}, "172": copy.deepcopy(NO_PR)})
+        request["tracker"][0]["state"] = "closed"
+        asked = self.control("chain", request)
+        admission = json.loads(path.read_text())["admission"]
+        controller = [claim for claim in admission["claims"] if claim["holder"] == "controller"]
+        self.assertEqual([(claim["released_at"], claim["release_event"]) for claim in controller],
+                         [(closed_at, "finalized")])
+        self.assertEqual(asked["actions"], [
+            {"id": "delivery_contract", "kind": "delivery_contract", "issues": [172]}])
+
+    def test_a_contract_request_passes_the_workflow_response_boundary(self):
+        """#221 D6: the T1 reply is what the adapter's pipe accepts, byte for byte."""
+        _, request, _ = self.contract_chain()
+        raw = self.cli("control", "--repo-root", self.root, "--run-id", "chain",
+                       "--request-file", "-", stdin=json.dumps(request).encode()).stdout
+        self.assertEqual(json.loads(raw)["actions"][-1]["kind"], "delivery_contract")
+        wire = subprocess.run([sys.executable, str(ARTIFACT_BUDGET), "validate-report",
+            "--boundary", "workflow-response", "--input", "-", "--policy", str(POLICY)],
+            input=raw, capture_output=True, check=False)
+        self.assertEqual((wire.returncode, wire.stderr), (0, b""))
+        self.assertEqual(wire.stdout, raw)
 
     def test_direct_acquisition_asks_for_the_contract_last(self):
         self.project()
