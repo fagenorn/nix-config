@@ -884,8 +884,9 @@ class TransactionStore:
         credential or no callable `observer.observe` is `StateInvalid`. The first hold
         (`_fenced`) runs `admit`, which may refuse; with no request it appends what
         `conclude(prior, [], [])` yields, if anything, and returns. Each request then goes to
-        `observer.observe` with no lock held; what it raises propagates, and a result failing
-        `check_result_violation` is `EffectResultInvalid`. The second hold refuses
+        `observer.observe` with no lock held; what it raises propagates, a copy of each result
+        is what is validated and kept, and one failing `check_result_violation` is
+        `EffectResultInvalid`. The second hold refuses
         `history_changed` when the revision moved, else appends `conclude`'s events."""
         require_custody_shape(custody)
         transaction_id = custody.transaction_id
@@ -900,7 +901,7 @@ class TransactionStore:
             revision = prior["revision"]
         results = []
         for request in requests:
-            result = observer.observe(request)
+            result = copy.deepcopy(observer.observe(request))
             violation = check_result_violation(result)
             if violation is not None:
                 raise EffectResultInvalid(f"{transaction_id}: {operation}: {violation}")

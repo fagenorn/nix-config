@@ -12,7 +12,7 @@ from agent_tools.transaction_core import (
 
 from .test_transaction_custody import KEYS, SUBJECT, TTL, CustodyCase, plain, serialize
 from .test_transaction_invocation import Crash, FakeEffect, FakeWorld, renumbered
-from .test_transaction_recovery_plan import PROOF, RECOVERY, with_unit
+from .test_transaction_recovery_plan import ANCHOR, COMPATIBLE, PROOF, RECOVERY, edge, with_unit
 
 
 class Boom(Exception):
@@ -40,6 +40,26 @@ class Checker:
                 "reference": "|".join((request["check"], request["predicate"],
                                        request["collector"], request["parameters"]["prior"],
                                        request["unit"], str(epoch)))}
+
+
+class Reusing:
+    """An observer that answers every call by refilling one dict, taking the outcomes in
+    call order: a store must keep what it validated, not the observer's object."""
+
+    def __init__(self, *outcomes):
+        self.outcomes, self.calls, self.reply = list(outcomes), 0, {}
+
+    def observe(self, request):
+        outcome = self.outcomes[self.calls]
+        self.calls += 1
+        self.reply.clear()
+        self.reply.update(outcome=outcome, reason="ok" if outcome == "satisfied" else "gone",
+                          reference=f"ref-{self.calls}")
+        return self.reply
+
+
+TWO_RESTORABLE = with_unit(2, posture="restorable", anchor=ANCHOR, compatibility=COMPATIBLE,
+                           edges=[edge("restore", "pin")])
 
 
 class RecoveryCase(CustodyCase):
@@ -124,6 +144,14 @@ class AnchorsTest(RecoveryCase):
                 self.assertIn(f"start ({self.act('start', n=2)})", str(error))
         error = self.assertRefusedUnchanged(TransitionRefused, lambda: self.to("publishing"))
         self.assertIn("anchors_verified", str(error))
+
+    def test_a_reused_result_object_cannot_rewrite_an_earlier_outcome(self):
+        self.start_with(TWO_RESTORABLE, key="two", keys=("key:two",))
+        self.to("awaiting_verification", "ready")
+        error = self.refused("rollback_anchor_missing",
+                             lambda: self.verify(Reusing("unsatisfied", "satisfied")))
+        self.assertIn(f"start ({self.act('start', n=2)})", str(error))
+        self.assertRefusedUnchanged(TransitionRefused, lambda: self.to("publishing"))
 
     def test_publication_needs_a_verification_under_the_entering_fence(self):
         self.to("awaiting_verification", "ready")
@@ -298,6 +326,14 @@ class BeginTest(RecoveryCase):
                 error = self.refused("restore_incompatible", lambda: self.begin(
                     checker=Checker({"compatibility": outcome})))
                 self.assertIn("start (", str(error))
+
+    def test_a_reused_result_object_cannot_hide_an_incompatible_restore(self):
+        self.start_with(TWO_RESTORABLE, key="two", keys=("key:two",))
+        self.parked(pin="diverged")
+        self.grant()
+        error = self.refused("restore_incompatible",
+                             lambda: self.begin(checker=Reusing("unsatisfied", "satisfied")))
+        self.assertIn("start (", str(error))
 
     def test_a_history_grown_during_the_check_is_refused(self):
         self.parked()

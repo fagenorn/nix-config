@@ -426,6 +426,16 @@ def _incomplete_violation(event: dict, events_before: Sequence[Mapping]) -> str 
     return None
 
 
+def _unit_references_violation(entries: Any, expected_ids: list[str]) -> bool:
+    """Whether `entries` is not a list of closed `{unit, reference}` objects, each with a
+    non-empty string reference, whose units are `expected_ids` in order."""
+    return (type(entries) is not list
+            or any(type(entry) is not dict or set(entry) != _ANCHOR_KEYS
+                   or type(entry["reference"]) is not str or not entry["reference"]
+                   for entry in entries)
+            or [entry["unit"] for entry in entries] != expected_ids)
+
+
 def _started_violation(event: dict, events_before: Sequence[Mapping], document: dict,
                        open_fence: dict, state: str) -> str | None:
     before = {**document, "events": list(events_before), "state": state,
@@ -438,13 +448,8 @@ def _started_violation(event: dict, events_before: Sequence[Mapping], document: 
         return "recovery_started effect_snapshot is not the re-derived effect classes"
     if event["selected"] != selection(plan, actions):
         return "recovery_started selected is not the re-derived selection"
-    checks = event["checks"]
-    if (type(checks) is not list
-            or any(type(entry) is not dict or set(entry) != _ANCHOR_KEYS
-                   or type(entry["reference"]) is not str or not entry["reference"]
-                   for entry in checks)
-            or [entry["unit"] for entry in checks]
-            != [unit["action_id"] for unit in _checked(before)]):
+    if _unit_references_violation(event["checks"],
+                                  [unit["action_id"] for unit in _checked(before)]):
         return ("recovery_started checks are not each affected restorable unit's unit and "
                 "non-empty reference, in plan order")
     return None
@@ -484,13 +489,8 @@ def recovery_event_violation(event: dict, events_before: Sequence[Mapping], docu
         return _incomplete_violation(event, events_before)
     if kind == "roll_forward_linked":
         return _linked_violation(event, events_before, document)
-    anchors = event["anchors"]
-    if (type(anchors) is not list
-            or any(type(entry) is not dict or set(entry) != _ANCHOR_KEYS
-                   or type(entry["reference"]) is not str or not entry["reference"]
-                   for entry in anchors)
-            or [entry["unit"] for entry in anchors]
-            != [unit["action_id"] for unit in _restorable(document)]):
+    if _unit_references_violation(event["anchors"],
+                                  [unit["action_id"] for unit in _restorable(document)]):
         return (f"{kind} anchors are not each restorable unit's unit and non-empty "
                 f"reference, in plan order")
     return None
