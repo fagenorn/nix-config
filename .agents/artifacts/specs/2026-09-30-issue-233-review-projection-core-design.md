@@ -237,6 +237,10 @@ entire already committed CORE plan, including remaining publication/tests/proces
 Validate canonical stdout, independently match all identities/metrics and require
 exit 0/within-budget before any work beyond this source boundary, installed
 publication or final acceptance. Exit 2 or 3 stops; neither extends the exception.
+Every recovered source/built producer, checker and validator runs with the matching
+disposable external closure specified by the plan (D8); ambient installed helpers
+are not substituted. Preserve the actual command’s legacy `--help` misuse: exit 2,
+empty stdout, `review-package: invalid invocation\n` on stderr.
 Source changes require fresh review and projection; plan changes require a new
 committed package and projection. A passing subrange or historical result cannot
 clear a complete gate, and source admission itself never claims full-plan fit.
@@ -291,6 +295,9 @@ No changed caps, hidden costs, forecast fiction or generated-exemption expansion
 | D5 | Preserve exact whole-path proof and neutral unsupported outcomes; prove positive recommendations with independent real-Git fixtures and source/built command seams. | Parent D17/D18 and generic R3; issue 233; observable-test and YAGNI standards. | Infer semantic dependency, copy aggregate files, add speculative hunk composition or mock measured parity. |
 | D6 | Include minimum stale-reference repairs in the same forecasted commit as an essential source move; defer command publication, installed wiring and broader documentation until the source gate. | The bar's move-history rule; authorized coherent CORE source recovery; owner clarification on 2026-09-30. | Break living references, duplicate the final producer or use the move to expand the bootstrap's publication authority. |
 | D7 | Refines D6: the required source move also preserves only the existing `review-package` CLI via its indispensable package registration, legacy mapping removal and relocation references; new generic publication remains gated. | Owner clarification and amended issue 233 on 2026-09-30; buildable move-history requirement; unchanged actual public behavior. | Broken Nix path, duplicate producer or fictitious later move defeats coherent recovery; broader pre-gate publication exceeds authority. |
+
+| D8 | Preserve actual `--help` misuse exactly and run recovered producer/checker gates through a disposable matching source/built external closure, including the HOME-selected budget module/policy and pinned interpreters. | Accepted Phase-5 B1/B2 at f5ece11655ea023edab7a32b1396357a65249f09; frozen parser and live wrapper; D2/D7 and package standard. | Add help behavior, trust ambient installed budget, or activate the host: these change compatibility or select an unreviewed/incompatible closure. |
+| D9 | Rehashed-edge regression reconstructs the complete ownership envelope and fresh false-pair facts, proves a valid clean control, and requires the raw-parent mismatch cause (`HistoryError.code=original_parent_mismatch`) at the prerequisite boundary. | Accepted Phase-5 S1; D4; real ownership digest contract and tests-that-can-fail standard. | Hash an edge list alone or accept any error: a consistency-only check could pass without authenticating original parents. |
 
 Design/grill frontier is closed within the approved scope. No context-map or ADR
 write route exists in the retained project bindings; this ledger is the issue's
