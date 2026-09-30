@@ -40,7 +40,7 @@ must identify these rows and any selectively omitted effects in their task repor
 
 | ID / original identity | Recover into CORE | Disposition |
 |---|---|---|
-| R1: `adb76e36c871cd0c6acc0df7a5ec03d033c33c1e` (accepted Task 1) | Actual records/candidates, whole-record packer, budget adapter, thin producer and publication; budget query/pinning and legacy tests | Preserve the VCS move from the sdd `review-package` script to `agent_tools.review_publish`; retain ordinary/detail/publication behavior. Source modules/tests and minimum stale-reference repairs accompanying that move may enter bootstrap (D6); command-table/default-module changes, installed tests and broader living documentation belong to later publication. |
+| R1: `adb76e36c871cd0c6acc0df7a5ec03d033c33c1e` (accepted Task 1) | Actual records/candidates, whole-record packer, budget adapter, thin producer and publication; budget query/pinning and legacy tests | Preserve the VCS move from the sdd `review-package` script to `agent_tools.review_publish`; retain ordinary/detail/publication behavior. Source modules/tests and minimum stale-reference repairs accompanying that move may enter bootstrap (D6). The indispensable existing `review-package` registration/legacy mapping and relocation references enter that same source commit (D7); the new `review-feasibility` launcher, broader installed tests and publication documentation follow the source gate. |
 | R2: `5907f05a6cf7f0a4e672afa7b2f5cbe680c32e0e` through accepted Task-2 head `adf52bdba1e204a4945f811d9fea03c1836ddaa7` | Generic forecast/ownership/graph/projection/validation, actual packing-policy identity and bounded symbolic measurement; generic source tests | Recover the complete accepted effect, including the earlier implementation and final correction, then apply new provenance correction and fresh review. |
 | R3: `35e6fd7aa59f11160b08047b967e0be6cd919bac` (unaccepted Task 3) | Shared typed reconstruction refusals; `test_review_projection_cases` and only its test registration | Select these generic effects explicitly. Exclude retained contribution adapter/tests and their registration; DERIVE owns them and their I1 correction. Passing old tests do not accept R3. |
 | R4: newly authored child work | Raw-parent/edge/prerequisite correction, independent adversarial tests, missing command/publication/installed coverage and current architecture references | Charge all recovery adjustments, fixes, sequential shared-path edits, process artifacts and subjects in the committed forecast. No whole parent commit imports unrelated process or retained work. |
@@ -226,7 +226,7 @@ honestly. Existing forecasts remain until supported scope-specific replacements
 exist. This exception permits only shared actual/generic source recovery/correction
 and necessary source tests. An essential VCS move includes only the minimum
 references made stale by that move, in the same commit and forecast (D6); this
-permits no new command publication, installed wiring or broader documentation.
+permits only the existing actual command wiring required by its move (D7), not the new generic launcher, new behavior or broader documentation.
 Every task/fix still needs fresh independent review,
 complete actual production and independent checking, with focused/full/applicable
 build verification. Actual overflow stops immediately.
@@ -241,9 +241,10 @@ Source changes require fresh review and projection; plan changes require a new
 committed package and projection. A passing subrange or historical result cannot
 clear a complete gate, and source admission itself never claims full-plan fit.
 
-Publication adds both command-table launchers, removes the superseded legacy
-mapping, repoints living documentation and verifies source/built policy and
-behavior parity. Use the current isolated launcher that clears hostile Python/Nix
+The source move preserves the existing actual command through its command-table
+launcher and removes its superseded legacy mapping (D7). Post-gate publication adds
+the generic launcher, completes living documentation and verifies full source/built
+policy and behavior parity. Use the current isolated launcher that clears hostile Python/Nix
 environment influence. Build only; never activate the host. At final head require
 the fixed-base complete actual gate, exact actual-only projection parity, focused
 tests, full `agent-workflow-tests`, managed `nix-build`, installed checks without
@@ -289,6 +290,7 @@ No changed caps, hidden costs, forecast fiction or generated-exemption expansion
 | D4 | Authenticate raw original ordered parents once at the shared Git boundary and reuse that authority across ranges, edges, metadata tails, prerequisites and reconstruction. | Task-3 I1 plus fresh generic admission; defense in depth. | Traversal-only or rehashed-evidence checks authenticate the same attacker-controlled virtual ancestry. |
 | D5 | Preserve exact whole-path proof and neutral unsupported outcomes; prove positive recommendations with independent real-Git fixtures and source/built command seams. | Parent D17/D18 and generic R3; issue 233; observable-test and YAGNI standards. | Infer semantic dependency, copy aggregate files, add speculative hunk composition or mock measured parity. |
 | D6 | Include minimum stale-reference repairs in the same forecasted commit as an essential source move; defer command publication, installed wiring and broader documentation until the source gate. | The bar's move-history rule; authorized coherent CORE source recovery; owner clarification on 2026-09-30. | Break living references, duplicate the final producer or use the move to expand the bootstrap's publication authority. |
+| D7 | Refines D6: the required source move also preserves only the existing `review-package` CLI via its indispensable package registration, legacy mapping removal and relocation references; new generic publication remains gated. | Owner clarification and amended issue 233 on 2026-09-30; buildable move-history requirement; unchanged actual public behavior. | Broken Nix path, duplicate producer or fictitious later move defeats coherent recovery; broader pre-gate publication exceeds authority. |
 
 Design/grill frontier is closed within the approved scope. No context-map or ADR
 write route exists in the retained project bindings; this ledger is the issue's
