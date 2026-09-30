@@ -106,7 +106,7 @@ Prefix source calls with `core_gate source TREE PYTHON`: `python3 -m agent_tools
 
 D2–D9/R1–R4 govern Task 1 source/compatibility; D1/D2/D5/D7/D8 govern Task 2 publication/parity. These map every acceptance row; the spec owns the ledger.
 
-Phase 5: `/root/review_core233_plan` reviewed `f5ece11655ea023edab7a32b1396357a65249f09` (`plan-review.md`, primary SDD). Owner accepted B1/B2/S1; D8/D9 fixes await scoped independent re-review. No admission/fit claim.
+Phase 5 is clean (0/0/0): native Codex fallback reviewer/job `/root/review_core233_plan`, fix range `f5ece11655ea023edab7a32b1396357a65249f09..e348355530865f838e04446d8e95c34d6adc1d5f`; report `plan-review-r2.md` in primary SDD, preserving initial `plan-review.md`. B1/B2/S1 resolved per D8/D9. This review confers no source admission or fit.
 
 ## Review feasibility delivery
 
