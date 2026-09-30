@@ -46,6 +46,7 @@ let
     "diff-scope"
     "promotion"
     "resolve-project"
+    "review-feasibility"
     "review-package"
   ];
 
