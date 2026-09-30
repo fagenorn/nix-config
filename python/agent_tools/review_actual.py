@@ -18,6 +18,7 @@ RECORD_POLICY = {
     "git_config": ["-c", "diff.renames=true", "-c", "diff.renameLimit=0",
                    "-c", "core.quotePath=true"],
     "diff_args": ["--find-renames=100%", "--no-ext-diff", "--no-textconv",
+                  "--ignore-submodules=none", "--submodule=short",
                   "--full-index", "--no-relative", "--src-prefix=a/", "--dst-prefix=b/",
                   "--diff-algorithm=myers", "--no-indent-heuristic", "--inter-hunk-context=0",
                   "--no-color", "--line-prefix=", "--output-indicator-new=+",

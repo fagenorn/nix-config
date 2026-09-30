@@ -327,3 +327,54 @@ class OriginalHistoryTest(SourceProjectionFixture, unittest.TestCase):
             self.assertEqual(rebuilt.result_tree, expected_tree)
             self.assertEqual(rebuilt.ordered_edges, expected_edges)
         self.assertEqual(before, self.snapshot())
+
+    def gitlink_change(self):
+        old, new = self.base, self.head
+        commits = []
+        for oid in (old, new):
+            self.git('update-index', '--add', '--cacheinfo', f'160000,{oid},module')
+            tree = self.git('write-tree')
+            commits.append(self.git('commit-tree', tree, '-p', commits[-1] if commits else self.head,
+                                    '-m', 'gitlink change'))
+        expected = (f'diff --git a/module b/module\nindex {old}..{new} 160000\n'
+                    f'--- a/module\n+++ b/module\n@@ -1 +1 @@\n'
+                    f'-Subproject commit {old}\n+Subproject commit {new}\n').encode()
+        return *commits, old, new, expected
+
+    def submodule_configs(self):
+        for ignore, style in (('none', 'short'), ('all', 'short'), ('none', 'log'),
+                              ('none', 'diff'), ('all', 'diff')):
+            self.git('config', 'diff.ignoreSubmodules', ignore)
+            self.git('config', 'diff.submodule', style)
+            yield ignore, style
+
+    def test_gitlink_actual_coverage_ignores_hostile_submodule_config(self):
+        from agent_tools.review_actual import actual_inputs, pack_input
+        from agent_tools.review_pack import ReviewLimits
+        first, second, old, new, expected = self.gitlink_change()
+        limits = ReviewLimits(16384, 65536, 8, 524288)
+        for config in self.submodule_configs():
+            with self.subTest(config=config):
+                items = tuple(actual_inputs(self.repo, first, second, 'review.json', limits))
+                self.assertEqual([item.context_lines for item in items], [None, 7, 5, 3, 1, 0])
+                for item in items:
+                    self.assertEqual([(row.path, row.payload, row.source_bytes) for row in item.records],
+                                     [('module', expected, len(expected))])
+                    self.assertEqual(item.stat, dict(files_changed=1, insertions=1, deletions=1))
+                    self.assertEqual(item.source_diff_bytes, len(expected))
+                    packed = pack_input(item, limits)
+                    self.assertEqual((packed.status, packed.shards), ('within_budget', (expected,)))
+                    self.assertTrue(packed.manifest['coverage']['complete'])
+                    self.assertEqual(packed.manifest['coverage']['file_diff_count'], 1)
+
+    def test_gitlink_edge_ownership_ignores_hostile_submodule_config(self):
+        first, second, old, new, expected = self.gitlink_change()
+        fact = dict(operation='M', path='module', old_path='module',
+                    before=dict(mode='160000', kind='commit', oid=old),
+                    after=dict(mode='160000', kind='commit', oid=new),
+                    record_bytes=len(expected),
+                    record_sha256='sha256:' + hashlib.sha256(expected).hexdigest())
+        for config in self.submodule_configs():
+            with self.subTest(config=config):
+                self.assertEqual(edge_facts(self.repo, first, second, 1),
+                                 dict(parent=first, commit=second, parent_ordinal=1, records=[fact]))
