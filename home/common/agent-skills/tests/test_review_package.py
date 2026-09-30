@@ -1,52 +1,119 @@
 from __future__ import annotations
 
 import json
-from importlib.machinery import SourceFileLoader
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
-import types
+import shutil
 import unittest
 from unittest import mock
 
 
 ROOT = Path(__file__).parents[4]
-COMMAND = ROOT / "home/common/agent-skills/skills/sdd/scripts/review-package"
+COMMAND = [sys.executable, "-m", "agent_tools.review_package"]
 MODULE = ROOT / "home/common/agent-skills/scripts/artifact_budget.py"
 POLICY = ROOT / "home/common/agent-skills/artifact-budget-policy.json"
-sys.path.insert(0, str(MODULE.parent))
-review_package_module = types.ModuleType("review_package")
-SourceFileLoader("review_package", str(COMMAND)).exec_module(review_package_module)
+from agent_tools import review_publish as review_package_module
+from agent_tools.review_actual import actual_inputs, actual_inputs_from_trees, pack_input
+from agent_tools.review_pack import ReviewLimits
 
 
-# An artifact_budget shim: the real API when imported, a hard refusal when run
-# as a script. review-package uses both faces — check_artifact/load_limits
-# in-process, then `sys.executable <artifact_budget.__file__> validate-report`
-# for the producer report — so only the second one may fail (D16). The
-# sys.modules registration is load-bearing: dataclasses resolves
-# cls.__module__ through sys.modules while exec_module runs.
-REPORT_VALIDATOR_STUB = '''import sys
-
-if __name__ == "__main__":
+# The injected failure is at the real external CLI boundary, never an imported
+# module mutation. All other operations execute the source budget command.
+REPORT_VALIDATOR_STUB = """import os, sys
+if sys.argv[1] == "validate-report":
     sys.stderr.write("stub validator refuses validate-report\\n")
     raise SystemExit(9)
-
-import types
-from importlib.machinery import SourceFileLoader
-
-_real = types.ModuleType("_real_artifact_budget")
-sys.modules["_real_artifact_budget"] = _real
-SourceFileLoader("_real_artifact_budget", REAL_MODULE_PATH).exec_module(_real)
-ArtifactBudgetError = _real.ArtifactBudgetError
-CheckResult = _real.CheckResult
-check_artifact = _real.check_artifact
-load_limits = _real.load_limits
-'''
+os.execv(sys.executable, [sys.executable, REAL_MODULE_PATH, *sys.argv[1:]])
+"""
 
 
 class ReviewPackageCliTest(unittest.TestCase):
+    def test_source_path_workspace_and_every_fresh_context(self):
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            plan, env = self.setup_repo(repo)
+            budget_path = Path(shutil.which("artifact-budget", path=env["PATH"]))
+            workspace_path = Path(shutil.which("sdd-workspace", path=env["PATH"]))
+            self.assertEqual(budget_path, Path(env["HOME"]) / "bin/artifact-budget")
+            self.assertIn(str(MODULE), budget_path.read_text())
+            self.assertEqual(workspace_path.resolve(),
+                ROOT / "home/common/agent-skills/skills/sdd/scripts/sdd-workspace")
+            lines = [f"context {n}\n" for n in range(40)]
+            (repo / "a.txt").write_text("".join(lines))
+            (repo / "binary").write_bytes(b"\0before")
+            base = self.commit(repo, "base", env)
+            lines[20] = "changed line\n"
+            (repo / "a.txt").write_text("".join(lines))
+            (repo / "binary").write_bytes(b"\0after")
+            head = self.commit(repo, "changed", env)
+            limits = ReviewLimits(16384, 65536, 8, 524288)
+            candidates = tuple(actual_inputs(repo, base, head, "review.json", limits))
+            self.assertEqual([item.context_lines for item in candidates], [None, 7, 5, 3, 1, 0])
+            trees = [self.run_git(repo, "rev-parse", f"{sha}^{{tree}}").strip() for sha in (base, head)]
+            rebuilt = tuple(actual_inputs_from_trees(repo, *trees, base=base, head=head,
+                commits=candidates[0].commits, package_name="review.json", limits=limits))
+            self.assertEqual(rebuilt, candidates)
+            for item in candidates:
+                context = 10 if item.context_lines is None else item.context_lines
+                expected = subprocess.run(["git", "-C", str(repo), "-c", "diff.renames=true",
+                    "-c", "diff.renameLimit=0", "-c", "core.quotePath=true", "diff", "--find-renames=100%",
+                    "--no-ext-diff", "--no-textconv", "--full-index", "--no-relative", "--src-prefix=a/",
+                    "--dst-prefix=b/", "--diff-algorithm=myers", "--no-indent-heuristic",
+                    "--inter-hunk-context=0", "--no-color", "--line-prefix=", "--output-indicator-new=+",
+                    "--output-indicator-old=-", "--output-indicator-context= ", "--binary", f"-U{context}",
+                    base, head], capture_output=True, check=True).stdout
+                self.assertEqual(b"".join(r.payload for r in item.records), expected)
+                self.assertEqual(item.stat, {"files_changed": 2, "insertions": 1, "deletions": 1})
+                self.assertIn(b"GIT binary patch", expected)
+                self.assertIn(b"+changed line", expected)
+                self.assertIn(b"-context 20", expected)
+                self.assertEqual(pack_input(item, limits).status, "within_budget")
+            # No explicit output exercises source sdd-workspace through PATH.
+            produced = subprocess.run([*COMMAND, plan, base, head], cwd=repo, env=env,
+                                      capture_output=True, text=True)
+            self.assertEqual(produced.returncode, 0, produced.stderr)
+            report = json.loads(produced.stdout)
+            published = repo / report["artifact"]["path"]
+            checked = subprocess.run(["artifact-budget", "check", "--kind", "review-package",
+                "--root", str(published), "--format", "json"], env=env, capture_output=True, text=True)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            self.assertEqual(json.loads(checked.stdout)["metrics"], report["artifact"]["metrics"])
+
+    def test_exact_rename_records_ignore_hostile_git_configuration(self):
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            plan, env = self.setup_repo(repo)
+            (repo / "old é.txt").write_text("unchanged content\n" * 30)
+            base = self.commit(repo, "base", env)
+            (repo / "old é.txt").rename(repo / "new é.txt")
+            head = self.commit(repo, "move", env)
+            snapshots = []
+            for number, (setting, value) in enumerate((("diff.renames", "true"),
+                    ("diff.renames", "false"), ("diff.renames", "copies"),
+                    ("diff.renameLimit", "1"), ("core.quotePath", "false"))):
+                self.run_git(repo, "config", setting, value)
+                destination = repo / f"output-{number}"
+                destination.mkdir()
+                output = destination / "review.json"
+                produced = self.invoke(repo, plan, base, head, output, env)
+                self.assertEqual(produced.returncode, 0, produced.stderr)
+                report = json.loads(produced.stdout)
+                manifest = json.loads(output.read_bytes())
+                shards = tuple((destination / row["path"]).read_bytes() for row in manifest["shards"])
+                self.assertEqual(manifest["coverage"], {"complete": True, "file_diff_count": 1})
+                self.assertEqual(manifest["stat"], {"files_changed": 1, "insertions": 0, "deletions": 0})
+                self.assertIn(b"similarity index 100%\n", b"".join(shards))
+                self.assertIn(b'rename to "new \\303\\251.txt"', b"".join(shards))
+                checked = subprocess.run(["artifact-budget", "check", "--kind", "review-package",
+                    "--root", str(output), "--format", "json"], env=env, capture_output=True, text=True)
+                self.assertEqual(checked.returncode, 0, checked.stderr)
+                self.assertEqual(json.loads(checked.stdout)["metrics"], report["artifact"]["metrics"])
+                snapshots.append((output.read_bytes(), shards, report["artifact"]["metrics"]))
+            self.assertTrue(all(snapshot == snapshots[0] for snapshot in snapshots))
+
     def run_git(self, repo: Path, *args: str, text: bool = True):
         return subprocess.run(["git", "-C", str(repo), *args], check=True,
                               capture_output=True, text=text).stdout
@@ -65,13 +132,16 @@ class ReviewPackageCliTest(unittest.TestCase):
         )
         env = os.environ.copy()
         home = directory / "home"
-        lib = home / ".agents/lib/python"
+        bin_dir = home / "bin"
         share = home / ".agents/share"
-        lib.mkdir(parents=True)
+        bin_dir.mkdir(parents=True)
         share.mkdir(parents=True)
-        (lib / "artifact_budget.py").symlink_to(MODULE)
+        budget = bin_dir / "artifact-budget"
+        budget.write_text(f"#!{sys.executable}\nimport os, sys\nos.execv(sys.executable, [sys.executable, {str(MODULE)!r}, *sys.argv[1:]])\n")
+        budget.chmod(0o755)
+        (bin_dir / "sdd-workspace").symlink_to(ROOT / "home/common/agent-skills/skills/sdd/scripts/sdd-workspace")
         (share / "artifact-budget-policy.json").symlink_to(POLICY)
-        env.update({"HOME": str(home), "PYTHONPATH": str(lib),
+        env.update({"HOME": str(home), "PYTHONPATH": str(ROOT / "python"), "PATH": str(bin_dir) + os.pathsep + env["PATH"],
                     "GIT_AUTHOR_DATE": "2026-08-19T12:00:00Z",
                     "GIT_COMMITTER_DATE": "2026-08-19T12:00:00Z"})
         return str(directory / "plan.md"), env
@@ -95,7 +165,7 @@ class ReviewPackageCliTest(unittest.TestCase):
 
     def invoke(self, repo: Path, plan: str, base: str, head: str,
                out: Path, env: dict[str, str]):
-        return subprocess.run([str(COMMAND), plan, base, head, str(out)], cwd=repo,
+        return subprocess.run([*COMMAND, plan, base, head, str(out)], cwd=repo,
                               env=env, text=True, capture_output=True, check=False)
 
     def invoke_detail(self, repo: Path, source: Path, env: dict[str, str],
@@ -103,7 +173,7 @@ class ReviewPackageCliTest(unittest.TestCase):
                       issue: str = "49", producer: str = "sdd", head: str,
                       output: Path | str | None = None):
         argv = [
-            str(COMMAND), "--detail-input", str(source), "--producer", producer,
+            *COMMAND, "--detail-input", str(source), "--producer", producer,
              "--issue", issue, "--branch", branch, "--run-id", run_id,
              "--head", head]
         if output is not None:
@@ -117,16 +187,16 @@ class ReviewPackageCliTest(unittest.TestCase):
             for broken in (False, True):
                 with self.subTest(broken=broken):
                     home = directory / ("broken" if broken else "missing")
-                    module_home = home / ".agents/lib/python"
-                    module_home.mkdir(parents=True)
+                    bin_dir = home / "bin"
+                    bin_dir.mkdir(parents=True)
                     if broken:
-                        (module_home / "artifact_budget.py").write_text(
-                            "raise RuntimeError('broken validator')\n", encoding="utf-8"
-                        )
+                        bad = bin_dir / "artifact-budget"
+                        bad.write_text(f"#!{sys.executable}\nraise RuntimeError('broken validator')\n")
+                        bad.chmod(0o755)
                     env = os.environ.copy()
-                    env.update({"HOME": str(home), "PYTHONPATH": ""})
+                    env.update({"HOME": str(home), "PYTHONPATH": str(ROOT / "python"), "PATH": str(bin_dir)})
                     result = subprocess.run(
-                        [str(COMMAND)], cwd=directory, env=env, text=True,
+                        COMMAND, cwd=directory, env=env, text=True,
                         capture_output=True, check=False,
                     )
                     self.assertEqual(result.returncode, 2)
@@ -156,7 +226,11 @@ class ReviewPackageCliTest(unittest.TestCase):
             rebuilt = b"".join((out.parent / item["path"]).read_bytes()
                                for item in manifest["shards"])
             expected = subprocess.run(
-                ["git", "-C", str(repo), "diff", "--no-ext-diff", "--binary", "-U10",
+                ["git", "-C", str(repo), "-c", "diff.renames=true", "-c", "diff.renameLimit=0", "-c", "core.quotePath=true",
+                 "diff", "--find-renames=100%", "--no-ext-diff", "--no-textconv", "--full-index",
+                 "--no-relative", "--src-prefix=a/", "--dst-prefix=b/", "--diff-algorithm=myers",
+                 "--no-indent-heuristic", "--inter-hunk-context=0", "--no-color", "--line-prefix=",
+                 "--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= ", "--binary", "-U10",
                  f"{base}..{head}"], check=True, capture_output=True).stdout
             self.assertEqual(rebuilt, expected)
             self.assertEqual(manifest["total_diff_bytes"], len(expected))
@@ -226,7 +300,11 @@ class ReviewPackageCliTest(unittest.TestCase):
             self.assertTrue(all(item["bytes"] <= 65_536
                                 for item in manifest["shards"]))
             expected = subprocess.run(
-                ["git", "-C", str(repo), "diff", "--no-ext-diff", "--binary", "-U7",
+                ["git", "-C", str(repo), "-c", "diff.renames=true", "-c", "diff.renameLimit=0", "-c", "core.quotePath=true",
+                 "diff", "--find-renames=100%", "--no-ext-diff", "--no-textconv", "--full-index",
+                 "--no-relative", "--src-prefix=a/", "--dst-prefix=b/", "--diff-algorithm=myers",
+                 "--no-indent-heuristic", "--inter-hunk-context=0", "--no-color", "--line-prefix=",
+                 "--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= ", "--binary", "-U7",
                  f"{base}..{head}"], check=True, capture_output=True,
             ).stdout
             self.assertEqual(manifest["source_diff_bytes"], len(expected))
@@ -374,7 +452,11 @@ class ReviewPackageCliTest(unittest.TestCase):
             rebuilt = b"".join((out.parent / item["path"]).read_bytes()
                                for item in manifest["shards"])
             expected = subprocess.run(
-                ["git", "-C", str(repo), "diff", "--no-ext-diff", "--binary", "-U10",
+                ["git", "-C", str(repo), "-c", "diff.renames=true", "-c", "diff.renameLimit=0", "-c", "core.quotePath=true",
+                 "diff", "--find-renames=100%", "--no-ext-diff", "--no-textconv", "--full-index",
+                 "--no-relative", "--src-prefix=a/", "--dst-prefix=b/", "--diff-algorithm=myers",
+                 "--no-indent-heuristic", "--inter-hunk-context=0", "--no-color", "--line-prefix=",
+                 "--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= ", "--binary", "-U10",
                  f"{base}..{head}"], check=True, capture_output=True).stdout
             self.assertEqual(rebuilt, expected)
 
@@ -1372,10 +1454,9 @@ class ReviewPackageCliTest(unittest.TestCase):
             (repo / "a.txt").write_text("after\n", encoding="utf-8")
             head = self.commit(repo, "change a", env)
 
-            shim = Path(env["PYTHONPATH"]) / "artifact_budget.py"
-            shim.unlink()
+            shim = Path(env["HOME"]) / "bin/artifact-budget"
             shim.write_text(
-                REPORT_VALIDATOR_STUB.replace("REAL_MODULE_PATH", repr(str(MODULE))),
+                f"#!{sys.executable}\n" + REPORT_VALIDATOR_STUB.replace("REAL_MODULE_PATH", repr(str(MODULE))),
                 encoding="utf-8",
             )
             scratch = Path(raw) / "tmp"
@@ -1385,11 +1466,11 @@ class ReviewPackageCliTest(unittest.TestCase):
             result = self.invoke(repo, plan, base, head, repo / "review.json", env)
 
             # Non-vacuity: the run reached the candidate rather than refusing at
-            # bootstrap. "validator unavailable" here would mean the shim broke
-            # the in-process API and nothing was ever created to clean up.
+            # bootstrap. The shim must allow description and package checks.
             self.assertEqual(result.stderr, "review-package: generation failed\n")
             self.assertEqual(result.returncode, 2)
             self.assertEqual(result.stdout, "")
+            self.assertTrue((repo / "review.json").is_file())
             self.assertEqual(
                 sorted(p.name for p in scratch.glob("review-package-report-*.json")),
                 [],

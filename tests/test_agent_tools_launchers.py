@@ -38,11 +38,9 @@ NOT_LAUNCHERS = ("workflow-state",)
 # The commands #175, #179 and #177 accepted as launchers: a floor, not the full
 # set, which the command table in lib/agent-tools.nix owns (#175 D8).
 LAUNCHER_FLOOR = ("adopt-project", "agent-evidence", "agent-model-matrix", "conformance",
-                  "context-map-lint", "diff-scope", "resolve-project")
-# Commands without an argparse parser answer `--help` as misuse, with the
-# module docstring on stderr and exit 2. Their CLI is promised unchanged
-# (parent D15), so the probe pins that answer by a line only the module's own
-# docstring prints.
+                  "context-map-lint", "diff-scope", "resolve-project", "review-package")
+# Legacy commands may treat --help as misuse, including parser-backed commands
+# with help disabled; pin each existing exit/stdout/stderr contract.
 MISUSE_USAGE = {"context-map-lint": "Usage: context-map-lint --repo-root "}
 
 
@@ -107,10 +105,6 @@ class AgentToolsLauncherTest(unittest.TestCase):
         return subprocess.run(argv, env=env, cwd=cwd, capture_output=True, text=True,
                               timeout=TIMEOUT_SECONDS, check=False)
 
-    def hostile_env(self):
-        return dict(os.environ, PYTHONPATH=str(self.hostile),
-                    NIX_PYTHONPATH=str(self.hostile))
-
     def test_the_command_table_generates_each_deployed_command(self):
         launchers = self.launchers()
         for name in LAUNCHER_FLOOR:
@@ -122,26 +116,43 @@ class AgentToolsLauncherTest(unittest.TestCase):
             with self.subTest(launcher=name):
                 self.assertEqual(name, module.replace("_", "-"))
 
+    def dependency_env(self):
+        home = self.hostile / 'dependencies'
+        bins = self.hostile / 'dependency-bin'
+        if not home.exists():
+            home.mkdir(); bins.mkdir()
+            (home / '.agents').symlink_to(self.root / '.agents', target_is_directory=True)
+            (bins / 'python3').symlink_to(self.launchers()['review-package'][0])
+        return dict(os.environ, HOME=str(home),
+                    PATH=str(bins) + os.pathsep + str(self.root / '.agents/bin')
+                    + os.pathsep + os.environ['PATH'])
+
+    def hostile_env(self):
+        return dict(self.dependency_env(), PYTHONPATH=str(self.hostile),
+                    NIX_PYTHONPATH=str(self.hostile))
+
     def test_a_hostile_agent_tools_on_every_channel_is_ignored(self):
         for name in self.launchers():
             with self.subTest(launcher=name):
                 completed = self.run_child(
-                    [str(self.root / ".agents" / "bin" / name), "--help"],
+                    [str(self.root / '.agents/bin' / name), '--help'],
                     self.hostile_env(), self.hostile)
-                if name in MISUSE_USAGE:
+                if name == 'review-package':
+                    self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
+                                     (2, '', 'review-package: invalid invocation\n'))
+                elif name in MISUSE_USAGE:
                     self.assertEqual(completed.returncode, 2, completed.stderr)
-                    self.assertEqual(completed.stdout, "")
+                    self.assertEqual(completed.stdout, '')
                     self.assertIn(MISUSE_USAGE[name], completed.stderr)
                 else:
                     self.assertEqual(completed.returncode, 0, completed.stderr)
-                    self.assertTrue(completed.stdout.startswith(f"usage: {name} "),
-                                    completed.stdout[:200])
+                    self.assertTrue(completed.stdout.startswith(f'usage: {name} '), completed.stdout[:200])
                 self.assertNotIn(MARKER, completed.stdout + completed.stderr)
 
     def test_each_hostile_channel_is_live_without_the_launcher(self):
         # Each control opens exactly one channel, so a dead channel cannot hide
         # behind a live one.
-        clean = {key: value for key, value in os.environ.items()
+        clean = {key: value for key, value in self.dependency_env().items()
                  if key not in ("PYTHONPATH", "NIX_PYTHONPATH")}
         pythonpath_only = dict(clean, PYTHONPATH=str(self.hostile))
         nix_only = dict(clean, NIX_PYTHONPATH=str(self.hostile))
@@ -165,6 +176,53 @@ class AgentToolsLauncherTest(unittest.TestCase):
                     self.assertEqual(completed.returncode, HOSTILE_EXIT, completed.stderr)
                     self.assertIn(MARKER, completed.stderr)
 
+
+    def test_relocated_actual_command_matches_source(self):
+        import json
+        import sys
+        source = Path(__file__).resolve().parents[1]
+        top = self.hostile / 'actual-parity'
+        top.mkdir()
+        repo = top / 'repo'; repo.mkdir()
+        home = top / 'home'; home.mkdir()
+        (home / '.agents').symlink_to(self.root / '.agents', target_is_directory=True)
+        env = {k: v for k, v in os.environ.items() if k not in
+               ('PYTHONPATH', 'NIX_PYTHONPATH', 'NIX_PYTHONPREFIX', 'NIX_PYTHONEXECUTABLE')}
+        env.update(HOME=str(home), PYTHONPATH=str(source / 'python'),
+                   PATH=self.dependency_env()['PATH'])
+        def git(*args):
+            result = subprocess.run(['git', *args], cwd=repo, env=env, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.decode().strip()
+        git('init', '-q'); git('config', 'user.name', 'Fixture')
+        git('config', 'user.email', 'fixture@example.test'); git('config', 'commit.gpgsign', 'false')
+        (repo / 'value.txt').write_text('before\n')
+        git('add', '-A'); git('commit', '-qm', 'base'); base = git('rev-parse', 'HEAD')
+        (repo / 'value.txt').write_text('after\n')
+        (repo / 'plan.md').write_text('# Plan\n\n## Task index\n\nTask 1 — Case — value.txt — full — '
+                                    '[task-1.md](plan.tasks/task-1.md)\n')
+        (repo / 'plan.tasks').mkdir(); (repo / 'plan.tasks/task-1.md').write_text('# Task 1\n')
+        git('add', '-A'); git('commit', '-qm', 'change'); head = git('rev-parse', 'HEAD')
+        roots = []
+        for label in ('source', 'built'):
+            out = top / label; out.mkdir(); root = out / 'review.json'; roots.append(root)
+            childenv = dict(env)
+            argv = [sys.executable, '-m', 'agent_tools.review_package']
+            if label == 'built':
+                argv = [str(self.root / '.agents/bin/review-package')]
+                childenv.update(PYTHONPATH=str(self.hostile), NIX_PYTHONPATH=str(self.hostile))
+            produced = subprocess.run([*argv, str(repo / 'plan.md'), base, head, str(root)],
+                                      cwd=repo, env=childenv, capture_output=True)
+            self.assertEqual(produced.returncode, 0, produced.stderr)
+            self.assertNotIn(MARKER.encode(), produced.stdout + produced.stderr)
+            checked = subprocess.run(['artifact-budget', 'check', '--kind', 'review-package',
+                '--root', str(root), '--format', 'json'], env=env, capture_output=True)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            self.assertEqual(json.loads(produced.stdout)['artifact']['metrics'],
+                             json.loads(checked.stdout)['metrics'])
+        self.assertEqual(roots[0].read_bytes(), roots[1].read_bytes())
+        for member in roots[0].with_suffix('.shards').iterdir():
+            self.assertEqual(member.read_bytes(), (roots[1].with_suffix('.shards') / member.name).read_bytes())
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import importlib.util
 import os
 from copy import deepcopy
@@ -24,6 +25,45 @@ import artifact_budget
 
 
 class ArtifactBudgetCliTest(unittest.TestCase):
+    def test_describe_pins_exact_policy_bytes_for_every_operation(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            policy = directory / "policy.json"
+            original = POLICY.read_bytes()
+            policy.write_bytes(original)
+            command = [sys.executable, str(SCRIPT)]
+            described = subprocess.run(command + ["describe", "--kind", "review-package",
+                "--format", "json", "--policy", str(policy)], capture_output=True)
+            self.assertEqual(described.returncode, 0, described.stderr)
+            value = json.loads(described.stdout)
+            identity = "sha256:" + hashlib.sha256(original).hexdigest()
+            self.assertEqual(value, {"schema_version": 1, "kind": "artifact-budget-description",
+                "artifact_kind": "review-package", "limits": json.loads(original)["artifacts"]["review-package"],
+                "report_wire_max_bytes": json.loads(original)["phase_reports"]["wire_max_bytes"],
+                "policy_sha256": identity})
+            self.assertEqual(described.stdout, json.dumps(value, ensure_ascii=False,
+                sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n")
+            loaded = artifact_budget.load_limits(policy)["review-package"]
+            self.assertEqual(value["limits"], vars(loaded))
+            root = directory / "note.md"
+            root.write_text("bounded\n")
+            operations = [
+                (["check", "--kind", "design-spec", "--root", str(root), "--format", "json"], None),
+                (["validate-report", "--boundary", "producer", "--input", "-"],
+                 b'{"state":"failed","artifact":null,"notes":"fixture"}'),
+                (["validate-detail-input", "--input", "-"],
+                 b'{"interface_version":1,"findings":[{"axis":"conformance","severity":"Minor","status":"parked","text":"f","ruling":"r"}]}'),
+            ]
+            for argv, payload in operations:
+                with self.subTest(operation=argv[0]):
+                    policy.write_bytes(original)
+                    pinned = command + argv + ["--policy", str(policy), "--expected-policy-sha256", identity]
+                    good = subprocess.run(pinned, input=payload, capture_output=True)
+                    self.assertEqual(good.returncode, 0, good.stderr)
+                    policy.write_bytes(original + b"\n")
+                    refused = subprocess.run(pinned, input=payload, capture_output=True)
+                    self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+
     def run_check(self, kind: str, root: Path, policy: Path = POLICY):
         return subprocess.run(
             [sys.executable, str(SCRIPT), "check", "--kind", kind,

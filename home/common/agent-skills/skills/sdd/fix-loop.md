@@ -26,7 +26,7 @@ Agent(subagent_type="implementer", model="opus", effort="high") owns the fifth a
 
 Every round: the implementer fixes, re-runs the covering tests, appends a fix report (what changed, covering tests, command, output) to the same report file, and returns the short contract. Confirm all three fix-report elements before dispatching the re-review — reviewers do not re-run tests.
 
-The re-review is scoped: run `scripts/review-package PLAN_FILE FIX_BASE HEAD`
+The re-review is scoped: run `review-package PLAN_FILE FIX_BASE HEAD`
 (FIX_BASE = the head the previous review saw), capture stdout unchanged, and
 validate it through
 `artifact-budget validate-report --boundary producer --input -`. Generator

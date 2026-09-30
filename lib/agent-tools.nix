@@ -46,6 +46,7 @@ let
     "diff-scope"
     "promotion"
     "resolve-project"
+    "review-package"
   ];
 
   # -I drops every PYTHON* variable, the working directory and the user site.
