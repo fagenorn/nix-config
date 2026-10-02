@@ -43,6 +43,8 @@ Task 3 — Evals describe the companion invocation only — `home/common/claude-
 
 Task 4 — Migrate nix-config's review bindings and fixtures; final gate — `.agents/project.json`, `home/common/agent-skills/tests/test_resolve_project.py`, `home/common/agent-skills/tests/conformance_test_support.py`, `home/common/agent-skills/tests/test_conformance_checks.py` — full — [task-4.md](2026-10-02-issue-236-companion-only-review.tasks/task-4.md)
 
+Task 5 — Callers point at the skill instead of restating it; final gate re-run — `home/common/agent-skills/skills/sdd/final-review.md`, `home/common/agent-skills/skills/ship-issue/REVIEW.md`, `home/common/agent-skills/tests/test_workflow_skill_contracts.py` — full — [task-5.md](2026-10-02-issue-236-companion-only-review.tasks/task-5.md)
+
 ## Decisions
 
 Tasks cite the spec's ledger. D12–D16 (the redo) govern; D3, D4, D6 and D8 stand as amended. Planning added D17 (exec pins are replaced and inverted into negative pins) and D18 (the committed-bindings case lives in the resolver suite and asserts bindings, not capability state).
@@ -56,3 +58,7 @@ The patched companion's node suite passes `runtime.reasoningEffort` only because
 - Reviewer: Claude (reviewer agent, Opus), native route taken directly. The configured binding at the reviewed HEAD is still `["codex"]` (the exec route), which this run's first plan review showed cannot pass metadata validation on codex-cli 0.159.0 (no runtime-selection event); a re-run could not establish a Codex review, so no Codex call was made.
 - Base SHA 8836b641551b1ab6f2662379f0c0b83e38f5a0fb; reviewed plan commit 6fe2fa2; isolated, read-only.
 - Findings: 0 Blocking; 2 Should fix accepted (S1 → D19, `## Acceptance evidence` precondition and task-4 Step 8 build-closure demo; S2 → task-2 caller paragraph states the `argv[0]` basename rule, with an anchor); 3 Discussion: Q1 accepted (first failing condition, in order, names the cause), Q2 accepted (spec test-seams item 1 now points at D18), Q3 informational (clean sweeps). Accepted 4, rejected 0, deferred 0.
+
+## Amendment after execution (D20)
+
+Tasks 1–4 were executed. Their final gate failed `test_the_live_tree_breaches_no_ceiling` (the restated caller paragraph grew five owner/agent load pairs by about 550 bytes). The user rejected raising the ceilings, so Task 5 removes the restatement instead (per D20). It was added by the controller after Phase 5 and not re-reviewed separately; its verification gate is the ceiling test itself.
