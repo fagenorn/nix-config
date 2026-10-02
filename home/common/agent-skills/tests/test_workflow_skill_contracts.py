@@ -617,8 +617,8 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             self.assertNotIn(forbidden, corpus)
         for required in (
             "ResolvedProject", "bindings.workflow.review.code",
-            "bindings.commands", "gpt-6-astra", 'model_reasoning_effort="xhigh"',
-            "selected model", "last-message",
+            "bindings.commands", "gpt-6-astra", "--effort xhigh",
+            "runtime.reasoningEffort", "rawOutput",
         ):
             self.assertIn(required, corpus)
 
@@ -1122,6 +1122,27 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertNotEqual(next_position, -1, f"missing anchor: {anchor!r}")
             self.assertGreater(next_position, position, f"out-of-order anchor: {anchor!r}")
             position = next_position
+
+    def test_codex_collaboration_evals_describe_only_the_companion_shape(self):
+        evals = {item["id"]: item for item in self.codex_collaboration_evals["evals"]}
+        companion_tail = "--model gpt-6-astra --effort xhigh --cwd <absolute-worktree> --json"
+        self.assertIn(
+            '["codex-companion","task","--fresh","--reviewer","plan-review"]',
+            evals[1]["prompt"],
+        )
+        for eval_id in (1, 2, 3):
+            expected = evals[eval_id]["expected_output"]
+            for fragment in (
+                companion_tail, "no positional argument", "touchedFiles",
+                "runtime.model gpt-6-astra", "runtime.reasoningEffort xhigh",
+                "rawOutput", "binding shape error",
+                "codex-companion task [--fresh] --reviewer <op>",
+            ):
+                with self.subTest(eval=eval_id, fragment=fragment):
+                    self.assertIn(fragment, expected)
+            for retired in RETIRED_EXEC_REVIEW_TOKENS:
+                with self.subTest(eval=eval_id, retired=retired):
+                    self.assertNotIn(retired, evals[eval_id]["prompt"] + expected)
 
     def test_delivery_interface_two_is_one_atomic_production_caller_contract(self):
         documents = {
