@@ -30,7 +30,8 @@ let
   # Flat fetch: `executable = true` would hash the NAR, not the sidecar's file hash.
   engineBinary = pkgs.fetchurl {
     url = "https://github.com/pbakaus/impeccable/releases/download/engine-v${engine.version}/impeccable-${slot}";
-    hash = engine.hashes.${system};
+    # fetchurl forces `hash` before `url`; force `slot` first so its throw names the system.
+    hash = builtins.seq slot engine.hashes.${system};
   };
 
   # Upstream's tree unchanged, plus the engine in the launcher's sibling slot,
