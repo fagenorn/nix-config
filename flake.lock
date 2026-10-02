@@ -432,8 +432,7 @@
         "nixpkgs-darwin": "nixpkgs-darwin",
         "nixpkgs-unstable": "nixpkgs-unstable",
         "sops-nix": "sops-nix",
-        "spotx-bash": "spotx-bash",
-        "ui-ux-pro-max": "ui-ux-pro-max"
+        "spotx-bash": "spotx-bash"
       }
     },
     "sops-nix": {
@@ -515,22 +514,6 @@
       "original": {
         "owner": "nix-systems",
         "repo": "default",
-        "type": "github"
-      }
-    },
-    "ui-ux-pro-max": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1789995669,
-        "narHash": "sha256-yg4O0KIAMOBh3pceig7FVTkxpwnV7DaN2A3a5lqAJns=",
-        "owner": "nextlevelbuilder",
-        "repo": "ui-ux-pro-max-skill",
-        "rev": "dcc40ff5133ef78276117db0cc34e7b83cc8aeba",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nextlevelbuilder",
-        "repo": "ui-ux-pro-max-skill",
         "type": "github"
       }
     },

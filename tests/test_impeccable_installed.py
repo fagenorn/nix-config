@@ -1,4 +1,4 @@
-"""Installed-layout seam for the Impeccable skill (#238 D3, D4, D7, D9).
+"""Installed-layout seam for the Impeccable skill (#238 D3, D4, D6, D7, D9).
 
 Run: just agent-installed-skill-tests. That recipe builds first and passes the
 built home-manager-files tree as AGENT_SKILLS_INSTALLED_HOME. Codex gets the
@@ -18,6 +18,7 @@ INSTALLED_HOME_ENV = "AGENT_SKILLS_INSTALLED_HOME"
 INSTALLED_RECIPE = "just agent-installed-skill-tests"
 SKILL = "impeccable"
 OPT_IN_SKILLS = ("sdd", "from-issue")
+RETIRED_SKILLS = ("ui-ux-pro-max",)
 SKILL_ROOTS = (".agents/skills", ".claude/skills")
 SLOTS = {("Darwin", "arm64"): "darwin-arm64", ("Linux", "x86_64"): "linux-x64"}
 TIMEOUT_SECONDS = 60
@@ -104,6 +105,13 @@ class ImpeccableInstalledTest(unittest.TestCase):
                             self.assertNotIn(
                                 b"impeccable", path.read_bytes().lower(), str(path)
                             )
+
+    def test_retired_skills_are_not_installed(self):
+        for skills_dir in SKILL_ROOTS:
+            for name in RETIRED_SKILLS:
+                path = self.root / skills_dir / name
+                with self.subTest(path=str(path)):
+                    self.assertFalse(os.path.lexists(path), f"{path} still installed")
 
 
 if __name__ == "__main__":

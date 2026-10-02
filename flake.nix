@@ -64,10 +64,6 @@
       url = "github:pbakaus/impeccable/skill-v4.5.0";
       flake = false;
     };
-    ui-ux-pro-max = {
-      url = "github:nextlevelbuilder/ui-ux-pro-max-skill";
-      flake = false;
-    };
 
     # macOS Spotify patch source. Homebrew still owns the Spotify app itself;
     # this non-flake input only supplies the pinned SpotX-Bash script.
