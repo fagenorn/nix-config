@@ -916,20 +916,19 @@ def assert_configured_code_review_pair(case, owner, support):
     case.assert_ordered(
         support_text,
         "review binding shape",
-        "exec", "--sandbox read-only", "--model gpt-6-astra",
-        'model_reasoning_effort="xhigh"', "--json", "--output-last-message",
-        "--ephemeral", "selected model", "selected reasoning effort",
-        "terminal agent-message", "last-message",
+        "basename of `argv[0]`",
         "`codex-companion task --reviewer diff-review`", "optional `--fresh`",
         *CODEX_COMPANION_INVOCATION_ANCHORS,
         *CODEX_COMPANION_VALIDATION_ANCHORS,
-        "binding shape error", "no Codex call",
+        "binding shape error",
+        "`codex-companion task [--fresh] --reviewer <op>`",
+        "no Codex call",
         "`blocked` stops", *CAPACITY_SCOPE_ANCHORS,
         CONFIGURED_REVIEW_UNSUPPORTED_ROUTE, CONFIGURED_REVIEW_AVAILABLE_FALLBACK,
     )
-    # The companion tail never inherits the exec tail's stdin marker or subcommand.
-    companion = support_text[support_text.index("`codex-companion task --reviewer diff-review`"):]
-    case.assertNotIn("exec --sandbox", companion)
+    case.assertIn('bare `["codex"]` included', support_text)
+    for retired in RETIRED_EXEC_REVIEW_TOKENS:
+        case.assertNotIn(retired, support_text)
     # The pre-D15 sentence called the primary `unsupported` route a fallback.
     case.assertNotIn("Authored unsupported or a completed non-capacity", support_text)
     for text in (owner_text, support_text):
