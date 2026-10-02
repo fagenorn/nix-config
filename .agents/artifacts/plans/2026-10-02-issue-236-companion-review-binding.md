@@ -43,4 +43,14 @@ Task 4 — Evals describe both shapes; final gate — `home/common/claude-code/s
 
 ## Decisions
 
-Tasks cite the spec's ledger: D1–D8 come from design, and planning added D9 (the caller paragraph copies) and D10 (`thread/start` config only when an effort is requested).
+Tasks cite the spec's ledger: D1–D8 come from design, and planning added D9 (the caller paragraph copies) and D10 (`thread/start` config only when an effort is requested), and standards review added D11 (the exec shape's known attestation gap, out of scope).
+
+## Acceptance evidence
+
+The node suite's `runtime.reasoningEffort` assertion passes because the fake-codex fixture echoes `config.model_reasoning_effort`; it cannot catch a real app-server that ignores `config`. The live companion plan-review and diff-review demo (issue acceptance criteria 1–3) is therefore the only real check of the runtime attestation, and the delivery report must say whether it ran.
+
+## Standards review provenance
+
+- Reviewer: Claude fallback (reviewer agent, Opus). The configured Codex plan-review (`codex-review` → `codex exec`, codex-cli 0.159.0) completed with exit 0 but failed metadata validation: no runtime-selection event naming model/effort (per D11). One native fallback with the same packet, plus that observation; no Codex retry.
+- Base SHA 8836b641551b1ab6f2662379f0c0b83e38f5a0fb; reviewed plan commit 9834b6d; isolated, read-only.
+- Findings: 0 Blocking; 3 Should fix accepted (S1 → D11 and corrected D5 grounding; S2 → "last captured agent message" wording in Tasks 2–4 and D6; S3 → Task 1 store path taken from this build's closure); 2 Discussion: D2 accepted as the acceptance-evidence note above; D1 (how a companion capacity rejection is recognised) deferred: the shared failure-class paragraph stays unchanged per D8 and stays true, and the reviewer runtime is a per-job isolated runtime (`lib/codex.mjs` `createReviewerRuntime`), so no new capacity signal is defined here. Accepted 4, rejected 0, deferred 1.

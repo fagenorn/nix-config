@@ -113,13 +113,13 @@ Run from the worktree:
 
 ```bash
 just build 2>&1 | tail -3
-STORE=$(ls -d /nix/store/*-codex-plugin-cc-*-nix.db52e28f.p13 | grep -v '\.drv$' | head -1)
-test -n "$STORE"
+STORE=$(nix-store -qR "$(readlink -f result)" | grep -- '-codex-plugin-cc-.*-nix\.db52e28f\.p13$')
+test "$(printf '%s\n' "$STORE" | grep -c .)" -eq 1
 grep -c 'model_reasoning_effort' "$STORE/plugins/codex/scripts/lib/codex.mjs"         # >= 1
 grep -c 'runtime: result.runtime' "$STORE/plugins/codex/scripts/codex-companion.mjs"  # exactly 1
 ```
 
-The build must succeed. `$STORE` is the marketplace that `lib/agent-plugins.nix` builds, named `codex-plugin-cc-<version>`, where the version ends `.p13`. No `.p13` path exists at the base commit, and neither string is in the base source, so this gate can fail.
+The build must succeed. `$STORE` is the marketplace that `lib/agent-plugins.nix` builds, named `codex-plugin-cc-<version>`, where the version ends `.p13`. `$STORE` is taken from this build's closure and must be exactly one path, so an earlier `.p13` build with different patch content cannot satisfy the gate. No `.p13` path exists at the base commit, and neither string is in the base source, so this gate can fail.
 
 - [ ] **Step 7: Commit (in the worktree)**
 

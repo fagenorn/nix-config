@@ -51,7 +51,7 @@ CODEX_COMPANION_VALIDATION_ANCHORS = (
     "`runtime.model` is `gpt-6-astra`",
     "`runtime.reasoningEffort` is `xhigh`",
     "`rawOutput` is a non-empty string",
-    "single terminal agent message",
+    "last captured agent message",
     "No JSONL or last-message candidate",
 )
 
@@ -138,7 +138,7 @@ Expected: FAIL. The base text has no `review binding shape`, so the `missing anc
      --cwd <absolute-worktree> --json
    ```
 
-   Then the validation, as one sentence or a short list. Require exit status 0 and stdout that parses as exactly one JSON object; `status` is `0`; `touchedFiles` is empty; `runtime.model` is `gpt-6-astra` and `runtime.reasoningEffort` is `xhigh`; `rawOutput` is a non-empty string, the turn's single terminal agent message. Then validate the operation headings. Say: "No JSONL or last-message candidate is created on this route." Only that success establishes reviewer identity `Codex`. It is true to add that the companion's reviewer mode forces a fresh, read-only, ephemeral thread and applies its own wall-clock budget, so the tail passes none of these.
+   Then the validation, as one sentence or a short list. Require exit status 0 and stdout that parses as exactly one JSON object; `status` is `0`; `touchedFiles` is empty; `runtime.model` is `gpt-6-astra` and `runtime.reasoningEffort` is `xhigh`; `rawOutput` is a non-empty string, the companion's last captured agent message. Then validate the operation headings. Say: "No JSONL or last-message candidate is created on this route." Only that success establishes reviewer identity `Codex`. It is true to add that the companion's reviewer mode forces a fresh, read-only, ephemeral thread and applies its own wall-clock budget, so the tail passes none of these.
 6. Keep today's failure-class paragraph unchanged as the section's last paragraph. It starts "On the `available` route, a daemon, slot, or capacity rejection" and covers both shapes.
 
 - [ ] **Step 4: Verify**
