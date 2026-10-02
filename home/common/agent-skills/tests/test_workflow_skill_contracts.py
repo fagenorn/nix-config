@@ -907,7 +907,23 @@ def assert_configured_code_review_pair(case, owner, support):
     owner_text = normalized(owner.read_text(encoding="utf-8"))
     support_text = normalized(support.read_text(encoding="utf-8"))
     case.assert_ordered(owner_text, "bindings.workflow.review.code", "capabilities.review.code", "bindings.commands[review_id].argv")
-    case.assert_ordered(support_text, "exec", "--sandbox read-only", "--model gpt-6-astra", 'model_reasoning_effort="xhigh"', "--json", "--output-last-message", "--ephemeral", "selected model", "selected reasoning effort", "terminal agent-message", "last-message", "`blocked` stops", *CAPACITY_SCOPE_ANCHORS, CONFIGURED_REVIEW_UNSUPPORTED_ROUTE, CONFIGURED_REVIEW_AVAILABLE_FALLBACK)
+    case.assert_ordered(
+        support_text,
+        "review binding shape",
+        "exec", "--sandbox read-only", "--model gpt-6-astra",
+        'model_reasoning_effort="xhigh"', "--json", "--output-last-message",
+        "--ephemeral", "selected model", "selected reasoning effort",
+        "terminal agent-message", "last-message",
+        "`codex-companion task --reviewer diff-review`", "optional `--fresh`",
+        *CODEX_COMPANION_INVOCATION_ANCHORS,
+        *CODEX_COMPANION_VALIDATION_ANCHORS,
+        "binding shape error", "no Codex call",
+        "`blocked` stops", *CAPACITY_SCOPE_ANCHORS,
+        CONFIGURED_REVIEW_UNSUPPORTED_ROUTE, CONFIGURED_REVIEW_AVAILABLE_FALLBACK,
+    )
+    # The companion tail never inherits the exec tail's stdin marker or subcommand.
+    companion = support_text[support_text.index("`codex-companion task --reviewer diff-review`"):]
+    case.assertNotIn("exec --sandbox", companion)
     # The pre-D15 sentence called the primary `unsupported` route a fallback.
     case.assertNotIn("Authored unsupported or a completed non-capacity", support_text)
     for text in (owner_text, support_text):
