@@ -1,9 +1,10 @@
 # Transaction core 6/6: terminal receipts, the failed disposition and the full-sweep gate
 
 Design for [#209](https://github.com/fagenorn/nix-config/issues/209), slice 6 of 6 of
-[#123](https://github.com/fagenorn/nix-config/issues/123), 2026-09-29, against main `93bf5fd`.
-Written in autonomous mode: every choice below is an agent judgment inside the issue's
-delegated scope, recorded in the decision ledger, not a human answer.
+[#123](https://github.com/fagenorn/nix-config/issues/123), written 2026-09-29 against main `93bf5fd`
+and refreshed 2026-10-02 onto main `f40c09f`, which adds #229's result intake and #230's shared
+history constructor (D23). Written in autonomous mode: every choice below is an agent judgment
+inside the issue's delegated scope, recorded in the decision ledger, not a human answer.
 
 ## Problem
 
@@ -29,12 +30,13 @@ cause effects, a proof judge and a way back. Nothing proves what a terminal says
 ## Solution
 
 **Every terminal seals one receipt.** The transition into any terminal goes through one
-choke point in the store's append path. It derives a canonical
-`transaction-terminal-receipt/v1` from the history, writes it create-if-absent under the
-store root, and reads the bytes back and checks their digest. Only then does it append
-`receipt_sealed {receipt_digest}` as the document's last event, in the same `state.json`
-write as the transition. A store or read-back failure raises before `state.json` is written,
-so the transaction stays nonterminal with its ledger intact (#88). The validator re-derives the
+choke point in the store's append path. Its recipe ends with `receipt_sealed`, and #230's
+`append_events` builds the whole candidate in one validating walk, stamping the digest of the
+canonical `transaction-terminal-receipt/v1` it derives from the history. Only then does the
+store write that receipt create-if-absent under the store root, read the bytes back and check
+their digest, and only after that write `state.json` with the transition and `receipt_sealed`
+together. A store or read-back failure raises before `state.json` is written, so the
+transaction stays nonterminal with its ledger intact (#88). The validator re-derives the
 receipt from the history and requires the pinned digest. `load` of a terminal document also
 reads the receipt file back and refuses bytes that are not the pinned receipt, so a sealed
 receipt cannot be rewritten undetected. No operation rewrites or removes one.
@@ -59,9 +61,10 @@ receipt is asserted against its bytes on disk.
 Two options were weighed for where the seal happens (D2):
 
 - **One choke point in the append path (chosen).** Every terminal writer (`advance`,
-  `settle_proof`, `settle_recovery`, `dispose_failed`) already funnels through the one
-  function that writes a terminal and releases custody. Sealing there makes "no terminal
-  without a receipt" structural.
+  `settle_proof`, `settle_recovery`, `dispose_failed`) already funnels through `_append`, the
+  one recipe that writes a terminal and releases custody. Sealing there, with the shared walk
+  refusing any terminal without `receipt_sealed`, makes "no terminal without a receipt"
+  structural.
 - **A separate `seal` operation after each terminal writer.** That leaves a window where the
   transaction is terminal with no receipt, which is exactly what #88 forbids.
 
@@ -82,16 +85,22 @@ Two modules join the package, one per concern, as each earlier slice added (D1):
   transition. It is pure.
 
 `transaction_core` gains `dispose_failed`, the receipt read and observation operations, and the
-seal inside its append path, all as thin wrappers. It re-exports the new public names. Both
+seal inside its append path, all as thin wrappers. It re-exports the new public names.
+`transaction_history` keeps the one validating walk (#230): `_history_projection` calls the
+two modules' event rules, and `append_events` stamps `receipt_sealed`'s digest. Both
 modules are standard-library only, have no command-table row, are import-checked by the Nix
 build, and join the neutrality check. `transaction_core` stays within #208 D20's 64000-byte
-budget. Docstring economy comes first (#208 D27), and the plan fixes the exact figure (D17).
+budget (60762 bytes at `f40c09f`). Docstring economy comes first (#208 D27), and the plan
+fixes the exact figure (D17, D27).
 
 ### The receipt
 
-`terminal_receipt(document)` is a pure function of a document whose last event is a terminal
-transition or the terminal `lease_released` that follows it. The receipt is a closed object
-with exactly these keys (D3):
+`terminal_receipt(document, covered)` is a pure function of a document's immutable
+metadata (identity, subject, keys, the two plans) and `covered`, the enveloped events ending
+in a terminal transition or the terminal `lease_released` that follows it. It never reads the
+stored `state`, `parked_from`, `custody` or `revision`. `append_events` calls it before it
+installs those projections, and #230 makes stored projections never an input (D25). The
+receipt is a closed object with exactly these keys (D3):
 
 | Key | Content |
 |---|---|
@@ -153,19 +162,26 @@ are the expected bytes, so a retried seal is idempotent. Anything else is `Recei
 re-serializing the parse gives the file's exact bytes and that its digest is the name. It
 returns a read-only view.
 
-The seal, inside the append that enters a terminal (D2):
+The seal, inside `_append` when its fields enter a terminal, under the transaction lock
+(D2, D24):
 
-1. Build the candidate as today: the transition, then `lease_released` reason `terminal` if
-   custody is held.
-2. Derive `terminal_receipt(candidate)` and write it.
-3. Read it back through `read` and compare with the derived receipt. A mismatch is
-   `ReceiptInvalid`.
-4. For an `effects_unobservable` outcome, write one hazard marker per concurrency key.
-5. Append `receipt_sealed {receipt_digest}` as the last event, validate, and write
-   `state.json` (clearing the lease records as today).
+1. The recipe is the operation's fields, then `lease_released` reason `terminal` if custody
+   is held (as today), then `{"type": "receipt_sealed"}`, appended whether custody is held or
+   not.
+2. `append_events` envelopes every field with `seq` and `at`. It then completes
+   `receipt_sealed` with `receipt_digest`, the `telemetry_digest` of
+   `terminal_receipt(candidate, events before it)`, and runs the one shared walk, which
+   re-derives and checks that digest. A recipe that supplies its own `receipt_digest` is
+   refused. Nothing durable has been written yet.
+3. The store re-derives the receipt from the checked candidate and writes it through
+   `ReceiptStore`. It reads it back through `read` and requires the digest the candidate
+   names. A mismatch is `ReceiptInvalid`.
+4. For an `effects_unobservable` outcome, it writes one hazard marker per concurrency key.
+5. It writes `state.json`, then clears the lease records under the lease lock, as today.
+   Steps 3 and 4 touch no lease record and run before the lease lock is taken.
 
 Any failure in steps 2–4 propagates before step 5, and the transaction stays nonterminal. A
-retry after a death between steps 2 and 5 seals at a new `at`, so it writes a new receipt and
+retry after a death between steps 3 and 5 seals at a new `at`, so it writes a new receipt and
 leaves an unreferenced one behind. That is harmless, because a receipt is authoritative only
 through the `receipt_sealed` that names it. An orphaned hazard marker errs on the safe side: a
 spurious warning, never a hidden hazard (D6).
@@ -173,13 +189,17 @@ spurious warning, never a hidden hazard (D6).
 ### `receipt_sealed` and the validator
 
 `receipt_sealed` is `{seq, type, at, receipt_digest}`, with `at` equal to the terminal
-transition's `at`. The validator requires it exactly when the state is terminal, as the
-document's last event, immediately after the terminal transition or its `lease_released`. It
-requires `receipt_digest` to equal the `telemetry_digest` of `terminal_receipt` over the
-events before it, through the writer's own function (#208 D10). No event may follow it. The
-store's `_validated_document` then reads a terminal document's receipt through
-`ReceiptStore.read`, and a missing or altered receipt is `ReceiptInvalid` (a `StateInvalid`),
-so a tampered receipt fails every load (D7).
+transition's `at`. The rule lives in the shared walk, `_history_projection`, so construction
+and load apply it alike (#230). The walk's post-terminal rule, which today admits only the
+terminal `lease_released`, now admits exactly one `receipt_sealed` after the terminal
+transition or that release. At the walk's end, a terminal state whose last event is not
+`receipt_sealed` is refused. `receipt_digest` must equal the `telemetry_digest` of
+`terminal_receipt` over the events before it, through the writer's own function (#208 D10).
+No event may follow it. The walk reads no file. After `_validate_state`, the store's
+`_validated_document` reads a terminal document's receipt through `ReceiptStore.read`, and a
+missing or altered receipt is `ReceiptInvalid` (a `StateInvalid`). A tampered receipt
+therefore fails every load, and every fenced writer's admission too, before that writer's
+terminal refusal (D7, D26).
 
 `Transaction` gains `terminal`, derived on every load and never stored: null before a terminal,
 else `{receipt_digest, outcome, terminal_qualifier}`.
@@ -241,9 +261,12 @@ write. The core passes the successor's snapshot, loaded lock-free before the par
    is not under the held fence, or is not later than `occurred_at` (#94's exhausted
    inspection).
 
-Otherwise the one write appends `failure_disposed`, then the transition `attention_required ->
-failed` with reason `failure_disposed` and external state `known`, the terminal
-`lease_released`, and `receipt_sealed`. `failure_disposed` carries `{grant_id, ground,
+Otherwise the one write's recipe is `failure_disposed`, then the transition
+`attention_required -> failed` with reason `failure_disposed` and external state `known`, the
+terminal `lease_released`, and `receipt_sealed`, all through `_append`. The disposition is a
+caller argument, not an adapter return, so #229's `_capture_result` does not apply. It is
+validated as a strict JSON object, and `append_events` deep-copies the fields that carry it
+(D26). `failure_disposed` carries `{grant_id, ground,
 reference, occurred_at, successor, successor_receipt, qualifier, effect_snapshot, units,
 fence}`. `effect_snapshot` is every action's #208 class, verbatim. A unit last classified
 `unknown` stays `unknown` in it, never `no_effect` (#94's hard prohibition). Every terminal
@@ -338,7 +361,7 @@ earlier final state, path or attempt count changes.
 ### Documentation
 
 CLAUDE.md's sentence on `agent_tools.transaction_core` names slice 6 and the two new modules,
-still caller-less until #125. The #204–#208 specs are point-in-time records and stay unedited.
+still caller-less until #125. The validator it names becomes `transaction-state/v6`. The #204–#208 specs are point-in-time records and stay unedited.
 
 ## Test seams
 
@@ -377,8 +400,11 @@ The three existing seams stay, and none is added (D16):
    shapes, against the committed table.
 3. **Neutrality checker** over all eleven transaction modules.
 
-New tests go in `test_transaction_receipt` and `test_transaction_disposition`, beside the
-recovery tests and run by `just agent-workflow-tests`. Each file stays under the review member
+As #230 D4 requires, no test calls `append_events`, `terminal_receipt` or the walk directly.
+Expected receipts and histories are authored independently, never generated by production
+derivation, and each is asserted on the returned snapshot, the bytes on disk and a fresh
+`load`. New tests go in `test_transaction_receipt` and `test_transaction_disposition`, beside
+the recovery tests and run by `just agent-workflow-tests`. Each file stays under the review member
 cap. Earlier test files change only where v6 demands it: the schema string, the required
 `authority_class` and grant keywords, `failed` no longer reachable by `advance`, and the
 terminal's trailing `receipt_sealed`.
@@ -428,3 +454,8 @@ None remain: every frontier question was self-answered in the ledger below.
 | D20 | Plan: a receipt file is exactly `serialize(receipt)`, trailing newline included, so its digest is sha256 over the bytes minus that newline, which is `telemetry_digest`; every seal failure (a non-directory, symlinked or unwritable path, an `OSError`, a read-back mismatch) is `ReceiptInvalid`; the `abandoned` and `failed` effect snapshots cover every folded action (forward, edge or undeclared) in declaration order; a proof unit with no event records `status` and `observed` null and `effected` false; an evaluation's `evidence_id` is the latest `obligation_observed` of that obligation, or null. | The store's one file format (every file is `serialize` bytes); agent-helpers rule 4; #94 "a unit last unknown stays unknown" needs every action; #88 fail loud. | Writing receipts without the newline (a second file format), `StateInvalid` for path faults (a seal failure then reads as a corrupt ledger), or plan units only in the snapshot (an edge or undeclared effect would drop out). |
 | D21 | Plan: `failed` closes in Task 1, before `dispose_failed` exists: `advance` refuses it and `failure_disposed`, and the pairing rule refuses any `failed` that does not directly follow a `failure_disposed`. The validator re-derives `failure_disposed` through the writer's own `failure_refusal` and `failure_events`, skipping only the clock and successor-state rules. #206 D20's unresolved-terminal rule admits a `failed` transition over `unknown` actions that an observability-ground `failure_disposed` lists; `in_progress` still blocks, and `dispose_failed` refuses it `effect_uncertain` under every ground. The core loads the successor lock-free and passes `{state, receipt_digest}`, or None when there is no such transaction. | D8, D10; #208 D10 writer-function re-derivation; #94 exhausted inspection leaves possibly-live units `unknown`; #206 D20. | Letting `failed` stay reachable until Task 4 (a receipt-less `failed` would exist between tasks), dropping #206 D20 for `failed` (it would admit `in_progress`), or a validator with its own copy of the rules. |
 | D22 | Plan: `issue_grant` validates `actor_kind` against `ACTOR_KINDS = ("human", "agent")`, which is homed in `transaction_history` and re-exported, and the grants view carries both new fields; a hazard marker is `hazards/<sha256 of key>/<receipt hex>.json`; `hazard_markers` and `post_terminal_observations` re-validate every file they list; a malformed observation or an illegal `contradicts_ground` is `StateInvalid` before any write. | D11, D12, D18; #205 D16 grants view; #206 D21 argument refusals are `StateInvalid`. | A new refusal class for post-terminal arguments (no closed reason set to carry) or trusting listed files without validation (a tampered marker would pass). |
+| D23 | Reuse the 2026-09-29 spec and plan from the abandoned orchestrated run, cherry-picked onto `f40c09f` and refreshed against #229 and #230; existing rows stay as recorded, and rows from D24 on amend them where the live code moved. | User statement at Phase 0: start a new run and reuse those artifacts; the-bar moves keep their history (point-in-time rows are not rewritten). | Re-designing from scratch (discards settled D1–D22 for no new requirement) or editing old rows in place (loses what changed and why). |
+| D24 | Amends D2's step order: the terminal recipe in `_append` ends with `{"type": "receipt_sealed"}`, `append_events` completes its `receipt_digest` as an envelope field and runs the one walk, and only then are the receipt, read-back and hazard markers written, before `state.json`; a recipe-supplied digest is refused. | #230 D1–D3: one constructor owns envelopes and projections, recipes select events explicitly, no durable write before the candidate is checked, one walk per construction; #88 receipt before terminal. | Two `append_events` calls (the intermediate terminal fails the walk, and it is a second walk), the constructor appending the seal implicitly (hides event selection, contrary to #230 D3), or the recipe computing the digest (duplicates envelope knowledge). |
+| D25 | `terminal_receipt(document, covered)` reads only immutable metadata and the covered events, never stored projections; it is derived at construction to stamp the digest, by the walk to check it, and by the store to write the bytes, all through the one function. | #230 "stored projections are never inputs" and its no-repair-mode rule; #208 D10 writer-function re-derivation. | Returning the receipt from `append_events` (widens #230's internal interface for one caller) or a walk mode that fills the digest (validation turned into repair, which #230 D2 rejects). |
+| D26 | #229's `_capture_result` stays the adapter-return intake and gains no caller: `dispose_failed`'s disposition and `record_post_terminal`'s observation are caller arguments, validated strictly and copied by `append_events` or serialized; the successor is read through `_validated_document`, so its receipt is verified too; a tampered receipt refuses fenced admission before the terminal refusal. | #229 scope excludes caller parameters and adds no new intake family; #230 constructor deep-copies fields; the-bar defense in depth. | Routing caller arguments through `_capture_result` (an adapter contract applied to non-adapter input) or trusting a successor's pinned digest without its receipt (an altered child receipt would back `successor_succeeded`). |
+| D27 | Refresh: at `f40c09f`, `transaction_core` is 60762 bytes, so the 64000 ceiling leaves 3238; D19's docstring cut stays the first remedy and the plan re-fixes the figure; the eleven-module neutrality set is the nine live modules plus the two new ones. | #230 shrank the core's writers; #208 D20, D27; live `NEUTRAL_MODULES` lists nine. | Assuming the new headroom absorbs the growth unmeasured (the plan must measure it) or raising the ceiling (D17 forbids it). |
