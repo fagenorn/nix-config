@@ -12,7 +12,8 @@ from agent_tools.transaction_core import (
     PROOF_REFUSAL_REASONS, EffectResultInvalid, ProofRefused, StaleCustody, StateInvalid,
     TransactionError, TransactionStore, TransitionRefused, action_id)
 
-from .test_transaction_custody import KEYS, SUBJECT, TTL, CustodyCase, plain, serialize
+from .test_transaction_custody import (
+    AUTHORITY, KEYS, SUBJECT, TTL, CustodyCase, plain, serialize)
 from .test_transaction_invocation import FakeEffect, FakeWorld, malformed_results, renumbered
 from .test_transaction_recovery_plan import inert_recovery
 
@@ -77,7 +78,7 @@ class ProofCase(CustodyCase):
         self.world = FakeWorld()
         self.transaction_id = self.store.create(
             "proof", SUBJECT, concurrency_keys=KEYS, proof=DECLARATION,
-            recovery=inert_recovery(DECLARATION)).transaction_id
+            recovery=inert_recovery(DECLARATION), authority_class=AUTHORITY).transaction_id
         self.custody = self.acquire(self.transaction_id)
         self.plan = self.store.load(self.transaction_id).proof_plan
         self.ids = [entry["obligation_id"] for entry in self.plan["obligations"]]
@@ -621,7 +622,7 @@ class GateTest(ProofCase):
             "no-activation", SUBJECT, concurrency_keys=("key:solo",),
             proof={**DECLARATION, "units": UNITS[:1], "obligations": []},
             recovery=inert_recovery({**DECLARATION, "units": UNITS[:1],
-                                     "obligations": []})).transaction_id
+                                     "obligations": []}), authority_class=AUTHORITY).transaction_id
         self.custody = self.acquire(self.transaction_id)
         self.to("awaiting_verification", "ready", "publishing")
         self.satisfy("build", {"n": 1})

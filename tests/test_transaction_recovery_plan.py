@@ -13,7 +13,7 @@ from agent_tools.transaction_core import (
     ProofPlanRejected, RecoveryPlanRejected, TransactionError, action_id, bind_recovery,
     compile_proof, compile_recovery, materialize_recovery)
 
-from .test_transaction_custody import KEYS, SUBJECT, CustodyCase
+from .test_transaction_custody import AUTHORITY, KEYS, SUBJECT, CustodyCase
 
 TID = "rel_01890a5d-ac96-7abc-8def-0123456789ab"
 C = {"basis": "deterministic", "max_collection_latency_ms": 30_000,
@@ -196,12 +196,12 @@ class VocabularyTest(unittest.TestCase):
 class CreationTest(CustodyCase):
     def create(self, key="k", recovery=RECOVERY, proof=PROOF):
         return self.store.create(key, SUBJECT, concurrency_keys=KEYS, proof=proof,
-                                 recovery=recovery)
+                                 recovery=recovery, authority_class=AUTHORITY)
 
     def test_the_plan_is_stored_and_pinned_on_the_created_event(self):
         created = self.create()
         document = self.state_doc(created.transaction_id)
-        self.assertEqual(document["schema"], "transaction-state/v5")
+        self.assertEqual(document["schema"], "transaction-state/v6")
         plan = document["recovery_plan"]
         self.assertEqual(plan, materialize_recovery(bound(), created.transaction_id))
         first = document["events"][0]
@@ -216,7 +216,8 @@ class CreationTest(CustodyCase):
 
     def test_recovery_is_required(self):
         with self.assertRaises(TypeError):
-            self.store.create("k", SUBJECT, concurrency_keys=KEYS, proof=PROOF)
+            self.store.create("k", SUBJECT, concurrency_keys=KEYS, proof=PROOF,
+                              authority_class=AUTHORITY)
 
     def test_a_rejected_declaration_leaves_the_root_untouched(self):
         for declaration in (with_unit(0, operation="promote"),

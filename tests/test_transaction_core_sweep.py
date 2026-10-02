@@ -21,7 +21,7 @@ from agent_tools.transaction_core import RecoveryPlanRejected, TransactionStore
 
 from .transaction_core_shapes import SHAPES
 from .transaction_core_sweep_support import (
-    SCENARIOS, drive, shape_declaration, shape_recovery)
+    AUTHORITY_CLASS, SCENARIOS, drive, shape_declaration, shape_recovery)
 from .transaction_core_world import World
 
 WITH_ACTIVATION = ("created", "awaiting_verification", "ready", "publishing", "published",
@@ -393,7 +393,8 @@ class SweepTableTest(unittest.TestCase):
             with self.subTest(shape=shape), tempfile.TemporaryDirectory() as tmp:
                 created = TransactionStore(Path(tmp)).create(
                     "probe", {"s": shape}, concurrency_keys=["k"],
-                    proof=shape_declaration(shape), recovery=shape_recovery(shape))
+                    proof=shape_declaration(shape), recovery=shape_recovery(shape),
+                    authority_class=AUTHORITY_CLASS)
                 plan = created.proof_plan
                 self.assertEqual(sorted(u["name"] for u in plan["units"]),
                                  declared_nodes(shape))
@@ -444,7 +445,8 @@ class SweepTableTest(unittest.TestCase):
             again = store.create("library:success", dict(persisted.subject),
                                  concurrency_keys=list(persisted.concurrency_keys),
                                  proof=shape_declaration("library"),
-                                 recovery=shape_recovery("library"))
+                                 recovery=shape_recovery("library"),
+                                 authority_class=AUTHORITY_CLASS)
             self.assertEqual(again.transaction_id, first)
             self.assertEqual(len(again.events), len(persisted.events))
 
@@ -491,13 +493,14 @@ def neutrality_findings(source):
     return findings
 
 
-from agent_tools import (transaction_custody, transaction_history, transaction_invocation,
-                         transaction_plan, transaction_proof, transaction_recovery,
-                         transaction_recovery_plan, transaction_storage)
+from agent_tools import (transaction_custody, transaction_disposition, transaction_history,
+                         transaction_invocation, transaction_plan, transaction_proof,
+                         transaction_recovery, transaction_recovery_plan, transaction_storage)
 
-NEUTRAL_MODULES = (transaction_core, transaction_history, transaction_recovery,
-                   transaction_recovery_plan, transaction_proof, transaction_plan,
-                   transaction_invocation, transaction_custody, transaction_storage)
+NEUTRAL_MODULES = (transaction_core, transaction_history, transaction_disposition,
+                   transaction_recovery, transaction_recovery_plan, transaction_proof,
+                   transaction_plan, transaction_invocation, transaction_custody,
+                   transaction_storage)
 
 
 class NeutralityTest(unittest.TestCase):

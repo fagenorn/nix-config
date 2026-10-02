@@ -77,7 +77,8 @@ def admissibility(events: Sequence[Mapping[str, Any]]) -> tuple[list[dict], list
     admissible; `snapshot` needs the latest fence (else `fence_changed`);
     `interval` needs no custody event strictly between its open and its record
     (else `fence_discontinuity`) and then the latest fence (else `fence_changed`).
-    A grant is valid while its fence is the latest and that span is still open.
+    A grant carries its `actor_kind` and `authority_class` (#209 D22) and is valid while
+    its fence is the latest and that span is still open.
     Pure: fresh dicts, no I/O.
     """
     custody_seqs, opened_at = [], {}
@@ -106,6 +107,7 @@ def admissibility(events: Sequence[Mapping[str, Any]]) -> tuple[list[dict], list
         elif event["type"] == "grant_issued":
             grants.append({
                 "grant_id": event["grant_id"], "actor": event["actor"],
+                "actor_kind": event["actor_kind"], "authority_class": event["authority_class"],
                 "fence": copy.deepcopy(event["fence"]), "seq": event["seq"],
                 "valid": span_open and event["fence"] == latest})
     return evidence, grants

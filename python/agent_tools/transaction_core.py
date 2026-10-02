@@ -1,51 +1,17 @@
-"""The transaction core (#204, #205, #206, #207, #208).
+"""The transaction core (#204-#209).
 
-A caller-rooted store of closed-schema transactions with a closed lifecycle:
-`TransactionStore(root, clock=...)` creates deduplicated transactions under an
-absolute, pre-existing root and loads validated snapshots of them. Each
-transaction's whole state and typed event history live in one `state.json`
-whose `state`/`parked_from`/`custody`/`revision` come from the shared validating history
-walk, beside the immutable sorted `concurrency_keys` fixed at creation. Mutation recipes
-supply fields to history's `append_events`, which owns envelopes and complete candidates;
-stored validation compares projections with that same walk. Every event `at` is read
-from the injected clock (integer epoch milliseconds, the wall clock by default);
-transaction ids still come from
-the wall clock. `acquire` takes custody of the whole key set from the lease
-authority in `agent_tools.transaction_custody`, returning a `Custody` credential
-that `renew`, `release` and every fenced write check against the stored projection
-and the live lease records; `advance` is fenced from `publishing` on and while
-custody is held, and entering a terminal releases custody. `record_evidence`,
-`open_interval` and `issue_grant` append fence-stamped records under the held
-custody, `check_grant` checks one read-only, and every snapshot re-derives their
-verdicts from the history. `reap` records a lapsed span's lapse and synthesized stop,
-parking the transaction unless it is already parked, and `record_owner_result` keeps an
-authentic late owner result beside that stop without changing state or custody.
-`inspect_action` observes one declared action through a caller-passed effect with no lock
-held across the call, and records the observation fence-stamped (#206); the two protocol
-operations are that and `invoke_action`, which calls the effect only after a fresh `absent`
-inspection, behind a durable intent and within the retry budget. An action observed in
-flight (`open`, or last read `in_progress`) keeps `renew` from quiescing a parked
-transaction, and `advance` enters no terminal while an action is `open`, `in_progress` or
-`unknown`; it never enters `succeeded` nor writes a reserved parking reason, and applies
-the publication and activation gates of `agent_tools.transaction_proof`. The durable-file
-primitives and the refusal hierarchy live in
-`agent_tools.transaction_storage`, and the document model — vocabularies, `Custody`,
-`Transaction`, history construction, validation and the snapshot fold — in
-`agent_tools.transaction_history`;
-this module re-exports the errors and the public model names. `action_id` and the retry
-constants live in `agent_tools.transaction_invocation`, which this module re-exports too.
-`agent_tools.transaction_plan` is the home of the proof declaration's compiler and the plan
-constants, which this module re-exports as well. `collect_obligation` records one proof
-observation around the pure halves in `agent_tools.transaction_proof` (re-exported too);
-`start_cohort` opens a convergence cohort and `settle_proof` judges it in one write.
-`agent_tools.transaction_recovery_plan` compiles, binds and materializes the recovery
-declaration (#208); this module re-exports its constants and those three functions.
-`verify_anchors` observes every restorable unit's rollback anchor in `ready` around the pure
-halves in `agent_tools.transaction_recovery`, whose refusal reasons and effect classes this
-module re-exports; `begin_recovery` enters `recovering` under a fresh grant around that module's
-admission, `settle_recovery` judges it into `rolled_back` or a `recovery_incomplete` park,
-`roll_forward` creates a linked child without holding the parent lock across it, and
-`advance` applies its gates. The module has no command and no caller yet.
+`TransactionStore(root, clock=...)` holds caller-rooted transactions under an absolute,
+pre-existing root, each in one `<id>/state.json`; every event `at` is read from the injected
+clock (integer epoch milliseconds), transaction ids from the wall clock. Each sibling module
+documents what it owns, and this module re-exports its public names:
+`agent_tools.transaction_history` the `transaction-state/v6` document model, its one
+validating walk and the snapshot fold; `transaction_disposition` the `failed` disposition;
+`transaction_recovery` recovery's admission, decisions and rules; `transaction_recovery_plan`
+the recovery plan; `transaction_proof` the proof's collection, cohorts and settlement;
+`transaction_plan` the proof plan; `transaction_invocation` the action protocol and retry
+budget; `transaction_custody` the lease authority and admissibility; `transaction_storage` the
+durable-file primitives and the refusal classes. The store adds the locks, the clock, the
+fenced check and the writes. No command and no caller until #125.
 """
 
 import contextlib
@@ -65,12 +31,13 @@ from typing import Any
 from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_custody import (
     EVIDENCE_FORMS, LeaseAuthority, admissibility, fence_violation)
+from agent_tools.transaction_disposition import disposition_advance_violation
 from agent_tools.transaction_history import (
-    EXTERNAL_STATES, FORWARD, PARKINGS, SCHEMA, STATES, TERMINALS, TRANSITIONS, Custody,
-    Transaction, append_events, bound_path, edge_allowed, fenced_id_violation, format_at, is_id,
-    is_subject_path, json_object_violation, key_set_violation, owner_result_event,
-    parked_since, reap_events, require_custody_shape, require_texts, snapshot, span_issued,
-    validate_state)
+    ACTOR_KINDS, EXTERNAL_STATES, FORWARD, PARKINGS, SCHEMA, STATES, TERMINALS, TRANSITIONS,
+    Custody, Transaction, append_events, bound_path, edge_allowed, fenced_id_violation,
+    format_at, is_id, is_subject_path, json_object_violation, key_set_violation,
+    owner_result_event, parked_since, reap_events, require_custody_shape, require_texts,
+    snapshot, span_issued, validate_state)
 from agent_tools.transaction_invocation import (
     EFFECT_STATES, MAX_ATTEMPTS, REFUSAL_REASONS, RETRY_WINDOW_MS, ActionFold, action_id,
     action_violation, effect_request, fold_actions, inspect_result_violation,
@@ -142,9 +109,10 @@ def _validate_state(document: Any, transaction_id: str, root: Path) -> None:
     validate_state(document, transaction_id, lambda key: _read_index(root, key))
 
 
-def _require_creatable(root: Path, creation_key: Any, subject: Any,
-                       concurrency_keys: Any) -> None:
-    """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v5 document."""
+def _require_creatable(root: Path, creation_key: Any, subject: Any, concurrency_keys: Any,
+                       authority_class: Any) -> None:
+    """Refuse (StateInvalid) arguments that cannot form a valid transaction-state/v6 document,
+    `authority_class` last (#209 D11)."""
     where = f"{root}: creation_key {creation_key!r}"
     if type(creation_key) is not str or not creation_key:
         raise StateInvalid(f"{where}: not a non-empty string")
@@ -158,6 +126,9 @@ def _require_creatable(root: Path, creation_key: Any, subject: Any,
     violation = key_set_violation(concurrency_keys)
     if violation is not None:
         raise StateInvalid(f"{where}: {violation}")
+    if type(authority_class) is not str or not authority_class:
+        raise StateInvalid(f"{where}: authority_class {authority_class!r} is not a non-empty "
+                           f"string")
 
 
 def _capture_result(result: Any, validator: Callable[[Any], str | None], *,
@@ -243,12 +214,13 @@ class TransactionStore:
         whatever `external_state` the caller passes. Before it, `advance_violation` refuses
         `succeeded` (entered only through `settle_proof`), a `proving -> attention_required`
         with a reserved reason, and a failing publication or activation gate (#207 D10, D12,
-        D27); after it, `recovery_advance_violation` refuses `recovering`, a reserved recovery
-        reason, `abandoned` over an action with effect, and `ready -> publishing` without an
-        `anchors_verified` under the held fence (#208 D7, D10, D22). Entering a terminal while
-        custody is held appends the transition and a `lease_released` reason `terminal` in one
-        `state.json` write, then clears the lease records. Every refusal happens
-        before any write; the lock file is never created.
+        D27), then `disposition_advance_violation` refuses `failed` and the reserved reason
+        `failure_disposed` (#209 D8, D21); after it, `recovery_advance_violation` refuses
+        `recovering`, a reserved recovery reason, `abandoned` over an action with effect, and
+        `ready -> publishing` without an `anchors_verified` under the held fence (#208 D7,
+        D10, D22). Entering a terminal while custody is held appends the transition and a
+        `lease_released` reason `terminal` in one `state.json` write, then clears the lease
+        records. Every refusal happens before any write; the lock file is never created.
         """
         if custody is not None:
             require_custody_shape(custody)
@@ -306,7 +278,8 @@ class TransactionStore:
             raise TransitionRefused(f"{where}: external_state is not known, unknown or None")
         if target in TERMINALS and external_state != "known":
             raise TransitionRefused(f"{where}: terminal target needs known external state")
-        rule = advance_violation(prior, target, reason)
+        rule = (advance_violation(prior, target, reason)
+                or disposition_advance_violation(target, reason))
         if rule is not None:
             raise TransitionRefused(f"{where}: {rule}")
         blocker = unresolved(fold_actions(prior["events"])) if target in TERMINALS else None
@@ -321,26 +294,31 @@ class TransactionStore:
             "external_state": external_state}])
 
     def create(self, creation_key: str, subject: dict, *, concurrency_keys: Collection[str],
-               proof: dict, recovery: dict) -> Transaction:
+               proof: dict, recovery: dict, authority_class: str) -> Transaction:
         """Create the transaction for `creation_key`, or return the one it already names.
 
         The concurrency key set is fixed here, stored sorted, and compared with the
         subject when the key already names a transaction (D4). Neither the `proof` nor the
-        `recovery` declaration has a default; before any lock the recovery declaration is
+        `recovery` declaration nor the opaque `authority_class` has a default; an
+        `authority_class` that is not a non-empty string is `StateInvalid` before any lock
+        (#209 D11). Before any lock the recovery declaration is
         compiled, then the proof declaration, then the two are bound unit for unit, so a
         rejected one (`RecoveryPlanRejected`, `ProofPlanRejected`) leaves nothing behind.
         The two plans they materialize under the transaction id are stored with their
-        digests on the `created` event, whose `recovers` is null here; a same-key create
-        whose subject, key set, proof plan digest or recovery plan digest differs is a
-        `CreationConflict` (#207 D2, D3; #208 D2, D5, D6).
+        digests on the `created` event, whose `recovers` is null here, beside the
+        `authority_class`; a same-key create whose subject, key set, proof plan digest,
+        recovery plan digest or authority class differs is a `CreationConflict` (#207 D2,
+        D3; #208 D2, D5, D6; #209 D11).
         """
-        return self._create(creation_key, subject, concurrency_keys, proof, recovery, None)
+        return self._create(creation_key, subject, concurrency_keys, proof, recovery, None,
+                            authority_class)
 
     def _create(self, creation_key: str, subject: dict, concurrency_keys: Collection[str],
-                proof: dict, recovery: dict, recovers: str | None) -> Transaction:
+                proof: dict, recovery: dict, recovers: str | None,
+                authority_class: str) -> Transaction:
         """`create`, with the `created` event's `recovers` back-link set to `recovers`, which
         a same-key create must match too (#208 D11)."""
-        _require_creatable(self.root, creation_key, subject, concurrency_keys)
+        _require_creatable(self.root, creation_key, subject, concurrency_keys, authority_class)
         where = f"{self.root}: creation_key {creation_key!r}"
         compiled_recovery = compile_recovery(recovery, where=where)
         compiled = compile_proof(proof, where=where)
@@ -350,13 +328,13 @@ class TransactionStore:
         descriptor = open_lock(self.root / "creation.lock")
         try:
             return self._create_locked(creation_key, subject, keys, compiled, bound, recovers,
-                                       at)
+                                       authority_class, at)
         finally:
             os.close(descriptor)
 
     def _create_locked(self, creation_key: str, subject: dict, keys: list[str],
                        compiled: dict, bound: dict, recovers: str | None,
-                       at: str) -> Transaction:
+                       authority_class: str, at: str) -> Transaction:
         transaction_id = _read_index(self.root, creation_key)
         if transaction_id is None:
             transaction_id = _mint_id()
@@ -391,7 +369,9 @@ class TransactionStore:
                      != document["events"][0]["proof_plan_digest"]),
                     ("recovery plan", telemetry_digest(recovery_plan)
                      != document["events"][0]["recovery_plan_digest"]),
-                    ("recovers", document["events"][0]["recovers"] != recovers)) if differ]
+                    ("recovers", document["events"][0]["recovers"] != recovers),
+                    ("authority class",
+                     document["events"][0]["authority_class"] != authority_class)) if differ]
                 if differs:
                     raise CreationConflict(
                         f"{transaction_id}: creation_key {creation_key!r} already names a "
@@ -404,7 +384,7 @@ class TransactionStore:
                 "events": [{"seq": 1, "type": "created", "at": at,
                             "proof_plan_digest": telemetry_digest(plan),
                             "recovery_plan_digest": telemetry_digest(recovery_plan),
-                            "recovers": recovers}],
+                            "recovers": recovers, "authority_class": authority_class}],
                 "concurrency_keys": keys, "custody": None, "proof_plan": plan,
                 "recovery_plan": recovery_plan,
             }
@@ -566,12 +546,23 @@ class TransactionStore:
             return self._append_fenced(prior, now, "open_interval", {
                 "type": "interval_opened", "evidence_id": evidence_id})
 
-    def issue_grant(self, custody: Custody, *, grant_id: str, actor: str) -> Transaction:
-        """Append `grant_issued` for the held custody only, stamped with its fence (D16)."""
-        require_texts(custody, "issue_grant", grant_id=grant_id, actor=actor)
+    def issue_grant(self, custody: Custody, *, grant_id: str, actor: str, actor_kind: str,
+                    authority_class: str) -> Transaction:
+        """Append `grant_issued` for the held custody only, stamped with its fence (D16).
+
+        Before any lock, a malformed credential, `grant_id`, `actor` or `authority_class`,
+        then an `actor_kind` outside `ACTOR_KINDS`, is `StateInvalid`; the core records the
+        actor kind, it does not authenticate it (#209 D11, D22).
+        """
+        require_texts(custody, "issue_grant", grant_id=grant_id, actor=actor,
+                      authority_class=authority_class)
+        if type(actor_kind) is not str or actor_kind not in ACTOR_KINDS:
+            raise StateInvalid(f"{custody.transaction_id}: issue_grant: actor_kind "
+                               f"{actor_kind!r} is not human or agent")
         with self._fenced(custody, "issue_grant", writes=True) as (prior, now):
             return self._append_fenced(prior, now, "issue_grant", {
-                "type": "grant_issued", "grant_id": grant_id, "actor": actor})
+                "type": "grant_issued", "grant_id": grant_id, "actor": actor,
+                "actor_kind": actor_kind, "authority_class": authority_class})
 
     def check_grant(self, custody: Custody, grant_id: str) -> Mapping[str, Any]:
         """The grant's entry when its fence is the presented, current one (D16).
@@ -843,19 +834,20 @@ class TransactionStore:
 
     def roll_forward(self, custody: Custody, *, grant_id: str, reason: str,
                      creation_key: str, subject: dict, concurrency_keys: Collection[str],
-                     proof: dict, recovery: dict) -> Transaction:
-        """Create the child whose `recovers` is this transaction, link it, return its snapshot
-        (#208 D11). Before any lock a malformed credential, `grant_id` or `reason` refuses.
-        The parent's first hold runs `roll_forward_refusal` and writes nothing; with no parent
-        lock held, `_create` then makes the child or returns the one `creation_key` names,
-        under every `create` rule (a differing `recovers` is a `CreationConflict`); the second
-        hold repeats the refusal and appends `link_events`, if any. A retry after a death
-        between child and link finds that child and links it once."""
+                     proof: dict, recovery: dict, authority_class: str) -> Transaction:
+        """Create the child whose `recovers` is this transaction, under its own explicit
+        `authority_class`, link it, return its snapshot (#208 D11; #209 D18). Before any lock
+        a malformed credential, `grant_id` or `reason` refuses. The parent's first hold runs
+        `roll_forward_refusal` and writes nothing; with no parent lock held, `_create` then
+        makes the child or returns the one `creation_key` names, under every `create` rule (a
+        differing `recovers` or authority class is a `CreationConflict`); the second hold
+        repeats the refusal and appends `link_events`, if any. A retry after a death between
+        child and link finds that child and links it once."""
         require_texts(custody, "roll_forward", grant_id=grant_id, reason=reason)
         with self._fenced(custody, "roll_forward", writes=True) as (prior, _):
             roll_forward_refusal(prior, grant_id)
         child = self._create(creation_key, subject, concurrency_keys, proof, recovery,
-                             custody.transaction_id)
+                             custody.transaction_id, authority_class)
         with self._fenced(custody, "roll_forward", writes=True) as (prior, now):
             roll_forward_refusal(prior, grant_id)
             events = link_events(prior, child.transaction_id, grant_id, reason)

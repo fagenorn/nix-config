@@ -10,7 +10,7 @@ import unittest
 from agent_tools.transaction_core import (
     CreationConflict, RecoveryRefused, StaleCustody, TransactionStore, TransitionRefused)
 
-from .test_transaction_custody import KEYS, SUBJECT, TTL, plain
+from .test_transaction_custody import AUTHORITY, KEYS, SUBJECT, TTL, plain
 from .test_transaction_invocation import FakeEffect, renumbered
 from .test_transaction_recovery import RecoveryCase
 from .test_transaction_recovery_plan import PROOF, RECOVERY
@@ -198,7 +198,8 @@ class RollForwardTest(SettleCase):
                 subject={**SUBJECT, "candidate": "sha256:def"}):
         return (store or self.store).roll_forward(
             self.custody, grant_id=grant_id, reason="unit_not_restorable", creation_key=key,
-            subject=subject, concurrency_keys=KEYS, proof=PROOF, recovery=RECOVERY)
+            subject=subject, concurrency_keys=KEYS, proof=PROOF, recovery=RECOVERY,
+            authority_class=AUTHORITY)
 
     def test_the_child_has_its_own_id_and_the_parent_records_the_link_without_rewrite(self):
         self.parked()

@@ -99,6 +99,7 @@ agent-workflow-tests:
     tests/test_transaction_recovery_plan.py \
     tests/test_transaction_recovery.py \
     tests/test_transaction_recovery_settle.py \
+    tests/test_transaction_disposition.py \
     tests/test_transaction_core_sweep.py \
     tests/test_agent_costs.py \
     tests/test_agent_model_drift_schema.py \

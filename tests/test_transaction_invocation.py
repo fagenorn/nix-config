@@ -165,9 +165,9 @@ class ProtocolCase(CustodyCase):
 
 
 class SchemaTest(ProtocolCase):
-    def test_new_state_is_v5_and_a_v3_document_fails_closed_naming_its_version(self):
+    def test_new_state_is_v6_and_a_v3_document_fails_closed_naming_its_version(self):
         document = self.state_doc(self.transaction_id)
-        self.assertEqual(document["schema"], "transaction-state/v5")
+        self.assertEqual(document["schema"], "transaction-state/v6")
         self.assertRuleRefuses(self.transaction_id,
                                {**document, "schema": "transaction-state/v3"},
                                "transaction-state/v3")
@@ -698,7 +698,7 @@ class LifecycleTest(InvokeCase):
         with self.assertRaises(Crash):
             self.invoke(self.effect(crash="before"))
         self.to("attention_required")
-        error = self.assertRefusedUnchanged(TransitionRefused, lambda: self.to("failed"))
+        error = self.assertRefusedUnchanged(TransitionRefused, lambda: self.to("abandoned"))
         self.assertIn("open", str(error))
 
     def test_refusals_keep_their_precedence(self):

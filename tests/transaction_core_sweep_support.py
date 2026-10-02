@@ -48,6 +48,7 @@ from .transaction_core_shapes import SHAPES
 from .transaction_core_world import ExecutorCrash, World
 
 TTL_MS = 600_000
+AUTHORITY_CLASS = "fixture-release"
 
 
 def _add_unsupported_publication(profile, registry):
@@ -319,7 +320,8 @@ def drive(root, shape, scenario, world=None):
     proof = proof_declaration(profile, registry)
     recovery = recovery_declaration(profile, registry)
     transaction_id = store.create(f"{shape}:{scenario}", subject, concurrency_keys=keys,
-                                  proof=proof, recovery=recovery).transaction_id
+                                  proof=proof, recovery=recovery,
+                                  authority_class=AUTHORITY_CLASS).transaction_id
     definite = {"all": True}
     held = {"custody": None}
 
@@ -475,7 +477,8 @@ def drive(root, shape, scenario, world=None):
 
     def recover():
         """The one recovery step after a park (#208 D13, D14)."""
-        store.issue_grant(held["custody"], grant_id="recovery-1", actor="fixture-operator")
+        store.issue_grant(held["custody"], grant_id="recovery-1", actor="fixture-operator",
+                          actor_kind="agent", authority_class=AUTHORITY_CLASS)
         try:
             begun = store.begin_recovery(held["custody"], grant_id="recovery-1", observer=router)
         except RecoveryRefused as refused:
@@ -487,7 +490,8 @@ def drive(root, shape, scenario, world=None):
                     held["custody"], grant_id="recovery-1", reason=refused.reason,
                     creation_key=f"{shape}:{scenario}:forward",
                     subject={**subject, "candidate": subject["candidate"] + "-forward"},
-                    concurrency_keys=keys, proof=proof, recovery=recovery)
+                    concurrency_keys=keys, proof=proof, recovery=recovery,
+                    authority_class=AUTHORITY_CLASS)
             return
         edges = {edge["action_id"]: (unit, edge) for unit in begun.recovery_plan["units"]
                  for edge in unit["edges"]}

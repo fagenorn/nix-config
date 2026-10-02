@@ -25,6 +25,7 @@ KEYS = ("target:alpha", "project:alpha")
 SUBJECT = {"candidate": "sha256:abc"}
 EMPTY_PROOF = {"units": [], "obligations": [], "collectors": {}}
 EMPTY_RECOVERY = {"effects": {}, "units": []}
+AUTHORITY = "release:alpha"
 PATH = "/work/alpha"
 INSTANCE = re.compile(r"lin_[0-9a-f]{32}")
 
@@ -66,7 +67,8 @@ class CustodyCase(unittest.TestCase):
 
     def new(self, key="k", keys=KEYS):
         return self.store.create(key, SUBJECT, concurrency_keys=keys,
-                                 proof=EMPTY_PROOF, recovery=EMPTY_RECOVERY).transaction_id
+                                 proof=EMPTY_PROOF, recovery=EMPTY_RECOVERY,
+                                 authority_class=AUTHORITY).transaction_id
 
     def acquire(self, transaction_id, executor="exec-a", path=PATH, ttl=TTL):
         return self.store.acquire(transaction_id, executor_id=executor, subject_path=path,
@@ -651,12 +653,14 @@ class EvidenceTest(CustodyCase):
                                    reference="r")
         self.store.record_evidence(custody, evidence_id="e1", form="event", reference="r")
         self.store.open_interval(custody, evidence_id="i1")
-        self.store.issue_grant(custody, grant_id="g0", actor="publisher")
+        self.store.issue_grant(custody, grant_id="g0", actor="publisher",
+                               actor_kind="agent", authority_class=AUTHORITY)
         self.clock.advance(TTL // 2 + 1)
         self.store.renew(custody)
         self.store.record_evidence(custody, evidence_id="i1", form="interval",
                                    reference="r")
-        self.store.issue_grant(custody, grant_id="g1", actor="publisher")
+        self.store.issue_grant(custody, grant_id="g1", actor="publisher",
+                               actor_kind="agent", authority_class=AUTHORITY)
         renewed = self.store.load(transaction_id)
         self.assertEqual([e["admissible"] for e in renewed.evidence], [True, True, True])
         self.assertEqual([g["valid"] for g in renewed.grants], [True, True])
@@ -698,7 +702,8 @@ class EvidenceTest(CustodyCase):
 
     def test_a_released_span_invalidates_its_grants(self):
         custody = self.acquire(self.new())
-        self.store.issue_grant(custody, grant_id="g1", actor="a")
+        self.store.issue_grant(custody, grant_id="g1", actor="a",
+                               actor_kind="agent", authority_class=AUTHORITY)
         self.assertEqual([g["valid"] for g in self.store.release(custody).grants], [False])
 
     def test_reused_ids_and_unopened_intervals_are_refused_before_any_write(self):
@@ -706,7 +711,8 @@ class EvidenceTest(CustodyCase):
         custody = self.acquire(transaction_id)
         self.store.record_evidence(custody, evidence_id="e1", form="event", reference="r")
         self.store.open_interval(custody, evidence_id="i1")
-        self.store.issue_grant(custody, grant_id="g1", actor="a")
+        self.store.issue_grant(custody, grant_id="g1", actor="a",
+                               actor_kind="agent", authority_class=AUTHORITY)
         for call in (
                 lambda: self.store.record_evidence(custody, evidence_id="e1", form="event",
                                                    reference="r"),
@@ -716,12 +722,14 @@ class EvidenceTest(CustodyCase):
                                                    form="interval", reference="r"),
                 lambda: self.store.record_evidence(custody, evidence_id="i1",
                                                    form="snapshot", reference="r"),
-                lambda: self.store.issue_grant(custody, grant_id="g1", actor="a"),
+                lambda: self.store.issue_grant(custody, grant_id="g1", actor="a",
+                                               actor_kind="agent", authority_class=AUTHORITY),
                 lambda: self.store.record_evidence(custody, evidence_id="x", form="guess",
                                                    reference="r"),
                 lambda: self.store.record_evidence(custody, evidence_id="", form="event",
                                                    reference="r"),
-                lambda: self.store.issue_grant(custody, grant_id="g2", actor="")):
+                lambda: self.store.issue_grant(custody, grant_id="g2", actor="",
+                                               actor_kind="agent", authority_class=AUTHORITY)):
             self.assertRefusedUnchanged(StateInvalid, call)
         self.assertRefusedUnchanged(GrantInvalid,
                                     lambda: self.store.check_grant(custody, "nope"))
@@ -736,7 +744,8 @@ class EvidenceTest(CustodyCase):
                 lambda: self.store.record_evidence(credential, evidence_id="s",
                                                    form="snapshot", reference="r"),
                 lambda: self.store.open_interval(credential, evidence_id="i"),
-                lambda: self.store.issue_grant(credential, grant_id="g", actor="a"))
+                lambda: self.store.issue_grant(credential, grant_id="g", actor="a",
+                                               actor_kind="agent", authority_class=AUTHORITY))
 
         self.clock.advance(TTL)
         for call in writes(stale):
@@ -758,7 +767,8 @@ class EvidenceTest(CustodyCase):
         custody = self.acquire(transaction_id)
         self.store.open_interval(custody, evidence_id="i1")
         self.store.record_evidence(custody, evidence_id="i1", form="interval", reference="r")
-        self.store.issue_grant(custody, grant_id="g1", actor="a")
+        self.store.issue_grant(custody, grant_id="g1", actor="a",
+                               actor_kind="agent", authority_class=AUTHORITY)
         base = self.state_doc(transaction_id)
         _, acquired, opened, closed, granted = base["events"]
         held = span(acquired)
