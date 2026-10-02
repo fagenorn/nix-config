@@ -1,3 +1,5 @@
+> **Superseded** by [2026-10-02-issue-236-companion-only-review.md](2026-10-02-issue-236-companion-only-review.md) (companion-only redo, spec D12–D18); its Task 1 (commit 3bfc93a) stays delivered.
+
 # Companion Review Binding Implementation Plan
 
 > **For agentic workers:** execute this plan with the `sdd` skill — one implementer
