@@ -43,7 +43,27 @@ still reportable; anchor it in the artifact with evidence.
 
 ## Direct configured review
 
-Build the operation packet from its support document. Create absolute JSONL and
+Build the operation packet from its support document. Before any invocation,
+classify the selected command's authored argv into exactly one review binding
+shape:
+
+1. Exec shape: the basename of `argv[0]` is exactly `codex`.
+2. Companion shape: the basename of `argv[0]` is exactly `codex-companion`,
+   `argv[1]` is `task`, and the remaining tokens are exactly `--reviewer <op>`
+   plus an optional `--fresh`, in any order, where `<op>` equals the running
+   operation. No other flag and no positional token may appear: this skill owns
+   model, effort, cwd and output, and a positional would displace the stdin
+   packet.
+3. Anything else is a **binding shape error**.
+
+A binding shape error is a configuration error. It makes no Codex call, no
+retry and no native fallback, and stops the operation with one error. The error
+names the operation, the `review_id`, the authored argv, and exactly one cause:
+unrecognised executable, a companion subcommand other than `task`, a missing or
+mismatched `--reviewer`, or an unsupported companion token. It stops the way
+`blocked` does, but carries no capability repair ID.
+
+**Exec shape.** Create absolute JSONL and
 last-message candidates under `${TMPDIR:-/tmp}` and remove both with `trap` or
 `finally` on every outcome. Preserve the selected command object's base argv,
 cwd, and declared env (unset only declared env names), append the exact tail,
@@ -62,6 +82,25 @@ selected model `gpt-6-astra` and selected reasoning effort `xhigh`; require
 exactly one terminal agent-message; require a non-empty last-message file whose
 UTF-8 bytes equal that terminal agent-message byte-for-byte; then validate the
 operation headings. Only that success establishes reviewer identity `Codex`.
+
+**Companion shape.** Preserve the selected command object's base argv, cwd, and
+declared env (unset only declared env names), append the exact tail, and send
+the complete packet on stdin with no positional argument, in the foreground:
+
+```text
+bindings.commands[review_id].argv \
+  --model gpt-6-astra --effort xhigh \
+  --cwd <absolute-worktree> --json
+```
+
+The companion's reviewer mode forces a fresh, read-only, ephemeral thread and
+applies its own wall-clock budget, so the tail passes none of these. Require
+exit status 0 and stdout that parses as exactly one JSON object in which
+`status` is `0`, `touchedFiles` is empty, `runtime.model` is `gpt-6-astra`,
+`runtime.reasoningEffort` is `xhigh`, and `rawOutput` is a non-empty string, the
+companion's last captured agent message; then validate the operation headings.
+No JSONL or last-message candidate is created on this route. Only that success
+establishes reviewer identity `Codex`.
 
 On the `available` route, a daemon, slot, or capacity rejection is a binding
 capacity rejection: surface it verbatim, stop, make no retry, and take no native
