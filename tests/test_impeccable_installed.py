@@ -9,6 +9,7 @@ without touching ~/.impeccable/bin.
 
 import os
 import platform
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -22,6 +23,18 @@ RETIRED_SKILLS = ("ui-ux-pro-max",)
 SKILL_ROOTS = (".agents/skills", ".claude/skills")
 SLOTS = {("Darwin", "arm64"): "darwin-arm64", ("Linux", "x86_64"): "linux-x64"}
 TIMEOUT_SECONDS = 60
+
+
+def path_without_engines(path):
+    """`path` minus every directory holding an `impeccable` executable.
+
+    The launcher falls back to `impeccable` on PATH when its sibling engine is
+    missing, so a probe that kept e.g. ~/.agents/bin would pass on a global
+    wrapper instead of the tree under test. The other directories stay so the
+    launcher's own utilities (`uname`, `tr`) still resolve.
+    """
+    kept = [d for d in path.split(os.pathsep) if d and shutil.which(SKILL, path=d) is None]
+    return os.pathsep.join(kept)
 
 
 class ImpeccableInstalledTest(unittest.TestCase):
@@ -53,12 +66,14 @@ class ImpeccableInstalledTest(unittest.TestCase):
         return (self.codex / "scripts/VERSION").read_text(encoding="utf-8").strip()
 
     def probe(self, executable):
-        """Run `<executable> engine-probe` isolated from any ~/.impeccable."""
+        """Run `<executable> engine-probe` isolated from ~/.impeccable and PATH engines."""
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         home = Path(scratch.name)
         env = {k: v for k, v in os.environ.items() if not k.startswith("IMPECCABLE_")}
         env.update(HOME=str(home), IMPECCABLE_NO_UPDATE_CHECK="1", DO_NOT_TRACK="1")
+        env["PATH"] = path_without_engines(env.get("PATH", os.defpath))
+        self.assertIsNone(shutil.which(SKILL, path=env["PATH"]), env["PATH"])
         result = subprocess.run(
             [str(executable), "engine-probe"], env=env, capture_output=True,
             text=True, timeout=TIMEOUT_SECONDS, check=False,
