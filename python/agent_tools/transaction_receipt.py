@@ -22,12 +22,17 @@ receipt outlives a collected ledger: `receipts/<hex>.json`, where `sha256:<hex>`
 receipt's `telemetry_digest`, holding exactly its `serialize` bytes, mode `0444`. A file is
 created once and never replaced, and `read` verifies the bytes, the digest and the schema on
 every read. The store's seal order is: `append_events` stamps `receipt_sealed` with the
-receipt's digest and the walk re-derives it; `seal` then writes the receipt and reads it
-back, and only then is `state.json` written. It reads files but no lock or clock: the
-core passes every `at`.
+receipt's digest and the walk re-derives it; `seal` then writes the receipt, reads it back
+and, for an `effects_unobservable` receipt, writes one `transaction-hazard-marker/v1` per
+concurrency key at `hazards/<sha256 hex of the key>/<receipt hex>.json`; only then is
+`state.json` written. Post-terminal observations are numbered files beside the receipt,
+`observations/<receipt hex>/<n>.json`, that never touch it or a ledger (D12, D18). Every
+listing re-validates each file it lists. It reads files but no lock or clock: the core
+passes every `at`.
 """
 
 import copy
+import hashlib
 import os
 import re
 import secrets
@@ -38,16 +43,25 @@ from types import MappingProxyType
 from typing import Any
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_disposition import FAILURE_REASON, action_effects
+from agent_tools.transaction_disposition import (
+    FAILURE_REASON, OBSERVABILITY_GROUNDS, action_effects)
 from agent_tools.transaction_invocation import fold_actions, status
-from agent_tools.transaction_proof import evaluate
+from agent_tools.transaction_proof import closed_result_violation, evaluate
 from agent_tools.transaction_storage import (
     ReceiptInvalid, StateInvalid, fsync_directory, lstat_mode, parse_at, require_directory,
     serialize, strict_loads)
 
 RECEIPT_SCHEMA = "transaction-terminal-receipt/v1"
+HAZARD_SCHEMA = "transaction-hazard-marker/v1"
+OBSERVATION_SCHEMA = "transaction-post-terminal-observation/v1"
 RECEIPT_EVENT_KEYS = frozenset({"seq", "type", "at", "receipt_digest"})
 _DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+_HEX_NAME = re.compile(r"([0-9a-f]{64})\.json")
+_NUMBER_NAME = re.compile(r"([1-9][0-9]*)\.json")
+_AT_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z")
+_RESULT_FIELDS = ("outcome", "reason", "reference")
+_OBSERVATION_KEYS = frozenset({"schema", "receipt_digest", "n", "at", "contradicts_ground",
+                               *_RESULT_FIELDS})
 
 
 def receipt_invalid(where: str, detail: str) -> ReceiptInvalid:
@@ -184,6 +198,36 @@ def terminal_receipt(document: Mapping, covered: Sequence[Mapping]) -> dict:
         "evaluations": _evaluations(document["proof_plan"], covered)})
 
 
+def _is_at(value: Any) -> bool:
+    """Whether `value` is a `YYYY-MM-DDTHH:MM:SS.mmmZ` stamp that `parse_at` accepts."""
+    if type(value) is not str or _AT_PATTERN.fullmatch(value) is None:
+        return False
+    try:
+        parse_at(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _observation_violation(observation: Any, contradicts_ground: Any, at: Any,
+                           receipt: Mapping) -> str | None:
+    """How a post-terminal observation breaks its value rules against `receipt`, or None:
+    the one validator of insertion and read (D12, D22, D31). The observation is the closed
+    `closed_result_violation` object, `at` a core timestamp, `contradicts_ground` a bool,
+    and true only on a `failed` receipt whose ground is an observability ground."""
+    violation = closed_result_violation(observation, "observation")
+    if violation is not None:
+        return violation
+    if not _is_at(at):
+        return f"at {at!r} is not a core timestamp"
+    if type(contradicts_ground) is not bool:
+        return f"contradicts_ground {contradicts_ground!r} is not a bool"
+    if contradicts_ground and (receipt["outcome"] != "failed" or receipt["outcome_proof"][
+            "ground"] not in OBSERVABILITY_GROUNDS):
+        return "contradicts_ground is legal only on a failed receipt with an observability ground"
+    return None
+
+
 def receipt_event_violation(event: dict, events_before: Sequence[Mapping],
                             document: dict) -> str | None:
     """How a `receipt_sealed` the walk admitted after a terminal breaks its rule, or None
@@ -228,7 +272,9 @@ class ReceiptStore:
         """Write `receipt` at the name `digest` gives, then read it back (D2, D29).
 
         Refused unless `digest` is the receipt's `telemetry_digest`; an existing file is
-        accepted only when it holds the same bytes, so a retried seal is idempotent.
+        accepted only when it holds the same bytes, so a retried seal is idempotent. An
+        `effects_unobservable` receipt then gets one hazard marker per concurrency key, each
+        created the same way (D6, D12, D22).
         """
         if type(digest) is not str or telemetry_digest(receipt) != digest:
             raise receipt_invalid(repr(digest), "is not the digest of the receipt to seal")
@@ -237,6 +283,11 @@ class ReceiptStore:
         self._create_once(path, content.encode("ascii"))
         if serialize(dict(self.read(digest))) != content:
             raise receipt_invalid(str(path), "does not read back as the sealed receipt")
+        if receipt["terminal_qualifier"] == "effects_unobservable":
+            for key in receipt["concurrency_keys"]:
+                marker = {"schema": HAZARD_SCHEMA, "key": key, "receipt_digest": digest}
+                self._create_once(self._hazards(key) / path.name,
+                                  serialize(marker).encode("ascii"))
 
     def read(self, digest: Any) -> Mapping[str, Any]:
         """The receipt `digest` names, a read-only view over its strict parse (D7, D20).
@@ -263,6 +314,116 @@ class ReceiptStore:
             raise receipt_invalid(str(path), f"schema is not {RECEIPT_SCHEMA}")
         return MappingProxyType(receipt)
 
+    def _hazards(self, key: str) -> Path:
+        return self.root / "hazards" / hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+    def hazard_markers(self, key: str) -> tuple[str, ...]:
+        """The sorted receipt digests marked under `key`, or `()` when none are (D12, D22).
+
+        Each marker is re-validated: its `serialize` bytes, the closed keys, the schema,
+        `key`, and a `receipt_digest` its file name gives. It reads no receipt.
+        """
+        digests = []
+        for path, match in self._listing(self._hazards(key), _HEX_NAME):
+            marker = self._document(path)
+            expected = {"schema": HAZARD_SCHEMA, "key": key,
+                        "receipt_digest": "sha256:" + match.group(1)}
+            if marker != expected:
+                raise receipt_invalid(str(path), f"is not the {HAZARD_SCHEMA} marker it names")
+            digests.append(expected["receipt_digest"])
+        return tuple(sorted(digests))
+
+    def record_observation(self, receipt_digest: Any, observation: Any,
+                           contradicts_ground: Any, at: str) -> Mapping[str, Any]:
+        """Append the next numbered observation of the receipt `receipt_digest` names, a
+        read-only view of its record (D12, D18, D22, D26).
+
+        The receipt is read first; an observation `_observation_violation` refuses is
+        `StateInvalid` before any write. The record copies the observation's three fields.
+        `n` starts one past the files present and moves on at each collision, so no file is
+        replaced. It never touches the receipt, a ledger or a lease.
+        """
+        receipt = self.read(receipt_digest)
+        violation = _observation_violation(observation, contradicts_ground, at, receipt)
+        if violation is not None:
+            raise StateInvalid(f"{receipt['transaction_id']}: record_post_terminal: {violation}")
+        directory = self._observations(receipt_digest)
+        n = len(self._listing(directory, _NUMBER_NAME)) + 1
+        while True:
+            record = {"schema": OBSERVATION_SCHEMA, "receipt_digest": receipt_digest, "n": n,
+                      "at": at, "contradicts_ground": contradicts_ground,
+                      **{name: observation[name] for name in _RESULT_FIELDS}}
+            try:
+                self._create_once(directory / f"{n}.json", serialize(record).encode("ascii"),
+                                  exclusive=True)
+            except FileExistsError:
+                n += 1
+                continue
+            return MappingProxyType(record)
+
+    def observations(self, receipt_digest: Any) -> tuple[Mapping[str, Any], ...]:
+        """The receipt's observations ordered by `n`, each a read-only view (D12, D22, D31).
+
+        The receipt is read first. Each file is re-validated: its `serialize` bytes, the
+        closed keys, the schema, `receipt_digest`, an `n` its name gives, and every value
+        rule `record_observation` enforces.
+        """
+        receipt = self.read(receipt_digest)
+        records = []
+        for path, match in self._listing(self._observations(receipt_digest), _NUMBER_NAME):
+            record = self._document(path)
+            if set(record) != _OBSERVATION_KEYS or record["schema"] != OBSERVATION_SCHEMA:
+                raise receipt_invalid(str(path), f"is not a closed {OBSERVATION_SCHEMA} record")
+            if record["receipt_digest"] != receipt_digest:
+                raise receipt_invalid(str(path), "names another receipt")
+            if type(record["n"]) is not int or record["n"] != int(match.group(1)):
+                raise receipt_invalid(str(path), "n is not its file name")
+            violation = _observation_violation(
+                {name: record[name] for name in _RESULT_FIELDS}, record["contradicts_ground"],
+                record["at"], receipt)
+            if violation is not None:
+                raise receipt_invalid(str(path), violation)
+            records.append(record)
+        return tuple(MappingProxyType(record) for record in
+                     sorted(records, key=lambda record: record["n"]))
+
+    def _observations(self, receipt_digest: str) -> Path:
+        return self.root / "observations" / receipt_digest.removeprefix("sha256:")
+
+    def _listing(self, directory: Path, name: re.Pattern) -> list[tuple[Path, re.Match]]:
+        """Each file in `directory` and its `name` match, `[]` when `directory` is missing.
+
+        `directory` and its parent below the root must be real directories; the create
+        helper's temporary siblings (a leading `.`) are skipped, any other unmatched name
+        is refused.
+        """
+        try:
+            for level in (directory.parent, directory):
+                if not require_directory(level, missing_ok=True):
+                    return []
+            entries = sorted(os.listdir(directory))
+        except (OSError, StateInvalid) as error:
+            raise receipt_invalid(str(directory), f"cannot be listed ({error})") from error
+        listed = []
+        for entry in entries:
+            match = name.fullmatch(entry)
+            if match is None and not entry.startswith("."):
+                raise receipt_invalid(str(directory / entry), "is not a file this store names")
+            if match is not None:
+                listed.append((directory / entry, match))
+        return listed
+
+    def _document(self, path: Path) -> dict:
+        """The strict parse of one listed file whose bytes are its `serialize` bytes."""
+        raw = self._bytes(path)
+        try:
+            document = strict_loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as error:
+            raise receipt_invalid(str(path), f"not strict JSON ({error})") from error
+        if type(document) is not dict or serialize(document).encode("ascii") != raw:
+            raise receipt_invalid(str(path), "bytes are not a serialized object")
+        return document
+
     @staticmethod
     def _bytes(path: Path) -> bytes:
         """The bytes of one regular, non-symlinked file."""
@@ -285,17 +446,22 @@ class ReceiptStore:
         for part in directory.relative_to(self.root).parts:
             level = parent / part
             if not require_directory(level, missing_ok=True):
-                level.mkdir()
-                require_directory(level, missing_ok=False)
-                fsync_directory(parent)
+                try:
+                    level.mkdir()
+                except FileExistsError:  # a concurrent first writer made it
+                    require_directory(level, missing_ok=False)
+                else:
+                    require_directory(level, missing_ok=False)
+                    fsync_directory(parent)
             parent = level
 
-    def _create_once(self, path: Path, content: bytes) -> None:
+    def _create_once(self, path: Path, content: bytes, *, exclusive: bool = False) -> None:
         """Create `path` holding `content`, mode `0444`, never replacing a file (D6, D20).
 
         A temporary sibling opened `O_CREAT | O_EXCL | O_NOFOLLOW` is written and fsynced,
         hard-linked to `path` and always unlinked, then the directory is fsynced. When
-        `path` exists its bytes must be `content`.
+        `path` exists its bytes must be `content`, or, when `exclusive`, the collision is a
+        `FileExistsError` to the caller.
         """
         try:
             self._directory(path.parent)
@@ -311,6 +477,8 @@ class ReceiptStore:
                 try:
                     os.link(temporary, path)
                 except FileExistsError:
+                    if exclusive:
+                        raise
                     if self._bytes(path) != content:
                         raise receipt_invalid(str(path), "already holds other bytes") from None
             finally:
@@ -319,4 +487,6 @@ class ReceiptStore:
         except ReceiptInvalid:
             raise
         except (OSError, StateInvalid) as error:
+            if exclusive and isinstance(error, FileExistsError):
+                raise
             raise receipt_invalid(str(path), f"cannot be written ({error})") from error

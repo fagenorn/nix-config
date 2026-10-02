@@ -10,7 +10,9 @@ disposition's grounds, refusals and rules; `transaction_recovery` recovery's adm
 decisions and rules; `transaction_recovery_plan` the recovery plan; `transaction_proof` the
 proof's collection, cohorts and settlement; `transaction_plan` the proof plan;
 `transaction_invocation` the action protocol and retry budget; `transaction_custody` the
-lease authority and admissibility; `transaction_storage` the durable-file primitives and the
+lease authority and admissibility; `transaction_receipt` the receipts, hazard markers and
+post-terminal observations behind `read_receipt`, `hazard_markers`, `record_post_terminal`
+and `post_terminal_observations`; `transaction_storage` the durable-file primitives and the
 refusal classes. The store adds the locks, the clock, the
 fenced check and the writes. No command and no caller until #125.
 """
@@ -55,7 +57,8 @@ from agent_tools.transaction_proof import (
     PROOF_REFUSAL_REASONS, advance_violation, cohort_start, collection_refusal,
     next_evidence_id, obligation, observation_request, observation_violation, open_cohort,
     proof_refused, settlement)
-from agent_tools.transaction_receipt import RECEIPT_SCHEMA, ReceiptStore, terminal_receipt
+from agent_tools.transaction_receipt import (
+    HAZARD_SCHEMA, OBSERVATION_SCHEMA, RECEIPT_SCHEMA, ReceiptStore, terminal_receipt)
 from agent_tools.transaction_recovery import (
     EFFECT_CLASSES, RECOVERY_REFUSAL_REASONS, anchor_requests, anchors_events, begin_events,
     begin_requests, check_result_violation, link_events, recovery_advance_violation,
@@ -1028,14 +1031,31 @@ class TransactionStore:
             atomic_write(directory, directory / "state.json", candidate)
         return snapshot(candidate)
 
-    def inspect_lease(self, key: str) -> Mapping[str, Any] | None:
-        """A read-only view of `key`'s lease record, or None; no lock, no write (D6)."""
+    def _key(self, key: Any) -> str:
+        """`key`, refused (StateInvalid) unless a non-empty UTF-8-encodable string."""
         if type(key) is not str or not key:
-            raise StateInvalid(f"{self.root}: lease key {key!r} is not a non-empty string")
+            raise StateInvalid(f"{self.root}: key {key!r} is not a non-empty string")
         try:
             key.encode("utf-8")
         except UnicodeEncodeError as error:
-            raise StateInvalid(f"{self.root}: lease key {key!r} is not encodable as "
-                               f"UTF-8") from error
-        record = self._leases.record(key)
+            raise StateInvalid(f"{self.root}: key {key!r} is not encodable as UTF-8") from error
+        return key
+
+    def inspect_lease(self, key: str) -> Mapping[str, Any] | None:
+        """A read-only view of `key`'s lease record, or None; no lock, no write (D6)."""
+        record = self._leases.record(self._key(key))
         return None if record is None else MappingProxyType(copy.deepcopy(record))
+
+    def hazard_markers(self, key: str) -> tuple[str, ...]:
+        """`ReceiptStore.hazard_markers` for a key `inspect_lease` admits (#209 D12, D22)."""
+        return self._receipts.hazard_markers(self._key(key))
+
+    def record_post_terminal(self, receipt_digest: str, *, observation: dict,
+                             contradicts_ground: bool) -> Mapping[str, Any]:
+        """`ReceiptStore.record_observation` at one clock reading (#209 D12, D18, D22)."""
+        return self._receipts.record_observation(receipt_digest, observation,
+                                                 contradicts_ground, format_at(self._now()))
+
+    def post_terminal_observations(self, receipt_digest: str) -> tuple[Mapping[str, Any], ...]:
+        """`ReceiptStore.observations` (#209 D12, D22)."""
+        return self._receipts.observations(receipt_digest)

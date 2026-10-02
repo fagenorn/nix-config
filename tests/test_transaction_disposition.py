@@ -4,17 +4,22 @@ Run: just agent-workflow-tests
 """
 
 import copy
+import hashlib
+import json
+import os
 import unittest
 
 from agent_tools import (
-    transaction_core, transaction_disposition, transaction_history, transaction_storage)
+    transaction_core, transaction_disposition, transaction_history, transaction_receipt,
+    transaction_storage)
 from agent_tools.transaction_core import (
-    ACTOR_KINDS, CONSEQUENCES, DISPOSITION_REFUSAL_REASONS, GROUNDS, KNOWN_STATE_GROUNDS,
-    OBSERVABILITY_GROUNDS, QUALIFIERS, RESIDUE_BOUNDS, CreationConflict, DispositionRefused,
-    StateInvalid, TransitionRefused)
+    ACTOR_KINDS, CONSEQUENCES, DISPOSITION_REFUSAL_REASONS, GROUNDS, HAZARD_SCHEMA,
+    KNOWN_STATE_GROUNDS, OBSERVABILITY_GROUNDS, OBSERVATION_SCHEMA, QUALIFIERS, RESIDUE_BOUNDS,
+    CreationConflict, DispositionRefused, ReceiptInvalid, StateInvalid, TransitionRefused)
 
 from .test_transaction_custody import (
-    AUTHORITY, EMPTY_PROOF, EMPTY_RECOVERY, KEYS, SUBJECT, T0, TTL, CustodyCase, plain)
+    AUTHORITY, EMPTY_PROOF, EMPTY_RECOVERY, KEYS, PATH, SUBJECT, T0, TTL, CustodyCase, plain,
+    serialize)
 from .test_transaction_receipt import Sealed
 from .test_transaction_recovery import RecoveryCase
 from .test_transaction_recovery_plan import RECOVERY
@@ -345,3 +350,162 @@ class DisposeTest(DisposeCase):
                 edited = copy.deepcopy(document)
                 edit(edited["events"][index])
                 self.assertRuleRefuses(self.transaction_id, edited, fragment)
+
+
+class UnobservableTest(DisposeCase):
+    def unobservable_failure(self):
+        self.parked(start="unknown")
+        self.human()
+        after = self.dispose("h-1", disposition=self.unobservable())
+        return after, after.terminal["receipt_digest"]
+
+    def marker(self, key, digest):
+        return (self.root / "hazards" / hashlib.sha256(key.encode()).hexdigest()
+                / (digest.removeprefix("sha256:") + ".json"))
+
+    def test_an_unobservable_disposition_seals_its_qualifier_and_marks_every_key(self):
+        after, digest = self.unobservable_failure()
+        receipt = self.assertSealed(after, "failed", qualifier="effects_unobservable")
+        disposed = next(dict(e) for e in after.events if e["type"] == "failure_disposed")
+        start = self.act("start", n=2)
+        self.assertEqual(disposed["effect_snapshot"][start], "unknown")
+        self.assertEqual(receipt["outcome_proof"]["units"], disposed["units"])
+        self.assertEqual(receipt["outcome_proof"]["ground_occurred_at"], T0 - 1)
+        moved = [e for e in after.events if e["type"] == "transitioned"][-1]
+        self.assertEqual((moved["to"], moved["external_state"]), ("failed", "known"))
+        self.assertEqual(HAZARD_SCHEMA, "transaction-hazard-marker/v1")
+        self.assertIs(HAZARD_SCHEMA, transaction_receipt.HAZARD_SCHEMA)
+        for key in KEYS:
+            with self.subTest(key=key):
+                self.assertEqual(self.store.hazard_markers(key), (digest,))
+                self.assertEqual(json.loads(self.marker(key, digest).read_text()),
+                                 {"schema": HAZARD_SCHEMA, "key": key, "receipt_digest": digest})
+        self.assertEqual(self.store.hazard_markers("key:unmarked"), ())
+        with self.assertRaises(StateInvalid):
+            self.store.hazard_markers("")
+
+    def test_every_unit_destroyed_seals_final_state_known_and_marks_nothing(self):
+        self.parked()
+        self.human()
+        build, start = self.act("build", n=1), self.act("start", n=2)
+        after = self.dispose("h-1", disposition=self.unobservable(
+            units=[destroyed(build), destroyed(start)]))
+        self.assertSealed(after, "failed", qualifier="final_state_known")
+        self.assertFalse((self.root / "hazards").exists())
+        self.assertEqual(self.store.hazard_markers(KEYS[0]), ())
+
+    def test_post_terminal_observations_sit_beside_the_receipt_and_change_nothing(self):
+        after, digest = self.unobservable_failure()
+        receipt_path = self.root / "receipts" / (digest.removeprefix("sha256:") + ".json")
+        before = (receipt_path.read_bytes(), self.state_doc(self.transaction_id))
+        self.clock.advance(5)
+        seen = {"outcome": "satisfied", "reason": "residue gone", "reference": "ops://recheck/1"}
+        first = self.store.record_post_terminal(digest, observation=seen,
+                                                contradicts_ground=False)
+        second = self.store.record_post_terminal(
+            digest, observation={**seen, "outcome": "unsatisfied"}, contradicts_ground=True)
+        self.assertEqual((first["n"], second["n"]), (1, 2))
+        self.assertEqual(OBSERVATION_SCHEMA, "transaction-post-terminal-observation/v1")
+        listed = [dict(o) for o in self.store.post_terminal_observations(digest)]
+        self.assertEqual(listed, [dict(first), dict(second)])
+        self.assertEqual(listed[0], {
+            "schema": OBSERVATION_SCHEMA, "receipt_digest": digest, "n": 1, "at": first["at"],
+            "outcome": "satisfied", "reason": "residue gone", "reference": "ops://recheck/1",
+            "contradicts_ground": False})
+        self.assertGreater(first["at"], after.events[-1]["at"])
+        self.assertTrue((self.root / "observations" / digest.removeprefix("sha256:")
+                         / "2.json").is_file())
+        self.assertEqual((receipt_path.read_bytes(), self.state_doc(self.transaction_id)),
+                         before)
+        self.assertEqual(self.store.load(self.transaction_id).state, "failed")
+
+    def test_a_bad_post_terminal_observation_is_refused_before_any_write(self):
+        after, digest = self.unobservable_failure()
+        seen = {"outcome": "satisfied", "reason": "r", "reference": "ops://x"}
+        for observation, contradicts in (({**seen, "extra": 1}, False),
+                                         ({**seen, "outcome": "maybe"}, False),
+                                         (seen, "yes")):
+            with self.subTest(observation=observation, contradicts=contradicts):
+                self.assertRefusedUnchanged(StateInvalid, lambda: self.store.record_post_terminal(
+                    digest, observation=observation, contradicts_ground=contradicts))
+        with self.assertRaises(ReceiptInvalid):
+            self.store.record_post_terminal("sha256:" + "0" * 64, observation=seen,
+                                            contradicts_ground=False)
+        self.start_with(RECOVERY, key="known", keys=("key:known",))
+        self.parked()
+        self.grant()
+        known = self.dispose().terminal["receipt_digest"]
+        self.assertRefusedUnchanged(StateInvalid, lambda: self.store.record_post_terminal(
+            known, observation=seen, contradicts_ground=True))
+        self.assertEqual(self.store.record_post_terminal(
+            known, observation=seen, contradicts_ground=False)["n"], 1)
+
+    def test_a_tampered_marker_or_observation_fails_its_listing(self):
+        after, digest = self.unobservable_failure()
+        seen = {"outcome": "satisfied", "reason": "r", "reference": "ops://x"}
+        self.store.record_post_terminal(digest, observation=seen, contradicts_ground=False)
+        observation = (self.root / "observations" / digest.removeprefix("sha256:") / "1.json")
+        for path, listing in ((self.marker(KEYS[0], digest),
+                               lambda: self.store.hazard_markers(KEYS[0])),
+                              (observation,
+                               lambda: self.store.post_terminal_observations(digest))):
+            with self.subTest(path=path.name):
+                os.chmod(path, 0o644)
+                document = json.loads(path.read_text())
+                document["receipt_digest"] = "sha256:" + "1" * 64
+                path.write_text(json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n")
+                with self.assertRaises(ReceiptInvalid):
+                    listing()
+
+    def test_a_canonically_reserialized_bad_observation_value_fails_its_listing(self):
+        self.parked()
+        self.grant()
+        known = self.dispose().terminal["receipt_digest"]
+        seen = {"outcome": "satisfied", "reason": "r", "reference": "ops://x"}
+        self.store.record_post_terminal(known, observation=seen, contradicts_ground=False)
+        path = self.root / "observations" / known.removeprefix("sha256:") / "1.json"
+        original = json.loads(path.read_text())
+        os.chmod(path, 0o644)
+        for edit in ({"outcome": "maybe"}, {"contradicts_ground": "yes"},
+                     {"contradicts_ground": True}, {"at": "2027-13-01T08:00:00.000Z"},
+                     {"at": "yesterday"}):
+            with self.subTest(edit=edit):
+                path.write_text(serialize({**original, **edit}))
+                with self.assertRaises(ReceiptInvalid):
+                    self.store.post_terminal_observations(known)
+        path.write_text(serialize(original))
+        self.assertEqual([dict(o) for o in self.store.post_terminal_observations(known)],
+                         [original])
+
+    def test_a_marker_failure_leaves_no_terminal_and_a_retry_succeeds(self):
+        self.parked(start="unknown")
+        self.human()
+        disposition = self.unobservable()
+        obstruction = self.root / "hazards" / hashlib.sha256(KEYS[0].encode()).hexdigest()
+        obstruction.parent.mkdir()
+        obstruction.write_text("not a directory\n")
+        guarded = lambda: {name: raw for name, raw in self.files().items()  # noqa: E731
+                           if name.startswith("leases") or name.endswith("state.json")}
+        before = guarded()
+        with self.assertRaises(ReceiptInvalid):
+            self.store.dispose_failed(self.custody, grant_id="h-1", disposition=disposition)
+        self.assertEqual(guarded(), before)
+        self.assertNotIn("receipt_sealed", self.types(self.transaction_id))
+        self.assertEqual(self.store.load(self.transaction_id).state, "attention_required")
+        obstruction.unlink()
+        after = self.store.dispose_failed(self.custody, grant_id="h-1", disposition=disposition)
+        digest = after.terminal["receipt_digest"]
+        self.assertSealed(after, "failed", qualifier="effects_unobservable")
+        for key in KEYS:
+            with self.subTest(key=key):
+                self.assertEqual(self.store.hazard_markers(key), (digest,))
+
+    def test_a_result_after_the_seal_is_a_post_terminal_observation_not_a_ledger_write(self):
+        after, digest = self.unobservable_failure()
+        self.assertRefusedUnchanged(TransitionRefused, lambda: self.store.record_owner_result(
+            self.transaction_id, executor_id="exec-a", subject_path=PATH,
+            fence=plain(self.custody.fence), result={"late": True}))
+        record = self.store.record_post_terminal(
+            digest, observation={"outcome": "satisfied", "reason": "late owner result",
+                                 "reference": "owner://exec-a"}, contradicts_ground=False)
+        self.assertEqual(record["receipt_digest"], digest)
