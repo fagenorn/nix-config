@@ -311,6 +311,25 @@ class SnapshotShapeTest(ResolverTestCase):
                 self.assertIsNone(entry["reason_code"])
                 self.assertIsNone(entry["repair_id"])
 
+    def test_committed_review_bindings_have_the_companion_shape(self):
+        # Through the resolver (D16): bindings only, because capability state
+        # follows the host's PATH, which lacks `codex-companion` in CI (D18).
+        code, snap, err = self.resolve(self.make_root())
+        self.assertEqual(code, 0, err)
+        bindings = snap["bindings"]
+        self.assertEqual(bindings["workflow"]["review"],
+                         {"plan": "codex-plan-review", "code": "codex-diff-review"})
+        self.assertNotIn("codex-review", bindings["commands"])
+        for review_id, operation in (("codex-plan-review", "plan-review"),
+                                     ("codex-diff-review", "diff-review")):
+            with self.subTest(review_id=review_id):
+                self.assertEqual(bindings["commands"][review_id], {
+                    "argv": ["codex-companion", "task", "--fresh",
+                             "--reviewer", operation],
+                    "cwd": snap["project"]["root"],
+                    "env": [],
+                })
+
     def test_two_runs_emit_byte_identical_stdout(self):
         root = self.make_root()
         first = run("resolve", "--repo-root", str(root), home=self.home)
@@ -941,7 +960,7 @@ class CapabilityStateTest(ResolverTestCase):
 
     def test_available_when_every_prerequisite_is_present(self):
         root = self.make_root()
-        stub = make_stub_bin(("gh", "git", "just", "codex"))
+        stub = make_stub_bin(("gh", "git", "just", "codex-companion"))
         code, snap, _, err = self.resolve_with_path(root, stub)
         self.assertEqual(code, 0, err)
         for name in ("tracker", "worktrees", "knowledge.standards",
@@ -955,7 +974,7 @@ class CapabilityStateTest(ResolverTestCase):
 
     def test_tracker_is_blocked_when_its_cli_is_absent(self):
         root = self.make_root()
-        stub = make_stub_bin(("git", "just", "codex"))
+        stub = make_stub_bin(("git", "just", "codex-companion"))
         code, snap, _, err = self.resolve_with_path(root, stub)
         self.assertEqual(code, 0, err)
         entry = snap["capabilities"]["tracker"]
@@ -965,7 +984,7 @@ class CapabilityStateTest(ResolverTestCase):
 
     def test_worktrees_is_blocked_when_git_is_absent(self):
         root = self.make_root()
-        stub = make_stub_bin(("gh", "just", "codex"))
+        stub = make_stub_bin(("gh", "just", "codex-companion"))
         code, snap, _, err = self.resolve_with_path(root, stub)
         self.assertEqual(code, 0, err)
         entry = snap["capabilities"]["worktrees"]
@@ -976,7 +995,7 @@ class CapabilityStateTest(ResolverTestCase):
 
     def test_verification_is_blocked_when_a_command_binary_is_absent(self):
         root = self.make_root()
-        stub = make_stub_bin(("gh", "git", "codex"))
+        stub = make_stub_bin(("gh", "git", "codex-companion"))
         code, snap, _, err = self.resolve_with_path(root, stub)
         self.assertEqual(code, 0, err)
         entry = snap["capabilities"]["verification"]
@@ -991,7 +1010,7 @@ class CapabilityStateTest(ResolverTestCase):
         contract = source_contract()
         contract["bindings"]["paths"]["architecture"] = ["docs/architecture.md"]
         root = self.make_root(contract)
-        stub = make_stub_bin(("gh", "git", "just", "codex"))
+        stub = make_stub_bin(("gh", "git", "just", "codex-companion"))
         code, snap, _, err = self.resolve_with_path(root, stub)
         self.assertEqual(code, 0, err)
         entry = snap["capabilities"]["knowledge.architecture"]
@@ -1028,7 +1047,7 @@ class CapabilityStateTest(ResolverTestCase):
                      "mode bits do not bind root")
     def test_worktrees_is_blocked_when_the_worktree_parent_is_unwritable(self):
         root = self.make_root()
-        stub = make_stub_bin(("gh", "git", "just", "codex"))
+        stub = make_stub_bin(("gh", "git", "just", "codex-companion"))
         # The parent of `.worktrees` is the checkout itself: a read-only
         # checkout is the failure this prerequisite exists to catch.
         parent = root
@@ -1050,7 +1069,7 @@ class CapabilityStateTest(ResolverTestCase):
         clone; blocking on it would report a working capability as broken.
         """
         root = self.make_root()
-        stub = make_stub_bin(("gh", "git", "just", "codex"))
+        stub = make_stub_bin(("gh", "git", "just", "codex-companion"))
         shutil.rmtree(root / ".worktrees")
         code, snap, _, err = self.resolve_with_path(root, stub)
         self.assertEqual(code, 0, err)
@@ -1066,7 +1085,7 @@ class CapabilityStateTest(ResolverTestCase):
             "argv": ["./check"], "cwd": "tools", "env": []}
         source["bindings"]["workflow"]["verification"] = ["local-check"]
         root = self.make_root(source)
-        stub = make_stub_bin(("gh", "git", "just", "codex"))
+        stub = make_stub_bin(("gh", "git", "just", "codex-companion"))
 
         (root / "tools").mkdir()
         code, snap, _, err = self.resolve_with_path(root, stub)
@@ -1090,7 +1109,7 @@ class CapabilityStateTest(ResolverTestCase):
         decoy = root / "check"
         decoy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         decoy.chmod(decoy.stat().st_mode | stat.S_IXUSR)
-        stub = make_stub_bin(("gh", "git", "just", "codex"))
+        stub = make_stub_bin(("gh", "git", "just", "codex-companion"))
         code, snap, _, err = self.resolve_with_path(root, stub)
         self.assertEqual(code, 0, err)
         self.assertEqual(snap["capabilities"]["verification"]["state"], "blocked")
@@ -1153,7 +1172,7 @@ class RequireTest(ResolverTestCase):
     def test_requiring_an_unsupported_capability_refuses(self):
         root = self.make_root()
         code, out, _ = run_with_path(
-            str(make_stub_bin(("gh", "git", "just", "codex"))),
+            str(make_stub_bin(("gh", "git", "just", "codex-companion"))),
             "resolve", "--repo-root", str(root), "--require", "release",
             home=self.home)
         payload = json.loads(out)
@@ -1168,7 +1187,7 @@ class RequireTest(ResolverTestCase):
     def test_requiring_a_blocked_capability_names_its_reason_code(self):
         root = self.make_root()
         code, out, _ = run_with_path(
-            str(make_stub_bin(("git", "just", "codex"))),
+            str(make_stub_bin(("git", "just", "codex-companion"))),
             "resolve", "--repo-root", str(root), "--require", "tracker",
             home=self.home)
         error = json.loads(out)["error"]
@@ -1179,7 +1198,7 @@ class RequireTest(ResolverTestCase):
     def test_several_offending_requirements_are_reported_in_pointer_order(self):
         root = self.make_root()
         code, out, _ = run_with_path(
-            str(make_stub_bin(("gh", "git", "just", "codex"))),
+            str(make_stub_bin(("gh", "git", "just", "codex-companion"))),
             "resolve", "--repo-root", str(root),
             "--require", "release", "--require", "deploy", home=self.home)
         error = json.loads(out)["error"]
@@ -1191,7 +1210,7 @@ class RequireTest(ResolverTestCase):
     def test_requiring_an_available_capability_returns_the_snapshot(self):
         root = self.make_root()
         code, out, err = run_with_path(
-            str(make_stub_bin(("gh", "git", "just", "codex"))),
+            str(make_stub_bin(("gh", "git", "just", "codex-companion"))),
             "resolve", "--repo-root", str(root), "--require", "tracker",
             home=self.home)
         self.assertEqual(code, 0, err)
