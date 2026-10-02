@@ -51,6 +51,7 @@ from agent_tools.transaction_proof import (
     PROOF_REFUSAL_REASONS, advance_violation, cohort_start, collection_refusal,
     next_evidence_id, obligation, observation_request, observation_violation, open_cohort,
     proof_refused, settlement)
+from agent_tools.transaction_receipt import RECEIPT_SCHEMA, ReceiptStore, terminal_receipt
 from agent_tools.transaction_recovery import (
     EFFECT_CLASSES, RECOVERY_REFUSAL_REASONS, anchor_requests, anchors_events, begin_events,
     begin_requests, check_result_violation, link_events, recovery_advance_violation,
@@ -61,7 +62,7 @@ from agent_tools.transaction_recovery_plan import (
 from agent_tools.transaction_storage import (
     LAST_AT_MS, CreationConflict, CustodyMisbound, EffectResultInvalid, FenceViolation,
     GrantInvalid, InvocationRefused, LeaseUnavailable, ProofPlanRejected, ProofRefused,
-    RecoveryPlanRejected, RecoveryRefused, StaleCustody,
+    ReceiptInvalid, RecoveryPlanRejected, RecoveryRefused, StaleCustody,
     StateInvalid, TransactionBusy, TransactionError, TransitionRefused, UnknownTransaction,
     atomic_write, fsync_directory, lstat_mode, open_lock, read_json, require_directory)
 
@@ -164,6 +165,7 @@ class TransactionStore:
         self.root = root
         self._clock = clock if clock is not None else lambda: time.time_ns() // 1_000_000
         self._leases = LeaseAuthority(root)
+        self._receipts = ReceiptStore(root)
 
     def _now(self) -> int:
         """One clock reading, refused unless an int in [0, _MAX_CLOCK_MS] (D3, D32)."""
@@ -185,18 +187,26 @@ class TransactionStore:
         return directory
 
     def _validated_document(self, transaction_id: str) -> dict:
-        """Read and fully validate `state.json` without writing or locking (D13, D16)."""
+        """Read and fully validate `state.json` without writing or locking (D13, D16); a
+        terminal's receipt is then read back, so a missing or altered one is `ReceiptInvalid`
+        (#209 D7, D26)."""
         directory = self._existing_directory(transaction_id)
         lock_mode = lstat_mode(directory / "lock")
         if lock_mode is None or stat.S_ISLNK(lock_mode) or not stat.S_ISREG(lock_mode):
             raise StateInvalid(f"{transaction_id}: lock file is missing or not a regular file")
         document = read_json(directory / "state.json")
         _validate_state(document, transaction_id, self.root)
+        if document["state"] in TERMINALS:
+            self._receipts.read(document["events"][-1]["receipt_digest"])
         return document
 
     def load(self, transaction_id: str) -> Transaction:
         """A validated snapshot; writes nothing, creates nothing, takes no lock."""
         return snapshot(self._validated_document(transaction_id))
+
+    def read_receipt(self, receipt_digest: str) -> Mapping[str, Any]:
+        """`ReceiptStore.read`: the verified receipt `receipt_digest` names (#209 D7)."""
+        return self._receipts.read(receipt_digest)
 
     def advance(self, transaction_id: str, target: str, *, reason: str,
                 external_state: str | None = None,
@@ -218,9 +228,9 @@ class TransactionStore:
         `failure_disposed` (#209 D8, D21); after it, `recovery_advance_violation` refuses
         `recovering`, a reserved recovery reason, `abandoned` over an action with effect, and
         `ready -> publishing` without an `anchors_verified` under the held fence (#208 D7,
-        D10, D22). Entering a terminal while custody is held appends the transition and a
-        `lease_released` reason `terminal` in one `state.json` write, then clears the lease
-        records. Every refusal happens before any write; the lock file is never created.
+        D10, D22). Entering a terminal releases held custody and seals the receipt through
+        `_append`. Every refusal precedes any `state.json` write; the lock file is never
+        created.
         """
         if custody is not None:
             require_custody_shape(custody)
@@ -607,16 +617,23 @@ class TransactionStore:
     def _append(self, prior: dict, now: int, events: list[dict]) -> Transaction:
         """Construct event fields through `append_events` and save under the transaction lock.
 
-        A terminal transition under custody adds a release last; state is saved before
-        clearing its lease records under the lease lock.
+        A terminal transition adds a `lease_released` reason `terminal` under custody, then
+        `receipt_sealed` last. A terminal candidate's receipt is sealed through
+        `ReceiptStore.seal` before `state.json` is written, so a refused seal leaves the
+        transaction and its lease records untouched (#209 D2, D24, D29); state is saved
+        before clearing its lease records under the lease lock.
         """
         transaction_id = prior["transaction_id"]
         fields = list(events)
         fence = prior["custody"]["fence"] if prior["custody"] is not None else None
-        if fence is not None and any(event["type"] == "transitioned"
-                                     and event["to"] in TERMINALS for event in fields):
-            fields.append({"type": "lease_released", "fence": fence, "reason": "terminal"})
+        if any(event["type"] == "transitioned" and event["to"] in TERMINALS for event in fields):
+            if fence is not None:
+                fields.append({"type": "lease_released", "fence": fence, "reason": "terminal"})
+            fields.append({"type": "receipt_sealed"})
         candidate = append_events(prior, fields, at=format_at(now))
+        if candidate["state"] in TERMINALS:
+            self._receipts.seal(terminal_receipt(candidate, candidate["events"][:-1]),
+                                candidate["events"][-1]["receipt_digest"])
         directory = self.root / transaction_id
         if candidate["custody"] is None and fence is not None:
             with self._leases.locked():

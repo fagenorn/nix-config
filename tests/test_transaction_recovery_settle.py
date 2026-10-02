@@ -46,9 +46,10 @@ class SettleTest(SettleCase):
         self.assertEqual(settled["residue"], [
             {"unit": build, "residue": "old build stays cached"},
             {"unit": start, "residue": "cache cleared"}])
-        self.assertEqual([e["type"] for e in after.events[-3:]],
-                         ["recovery_settled", "transitioned", "lease_released"])
-        moved = after.events[-2]
+        self.assertEqual([e["type"] for e in after.events[-4:]],
+                         ["recovery_settled", "transitioned", "lease_released",
+                          "receipt_sealed"])
+        moved = after.events[-3]
         self.assertEqual((moved["from"], moved["to"], moved["reason"], moved["external_state"]),
                          ("recovering", "rolled_back", "recovery_settled", "known"))
         self.assertEqual((after.state, after.custody), ("rolled_back", None))

@@ -278,9 +278,13 @@ class LoadTest(StoreCase):
             "k", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF,
             recovery=EMPTY_RECOVERY, authority_class=AUTHORITY).transaction_id
         base = self.document(transaction_id)
+        self.write(transaction_id, with_history(base, "attention_required"))
+        self.assertEqual(self.store.load(transaction_id).state, "attention_required")
         self.write(transaction_id, with_history(base, "attention_required", "created",
                                                 "abandoned"))
-        self.assertEqual(self.store.load(transaction_id).state, "abandoned")
+        with self.assertRaises(StateInvalid) as caught:
+            self.store.load(transaction_id)
+        self.assertIn("receipt_sealed", str(caught.exception))
         self.write(transaction_id, with_history(base, "attention_required", "recovering",
                                                 "rolled_back"))
         with self.assertRaises(StateInvalid) as caught:
@@ -422,12 +426,13 @@ class AdvanceTest(AdvanceCase):
         persisted = TransactionStore(self.root).load(transaction_id)
         transitions = [e for e in persisted.events if e["type"] == "transitioned"]
         self.assertEqual(persisted.state, "succeeded")
-        self.assertEqual(persisted.revision, 12)
-        self.assertEqual([e["seq"] for e in persisted.events], list(range(1, 13)))
+        self.assertEqual(persisted.revision, 13)
+        self.assertEqual([e["seq"] for e in persisted.events], list(range(1, 14)))
         self.assertEqual([e["to"] for e in transitions], list(PATHS_TO_TERMINAL["succeeded"]))
         self.assertEqual(transitions[-1]["external_state"], "known")
         self.assertEqual(transitions[0]["reason"], "to awaiting_verification")
-        self.assertEqual(persisted.events[-1]["type"], "lease_released")
+        self.assertEqual(persisted.events[-2]["type"], "lease_released")
+        self.assertEqual(persisted.events[-1]["type"], "receipt_sealed")
 
     def test_the_library_path_skips_activation(self):
         transaction_id = self.reach("k", FORWARD[1:5] + ("proving", "succeeded"))

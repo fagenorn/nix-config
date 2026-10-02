@@ -28,6 +28,11 @@ class StateInvalid(TransactionError):
     fails the closed schema."""
 
 
+class ReceiptInvalid(StateInvalid):
+    """A terminal receipt that cannot be sealed, read back or verified against its digest,
+    or a `receipts/` path that is not a writable real directory (#209 D7, D20)."""
+
+
 class TransactionBusy(TransactionError):
     """A lock the call needs is held elsewhere."""
 

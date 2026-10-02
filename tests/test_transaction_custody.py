@@ -572,9 +572,9 @@ class FencedAdvanceTest(CustodyCase):
                 custody = self.acquire(transaction_id)
                 after = self.step(transaction_id, *path, custody=custody)
                 self.assertIsNone(after.custody)
-                self.assertEqual([e["type"] for e in after.events[-2:]],
-                                 ["transitioned", "lease_released"])
-                self.assertEqual(after.events[-1]["reason"], "terminal")
+                self.assertEqual([e["type"] for e in after.events[-3:]],
+                                 ["transitioned", "lease_released", "receipt_sealed"])
+                self.assertEqual(after.events[-2]["reason"], "terminal")
                 self.assertIsNone(self.store.inspect_lease(key)["holder"])
                 for call in (lambda: self.step(transaction_id, "created", custody=custody),
                              lambda: self.store.renew(custody),
@@ -620,12 +620,15 @@ class EvidenceTest(CustodyCase):
                                       "external_state": None})])
         after = self.store.advance(transaction_id, "abandoned", reason="done",
                                    external_state="known", custody=custody)
+        [receipt] = (self.root / "receipts").iterdir()
         self.assertStoredProjection(
-            after, state="abandoned", parked_from=None, custody=None, revision=8,
+            after, state="abandoned", parked_from=None, custody=None, revision=9,
             tail=[self.expected_event(
                 7, "transitioned", **{"from": "awaiting_verification", "to": "abandoned",
                                       "reason": "done", "external_state": "known"}),
-                  self.expected_event(8, "lease_released", fence=fence, reason="terminal")])
+                  self.expected_event(8, "lease_released", fence=fence, reason="terminal"),
+                  self.expected_event(9, "receipt_sealed",
+                                      receipt_digest="sha256:" + receipt.stem)])
         for key in KEYS:
             self.assertIsNone(self.store.inspect_lease(key)["holder"])
 

@@ -364,14 +364,14 @@ class CohortTest(CohortCase):
         self.members()
         after = self.settle()
         self.assertEqual((after.state, after.custody), ("succeeded", None))
-        self.assertEqual([e["type"] for e in after.events[-3:]],
-                         ["proof_sealed", "transitioned", "lease_released"])
-        seal = dict(after.events[-3])
+        self.assertEqual([e["type"] for e in after.events[-4:]],
+                         ["proof_sealed", "transitioned", "lease_released", "receipt_sealed"])
+        seal = dict(after.events[-4])
         self.assertEqual({k: v for k, v in seal.items() if k not in ("seq", "at", "fence")}, {
             "type": "proof_sealed", "cohort": 1, "proof_cutoff_at": seal["at"],
             "makespan_ms": 60_000, "governing_window_ms": 600_000,
             "advisory_warnings": ["vibe", "uptime"]})
-        transition = after.events[-2]
+        transition = after.events[-3]
         self.assertEqual((transition["to"], transition["reason"], transition["external_state"]),
                          ("succeeded", "proof_sealed", "known"))
         self.assertEqual(after.proof["cohorts"], [{"cohort": 1, "status": "sealed",
@@ -386,7 +386,7 @@ class CohortTest(CohortCase):
         self.members()
         after = self.settle()
         self.assertEqual(after.state, "succeeded")
-        self.assertEqual(after.events[-3]["advisory_warnings"], ["vibe", "uptime"])
+        self.assertEqual(after.events[-4]["advisory_warnings"], ["vibe", "uptime"])
 
     def test_a_snapshot_collected_before_the_cohort_cannot_seal(self):
         self.ready()

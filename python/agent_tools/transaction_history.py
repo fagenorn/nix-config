@@ -23,11 +23,15 @@ binds `recovery_started` to the entry into `recovering`, `recovery_settled` to t
 a non-empty `authority_class`, and each `grant_issued` an `actor_kind` in `ACTOR_KINDS` and a
 non-empty `authority_class` (#209 D11, D22); `agent_tools.transaction_disposition`'s
 `disposition_pairing_violation` binds `failure_disposed` and every entry into `failed` as the
-recovery pairing does (#209 D21). It reads no file, lock or clock: `validate_state` takes
-the creation-key index lookup as a callable, which `agent_tools.transaction_core` binds to
-its store root. It also composes event fields for
-a lapsed span's reap (`reap_events`) and a late owner result (`owner_result_event`),
-and answers whether an executor and fence were ever issued a span (`span_issued`). The
+recovery pairing does (#209 D21). A terminal's last event is `receipt_sealed`, admitted once
+after the terminal transition or its release and checked by
+`agent_tools.transaction_receipt`'s `receipt_event_violation`; `append_events` stamps its
+digest through that module's `terminal_receipt`, and `terminal_view` derives the snapshot's
+`terminal` view on every load (#209 D7, D24, D25). It reads no file, lock or clock:
+`validate_state` takes the creation-key index lookup as a callable, which
+`agent_tools.transaction_core` binds to its store root, and the core reads the receipt file
+itself. It also composes event fields for a lapsed span's reap (`reap_events`) and a late
+owner result (`owner_result_event`), and answers whether an executor and fence were ever issued a span (`span_issued`). The
 `at`-timestamp codec (`format_at`, `parse_at`) and the strict JSON object rule
 (`json_object_violation`) that a created `subject` and a late `result` share are imported
 from `agent_tools.transaction_storage`, not held here.
@@ -53,6 +57,8 @@ from agent_tools.transaction_plan import plan_violation
 from agent_tools.transaction_proof import (
     PROOF_EVENT_KEYS, ProofFold, apply_proof_event, gate_violation, pairing_violation,
     proof_event_violation, proof_view)
+from agent_tools.transaction_receipt import (
+    RECEIPT_EVENT_KEYS, receipt_event_violation, terminal_receipt, terminal_view)
 from agent_tools.transaction_recovery import (
     RECOVERY_EVENT_KEYS, recovery_event_violation, recovery_pairing_violation,
     recovery_transition_violation, recovery_view, selection_refusal)
@@ -148,7 +154,8 @@ class Transaction:
     `proof_plan` is the stored plan fixed at creation, a read-only view over a deep copy,
     and `proof` a read-only view over `proof_view`, derived on every load and never stored
     (#207 D3, D13). `recovery_plan` and `recovery` are the same pair for the recovery plan,
-    over `recovery_view` (#208 D6, D12).
+    over `recovery_view` (#208 D6, D12). `terminal` is `terminal_view`'s `{receipt_digest,
+    outcome, terminal_qualifier}`, or None before a terminal (#209 D7).
     """
 
     transaction_id: str
@@ -167,6 +174,7 @@ class Transaction:
     proof: Mapping[str, Any]
     recovery_plan: Mapping[str, Any]
     recovery: Mapping[str, Any]
+    terminal: Mapping[str, Any] | None
 
 
 def edge_allowed(source: str, parked_from: str | None, target: str) -> bool:
@@ -479,7 +487,10 @@ def validate_state(document: Any, transaction_id: str,
     is checked to be a transaction id (#208 D11), and `recovery_pairing_violation` binds each
     recovery event and reserved recovery reason as `pairing_violation` does (#208 D7, D9, D10,
     D22), and `disposition_pairing_violation` binds `failure_disposed`, every transition into
-    `failed` and the reserved reason `failure_disposed` likewise (#209 D21). Metadata checks
+    `failed` and the reserved reason `failure_disposed` likewise (#209 D21). A `receipt_sealed`
+    is admitted only after the terminal transition or its terminal release, once, and is
+    checked by `receipt_event_violation`; a terminal whose last event is not `receipt_sealed`
+    is refused (#209 D7, D24). Metadata checks
     precede `_history_projection`; strict stored-projection comparisons follow it without
     repairing the document."""
     def refuse(rule: str) -> StateInvalid:
@@ -564,14 +575,15 @@ def _history_projection(document: dict,
         raise refuse("event 1 recovers is neither null nor another transaction's rel_ UUIDv7")
     if type(first["authority_class"]) is not str or not first["authority_class"]:
         raise refuse("event 1 authority_class is not a non-empty string")
-    state, parked, entered_terminal = "created", None, None
+    state, parked, entered_terminal, sealed = "created", None, None, False
     fold = _CustodyFold(keys)
     actions: dict = {}
     proof_fold = ProofFold()
     for seq, event in enumerate(events[1:], start=2):
-        if state in TERMINALS and not (
-                entered_terminal == seq - 1 and type(event) is dict
-                and event.get("type") == "lease_released" and event.get("reason") == "terminal"):
+        if state in TERMINALS and not (type(event) is dict and (
+                entered_terminal == seq - 1 and event.get("type") == "lease_released"
+                and event.get("reason") == "terminal"
+                or event.get("type") == "receipt_sealed" and not sealed)):
             raise refuse(f"event {seq} follows the terminal state {state}")
         if type(event) is not dict:
             raise refuse(f"event {seq} is not a JSON object")
@@ -598,6 +610,14 @@ def _history_projection(document: dict,
                     None if fold.custody is None else fold.custody["fence"])
                 if violation is not None:
                     raise refuse(f"event {seq} {violation}")
+            case "receipt_sealed":
+                _check_envelope(event, seq, RECEIPT_EVENT_KEYS, refuse)
+                if state not in TERMINALS:
+                    raise refuse(f"event {seq} receipt_sealed outside a terminal state")
+                violation = receipt_event_violation(event, events[:seq - 1], document)
+                if violation is not None:
+                    raise refuse(f"event {seq} {violation}")
+                sealed = True
             case str() if event_type in CUSTODY_EVENTS:
                 _fold_custody(event, seq, fold, state, entered_terminal, refuse)
             case str() if event_type in _FENCED_EVENTS:
@@ -653,6 +673,8 @@ def _history_projection(document: dict,
     custody = fold.custody
     if state in TERMINALS and custody is not None:
         raise refuse(f"terminal state {state} still holds custody")
+    if state in TERMINALS and not sealed:
+        raise refuse(f"terminal state {state} has no receipt_sealed as its last event")
     return state, parked, custody, len(events)
 
 
@@ -661,11 +683,19 @@ def append_events(prior: dict, event_fields: list[dict], *, at: str) -> dict:
 
     The store admits the prior under its transaction lock and supplies one timestamp.
     Fields omit `seq` and `at`; this constructor owns those envelopes and installs the
-    shared history walk's projection.
+    shared history walk's projection. A field that is exactly `{"type": "receipt_sealed"}`
+    is completed with `receipt_digest`, the `telemetry_digest` of `terminal_receipt` over
+    the candidate's events before it; one with any other key is `StateInvalid` (#209 D24,
+    D29). The walk then runs once and re-derives that digest.
     """
     candidate = copy.deepcopy(prior)
     events = candidate["events"]
     for fields in copy.deepcopy(event_fields):
+        if fields.get("type") == "receipt_sealed":
+            if fields != {"type": "receipt_sealed"}:
+                raise StateInvalid(f"{candidate['transaction_id']}: receipt_sealed fields "
+                                   f"carry more than their type")
+            fields["receipt_digest"] = telemetry_digest(terminal_receipt(candidate, events))
         events.append({"seq": len(events) + 1, "at": at, **fields})
     (candidate["state"], candidate["parked_from"], candidate["custody"],
      candidate["revision"]) = _history_projection(candidate, candidate["transaction_id"])
@@ -701,6 +731,7 @@ def snapshot(document: dict) -> Transaction:
         proof=MappingProxyType(proof_view(document)),
         recovery_plan=MappingProxyType(copy.deepcopy(document["recovery_plan"])),
         recovery=MappingProxyType(recovery_view(document)),
+        terminal=terminal_view(document),
     )
 
 
