@@ -852,27 +852,28 @@ CAPACITY_SCOPE_ANCHORS = (
 )
 
 
-# Issue 236: the closed set of review binding shapes and their routes (D1-D6).
+# Issue 236: the one review binding shape, its invocation and validation (D12-D15).
 CODEX_SHAPE_CLASSIFIER_ANCHORS = (
-    "review binding shape",
-    "basename of `argv[0]` is exactly `codex`",
+    "one supported review binding shape",
     "basename of `argv[0]` is exactly `codex-companion`",
     "`argv[1]` is `task`",
     "`--reviewer <op>`",
     "optional `--fresh`",
+    'bare `["codex"]` included',
     "binding shape error",
 )
 CODEX_SHAPE_ERROR_ANCHORS = (
     "binding shape error is a configuration error",
     "no Codex call", "no retry", "no native fallback",
     "`review_id`", "authored argv",
-    "unrecognised executable",
+    "`codex-companion task [--fresh] --reviewer <op>`",
+    "an executable other than `codex-companion`",
     "a companion subcommand other than `task`",
     "a missing or mismatched `--reviewer`",
     "an unsupported companion token",
     "no capability repair ID",
 )
-# In text order: the stdin sentence precedes the tail's code block.
+# In text order: the stdin sentence precedes the tail.
 CODEX_COMPANION_INVOCATION_ANCHORS = (
     "no positional argument",
     "--model gpt-6-astra --effort xhigh",
@@ -886,7 +887,12 @@ CODEX_COMPANION_VALIDATION_ANCHORS = (
     "`runtime.reasoningEffort` is `xhigh`",
     "`rawOutput` is a non-empty string",
     "last captured agent message",
-    "No JSONL or last-message candidate",
+)
+# Retired with the exec route (D12, D17): none may reappear in the skill, the
+# two caller paragraphs or the evals.
+RETIRED_EXEC_REVIEW_TOKENS = (
+    "exec --sandbox", "--output-last-message", "terminal agent-message",
+    "model_reasoning_effort", "JSONL", "Exec shape", "exec shape",
 )
 
 
@@ -1033,16 +1039,14 @@ def assert_codex_operation_pair(case, support, review_field, headings):
         owner,
         review_field,
         *CODEX_SHAPE_CLASSIFIER_ANCHORS, *CODEX_SHAPE_ERROR_ANCHORS,
+        CODEX_COMPANION_INVOCATION_ANCHORS[0],
         "bindings.commands[review_id].argv",
-        "exec", "--sandbox read-only", "--model gpt-6-astra",
-        'model_reasoning_effort="xhigh"', "--json",
-        "--output-last-message", "--ephemeral",
-        "selected model", "selected reasoning effort",
-        "terminal agent-message", "last-message",
-        *CODEX_COMPANION_INVOCATION_ANCHORS,
+        *CODEX_COMPANION_INVOCATION_ANCHORS[1:],
         *CODEX_COMPANION_VALIDATION_ANCHORS,
         *CAPACITY_SCOPE_ANCHORS,
     )
+    for retired in RETIRED_EXEC_REVIEW_TOKENS:
+        case.assertNotIn(retired, owner)
     case.assertIn("retained `ResolvedProject`", support_text)
     case.assertIn(review_field, support_text)
     for heading in headings:
@@ -3111,40 +3115,39 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 self.assertIn(fragment, packet)
 
     def test_codex_collaboration_dispatch_carries_operation_envelope(self):
-        self.assertIn("bindings.commands[review_id].argv", self.collaboration)
-        self.assertIn("--output-last-message", self.collaboration)
-        self.assertIn("terminal agent-message", self.collaboration)
+        text = normalized(self.collaboration)
+        self.assertIn("bindings.commands[review_id].argv", text)
+        self.assertIn("--cwd <absolute-worktree> --json", text)
+        self.assertIn("`rawOutput` is a non-empty string", text)
 
     def direct_review_section(self):
         return self.section(
             self.collaboration, "## Direct configured review", "## Disposition")
 
-    def test_codex_collaboration_has_one_tail_per_binding_shape(self):
-        blocks = re.findall(r"```text\n(.*?)```", self.direct_review_section(), re.S)
-        self.assertEqual(len(blocks), 2, blocks)
-        exec_tail, companion_tail = blocks
-        self.assertEqual(
-            exec_tail,
-            "bindings.commands[review_id].argv \\\n"
-            "  exec --sandbox read-only --model gpt-6-astra \\\n"
-            '  -c model_reasoning_effort="xhigh" --json \\\n'
-            "  --output-last-message <absolute-last-message> --ephemeral \\\n"
-            "  -C <absolute-worktree> -\n",
-        )
-        self.assertEqual(
-            companion_tail,
+    def test_codex_collaboration_has_exactly_one_companion_tail(self):
+        section = self.direct_review_section()
+        blocks = re.findall(r"```text\n(.*?)```", section, re.S)
+        self.assertEqual(blocks, [
             "bindings.commands[review_id].argv \\\n"
             "  --model gpt-6-astra --effort xhigh \\\n"
             "  --cwd <absolute-worktree> --json\n",
-        )
+        ])
+        for retired in RETIRED_EXEC_REVIEW_TOKENS:
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, self.collaboration)
+        text = normalized(section)
+        self.assertIn("malformed or mismatched payload", text)
+        self.assertNotIn("metadata", text)
 
     def test_codex_collaboration_shape_error_stops_before_any_fallback(self):
         section = normalized(self.direct_review_section())
         error_at = section.index("binding shape error is a configuration error")
         fallback_at = section.index("uses exactly one native fallback")
         self.assertLess(error_at, fallback_at)
+        error_paragraph = section[error_at:section.index("**Invocation.**", error_at)]
+        self.assertIn("`codex-companion task [--fresh] --reviewer <op>`", error_paragraph)
+        self.assertIn("(bare `codex` included)", error_paragraph)
         # The shape-error paragraph itself never offers the fallback.
-        error_paragraph = section[error_at:section.index("**Exec shape.**", error_at)]
         for offered in ("one native fallback", "same packet", "Claude fallback"):
             self.assertNotIn(offered, error_paragraph)
         # It is a pre-call stop, not a fourth failure class.
@@ -3160,7 +3163,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # that came back across a line wrap (`~14\nmin`) would otherwise slip
         # past the very check that exists to catch it.
         self.assertIn("--model gpt-6-astra", self.collaboration)
-        self.assertIn('model_reasoning_effort="xhigh"', self.collaboration)
+        self.assertIn("--effort xhigh", self.collaboration)
 
     def test_codex_collaboration_never_reports_sandbox_limits_as_findings(self):
         # The rule lives in the packet-borne shared rules, not in the Launch

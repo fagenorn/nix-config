@@ -44,46 +44,30 @@ still reportable; anchor it in the artifact with evidence.
 ## Direct configured review
 
 Build the operation packet from its support document. Before any invocation,
-classify the selected command's authored argv into exactly one review binding
-shape:
+classify the selected command's authored argv. It has the one supported review
+binding shape, the companion shape, only when all of these hold:
 
-1. Exec shape: the basename of `argv[0]` is exactly `codex`.
-2. Companion shape: the basename of `argv[0]` is exactly `codex-companion`,
-   `argv[1]` is `task`, and the remaining tokens are exactly `--reviewer <op>`
-   plus an optional `--fresh`, in any order, where `<op>` equals the running
-   operation. No other flag and no positional token may appear: this skill owns
-   model, effort, cwd and output, and a positional would displace the stdin
-   packet.
-3. Anything else is a **binding shape error**.
+- the basename of `argv[0]` is exactly `codex-companion`;
+- `argv[1]` is `task`;
+- the remaining tokens are exactly `--reviewer <op>` plus an optional
+  `--fresh`, in any order;
+- `<op>` equals the running operation (`plan-review` or `diff-review`).
+
+No other flag and no positional token may appear: this skill owns model,
+effort, cwd and output, and a positional would displace the stdin packet. Any
+other argv, bare `["codex"]` included, is a **binding shape error**.
 
 A binding shape error is a configuration error. It makes no Codex call, no
 retry and no native fallback, and stops the operation with one error. The error
-names the operation, the `review_id`, the authored argv, and exactly one cause:
-unrecognised executable, a companion subcommand other than `task`, a missing or
-mismatched `--reviewer`, or an unsupported companion token. It stops the way
-`blocked` does, but carries no capability repair ID.
+names the operation, the `review_id`, the authored argv, the expected form
+`codex-companion task [--fresh] --reviewer <op>`, and exactly one cause, the
+first of these that fails, in this order: an
+executable other than `codex-companion` (bare `codex` included), a companion
+subcommand other than `task`, a missing or mismatched `--reviewer`, or an
+unsupported companion token. It stops the way `blocked` does, but carries no
+capability repair ID.
 
-**Exec shape.** Create absolute JSONL and
-last-message candidates under `${TMPDIR:-/tmp}` and remove both with `trap` or
-`finally` on every outcome. Preserve the selected command object's base argv,
-cwd, and declared env (unset only declared env names), append the exact tail,
-and send the complete packet on stdin:
-
-```text
-bindings.commands[review_id].argv \
-  exec --sandbox read-only --model gpt-6-astra \
-  -c model_reasoning_effort="xhigh" --json \
-  --output-last-message <absolute-last-message> --ephemeral \
-  -C <absolute-worktree> -
-```
-
-Validate every JSONL object. Require its runtime-selection event to report the
-selected model `gpt-6-astra` and selected reasoning effort `xhigh`; require
-exactly one terminal agent-message; require a non-empty last-message file whose
-UTF-8 bytes equal that terminal agent-message byte-for-byte; then validate the
-operation headings. Only that success establishes reviewer identity `Codex`.
-
-**Companion shape.** Preserve the selected command object's base argv, cwd, and
+**Invocation.** Preserve the selected command object's base argv, cwd, and
 declared env (unset only declared env names), append the exact tail, and send
 the complete packet on stdin with no positional argument, in the foreground:
 
@@ -94,19 +78,19 @@ bindings.commands[review_id].argv \
 ```
 
 The companion's reviewer mode forces a fresh, read-only, ephemeral thread and
-applies its own wall-clock budget, so the tail passes none of these. Require
-exit status 0 and stdout that parses as exactly one JSON object in which
-`status` is `0`, `touchedFiles` is empty, `runtime.model` is `gpt-6-astra`,
-`runtime.reasoningEffort` is `xhigh`, and `rawOutput` is a non-empty string, the
-companion's last captured agent message; then validate the operation headings.
-No JSONL or last-message candidate is created on this route. Only that success
-establishes reviewer identity `Codex`.
+applies its own wall-clock budget, so the tail passes none of these.
+
+**Validation.** Require exit status 0 and stdout that parses as exactly one JSON
+object in which `status` is `0`, `touchedFiles` is empty, `runtime.model` is
+`gpt-6-astra`, `runtime.reasoningEffort` is `xhigh`, and `rawOutput` is a
+non-empty string, the companion's last captured agent message; then validate the
+operation headings. Only that success establishes reviewer identity `Codex`.
 
 On the `available` route, a daemon, slot, or capacity rejection is a binding
 capacity rejection: surface it verbatim, stop, make no retry, and take no native
 fallback. A Codex call made under `unsupported` is a routing error, never a
 capacity rejection. A completed available-command runtime failure, malformed or
-mismatched metadata/output, or operation-schema failure uses exactly one native
+mismatched payload, or operation-schema failure uses exactly one native
 fallback with the same packet; never retry Codex. The fallback is not
 route-establishment evidence.
 
