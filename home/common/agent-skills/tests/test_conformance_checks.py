@@ -546,7 +546,7 @@ class ReleaseProfileLintTest(ReportAssertions, unittest.TestCase):
             root = make_root(tmp)
             path = root / ".agents/project.json"
             contract = json.loads(path.read_text(encoding="utf-8"))
-            contract["bindings"]["workflow"]["release"] = "codex-review"
+            contract["bindings"]["workflow"]["release"] = "nix-activate"
             contract["capabilities"]["release"] = {"support": "supported"}
             path.write_text(json.dumps(contract), encoding="utf-8")
             report, by_id = doctor(self, root)
@@ -555,7 +555,7 @@ class ReleaseProfileLintTest(ReportAssertions, unittest.TestCase):
                 self.assertEqual([check["status"], check["reason_code"]],
                                  ["not_run", "profile_unsupported"])
                 self.assertEqual(check["facts"], {"declared": True,
-                                                  "release_command": "codex-review"})
+                                                  "release_command": "nix-activate"})
             self.assertEqual(report["outcome"]["status"], "passed")
             self.assert_validates(report)
 

@@ -8,10 +8,10 @@ import unittest
 
 from agent_tools.transaction_core import (
     RECOVERY_REFUSAL_REASONS, EffectResultInvalid, InvocationRefused, RecoveryRefused,
-    StaleCustody, TransactionError, TransitionRefused, action_id)
+    StaleCustody, TransactionError, TransactionStore, TransitionRefused, action_id)
 
 from .test_transaction_custody import KEYS, SUBJECT, TTL, CustodyCase, plain, serialize
-from .test_transaction_invocation import Crash, FakeEffect, FakeWorld, renumbered
+from .test_transaction_invocation import Crash, FakeEffect, FakeWorld, malformed_results, renumbered
 from .test_transaction_recovery_plan import ANCHOR, COMPATIBLE, PROOF, RECOVERY, edge, with_unit
 
 
@@ -484,6 +484,58 @@ class RecoveryVocabularyTest(unittest.TestCase):
             "reconciliation_required", "undeclared_effect", "effect_uncertain", "no_effect",
             "unit_not_restorable", "restore_incompatible", "recovery_pending"))
         self.assertTrue(issubclass(RecoveryRefused, TransactionError))
+
+
+class RecoveryOwnershipTest(RecoveryCase):
+    def test_anchor_reuse_retains_each_units_reference(self):
+        self.start_with(TWO_RESTORABLE, key="two", keys=("key:two",))
+        self.to("awaiting_verification", "ready")
+        after = self.verify(Reusing("satisfied", "satisfied"))
+        expected = [{"unit": self.act("start", n=2), "reference": "ref-1"},
+                    {"unit": self.act("pin", n=3), "reference": "ref-2"}]
+        for transaction in (after, TransactionStore(self.root).load(self.transaction_id)):
+            self.assertEqual(transaction.state, "ready")
+            event = transaction.events[-1]
+            self.assertEqual((event["type"], event["anchors"]),
+                             ("anchors_verified", expected))
+        self.assertEqual(self.to("publishing").state, "publishing")
+
+    def test_compatibility_reuse_retains_each_units_reference(self):
+        self.start_with(TWO_RESTORABLE, key="two", keys=("key:two",))
+        self.parked(pin="diverged")
+        self.grant()
+        after = self.begin(checker=Reusing("satisfied", "satisfied"))
+        expected = [{"unit": self.act("start", n=2), "reference": "ref-1"},
+                    {"unit": self.act("pin", n=3), "reference": "ref-2"}]
+        for transaction in (after, TransactionStore(self.root).load(self.transaction_id)):
+            self.assertEqual(transaction.state, "recovering")
+            event = transaction.events[-2]
+            self.assertEqual((event["type"], event["checks"]),
+                             ("recovery_started", expected))
+
+
+class RecoveryResultCompatibilityTest(RecoveryCase):
+    def malformed_checks(self, operation, call):
+        valid = {"outcome": "satisfied", "reason": "ok", "reference": "check:original"}
+        for label, bad in malformed_results(valid):
+            with self.subTest(result=label):
+                before = self.store.load(self.transaction_id)
+                with self.assertRaises(EffectResultInvalid) as caught:
+                    call(Checker(result=bad))
+                self.assertTrue(str(caught.exception).startswith(
+                    f"{self.transaction_id}: {operation}: "))
+                loaded = TransactionStore(self.root).load(self.transaction_id)
+                self.assertEqual((loaded.events, loaded.state, loaded.recovery),
+                                 (before.events, before.state, before.recovery))
+
+    def test_malformed_anchor_results_record_nothing(self):
+        self.to("awaiting_verification", "ready")
+        self.malformed_checks("verify_anchors", self.verify)
+
+    def test_malformed_compatibility_results_record_nothing(self):
+        self.parked()
+        self.grant()
+        self.malformed_checks("begin_recovery", lambda checker: self.begin(checker=checker))
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ Run: just agent-workflow-tests
 
 import copy
 import dataclasses
+import datetime
 import fcntl
 import hashlib
 import json
@@ -31,8 +32,15 @@ INSTANCE = re.compile(r"lin_[0-9a-f]{32}")
 class FakeClock:
     def __init__(self, now=T0):
         self.now = now
+        self.next_read = None
+
+    def on_next_read(self, callback):
+        self.next_read = callback
 
     def __call__(self):
+        callback, self.next_read = self.next_read, None
+        if callback is not None:
+            callback()
         return self.now
 
     def advance(self, ms):
@@ -84,6 +92,34 @@ class CustodyCase(unittest.TestCase):
     def state_doc(self, transaction_id):
         return json.loads((self.root / transaction_id / "state.json").read_text())
 
+    def expected_event(self, seq, kind, **fields):
+        at = datetime.datetime.fromtimestamp(
+            self.clock.now / 1000, datetime.timezone.utc).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+        return {"seq": seq, "type": kind, "at": at, **fields}
+
+    def assertStoredProjection(self, after, *, state, parked_from, custody,
+                               revision, tail):
+        transaction_id = after.transaction_id
+        held = None if custody is None else {
+            "executor_id": custody.executor_id, "subject_path": custody.subject_path,
+            "fence": plain(custody.fence)}
+        expected = {"state": state, "parked_from": parked_from,
+                    "custody": held, "revision": revision}
+        document = self.state_doc(transaction_id)
+        self.assertEqual({key: document[key] for key in expected}, expected)
+        loaded = TransactionStore(self.root, clock=self.clock).load(transaction_id)
+        for snapshot in (after, loaded):
+            self.assertEqual((snapshot.state, snapshot.parked_from,
+                              snapshot.custody, snapshot.revision),
+                             (state, parked_from, custody, revision))
+            self.assertEqual([dict(event) for event in snapshot.events],
+                             document["events"])
+        self.assertEqual(len(document["events"]), revision)
+        self.assertEqual([event["seq"] for event in document["events"]],
+                         list(range(1, revision + 1)))
+        self.assertEqual(document["events"][-len(tail):], tail)
+
     def assertRuleRefuses(self, transaction_id, document, fragment):
         (self.root / transaction_id / "state.json").write_text(serialize(document))
         with self.assertRaises(StateInvalid) as caught:
@@ -114,6 +150,10 @@ class AcquireTest(CustodyCase):
         self.assertEqual(event["fence"], plain(custody.fence))
         self.assertEqual(self.state_doc(transaction_id)["custody"], {
             "executor_id": "exec-a", "subject_path": PATH, "fence": plain(custody.fence)})
+        self.assertStoredProjection(
+            after, state="created", parked_from=None, custody=custody, revision=2,
+            tail=[self.expected_event(2, "lease_acquired", executor_id="exec-a",
+                                      subject_path=PATH, fence=plain(custody.fence))])
         for key in KEYS:
             self.assertEqual(dict(self.store.inspect_lease(key)), {
                 "schema": "transaction-lease/v1", "key": key, "epoch": 1, "holder": {
@@ -137,6 +177,10 @@ class AcquireTest(CustodyCase):
         transaction_id = self.new()
         first = self.acquire(transaction_id)
         released = self.store.release(first)
+        self.assertStoredProjection(
+            released, state="created", parked_from=None, custody=None, revision=3,
+            tail=[self.expected_event(3, "lease_released", fence=plain(first.fence),
+                                      reason="released")])
         self.assertIsNone(released.custody)
         self.assertEqual(dict(released.events[-1]), {
             "seq": 3, "type": "lease_released", "at": released.events[-1]["at"],
@@ -144,7 +188,15 @@ class AcquireTest(CustodyCase):
         for key in KEYS:
             self.assertEqual((self.store.inspect_lease(key)["epoch"],
                               self.store.inspect_lease(key)["holder"]), (1, None))
-        second = self.acquire(transaction_id, executor="exec-b")
+        second_snapshot = self.store.acquire(
+            transaction_id, executor_id="exec-b", subject_path=PATH, ttl_ms=TTL)
+        second = second_snapshot.custody
+        self.assertStoredProjection(
+            second_snapshot, state="created", parked_from=None, custody=second,
+            revision=4, tail=[self.expected_event(
+                4, "lease_reacquired", executor_id="exec-b", subject_path=PATH,
+                fence=plain(second.fence), prior_executor_id="exec-a",
+                prior_fence=plain(first.fence), reason="released")])
         event = dict(self.store.load(transaction_id).events[-1])
         self.assertEqual((event["type"], event["reason"], event["prior_executor_id"]),
                          ("lease_reacquired", "released", "exec-a"))
@@ -156,7 +208,18 @@ class AcquireTest(CustodyCase):
         transaction_id = self.new()
         first = self.acquire(transaction_id)
         self.clock.advance(TTL)
-        second = self.acquire(transaction_id, executor="exec-b")
+        second_snapshot = self.store.acquire(
+            transaction_id, executor_id="exec-b", subject_path=PATH, ttl_ms=TTL)
+        second = second_snapshot.custody
+        self.assertStoredProjection(
+            second_snapshot, state="created", parked_from=None, custody=second,
+            revision=4, tail=[
+                self.expected_event(3, "lease_lapse_detected",
+                                    fence=plain(first.fence), executor_id="exec-a"),
+                self.expected_event(4, "lease_reacquired", executor_id="exec-b",
+                                    subject_path=PATH, fence=plain(second.fence),
+                                    prior_executor_id="exec-a",
+                                    prior_fence=plain(first.fence), reason="expired")])
         events = self.store.load(transaction_id).events
         self.assertEqual([e["type"] for e in events[-2:]],
                          ["lease_lapse_detected", "lease_reacquired"])
@@ -424,6 +487,10 @@ class QuiesceTest(CustodyCase):
             self.assertEqual(self.store.renew(custody).custody, custody)
         self.clock.advance(1)
         after = self.store.renew(custody)
+        self.assertStoredProjection(
+            after, state="attention_required", parked_from="created", custody=None,
+            revision=4, tail=[self.expected_event(
+                4, "lease_released", fence=plain(custody.fence), reason="quiesced")])
         self.assertIsNone(after.custody)
         self.assertEqual((after.events[-1]["type"], after.events[-1]["reason"]),
                          ("lease_released", "quiesced"))
@@ -515,6 +582,51 @@ class FencedAdvanceTest(CustodyCase):
 
 
 class EvidenceTest(CustodyCase):
+    def test_append_projections_round_trip_through_parking_and_terminal_release(self):
+        transaction_id = self.new()
+        custody = self.acquire(transaction_id)
+        fence = plain(custody.fence)
+        after = self.store.advance(transaction_id, "awaiting_verification",
+                                   reason="verify", custody=custody)
+        self.assertStoredProjection(
+            after, state="awaiting_verification", parked_from=None,
+            custody=custody, revision=3, tail=[self.expected_event(
+                3, "transitioned", **{"from": "created", "to": "awaiting_verification",
+                                      "reason": "verify", "external_state": None})])
+        after = self.store.record_evidence(custody, evidence_id="e1", form="snapshot",
+                                           reference="evidence://a")
+        self.assertStoredProjection(
+            after, state="awaiting_verification", parked_from=None,
+            custody=custody, revision=4, tail=[self.expected_event(
+                4, "evidence_recorded", evidence_id="e1", form="snapshot",
+                reference="evidence://a", fence=fence)])
+        after = self.store.advance(transaction_id, "attention_required", reason="wait",
+                                   custody=custody)
+        self.assertStoredProjection(
+            after, state="attention_required", parked_from="awaiting_verification",
+            custody=custody, revision=5, tail=[self.expected_event(
+                5, "transitioned", **{"from": "awaiting_verification",
+                                      "to": "attention_required", "reason": "wait",
+                                      "external_state": None})])
+        after = self.store.advance(transaction_id, "awaiting_verification", reason="resume",
+                                   custody=custody)
+        self.assertStoredProjection(
+            after, state="awaiting_verification", parked_from=None,
+            custody=custody, revision=6, tail=[self.expected_event(
+                6, "transitioned", **{"from": "attention_required",
+                                      "to": "awaiting_verification", "reason": "resume",
+                                      "external_state": None})])
+        after = self.store.advance(transaction_id, "abandoned", reason="done",
+                                   external_state="known", custody=custody)
+        self.assertStoredProjection(
+            after, state="abandoned", parked_from=None, custody=None, revision=8,
+            tail=[self.expected_event(
+                7, "transitioned", **{"from": "awaiting_verification", "to": "abandoned",
+                                      "reason": "done", "external_state": "known"}),
+                  self.expected_event(8, "lease_released", fence=fence, reason="terminal")])
+        for key in KEYS:
+            self.assertIsNone(self.store.inspect_lease(key)["holder"])
+
     def test_evidence_is_stamped_with_the_current_fence(self):
         transaction_id = self.new()
         custody = self.acquire(transaction_id)
@@ -704,7 +816,20 @@ class ReapTest(CustodyCase):
     def test_reaping_a_lapse_parks_with_a_synthesized_stop_once(self):
         transaction_id, custody = self.proving()
         self.clock.advance(TTL)
+        leases_before = {key: self.lease_path(key).read_bytes() for key in KEYS}
         reaped = self.store.reap(transaction_id, reason="lease expired")
+        self.assertStoredProjection(
+            reaped, state="attention_required", parked_from="proving", custody=None,
+            revision=10, tail=[
+                self.expected_event(8, "lease_lapse_detected",
+                                    fence=plain(custody.fence), executor_id="exec-a"),
+                self.expected_event(9, "stop_synthesized", fence=plain(custody.fence),
+                                    executor_id="exec-a", reason="lease expired"),
+                self.expected_event(10, "transitioned", **{
+                    "from": "proving", "to": "attention_required",
+                    "reason": "lease expired", "external_state": "unknown"})])
+        self.assertEqual({key: self.lease_path(key).read_bytes() for key in KEYS},
+                         leases_before)
         tail = [dict(e) for e in reaped.events[-3:]]
         self.assertEqual([e["type"] for e in tail],
                          ["lease_lapse_detected", "stop_synthesized", "transitioned"])
@@ -740,7 +865,24 @@ class ReapTest(CustodyCase):
         custody = self.acquire(transaction_id)
         self.store.advance(transaction_id, "attention_required", reason="r", custody=custody)
         self.clock.advance(TTL)
+        successor = self.new("successor", keys=("project:alpha", "target:beta"))
+        taken = self.acquire(successor, executor="exec-b", path="/work/beta")
+        lease_keys = ("project:alpha", "target:alpha", "target:beta")
+        leases_before = {key: self.lease_path(key).read_bytes() for key in lease_keys}
         reaped = self.store.reap(transaction_id, reason="lease expired")
+        self.assertStoredProjection(
+            reaped, state="attention_required", parked_from="created", custody=None,
+            revision=5, tail=[
+                self.expected_event(4, "lease_lapse_detected",
+                                    fence=plain(custody.fence), executor_id="exec-a"),
+                self.expected_event(5, "stop_synthesized", fence=plain(custody.fence),
+                                    executor_id="exec-a", reason="lease expired")])
+        self.assertEqual({key: self.lease_path(key).read_bytes() for key in lease_keys},
+                         leases_before)
+        self.assertEqual(self.store.load(successor).custody, taken)
+        before = self.files()
+        self.assertEqual(self.store.reap(transaction_id, reason="again"), reaped)
+        self.assertEqual(self.files(), before)
         self.assertEqual([e["type"] for e in reaped.events[-2:]],
                          ["lease_lapse_detected", "stop_synthesized"])
         self.assertEqual(reaped.state, "attention_required")
@@ -758,7 +900,19 @@ class OwnerResultTest(ReapTest):
         self.clock.advance(TTL)
         reaped = self.store.reap(transaction_id, reason="lease expired")
         stop = next(e for e in reaped.events if e["type"] == "stop_synthesized")
+        successor = self.new("successor", keys=("project:alpha", "target:beta"))
+        taken = self.acquire(successor, executor="exec-b", path="/work/beta")
+        lease_keys = ("project:alpha", "target:alpha", "target:beta")
+        leases_before = {key: self.lease_path(key).read_bytes() for key in lease_keys}
         after = self.late(transaction_id, custody)
+        self.assertStoredProjection(
+            after, state="attention_required", parked_from="proving", custody=None,
+            revision=11, tail=[self.expected_event(
+                11, "owner_result", executor_id="exec-a", fence=plain(custody.fence),
+                custody="stale", supersedes=9, result={"status": "done", "items": [1, 2]})])
+        self.assertEqual({key: self.lease_path(key).read_bytes() for key in lease_keys},
+                         leases_before)
+        self.assertEqual(self.store.load(successor).custody, taken)
         event = dict(after.events[-1])
         self.assertEqual(event, {
             "seq": reaped.revision + 1, "type": "owner_result", "at": event["at"],
@@ -772,9 +926,27 @@ class OwnerResultTest(ReapTest):
 
     def test_a_result_under_live_custody_is_current(self):
         transaction_id, custody = self.proving()
-        event = self.late(transaction_id, custody).events[-1]
+        leases_before = {key: self.lease_path(key).read_bytes() for key in KEYS}
+        after = self.late(transaction_id, custody)
+        self.assertStoredProjection(
+            after, state="proving", parked_from=None, custody=custody, revision=8,
+            tail=[self.expected_event(
+                8, "owner_result", executor_id="exec-a", fence=plain(custody.fence),
+                custody="current", supersedes=None,
+                result={"status": "done", "items": [1, 2]})])
+        event = after.events[-1]
         self.assertEqual((event["custody"], event["supersedes"]), ("current", None))
         self.assertEqual(self.store.load(transaction_id).custody, custody)
+        self.clock.advance(TTL)
+        after = self.late(transaction_id, custody)
+        self.assertStoredProjection(
+            after, state="proving", parked_from=None, custody=custody, revision=9,
+            tail=[self.expected_event(
+                9, "owner_result", executor_id="exec-a", fence=plain(custody.fence),
+                custody="stale", supersedes=None,
+                result={"status": "done", "items": [1, 2]})])
+        self.assertEqual({key: self.lease_path(key).read_bytes() for key in KEYS},
+                         leases_before)
 
     def test_unissued_misbound_or_malformed_results_are_refused_before_any_write(self):
         transaction_id, custody = self.proving()

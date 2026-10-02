@@ -136,7 +136,8 @@ agent-installed-skill-tests: build
       home/common/agent-skills/tests/test_shell_example_contracts.py \
       home/common/agent-skills/tests/test_workflow_skill_contracts.py \
       tests/test_agent_tools_launchers.py \
-      tests/test_promotion_installed.py
+      tests/test_promotion_installed.py \
+      tests/test_impeccable_installed.py
 
 ## claude code
 # Print the Nix-generated ~/.claude/settings.json exactly as the next switch will write it.

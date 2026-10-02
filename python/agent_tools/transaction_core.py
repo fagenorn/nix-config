@@ -4,10 +4,12 @@ A caller-rooted store of closed-schema transactions with a closed lifecycle:
 `TransactionStore(root, clock=...)` creates deduplicated transactions under an
 absolute, pre-existing root and loads validated snapshots of them. Each
 transaction's whole state and typed event history live in one `state.json`
-whose `state`/`parked_from`/`custody`/`revision` are a projection the validator
-re-folds from the events, beside the immutable sorted `concurrency_keys` fixed at
-creation. Every event `at` is read from the injected clock (integer
-epoch milliseconds, the wall clock by default); transaction ids still come from
+whose `state`/`parked_from`/`custody`/`revision` come from the shared validating history
+walk, beside the immutable sorted `concurrency_keys` fixed at creation. Mutation recipes
+supply fields to history's `append_events`, which owns envelopes and complete candidates;
+stored validation compares projections with that same walk. Every event `at` is read
+from the injected clock (integer epoch milliseconds, the wall clock by default);
+transaction ids still come from
 the wall clock. `acquire` takes custody of the whole key set from the lease
 authority in `agent_tools.transaction_custody`, returning a `Custody` credential
 that `renew`, `release` and every fenced write check against the stored projection
@@ -28,7 +30,8 @@ transaction, and `advance` enters no terminal while an action is `open`, `in_pro
 the publication and activation gates of `agent_tools.transaction_proof`. The durable-file
 primitives and the refusal hierarchy live in
 `agent_tools.transaction_storage`, and the document model — vocabularies, `Custody`,
-`Transaction`, the validator and the snapshot fold — in `agent_tools.transaction_history`;
+`Transaction`, history construction, validation and the snapshot fold — in
+`agent_tools.transaction_history`;
 this module re-exports the errors and the public model names. `action_id` and the retry
 constants live in `agent_tools.transaction_invocation`, which this module re-exports too.
 `agent_tools.transaction_plan` is the home of the proof declaration's compiler and the plan
@@ -64,9 +67,9 @@ from agent_tools.transaction_custody import (
     EVIDENCE_FORMS, LeaseAuthority, admissibility, fence_violation)
 from agent_tools.transaction_history import (
     EXTERNAL_STATES, FORWARD, PARKINGS, SCHEMA, STATES, TERMINALS, TRANSITIONS, Custody,
-    Transaction, bound_path, edge_allowed, fenced_id_violation, format_at, is_id,
+    Transaction, append_events, bound_path, edge_allowed, fenced_id_violation, format_at, is_id,
     is_subject_path, json_object_violation, key_set_violation, owner_result_event,
-    parked_since, reaped, require_custody_shape, require_texts, snapshot, span_issued,
+    parked_since, reap_events, require_custody_shape, require_texts, snapshot, span_issued,
     validate_state)
 from agent_tools.transaction_invocation import (
     EFFECT_STATES, MAX_ATTEMPTS, REFUSAL_REASONS, RETRY_WINDOW_MS, ActionFold, action_id,
@@ -155,6 +158,16 @@ def _require_creatable(root: Path, creation_key: Any, subject: Any,
     violation = key_set_violation(concurrency_keys)
     if violation is not None:
         raise StateInvalid(f"{where}: {violation}")
+
+
+def _capture_result(result: Any, validator: Callable[[Any], str | None], *,
+                    where: str) -> dict:
+    """Own accepted fields before later adapter calls can rewrite the returned dictionary."""
+    captured = dict.copy(result) if type(result) is dict else result
+    violation = validator(captured)
+    if violation is not None:
+        raise EffectResultInvalid(f"{where}: {violation}")
+    return captured
 
 
 def _refuse_in_flight(prior: dict, identity: str, entry: ActionFold | None,
@@ -436,24 +449,23 @@ class TransactionStore:
 
     def _acquisition(self, prior: dict, executor_id: str, subject_path: str,
                      now: int) -> dict:
-        """The validated candidate an acquisition at `now` writes; refuses a live key."""
+        """Refuse live keys, then construct an acquisition recipe through `append_events`."""
         transaction_id = prior["transaction_id"]
-        candidate = copy.deepcopy(prior)
-        events = candidate["events"]
-        at = format_at(now)
+        fields = []
         held = prior["custody"]
         if held is not None:
             if not self._leases.span_lapsed(held["fence"], now):
                 raise LeaseUnavailable(f"{transaction_id}: its own custody by "
                                        f"{held['executor_id']!r} is still live")
-            events.append({"seq": len(events) + 1, "type": "lease_lapse_detected", "at": at,
+            fields.append({"type": "lease_lapse_detected",
                            "fence": held["fence"], "executor_id": held["executor_id"]})
         live = self._leases.first_live_key(prior["concurrency_keys"], now)
         if live is not None:
             raise LeaseUnavailable(f"{transaction_id}: concurrency key {live!r} is live-held")
         fence = self._leases.next_fence(prior["concurrency_keys"])
-        opening = {"seq": len(events) + 1, "type": "lease_acquired", "at": at,
+        opening = {"type": "lease_acquired",
                    "executor_id": executor_id, "subject_path": subject_path, "fence": fence}
+        events = prior["events"] + fields
         openings = [e for e in events if e["type"] in ("lease_acquired", "lease_reacquired")]
         if openings:
             closing = [e for e in events
@@ -463,12 +475,8 @@ class TransactionStore:
                 "prior_fence": openings[-1]["fence"],
                 "reason": ("expired" if closing["type"] == "lease_lapse_detected"
                            else "released")})
-        events.append(opening)
-        candidate["custody"] = {"executor_id": executor_id, "subject_path": subject_path,
-                                "fence": fence}
-        candidate["revision"] = len(events)
-        _validate_state(candidate, transaction_id, self.root)
-        return candidate
+        fields.append(opening)
+        return append_events(prior, fields, at=format_at(now))
 
     def release(self, custody: Custody) -> Transaction:
         """Give custody up voluntarily: `state.json` first, then the records (D8, D24)."""
@@ -489,13 +497,8 @@ class TransactionStore:
         the caller holds both locks and has passed the fenced check (D8, D24)."""
         transaction_id = prior["transaction_id"]
         fence = prior["custody"]["fence"]
-        candidate = copy.deepcopy(prior)
-        candidate["events"].append({
-            "seq": prior["revision"] + 1, "type": "lease_released", "at": format_at(now),
-            "fence": fence, "reason": reason})
-        candidate["custody"] = None
-        candidate["revision"] = len(candidate["events"])
-        _validate_state(candidate, transaction_id, self.root)
+        candidate = append_events(prior, [{"type": "lease_released", "fence": fence,
+                                           "reason": reason}], at=format_at(now))
         directory = self.root / transaction_id
         atomic_write(directory, directory / "state.json", candidate)
         self._leases.clear(fence)
@@ -611,31 +614,18 @@ class TransactionStore:
         return self._append(prior, now, [event])
 
     def _append(self, prior: dict, now: int, events: list[dict]) -> Transaction:
-        """Append `events` numbered from `prior`'s revision, each stamped `at` `now`, in one
-        validated `state.json` write; the caller holds the transaction lock. A `transitioned`
-        event moves `state` and `parked_from`; entering a terminal under custody also appends
-        `lease_released` reason `terminal` and clears the records under the lease lock."""
+        """Construct event fields through `append_events` and save under the transaction lock.
+
+        A terminal transition under custody adds a release last; state is saved before
+        clearing its lease records under the lease lock.
+        """
         transaction_id = prior["transaction_id"]
-        candidate = copy.deepcopy(prior)
-        at = format_at(now)
-        for fields in events:
-            candidate["events"].append(
-                {"seq": len(candidate["events"]) + 1, "at": at, **fields})
-            if fields["type"] == "transitioned":
-                source, target = fields["from"], fields["to"]
-                if target == "attention_required":
-                    candidate["parked_from"] = source
-                elif source == "attention_required":
-                    candidate["parked_from"] = None
-                candidate["state"] = target
+        fields = list(events)
         fence = prior["custody"]["fence"] if prior["custody"] is not None else None
-        if candidate["state"] in TERMINALS and fence is not None:
-            candidate["events"].append({
-                "seq": len(candidate["events"]) + 1, "type": "lease_released", "at": at,
-                "fence": fence, "reason": "terminal"})
-            candidate["custody"] = None
-        candidate["revision"] = len(candidate["events"])
-        _validate_state(candidate, transaction_id, self.root)
+        if fence is not None and any(event["type"] == "transitioned"
+                                     and event["to"] in TERMINALS for event in fields):
+            fields.append({"type": "lease_released", "fence": fence, "reason": "terminal"})
+        candidate = append_events(prior, fields, at=format_at(now))
         directory = self.root / transaction_id
         if candidate["custody"] is None and fence is not None:
             with self._leases.locked():
@@ -691,11 +681,9 @@ class TransactionStore:
             attempts = 0 if entry is None else entry.attempts
             latest_seq = 0 if entry is None else entry.latest_seq
             request = effect_request(prior, identity, name, parameters, attempts)
-        result = effect.inspect(request)
-        violation = inspect_result_violation(result)
-        if violation is not None:
-            raise EffectResultInvalid(f"{custody.transaction_id}: inspect_action: "
-                                      f"{violation}")
+        result = _capture_result(
+            effect.inspect(request), inspect_result_violation,
+            where=f"{custody.transaction_id}: inspect_action")
         with self._fenced(custody, "inspect_action", writes=True) as (prior, now):
             entry = fold_actions(prior["events"]).get(identity)
             _refuse_in_flight(prior, identity, entry, latest_seq)
@@ -751,13 +739,12 @@ class TransactionStore:
             self._append(prior, now, [{"type": "invocation_intended", "action_id": identity,
                                        "attempt": attempt, "fence": fence}])
             request = effect_request(prior, identity, name, parameters, attempt)
-        returned = effect.invoke(request)
-        violation = invoke_result_violation(returned)
-        if violation is None:
-            inspected = effect.inspect(request)
-            violation = inspect_result_violation(inspected)
-        if violation is not None:
-            raise EffectResultInvalid(f"{transaction_id}: invoke_action: {violation}")
+        returned = _capture_result(
+            effect.invoke(request), invoke_result_violation,
+            where=f"{transaction_id}: invoke_action")
+        inspected = _capture_result(
+            effect.inspect(request), inspect_result_violation,
+            where=f"{transaction_id}: invoke_action")
         with self._fenced(custody, "invoke_action", writes=True) as (prior, now):
             fence = prior["custody"]["fence"]
             return self._append(prior, now, [
@@ -803,10 +790,9 @@ class TransactionStore:
                                                "evidence_id": evidence_id,
                                                "fence": prior["custody"]["fence"]}])
             request = observation_request(prior, entry, cohort)
-        result = observer.observe(request)
-        violation = observation_violation(result, entry)
-        if violation is not None:
-            raise EffectResultInvalid(f"{transaction_id}: collect_obligation: {violation}")
+        result = _capture_result(
+            observer.observe(request), lambda captured: observation_violation(captured, entry),
+            where=f"{transaction_id}: collect_obligation")
         with self._fenced(custody, "collect_obligation", writes=True) as (prior, now):
             fence = prior["custody"]["fence"]
             reason = "clock_regressed" if now < started else collection_refusal(
@@ -884,8 +870,8 @@ class TransactionStore:
         credential or no callable `observer.observe` is `StateInvalid`. The first hold
         (`_fenced`) runs `admit`, which may refuse; with no request it appends what
         `conclude(prior, [], [])` yields, if anything, and returns. Each request then goes to
-        `observer.observe` with no lock held; what it raises propagates, a copy of each result
-        is what is validated and kept, and one failing `check_result_violation` is
+        `observer.observe` with no lock held; what it raises propagates, each accepted result
+        is captured and validated before the next request, and a failing check is
         `EffectResultInvalid`. The second hold refuses
         `history_changed` when the revision moved, else appends `conclude`'s events."""
         require_custody_shape(custody)
@@ -901,10 +887,9 @@ class TransactionStore:
             revision = prior["revision"]
         results = []
         for request in requests:
-            result = copy.deepcopy(observer.observe(request))
-            violation = check_result_violation(result)
-            if violation is not None:
-                raise EffectResultInvalid(f"{transaction_id}: {operation}: {violation}")
+            result = _capture_result(
+                observer.observe(request), check_result_violation,
+                where=f"{transaction_id}: {operation}")
             results.append(result)
         with self._fenced(custody, operation, writes=True) as (prior, now):
             if prior["revision"] != revision:
@@ -961,8 +946,7 @@ class TransactionStore:
             now = self._now()
             if not self._leases.span_lapsed(prior["custody"]["fence"], now):
                 return snapshot(prior)
-            candidate = reaped(prior, format_at(now), reason)
-            _validate_state(candidate, transaction_id, self.root)
+            candidate = append_events(prior, reap_events(prior, reason), at=format_at(now))
             directory = self.root / transaction_id
             atomic_write(directory, directory / "state.json", candidate)
         return snapshot(candidate)
@@ -1007,12 +991,10 @@ class TransactionStore:
                 raise CustodyMisbound(f"{where}: subject_path {subject_path!r} differs from "
                                       f"the bound path {bound!r}")
             now = self._now()
-            candidate = copy.deepcopy(prior)
-            candidate["events"].append(owner_result_event(
-                prior, at=format_at(now), executor_id=executor_id, fence=presented,
-                result=result, lapsed=self._leases.span_lapsed(presented, now)))
-            candidate["revision"] = len(candidate["events"])
-            _validate_state(candidate, transaction_id, self.root)
+            fields = owner_result_event(
+                prior, executor_id=executor_id, fence=presented, result=result,
+                lapsed=self._leases.span_lapsed(presented, now))
+            candidate = append_events(prior, [fields], at=format_at(now))
             directory = self.root / transaction_id
             atomic_write(directory, directory / "state.json", candidate)
         return snapshot(candidate)
