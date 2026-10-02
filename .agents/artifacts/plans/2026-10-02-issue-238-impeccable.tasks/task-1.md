@@ -222,7 +222,7 @@ in
   - Add `".claude/skills/impeccable" = { source = impeccable.skill; recursive = true; };` next to the Claude `ui-ux-pro-max` entry.
   - Add `home.sessionVariables.IMPECCABLE_NO_UPDATE_CHECK = "1";`, with a one-line comment: Nix owns the version, and the store is read-only (D5).
 
-- [ ] **Step 6: Verify.**
+- [ ] **Step 6: Verify.** First run `git add lib/impeccable.nix tests/test_impeccable_installed.py`. The flake is Git-backed, so an untracked new file is invisible to evaluation, and every gate below would fail on the import (per D10).
   - `just agent-installed-skill-tests 2>&1 | grep -E "^(FAIL|ERROR|OK|FAILED)|Ran " | tail -4`. Expected: `OK`, with all five `ImpeccableInstalledTest` tests passing.
   - `nix eval --raw '.#nixosConfigurations.anis-desktop.config.system.build.toplevel.drvPath'`. Expected: one `/nix/store/…drv` path.
   - Linux hash check: `nix store prefetch-file --json https://github.com/pbakaus/impeccable/releases/download/engine-v0.1.11/impeccable-linux-x64 | jq -r .hash`. Expected: `sha256-AiFgfh9TWvk36iZ8NHsfkCM7hdwlY8vS7u/fQuDlxZQ=`.

@@ -42,3 +42,7 @@ Task 3 — Architecture prose — `CLAUDE.md` — low-risk — [task-3.md](2026-
 ## Decisions
 
 Tasks cite D1–D7 (spec) and D8–D9 (appended by planning) by ID.
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra/xhigh), isolated read-only, base 5ad84230. 2 findings accepted (238-B1 Blocking, 238-S1 Should fix, per D10), 0 rejected, 0 deferred. No fallback.

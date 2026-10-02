@@ -66,6 +66,10 @@ and this attribute beside `migrateCodexSkillLinks` (full code, because it is fai
         if [ ! -e "$target" ] && [ ! -L "$target" ]; then
           continue
         fi
+        if ! ${pkgs.findutils}/bin/find "$target" >/dev/null; then
+          warnEcho "Retired skill $target is still present but could not be fully inspected (see the find errors above). Check it by hand."
+          continue
+        fi
         foreign=""
         while IFS= read -r -d "" entry; do
           if [ -d "$entry" ] && [ ! -L "$entry" ]; then
