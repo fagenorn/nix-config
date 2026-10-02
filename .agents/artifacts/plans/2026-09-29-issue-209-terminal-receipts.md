@@ -157,3 +157,7 @@ and derivation details, how `failed` closes early and how the validator re-deriv
 the grant, hazard-marker and observation argument rules) and, in the refresh onto
 `f40c09f`, D28–D30 (the re-fixed core budget, the seal's interface across
 `append_events`, the walk and `ReceiptStore`, and `is_id`'s move to `transaction_storage`).
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra/xhigh), isolated, read-only, no fallback, against base `f40c09f`. Findings: 1 Blocking, 2 Should fix, 0 Discussion; 3 accepted, 0 rejected, 0 deferred. B1 migrated the hand-built `abandoned` fixture in Task 2; S1 and S2 tightened Task 5's observation read-back and added a marker-failure test (per D31).

@@ -54,8 +54,13 @@
   read-only view of the record and never touches the receipt, a ledger or a lease.
 - `post_terminal_observations(digest)` reads the receipt first, then returns every
   observation file ordered by `n`. Each is re-validated like a marker: closed keys,
-  schema, `receipt_digest`, an `n` equal to its file name, and `serialize` bytes.
-  Anything else is `ReceiptInvalid`.
+  schema, `receipt_digest`, an `n` equal to its file name, and `serialize` bytes. The
+  read also re-applies every value rule `record_post_terminal` enforces at insertion
+  (Phase-5 S1): the three observation fields pass the same
+  `closed_result_violation(..., "observation")` check, `at` parses as a core timestamp,
+  `contradicts_ground` is a bool, and a true `contradicts_ground` again requires the
+  receipt's `failed` outcome and an `OBSERVABILITY_GROUNDS` ground. One shared validator
+  serves both insertion and read. Anything else is `ReceiptInvalid`.
 - `record_owner_result` keeps refusing a terminal. A result that arrives after the seal
   is recorded through `record_post_terminal` (per D18).
 - The receipt module's docstring gains the two directories. The core's sibling clause
@@ -184,6 +189,20 @@ class UnobservableTest(DisposeCase):
 ```
 
   (Also import `PATH` from `tests/test_transaction_custody.py`.)
+
+  Add two more tests alongside these (Phase-5 S1, S2):
+  - `test_a_canonically_reserialized_bad_observation_value_fails_its_listing`: record
+    one observation, then for each of `outcome: "maybe"`, `contradicts_ground: "yes"`,
+    `contradicts_ground: true` on a non-observability ground, and a malformed `at`,
+    rewrite `1.json` with canonical `serialize` bytes (digest and `n` untouched) and
+    assert `post_terminal_observations` raises `ReceiptInvalid`.
+  - `test_a_marker_failure_leaves_no_terminal_and_a_retry_succeeds`: before the
+    `effects_unobservable` disposal, create a regular file at the first key's `hazards/<key
+    hex>` path so the marker directory cannot be made. Assert the disposal raises
+    `ReceiptInvalid`, `state.json` and the lease bytes are unchanged, and the history has
+    no `receipt_sealed`. Then remove the obstruction, dispose again, and assert it
+    succeeds with both markers listed. The orphan receipt the first try left is
+    tolerated (per D6).
 
 - [ ] **Step 2: Run the tests and watch them fail.**
   Run: `PYTHONPATH=python python3 -m unittest tests/test_transaction_disposition.py 2>&1 | tail -3`.

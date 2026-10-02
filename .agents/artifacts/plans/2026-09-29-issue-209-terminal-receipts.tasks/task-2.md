@@ -125,6 +125,14 @@
   counts grow by one. `tests/test_transaction_core.py`'s forward chain becomes
   `revision == 13`, seqs `1..13`, `events[-2]` the `lease_released` and `events[-1]` the
   `receipt_sealed`.
+- One existing fixture changes beyond that (Phase-5 B1).
+  `tests/test_transaction_core.py`'s `test_a_valid_hand_built_history_loads` hand-builds
+  an `abandoned` terminal with no `receipt_sealed`, which this task's validator refuses.
+  It keeps its nonterminal half: `with_history(base, "attention_required")` must still
+  load as `attention_required`. Its terminal half becomes a refusal: `with_history(base,
+  "attention_required", "created", "abandoned")` raises `StateInvalid`, asserted the way
+  the neighbouring `test_a_hand_built_succeeded_without_a_seal_is_refused` asserts its
+  missing seal, and the existing `rolled_back` refusal stays.
 
 - [ ] **Step 1: Write the failing tests.** Create `tests/test_transaction_receipt.py`:
 
