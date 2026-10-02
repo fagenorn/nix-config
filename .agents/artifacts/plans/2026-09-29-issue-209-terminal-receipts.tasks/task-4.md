@@ -5,7 +5,8 @@
   events, validator rules, `terminal_blocker`, `action_effects`)
 - Modify: `python/agent_tools/transaction_recovery.py` (extract `unreconciled`, used by
   `begin_refusal` and the disposition)
-- Modify: `python/agent_tools/transaction_storage.py` (`DispositionRefused`)
+- Modify: `python/agent_tools/transaction_storage.py` (`DispositionRefused`; `is_id` and
+  its pattern move here from `transaction_history`, per D30)
 - Modify: `python/agent_tools/transaction_receipt.py` (the `failed` outcome proof and
   qualifier; `abandoned` reuses `action_effects`)
 - Modify: `python/agent_tools/transaction_history.py` (dispatch `failure_disposed`;
@@ -21,7 +22,9 @@
   `AUTHORITY`, `T0`, `TTL`, `plain`, `SUBJECT`, `KEYS`, `EMPTY_PROOF`, `EMPTY_RECOVERY`
   (`tests/test_transaction_custody.py`). From `transaction_recovery`: `effect_class`,
   `fresh_grant`, `no_effect`, `recovery_view`. From `transaction_invocation`:
-  `fold_actions`, `status`, `unresolved`.
+  `fold_actions`, `status`, `unresolved`. From the core at `f40c09f`:
+  `_decide(custody, operation, decide)`, whose `decide(prior, now)` returns event fields
+  that `_append` hands to `append_events`, ending in the seal Task 2 added.
 - Produces:
   - The Global Constraints' constants, plus `DISPOSITION_EVENT_KEYS =
     {"failure_disposed": envelope | {"grant_id", "ground", "reference", "occurred_at",
@@ -42,6 +45,9 @@
     | None`.
   - `terminal_blocker(actions, previous) -> ActionFold | None`.
   - `transaction_recovery.unreconciled(actions, held) -> ActionFold | None`.
+  - `transaction_storage.is_id(value: object) -> bool`, moved unchanged with its
+    `rel_` UUIDv7 pattern from `transaction_history`, which imports it back, so
+    `transaction_history.is_id` and the core's import of it keep working (per D30).
   - `TransactionStore.dispose_failed(custody, *, grant_id: str, disposition: Any) ->
     Transaction`.
   - Tests: `DisposeCase` with `disposition`, `dispose`, `human`, `unobservable`,
@@ -95,15 +101,22 @@
   successor["receipt_digest"]` for `successor_succeeded`, else None.
 - `dispose_failed` runs `require_texts(custody, "dispose_failed", grant_id=grant_id)`
   before any lock. With no lock held, when `disposition` is a dict whose `successor`
-  passes `is_id`, it loads that transaction. `successor` becomes `{"state",
-  "receipt_digest"}` from its snapshot and `terminal`, or None on `UnknownTransaction`.
+  passes `is_id`, it loads that transaction through `self.load`, so `_validated_document`
+  verifies the child's receipt as well (a tampered child receipt is `ReceiptInvalid`, per
+  D26). `successor` becomes `{"state", "receipt_digest"}` from its snapshot and
+  `terminal`, or None on `UnknownTransaction`. The disposition is a caller argument, not an
+  adapter return: it never passes through `_capture_result`; `failure_refusal` validates
+  it, `failure_record` deep-copies it, and `append_events` copies the fields again (per
+  D26).
   It then calls `self._decide(custody, "dispose_failed", lambda prior, now:
   failure_events(prior, now, grant_id, disposition, successor))`, so the seal follows in
   the same write (per D2, D21). Its docstring points to `failure_refusal`'s.
-- The validator dispatches `failure_disposed` through `_check_envelope` with
-  `DISPOSITION_EVENT_KEYS`. Then `failure_event_violation` runs over a view `{**document,
+- The walk, `_history_projection`, dispatches `failure_disposed` through
+  `_check_envelope` with `DISPOSITION_EVENT_KEYS`, so construction and load apply the
+  rule alike (#230). Then `failure_event_violation` runs over a view `{**document,
   "events": events_before, "state": state, "custody": {"fence": open_fence}}`. With no
-  open span it returns `failure_disposed sits outside an open custody span`. A refusal
+  open span it returns `failure_disposed sits outside an open custody span`. The view's `state` and `custody`
+  are the walk's own folded values, never the stored projections (per D25). A refusal
   from `failure_refusal(view, …, now_ms=None, successor=None, writer=False)` reads
   `failure_disposed <reason>: <detail>`. `successor_receipt` must be None for every
   ground but `successor_succeeded`, and a `sha256:` + 64-hex string for it, else
@@ -111,7 +124,7 @@
   requires`. Then every other field must equal `failure_record(view, …)`'s, else
   `failure_disposed does not match its re-derivation: <first differing key in sorted
   order>` (per D21; #208 D10).
-- At a terminal transition the history uses `terminal_blocker(actions, events[seq - 2])`
+- At a terminal transition the walk uses `terminal_blocker(actions, events[seq - 2])`
   in place of `unresolved(actions)`. When the previous event is a `failure_disposed` with
   an observability ground, the blocker is the first action whose status is `open`,
   `in_progress` or `unknown`, skipping an `unknown` action named in its `units`.
@@ -359,7 +372,11 @@ class DisposeTest(DisposeCase):
   Run: `PYTHONPATH=python python3 -m unittest tests/test_transaction_disposition.py 2>&1 | tail -3`.
   Expected: ERROR (`CONSEQUENCES` cannot be imported).
 
-- [ ] **Step 3: Implement** the invariants. `failure_refusal` is one function whose steps
+- [ ] **Step 3: Implement** the invariants. First move `is_id` and `_ID_PATTERN` into
+  `transaction_storage` and import them back into `transaction_history`, with no change in
+  behavior, so `transaction_disposition` can check `successor` without importing the
+  history module to its left (per D19, D30). Update the storage and history module
+  docstrings' lists of what each holds. `failure_refusal` is one function whose steps
   are the numbered list. The writer and the validator both call it, and they differ only
   through `writer` and `now_ms` (per D21). Extract `unreconciled` without changing
   `begin_refusal`'s refusal text. If `transaction_core.py` passes 64000 bytes, apply the
@@ -371,6 +388,9 @@ class DisposeTest(DisposeCase):
 ```bash
 grep -q "def dispose_failed" python/agent_tools/transaction_core.py || exit 1
 grep -q "def unreconciled" python/agent_tools/transaction_recovery.py || exit 1
+grep -q "^def is_id" python/agent_tools/transaction_storage.py || exit 1
+if grep -q "^def is_id" python/agent_tools/transaction_history.py; then exit 1; fi
+if grep -q "transaction_history" python/agent_tools/transaction_disposition.py; then exit 1; fi
 if grep -n "unresolved(actions)" python/agent_tools/transaction_history.py; then exit 1; fi
 ```
 
@@ -385,4 +405,4 @@ git commit -m "feat(transaction-core): enter failed only through a closed, groun
 - [ ] **Step 6: Check the review budget** with `FILES="python/agent_tools/transaction_disposition.py python/agent_tools/transaction_recovery.py python/agent_tools/transaction_receipt.py python/agent_tools/transaction_history.py python/agent_tools/transaction_core.py tests/test_transaction_disposition.py"`.
   Expected: exit 0.
 
-Decisions: per D8, D9, D10, D11, D16, D20, D21.
+Decisions: per D8, D9, D10, D11, D16, D19, D20, D21, D24, D25, D26, D30.

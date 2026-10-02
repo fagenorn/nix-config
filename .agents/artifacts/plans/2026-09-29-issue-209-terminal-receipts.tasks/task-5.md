@@ -10,7 +10,7 @@
 
 **Interfaces:**
 - Consumes (Tasks 2, 4): `ReceiptStore` and its exclusive-create helper, `read`,
-  `seal`; `OBSERVABILITY_GROUNDS`; `transaction_proof.closed_result_violation`;
+  `seal(receipt, digest)`, which `_append` calls before `state.json` is written; `OBSERVABILITY_GROUNDS`; `transaction_proof.closed_result_violation`;
   `DisposeCase`, `destroyed`, `live`, `KEYS`, `AUTHORITY`.
 - Produces:
   - `HAZARD_SCHEMA = "transaction-hazard-marker/v1"` and `OBSERVATION_SCHEMA =
@@ -44,7 +44,9 @@
   `observation` failing `closed_result_violation(observation, "observation")`, a
   `contradicts_ground` that is not a bool, or `contradicts_ground` true on a receipt
   whose `outcome` is not `failed` or whose `outcome_proof["ground"]` is not in
-  `OBSERVABILITY_GROUNDS` (per D12, D22). It then writes `observations/<receipt
+  `OBSERVABILITY_GROUNDS` (per D12, D22). The observation is a caller argument, so it
+  never passes through `_capture_result`; the record copies its three fields (per D26).
+  It then writes `observations/<receipt
   hex>/<n>.json` with exactly `{"schema": OBSERVATION_SCHEMA, "receipt_digest", "n",
   "at", "outcome", "reason", "reference", "contradicts_ground"}`. `n` starts at one more
   than the files present, and each exclusive-create collision tries `n + 1`, so no file
@@ -214,4 +216,4 @@ git commit -m "feat(transaction-core): hazard markers and post-terminal observat
 - [ ] **Step 6: Check the review budget** with `FILES="python/agent_tools/transaction_receipt.py python/agent_tools/transaction_core.py tests/test_transaction_disposition.py"`.
   Expected: exit 0.
 
-Decisions: per D6, D12, D16, D18, D22.
+Decisions: per D6, D12, D16, D18, D22, D26, D29.

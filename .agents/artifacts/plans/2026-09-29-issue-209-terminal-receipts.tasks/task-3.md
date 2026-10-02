@@ -6,7 +6,7 @@
   the new tests)
 
 **Interfaces:**
-- Consumes (Task 2): `terminal_receipt`, `ReceiptStore`, `read_receipt`, the `Sealed`
+- Consumes (Task 2): `terminal_receipt(document, covered)`, `ReceiptStore`, `read_receipt`, the `Sealed`
   mixin and `ENVELOPE`. From `transaction_proof`: `evaluate(plan, events, cutoff_ms)`.
   From `transaction_invocation`: `fold_actions`, `status`. From `transaction_storage`:
   `parse_at`. Tests use `CustodyCase`, `AUTHORITY`, `PATH`, `TTL`, `plain`, `serialize`
@@ -16,6 +16,9 @@
   and the test constant `TRUTH`. Task 6 reads `postconditions` in the sweep.
 
 **Invariants:**
+- Every key below is derived from `document["proof_plan"]` and `covered` alone, never
+  from `document["events"]` or a stored projection, so the walk's re-derivation and the
+  store's seal agree (per D25).
 - `postconditions` has one entry per `proof_plan["units"]` entry, in plan order:
   `{"unit": action_id, "name", "phase", "status", "observed", "effected"}`. `status` is
   `status(fold)` of that action, or None when the action has no event. `observed` is the
@@ -30,9 +33,9 @@
   telemetry_digest(result)}`. The result body never enters the receipt (per D3).
 - `evaluations` has one entry per `proof_plan["obligations"]` entry, in plan order:
   `{"obligation_id", "evaluation", "reason", "evidence_id"}`. The pair comes from
-  `evaluate(proof_plan, events, parse_at(sealed_at))`. `evidence_id` is that
+  `evaluate(proof_plan, covered, parse_at(sealed_at))`. `evidence_id` is that
   obligation's latest `obligation_observed` `evidence_id`, else None (per D20).
-- Every value is deep-copied from the events, so a receipt never aliases the document.
+- Every value is deep-copied from `covered`, so a receipt never aliases the document.
 - The receipt module docstring gains one sentence per new key, written from the code.
 
 - [ ] **Step 1: Write the failing tests.** In `tests/test_transaction_receipt.py`, add
@@ -253,4 +256,4 @@ git commit -m "feat(transaction-core): record postconditions, stops and evaluati
 - [ ] **Step 6: Check the review budget** with `FILES="python/agent_tools/transaction_receipt.py tests/test_transaction_receipt.py"`.
   Expected: exit 0.
 
-Decisions: per D3, D4, D13, D16, D20.
+Decisions: per D3, D4, D13, D16, D20, D25.

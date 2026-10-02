@@ -9,7 +9,7 @@
 - Modify: `CLAUDE.md` (the `agent_tools.transaction_core` sentence)
 
 **Interfaces:**
-- Consumes (Tasks 1–5): `dispose_failed`, `DispositionRefused` (message `"<id>:
+- Consumes (Tasks 1–5): `dispose_failed(custody, *, grant_id, disposition)`, `DispositionRefused` (message `"<id>:
   disposition refused: <reason>: <detail>"`), `read_receipt`, the receipt's `outcome`
   and `postconditions`, `AUTHORITY_CLASS` in the sweep support, and the existing
   `drive`, `SCENARIOS`, `SWEEP`, `LANDINGS`, `RECOVERIES`, `CUSTODY_EVENTS`,
@@ -60,9 +60,10 @@
   asserted against its bytes.
 - CLAUDE.md, in the `agent_tools.transaction_core` sentence: `with the
   \`transaction-state/v5\` validator` becomes `v6`. After the slice-5 clause, and before
-  `, with the`, insert `; slice 6 (#209) seals a permanent, content-addressed terminal
-  receipt under the store root's \`receipts/\` in the same write that enters every
-  terminal, and reads it back on every load (\`agent_tools.transaction_receipt\`), and
+  `, with the`, insert `; slice 6 (#209) writes a permanent, content-addressed terminal
+  receipt under the store root's \`receipts/\` and reads it back before the one
+  \`state.json\` write that enters any terminal, which ends with a \`receipt_sealed\` event
+  naming it, then re-reads that receipt on every load (\`agent_tools.transaction_receipt\`), and
   makes \`dispose_failed\` the only way into \`failed\`: it takes a fresh grant and one
   closed ground, and it yields an \`effects_unobservable\` qualifier with per-key hazard
   markers only when a human grant at the transaction's authority class asserts an

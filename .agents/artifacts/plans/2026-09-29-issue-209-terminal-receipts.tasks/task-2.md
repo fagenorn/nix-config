@@ -3,8 +3,8 @@
 **Files:**
 - Create: `python/agent_tools/transaction_receipt.py`
 - Modify: `python/agent_tools/transaction_storage.py` (`ReceiptInvalid`)
-- Modify: `python/agent_tools/transaction_history.py` (the `receipt_sealed` position
-  rules, `Transaction.terminal`)
+- Modify: `python/agent_tools/transaction_history.py` (`append_events` completes the
+  seal's digest; the walk's `receipt_sealed` position and end rules; `Transaction.terminal`)
 - Modify: `python/agent_tools/transaction_core.py` (`__init__`, `_append`,
   `_validated_document`, `read_receipt`, re-exports)
 - Create: `tests/test_transaction_receipt.py`
@@ -17,15 +17,22 @@
   (`transaction_receipt` joins `NEUTRAL_MODULES`)
 
 **Interfaces:**
-- Consumes (Task 1): `authority_class` on the `created` event; `AUTHORITY`,
+- Consumes (Task 1, and `f40c09f`): `append_events(prior, event_fields, *, at)` and the
+  walk `_history_projection(document, transaction_id)` in `transaction_history`;
+  `_append(prior, now, events)` in the core; `authority_class` on the `created` event; `AUTHORITY`,
   `CustodyCase`, `serialize` (`tests/test_transaction_custody.py`); `CohortCase`
   (`tests/test_transaction_proof.py`); `SettleCase`
   (`tests/test_transaction_recovery_settle.py`); `FakeEffect`, `FakeWorld`
   (`tests/test_transaction_invocation.py`).
 - Produces:
   - `transaction_receipt.RECEIPT_SCHEMA = "transaction-terminal-receipt/v1"`, re-exported.
-  - `terminal_receipt(document: dict) -> dict`, a pure function of a document whose last
-    event is the terminal transition or the terminal `lease_released` after it.
+  - `terminal_receipt(document: Mapping, covered: Sequence[Mapping]) -> dict`, a pure
+    function of `document`'s immutable metadata (`transaction_id`, `creation_key`,
+    `subject`, `concurrency_keys`, `proof_plan`, `recovery_plan`) and `covered`, the
+    enveloped events ending in a terminal transition or the terminal `lease_released`
+    right after one. It never reads `document["events"]`, `state`, `parked_from`,
+    `custody` or `revision`, and raises `ValueError` when `covered` ends any other way
+    (per D25, D29).
   - `RECEIPT_EVENT_KEYS = frozenset({"seq", "type", "at", "receipt_digest"})` and
     `receipt_event_violation(event: dict, events_before: Sequence[Mapping], document:
     dict) -> str | None`.
@@ -33,9 +40,9 @@
     field it fills on every load.
   - `receipt_invalid(where: str, detail: str) -> ReceiptInvalid`, the one construction
     path, and `transaction_storage.ReceiptInvalid(StateInvalid)`, re-exported.
-  - `class ReceiptStore(root: Path)` with `seal(receipt: dict) -> str` (the digest) and
+  - `class ReceiptStore(root: Path)` with `seal(receipt: dict, digest: str) -> None` and
     `read(digest: Any) -> Mapping[str, Any]`, plus a private exclusive-create helper that
-    Task 5 reuses for markers and observations.
+    Task 5 reuses for markers and observations (per D29).
   - `TransactionStore.read_receipt(receipt_digest: str) -> Mapping[str, Any]`.
   - Tests: the `Sealed` mixin with `receipt_files()` and `assertSealed(after, outcome,
     qualifier=None) -> Mapping`, and the `ENVELOPE` key set, which Task 3 extends.
@@ -46,56 +53,73 @@
   `transaction_id`, `creation_key`, `recovers`, `authority_class`, `concurrency_keys`,
   `subject_digest`, `proof_plan_digest`, `recovery_plan_digest`, `outcome`,
   `terminal_qualifier`, `sealed_at`, `revision`, `history_digest` and `outcome_proof`.
-  Their values follow spec "The receipt". `outcome` is the last transition's `to`.
-  `sealed_at` is the last event's `at`. `revision` is `len(events)`. `history_digest` is
-  `telemetry_digest(events)`. `terminal_qualifier` is None. Task 3 adds the four
-  remaining keys, and Task 4 adds `failed` and its qualifier (per D3).
+  Their values follow spec "The receipt". `outcome` is the last transition's `to` in
+  `covered`. `sealed_at` is `covered[-1]["at"]`. `revision` is `len(covered)`.
+  `history_digest` is `telemetry_digest(list(covered))`. `terminal_qualifier` is None.
+  Task 3 adds the four remaining keys, and Task 4 adds `failed` and its qualifier (per
+  D3).
 - `outcome_proof` per outcome. `succeeded` gets `{proof_sealed_seq, proof_cutoff_at,
   advisory_warnings}` from the `proof_sealed`. `abandoned` gets `{effect_snapshot}`: each
   `fold_actions` entry's `effect_class`, keyed by action id in declaration order (per
   D20). `rolled_back` gets `{recovery_settled_seq, effect_snapshot, selected, restored,
   residue}`, with `effect_snapshot` and `selected` from the latest `recovery_started` and
   the rest from the `recovery_settled`. Any other outcome is a `ValueError` until Task 4.
-- The seal (per D2). In `_append`, after the terminal `lease_released` (if custody was
-  held), and when `candidate["state"]` is terminal: `digest =
-  self._receipts.seal(terminal_receipt(candidate))`. Then append `{"seq", "type":
-  "receipt_sealed", "at": at, "receipt_digest": digest}`, then set the revision, validate
-  and write as today. Any exception from the seal propagates before `state.json` is
-  written, so the transaction stays nonterminal and its lease records stay untouched.
-- `ReceiptStore.seal` writes `receipts/<hex>.json`, where `digest = telemetry_digest
-  (receipt) = "sha256:<hex>"`. The bytes are `serialize(receipt)` and the mode is `0444`
+- The recipe (per D24). In `_append`, when some field is a `transitioned` into a
+  terminal, the fields gain `lease_released` reason `terminal` if custody is held (as
+  today), then `{"type": "receipt_sealed"}`, whether custody is held or not. Nothing else
+  in `_append`'s recipe changes.
+- The constructor (per D24, D29). `append_events` envelopes each field in order as today.
+  For a field whose type is `receipt_sealed` it first requires the field to be exactly
+  `{"type": "receipt_sealed"}`, else `StateInvalid` naming the transaction and
+  `receipt_sealed fields carry more than their type`; it then appends `{"seq", "at",
+  "type": "receipt_sealed", "receipt_digest": telemetry_digest(terminal_receipt(candidate,
+  <the candidate's events so far>))}`. The one walk then runs once over the whole
+  candidate, as today, and re-derives that digest. No second walk runs.
+- The seal (per D2, D24, D29). After `append_events` returns, when `candidate["state"]` is
+  terminal, `_append` calls `self._receipts.seal(terminal_receipt(candidate,
+  candidate["events"][:-1]), candidate["events"][-1]["receipt_digest"])` before it takes
+  the lease lock or writes `state.json`, then writes and clears the lease records exactly
+  as today. Any exception from the seal propagates before `state.json` is written, so the
+  transaction stays nonterminal and its lease records stay untouched.
+- `ReceiptStore.seal(receipt, digest)` first refuses `ReceiptInvalid` unless
+  `telemetry_digest(receipt) == digest`. It writes `receipts/<hex>.json`, where `digest =
+  "sha256:<hex>"`. The bytes are `serialize(receipt)` and the mode is `0444`
   (per D6, D20). The write is exclusive: create `receipts/` if missing (fsync the root),
   refusing a non-directory or symlink. Open a temporary sibling with `O_CREAT | O_EXCL |
   O_WRONLY | O_NOFOLLOW`, mode `0o444`, write, fsync, `os.link` it to the final name,
   unlink the temporary in `finally`, then fsync the directory. On `FileExistsError` the
   existing bytes must equal the expected bytes, else `ReceiptInvalid`. The seal then
-  reads the file back through `read` and requires `serialize(dict(read)) ==
+  reads the file back through `read(digest)` and requires `serialize(dict(read)) ==
   serialize(receipt)`. Every `OSError`, `StateInvalid` or mismatch is `ReceiptInvalid`
   naming the path (per D20).
 - `read(digest)` refuses `ReceiptInvalid` for a digest that is not a
   `sha256:<64 lowercase hex>` string, a missing, non-regular or unparseable file, bytes
   that differ from `serialize` of the strict parse, a parse whose `telemetry_digest`
-  differs from `digest`, or a `schema` other than `RECEIPT_SCHEMA`. It returns
+  differs from `digest`, or a `schema` other than `RECEIPT_SCHEMA`; each message names the
+  receipt file's path (`receipts/<hex>.json`, or the digest when it is malformed). It returns
   `MappingProxyType` over the parse. It reads no lock or clock.
-- The validator (per D7). A `receipt_sealed` is admitted only while the folded state is
-  terminal and no `receipt_sealed` came before. Any other event after a terminal, except
-  the existing terminal `lease_released` right after the transition, keeps the rule `event
-  <seq> follows the terminal state <state>`. A `receipt_sealed` in a nonterminal state is
-  refused `receipt_sealed outside a terminal state`. The history runs `_check_envelope` with
-  `RECEIPT_EVENT_KEYS` first (so an extra key reads `is not the closed receipt_sealed
-  event`), then `receipt_event_violation`, which returns `receipt_sealed at is
-  not the terminal transition's at` or `receipt_sealed receipt_digest is not the digest of
-  the terminal receipt`, the latter re-deriving through `terminal_receipt({**document,
-  "events": list(events_before)})`. After the loop, a terminal state whose last event is
-  not `receipt_sealed` is refused `terminal state <state> has no receipt_sealed as its
-  last event`.
+- The walk (per D7, D26). These rules live in `_history_projection`, so construction and
+  load apply them alike. Its post-terminal guard, which today admits only the terminal
+  `lease_released` right after the transition, also admits a `receipt_sealed` while the
+  folded state is terminal and no `receipt_sealed` came before. Any other event after a
+  terminal keeps the rule `event <seq> follows the terminal state <state>`. A
+  `receipt_sealed` dispatch runs `_check_envelope` with `RECEIPT_EVENT_KEYS` first (so an
+  extra key reads `is not the closed receipt_sealed event`), then refuses a nonterminal
+  folded state with `receipt_sealed outside a terminal state`, then calls
+  `receipt_event_violation(event, events[:seq - 1], document)`, which returns
+  `receipt_sealed at is not the terminal transition's at` or `receipt_sealed
+  receipt_digest is not the digest of the terminal receipt`, the latter through
+  `terminal_receipt(document, events_before)`. After the loop, a terminal state whose last
+  event is not `receipt_sealed` is refused `terminal state <state> has no receipt_sealed
+  as its last event`.
 - `_validated_document` reads a terminal document's receipt through
   `self._receipts.read(document["events"][-1]["receipt_digest"])` after `_validate_state`.
-  So `load`, every writer's prior read and a same-key `create` all refuse a missing or
-  altered receipt.
+  So `load`, `_fenced`, `_advance_locked` and a same-key `create` all refuse a missing or
+  altered receipt, before any terminal refusal (per D26).
 - `terminal_view` returns None unless the last event is `receipt_sealed`. Otherwise it
   returns `MappingProxyType({"receipt_digest", "outcome": state, "terminal_qualifier":
-  None})`. Task 4 fills the qualifier.
+  None})`. Task 4 fills the qualifier. `snapshot` fills `Transaction.terminal`, a new last
+  field of the dataclass, from it; nothing stores it.
 - Existing tests change only by the trailing `receipt_sealed`: exact trailing-type lists
   gain it, `events[-1]`/`[-2]`/`[-3]` indexes shift by one, and exact revision and seq
   counts grow by one. `tests/test_transaction_core.py`'s forward chain becomes
@@ -241,9 +265,11 @@ class AbandonedReceiptTest(Sealed, CustodyCase):
                     path.unlink()
                 else:
                     path.write_text(content)
-                with self.assertRaises(ReceiptInvalid) as caught:
-                    self.store.load(transaction_id)
-                self.assertIn(path.name, str(caught.exception))
+                for call in (lambda: self.store.load(transaction_id),
+                             lambda: self.abandon(transaction_id), self.new):
+                    with self.assertRaises(ReceiptInvalid) as caught:
+                        call()
+                    self.assertIn(path.name, str(caught.exception))
 
     def test_a_broken_receipts_path_refuses_the_seal_leaving_the_state_nonterminal(self):
         receipts = self.root / "receipts"
@@ -320,10 +346,11 @@ class AbandonedReceiptTest(Sealed, CustodyCase):
   `transaction_invocation` (`fold_actions`) and `transaction_storage`
   (`serialize`, `strict_loads`, `lstat_mode`, `fsync_directory`, `require_directory`,
   `ReceiptInvalid`, `StateInvalid`). Keep D19's direction. `transaction_history`
-  imports `RECEIPT_EVENT_KEYS`, `receipt_event_violation` and `terminal_view` from it.
-  Write the `transaction_receipt` module docstring from the code: what the receipt holds,
-  where the store puts it, and the seal's order. Update `_append`'s docstring and the
-  `transaction_history` module and `validate_state` docstrings. If
+  imports `RECEIPT_EVENT_KEYS`, `receipt_event_violation`, `terminal_receipt` and
+  `terminal_view` from it. Write the `transaction_receipt` module docstring from the code:
+  what the receipt holds, where the store puts it, and the seal's order. Update the
+  `_append`, `_validated_document`, `append_events` and `validate_state` docstrings and the
+  `transaction_history` module docstring. If
   `transaction_core.py` passes 64000 bytes, apply the Global Constraints' docstring
   economy first.
 
@@ -333,6 +360,8 @@ class AbandonedReceiptTest(Sealed, CustodyCase):
 ```bash
 grep -q 'tests/test_transaction_receipt.py' justfile || exit 1
 grep -q 'transaction_receipt' tests/test_transaction_core_sweep.py || exit 1
+grep -q '"receipt_sealed"' python/agent_tools/transaction_core.py || exit 1
+grep -q 'terminal_receipt' python/agent_tools/transaction_history.py || exit 1
 if grep -n "import time\|import fcntl\|flock\|time_ns" python/agent_tools/transaction_receipt.py; then exit 1; fi
 ```
 
@@ -347,4 +376,4 @@ git commit -m "feat(transaction-core): seal a content-addressed receipt at every
 - [ ] **Step 6: Check the review budget** with `FILES="python/agent_tools/transaction_receipt.py python/agent_tools/transaction_storage.py python/agent_tools/transaction_history.py python/agent_tools/transaction_core.py tests/test_transaction_receipt.py tests/test_transaction_core.py"`.
   Expected: exit 0.
 
-Decisions: per D2, D3, D6, D7, D16, D19, D20.
+Decisions: per D2, D3, D6, D7, D16, D19, D20, D24, D25, D26, D29.

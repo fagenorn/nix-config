@@ -19,7 +19,8 @@
   `tests/test_transaction_core_sweep.py`
 
 **Interfaces:**
-- Consumes: the #208 code base at `93bf5fd`.
+- Consumes: the code base at `f40c09f`: slices 1–5, #229's `_capture_result` and #230's
+  `append_events` / `_history_projection` (the one validating walk).
 - Produces:
   - `TransactionStore.create(creation_key, subject, *, concurrency_keys, proof, recovery,
     authority_class: str) -> Transaction`; `_create(creation_key, subject,
@@ -45,7 +46,10 @@
   `actor_kind` must be in `ACTOR_KINDS` (rule text `actor_kind is not human or agent`)
   (per D11, D22).
 - `create` refuses `StateInvalid` before any lock when `authority_class` is not a
-  non-empty string. The check sits in `_require_creatable`, which gains the parameter. A
+  non-empty string. The check sits in `_require_creatable`, which gains the parameter
+  (its docstring's `transaction-state/v5` becomes `v6`). `_create_locked` still builds the
+  `created` document by hand and checks it with `_validate_state`, now with
+  `authority_class` stored beside `recovers`. A
   same-key create whose stored class differs adds `authority class` to the `differs`
   list, after `recovers`. `roll_forward` passes its own `authority_class` to `_create`
   (per D11, D18).
@@ -66,9 +70,11 @@
   `failed` must follow a `failure_disposed` (else `"transition into failed does not
   immediately follow failure_disposed"`). A transition with reason `failure_disposed` must
   follow its event (else `"reserved reason failure_disposed does not immediately follow its
-  event"`). `validate_state` ORs it after the two existing pairing calls, both in the loop
-  and at the end. `failure_disposed` is not a dispatched event type yet, so every `failed`
-  document is refused until Task 4 (per D21).
+  event"`). The walk, `_history_projection`, ORs it after the existing
+  `pairing_violation` and `recovery_pairing_violation` calls, both in its event loop and in
+  its end-of-history check, so `append_events` and `validate_state` apply it alike (#230).
+  `failure_disposed` is not a dispatched event type yet, so every `failed` document is
+  refused until Task 4 (per D21).
 - The `TRANSITIONS` table is unchanged.
 - The core module docstring is at most 1200 bytes. It is a map: the store, its root and
   clock, one clause per sibling module naming what that module owns, and "no command and
@@ -83,15 +89,18 @@
   defines its own equal constant beside `EMPTY_RECOVERY`). Every `roll_forward` passes
   `authority_class=AUTHORITY`. Every `issue_grant` passes `actor_kind="agent",
   authority_class=AUTHORITY`. The exact `created` key-set assertions
-  (`tests/test_transaction_core.py` ~line 148, `tests/test_transaction_plan.py` ~line
-  291) gain `authority_class`. Exact grant-entry assertions gain the two fields.
-  `transaction-state/v5` becomes `v6`, and
-  `test_new_state_is_v5_and_a_v3_document_fails_closed_naming_its_version` is renamed
-  `…_v6_…`. In `tests/test_transaction_core.py`, `PATHS_TO_TERMINAL` loses `failed`, and
+  (`tests/test_transaction_core.py` ~line 151, `tests/test_transaction_plan.py` ~line
+  295) gain `authority_class`. Exact grant-entry assertions gain the two fields.
+  Every `transaction-state/v5` string in `tests/test_transaction_core.py`,
+  `tests/test_transaction_invocation.py`, `tests/test_transaction_plan.py` and
+  `tests/test_transaction_recovery_plan.py` becomes `v6`, and
+  `test_new_state_is_v5_and_a_v3_document_fails_closed_naming_its_version`
+  (`tests/test_transaction_invocation.py` ~line 168) is renamed `…_v6_…`. In `tests/test_transaction_core.py`, `PATHS_TO_TERMINAL` loses `failed`, and
   the `attention_required` allowed set in
   `test_every_allowed_edge_is_accepted_and_every_other_target_refused` becomes
   `{"created", "abandoned"}`. In `tests/test_transaction_invocation.py`,
-  `test_an_open_attempt_blocks_a_terminal` advances to `abandoned` instead of `failed`.
+  `test_an_open_attempt_blocks_a_terminal` (~line 696) advances to `abandoned` instead of
+  `failed`.
   The sweep support's module constant `AUTHORITY_CLASS = "fixture-release"` goes to its
   `create` and `roll_forward`. `recover()`'s grant becomes `actor_kind="agent",
   authority_class=AUTHORITY_CLASS`. `tests/test_transaction_core_sweep.py`'s two creates
@@ -242,15 +251,17 @@ class FailedClosedTest(CustodyCase):
   then thread `authority_class` through `create` → `_create` → `_create_locked` (stored
   on the `created` event beside `recovers`) and `roll_forward`. Add `actor_kind` and
   `authority_class` to `issue_grant` and its event, then the history rules, the grants
-  view and the disposition module. Update the `create`, `issue_grant`, `advance`,
-  `validate_state` and `transaction_history` module docstrings from the resulting code.
+  view and the disposition module. Update the `create`, `_require_creatable`,
+  `issue_grant`, `advance`, `validate_state` and `transaction_history` module docstrings
+  from the resulting code.
 
 - [ ] **Step 4: Verify.**
   Run the slice unit command with `tests/test_transaction_disposition.py`. Expected: `OK`.
 
 ```bash
 grep -q 'SCHEMA = "transaction-state/v6"' python/agent_tools/transaction_history.py || exit 1
-if grep -rn "transaction-state/v5\"\|is_v5" tests/test_transaction_core.py tests/test_transaction_invocation.py tests/test_transaction_plan.py python/agent_tools/transaction_*.py; then exit 1; fi
+if grep -rn "transaction-state/v5\|is_v5" python/agent_tools/ tests/test_transaction_core.py tests/test_transaction_invocation.py tests/test_transaction_plan.py tests/test_transaction_recovery_plan.py; then exit 1; fi
+grep -q "disposition_pairing_violation" python/agent_tools/transaction_history.py || exit 1
 n=$(python3 -c "import ast;print(len(ast.get_docstring(ast.parse(open('python/agent_tools/transaction_core.py').read()),clean=False)))"); [ "$n" -le 1200 ] || exit 1
 grep -q 'tests/test_transaction_disposition.py' justfile || exit 1
 ```
