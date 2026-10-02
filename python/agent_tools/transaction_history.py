@@ -22,8 +22,10 @@ binds `recovery_started` to the entry into `recovering`, `recovery_settled` to t
 `roll_forward_linked` must also name a transaction id (#208 D11). The `created` event carries
 a non-empty `authority_class`, and each `grant_issued` an `actor_kind` in `ACTOR_KINDS` and a
 non-empty `authority_class` (#209 D11, D22); `agent_tools.transaction_disposition`'s
-`disposition_pairing_violation` binds `failure_disposed` and every entry into `failed` as the
-recovery pairing does (#209 D21). A terminal's last event is `receipt_sealed`, admitted once
+`failure_event_violation` re-derives each `failure_disposed`, its
+`disposition_pairing_violation` binds that event and every entry into `failed` as the
+recovery pairing does, and its `terminal_blocker` names the action no terminal transition
+may cross (#209 D21). A terminal's last event is `receipt_sealed`, admitted once
 after the terminal transition or its release and checked by
 `agent_tools.transaction_receipt`'s `receipt_event_violation`; `append_events` stamps its
 digest through that module's `terminal_receipt`, and `terminal_view` derives the snapshot's
@@ -31,10 +33,11 @@ digest through that module's `terminal_receipt`, and `terminal_view` derives the
 `validate_state` takes the creation-key index lookup as a callable, which
 `agent_tools.transaction_core` binds to its store root, and the core reads the receipt file
 itself. It also composes event fields for a lapsed span's reap (`reap_events`) and a late
-owner result (`owner_result_event`), and answers whether an executor and fence were ever issued a span (`span_issued`). The
-`at`-timestamp codec (`format_at`, `parse_at`) and the strict JSON object rule
-(`json_object_violation`) that a created `subject` and a late `result` share are imported
-from `agent_tools.transaction_storage`, not held here.
+owner result (`owner_result_event`), and answers whether an executor and fence were ever
+issued a span (`span_issued`). The `at`-timestamp codec (`format_at`, `parse_at`), the
+strict JSON object rule (`json_object_violation`) that a created `subject` and a late
+`result` share, and the transaction id rule (`is_id`; #209 D30) are imported from
+`agent_tools.transaction_storage`, not held here.
 """
 
 import copy
@@ -49,10 +52,11 @@ from typing import Any
 from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_custody import (
     CUSTODY_EVENTS, EVIDENCE_EVENTS, EVIDENCE_FORMS, admissibility, fence_violation)
-from agent_tools.transaction_disposition import disposition_pairing_violation
+from agent_tools.transaction_disposition import (
+    DISPOSITION_EVENT_KEYS, disposition_pairing_violation, failure_event_violation,
+    terminal_blocker)
 from agent_tools.transaction_invocation import (
-    ACTION_EVENT_KEYS, action_event_violation, action_views, apply_action_event, status,
-    unresolved)
+    ACTION_EVENT_KEYS, action_event_violation, action_views, apply_action_event, status)
 from agent_tools.transaction_plan import plan_violation
 from agent_tools.transaction_proof import (
     PROOF_EVENT_KEYS, ProofFold, apply_proof_event, gate_violation, pairing_violation,
@@ -64,7 +68,7 @@ from agent_tools.transaction_recovery import (
     recovery_transition_violation, recovery_view, selection_refusal)
 from agent_tools.transaction_recovery_plan import recovery_plan_violation
 from agent_tools.transaction_storage import (
-    StateInvalid, format_at, json_object_violation, parse_at, serialize)
+    StateInvalid, format_at, is_id, json_object_violation, parse_at, serialize)
 
 SCHEMA = "transaction-state/v6"
 
@@ -93,8 +97,6 @@ TRANSITIONS: Mapping[str, frozenset[str]] = MappingProxyType({
 EXTERNAL_STATES = ("known", "unknown", None)
 ACTOR_KINDS = ("human", "agent")
 
-_ID_PATTERN = re.compile(
-    r"rel_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 _AT_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z")
 _STATE_KEYS = frozenset({"schema", "transaction_id", "creation_key", "subject", "state",
                          "parked_from", "revision", "events", "concurrency_keys", "custody",
@@ -185,10 +187,6 @@ def edge_allowed(source: str, parked_from: str | None, target: str) -> bool:
     if source == "attention_required" and target in FORWARD:
         return target == parked_from
     return True
-
-
-def is_id(value: object) -> bool:
-    return type(value) is str and _ID_PATTERN.fullmatch(value) is not None
 
 
 def parked_since(events: list[dict]) -> int | None:
@@ -470,11 +468,10 @@ def validate_state(document: Any, transaction_id: str,
     `recovery_plan`, bound to the proof plan's declaration, and the `created` event's
     `recovers` is null or another transaction's id (#208 D6, D12) and its `authority_class` a
     non-empty string, and each `grant_issued`'s `actor_kind` is in `ACTOR_KINDS` (#209 D11,
-    D22); each action event is
-    checked by `action_event_violation` against the actions before it, and each
-    `invocation_intended` then by `selection_refusal` (#208 D15), and a transition into
-    a terminal while `unresolved` names an action is refused (#206 D20). Each proof event is
-    checked by `proof_event_violation` against the history before it and then, for an
+    D22); each action event is checked by `action_event_violation` against the actions
+    before it, and each `invocation_intended` then by `selection_refusal` (#208 D15), and a
+    transition into a terminal while `terminal_blocker` names an action is refused (#206
+    D20; #209 D21). Each proof event is checked by `proof_event_violation` against the history before it and then, for an
     `obligation_observed`, by the evidence-id fold (#207 D25). Cohorts are numbered from 1,
     at most `MAX_COHORT_ATTEMPTS`, one open at a time; a seal names the cohort open under
     its fence and passes `seal_violation`, which settlement also uses (#207 D31); and
@@ -487,7 +484,8 @@ def validate_state(document: Any, transaction_id: str,
     is checked to be a transaction id (#208 D11), and `recovery_pairing_violation` binds each
     recovery event and reserved recovery reason as `pairing_violation` does (#208 D7, D9, D10,
     D22), and `disposition_pairing_violation` binds `failure_disposed`, every transition into
-    `failed` and the reserved reason `failure_disposed` likewise (#209 D21). A `receipt_sealed`
+    `failed` and the reserved reason `failure_disposed` likewise, after
+    `failure_event_violation` re-derives each `failure_disposed` (#209 D21). A `receipt_sealed`
     is admitted only after the terminal transition or its terminal release, once, and is
     checked by `receipt_event_violation`; a terminal whose last event is not `receipt_sealed`
     is refused (#209 D7, D24). Metadata checks
@@ -600,7 +598,7 @@ def _history_projection(document: dict,
                 if violation is not None:
                     raise refuse(f"event {seq} {violation}")
                 if state in TERMINALS:
-                    blocker = unresolved(actions)
+                    blocker = terminal_blocker(actions, events[seq - 2])
                     if blocker is not None:
                         raise refuse(f"event {seq} reaches terminal {state} over unresolved "
                                      f"action {blocker.action_id} ({status(blocker)})")
@@ -651,6 +649,14 @@ def _history_projection(document: dict,
                 if event_type == "obligation_observed":
                     _note_id(event, fold)
                 apply_proof_event(event, proof_fold)
+            case str() if event_type in DISPOSITION_EVENT_KEYS:
+                _check_envelope(event, seq, DISPOSITION_EVENT_KEYS[event_type], refuse)
+                violation = failure_event_violation(
+                    event, events[:seq - 1], document,
+                    open_fence=None if fold.custody is None else fold.custody["fence"],
+                    state=state)
+                if violation is not None:
+                    raise refuse(f"event {seq} {violation}")
             case str() if event_type in RECOVERY_EVENT_KEYS:
                 _check_envelope(event, seq, RECOVERY_EVENT_KEYS[event_type], refuse)
                 if (event_type == "roll_forward_linked"

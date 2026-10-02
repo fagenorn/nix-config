@@ -1,7 +1,8 @@
 """Durable-file primitives, the refusal hierarchy and the pure codecs shared by the
 transaction modules (#205 D1, #206 D15): the `at`-timestamp codec (`format_at`,
-`parse_at`) and the strict JSON object rule (`json_object_violation`) live here so that
-every transaction module can import them without importing another's model.
+`parse_at`), the strict JSON object rule (`json_object_violation`) and the transaction id
+rule (`is_id`, a `rel_` UUIDv7; #209 D30) live here so that every transaction module can
+import them without importing another's model.
 """
 
 import calendar
@@ -10,6 +11,7 @@ import fcntl
 import json
 import math
 import os
+import re
 import stat
 import tempfile
 from pathlib import Path
@@ -125,7 +127,22 @@ class RecoveryRefused(TransactionError):
         self.reason = reason
 
 
+class DispositionRefused(TransactionError):
+    """A `dispose_failed` the core refuses; `reason` is one of the closed disposition
+    refusal reasons, and nothing is written (#209 D8, D9)."""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 LAST_AT_MS = 253_402_300_799_999  # 9999-12-31T23:59:59.999Z, the last `at` that fits
+_ID_PATTERN = re.compile(
+    r"rel_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+
+
+def is_id(value: object) -> bool:
+    return type(value) is str and _ID_PATTERN.fullmatch(value) is not None
 
 
 def format_at(ms: int) -> str:

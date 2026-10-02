@@ -1,18 +1,21 @@
-"""Terminal receipts (#209 D1-D4, D6, D7, D13, D20, D24, D25, D29).
+"""Terminal receipts (#209 D1-D4, D6, D7, D10, D13, D20, D24, D25, D29).
 
 `terminal_receipt` derives the closed `transaction-terminal-receipt/v1` a terminal seals,
 purely from a document's immutable metadata and the events it covers: identity, the
 `created` event's back-link, authority class and plan digests, the subject's digest, the
-outcome, `sealed_at`, the covered `revision` and a `history_digest` over those events, and
-a per-outcome `outcome_proof`. `postconditions` gives each proof-plan unit, in plan order,
-its action's `status`, its latest `satisfied` inspection as `observed` and whether an attempt
-was intended as `effected`. `stops` lists each `stop_synthesized` in seq order with
-`superseded_by`, the seq of the first `owner_result` that supersedes it. `owner_results`
-lists each `owner_result` in seq order with its result only as `result_digest`.
-`evaluations` gives each plan obligation, in plan order, its evaluation and reason at
-`sealed_at` and its latest `obligation_observed` as `evidence_id`. `receipt_event_violation` is the walk's rule for the
-`receipt_sealed` event that names the receipt, and `terminal_view` the snapshot's derived
-`terminal` view of it.
+outcome, its `terminal_qualifier` (the `failure_disposed`'s for `failed`, else null),
+`sealed_at`, the covered `revision` and a `history_digest` over those events, and a
+per-outcome `outcome_proof`: `succeeded` cites the `proof_sealed`, `abandoned` the
+`action_effects` snapshot, `rolled_back` the latest `recovery_started` and the
+`recovery_settled`, and `failed` the `failure_disposed`. `postconditions` gives each
+proof-plan unit, in plan order, its action's `status`, its latest `satisfied` inspection as
+`observed` and whether an attempt was intended as `effected`. `stops` lists each
+`stop_synthesized` in seq order with `superseded_by`, the seq of the first `owner_result`
+that supersedes it. `owner_results` lists each `owner_result` in seq order with its result
+only as `result_digest`. `evaluations` gives each plan obligation, in plan order, its
+evaluation and reason at `sealed_at` and its latest `obligation_observed` as
+`evidence_id`. `receipt_event_violation` is the walk's rule for the `receipt_sealed` event
+that names the receipt, and `terminal_view` the snapshot's derived `terminal` view of it.
 
 `ReceiptStore` keeps receipts beside the transaction directories, never inside one, so a
 receipt outlives a collected ledger: `receipts/<hex>.json`, where `sha256:<hex>` is the
@@ -35,9 +38,9 @@ from types import MappingProxyType
 from typing import Any
 
 from agent_tools.canonical import telemetry_digest
+from agent_tools.transaction_disposition import FAILURE_REASON, action_effects
 from agent_tools.transaction_invocation import fold_actions, status
 from agent_tools.transaction_proof import evaluate
-from agent_tools.transaction_recovery import effect_class
 from agent_tools.transaction_storage import (
     ReceiptInvalid, StateInvalid, fsync_directory, lstat_mode, parse_at, require_directory,
     serialize, strict_loads)
@@ -64,9 +67,8 @@ def _succeeded_proof(covered: Sequence[Mapping]) -> dict:
 
 
 def _abandoned_proof(covered: Sequence[Mapping]) -> dict:
-    """Every folded action's effect class, by action id in declaration order (D20)."""
-    return {"effect_snapshot": {identity: effect_class(entry)
-                                for identity, entry in fold_actions(covered).items()}}
+    """Every folded action's effect class, `action_effects` (D20)."""
+    return {"effect_snapshot": action_effects(covered)}
 
 
 def _rolled_back_proof(covered: Sequence[Mapping]) -> dict:
@@ -78,9 +80,24 @@ def _rolled_back_proof(covered: Sequence[Mapping]) -> dict:
             "residue": settled["residue"]}
 
 
+def _failed_proof(covered: Sequence[Mapping]) -> dict:
+    """The `failure_disposed`'s seq, ground, successor, snapshot and units (#209 D9, D10)."""
+    disposed = _latest(covered, FAILURE_REASON)
+    return {"disposition_seq": disposed["seq"], "ground": disposed["ground"],
+            "ground_reference": disposed["reference"],
+            "ground_occurred_at": disposed["occurred_at"], "successor": disposed["successor"],
+            "successor_receipt": disposed["successor_receipt"],
+            "effect_snapshot": disposed["effect_snapshot"], "units": disposed["units"]}
+
+
 _OUTCOME_PROOFS: Mapping[str, Callable[[Sequence[Mapping]], dict]] = MappingProxyType({
     "succeeded": _succeeded_proof, "abandoned": _abandoned_proof,
-    "rolled_back": _rolled_back_proof})
+    "rolled_back": _rolled_back_proof, "failed": _failed_proof})
+
+
+def _qualifier(events: Sequence[Mapping], outcome: str) -> str | None:
+    """The latest `failure_disposed`'s qualifier for `failed`, else None."""
+    return _latest(events, FAILURE_REASON)["qualifier"] if outcome == "failed" else None
 
 
 def _postconditions(plan: Mapping, covered: Sequence[Mapping]) -> list[dict]:
@@ -140,7 +157,9 @@ def terminal_receipt(document: Mapping, covered: Sequence[Mapping]) -> dict:
     terminal without an outcome proof, is a `ValueError`. Reads `document`'s
     `transaction_id`, `creation_key`, `subject`, `concurrency_keys` and `proof_plan` only,
     never its `events`, `state`, `parked_from`, `custody` or `revision`. `outcome` is the last
-    transition's `to`, `sealed_at` the last covered `at`, `revision` the covered count.
+    transition's `to`, `terminal_qualifier` the latest `failure_disposed`'s `qualifier` for
+    `failed` and null otherwise, `sealed_at` the last covered `at`, `revision` the covered
+    count.
     """
     covered = list(covered)
     final = (covered[-2] if len(covered) > 1 and covered[-1]["type"] == "lease_released"
@@ -156,7 +175,8 @@ def terminal_receipt(document: Mapping, covered: Sequence[Mapping]) -> dict:
         "subject_digest": telemetry_digest(document["subject"]),
         "proof_plan_digest": created["proof_plan_digest"],
         "recovery_plan_digest": created["recovery_plan_digest"], "outcome": final["to"],
-        "terminal_qualifier": None, "sealed_at": covered[-1]["at"], "revision": len(covered),
+        "terminal_qualifier": _qualifier(covered, final["to"]), "sealed_at": covered[-1]["at"],
+        "revision": len(covered),
         "history_digest": telemetry_digest(covered),
         "outcome_proof": _OUTCOME_PROOFS[final["to"]](covered),
         "postconditions": _postconditions(document["proof_plan"], covered),
@@ -179,12 +199,14 @@ def receipt_event_violation(event: dict, events_before: Sequence[Mapping],
 
 def terminal_view(document: dict) -> Mapping | None:
     """None unless the last event is `receipt_sealed`; else a read-only
-    `{receipt_digest, outcome, terminal_qualifier}`, derived and never stored."""
-    last = document["events"][-1]
-    if last["type"] != "receipt_sealed":
+    `{receipt_digest, outcome, terminal_qualifier}`, the receipt's qualifier, derived and
+    never stored."""
+    events = document["events"]
+    if events[-1]["type"] != "receipt_sealed":
         return None
-    return MappingProxyType({"receipt_digest": last["receipt_digest"],
-                             "outcome": document["state"], "terminal_qualifier": None})
+    return MappingProxyType({"receipt_digest": events[-1]["receipt_digest"],
+                             "outcome": document["state"],
+                             "terminal_qualifier": _qualifier(events, document["state"])})
 
 
 class ReceiptStore:

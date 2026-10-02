@@ -5,12 +5,13 @@ pre-existing root, each in one `<id>/state.json`; every event `at` is read from 
 clock (integer epoch milliseconds), transaction ids from the wall clock. Each sibling module
 documents what it owns, and this module re-exports its public names:
 `agent_tools.transaction_history` the `transaction-state/v6` document model, its one
-validating walk and the snapshot fold; `transaction_disposition` the `failed` disposition;
-`transaction_recovery` recovery's admission, decisions and rules; `transaction_recovery_plan`
-the recovery plan; `transaction_proof` the proof's collection, cohorts and settlement;
-`transaction_plan` the proof plan; `transaction_invocation` the action protocol and retry
-budget; `transaction_custody` the lease authority and admissibility; `transaction_storage` the
-durable-file primitives and the refusal classes. The store adds the locks, the clock, the
+validating walk and the snapshot fold; `transaction_disposition` the `failed`
+disposition's grounds, refusals and rules; `transaction_recovery` recovery's admission,
+decisions and rules; `transaction_recovery_plan` the recovery plan; `transaction_proof` the
+proof's collection, cohorts and settlement; `transaction_plan` the proof plan;
+`transaction_invocation` the action protocol and retry budget; `transaction_custody` the
+lease authority and admissibility; `transaction_storage` the durable-file primitives and the
+refusal classes. The store adds the locks, the clock, the
 fenced check and the writes. No command and no caller until #125.
 """
 
@@ -31,7 +32,10 @@ from typing import Any
 from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_custody import (
     EVIDENCE_FORMS, LeaseAuthority, admissibility, fence_violation)
-from agent_tools.transaction_disposition import disposition_advance_violation
+from agent_tools.transaction_disposition import (
+    CONSEQUENCES, DISPOSITION_REFUSAL_REASONS, GROUNDS, KNOWN_STATE_GROUNDS,
+    OBSERVABILITY_GROUNDS, QUALIFIERS, RESIDUE_BOUNDS, disposition_advance_violation,
+    failure_events)
 from agent_tools.transaction_history import (
     ACTOR_KINDS, EXTERNAL_STATES, FORWARD, PARKINGS, SCHEMA, STATES, TERMINALS, TRANSITIONS,
     Custody, Transaction, append_events, bound_path, edge_allowed, fenced_id_violation,
@@ -60,9 +64,9 @@ from agent_tools.transaction_recovery_plan import (
     EDGE_ACTIONS, POSTURES, RECOVERY_PLAN_SCHEMA, RECOVERY_REJECTION_REASONS, bind_recovery,
     compile_recovery, materialize_recovery)
 from agent_tools.transaction_storage import (
-    LAST_AT_MS, CreationConflict, CustodyMisbound, EffectResultInvalid, FenceViolation,
-    GrantInvalid, InvocationRefused, LeaseUnavailable, ProofPlanRejected, ProofRefused,
-    ReceiptInvalid, RecoveryPlanRejected, RecoveryRefused, StaleCustody,
+    LAST_AT_MS, CreationConflict, CustodyMisbound, DispositionRefused, EffectResultInvalid,
+    FenceViolation, GrantInvalid, InvocationRefused, LeaseUnavailable, ProofPlanRejected,
+    ProofRefused, ReceiptInvalid, RecoveryPlanRejected, RecoveryRefused, StaleCustody,
     StateInvalid, TransactionBusy, TransactionError, TransitionRefused, UnknownTransaction,
     atomic_write, fsync_directory, lstat_mode, open_lock, read_json, require_directory)
 
@@ -871,6 +875,22 @@ class TransactionStore:
             if events:
                 self._append(prior, now, events)
         return child
+
+    def dispose_failed(self, custody: Custody, *, grant_id: str,
+                       disposition: Any) -> Transaction:
+        """Enter `failed` in one write under `grant_id`: `failure_events`, refusing with
+        `failure_refusal`'s first reason (#209 D8, D9, D21, D26). A malformed credential or
+        `grant_id` refuses before any lock; with no lock held, a `successor` id is loaded,
+        its receipt verified, as `{state, receipt_digest}`, or None for no such transaction."""
+        require_texts(custody, "dispose_failed", grant_id=grant_id)
+        successor = None
+        if type(disposition) is dict and is_id(disposition.get("successor")):
+            with contextlib.suppress(UnknownTransaction):
+                child = self.load(disposition["successor"])
+                successor = {"state": child.state, "receipt_digest": None
+                             if child.terminal is None else child.terminal["receipt_digest"]}
+        return self._decide(custody, "dispose_failed", lambda prior, now: failure_events(
+            prior, now, grant_id, disposition, successor))
 
     def _observed(self, custody: Custody, operation: str, observer: Any,
                   admit: Callable[[dict], list[Mapping]],
