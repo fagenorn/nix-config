@@ -1,10 +1,16 @@
-"""Terminal receipts (#209 D1-D3, D6, D7, D20, D24, D25, D29).
+"""Terminal receipts (#209 D1-D4, D6, D7, D13, D20, D24, D25, D29).
 
 `terminal_receipt` derives the closed `transaction-terminal-receipt/v1` a terminal seals,
 purely from a document's immutable metadata and the events it covers: identity, the
 `created` event's back-link, authority class and plan digests, the subject's digest, the
 outcome, `sealed_at`, the covered `revision` and a `history_digest` over those events, and
-a per-outcome `outcome_proof`. `receipt_event_violation` is the walk's rule for the
+a per-outcome `outcome_proof`. `postconditions` gives each proof-plan unit, in plan order,
+its action's `status`, its latest `satisfied` inspection as `observed` and whether an attempt
+was intended as `effected`. `stops` lists each `stop_synthesized` in seq order with
+`superseded_by`, the seq of the first `owner_result` that supersedes it. `owner_results`
+lists each `owner_result` in seq order with its result only as `result_digest`.
+`evaluations` gives each plan obligation, in plan order, its evaluation and reason at
+`sealed_at` and its latest `obligation_observed` as `evidence_id`. `receipt_event_violation` is the walk's rule for the
 `receipt_sealed` event that names the receipt, and `terminal_view` the snapshot's derived
 `terminal` view of it.
 
@@ -29,11 +35,12 @@ from types import MappingProxyType
 from typing import Any
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.transaction_invocation import fold_actions
+from agent_tools.transaction_invocation import fold_actions, status
+from agent_tools.transaction_proof import evaluate
 from agent_tools.transaction_recovery import effect_class
 from agent_tools.transaction_storage import (
-    ReceiptInvalid, StateInvalid, fsync_directory, lstat_mode, require_directory, serialize,
-    strict_loads)
+    ReceiptInvalid, StateInvalid, fsync_directory, lstat_mode, parse_at, require_directory,
+    serialize, strict_loads)
 
 RECEIPT_SCHEMA = "transaction-terminal-receipt/v1"
 RECEIPT_EVENT_KEYS = frozenset({"seq", "type", "at", "receipt_digest"})
@@ -76,14 +83,63 @@ _OUTCOME_PROOFS: Mapping[str, Callable[[Sequence[Mapping]], dict]] = MappingProx
     "rolled_back": _rolled_back_proof})
 
 
+def _postconditions(plan: Mapping, covered: Sequence[Mapping]) -> list[dict]:
+    """Each plan unit from its action's fold: `status` and `observed` None and `effected`
+    false when the action has no event (D4, D20; #208 D19)."""
+    actions = fold_actions(covered)
+    entries = []
+    for unit in plan["units"]:
+        identity = unit["action_id"]
+        fold = actions.get(identity)
+        seen = [event for event in covered if event["type"] == "action_inspected"
+                and event["action_id"] == identity and event["outcome"] == "satisfied"]
+        entries.append({
+            "unit": identity, "name": unit["name"], "phase": unit["phase"],
+            "status": None if fold is None else status(fold),
+            "observed": {key: seen[-1][key] for key in ("seq", "at", "reference", "fence")}
+            if seen else None,
+            "effected": fold is not None and fold.attempts > 0})
+    return entries
+
+
+def _stops(covered: Sequence[Mapping]) -> list[dict]:
+    """Each `stop_synthesized`, linked to the first `owner_result` superseding it (D13)."""
+    results = [event for event in covered if event["type"] == "owner_result"]
+    return [{"seq": stop["seq"], "executor_id": stop["executor_id"], "fence": stop["fence"],
+             "reason": stop["reason"],
+             "superseded_by": next((result["seq"] for result in results
+                                    if result["supersedes"] == stop["seq"]), None)}
+            for stop in covered if stop["type"] == "stop_synthesized"]
+
+
+def _owner_results(covered: Sequence[Mapping]) -> list[dict]:
+    """Each `owner_result`, its body only as a digest (D3, D13)."""
+    return [{"seq": result["seq"], "executor_id": result["executor_id"],
+             "fence": result["fence"], "custody": result["custody"],
+             "supersedes": result["supersedes"],
+             "result_digest": telemetry_digest(result["result"])}
+            for result in covered if result["type"] == "owner_result"]
+
+
+def _evaluations(plan: Mapping, covered: Sequence[Mapping]) -> list[dict]:
+    """Each plan obligation's evaluation at the last covered `at`, citing its latest
+    `obligation_observed`, else None (D20)."""
+    evaluations = evaluate(plan, covered, parse_at(covered[-1]["at"]))
+    latest = {event["obligation_id"]: event["evidence_id"] for event in covered
+              if event["type"] == "obligation_observed"}
+    return [{"obligation_id": identity, "evaluation": evaluations[identity][0],
+             "reason": evaluations[identity][1], "evidence_id": latest.get(identity)}
+            for identity in (entry["obligation_id"] for entry in plan["obligations"])]
+
+
 def terminal_receipt(document: Mapping, covered: Sequence[Mapping]) -> dict:
     """The receipt that seals `covered`, a detached copy (D3, D25, D29).
 
     `covered` is the enveloped events from `created` through the transition into a terminal,
     or through the terminal `lease_released` right after it; ending any other way, or in a
     terminal without an outcome proof, is a `ValueError`. Reads `document`'s
-    `transaction_id`, `creation_key`, `subject` and `concurrency_keys` only, never its
-    `events`, `state`, `parked_from`, `custody` or `revision`. `outcome` is the last
+    `transaction_id`, `creation_key`, `subject`, `concurrency_keys` and `proof_plan` only,
+    never its `events`, `state`, `parked_from`, `custody` or `revision`. `outcome` is the last
     transition's `to`, `sealed_at` the last covered `at`, `revision` the covered count.
     """
     covered = list(covered)
@@ -102,7 +158,10 @@ def terminal_receipt(document: Mapping, covered: Sequence[Mapping]) -> dict:
         "recovery_plan_digest": created["recovery_plan_digest"], "outcome": final["to"],
         "terminal_qualifier": None, "sealed_at": covered[-1]["at"], "revision": len(covered),
         "history_digest": telemetry_digest(covered),
-        "outcome_proof": _OUTCOME_PROOFS[final["to"]](covered)})
+        "outcome_proof": _OUTCOME_PROOFS[final["to"]](covered),
+        "postconditions": _postconditions(document["proof_plan"], covered),
+        "stops": _stops(covered), "owner_results": _owner_results(covered),
+        "evaluations": _evaluations(document["proof_plan"], covered)})
 
 
 def receipt_event_violation(event: dict, events_before: Sequence[Mapping],
