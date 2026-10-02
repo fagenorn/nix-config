@@ -915,18 +915,18 @@ def assert_configured_code_review_pair(case, owner, support):
     case.assert_ordered(owner_text, "bindings.workflow.review.code", "capabilities.review.code", "bindings.commands[review_id].argv")
     case.assert_ordered(
         support_text,
-        "review binding shape",
-        "basename of `argv[0]`",
-        "`codex-companion task --reviewer diff-review`", "optional `--fresh`",
-        *CODEX_COMPANION_INVOCATION_ANCHORS,
-        *CODEX_COMPANION_VALIDATION_ANCHORS,
+        "For configured code review,",
+        "`codex-collaboration`'s `diff-review`",
         "binding shape error",
-        "`codex-companion task [--fresh] --reviewer <op>`",
         "no Codex call",
         "`blocked` stops", *CAPACITY_SCOPE_ANCHORS,
         CONFIGURED_REVIEW_UNSUPPORTED_ROUTE, CONFIGURED_REVIEW_AVAILABLE_FALLBACK,
     )
-    case.assertIn('bare `["codex"]` included', support_text)
+    # The skill owns the shape, invocation and validation; a caller restating
+    # them is the duplication D20 removed.
+    for restated in ("basename of `argv[0]`", *CODEX_COMPANION_INVOCATION_ANCHORS[1:],
+                     *CODEX_COMPANION_VALIDATION_ANCHORS[:-1]):
+        case.assertNotIn(restated, support_text)
     for retired in RETIRED_EXEC_REVIEW_TOKENS:
         case.assertNotIn(retired, support_text)
     # The pre-D15 sentence called the primary `unsupported` route a fallback.
