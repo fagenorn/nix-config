@@ -145,7 +145,8 @@ other argv, bare `["codex"]` included, is a **binding shape error**.
 A binding shape error is a configuration error. It makes no Codex call, no
 retry and no native fallback, and stops the operation with one error. The error
 names the operation, the `review_id`, the authored argv, the expected form
-`codex-companion task [--fresh] --reviewer <op>`, and exactly one cause: an
+`codex-companion task [--fresh] --reviewer <op>`, and exactly one cause, the
+first of these that fails, in this order: an
 executable other than `codex-companion` (bare `codex` included), a companion
 subcommand other than `task`, a missing or mismatched `--reviewer`, or an
 unsupported companion token. It stops the way `blocked` does, but carries no

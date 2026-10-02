@@ -115,3 +115,29 @@ if grep -qE 'exec --sandbox|output-last-message' "$matches"; then exit 1; fi
 ```
 
 Expected: exit 0. At the start commit the built SKILL.md still carries `exec --sandbox`, so this gate can fail. Commit nothing in this step; record in the task report that the live Codex demo (root `## Acceptance evidence`) is still owed.
+
+- [ ] **Step 8: Live companion demo (acceptance evidence)**, from the worktree, after Step 7. It uses this build's closure companion, not the PATH one, and makes two real read-only Codex calls:
+
+```bash
+set -euo pipefail
+cc="$(nix-store -qR "$(readlink -f result)" | while read -r p; do
+  f="$p/bin/codex-companion"; if [ -x "$f" ]; then echo "$f"; fi
+done | sort -u)"
+if [ "$(printf '%s\n' "$cc" | grep -c .)" -ne 1 ]; then echo "want one companion: $cc"; exit 1; fi
+for op in plan-review diff-review; do
+  out="$(mktemp)"; trap 'rm -f "$out"' EXIT
+  printf '%s\n' "Read-only demo for issue 236 ($op). Do not edit anything. Return exactly three top-level sections for $op headings (plan-review: Blocking / Should fix / Discussion; diff-review: Critical / Important / Minor), each containing None." \
+    | "$cc" task --fresh --reviewer "$op" --model gpt-6-astra --effort xhigh --cwd "$PWD" --json > "$out"
+  python3 - "$out" "$op" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); op = sys.argv[2]
+assert d["status"] == 0 and d["touchedFiles"] == [], d
+assert (d["runtime"]["model"], d["runtime"]["reasoningEffort"]) == ("gpt-6-astra", "xhigh"), d["runtime"]
+heads = ("Blocking", "Should fix", "Discussion") if op == "plan-review" else ("Critical", "Important", "Minor")
+assert isinstance(d["rawOutput"], str) and all(h in d["rawOutput"] for h in heads), d["rawOutput"][:400]
+print(op, "ok", d["runtime"])
+PY
+done
+```
+
+Expected: `plan-review ok …` and `diff-review ok …`. A failure here is a real acceptance failure, not a flake: report it with the payload's `status`, `runtime` and first 400 bytes of `rawOutput`. If the Codex call itself is refused for capacity or authentication, record the demo as not run (attestation unverified) instead of retrying. Commit nothing.

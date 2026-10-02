@@ -171,10 +171,8 @@ Per D7 and D16:
    code-review pair). They pin the classifier, the one invocation, the
    validation and the shape error's handling ahead of the fallback. They pin
    that the direct-review section carries exactly one tail block and no exec
-   tail, and that the evals describe the companion shape. A new case in that
-   file runs `resolve-project resolve` on the repo and asserts that both review
-   bindings in the snapshot are the companion shape with the matching
-   `--reviewer`.
+   tail, and that the evals describe the companion shape. The committed-bindings case
+   lives in `test_resolve_project.py` instead (per D18).
 2. **Resolver and conformance suites** (`test_resolve_project.py`,
    `conformance_test_support.py`, `test_conformance_checks.py`). These are the
    existing fixtures, with `codex-companion` stubbed wherever `codex` stood for
@@ -223,3 +221,4 @@ repo's own migrated binding returns Codex-attributed `Blocking` / `Should fix` /
 | D16 | Amends D7: the resolver and conformance fixtures stub `codex-companion` in place of `codex` and stop naming `codex-review`; one skill-contract case pins the committed bindings through `resolve-project resolve`, never by reading the contract file | Those fixtures copy the committed contract and the resolver blocks a review capability whose `argv[0]` is not on PATH; bootstrap forbids reading `.agents/project.json` directly | No test of the migrated bindings: the demo would be the only guard against a regression to `["codex"]` |
 | D17 | Every exec-tail pin in the skill contract tests is replaced by its companion counterpart and inverted into a negative pin: the skill, both caller paragraphs and the evals may carry none of `exec --sandbox`, `--output-last-message`, `terminal agent-message`, `model_reasoning_effort` or JSONL | D12 deletes the route; the-bar *Tests that can fail* | Only deleting the exec anchors: text that reintroduces the exec route would still pass |
 | D18 | Amends D16's location: the committed-bindings case lives in `test_resolve_project.py`, resolving a `make_root()` copy of the contract under the suite's hermetic installed home, and asserts bindings only, never capability state | The resolver refuses `platform.manifest.missing` without an installed manifest under `$HOME/.agents/share`, which CI's source-only run lacks; review readiness is `shutil.which(argv0)`, and CI has no `codex-companion` | A case in `test_workflow_skill_contracts.py` against the real `HOME`: it refuses in CI, and asserting `available` would depend on the host |
+| D19 | The live demo runs the build-closure companion before activation, and pre-activation Codex reviews of this branch are expected to take the native fallback | Phase-5 review: the PATH companion and installed skill are the pre-branch `.p12` build; activation (`just switch`) needs the user | Requiring `just switch` during delivery: activation is outside standing authorization |
