@@ -17,47 +17,56 @@ and no last-message file are produced, validation fails, and the skill quietly
 takes its one native fallback. Every `--auto` plan review on such a project runs
 on a Claude reviewer while looking like a transient Codex failure.
 
-The user needs two things. First, a configured Codex review on the companion
-binding delivers the packet, returns a result attributed to Codex, and passes a
-validation as strict as the `codex exec` route's. Second, any binding the skill
-cannot drive is reported as a specific configuration error, not as a runtime
-failure followed by a silent fallback.
+The `codex exec` route is no better. On codex-cli 0.159.0, `codex exec --json`
+emits only `thread.started`, `turn.started`, `item.*` and `turn.completed`. It
+has no runtime-selection event, and a turn carries several `agent_message`
+items. The exec route's model/effort check can never pass, so this repo's own
+`["codex"]` reviews have always fallen back to Claude silently. This run's own
+Phase-5 plan review showed it live.
+
+The user needs three things. First, a configured Codex review delivers the
+packet and returns a result attributed to Codex. That result must pass a
+validation that attests model and effort from the runtime. Second, any binding
+the skill cannot drive is reported as a specific configuration error, not as a
+runtime failure followed by a silent fallback. Third, nix-config's own reviews
+must actually run on Codex. The user's decision: there is one review route, and
+it is the companion.
 
 ## Solution
 
-The skill recognises a closed set of two **review binding shapes** from the
-authored base argv and builds a different invocation and validation for each:
+The skill supports exactly one **review binding shape**, the companion `task`
+reviewer form. It recognises that shape from the authored base argv. It appends
+flags that pin the model, the reasoning effort, the worktree and JSON output. It
+sends the packet on stdin with no positional prompt. It then validates the
+companion's single JSON result payload. The `codex exec` invocation and its
+JSONL/last-message validation are removed.
 
-- **exec shape.** This is today's route and is unchanged: the `codex exec` tail,
-  the packet on stdin, JSONL plus last-message validation.
-- **companion shape.** The skill appends companion flags that pin the model and
-  reasoning effort, the worktree and JSON output. It sends the packet on stdin
-  with no positional prompt, then validates the companion's single JSON result
-  payload.
+Any other argv, bare `["codex"]` included, is a **binding shape error**. The
+skill stops before calling Codex and names the cause and the expected form. It
+takes no fallback. The companion's JSON payload does not report the runtime
+selection, so the patched companion gains that report: the model and reasoning
+effort that Codex's app-server confirms when the thread starts.
 
-Any other argv is a **binding shape error**. The skill stops before calling
-Codex, names the cause, and takes no fallback. The companion's JSON payload does
-not report the runtime selection, so the patched companion gains that report:
-the model and reasoning effort that Codex's app-server confirms when the thread
-starts.
+nix-config migrates its own two review bindings to that shape, with one command
+entry per operation.
 
 ## Decisions
 
 ### Review binding shape (skill)
 
 After routing `available` and dereferencing `bindings.commands[review_id]`,
-classify its `argv` before building any invocation (per D1, D2):
+classify its `argv` before building any invocation (per D13). It is the
+companion shape only when all of the following hold:
 
-- **exec shape:** the basename of `argv[0]` is exactly `codex`. The base argv,
-  cwd and declared env are preserved and the existing tail is appended
-  unchanged.
-- **companion shape:** the basename of `argv[0]` is exactly `codex-companion`,
-  `argv[1]` is `task`, and the remaining tokens are exactly `--reviewer <op>`
-  plus an optional `--fresh`, in any order. `<op>` must equal the running
-  operation (`plan-review` or `diff-review`). No other flag and no positional
-  token may appear: the skill owns model, effort, cwd and output selection, and
-  a positional token would displace the stdin packet.
-- **anything else:** a binding shape error.
+- the basename of `argv[0]` is exactly `codex-companion`;
+- `argv[1]` is `task`;
+- the remaining tokens are exactly `--reviewer <op>` plus an optional `--fresh`,
+  in any order;
+- `<op>` equals the running operation (`plan-review` or `diff-review`).
+
+No other flag and no positional token may appear. The skill owns model, effort,
+cwd and output selection, and a positional token would displace the stdin
+packet. Anything else is a binding shape error.
 
 ### Companion invocation
 
@@ -77,100 +86,120 @@ budget, so the skill passes none of these.
 ### Companion validation
 
 Success, and with it reviewer identity `Codex`, requires all of the following
-(per D5, D6):
+(per D5, D6, D15):
 
 1. Exit status 0, and stdout parses as exactly one JSON object.
-2. Its `status` is `0`, its `touchedFiles` is empty, and its `runtime.model` is
-   `gpt-6-astra` and `runtime.reasoningEffort` is `xhigh`.
-3. Its `rawOutput` is a non-empty string. It is the turn's single terminal agent
-   message, taken byte for byte, and it passes the operation's heading
-   validation.
+2. Its `status` is `0`, its `touchedFiles` is empty, its `runtime.model` is
+   `gpt-6-astra` and its `runtime.reasoningEffort` is `xhigh`.
+3. Its `rawOutput` is a non-empty string, the companion's last captured agent
+   message, and it passes the operation's heading validation.
 
-The exec route's JSONL and last-message candidates are not created on this
-route. Every existing failure class carries over unchanged. A daemon, slot or
-capacity rejection stops verbatim with no retry and no fallback. A completed
-runtime failure, a malformed or mismatched payload, or a schema failure takes
-exactly one native fallback with the same packet.
+Every existing failure class carries over unchanged. A daemon, slot or capacity
+rejection stops verbatim with no retry and no fallback. A completed runtime
+failure, a malformed or mismatched payload, or a schema failure takes exactly
+one native fallback with the same packet.
 
 ### Binding shape error
 
 A binding shape error is a configuration error, not a runtime failure (per D3).
-The skill makes no Codex call, makes no retry and takes no native fallback, and
-stops the operation with one error. The error names the operation, the
-`review_id`, the authored argv and the specific cause:
+The skill makes no Codex call, no retry and no native fallback. It stops the
+operation with one error that names the operation, the `review_id`, the
+authored argv, the expected form `codex-companion task [--fresh] --reviewer
+<op>` and one specific cause (per D13):
 
-- unrecognised executable
+- an executable other than `codex-companion`, bare `codex` included
 - a companion subcommand other than `task`
 - a missing or mismatched `--reviewer`
 - an unsupported companion token
 
-Its handling matches how `blocked` stops, but it is reported as a binding shape
-error and carries no capability repair ID. Calling controllers (`from-issue`
-Phase 5, `sdd`, `ship-issue`) already route `blocked` before they invoke the
-skill, and they already receive a capacity rejection as a stopped operation
-with a verbatim error. A shape error reaches them through that same stop
-path, so no caller document changes (per D8).
+It stops the way `blocked` does, but it is reported as a binding shape error
+and carries no capability repair ID. Callers receive it through their existing
+stopped-operation path, so no caller adds a new outcome (per D8).
 
 ### Companion runtime report (patched codex-plugin-cc)
 
+This part is already delivered and kept as is:
+
 - When a task requests an effort and starts a fresh thread, it sends that effort
-  to `thread/start` as the config override `model_reasoning_effort`, in addition
-  to the turn's effort it already sends. That makes the app-server's start
-  response confirm the selection the turn runs under.
+  to `thread/start` as the config override `model_reasoning_effort` (per D10).
+  The override goes in alongside the turn's effort it already sends.
 - The `task --json` payload gains `runtime: { model, reasoningEffort }`, copied
   verbatim from the app-server's thread start or resume response, with `null`
-  where the response has none. The field is added for every task, not only for
-  reviewer tasks (per D5). Existing payload fields are unchanged.
-- The fake-codex test fixture echoes that config override in its `thread/start`
-  reply, so the suite can observe the field.
+  where the response has none. The field is added for every task (per D5).
+- The fake-codex fixture echoes that override in its `thread/start` reply.
 
 Evidence (2026-10-02, codex-cli 0.159.0): a `thread/start` with
-`model: gpt-6-astra` returns `model: gpt-6-astra` and returns
-`reasoningEffort: xhigh` or `low` exactly as the config override requests.
-Without an override it returns the `config.toml` default.
+`model: gpt-6-astra` returns `model: gpt-6-astra`. It returns
+`reasoningEffort: xhigh` or `low`, exactly as the config override requests.
 
-### Docs that change
+### nix-config's review bindings
 
-- **SKILL.md:** the direct configured review states both shapes, the classifier
-  and the shape error.
-- **PLAN-REVIEW.md / DIFF-REVIEW.md:** only where they restate the invocation or
-  the validation.
-- **evals.json:** eval 1 covers the plan review on the companion binding, and
-  evals 2–3 describe both shapes' invocations.
-- **The patch:** source, fixture and tests, with `patchRevision` bumped.
+The committed contract replaces the single `codex-review` entry (`["codex"]`)
+with two command entries (per D14):
+
+- `codex-plan-review`: `["codex-companion","task","--fresh","--reviewer","plan-review"]`
+- `codex-diff-review`: `["codex-companion","task","--fresh","--reviewer","diff-review"]`
+
+Both take cwd `.` and no env. `workflow.review.plan` names `codex-plan-review`
+and `workflow.review.code` names `codex-diff-review`. The resolver schema is
+unchanged: command ids are free keys and each review member names one of them.
+The projections are generated from the instruction source, not from commands,
+so they are unaffected.
+
+### What changes
+
+- **codex-collaboration SKILL.md:** the direct configured review states the
+  single companion shape, its invocation, its validation and the shape error.
+  The exec subsection is removed.
+- **The shared caller paragraph** in `sdd`'s final review and `ship-issue`'s
+  review is rewritten identically in both files to the companion shape only.
+  Their stop paths stay unchanged (per D9, D15).
+- **evals.json:** evals 1–3 describe the companion invocation and validation
+  only.
+- **The committed contract:** the two entries and repointed review bindings
+  above.
+- **Test fixtures** that stub the review executable as `codex`, or that name
+  the `codex-review` id, follow the new contract (per D16).
+- **PLAN-REVIEW.md / DIFF-REVIEW.md, the patch:** unchanged by the redo.
 
 ## Test seams
 
-Per D7:
+Per D7 and D16:
 
 1. **Skill contract tests** (`home/common/agent-skills/tests/test_workflow_skill_contracts.py`,
    the existing ordered-anchor helpers for the operation pair and the configured
-   code-review pair). They pin the classifier, both invocations, both validations
-   and the shape error's handling ahead of the fallback. They also pin that the
-   evals describe both shapes.
-2. **Companion node suite** (the patched plugin's `tests/*.test.mjs`, existing
-   fake-codex fixture). It asserts that a `task --json` run reports
-   `runtime.model` and `runtime.reasoningEffort` matching the requested values.
-   It also asserts that a stdin packet with no positional argument is the
-   thread's first prompt.
-3. **Build** (`just build`). It proves that the patch applies and that the
-   installed skill text is the edited source.
+   code-review pair). They pin the classifier, the one invocation, the
+   validation and the shape error's handling ahead of the fallback. They pin
+   that the direct-review section carries exactly one tail block and no exec
+   tail, and that the evals describe the companion shape. A new case in that
+   file runs `resolve-project resolve` on the repo and asserts that both review
+   bindings in the snapshot are the companion shape with the matching
+   `--reviewer`.
+2. **Resolver and conformance suites** (`test_resolve_project.py`,
+   `conformance_test_support.py`, `test_conformance_checks.py`). These are the
+   existing fixtures, with `codex-companion` stubbed wherever `codex` stood for
+   the review executable, and a remaining command id used where `codex-review`
+   appeared.
+3. **Companion node suite** (the patched plugin's `tests/*.test.mjs`): already
+   delivered. It covers `runtime` reporting and the stdin packet.
+4. **Build** (`just build`) and `just agent-workflow-tests`.
 
-The live demo is acceptance evidence, not a test seam: a nodocom-shaped plan
-review run through the skill returns Codex-attributed `Blocking` /
-`Should fix` / `Discussion` with no fallback.
+The live demo is acceptance evidence, not a test seam. A plan review on this
+repo's own migrated binding returns Codex-attributed `Blocking` / `Should fix` /
+`Discussion` with no fallback.
 
 ## Out of scope
 
-- nodocom's `.agents/project.json` and any project's authored bindings.
+- nodocom's `.agents/project.json` and any other project's authored bindings.
 - The resolver schema. No declared shape field is added.
 - The `codex:codex-reviewer` plugin bridge and its background route.
 - Review packet content, heading schemas, disposition rules, capability routing
   and capacity semantics.
-- Any third binding shape, such as a wrapper script or `codex` with an embedded
-  subcommand.
+- Reworking `codex exec` validation, and any shape besides the companion
+  reviewer form, such as a wrapper script.
 - Effort attestation for resumed companion threads beyond copying what the
   resume response reports.
+- The archived path-migration records that mention `codex-review`.
 
 ## Decision ledger
 
@@ -187,3 +216,8 @@ review run through the skill returns Codex-attributed `Blocking` /
 | D9 | Reverses D8 in part: the one configured-review paragraph that `sdd/final-review.md` and `ship-issue/REVIEW.md` share, which restates the exec tail, is rewritten identically in both to state both shapes and the shape error; their stop paths stay unchanged | Both files tell the reader to append the exec tail, so they would contradict the skill on a companion binding; the paragraph-identity test from issue 195 keeps them in step | Leaving the callers untouched as D8 said: they would keep the bug in their own text for every diff review |
 | D10 | `thread/start` gets `config: {model_reasoning_effort}` only when the task requested an effort; otherwise its params stay byte-identical to today, and `thread/resume` never gets it | Keeps every effort-less task and existing `lastThreadStart` assertion unchanged; the spec scopes resume attestation out | Always sending `config`, with `null` when there is no effort: it changes requests that no reviewer makes, and a null override is not a confirmed selection |
 | D11 | Known gap, not fixed here: on codex-cli 0.159.0 `codex exec --json` emits no runtime-selection event and several `agent_message` items, so the exec shape's existing model/effort check (kept unchanged per D1) cannot pass and every exec-shape review takes the native fallback; recorded for a follow-up issue | Phase-5 observation of this run's own exec-shape plan review; the issue scopes the companion route; AUTO.md: a should-fix implying scope change backs up rather than scope-creeps | Reworking exec-shape validation in this issue: a separate contract change outside the issue's acceptance criteria |
+| D12 | Reverses D1 and resolves D11 by removal: the companion `task` reviewer form is the one supported review binding shape; the exec invocation and its JSONL/last-message validation are deleted, not reworked | User decision (redo): "one review route only — the companion"; D11's evidence that exec can never attest model/effort on codex-cli 0.159.0; the-bar *Root causes*, *YAGNI* | Keeping exec with a reworked validation: no runtime-selection event exists to attest, so it would trust requested flags or keep silently falling back |
+| D13 | Reverses D2: the classifier accepts only basename `codex-companion` + `task` + `--reviewer <op>` (+ optional `--fresh`); bare `["codex"]` and every other argv is a shape error whose message also names the expected form `codex-companion task [--fresh] --reviewer <op>` | User decision (redo); bootstrap "no project policy is defaulted … fix the contract"; D3 | Silently translating `["codex"]` into a companion call: it guesses policy the contract never authored |
+| D14 | nix-config replaces `codex-review` with `codex-plan-review` and `codex-diff-review` (`["codex-companion","task","--fresh","--reviewer",<op>]`, cwd `.`, no env) and repoints `workflow.review.plan`/`.code`; no resolver schema or projection change | User decision (redo); `--reviewer` must equal the operation (D13); the resolver takes any command-id key and validates review members only as command-id references; projections derive from the instruction source; delivery seals no command member | One shared entry with the skill appending `--reviewer`: the skill would be authoring policy, and the shape rule forbids a missing `--reviewer` |
+| D15 | Reverses D9 in part and amends D6: the shared caller paragraph and the evals state only the companion shape; D6's "no JSONL or last-message candidates on this route" clause is dropped as moot, the rest of D6 stands | D12 leaves one route, so a cross-route contrast has nothing to contrast; the paragraph-identity test keeps both callers in step | Keeping the exec text as "deprecated": it leaves callers describing a route the skill refuses |
+| D16 | Amends D7: the resolver and conformance fixtures stub `codex-companion` in place of `codex` and stop naming `codex-review`; one skill-contract case pins the committed bindings through `resolve-project resolve`, never by reading the contract file | Those fixtures copy the committed contract and the resolver blocks a review capability whose `argv[0]` is not on PATH; bootstrap forbids reading `.agents/project.json` directly | No test of the migrated bindings: the demo would be the only guard against a regression to `["codex"]` |
