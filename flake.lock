@@ -242,6 +242,23 @@
         "type": "github"
       }
     },
+    "impeccable": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790908449,
+        "narHash": "sha256-bWmBWThANkAyJ5xd6rrO3UXL/QMm7sut4nf0tgqVk74=",
+        "owner": "pbakaus",
+        "repo": "impeccable",
+        "rev": "508d7e8955de3b3caf2d8676e85206723d41a887",
+        "type": "github"
+      },
+      "original": {
+        "owner": "pbakaus",
+        "ref": "skill-v4.5.0",
+        "repo": "impeccable",
+        "type": "github"
+      }
+    },
     "nikitabobko-tap": {
       "flake": false,
       "locked": {
@@ -406,6 +423,7 @@
         "homebrew-bundle": "homebrew-bundle",
         "homebrew-cask": "homebrew-cask",
         "homebrew-core": "homebrew-core",
+        "impeccable": "impeccable",
         "nikitabobko-tap": "nikitabobko-tap",
         "nix-darwin": "nix-darwin",
         "nix-homebrew": "nix-homebrew",

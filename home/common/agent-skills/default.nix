@@ -25,6 +25,8 @@ let
     cp -R ${inputs.ui-ux-pro-max}/cli/assets/scripts "$out/scripts"
   '';
 
+  impeccable = import ../../../lib/impeccable.nix { inherit inputs lib pkgs; };
+
   # Home Manager's recursive directory mode creates real directories whose
   # individual files are store symlinks. Codex ignores a skill when SKILL.md
   # itself is a symlink, but supports a symlink to the whole skill directory.
@@ -50,6 +52,8 @@ in
   # Claude Code consumes the same authored sources through skillsDir below.
   home.file = lib.mkMerge [ (localSkillFiles // {
     ".agents/skills/ui-ux-pro-max".source = uiUxSkill;
+    ".agents/skills/impeccable".source = impeccable.skill;
+    ".agents/bin/impeccable".source = impeccable.launcher;
 
     # Layers 0 and 1 of the standards architecture, machine-global so every
     # project inherits the bar and its stack's trap library. Layer 2 (project
@@ -113,7 +117,14 @@ in
       source = uiUxSkill;
       recursive = true;
     };
+    ".claude/skills/impeccable" = {
+      source = impeccable.skill;
+      recursive = true;
+    };
   }) agentToolFiles ];
+
+  # Nix owns the Impeccable version, and the store is read-only (#238 D5).
+  home.sessionVariables.IMPECCABLE_NO_UPDATE_CHECK = "1";
 
   # One-time migration from the previous `recursive = true` layout. Those
   # generations leave a real directory at each target, which would collide

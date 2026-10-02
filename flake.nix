@@ -58,6 +58,12 @@
       url = "github:openai/codex-plugin-cc/db52e28f4d9ded852ab3942cea316258ae4ef346";
       flake = false;
     };
+    # Impeccable design skill. Pinned to an immutable skill tag so `just update`
+    # cannot move it away from the engine record in lib/impeccable.nix (#238 D1).
+    impeccable = {
+      url = "github:pbakaus/impeccable/skill-v4.5.0";
+      flake = false;
+    };
     ui-ux-pro-max = {
       url = "github:nextlevelbuilder/ui-ux-pro-max-skill";
       flake = false;
