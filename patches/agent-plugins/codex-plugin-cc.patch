@@ -550,7 +550,7 @@ index 1954274..2097f9f 100644
 +  supervisionTimer.unref();
 +
 diff --git a/plugins/codex/scripts/codex-companion.mjs b/plugins/codex/scripts/codex-companion.mjs
-index 83df468..7e1ca90 100644
+index 83df468..80002c7 100644
 --- a/plugins/codex/scripts/codex-companion.mjs
 +++ b/plugins/codex/scripts/codex-companion.mjs
 @@ -32,2 +31,0 @@ import {
@@ -627,10 +627,14 @@ index 83df468..7e1ca90 100644
 +    throw new Error(`Read-only Codex reviewer reported file changes: ${result.touchedFiles.join(", ")}`);
 +  }
 +
-@@ -527 +535 @@ async function executeTaskRun(request) {
+@@ -516 +524,2 @@ async function executeTaskRun(request) {
+-    reasoningSummary: result.reasoningSummary
++    reasoningSummary: result.reasoningSummary,
++    runtime: result.runtime
+@@ -527 +536 @@ async function executeTaskRun(request) {
 -    jobClass: "task",
 +    jobClass: isReviewer ? "review" : "task",
-@@ -540 +548,7 @@ function buildReviewJobMetadata(reviewName, target) {
+@@ -540 +549,7 @@ function buildReviewJobMetadata(reviewName, target) {
 -function buildTaskRunMetadata({ prompt, resumeLast = false }) {
 +function buildTaskRunMetadata({ prompt, resumeLast = false, reviewOperation = null }) {
 +  if (reviewOperation !== null) {
@@ -639,30 +643,30 @@ index 83df468..7e1ca90 100644
 +      summary: shorten(prompt || "Read-only review")
 +    };
 +  }
-@@ -564 +578 @@ function getJobKindLabel(kind, jobClass) {
+@@ -564 +579 @@ function getJobKindLabel(kind, jobClass) {
 -  return jobClass === "review" ? "review" : "rescue";
 +  return REVIEW_OPERATIONS.has(kind) ? kind : jobClass === "review" ? "review" : "rescue";
-@@ -592 +606 @@ function createTrackedProgress(job, options = {}) {
+@@ -592 +607 @@ function createTrackedProgress(job, options = {}) {
 -function buildTaskJob(workspaceRoot, taskMetadata, write) {
 +function buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation = null) {
-@@ -594,2 +608,2 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+@@ -594,2 +609,2 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -    prefix: "task",
 -    kind: "task",
 +    prefix: reviewOperation === null ? "task" : "reviewer",
 +    kind: reviewOperation ?? "task",
-@@ -598 +612 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+@@ -598 +613 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -    jobClass: "task",
 +    jobClass: reviewOperation === null ? "task" : "review",
-@@ -604 +618 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
+@@ -604 +619 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
 -function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
 +function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, reviewOperation, timeoutMs, jobId }) {
-@@ -611,0 +626,2 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
+@@ -611,0 +627,2 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
 +    reviewOperation,
 +    timeoutMs,
-@@ -671 +687 @@ async function runForegroundCommand(job, runner, options = {}) {
+@@ -671 +688 @@ async function runForegroundCommand(job, runner, options = {}) {
 -function spawnDetachedTaskWorker(cwd, jobId) {
 +function spawnDetachedTaskWorker(cwd, jobId, logFile) {
-@@ -672,0 +689,10 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -672,0 +690,10 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +  // Same shape as spawnBrokerProcess. The child inherits an O_APPEND fd on the
 +  // job log, so everything it writes to fd 1/2 is appended to the file the job
 +  // record already points at via logFile — including output no application code
@@ -673,12 +677,12 @@ index 83df468..7e1ca90 100644
 +  // O_APPEND on the same inode from the same process, so the two interleave
 +  // chronologically: the last progress line, then the trail that ended it.
 +  const logFd = fs.openSync(logFile, "a");
-@@ -677 +703 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -677 +704 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 -    stdio: "ignore",
 +    stdio: ["ignore", logFd, logFd],
-@@ -680,0 +707 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -680,0 +708 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +  fs.closeSync(logFd);
-@@ -683,0 +711,35 @@ function spawnDetachedTaskWorker(cwd, jobId) {
+@@ -683,0 +712,35 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 +function resolveJobDeadline(createdAt, timeoutMs) {
 +  // The issue's definition: enqueue time + timeout, and a deadline exists only
 +  // when a timeout does. Measured from the record's own createdAt rather than a
@@ -714,7 +718,7 @@ index 83df468..7e1ca90 100644
 +  return deadline.toISOString();
 +}
 +
-@@ -688 +750,6 @@ function enqueueBackgroundTask(cwd, job, request) {
+@@ -688 +751,6 @@ function enqueueBackgroundTask(cwd, job, request) {
 -  const child = spawnDetachedTaskWorker(cwd, job.id);
 +  // Resolved before the spawn. It depends only on the record's createdAt and the
 +  // request's timeoutMs, both already known here, and anything that goes wrong
@@ -722,17 +726,17 @@ index 83df468..7e1ca90 100644
 +  // job record at all — unreachable, unreportable, and never reaped.
 +  const deadlineAt = resolveJobDeadline(job.createdAt, request.timeoutMs);
 +  const child = spawnDetachedTaskWorker(cwd, job.id, logFile);
-@@ -694,0 +762 @@ function enqueueBackgroundTask(cwd, job, request) {
+@@ -694,0 +763 @@ function enqueueBackgroundTask(cwd, job, request) {
 +    ...(deadlineAt ? { deadlineAt } : {}),
-@@ -704,2 +772,2 @@ function enqueueBackgroundTask(cwd, job, request) {
+@@ -704,2 +773,2 @@ function enqueueBackgroundTask(cwd, job, request) {
 -      title: job.title,
 -      summary: job.summary,
 +      kind: job.kind,
 +      title: job.title, summary: job.summary,
-@@ -764 +832 @@ async function handleTask(argv) {
+@@ -764 +833 @@ async function handleTask(argv) {
 -    valueOptions: ["model", "effort", "cwd", "prompt-file"],
 +    valueOptions: ["model", "effort", "cwd", "prompt-file", "timeout-ms", "reviewer"],
-@@ -782,0 +851,10 @@ async function handleTask(argv) {
+@@ -782,0 +852,10 @@ async function handleTask(argv) {
 +  const reviewOperation = normalizeReviewOperation(options.reviewer), isReviewer = reviewOperation !== null;
 +  if (isReviewer && (write || resumeLast)) {
 +    throw new Error("Reviewer jobs must be fresh and read-only.");
@@ -743,46 +747,46 @@ index 83df468..7e1ca90 100644
 +  if (timeoutMs !== null && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
 +    throw new Error("--timeout-ms must be a positive number.");
 +  }
-@@ -785 +863,2 @@ async function handleTask(argv) {
+@@ -785 +864,2 @@ async function handleTask(argv) {
 -    resumeLast
 +    resumeLast,
 +    reviewOperation
-@@ -792 +871 @@ async function handleTask(argv) {
+@@ -792 +872 @@ async function handleTask(argv) {
 -    const job = buildTaskJob(workspaceRoot, taskMetadata, write);
 +    const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation);
-@@ -799,0 +879,2 @@ async function handleTask(argv) {
+@@ -799,0 +880,2 @@ async function handleTask(argv) {
 +      reviewOperation,
 +      timeoutMs,
-@@ -807 +888 @@ async function handleTask(argv) {
+@@ -807 +889 @@ async function handleTask(argv) {
 -  const job = buildTaskJob(workspaceRoot, taskMetadata, write);
 +  const job = buildTaskJob(workspaceRoot, taskMetadata, write, reviewOperation);
-@@ -817,0 +899,2 @@ async function handleTask(argv) {
+@@ -817,0 +900,2 @@ async function handleTask(argv) {
 +        reviewOperation,
 +        timeoutMs,
-@@ -874,2 +957,3 @@ async function handleTaskWorker(argv) {
+@@ -874,2 +958,3 @@ async function handleTaskWorker(argv) {
 -    () =>
 -      executeTaskRun({
 +    () => {
 +      validateStoredReviewIdentity(storedJob, request);
 +      return executeTaskRun({
-@@ -878 +962,2 @@ async function handleTaskWorker(argv) {
+@@ -878 +963,2 @@ async function handleTaskWorker(argv) {
 -      }),
 +      });
 +    },
-@@ -937 +1022 @@ function handleTaskResumeCandidate(argv) {
+@@ -937 +1023 @@ function handleTaskResumeCandidate(argv) {
 -  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobs(workspaceRoot)));
 +  const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobsRetainingActive(workspaceRoot)));
-@@ -976 +1061,4 @@ async function handleCancel(argv) {
+@@ -976 +1062,4 @@ async function handleCancel(argv) {
 -  const interrupt = await interruptAppServerTurn(cwd, { threadId, turnId });
 +  const interrupt =
 +    job.jobClass === "review"
 +      ? { attempted: false, interrupted: false, detail: "reviewer uses an isolated direct runtime" }
 +      : await interruptAppServerTurn(cwd, { threadId, turnId });
-@@ -986,0 +1075,3 @@ async function handleCancel(argv) {
+@@ -986,0 +1076,3 @@ async function handleCancel(argv) {
 +  if (job.jobClass === "review") {
 +    cleanupReviewerRuntime(workspaceRoot, job.id);
 +  }
-@@ -1023,0 +1115,21 @@ async function handleCancel(argv) {
+@@ -1023,0 +1116,21 @@ async function handleCancel(argv) {
 +const STORED_REVIEW_OPERATION_ERROR = "Stored review operation must be plan-review or diff-review.";
 +const STORED_REVIEW_IDENTITY_ERROR = "Stored review identity must have matching kind, jobClass, and reviewOperation.";
 +
@@ -1377,7 +1381,7 @@ index 0000000..5d69509
 +  return { action: "continue", reason: null };
 +}
 diff --git a/plugins/codex/scripts/lib/codex.mjs b/plugins/codex/scripts/lib/codex.mjs
-index fead00c..aee30f2 100644
+index fead00c..5b305d7 100644
 --- a/plugins/codex/scripts/lib/codex.mjs
 +++ b/plugins/codex/scripts/lib/codex.mjs
 @@ -43 +43 @@ import { readJsonFile } from "./fs.mjs";
@@ -1385,9 +1389,13 @@ index fead00c..aee30f2 100644
 +import { BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
 @@ -45,0 +46 @@ import { binaryAvailable } from "./process.mjs";
 +import { cleanupReviewerRuntime, createReviewerRuntime } from "./runtime-home.mjs";
-@@ -561,0 +563 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
+@@ -70 +71,2 @@ function buildThreadParams(cwd, options = {}) {
+-    ephemeral: options.ephemeral ?? true
++    ephemeral: options.ephemeral ?? true,
++    ...(options.config ? { config: options.config } : {})
+@@ -561,0 +564 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
 +  let hardTimeout = null;
-@@ -605,0 +608,8 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
+@@ -605,0 +609,8 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
 +    if (Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
 +      const timeout = new Promise((_, reject) => {
 +        hardTimeout = setTimeout(() => {
@@ -1396,11 +1404,11 @@ index fead00c..aee30f2 100644
 +      });
 +      return await Promise.race([state.completion, timeout]);
 +    }
-@@ -607,0 +618,3 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
+@@ -607,0 +619,3 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
 +    if (hardTimeout) {
 +      clearTimeout(hardTimeout);
 +    }
-@@ -613,23 +626,4 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
+@@ -613,23 +627,4 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
 -async function withAppServer(cwd, fn) {
 -  let client = null;
 -  try {
@@ -1428,55 +1436,69 @@ index fead00c..aee30f2 100644
 +  if (options.reviewerJobId) {
 +    const runtime = createReviewerRuntime(cwd, options.reviewerJobId, { env: options.env });
 +    let client = null;
-@@ -637 +631,5 @@ async function withAppServer(cwd, fn) {
+@@ -637 +632,5 @@ async function withAppServer(cwd, fn) {
 -      return await fn(directClient);
 +      client = await CodexAppServerClient.connect(cwd, {
 +        disableBroker: true,
 +        env: runtime.env
 +      });
 +      return await fn(client);
-@@ -639 +637,2 @@ async function withAppServer(cwd, fn) {
+@@ -639 +638,2 @@ async function withAppServer(cwd, fn) {
 -      await directClient.close();
 +      await client?.close().catch(() => {});
 +      cleanupReviewerRuntime(cwd, options.reviewerJobId);
-@@ -642 +640,0 @@ async function withAppServer(cwd, fn) {
+@@ -642 +641,0 @@ async function withAppServer(cwd, fn) {
 -}
-@@ -644,2 +642 @@ async function withAppServer(cwd, fn) {
+@@ -644,2 +643 @@ async function withAppServer(cwd, fn) {
 -async function withDirectAppServer(cwd, fn) {
 -  const client = await CodexAppServerClient.connect(cwd, { disableBroker: true });
 +  let client = null;
-@@ -646,0 +644 @@ async function withDirectAppServer(cwd, fn) {
+@@ -646,0 +645 @@ async function withDirectAppServer(cwd, fn) {
 +    client = await CodexAppServerClient.connect(cwd, { env: options.env });
-@@ -649 +647 @@ async function withDirectAppServer(cwd, fn) {
+@@ -649 +648 @@ async function withDirectAppServer(cwd, fn) {
 -    await client.close();
 +    await client?.close().catch(() => {});
-@@ -661,2 +659,2 @@ function sourceContentSha256(sourcePath) {
+@@ -661,2 +660,2 @@ function sourceContentSha256(sourcePath) {
 -function importedThreadIdForSource(sourcePath) {
 -  const ledgerPath = path.join(resolveCodexHome(), "external_agent_session_imports.json");
 +function importedThreadIdForSource(sourcePath, codexHome = resolveCodexHome()) {
 +  const ledgerPath = path.join(codexHome, "external_agent_session_imports.json");
-@@ -942,4 +940 @@ export async function getCodexAuthStatus(cwd, options = {}) {
+@@ -942,4 +941 @@ export async function getCodexAuthStatus(cwd, options = {}) {
 -    client = await CodexAppServerClient.connect(cwd, {
 -      env: options.env,
 -      reuseExistingBroker: true
 -    });
 +    client = await CodexAppServerClient.connect(cwd, { env: options.env });
-@@ -1055 +1050 @@ export async function runAppServerReview(cwd, options = {}) {
+@@ -1055 +1051 @@ export async function runAppServerReview(cwd, options = {}) {
 -  });
 +  }, { reviewerJobId: options.reviewerJobId, env: options.env });
-@@ -1067 +1062 @@ export async function importExternalAgentSession(cwd, options = {}) {
+@@ -1067 +1063 @@ export async function importExternalAgentSession(cwd, options = {}) {
 -  return withDirectAppServer(cwd, async (client) => {
 +  return withAppServer(cwd, async (client) => {
-@@ -1080 +1075,4 @@ export async function importExternalAgentSession(cwd, options = {}) {
+@@ -1080 +1076,4 @@ export async function importExternalAgentSession(cwd, options = {}) {
 -    const threadId = importedThreadIdForSource(options.sourcePath);
 +    const threadId = importedThreadIdForSource(
 +      options.sourcePath,
 +      loadBrokerSession(cwd)?.codexHome ?? resolveCodexHome()
 +    );
-@@ -1143 +1141 @@ export async function runAppServerTurn(cwd, options = {}) {
+@@ -1102,0 +1102 @@ export async function runAppServerTurn(cwd, options = {}) {
++    let runtime;
+@@ -1111,0 +1112 @@ export async function runAppServerTurn(cwd, options = {}) {
++      runtime = { model: response.model ?? null, reasoningEffort: response.reasoningEffort ?? null };
+@@ -1118 +1119,2 @@ export async function runAppServerTurn(cwd, options = {}) {
+-        threadName: options.persistThread ? options.threadName : options.threadName ?? null
++        threadName: options.persistThread ? options.threadName : options.threadName ?? null,
++        config: options.effort ? { model_reasoning_effort: options.effort } : null
+@@ -1120,0 +1123 @@ export async function runAppServerTurn(cwd, options = {}) {
++      runtime = { model: response.model ?? null, reasoningEffort: response.reasoningEffort ?? null };
+@@ -1143 +1146 @@ export async function runAppServerTurn(cwd, options = {}) {
 -      { onProgress: options.onProgress }
 +      { onProgress: options.onProgress, timeoutMs: options.timeoutMs }
-@@ -1159 +1157 @@ export async function runAppServerTurn(cwd, options = {}) {
+@@ -1157 +1160,2 @@ export async function runAppServerTurn(cwd, options = {}) {
+-      commandExecutions: turnState.commandExecutions
++      commandExecutions: turnState.commandExecutions,
++      runtime
+@@ -1159 +1163 @@ export async function runAppServerTurn(cwd, options = {}) {
 -  });
 +  }, { reviewerJobId: options.reviewerJobId, env: options.env });
 diff --git a/plugins/codex/scripts/lib/git.mjs b/plugins/codex/scripts/lib/git.mjs
@@ -3489,7 +3511,7 @@ index c34b060..71664da 100644
 @@ -223 +305,0 @@ test("setup command can offer Codex install and still points users to codex logi
 -  assert.match(readme, /\/codex:setup --enable-review-gate/);
 diff --git a/tests/fake-codex-fixture.mjs b/tests/fake-codex-fixture.mjs
-index f83c96a..6920c62 100644
+index f83c96a..a8ea1dc 100644
 --- a/tests/fake-codex-fixture.mjs
 +++ b/tests/fake-codex-fixture.mjs
 @@ -274,0 +275,2 @@ bootState.appServerStarts = (bootState.appServerStarts || 0) + 1;
@@ -3498,6 +3520,9 @@ index f83c96a..6920c62 100644
 @@ -314,0 +317,2 @@ rl.on("line", (line) => {
 +        state.lastThreadStart = message.params;
 +        saveState(state);
+@@ -316 +320 @@ rl.on("line", (line) => {
+-        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
++        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: message.params.config?.model_reasoning_effort ?? null } });
 diff --git a/tests/git.test.mjs b/tests/git.test.mjs
 index 5b5c266..11b94e3 100644
 --- a/tests/git.test.mjs
@@ -4056,10 +4081,10 @@ index ab68038..4217fce 100644
 +});
 diff --git a/tests/reviewer-detach.test.mjs b/tests/reviewer-detach.test.mjs
 new file mode 100644
-index 0000000..25152d2
+index 0000000..efcb118
 --- /dev/null
 +++ b/tests/reviewer-detach.test.mjs
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,311 @@
 +import fs from "node:fs";
 +import path from "node:path";
 +import test from "node:test";
@@ -4325,6 +4350,52 @@ index 0000000..25152d2
 +    assert.equal(fs.existsSync(resolveReviewerRuntimeHome(repo, jobId)), false);
 +  });
 +}
++
++for (const operation of ["plan-review", "diff-review"]) {
++  test(`a foreground ${operation} takes its stdin packet as the prompt and reports the runtime selection`, () => {
++    const repo = makeReviewRepo();
++    const binDir = makeTempDir();
++    const canonicalHome = makeCanonicalHome();
++    installFakeCodex(binDir);
++    const env = { ...buildEnv(binDir), CODEX_HOME: canonicalHome };
++    const packet = `# ${operation} packet\nRead the artifact at HEAD and report findings.\n`;
++
++    const ran = run(
++      "node",
++      [SCRIPT, "task", "--fresh", "--reviewer", operation,
++        "--model", "gpt-6-astra", "--effort", "xhigh", "--cwd", repo, "--json"],
++      { cwd: repo, env, input: packet }
++    );
++    assert.equal(ran.status, 0, ran.stderr);
++    const payload = JSON.parse(ran.stdout);
++    assert.equal(payload.status, 0);
++    assert.deepEqual(payload.touchedFiles, []);
++    assert.deepEqual(payload.runtime, { model: "gpt-6-astra", reasoningEffort: "xhigh" });
++    assert.equal(payload.rawOutput, "Handled the requested task.\nTask prompt accepted.");
++
++    const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
++    // The packet, not an argument tail, is the thread's first prompt.
++    assert.equal(fakeState.lastTurnStart.prompt, packet.trim());
++    assert.deepEqual(fakeState.lastThreadStart.config, { model_reasoning_effort: "xhigh" });
++  });
++}
++
++test("a task with no requested effort sends no thread config and reports the runtime as returned", () => {
++  const repo = makeReviewRepo();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++
++  const ran = run("node", [SCRIPT, "task", "--json", "investigate the failing test"], {
++    cwd: repo,
++    env: buildEnv(binDir)
++  });
++  assert.equal(ran.status, 0, ran.stderr);
++  const payload = JSON.parse(ran.stdout);
++  assert.deepEqual(payload.runtime, { model: "gpt-5.4", reasoningEffort: null });
++
++  const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
++  assert.equal(Object.hasOwn(fakeState.lastThreadStart, "config"), false);
++});
 diff --git a/tests/runtime.test.mjs b/tests/runtime.test.mjs
 index 8f27683..692054c 100644
 --- a/tests/runtime.test.mjs

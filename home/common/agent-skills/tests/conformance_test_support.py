@@ -35,7 +35,7 @@ from agent_tools import conformance
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-STUB_TOOLS = ("codex", "gh", "git", "just")
+STUB_TOOLS = ("codex-companion", "gh", "git", "just")
 
 
 def make_stub_bin(directory: Path, exits: dict | None = None) -> str:
