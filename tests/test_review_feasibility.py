@@ -179,6 +179,8 @@ class SharedPackingPolicyTest(unittest.TestCase):
 
 class SourceProjectionFixture:
     """All command fixtures use actual Git objects and source subprocesses."""
+    plan_stem = 'all'
+
     def setUp(self):
         self.scratch = tempfile.TemporaryDirectory()
         self.addCleanup(self.scratch.cleanup)
@@ -206,6 +208,8 @@ class SourceProjectionFixture:
         self.tasks = [dict(schema_version=3, kind='review-feasibility-task', task=dict(
             id=n, commit_subject_bytes=[], actual_ranges=[], records=[])) for n in (1, 2)]
         row = BoundaryTreeTest().row('all', None, [1, 2])
+        row['process_package'] = dict(spec=self.plan_stem + '-spec.md', plan=self.plan_stem + '.md',
+            tasks=[f'{self.plan_stem}.tasks/task-{n}.md' for n in (1, 2)])
         self.delivery = dict(schema_version=3, kind='review-feasibility-delivery', delivery_base=self.base,
             proposed_boundary='all', boundaries=[row], process_records=[], derived_from=None,
             actual_evidence=dict(kind='git-range-ownership/v1', head=self.base,
@@ -243,12 +247,14 @@ class SourceProjectionFixture:
 
     def emit(self):
         canonical = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
-        self.write('all-spec.md', '# Spec\n')
-        self.write('all.md', '# Plan\n\n## Task index\n\n' + '\n'.join(
-            f'Task {n} — Case — shared.txt — full — [task-{n}.md](all.tasks/task-{n}.md)' for n in (1, 2))
+        stem = self.plan_stem
+        self.write(stem + '-spec.md', '# Spec\n')
+        self.write(stem + '.md', '# Plan\n\n## Task index\n\n' + '\n'.join(
+            f'Task {n} — Case — shared.txt — full — [task-{n}.md]({stem}.tasks/task-{n}.md)'
+            for n in range(1, len(self.tasks) + 1))
             + '\n\n## Review feasibility delivery\n\n```json\n' + canonical(self.delivery) + '\n```\n')
         for n, block in enumerate(self.tasks, 1):
-            self.write(f'all.tasks/task-{n}.md', f'# Task {n}\n\n## Review feasibility task\n\n```json\n'
+            self.write(f'{stem}.tasks/task-{n}.md', f'# Task {n}\n\n## Review feasibility task\n\n```json\n'
                        + canonical(block) + '\n```\n')
 
     def checkpoint(self):
@@ -260,12 +266,12 @@ class SourceProjectionFixture:
         self.emit()
         return self.commit('checkpoint')
 
-    def invoke(self, *args, input=None):
+    def invoke(self, *args, input=None, timeout=None):
         return subprocess.run([sys.executable, '-m', 'agent_tools.review_feasibility', *args],
-            cwd=self.repo, env=self.env, input=input, capture_output=True)
+            cwd=self.repo, env=self.env, input=input, capture_output=True, timeout=timeout)
 
     def project(self, completed=2, package='review.json', **overrides):
-        args = dict(plan=str(self.repo / 'all.md'), base=self.base, head=self.head,
+        args = dict(plan=str(self.repo / (self.plan_stem + '.md')), base=self.base, head=self.head,
                     completed_through=str(completed), package_name=package)
         args.update(overrides)
         return self.invoke('project', *(part for key, value in args.items() for part in ('--' + key.replace('_', '-'), str(value))))
@@ -273,7 +279,7 @@ class SourceProjectionFixture:
     def actual(self, directory=None):
         out = (directory or self.top) / 'review.json'
         result = subprocess.run([sys.executable, '-m', 'agent_tools.review_package',
-            str(self.repo / 'all.md'), self.base, self.head, str(out)], cwd=self.repo,
+            str(self.repo / (self.plan_stem + '.md')), self.base, self.head, str(out)], cwd=self.repo,
             env=self.env, capture_output=True)
         self.assertIn(result.returncode, (0, 3), result.stderr)
         checked = subprocess.run(['artifact-budget', 'check', '--kind', 'review-package', '--root', str(out),
@@ -483,6 +489,12 @@ class SourceProjectionTest(SourceProjectionFixture, unittest.TestCase):
         linked = self.top / 'linked'; linked.symlink_to(oversized)
         self.assert_refused(self.invoke('validate-result', '--input', str(linked), '--producer-exit', '0'))
 
+    def test_validate_result_refuses_fifo_input_without_blocking(self):
+        fifo = self.top / 'result.fifo'
+        os.mkfifo(fifo)
+        # No writer ever opens the FIFO: a blocking open would hang until the timeout.
+        self.assert_refused(self.invoke('validate-result', '--input', str(fifo), '--producer-exit', '0', timeout=20))
+
     def test_default_package_identity_and_changed_forecast_identity(self):
         result = self.invoke('project', '--plan', str(self.repo / 'all.md'), '--base', self.base,
             '--head', self.head, '--completed-through', '2')
@@ -524,6 +536,17 @@ class SourceProjectionTest(SourceProjectionFixture, unittest.TestCase):
         unavailable = self.project(1)
         self.assert_refused(unavailable)
         self.assertIn(b'projection_unavailable', unavailable.stderr)
+
+
+class NonAsciiPlanTest(SourceProjectionFixture, unittest.TestCase):
+    plan_stem = 'café'
+
+    def test_non_ascii_plan_members_match_complete_index(self):
+        self.write('product.txt', 'product\n'); self.commit('product', 1)
+        self.checkpoint()
+        result = self.project()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['metrics'], self.actual()[0])
 
 
 class GraphRefusalTest(BoundaryTreeTest):
@@ -672,6 +695,41 @@ class ReconstructionTest(SourceProjectionFixture, unittest.TestCase):
         self.assert_refused(result)
         self.assertIn(b'projection_unavailable', result.stderr)
         self.assertIn(b'excluded effects', result.stderr)
+
+    def test_recommendation_proves_completed_deletion_in_candidate_tree(self):
+        # Task 1 adds then deletes a transient path; excluded task 3 recreates it.
+        self.tasks.append(dict(schema_version=3, kind='review-feasibility-task', task=dict(
+            id=3, commit_subject_bytes=[], actual_ranges=[], records=[])))
+        root = BoundaryTreeTest().row('all', None, [1, 2, 3])
+        root['process_commit_subject_bytes'] = [120] * 30
+        front = BoundaryTreeTest().row('front', 'all', [1, 2])
+        back = BoundaryTreeTest().row('back', 'all', [3])
+        self.delivery['boundaries'] = [root, front, back]
+        self.delivery['process_records'] = []
+        for boundary in (root, front, back):
+            if boundary is not root:
+                boundary['process_commit_subject_bytes'] = [120]
+            package = boundary['process_package']
+            for index, path in enumerate([package['spec'], package['plan'], *package['tasks']]):
+                record = self.record(boundary['process_forecast_ids'][index], 0, path)
+                record['bounds'][0]['boundary'] = boundary['id']
+                self.delivery['process_records'].append(record)
+        deleted = self.record('transient-deleted', 1, 'transient', change='delete', horizon=1)
+        deleted['bounds'].append(dict(deleted['bounds'][0], boundary='front'))
+        self.tasks[0]['task']['records'] = [deleted]
+        self.emit()
+        self.base = self.commit('three task delivery')
+        self.delivery['delivery_base'] = self.base
+        self.ranges.clear()
+        self.write('transient', 'short lived\n'); self.commit('add transient', 1)
+        (self.repo / 'transient').unlink(); self.commit('delete transient', 1)
+        self.write('transient', 'recreated later\n'); self.commit('excluded task recreates transient', 3)
+        self.checkpoint()
+        result = self.project(1)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        recommendation = json.loads(result.stdout)['recommended_boundary']
+        self.assertEqual(recommendation['id'], 'front')
+        self.assertEqual(recommendation['actual_tree'], self.git('rev-parse', self.base + '^{tree}'))
 
     def test_independent_effects_excluded_dependencies_and_duplicate_commits(self):
         from agent_tools.review_projection import reconstruct_owned

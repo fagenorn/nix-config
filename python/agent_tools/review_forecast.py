@@ -204,7 +204,8 @@ def read_regular(repo: Path, relative: str, limit: int | None = None) -> bytes:
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = child
-        child = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+        # Non-blocking so a FIFO or device is refused below instead of hanging the open.
+        child = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
         try:
             before = os.fstat(child)
             if not stat.S_ISREG(before.st_mode):
@@ -543,7 +544,10 @@ def load_plan(repo: Path, plan: Path, base: str, head: str, authority: BudgetAut
     if count < 1:
         raise ForecastError("missing indexed tasks")
     paths = [relative, *(str(PurePosixPath(relative).with_suffix(".tasks") / f"task-{i}.md") for i in range(1, count + 1))]
-    committed_members = _run_git(repo, "ls-tree", "-r", "--name-only", head, "--", str(PurePosixPath(relative).with_suffix(".tasks"))).splitlines()
+    # NUL-terminated names are unquoted, so non-ASCII member paths compare as UTF-8.
+    listed = _run_git(repo, "ls-tree", "-r", "-z", "--name-only", head, "--",
+                      str(PurePosixPath(relative).with_suffix(".tasks")), binary=True)
+    committed_members = [member.decode("utf-8") for member in listed.split(b"\0")[:-1]]
     if set(committed_members) != set(paths[1:]):
         raise ForecastError("committed member set differs from complete index")
     package = [{"path": relative, "raw_sha256": raw_digest(raw)}]

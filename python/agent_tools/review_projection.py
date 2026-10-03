@@ -136,7 +136,7 @@ def _included(plan: ForecastPlan, boundary: dict) -> tuple[dict, ...]:
 
 
 def _completed_effects(plan: ForecastPlan, records: tuple[dict, ...], boundary: dict,
-                       completed: int, actual: CandidateInput) -> None:
+                       completed: int, actual: CandidateInput, candidate: tuple[Path, str]) -> None:
     paths = {r.path for r in actual.records}
     for record in records:
         if record["last_task"] > completed:
@@ -150,14 +150,15 @@ def _completed_effects(plan: ForecastPlan, records: tuple[dict, ...], boundary: 
         if record["path"] not in paths:
             if record["change"] != "delete" or not any(r["operation"] == "D" for r in effects):
                 raise ForecastError("completed contribution has no final actual effect")
-            if tree_entry(plan.repo, plan.head, record["path"]) is not None:
+            # Absence is proven in the candidate's own tree, never the full delivery head.
+            if tree_entry(*candidate, record["path"]) is not None:
                 raise ForecastError("completed deletion is not proven absent")
 
 
 def _project_input(plan: ForecastPlan, boundary: dict, completed: int,
-                   actual: CandidateInput) -> CandidateInput:
+                   actual: CandidateInput, candidate: tuple[Path, str]) -> CandidateInput:
     records = _included(plan, boundary)
-    _completed_effects(plan, records, boundary, completed, actual)
+    _completed_effects(plan, records, boundary, completed, actual, candidate)
     latest = {}
     for record in records:
         latest[record["path"]] = record
@@ -256,7 +257,9 @@ def _recommend(plan: ForecastPlan, completed: int, package_name: str,
                 base=prerequisite, head=source_head, commits=rebuilt.commits,
                 package_name=package_name, limits=authority.limits)
             candidate = select_candidate(inputs, authority.limits,
-                transform=lambda item: _project_input(plan, boundary, completed, item), measurement_only=True)
+                transform=lambda item: _project_input(plan, boundary, completed, item,
+                                                     (rebuilt.repo, rebuilt.result_tree)),
+                measurement_only=True)
             if candidate.status != "within_budget":
                 continue
             row = {"id": boundary["id"], "tasks": boundary["tasks"], "prerequisite_commit": prerequisite,
@@ -293,7 +296,7 @@ def project(repo: Path, plan: Path, base: str, head: str, completed_through: int
     projected_count = 0
     def transform(item: CandidateInput) -> CandidateInput:
         nonlocal actual_count, projected_count
-        projected = _project_input(forecast, boundary, completed_through, item)
+        projected = _project_input(forecast, boundary, completed_through, item, (forecast.repo, head))
         actual_count, projected_count = len(item.records), len(projected.records)
         return projected
     candidate = select_candidate(actual_inputs(repo, base, head, package_name, authority.limits),
