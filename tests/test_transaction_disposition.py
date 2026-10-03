@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import unittest
+import unittest.mock
 
 from agent_tools import (
     transaction_core, transaction_disposition, transaction_history, transaction_receipt,
@@ -20,6 +21,7 @@ from agent_tools.transaction_core import (
 from .test_transaction_custody import (
     AUTHORITY, EMPTY_PROOF, EMPTY_RECOVERY, KEYS, PATH, SUBJECT, T0, TTL, CustodyCase, plain,
     serialize)
+from .test_transaction_invocation import FakeEffect
 from .test_transaction_receipt import Sealed
 from .test_transaction_recovery import RecoveryCase
 from .test_transaction_recovery_plan import RECOVERY
@@ -326,6 +328,41 @@ class DisposeTest(DisposeCase):
         receipt = self.assertSealed(after, "failed", qualifier="final_state_known")
         self.assertEqual(receipt["outcome_proof"]["successor_receipt"],
                          finished.terminal["receipt_digest"])
+
+    def test_the_successor_named_at_entry_is_the_one_whose_success_is_cited(self):
+        self.parked()
+        self.grant()
+        first, second = (self.store.roll_forward(
+            self.custody, grant_id="g-1", reason="unit_not_restorable", creation_key=key,
+            subject={**SUBJECT, "candidate": "sha256:def"}, concurrency_keys=(f"target:{key}",),
+            proof=EMPTY_PROOF, recovery=EMPTY_RECOVERY, authority_class=AUTHORITY
+        ).transaction_id for key in ("first", "second"))
+        finished = self.succeeded(first)
+        disposition = self.disposition("successor_succeeded", successor=first)
+        real_load = self.store.load
+
+        def load_then_rename(transaction_id):
+            loaded = real_load(transaction_id)
+            disposition["successor"] = second
+            return loaded
+
+        with unittest.mock.patch.object(self.store, "load", load_then_rename):
+            after = self.dispose(disposition=disposition)
+        disposed = next(dict(e) for e in after.events if e["type"] == "failure_disposed")
+        self.assertEqual((disposed["successor"], disposed["successor_receipt"]),
+                         (first, finished.terminal["receipt_digest"]))
+
+    def test_an_unknown_action_no_unit_can_name_is_uncertain_under_every_ground(self):
+        self.published()
+        self.to("published", "activating")
+        self.run_action("start", {"n": 2}, "unknown")
+        self.store.inspect_action(self.custody, name="pin", parameters={"n": 3},
+                                  effect=FakeEffect(self.world, inspect_outcome="unknown"))
+        self.to("attention_required")
+        self.human()
+        error = self.declined("effect_uncertain", lambda: self.dispose(
+            "h-1", disposition=self.unobservable()))
+        self.assertIn(self.act("pin", n=3), str(error))
 
     def test_hand_edited_dispositions_are_state_invalid(self):
         self.parked()

@@ -2,18 +2,16 @@
 
 `TransactionStore(root, clock=...)` holds caller-rooted transactions under an absolute,
 pre-existing root, each in one `<id>/state.json`; every event `at` is read from the injected
-clock (integer epoch milliseconds), transaction ids from the wall clock. Each sibling module
-documents what it owns, and this module re-exports its public names:
-`agent_tools.transaction_history` the `transaction-state/v6` document model, its one
-validating walk and the snapshot fold; `transaction_disposition` the `failed`
-disposition's grounds, refusals and rules; `transaction_recovery` recovery's admission,
-decisions and rules; `transaction_recovery_plan` the recovery plan; `transaction_proof` the
-proof's collection, cohorts and settlement; `transaction_plan` the proof plan;
-`transaction_invocation` the action protocol and retry budget; `transaction_custody` the
-lease authority and admissibility; `transaction_receipt` the receipts, hazard markers and
-post-terminal observations behind `read_receipt`, `hazard_markers`, `record_post_terminal`
-and `post_terminal_observations`; `transaction_storage` the durable-file primitives and the
-refusal classes. The store adds the locks, the clock, the
+clock (integer epoch milliseconds), transaction ids from the wall clock. This module
+re-exports each sibling module's public names: `agent_tools.transaction_history` the
+`transaction-state/v6` document model, its one validating walk and the snapshot fold;
+`transaction_disposition` the `failed` disposition's grounds, refusals and rules;
+`transaction_recovery` recovery's admission, decisions and rules; `transaction_recovery_plan`
+the recovery plan; `transaction_proof` the proof's collection, cohorts and settlement;
+`transaction_plan` the proof plan; `transaction_invocation` the action protocol and retry
+budget; `transaction_custody` the lease authority and admissibility; `transaction_receipt`
+the receipts, hazard markers and post-terminal observations; `transaction_storage` the
+durable-file primitives and the refusal classes. The store adds the locks, the clock, the
 fenced check and the writes. No command and no caller until #125.
 """
 
@@ -883,15 +881,19 @@ class TransactionStore:
                        disposition: Any) -> Transaction:
         """Enter `failed` in one write under `grant_id`: `failure_events`, refusing with
         `failure_refusal`'s first reason (#209 D8, D9, D21, D26). A malformed credential or
-        `grant_id` refuses before any lock; with no lock held, a `successor` id is loaded,
-        its receipt verified, as `{state, receipt_digest}`, or None for no such transaction."""
+        `grant_id` refuses before any lock. A JSON `disposition` is copied once; with no
+        lock held, the copy's `successor` id is loaded, its receipt verified, as
+        `{transaction_id, state, receipt_digest}`, or None for no such transaction."""
         require_texts(custody, "dispose_failed", grant_id=grant_id)
         successor = None
-        if type(disposition) is dict and is_id(disposition.get("successor")):
-            with contextlib.suppress(UnknownTransaction):
-                child = self.load(disposition["successor"])
-                successor = {"state": child.state, "receipt_digest": None
-                             if child.terminal is None else child.terminal["receipt_digest"]}
+        if json_object_violation(disposition) is None:
+            disposition = copy.deepcopy(disposition)
+            if is_id(disposition.get("successor")):
+                with contextlib.suppress(UnknownTransaction):
+                    child = self.load(disposition["successor"])
+                    successor = {"transaction_id": child.transaction_id, "state": child.state,
+                                 "receipt_digest": None if child.terminal is None
+                                 else child.terminal["receipt_digest"]}
         return self._decide(custody, "dispose_failed", lambda prior, now: failure_events(
             prior, now, grant_id, disposition, successor))
 

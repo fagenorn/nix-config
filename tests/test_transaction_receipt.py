@@ -14,7 +14,8 @@ from agent_tools import transaction_core, transaction_receipt, transaction_stora
 from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_core import RECEIPT_SCHEMA, ReceiptInvalid, StateInvalid
 
-from .test_transaction_custody import AUTHORITY, KEYS, PATH, SUBJECT, TTL, CustodyCase, plain, serialize
+from .test_transaction_custody import (
+    AUTHORITY, KEYS, PATH, SUBJECT, TTL, CustodyCase, plain, serialize)
 from .test_transaction_invocation import FakeEffect, FakeWorld
 from .test_transaction_proof import CohortCase, Observer
 from .test_transaction_recovery_plan import inert_recovery
@@ -200,6 +201,14 @@ class AbandonedReceiptTest(Sealed, CustodyCase):
         for digest in ("sha256:" + "0" * 64, "sha256:XYZ", "nope", 7):
             with self.subTest(digest=digest), self.assertRaises(ReceiptInvalid):
                 self.store.read_receipt(digest)
+
+    @unittest.skipIf(os.geteuid() == 0, "root searches any directory")
+    def test_an_unsearchable_store_root_is_receipt_invalid_on_read(self):
+        os.chmod(self.root, 0o600)
+        self.addCleanup(os.chmod, self.root, 0o700)
+        with self.assertRaises(ReceiptInvalid) as caught:
+            self.store.read_receipt("sha256:" + "0" * 64)
+        self.assertIn("receipts", str(caught.exception))
 
     def test_the_receipt_names_are_re_exported(self):
         self.assertEqual(RECEIPT_SCHEMA, "transaction-terminal-receipt/v1")

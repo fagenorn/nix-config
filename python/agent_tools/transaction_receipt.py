@@ -292,14 +292,14 @@ class ReceiptStore:
     def read(self, digest: Any) -> Mapping[str, Any]:
         """The receipt `digest` names, a read-only view over its strict parse (D7, D20).
 
-        Refused for a malformed digest, a missing, non-regular or unparseable file, bytes
-        other than `serialize` of the parse, a parse whose digest is not `digest`, or
-        another schema.
+        Refused for a malformed digest, a missing, non-directory or unreadable `receipts`
+        directory, a missing, non-regular or unparseable file, bytes other than `serialize`
+        of the parse, a parse whose digest is not `digest`, or another schema.
         """
         path = self._path(digest)
         try:
             require_directory(path.parent, missing_ok=False)
-        except StateInvalid as error:
+        except (OSError, StateInvalid) as error:
             raise receipt_invalid(str(path), f"receipts directory refused ({error})") from error
         raw = self._bytes(path)
         try:

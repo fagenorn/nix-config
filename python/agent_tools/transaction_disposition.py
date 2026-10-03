@@ -19,11 +19,12 @@ possibly live), `action_effects` verbatim and the held fence, and precedes `atte
 `failure_event_violation` re-derives a `failure_disposed` through the same functions, without
 the clock or the successor's state, which only the writer reads. `terminal_blocker` replaces
 #206 D20's unresolved-terminal rule at a terminal transition, admitting `failed` over the
-`unknown` actions an observability ground lists. `disposition_advance_violation` refuses an
-`advance` into `failed` or with the reserved reason, and `disposition_pairing_violation`
-binds `failure_disposed` to the transition right after it, every transition into `failed`
-and every transition with the reserved reason to the event right before it. Every function
-here is pure: the module reads no file, lock or clock.
+`unknown` actions an observability ground lists; `effect_uncertain` refuses every other
+`unknown` one first. `disposition_advance_violation` refuses an `advance` into `failed` or
+with the reserved reason, and `disposition_pairing_violation` binds `failure_disposed` to the
+transition right after it, every transition into `failed` and every transition with the
+reserved reason to the event right before it. Every function here is pure: the module reads
+no file, lock or clock.
 """
 
 import copy
@@ -138,9 +139,12 @@ def _fresh_grant_event(events: Sequence[Mapping], grant_id: Any, fence: Any) -> 
 
 
 def _uncertain(actions: Mapping[str, ActionFold], ground: str) -> ActionFold | None:
-    blocking = ("in_progress",) if ground in OBSERVABILITY_GROUNDS else (
-        "in_progress", "unknown")
-    return next((entry for entry in actions.values() if status(entry) in blocking), None)
+    """The first action `in_progress`, or `unknown` where no unit can name it: under a
+    known-state ground, or with no effect, so `terminal_blocker` would refuse it (D21)."""
+    known = ground not in OBSERVABILITY_GROUNDS
+    return next((entry for entry in actions.values() if status(entry) == "in_progress"
+                 or status(entry) == "unknown" and (known or effect_class(entry) == "no_effect")),
+                None)
 
 
 def _exhausted_violation(actions: Mapping[str, ActionFold], units: list, held: Any,
@@ -166,10 +170,11 @@ def failure_refusal(document: dict, grant_id: Any, disposition: Any, *, now_ms: 
     any closed-shape, vocabulary or per-ground field rule (with `writer`, an observability
     `occurred_at` later than `now_ms` too); `no_effect` when no action has an effect;
     `reconciliation_required` for an action `unreconciled` names; `effect_uncertain` for an
-    action `in_progress`, or `unknown` under a known-state ground; for `successor_succeeded`,
-    `successor_not_succeeded` when the successor is not a linked child or, with `writer`,
-    `successor` (`{state, receipt_digest}`, None for no such transaction) is not a sealed
-    `succeeded`. Then, for an observability ground only: `human_required` and
+    action `in_progress`, or `unknown` under a known-state ground or with no effect (no unit
+    can name it); for `successor_succeeded`, `successor_not_succeeded` when the successor is
+    not a linked child or, with `writer`, `successor` (`{transaction_id, state,
+    receipt_digest}`, None for no such transaction) is not that child sealed `succeeded`.
+    Then, for an observability ground only: `human_required` and
     `authority_class_mismatch` for the latest such grant's `actor_kind` and `authority_class`
     against the `created` event's; `units_mismatch` unless the units are the actions with
     effect in declaration order; `inspection_not_exhausted` for a possibly-live unit whose
@@ -198,7 +203,8 @@ def failure_refusal(document: dict, grant_id: Any, disposition: Any, *, now_ms: 
     if ground == "successor_succeeded":
         child = disposition["successor"]
         if child not in recovery_view(document)["children"] or writer and (
-                successor is None or successor["state"] != "succeeded"
+                successor is None or successor["transaction_id"] != child
+                or successor["state"] != "succeeded"
                 or successor["receipt_digest"] is None):
             return "successor_not_succeeded", (f"successor {child} is not a linked child "
                                                f"sealed succeeded")
