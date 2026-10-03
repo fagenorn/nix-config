@@ -282,6 +282,22 @@ Sub-skills named here — `worktrees`, `design`, `grill-with-docs`, `writing-pla
 
 > Launch any subagent by type only, never by name: a subagent cannot spawn a named teammate, and a named launch returns an error instead of work. Read an existing file before writing to it: overwriting content you have not read destroys work you cannot see.
 
+**Writing workers.** With lifecycle identity, every agent this owner
+dispatches that may commit or write to the forge — a Phase 2–4 subagent that
+commits artifacts, sdd's writing agents (Phase 6) and the Phase-7 ship owner —
+is registered first:
+`workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`.
+Its prompt carries the printed id as the single line
+`Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>`,
+and it creates every commit through `launch-commit`. Release it with
+`--event returned` when it returns. Two dispatches are never registered:
+the fresh delegated owner, which adopts this owner's own launch, and the
+ledger-only bookkeeper, whose only job is the terminal write. A background
+worker this owner cannot wait for is first stopped through the host's
+task-stop and then released with `--event stopped`. On a host with no stop
+capability, wait for it to return. An owner that can neither wait nor stop
+must return without a terminal write and leave recovery to the dispatcher.
+
 **Artifact report boundary (D5, D6, D11, D14).** At every producer boundary,
 preserve the received stdout bytes and pipe them unchanged through
 `artifact-budget validate-report --boundary producer --input -`; only after that
@@ -391,7 +407,8 @@ as `historical_owner_result`, and empty delivery, authority, and reevaluation
 arrays. Validate the raw candidate with `artifact-budget validate-report
 --boundary ship-summary --input -` before decoding, and use only its canonical
 stdout as the summary bytes. The policy's `phase_reports.notes_max_characters`
-is authoritative. After the `check-launch` fence of this owner's own
+is authoritative. Before the terminal write, release every worker this owner
+registered (see **Writing workers**). After the `check-launch` fence of this owner's own
 `action_id`, feed those bytes on stdin as `--summary-file -` to
 `workflow-state finish` using the exact run and current time, in one command
 whose reply is validated before decoding:
@@ -427,7 +444,12 @@ rather than resolving it: an imminent quota or session limit, a repeated
 transport failure, a permission prompt only a human can approve, an external
 wait, or a context that cannot launch the agents a phase needs. A suspension
 parks the attempt without ending it — it consumes no attempt, needs no
-authorization phrase, and re-entry resumes it in place. Call:
+authorization phrase, and re-entry resumes it in place.
+
+Before suspending, release every worker this owner registered (see
+**Writing workers**): the helper refuses a suspend, a handoff `progress` or a
+`finish` that ends this launch while a registered worker is live, exiting 2
+with `live workers: <ids>` and writing nothing. Then call:
 
 ```text
 workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --issue <n> --attempt <k> --blocked-on <value> | artifact-budget validate-report --boundary workflow-response --input -

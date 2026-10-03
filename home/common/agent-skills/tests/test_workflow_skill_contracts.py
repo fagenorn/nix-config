@@ -3971,6 +3971,51 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
             "`ledger_repo_root`, `run_id` and `action_id`", "### Lifecycle workers",
             "register-worker", "## Phase 7 — Ship")
 
+    def test_from_issue_registers_writers_and_releases_before_every_exit(self):
+        text = self.read(FROM_ISSUE)
+        self.assert_ordered(
+            text, "## Dispatch, phase-budget and attempt-budget rules",
+            "**Writing workers.**", self.REGISTER, self.WORKER_LINE,
+            "the fresh delegated owner", "the ledger-only bookkeeper",
+            "--event stopped", "return without a terminal write",
+            "## Terminal return procedure", "release every worker",
+            "## Suspension procedure", "release every worker", "live workers:")
+
+    def test_auto_subagents_commit_through_launch_commit_and_the_bookkeeper_is_unregistered(self):
+        text = self.read(FROM_ISSUE_DIR / "AUTO.md")
+        self.assert_ordered(text, "Both prompts must carry", "`Lifecycle worker:` line",
+                            "launch-commit")
+        self.assert_ordered(text, "ledger-only bookkeeper route",
+                            "releases every worker it registered",
+                            "The bookkeeper is never registered")
+
+    def test_the_ship_prompt_carries_the_worker_line_outside_the_handoff(self):
+        self.assert_ordered(
+            self.read(FROM_ISSUE_DIR / "ship-handoff.md"), "## Ship-owner subagent prompt",
+            self.WORKER_LINE, "never inside the handoff")
+
+    def test_ship_issue_fences_local_commits_and_registers_its_children(self):
+        text = self.read(SHIP_ISSUE)
+        self.assert_ordered(
+            text, "## Launch guard", "### Local commits", self.COMMIT,
+            "git merge --no-commit --no-ff origin/<integration>", "--parent <worker_id>",
+            "## Phase 1 — Sync from the integration branch")
+        self.assertNotIn("Phase 3's local commits are not forge writes", text)
+        self.assertNotIn("Otherwise `git merge origin/<integration>`; commit the merge", text)
+        self.assert_ordered(text, "## Phase 1 — Sync from the integration branch",
+                            "git merge --no-commit --no-ff origin/<integration>",
+                            "Already up to date")
+        self.assert_ordered(text, "## Remainder mode", self.RELEASE, "finish")
+        self.assert_ordered(self.read(SHIP_ISSUE.parent / "CI-MERGE.md"),
+                            "## Post-selection sync", "launch-commit", "--amend --no-edit")
+        self.assert_ordered(text, "## Delivery loop", "--worker-id <worker_id>")
+
+    def test_the_remainder_prompt_releases_itself_before_its_finish(self):
+        self.assert_ordered(
+            self.read(FROM_ISSUE_DIR / "ship-handoff.md"), "## Remainder owner prompt",
+            self.WORKER_LINE, self.RELEASE,
+            "workflow-state finish --summary-file -")
+
 
 class CodebaseDesignSkillContractsTest(unittest.TestCase):
     """The vendored deep-module vocabulary package.
