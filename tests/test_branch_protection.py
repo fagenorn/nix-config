@@ -325,7 +325,7 @@ class WorkflowShape(unittest.TestCase):
         )
         body = job_body("agent-workflow-tests")
         self.assertIn("runs-on: ubuntu-24.04", body)
-        self.assertIn("timeout-minutes: 10", body)
+        self.assertIn("timeout-minutes: 45", body)
         self.assertIn("if: github.event_name != 'schedule'", body)
         self.assertNotIn("needs:", body)
         self.assertNotIn("strategy:", body)
