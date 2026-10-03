@@ -41,7 +41,9 @@ Read it before any task; it owns the design and the decision ledger.
   a signing failure rather than working around it. Every commit message ends
   with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - Run every command from the worktree root. Summarise test output to the
-  failing lines; never paste whole logs.
+  failing lines; never paste whole logs. A gate that pipes a runner into
+  `tail` starts with `set -o pipefail;` so the runner's failure is the gate's
+  (per D14).
 
 ## Test seams
 
@@ -52,7 +54,12 @@ Read it before any task; it owns the design and the decision ledger.
 - A real git repository created under the test's temporary directory serves as
   the attempt worktree (per D13).
 - Host-capacity refusals are driven through `LaunchRefusalTest` in
-  `test_host_admission.py`, which shares `LifecycleHarness` (per D13).
+  `test_host_admission.py`, which shares `LifecycleHarness` (per D13): four
+  refusal cycles through `control`, with no stall counter written by hand
+  (per D14).
+- The two probe-to-transaction re-checks are the only in-process cases: the
+  probe is wrapped so a public command lands between it and the transaction
+  (per D14).
 - Skill wording is pinned by ordered-anchor assertions over
   whitespace-normalised skill text in `test_workflow_skill_contracts.py`.
 
@@ -95,6 +102,22 @@ This plan rests on the spec's ledger: D1–D3 (verb, helper-derived marker,
 strict descendant), D4 (schema 6), D5 (reset at record time), D6–D7 (baseline
 and zero-exit no-write outcomes), D8 (probe before the lock), D9–D11, and the
 plan-phase rows D12 (how a pre-schema-6 ledger reads during `mark-progress`)
-and D13 (test seams for the git fixture and host-capacity case).
+D13 (test seams for the git fixture and host-capacity case) and D14 (unseeded
+host-capacity cycles, the launch re-check test and `pipefail` gates).
+
+## Standards review provenance
+
+Reviewer: Codex (gpt-6-astra, xhigh), isolated read-only mode, no focus, no
+fallback. Base SHA 5f865639eb669ac80ea66c50c9a20a0636fa1dde. Findings: 3
+accepted, 0 rejected, 0 deferred.
+
+- B1 (blocking, accepted): every gate that pipes a runner into `tail` now
+  sets `pipefail`; red-phase steps expect a non-zero exit.
+- S1 (should-fix, accepted): the host-capacity stall tests drive four refusal
+  cycles through `control` with no seeded counter; the seeded test is
+  replaced under its own name (Task 2).
+- S2 (should-fix, accepted): a second probe-interleaving test suspends the
+  launch before the transaction, so only the locked launch re-check can
+  refuse it (Task 2).
 
 ---

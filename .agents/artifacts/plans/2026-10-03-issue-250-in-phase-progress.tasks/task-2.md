@@ -1,7 +1,7 @@
 # Task 2: `workflow-state mark-progress` — marker rule, worktree probe and command
 
 Lane: full (lifecycle code). Decisions: per D1, D2, D3, D5, D6, D7, D8, D10,
-D12 and D13 of the spec's ledger. Read the spec's "New verb" section first; it
+D12, D13 and D14 of the spec's ledger. Read the spec's "New verb" section first; it
 owns the outcome table and this task does not restate its rationale.
 
 **Files:**
@@ -333,15 +333,18 @@ class ProgressMarkerTest(LifecycleHarness, unittest.TestCase):
              state["issues"]["16"]["attempts"][0]["progress_marker"]),
             (6, self.base))
 
-    def test_a_marker_recorded_during_the_probe_refuses_the_stale_write(self):
-        # The only in-process case (#250 D13): a second recording lands between
-        # this call's probe and its transaction, so the transaction must refuse.
-        workflow = load_source_module(SCRIPT, "workflow_state_progress_race")
+    def race(self, module_name, interleave, *, now="2026-08-13T20:09:00Z"):
+        """Run `mark-progress` in-process with `interleave()` between its probe and
+        its transaction (#250 D14); returns the exit code, stderr and the ledger
+        bytes `interleave()` left behind."""
+        workflow = load_source_module(SCRIPT, module_name)
         probe = workflow.probe_progress_head
+        left = {}
 
         def racing_probe(worktree, marker):
             observed = probe(worktree, marker)
-            self.mark()
+            interleave()
+            left["bytes"] = self.state_path.read_bytes()
             return observed
 
         stderr = io.StringIO()
@@ -349,53 +352,108 @@ class ProgressMarkerTest(LifecycleHarness, unittest.TestCase):
                 contextlib.redirect_stderr(stderr):
             code = workflow.main([
                 "mark-progress", "--repo-root", str(self.root), "--run-id",
-                self.run_id, "--now", "2026-08-13T20:09:00Z", "--action-id", "16:1:1"])
-        self.assertEqual(code, 2)
+                self.run_id, "--now", now, "--action-id", "16:1:1"])
+        return code, stderr.getvalue(), left["bytes"]
+
+    def test_a_marker_recorded_during_the_probe_refuses_the_stale_write(self):
+        # A second recording lands between this call's probe and its transaction.
+        code, stderr, left = self.race("workflow_state_progress_marker_race", self.mark)
+        self.assertEqual((code, self.state_path.read_bytes()), (2, left))
         self.assertIn("mark-progress refused: the attempt changed during the probe",
-                      stderr.getvalue())
+                      stderr)
         self.assertEqual(self.attempt()["progress_marker"], self.base)
+
+    def test_a_launch_suspended_during_the_probe_refuses_the_stale_write(self):
+        # The marker and worktree still match what the probe used, and the new
+        # commit would be `advanced`; only the locked launch re-check can refuse.
+        self.mark()
+        self.commit(self.worktree)
+        code, stderr, left = self.race("workflow_state_progress_launch_race", self.park)
+        self.assertEqual((code, self.state_path.read_bytes()), (2, left))
+        self.assertIn("mark-progress refused: launch 16:1:1 is inactive_attempt", stderr)
+        attempt = self.attempt()
+        self.assertEqual(
+            (attempt["state"], attempt["progress_marker"], attempt["suspend_phase"]),
+            ("suspended", self.base, 0))
 ```
 
-Append to `LaunchRefusalTest` in
-`home/common/agent-skills/tests/test_host_admission.py`, directly after
-`test_the_anti_zombie_bound_ends_a_launch_that_keeps_being_refused` (which is
-the unchanged no-marker counterpart and must stay green):
+In `home/common/agent-skills/tests/test_host_admission.py`, class
+`LaunchRefusalTest`: **replace** the existing
+`test_the_anti_zombie_bound_ends_a_launch_that_keeps_being_refused`, which
+seeds `stalled_resumes = 2` into the state file, with the helper and two tests
+below. They drive every host-capacity suspension through `control` and seed
+nothing (per D14): each refusal of issue 14's launch is followed by a public
+`suspend` of issue 12, the claim release that lets the next sweep resume 14
+(and 12 with it). The no-marker test already passes at this task's starting
+commit — it re-proves existing behaviour through public commands; the marker
+test is the one that fails until Step 4.
 
 ```python
-    def test_an_advanced_marker_spares_a_launch_that_is_refused_again(self):
-        """#250: the host-capacity path honours the reset `mark-progress` wrote."""
+    def refusal_cycles(self, between=lambda launch: None):
+        """Refuse 14's launches 1–3 through control, releasing 12's claim after each
+        so the next sweep resumes 14, then refuse launch 4 and return that sweep.
+
+        `between(launch)` runs while that launch of 14 is active. Nothing is
+        written into the state file by hand (#250 D14).
+        """
         self.admitted_pair()
+        for launch in (1, 2, 3):
+            minute = 3 * launch
+            between(launch)
+            parked = self.sweep(f"2026-08-13T20:{minute:02d}:00Z", recorded=(12, 14),
+                                owners=[self.refused(14, launch)])
+            self.assertEqual(
+                (self.summary(parked, 14)["state"], self.summary(parked, 14)["blocked_on"]),
+                ("suspended", "host_capacity"))
+            self.suspend(issue=12, attempt=1, blocked_on="usage_limit",
+                         now=f"2026-08-13T20:{minute + 1:02d}:00Z")
+            woken = self.sweep(f"2026-08-13T20:{minute + 2:02d}:00Z", recorded=(12, 14))
+            self.assertIn(("resume", 14), self.kinds(woken))
+        between(4)
+        return self.sweep("2026-08-13T20:12:00Z", recorded=(12, 14),
+                          owners=[self.refused(14, 4)])
+
+    def test_the_anti_zombie_bound_ends_a_launch_that_keeps_being_refused(self):
+        final = self.refusal_cycles()
+        self.assertEqual(self.summary(final, 14)["state"], "stopped")
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual(
+            (attempt["state"], attempt["result_source"], len(attempt["launches"])),
+            ("stopped", "stalled", 4))
+        self.assertEqual(self.claims()["14:1:4"]["release_event"], "finished")
+        self.assertFalse(any(a.get("issue") == 14 for a in final["actions"]))
+
+    def test_new_commits_between_refusals_keep_the_launch_resumable(self):
+        """#250: the host-capacity path honours the reset `mark-progress` wrote."""
         worktree = self.root / "wt-14"
         self.init_worktree(worktree, branch="issue-14")
-        self.assertEqual(
-            self.mark_progress(action_id="14:1:1",
-                               now="2026-08-13T20:00:30Z")["outcome"], "baseline")
-        self.sweep("2026-08-13T20:01:00Z", recorded=(12, 14), owners=[self.refused(14)])
-        state = self.read_state()
-        state["issues"]["14"]["attempts"][0]["stalled_resumes"] = 2  # two resumes spent
-        self.write_state(state)
-        self.suspend(issue=12, attempt=1, blocked_on="usage_limit",
-                     now="2026-08-13T20:02:00Z")
-        self.sweep("2026-08-13T20:03:00Z", recorded=(14,), unobserved=(12,))  # 14:1:2
-        head = self.commit(worktree)
-        self.assertEqual(
-            self.mark_progress(action_id="14:1:2", now="2026-08-13T20:03:30Z"),
-            {"action_id": "14:1:2", "outcome": "advanced", "marker": head})
-        final = self.sweep("2026-08-13T20:04:00Z", recorded=(14,), unobserved=(12,),
-                           owners=[self.refused(14, launch=2)])
+        heads = []
+
+        def record(launch):
+            heads.append(self.commit(worktree))
+            marked = self.mark_progress(
+                action_id=f"14:1:{launch}",
+                now=f"2026-08-13T20:{3 * launch - 1:02d}:30Z")
+            self.assertEqual(marked, {
+                "action_id": f"14:1:{launch}",
+                "outcome": "baseline" if launch == 1 else "advanced",
+                "marker": heads[-1]})
+
+        final = self.refusal_cycles(record)
         self.assertEqual(
             (self.summary(final, 14)["state"], self.summary(final, 14)["blocked_on"]),
             ("suspended", "host_capacity"))
         attempt = self.read_state()["issues"]["14"]["attempts"][0]
-        self.assertEqual((attempt["stalled_resumes"], attempt["progress_marker"]),
-                         (0, head))
+        self.assertEqual(
+            (attempt["state"], attempt["stalled_resumes"], attempt["progress_marker"]),
+            ("suspended", 0, heads[-1]))
 ```
 
 - [ ] **Step 3: Run the tests and watch them fail**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py -k ProgressMarkerTest 2>&1 | tail -8`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py -k ProgressMarkerTest 2>&1 | tail -8`
 
-Expected: every test fails or errors; the CLI ones report
+Expected: a non-zero exit status; every test fails or errors, and the CLI ones report
 `invalid choice: 'mark-progress'` (argparse exits 2 before any handler runs).
 
 - [ ] **Step 4: Implement the rule, the probe and the command**
@@ -505,13 +563,14 @@ migration (#250 D12).
 
 - [ ] **Step 5: Verify**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py -k ProgressMarker 2>&1 | tail -4`
-Expected: `Ran 17 tests`, `OK` (13 here plus Task 1's 4).
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py -k ProgressMarker 2>&1 | tail -4`
+Expected: `Ran 18 tests`, `OK` (14 here plus Task 1's 4).
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_host_admission.py -k LaunchRefusalTest 2>&1 | tail -4`
-Expected: `OK`, including both anti-zombie cases.
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_host_admission.py -k LaunchRefusalTest 2>&1 | tail -4`
+Expected: `OK`, including `test_the_anti_zombie_bound_ends_a_launch_that_keeps_being_refused`
+and `test_new_commits_between_refusals_keep_the_launch_resumable`.
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py -k stalled -k expiry 2>&1 | tail -4`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py -k stalled -k expiry 2>&1 | tail -4`
 Expected: `OK` — the pre-existing no-marker stall tests are unchanged and green.
 
 Run (the suspension arithmetic is untouched; `<base>` is this task's starting commit):
@@ -521,7 +580,7 @@ git diff <base> -- home/common/agent-skills/scripts/workflow-state.py \
 ```
 Expected: no output, exit 0.
 
-Run: `just agent-workflow-tests 2>&1 | tail -6`
+Run: `set -o pipefail; just agent-workflow-tests 2>&1 | tail -6`
 Expected: `OK`.
 
 - [ ] **Step 6: Commit**

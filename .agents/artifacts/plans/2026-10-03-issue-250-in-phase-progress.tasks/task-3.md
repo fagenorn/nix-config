@@ -103,9 +103,9 @@ class ProgressMarkerContractsTest(unittest.TestCase):
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k ProgressMarkerContractsTest 2>&1 | tail -8`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k ProgressMarkerContractsTest 2>&1 | tail -8`
 
-Expected: 5 tests, 5 failures (the `MARK` anchor, the `BOUND` phrase and the
+Expected: a non-zero exit status and 5 tests, 5 failures (the `MARK` anchor, the `BOUND` phrase and the
 architecture bullet do not exist yet).
 
 - [ ] **Step 3: Edit the skill sources**
@@ -220,10 +220,10 @@ Do not touch the `@.agents/instructions/bootstrap.md` import line or
 
 - [ ] **Step 6: Verify**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k ProgressMarkerContractsTest -k LaunchFencedWorkerContractsTest 2>&1 | tail -4`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k ProgressMarkerContractsTest -k LaunchFencedWorkerContractsTest 2>&1 | tail -4`
 Expected: `OK` — the 5 new tests and every pre-existing launch-fence contract.
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_instruction_load.py 2>&1 | tail -4`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_instruction_load.py 2>&1 | tail -4`
 Expected: `OK` (`test_the_live_tree_breaches_no_ceiling` included).
 
 Run:
@@ -251,10 +251,10 @@ The message ends with the co-author trailer from the plan's Global Constraints.
 Run both from the worktree root, after the commit, and report what each
 printed:
 
-Run: `just agent-workflow-tests 2>&1 | tail -6`
+Run: `set -o pipefail; just agent-workflow-tests 2>&1 | tail -6`
 Expected: `OK`, zero failures and errors.
 
-Run: `just build 2>&1 | tail -15`
+Run: `set -o pipefail; just build 2>&1 | tail -15`
 Expected: the build completes with exit status 0. Nix evaluates only tracked
 files, which is why this runs after the commit. A failure here is fixed at its
 cause and committed as a follow-up; it is never waived.

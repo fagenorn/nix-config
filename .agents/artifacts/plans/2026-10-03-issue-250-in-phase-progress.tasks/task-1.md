@@ -124,9 +124,10 @@ class ProgressMarkerSchemaTest(LifecycleHarness, unittest.TestCase):
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py -k ProgressMarkerSchemaTest 2>&1 | tail -15`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py -k ProgressMarkerSchemaTest 2>&1 | tail -15`
 
-Expected: 4 tests, all failing or erroring — the first with `5 != 6`, the
+Expected: a non-zero exit status (`pipefail` carries the runner's failure
+past `tail`) and 4 tests, all failing or erroring — the first with `5 != 6`, the
 others with `KeyError: 'progress_marker'` or a `0 != 2` return code. (At the
 starting commit the class does not exist and the same command prints
 `NO TESTS RAN`.)
@@ -225,10 +226,10 @@ carrying the key). Any other failure is a defect in Step 3; fix it there.
 
 - [ ] **Step 5: Verify**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py -k ProgressMarkerSchemaTest 2>&1 | tail -4`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py -k ProgressMarkerSchemaTest 2>&1 | tail -4`
 Expected: `Ran 4 tests`, `OK`.
 
-Run: `just agent-workflow-tests 2>&1 | tail -6`
+Run: `set -o pipefail; just agent-workflow-tests 2>&1 | tail -6`
 Expected: `OK` with no failures or errors. On a failure, re-run only the
 failing test id and read its last 30 lines.
 
