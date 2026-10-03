@@ -8,11 +8,16 @@ support rather than a suite and is not listed as one.
 """
 
 import hashlib
+import json
 import os
+import re
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 from agent_tools.canonical import telemetry_digest
+from agent_tools.review_actual import RECORD_POLICY
+from agent_tools.review_issue100 import ISSUE_100_PINS, Domain
 from agent_tools.review_issue121 import Issue121Pins
 from agent_tools.review_task7 import MODEL_VERSION, TARGETS, TASK7_PINS, RendererSpec, Task7Pins, derive_task7
 
@@ -180,3 +185,82 @@ def task7_fixture(repo, pins) -> tuple:
 def rehash_edges(edges) -> list:
     """Copies of `edges`, each with its `id` recomputed over every other member."""
     return [{**edge, "id": telemetry_digest({k: v for k, v in edge.items() if k != "id"})} for edge in edges]
+
+
+def _raw(repo, *args) -> bytes:
+    return subprocess.run(["git", "-C", str(repo), *args], env=dict(os.environ, **_IDENTITY),
+                          check=True, capture_output=True).stdout
+
+
+def _domain(pinned, raw) -> Domain:
+    records = len(re.findall(rb"(?m)^diff --git ", raw))
+    return Domain(pinned.name, pinned.policy_sha256, len(raw), records, hashlib.sha256(raw).hexdigest())
+
+
+def issue100_fixture(tmp) -> tuple:
+    """An issue repository, a clone of it as the live repository, an archive directory and their pins.
+
+    From the base, c1 adds the process path `docs/plan.md` and `tmp/scratch.txt`; c2 adds `src/a.txt`,
+    edits `ci.yaml` and deletes the scratch file; c3 edits `justfile`; s1, branched at c1, adds
+    `src/b.txt`; m merges s1 into c3; c4 renames `src/b.txt` to `src/c.txt`. The `live` branch from
+    the base writes head's `src/a.txt` and its own `ci.yaml`. The archive's two `shard-NNN.diff` shards,
+    manifest and producer come from running the pinned recipe over the base and head trees.
+    """
+    repo = init_repo(tmp)
+    base = commit_files(repo, {"README": b"fixture\n", "ci.yaml": b"ci: base\n", "justfile": b"base:\n"}, "base")
+    commit_files(repo, {"docs/plan.md": b"plan\n", "tmp/scratch.txt": b"scratch\n"}, "c1")
+    git(repo, "branch", "side")
+    commit_files(repo, {"src/a.txt": b"a\n", "ci.yaml": b"ci: head\n", "tmp/scratch.txt": None}, "c2")
+    commit_files(repo, {"justfile": b"head:\n"}, "c3")
+    git(repo, "checkout", "-q", "side")
+    commit_files(repo, {"src/b.txt": b"b\n"}, "s1")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+    head = commit_files(repo, {"src/b.txt": None, "src/c.txt": b"b\n"}, "c4")
+    git(repo, "checkout", "-q", "-b", "live", base)
+    live = commit_files(repo, {"src/a.txt": b"a\n", "ci.yaml": b"ci: live\n"}, "live")
+    git(repo, "checkout", "-q", "main")
+    live_repo = Path(tmp) / "live"
+    git(tmp, "clone", "-q", str(repo), str(live_repo))
+    trees = [git(repo, "rev-parse", f"{oid}^{{tree}}") for oid in (base, head)]
+    raw = _raw(repo, *ISSUE_100_PINS.recipe, *trees)
+    fresh = _raw(repo, *RECORD_POLICY["git_config"], "diff", *RECORD_POLICY["diff_args"], "--binary", "-U10", *trees)
+    historical = _domain(ISSUE_100_PINS.historical, raw)
+    starts = [m.start() for m in re.finditer(rb"(?m)^diff --git ", raw)]
+    shards = [raw[:starts[2]], raw[starts[2]:]]
+    archive, stem = Path(tmp) / "archive", "review-fixture"
+    (archive / f"{stem}.shards").mkdir(parents=True)
+    for n, shard in enumerate(shards, 1):
+        (archive / f"{stem}.shards/shard-{n:03d}.diff").write_bytes(shard)
+    numstat = [row.split("\t")[:2] for row in git(repo, "diff", "--numstat", base, head).splitlines()]
+    commits = git(repo, "rev-list", "--reverse", f"{base}..{head}").split()
+    manifest = json.dumps({
+        "commits": [{"sha": sha, "subject": git(repo, "show", "-s", "--format=%s", sha)} for sha in commits],
+        "coverage": {"complete": True, "file_diff_count": historical.records}, "interface_version": 1,
+        "kind": "review-package", "purpose": "diff-review", "range": {"base": base, "head": head},
+        "shards": [{"path": f"{stem}.shards/shard-{n:03d}.diff", "bytes": len(s)} for n, s in enumerate(shards, 1)],
+        "stat": {"deletions": sum(int(d) for _, d in numstat), "files_changed": historical.records,
+                 "insertions": sum(int(i) for i, _ in numstat)},
+        "total_diff_bytes": len(raw)}, sort_keys=True, separators=(",", ":")).encode()
+    # The producer's metrics are the package it reports: the manifest as root plus every shard.
+    producer = json.dumps({"artifact": {
+        "budget_status": "over_budget", "kind": "review-package",
+        "metrics": {"file_count": len(shards) + 1, "largest_member_bytes": max(len(manifest), *map(len, shards)),
+                    "root_bytes": len(manifest), "total_bytes": len(manifest) + len(raw)},
+        "path": str(archive / f"{stem}.json"), "violations": ["member_count", "aggregate_bytes"]},
+        "notes": "validated review package", "state": "decompose_required"}, sort_keys=True).encode()
+    (archive / f"{stem}.json").write_bytes(manifest)
+    (archive / "producer.raw").write_bytes(producer)
+    # Counts by construction: commits c1 c2 c3 s1 m c4; edge records 2+3+1+1 for c1 c2 c3 s1, 1+4 for
+    # m's two parents (c3: src/b.txt; s1: ci.yaml justfile src/a.txt tmp/scratch.txt), 1 for c4; final
+    # paths: docs/plan.md (process), src/a.txt (integrated), ci.yaml and justfile (pending), src/c.txt.
+    counts = {"commits": 6, "parent_edges": 7, "merge_edges": 1, "edge_records": 13, "contributions": 5,
+              "historical_process": 1, "integrated": 1, "candidate": 3, "candidate_ordinary": 1,
+              "candidate_reconciliation": 2, "pending_overlaps": 2, "reconciled": 0}
+    pins = replace(ISSUE_100_PINS, base=base, head=head, live=live, producer_name="producer.raw",
+                   manifest_name=f"{stem}.json", producer_bytes=len(producer), manifest_bytes=len(manifest),
+                   producer_sha256=hashlib.sha256(producer).hexdigest(),
+                   manifest_sha256=hashlib.sha256(manifest).hexdigest(),
+                   process_paths=frozenset({"docs/plan.md"}), pending_paths=("ci.yaml", "justfile"),
+                   historical=historical, fresh=_domain(ISSUE_100_PINS.fresh, fresh), expected_counts=counts)
+    return repo, live_repo, archive, pins

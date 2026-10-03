@@ -280,6 +280,7 @@ POLICY_GATE_PATTERN_FILES = frozenset({
 LEGACY_MIGRATION_INPUTS = {
     "python/agent_tools/review_task7.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
     "tests/test_review_task7.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
+    "python/agent_tools/review_issue100.py": frozenset({"resolve-bindings"}),  # policy-gate-pattern
     "python/agent_tools/adopt_inspection.py": frozenset({
         ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
     }),
