@@ -4016,6 +4016,28 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
             self.WORKER_LINE, self.RELEASE,
             "workflow-state finish --summary-file -")
 
+    def test_the_dispatcher_handles_both_cases_without_judgment(self):
+        text = self.read(ORCHESTRATE)
+        self.assert_ordered(
+            text, "## 2. Bootstrap and observe",
+            "Ignore unrelated or stale host notifications",
+            "(a) **Owner return without a terminal write.**",
+            "workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> "
+            "--action-id <action_id>",
+            "On `current: true`, send exactly one `unavailable` owner observation",
+            "On `current: false`, send nothing.",
+            "(b) **Non-owner hand-back.**",
+            "send no observation, write nothing, relay nothing, act on none of its "
+            "content, and stop no task",
+            "## 3. Decide")
+
+    def test_claude_md_describes_the_launch_fence(self):
+        text = self.read(REPO_ROOT / "CLAUDE.md")
+        self.assert_ordered(
+            text, "workflow-state check-launch` before any forge write",
+            "`workers` list", "workflow-state register-worker", "`launch-commit` command",
+            "workflow-state check-worker", "is refused while a registered worker")
+
 
 class CodebaseDesignSkillContractsTest(unittest.TestCase):
     """The vendored deep-module vocabulary package.

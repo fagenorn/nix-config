@@ -52,9 +52,9 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 23678
+        "claude": 24684
       },
-      "note": "One control-adapter run. It loads only its entry, whose resolver paragraph and lifecycle-call rule stay per entry (#155 D5). Ceiling re-measured after merging origin/main at 382b59c (#155 D19). Ceiling raised for #198: the finalize report routes an `agent_dispatch` suspension to its re-entry line (#155 D10). Ceiling raised for #221: §4's `delivery_contract` rule (#221 D10)."
+      "note": "One control-adapter run. It loads only its entry, whose resolver paragraph and lifecycle-call rule stay per entry (#155 D5). Ceiling re-measured after merging origin/main at 382b59c (#155 D19). Ceiling raised for #198: the finalize report routes an `agent_dispatch` suspension to its re-entry line (#155 D10). Ceiling raised for #221: §4's `delivery_contract` rule (#221 D10). Ceiling raised for #222: §2's dispatcher rules for an owner return without a terminal write and a non-owner hand-back (#155 D10)."
     },
     {
       "id": "orchestrated-issue-owner",
