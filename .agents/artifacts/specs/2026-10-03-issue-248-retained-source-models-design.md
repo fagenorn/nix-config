@@ -237,7 +237,7 @@ never derived from a repository path (S11).
 
 This child authors its own process package: this spec, an indexed v3 plan with
 `derived_from: null`, task members, honest forecasts and subject reserves of two
-per task plus ten for process. Before any product work, published CORE's
+per task plus fourteen for process (S20), three for Tasks 2 and 3 (S22). Before any product work, published CORE's
 `review-feasibility project` runs with the matching reviewed source closure over
 the whole committed plan. Exit 0 within budget clears G0. Exit 2 or 3 stops the
 child with no bootstrap; exit 3 stops for decomposition. Any change to the plan
@@ -324,6 +324,7 @@ no refs to protect the unreferenced issue-121 objects.
 | S19 | M5 also covers `compose`'s own write bound: when the base tree holds a target, its measured removal plus `_record` add gains the S15 allowance computed from the removed and output line counts. The `review_task7.py` bound rises to 32,768 B / +600, and G0 is renewed | Task-1 review: a 40-hunk write measured 22,874 B against a 20,879 B `compose` bound, and Task 2 consumes `compose` rows (S16) | Limiting M5 to table rows: `compose` would emit an unsound bound that Task 2 builds on |
 | S20 | Task-2 G0 revision. The `review_issue121.py` bound rises to 37,888 B / +660, and the process subject reserve rises from ten to fourteen 64-byte subjects; G0 is renewed | Task-2 implementer: the complete module measured a 35,373 B / +607 add record against a 31,602 B / +590 bound after one compaction, with every remaining check required by S9/S16; Task 1 used two process subjects (fix range plus evidence), so ten cannot cover Tasks 2-3 | Cutting required validation to fit, which is truncation (S13) |
 | S21 | Task-3 G0 revision. R3's criterion AC-MIG-02 names the legacy token `resolve-bindings`, and every criterion keeps its original text and digest, so `review_issue100.py` gets one `LEGACY_MIGRATION_INPUTS` row in `home/common/agent-skills/tests/test_workflow_skill_contracts.py`, the allowance route Task 1 used. The contracts test becomes a cumulative Task 1 + Task 3 record bounded at 3,072 B / +5, and G0 is renewed | Task-3 implementer: `test_living_source_has_no_legacy_policy_surface` refuses `python/agent_tools/review_issue100.py:42: resolve-bindings`, the only failure among 188 contracts tests | Escaping the token as `resolve\x2dbindings`: it hides a legacy mention from the scan, which must not widen silently. Loading criteria texts from R3's blob: a hidden input |
+| S22 | Final-review G0 revision. The correctness axis found three validation gaps: issue-121 final-record lineage and edge-fact shapes, and the issue-100 head entry against its history. Tasks 2 and 3 each get a third 64-byte subject for one final-review fix commit; the `review_issue100.py` bound rises to 29,184 B / +540 and its test to 21,504 B / +370; G0 is renewed | Task-3 fix round 1 left the module 1 B under its bound, and the plan reserved one fix subject per task, already used | Cutting validation to fit (S13); deferring a validator gap that accepts a rehashed forged payload |
 
 Design and grill frontier: closed within the approved scope. The resolved
 bindings carry no context-map or ADR route, so this ledger is the issue's

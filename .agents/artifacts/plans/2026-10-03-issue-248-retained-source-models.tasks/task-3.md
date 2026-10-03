@@ -126,18 +126,19 @@ just build 2>&1 | tail -3
 
   At the Task-2 commit the import and the `justfile` grep fail, so this gate can fail.
 
-- [ ] **Step 5: Commit.** Stage only the four Files; commit `feat(review): verify issue-100 payload and byte domains (#248)`.
+- [ ] **Step 5: Commit.** Stage only the five Files (S21 adds the contracts test); commit `feat(review): verify issue-100 payload and byte domains (#248)`.
 
 ## Forecast basis
 
 Priced per parent D15 (S14). R3's issue-100 half (its lines 1–370 of 544, about 22,000 B) is the measured base; the two-level edges, the domain tables and `validate_100` add the rest:
-- Module: 500 lines / 26,000 B → 27,012 B.
-- Test: 340 lines / 19,000 B → 19,852 B.
+- Module: 500 lines / 26,000 B → 27,012 B; S22 revises it to 29,184 B / +540 for the final-review fix.
+- Test: 340 lines / 19,000 B → 19,852 B; S22 revises it to 21,504 B / +370.
 - Support: adds about 125 lines / 6,500 B, cumulative 21,504 B / +405.
 - `justfile`: cumulative 3,072 B / +4.
+- Contracts test (S21): cumulative 3,072 B / +5.
 
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[{"base":"73a36925420b6f4a8a2ffe5f6d1493dbf2cd063f","head":"4698f28dfe59cbdad7b33e4c7d145c524251c6b5"}],"commit_subject_bytes":[64,64],"id":3,"records":[{"bounds":[{"added_lines":500,"boundary":"source","deleted_lines":0,"record_bytes":27012,"support":{"covers":["t3-1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t3-1","last_task":3,"owner":3,"path":"python/agent_tools/review_issue100.py"},{"bounds":[{"added_lines":340,"boundary":"source","deleted_lines":0,"record_bytes":19852,"support":{"covers":["t3-2"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t3-2","last_task":3,"owner":3,"path":"tests/test_review_issue100.py"},{"bounds":[{"added_lines":405,"boundary":"source","deleted_lines":0,"record_bytes":21504,"support":{"covers":["t1-2","t2-3","t3-3"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t3-3","last_task":3,"owner":3,"path":"tests/retained_review_test_support.py"},{"bounds":[{"added_lines":4,"boundary":"source","deleted_lines":0,"record_bytes":3072,"support":{"covers":["t1-4","t2-4","t3-4"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t3-4","last_task":3,"owner":3,"path":"justfile"},{"bounds":[{"added_lines":5,"boundary":"source","deleted_lines":0,"record_bytes":3072,"support":{"covers":["t1-5","t3-5"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t3-5","last_task":3,"owner":3,"path":"home/common/agent-skills/tests/test_workflow_skill_contracts.py"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[{"base":"73a36925420b6f4a8a2ffe5f6d1493dbf2cd063f","head":"4698f28dfe59cbdad7b33e4c7d145c524251c6b5"}],"commit_subject_bytes":[64,64,64],"id":3,"records":[{"bounds":[{"added_lines":540,"boundary":"source","deleted_lines":0,"record_bytes":29184,"support":{"covers":["t3-1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t3-1","last_task":3,"owner":3,"path":"python/agent_tools/review_issue100.py"},{"bounds":[{"added_lines":370,"boundary":"source","deleted_lines":0,"record_bytes":21504,"support":{"covers":["t3-2"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t3-2","last_task":3,"owner":3,"path":"tests/test_review_issue100.py"},{"bounds":[{"added_lines":405,"boundary":"source","deleted_lines":0,"record_bytes":21504,"support":{"covers":["t1-2","t2-3","t3-3"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t3-3","last_task":3,"owner":3,"path":"tests/retained_review_test_support.py"},{"bounds":[{"added_lines":4,"boundary":"source","deleted_lines":0,"record_bytes":3072,"support":{"covers":["t1-4","t2-4","t3-4"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t3-4","last_task":3,"owner":3,"path":"justfile"},{"bounds":[{"added_lines":5,"boundary":"source","deleted_lines":0,"record_bytes":3072,"support":{"covers":["t1-5","t3-5"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t3-5","last_task":3,"owner":3,"path":"home/common/agent-skills/tests/test_workflow_skill_contracts.py"}]}}
 ```
