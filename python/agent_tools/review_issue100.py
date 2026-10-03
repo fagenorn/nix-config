@@ -97,6 +97,7 @@ class Issue100Pins:
     historical: Domain
     fresh: Domain
     expected_counts: dict
+    parent_edges_sha256: str  # `telemetry_digest` of the raw parent edges, in range order (S23)
 
 
 _R3 = "2026-09-19-issue-100-strict-project-resolver"
@@ -114,7 +115,8 @@ ISSUE_100_PINS = Issue100Pins(
            "5c6c4fbe291994ee9d08e6ebf45f6369e6a8b3db4f96908989e2a152ca3ec9d4"),
     {"commits": 82, "parent_edges": 91, "merge_edges": 9, "edge_records": 543, "contributions": 115,
      "historical_process": 8, "integrated": 38, "candidate": 69, "candidate_ordinary": 65,
-     "candidate_reconciliation": 4, "pending_overlaps": 4, "reconciled": 0})
+     "candidate_reconciliation": 4, "pending_overlaps": 4, "reconciled": 0},
+    "sha256:b210dd7252a94fbf46078a093905661404c0ee02ac62cde7937d941f2b918101")
 
 
 def _require(condition, code="invalid_payload") -> None:
@@ -196,7 +198,8 @@ def _checked(pins: Issue100Pins) -> Issue100Pins:
                  {"domain": HISTORICAL_DOMAIN, "policy_sha256": _historical_policy(p.recipe)},
                  {"domain": RECORD_POLICY["kind"], "policy_sha256": RECORD_POLICY_SHA256}])
              and isinstance(p.expected_counts, dict) and set(p.expected_counts) == set(ISSUE_100_PINS.expected_counts)
-             and all(_count(v) for v in p.expected_counts.values()), bad)
+             and all(_count(v) for v in p.expected_counts.values())
+             and _match("sha256:[0-9a-f]{64}", p.parent_edges_sha256), bad)
     return p
 
 
@@ -365,14 +368,16 @@ def _entry(value) -> bool:
 
 
 def _validate_history(payload, pins) -> None:
-    """Raw parent edges in range order, ordinals from 1, each parent the base or an earlier range commit."""
+    """Raw parent edges in range order, ordinals from 1, each parent the base or an earlier range commit, and
+    the whole ordered list hashing to its pin: no parent is substituted, dropped or moved, however rehashed."""
     span, commits = payload["range"], payload["range"]["commits"]
     _require(_same({**span, "commits": 0}, {"base": pins.base, "head": pins.head, "live": pins.live, "commits": 0})
              and isinstance(commits, list) and all(_hex(c) for c in commits) and len(set(commits)) == len(commits)
              and commits[-1:] == [pins.head])
     position = {oid: n for n, oid in enumerate(commits)}
     parent_edges, edges, keys = payload["parent_edges"], payload["edges"], []
-    _require(isinstance(parent_edges, list) and isinstance(edges, list) and len(edges) == len(parent_edges))
+    _require(isinstance(parent_edges, list) and isinstance(edges, list) and len(edges) == len(parent_edges)
+             and telemetry_digest(parent_edges) == pins.parent_edges_sha256)
     for raw, edge in zip(parent_edges, edges):
         _closed(raw, ("parent", "commit", "parent_ordinal"))
         _closed(edge, (*raw, "records"))

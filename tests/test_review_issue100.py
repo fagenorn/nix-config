@@ -34,6 +34,23 @@ class Issue100Test(unittest.TestCase):
         with self.assertRaises(Issue100Error):
             call()
 
+    def rebuilt(self, payload, pairs):
+        """Both edge levels replaced together, with every reference, id and the summary recomputed."""
+        edges = [edge for _, edge in pairs]
+        rows = []
+        for row in payload["contributions"]:
+            names = {row["path"]}
+            for _ in edges:  # a fixed point over rename chains
+                names |= {n for e in edges for r in e["records"] if {r["path"], r["old_path"]} & names
+                          for n in (r["path"], r["old_path"])}
+            refs = [[e, n] for e, edge in enumerate(edges) for n, r in enumerate(edge["records"])
+                    if {r["path"], r["old_path"]} & names]
+            rows.append(rehashed(row, edge_refs=refs))
+        counts = {"parent_edges": len(pairs), "merge_edges": sum(p["parent_ordinal"] > 1 for p, _ in pairs),
+                  "edge_records": sum(len(e["records"]) for e in edges)}
+        return {**payload, "parent_edges": [p for p, _ in pairs], "edges": edges, "contributions": rows,
+                "summary": {**payload["summary"], **counts}}
+
     def test_derive_validates_and_preserves_inputs(self):
         before = self.archive_bytes(), snapshot(self.repo), snapshot(self.live)
         payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
@@ -128,26 +145,36 @@ class Issue100Test(unittest.TestCase):
         payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
         raw, edges = payload["parent_edges"], payload["edges"]
         pairs = list(zip(raw, edges))
-
-        def rebuilt(pairs):
-            edges = [edge for _, edge in pairs]
-            rows = []
-            for row in payload["contributions"]:
-                names = {row["path"]}
-                for _ in edges:  # a fixed point over rename chains
-                    names |= {n for e in edges for r in e["records"] if {r["path"], r["old_path"]} & names
-                              for n in (r["path"], r["old_path"])}
-                refs = [[e, n] for e, edge in enumerate(edges) for n, r in enumerate(edge["records"])
-                        if {r["path"], r["old_path"]} & names]
-                rows.append(rehashed(row, edge_refs=refs))
-            return {**payload, "parent_edges": [p for p, _ in pairs], "edges": edges, "contributions": rows}
-
-        validate_100(rebuilt(pairs), self.pins)  # the independent rebuild agrees with derivation
+        validate_100(self.rebuilt(payload, pairs), self.pins)  # the independent rebuild agrees with derivation
         merge = next(n for n, (p, _) in enumerate(pairs) if p["parent_ordinal"] == 2)
         outside = {"parent": self.pins.live}
         for changed in ([pairs[1], pairs[0], *pairs[2:]], pairs[:-1], [*pairs[:merge], *pairs[merge + 1:]],
                         [*pairs[:-1], tuple({**side, **outside} for side in pairs[-1])]):
-            self.refused(lambda: validate_100(rebuilt(changed), self.pins))
+            self.refused(lambda: validate_100(self.rebuilt(payload, changed), self.pins))
+
+    def test_rehashed_raw_parent_substitution_is_invalid(self):
+        """A raw parent swapped for the base or an earlier range commit, as the real range's live commit is,
+        keeps every count and reference: only the pinned digest of the raw parent edges refuses it (S23)."""
+        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        commits = payload["range"]["commits"]
+        pairs = list(zip(payload["parent_edges"], payload["edges"]))
+        validate_100(self.rebuilt(payload, pairs), self.pins)  # the clean rehashed control
+        order = [self.pins.base, *commits]
+        merge = next(n for n, (p, _) in enumerate(pairs) if p["parent_ordinal"] == 2)
+        side = next(n for n, (p, _) in enumerate(pairs) if p["commit"] == pairs[merge][0]["parent"])
+        cases = {"merge_second_parent_to_base": (merge, self.pins.base),
+                 "merge_second_parent_to_first_commit": (merge, commits[0]),
+                 "mid_range_first_parent_to_earlier_commit": (side, commits[1]),
+                 "head_parent_to_in_range_commit": (len(pairs) - 1, commits[2])}
+        for name, (n, parent) in cases.items():
+            with self.subTest(case=name):
+                raw = pairs[n][0]
+                self.assertNotEqual(parent, raw["parent"])  # the earlier-commit rule admits it
+                self.assertLess(order.index(parent), order.index(raw["commit"]))
+                changed = [*pairs[:n], tuple({**level, "parent": parent} for level in pairs[n]), *pairs[n + 1:]]
+                with self.assertRaises(Issue100Error) as caught:
+                    validate_100(self.rebuilt(payload, changed), self.pins)
+                self.assertEqual(caught.exception.code, "invalid_payload")
 
     def test_rehashed_contribution_fact_change_is_invalid(self):
         payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
@@ -306,9 +333,10 @@ class Issue100Test(unittest.TestCase):
         with self.assertRaises(Issue100Error) as caught:  # the real pins pass their own checks
             validate_100({}, pins)
         self.assertEqual(caught.exception.code, "invalid_payload")
-        with self.assertRaises(Issue100Error) as caught:
-            validate_100({}, replace(pins, recipe=pins.recipe[:-1]))
-        self.assertEqual(caught.exception.code, "invalid_pins")
+        for malformed in ({"recipe": pins.recipe[:-1]}, {"parent_edges_sha256": pins.parent_edges_sha256[7:]}):
+            with self.assertRaises(Issue100Error) as caught:
+                validate_100({}, replace(pins, **malformed))
+            self.assertEqual(caught.exception.code, "invalid_pins")
 
 
 if __name__ == "__main__":

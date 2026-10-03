@@ -205,7 +205,8 @@ def issue100_fixture(tmp) -> tuple:
     s1, branched at c1, adds `src/b.txt`; m merges s1 into c3; c4 renames `src/b.txt` to `src/c.txt`
     and adds `legacy/note.txt`, so `legacy` is a directory at the head. The `live` branch from
     the base writes head's `src/a.txt` and its own `ci.yaml`. The archive's two `shard-NNN.diff` shards,
-    manifest and producer come from running the pinned recipe over the base and head trees.
+    manifest and producer come from running the pinned recipe over the base and head trees. The pinned
+    digest of the raw parent edges is taken from plain `git rev-list --parents`, apart from the module.
     """
     repo = init_repo(tmp)
     base = commit_files(repo, {"README": b"fixture\n", "ci.yaml": b"ci: base\n", "justfile": b"base:\n",
@@ -260,10 +261,15 @@ def issue100_fixture(tmp) -> tuple:
     counts = {"commits": 6, "parent_edges": 7, "merge_edges": 1, "edge_records": 16, "contributions": 7,
               "historical_process": 1, "integrated": 1, "candidate": 5, "candidate_ordinary": 3,
               "candidate_reconciliation": 2, "pending_overlaps": 2, "reconciled": 0}
+    # Git's own raw parents in range order: one `{parent, commit, parent_ordinal}` row per parent.
+    listed = git(repo, "rev-list", "--parents", "--reverse", "--topo-order", f"{base}..{head}").splitlines()
+    parent_edges = [{"parent": parent, "commit": row.split()[0], "parent_ordinal": ordinal}
+                    for row in listed for ordinal, parent in enumerate(row.split()[1:], 1)]
     pins = replace(ISSUE_100_PINS, base=base, head=head, live=live, producer_name="producer.raw",
                    manifest_name=f"{stem}.json", producer_bytes=len(producer), manifest_bytes=len(manifest),
                    producer_sha256=hashlib.sha256(producer).hexdigest(),
                    manifest_sha256=hashlib.sha256(manifest).hexdigest(),
                    process_paths=frozenset({"docs/plan.md"}), pending_paths=("ci.yaml", "justfile"),
-                   historical=historical, fresh=_domain(ISSUE_100_PINS.fresh, fresh), expected_counts=counts)
+                   historical=historical, fresh=_domain(ISSUE_100_PINS.fresh, fresh), expected_counts=counts,
+                   parent_edges_sha256=telemetry_digest(parent_edges))
     return repo, live_repo, archive, pins
