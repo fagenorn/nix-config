@@ -18,7 +18,7 @@ import tempfile
 from typing import Any, Callable, Iterator
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 CONTROL_INTERFACE_VERSION = 3
 DIRECT_OWNER_INTERFACE_VERSION = 2
 ATTEMPT_STATES = frozenset(
@@ -78,8 +78,19 @@ PHASE_INPUT_FIELDS = (
 )
 STATE_FIELDS = frozenset(
     {"schema_version", "run_id", "created_at", "updated_at", "prior_run", "issues",
-     "admission"}
+     "admission", "workers"}
 )
+# The run's worker registry (#222 D2): every writing agent a launch dispatched,
+# in registration order. A worker is live while it is unreleased and its launch
+# is still current, so a superseded launch fences its workers with no write.
+WORKER_FIELDS = frozenset(
+    {"worker_id", "launch", "parent", "registered_at", "released_at", "release_event"}
+)
+# Group 1 is the launch ``action_id``; group 2 is the worker's ordinal in it.
+WORKER_ID_PATTERN = re.compile(
+    r"^([1-9][0-9]{0,17}:r?[1-9][0-9]{0,17}:[1-9][0-9]{0,17}):w([1-9][0-9]{0,17})$"
+)
+WORKER_RELEASE_EVENTS = frozenset({"returned", "stopped"})
 # The run's admission block (D5): `null` until a control sweep binds a route,
 # then the route and every claim ever acquired, released ones kept as the audit
 # trail. Claim policy lives here, never in the host admission library (D18).
@@ -422,7 +433,8 @@ def artifact_budget_validate(
         argv.extend(("--policy", str(policy)))
     completed = subprocess.run(argv, input=input_bytes, capture_output=True, check=False)
     if completed.returncode != 0 or not completed.stdout:
-        raise WorkflowError(f"artifact-budget {command} rejected the terminal result")
+        subject = "detail input" if boundary is None else f"{boundary} boundary"
+        raise WorkflowError(f"artifact-budget {command} rejected the {subject}")
     try:
         canonical = json.loads(completed.stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -706,8 +718,96 @@ def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
             validate_result(issue_value["outcome"], expected_issue=issue)
             if not attempts or attempts[-1]["result"] != issue_value["outcome"]:
                 raise WorkflowError("issue outcome does not match its latest attempt")
+    validate_workers(value)
     validate_admission(value, library=_host_admission())
     return value
+
+
+def parse_worker_id(value: Any) -> tuple[str, int]:
+    """Split a ``<action_id>:w<ordinal>`` worker identity into its launch and ordinal."""
+    matched = WORKER_ID_PATTERN.fullmatch(value) if isinstance(value, str) else None
+    if matched is None:
+        raise WorkflowError("invalid worker_id")
+    return matched[1], int(matched[2])
+
+
+def _launch_record_at(state: dict[str, Any], launch: str) -> str | None:
+    """The ``at`` of the launch event ``launch`` names, or ``None`` if there is none."""
+    issue, ordinal, launch_ordinal = parse_action_id(launch)
+    issue_state = state["issues"].get(str(issue))
+    if issue_state is None:
+        return None
+    records = (issue_state["delivery_remainders"] if ":r" in launch
+               else issue_state["attempts"])
+    if ordinal > len(records) or launch_ordinal > len(records[ordinal - 1]["launches"]):
+        return None
+    return records[ordinal - 1]["launches"][launch_ordinal - 1]["at"]
+
+
+def validate_workers(state: dict[str, Any]) -> None:
+    """Close the run's worker registry over exact records (#222 D2).
+
+    Each record names an existing launch, takes the next dense ordinal within
+    it, names an earlier record of the same launch (or nothing) as its parent,
+    and keeps its times inside the run's and its launch's. A release sets the
+    time and the event together, and a ``stopped`` record has no unreleased
+    descendant. Any breach is a `WorkflowError`, so every read and write
+    refuses it.
+    """
+    def invalid(detail: str) -> WorkflowError:
+        return WorkflowError(f"invalid workflow workers: {detail}")
+
+    workers = state["workers"]
+    if not isinstance(workers, list):
+        raise invalid("not a list")
+    created_at = parse_utc(state["created_at"], "run creation time")
+    updated_at = parse_utc(state["updated_at"], "run update time")
+    by_id: dict[str, dict[str, Any]] = {}
+    ordinals: dict[str, int] = {}
+    for record in workers:
+        if not isinstance(record, dict) or set(record) != WORKER_FIELDS:
+            raise invalid("record schema")
+        try:
+            launch, ordinal = parse_worker_id(record["worker_id"])
+        except WorkflowError:
+            raise invalid("worker_id") from None
+        if record["launch"] != launch:
+            raise invalid("worker_id outside its launch")
+        launch_at = _launch_record_at(state, launch)
+        if launch_at is None:
+            raise invalid("unknown launch")
+        if ordinal != ordinals.get(launch, 0) + 1:
+            raise invalid("ordinals are not dense per launch")
+        ordinals[launch] = ordinal
+        parent = record["parent"]
+        if parent is not None and (
+                not isinstance(parent, str) or parent not in by_id
+                or by_id[parent]["launch"] != launch):
+            raise invalid("parent is not an earlier worker of the same launch")
+        if not isinstance(record["registered_at"], str) or not (
+                record["released_at"] is None or isinstance(record["released_at"], str)):
+            raise invalid("registration and release times must be strings")
+        registered_at = parse_utc(record["registered_at"], "worker registration time")
+        if not created_at <= registered_at <= updated_at:
+            raise invalid("registration time outside the run")
+        if registered_at < parse_utc(launch_at, "launch time"):
+            raise invalid("registration precedes its launch")
+        if (record["released_at"] is None) != (record["release_event"] is None):
+            raise invalid("release time and event must both be null or both be set")
+        if record["released_at"] is not None:
+            if (not isinstance(record["release_event"], str)
+                    or record["release_event"] not in WORKER_RELEASE_EVENTS):
+                raise invalid("release event")
+            released_at = parse_utc(record["released_at"], "worker release time")
+            if not registered_at <= released_at <= updated_at:
+                raise invalid("release time order")
+        else:
+            ancestor = parent
+            while ancestor is not None:
+                if by_id[ancestor]["release_event"] == "stopped":
+                    raise invalid("stopped worker has an unreleased descendant")
+                ancestor = by_id[ancestor]["parent"]
+        by_id[record["worker_id"]] = record
 
 
 def parse_claim_holder(holder: str) -> tuple[int, str, int, int]:
@@ -1205,6 +1305,36 @@ def transact(
         return result
 
 
+def fence_owner_exit(
+    runtime: Any, mutation: Mutation, *, excused_worker: str | None = None,
+) -> Mutation:
+    """Refuse an owner-path write that ends a launch while it has a live worker.
+
+    The live workers are taken before ``mutation`` runs; any of them that is no
+    longer live after it refuses the whole write, so nothing persists. Controller
+    writes (``control``, the deadline reaper, ``direct-owner``) never pass
+    through this fence: they are the recovery path for a run whose owner died
+    with workers live. ``excused_worker`` is the calling ship owner of a
+    ``checkpoint-delivery``, itself a registered worker; it must be live, and
+    only it is excused, never its descendants (per #222 D4, D11).
+    """
+
+    def fenced(state: dict[str, Any] | None) -> tuple[Any, bool]:
+        assert state is not None
+        live = live_worker_ids(runtime, state)
+        if excused_worker is not None and excused_worker not in live:
+            raise WorkflowError(
+                f"invalid --worker-id: {worker_verdict(runtime, state, excused_worker)[1]}")
+        result, changed = mutation(state)
+        blocking = [worker for worker in live if worker != excused_worker
+                    and worker_verdict(runtime, state, worker)[1] != "live"]
+        if blocking:
+            raise WorkflowError("live workers: " + ", ".join(blocking))
+        return result, changed
+
+    return fenced
+
+
 def phase_notes_maximum() -> int:
     _, policy_path = artifact_budget_paths()
     if policy_path is None:
@@ -1242,6 +1372,7 @@ def new_run_state(
         "prior_run": prior_run,
         "issues": issues,
         "admission": None,
+        "workers": [],
     }
 
 
@@ -1844,7 +1975,9 @@ def control_summary(
 ) -> dict[str, Any]:
     return _delivery().control_summary(
         issue=issue, tracker=tracker, issue_state=issue_state, reduction=reduction,
-        blockers=control_blockers(tracker), result_fields=RESULT_FIELDS,
+        blockers=sorted(control_blockers(tracker),
+                        key=lambda item: (item["kind"], item["issue"])),
+        result_fields=RESULT_FIELDS,
         contract_required=contract_required, unresumable=unresumable)
 
 
@@ -2299,7 +2432,7 @@ def command_control(args: argparse.Namespace) -> int:
         return {"holder": holder, "roles": dict(roles), "acquired_at": now,
                 "released_at": None, "release_event": None, "release_seq": None}
 
-    def control(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+    def control(state: dict[str, Any] | None) -> tuple[bytes, bool]:
         assert state is not None
         if now_value < parse_utc(state["updated_at"], "run update time"):
             raise WorkflowError("control time must not move backward")
@@ -2368,8 +2501,28 @@ def command_control(args: argparse.Namespace) -> int:
                     release_claim(admission, claim, event="owner_unavailable", at=now)
             admission_changed = admission_changed or admission["releases"] != releases_before
 
+        # A delivered issue has nothing left to launch: its persisted ledger is
+        # delivery-complete after the opening settle, so no lane plans it and the
+        # one-issue policy never runs for it here (#220 D1, D2, D9).
+        delivered = frozenset(
+            issue for issue in request["issues"]
+            if str(issue) in state["issues"]
+            and runtime.delivery_complete(state["issues"][str(issue)]))
+
+        def delivered_verdict(issue: int) -> dict[str, Any]:
+            """The fixed verdict for a delivered issue: terminal, unchanged, no dispatch."""
+            issue_state = state["issues"][str(issue)]
+            return {"operation": "terminal", "changed": False,
+                    "issue_state": copy.deepcopy(issue_state),
+                    "attempt": issue_state["attempts"][-1] if issue_state["attempts"] else None,
+                    "requirements": [], "uses_candidate": False, "desired": "terminal",
+                    "expired": False}
+
         analysis: dict[int, dict[str, Any]] = {}
         for issue in request["issues"]:
+            if issue in delivered:
+                analysis[issue] = delivered_verdict(issue)
+                continue
             issue_state = state["issues"].get(str(issue))
             analysis[issue] = _apply_one_issue_policy(
                 ledger_issue=copy.deepcopy(issue_state),
@@ -2500,6 +2653,9 @@ def command_control(args: argparse.Namespace) -> int:
             return True
 
         def apply_policy(issue: int, dispatch_permitted: bool) -> dict[str, Any]:
+            if issue in delivered:
+                planned[issue] = delivered_verdict(issue)
+                return planned[issue]
             issue_state = state["issues"].get(str(issue))
             result = _apply_one_issue_policy(
                 ledger_issue=copy.deepcopy(issue_state),
@@ -2653,7 +2809,7 @@ def command_control(args: argparse.Namespace) -> int:
         actionless_replay = not dispatch_results
         for issue in request["issues"]:
             issue_state = state["issues"].get(str(issue))
-            if issue_state is None or not issue_state["attempts"]:
+            if issue_state is None or not issue_state["attempts"] or issue in delivered:
                 continue
             if "remainder" in (analysis[issue].get("custody_kind"),
                                planned.get(issue, {}).get("custody_kind")):
@@ -2830,7 +2986,7 @@ def command_control(args: argparse.Namespace) -> int:
                 declared_slots=declared_slots,
                 available=max(0, declared_slots - sum(reserved.values())),
                 waiting=[issue for issue in request["issues"] if issue in waiting])
-        return {
+        reply = render_json({
             "interface_version": CONTROL_INTERFACE_VERSION,
             "run_id": args.run_id,
             "now": now,
@@ -2839,11 +2995,17 @@ def command_control(args: argparse.Namespace) -> int:
             "actions": actions,
             "next_deadline": next_deadline,
             "admission": report,
-        }, changed
+        })
+        # The reply is the only source of action order, so a reply the boundary
+        # rejects must not commit: validation raises before `transact` commits,
+        # and the validated bytes are the bytes printed (#220 D5).
+        artifact_budget_validate(
+            "validate-report", boundary="workflow-response", input_bytes=reply)
+        return reply, changed
 
-    response = transact(args.repo_root, args.run_id, control,
-                        migration_contracts=migration_contracts)
-    print_json(response)
+    reply = transact(args.repo_root, args.run_id, control,
+                     migration_contracts=migration_contracts)
+    sys.stdout.buffer.write(reply)
     return 0
 
 
@@ -3220,16 +3382,20 @@ def load_result_file(path_value: str, issue: int) -> dict[str, Any]:
 
 
 def command_checkpoint_delivery(args):
+    if args.worker_id is not None and not WORKER_ID_PATTERN.fullmatch(args.worker_id):
+        raise WorkflowError("invalid worker_id")
     runtime = _delivery()
     now = format_utc(parse_utc(args.now, "--now"))
     report = artifact_budget_validate(
         "validate-report", boundary="ship-checkpoint",
         input_bytes=read_input_bytes(args.checkpoint_file, "checkpoint"))
 
-    response = transact(args.repo_root, args.run_id, lambda state: _call(
-        "checkpoint transition refused", runtime.checkpoint_state,
-        state, report, now=now, suspend_attempt=suspend_attempt,
-        ledger_repo_root=str(resolve_repo_root(args.repo_root)), run_id=args.run_id))
+    response = transact(args.repo_root, args.run_id, fence_owner_exit(
+        runtime, lambda state: _call(
+            "checkpoint transition refused", runtime.checkpoint_state,
+            state, report, now=now, suspend_attempt=suspend_attempt,
+            ledger_repo_root=str(resolve_repo_root(args.repo_root)), run_id=args.run_id),
+        excused_worker=args.worker_id))
     print_json(response)
     return 0
 
@@ -3331,7 +3497,7 @@ def command_progress(args: argparse.Namespace) -> int:
                 "custody": runtime.custody_for_record(args.issue, "implementation", attempt),
                 "action": action, "handoff_path": handoff_path}, True
 
-    print_json(transact(args.repo_root, args.run_id, progress))
+    print_json(transact(args.repo_root, args.run_id, fence_owner_exit(runtime, progress)))
     return 0
 
 
@@ -3377,7 +3543,7 @@ def command_suspend(args: argparse.Namespace) -> int:
             "reentry": reentry_command(args.issue),
         }, True
 
-    print_json(transact(args.repo_root, args.run_id, suspend))
+    print_json(transact(args.repo_root, args.run_id, fence_owner_exit(runtime, suspend)))
     return 0
 
 
@@ -3467,7 +3633,7 @@ def command_finish(args: argparse.Namespace) -> int:
         state["updated_at"] = now
         return result, True
 
-    persisted = transact(args.repo_root, args.run_id, finish)
+    persisted = transact(args.repo_root, args.run_id, fence_owner_exit(_delivery(), finish))
     print_json(persisted)
     return 0
 
@@ -3487,7 +3653,7 @@ def command_finish_delivery(args):
             ledger_repo_root=str(resolve_repo_root(args.repo_root)), run_id=args.run_id)
         return response, True
 
-    response = transact(args.repo_root, args.run_id, finish_delivery)
+    response = transact(args.repo_root, args.run_id, fence_owner_exit(runtime, finish_delivery))
     print_json(response)
     return 0
 
@@ -3499,14 +3665,14 @@ def read_state_unlocked(state_path: Path, run_id: str) -> dict[str, Any]:
     lock: `atomic_write_state` publishes by `os.replace`, so an unlocked reader
     sees either the whole prior file or the whole new one, never a torn one — and
     taking the lock would mean creating `state.lock`, which is a write. Schemas
-    1–3 are migrated and validated on a detached copy; the document is returned
+    1–4 are migrated and validated on a detached copy; the document is returned
     as stored.
     """
     try:
         raw_state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise WorkflowError("invalid workflow state") from error
-    if isinstance(raw_state, dict) and raw_state.get("schema_version") in {1, 2, 3}:
+    if isinstance(raw_state, dict) and raw_state.get("schema_version") in {1, 2, 3, 4}:
         candidate = _call("invalid legacy workflow state",
             _delivery().migrate, raw_state, migration_contracts={})
         validate_state(candidate, run_id=run_id)
@@ -3636,18 +3802,33 @@ def command_check_launch(args: argparse.Namespace) -> int:
     repo_root = resolve_repo_root(args.repo_root)
     if not RUN_ID_PATTERN.fullmatch(args.run_id):
         raise WorkflowError("invalid run_id")
-    issue, attempt_ordinal, launch_ordinal = parse_action_id(args.action_id)
-    remainder_query = ":r" in args.action_id
+    parse_action_id(args.action_id)
     state_path = repo_root / ".superpowers" / "workflows" / args.run_id / "state.json"
-    if not require_regular_path(state_path, "workflow state", allow_missing=True):
-        print_json({
-            "action_id": args.action_id,
-            "current": False,
-            "current_action_id": None,
-            "reason": "unknown_run",
-        })
-        return 0
-    state = read_state_unlocked(state_path, args.run_id)
+    state = (read_state_unlocked(state_path, args.run_id)
+             if require_regular_path(state_path, "workflow state", allow_missing=True)
+             else None)
+    current_action_id, reason = launch_verdict(runtime, state, args.action_id)
+    print_json({
+        "action_id": args.action_id,
+        "current": reason == "current",
+        "current_action_id": current_action_id,
+        "reason": reason,
+    })
+    return 0
+
+
+def launch_verdict(runtime: Any, state: dict[str, Any] | None,
+                   action_id: str) -> tuple[str | None, str]:
+    """``(current_action_id, reason)`` for one launch identity, as check-launch answers.
+
+    ``state`` is a ledger as `read_state_unlocked` or `transact` hands it over,
+    or ``None`` for a run with no ledger, which answers ``unknown_run``. A
+    malformed ``action_id`` raises.
+    """
+    issue, attempt_ordinal, launch_ordinal = parse_action_id(action_id)
+    remainder_query = ":r" in action_id
+    if state is None:
+        return None, "unknown_run"
 
     issue_state = state["issues"].get(str(issue))
     records = None if issue_state is None else (
@@ -3680,10 +3861,160 @@ def command_check_launch(args: argparse.Namespace) -> int:
             reason = "superseded_launch"
         else:
             reason = "current"
+    return current_action_id, reason
 
+
+def worker_verdict(runtime: Any, state: dict[str, Any] | None,
+                   worker_id: str) -> tuple[str | None, str]:
+    """``(current_action_id, reason)`` for one registered worker (#222 D2, D12).
+
+    ``current_action_id`` is its launch's verdict. The reason is the first that
+    holds of ``unknown_run``, ``unknown_worker``, ``released``, then the
+    launch's own reason, with ``current`` read as ``live``. A malformed
+    ``worker_id`` raises.
+    """
+    launch, _ = parse_worker_id(worker_id)
+    current_action_id, reason = launch_verdict(runtime, state, launch)
+    if state is None:
+        return current_action_id, reason
+    record = next((worker for worker in state.get("workers", [])
+                   if worker["worker_id"] == worker_id), None)
+    if record is None:
+        return current_action_id, "unknown_worker"
+    if record["released_at"] is not None:
+        return current_action_id, "released"
+    return current_action_id, "live" if reason == "current" else reason
+
+
+def live_worker_ids(runtime: Any, state: dict[str, Any]) -> list[str]:
+    """Every live worker's id, in ledger order."""
+    return [worker["worker_id"] for worker in state.get("workers", [])
+            if worker_verdict(runtime, state, worker["worker_id"])[1] == "live"]
+
+
+def command_register_worker(args: argparse.Namespace) -> int:
+    """Register one writing worker under a current launch (#222 D2, D6).
+
+    The worker takes its launch's next ordinal. A ``--parent`` must be a live
+    worker of the same launch.
+    """
+    if not RUN_ID_PATTERN.fullmatch(args.run_id):
+        raise WorkflowError("invalid run_id")
+    parse_action_id(args.action_id)
+    now_value = parse_utc(args.now, "--now")
+    now = format_utc(now_value)
+    runtime = _delivery()
+
+    def register(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        assert state is not None
+        _, reason = launch_verdict(runtime, state, args.action_id)
+        if reason != "current":
+            raise WorkflowError(
+                f"register-worker refused: launch {args.action_id} is {reason}")
+        if args.parent is not None:
+            if parse_worker_id(args.parent)[0] != args.action_id:
+                raise WorkflowError(
+                    f"register-worker refused: parent {args.parent} belongs to another launch")
+            _, parent_reason = worker_verdict(runtime, state, args.parent)
+            if parent_reason != "live":
+                raise WorkflowError(
+                    f"register-worker refused: parent {args.parent} is {parent_reason}")
+        if now_value < parse_utc(state["updated_at"], "run update time"):
+            raise WorkflowError("register-worker time must not move backward")
+        ordinal = 1 + sum(1 for worker in state["workers"]
+                          if worker["launch"] == args.action_id)
+        worker_id = f"{args.action_id}:w{ordinal}"
+        state["workers"].append({
+            "worker_id": worker_id, "launch": args.action_id, "parent": args.parent,
+            "registered_at": now, "released_at": None, "release_event": None,
+        })
+        state["updated_at"] = now
+        return {"worker_id": worker_id, "launch": args.action_id,
+                "parent": args.parent}, True
+
+    print_json(transact(args.repo_root, args.run_id, register))
+    return 0
+
+
+def command_release_worker(args: argparse.Namespace) -> int:
+    """Release one worker, and on ``stopped`` its unreleased descendants (#222 D8, D12).
+
+    ``returned`` is refused while a child is live. A repeat with the same event
+    is a no-op that releases nothing; a different event is refused. Release
+    ignores whether the launch is still current.
+    """
+    if not RUN_ID_PATTERN.fullmatch(args.run_id):
+        raise WorkflowError("invalid run_id")
+    parse_worker_id(args.worker_id)
+    now_value = parse_utc(args.now, "--now")
+    now = format_utc(now_value)
+    runtime = _delivery()
+
+    def release(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        assert state is not None
+        workers = state["workers"]
+        record = next((worker for worker in workers
+                       if worker["worker_id"] == args.worker_id), None)
+        if record is None:
+            raise WorkflowError(f"release-worker refused: unknown worker {args.worker_id}")
+        if now_value < parse_utc(state["updated_at"], "run update time"):
+            raise WorkflowError("release-worker time must not move backward")
+        if record["release_event"] is not None:
+            if record["release_event"] != args.event:
+                raise WorkflowError(
+                    f"release-worker refused: conflicting release of {args.worker_id}, "
+                    f"already {record['release_event']}")
+            return {"worker_id": args.worker_id, "release_event": args.event,
+                    "released": []}, False
+        if args.event == "returned":
+            live_children = [
+                worker["worker_id"] for worker in workers
+                if worker["parent"] == args.worker_id
+                and worker_verdict(runtime, state, worker["worker_id"])[1] == "live"]
+            if live_children:
+                raise WorkflowError(
+                    f"release-worker refused: {args.worker_id} has live children: "
+                    + ", ".join(live_children))
+            targets = [record]
+        else:
+            subtree = {args.worker_id}
+            targets = []
+            for worker in workers:
+                if worker["worker_id"] in subtree or worker["parent"] in subtree:
+                    subtree.add(worker["worker_id"])
+                    if worker["released_at"] is None:
+                        targets.append(worker)
+        for worker in targets:
+            worker["released_at"] = now
+            worker["release_event"] = args.event
+        state["updated_at"] = now
+        return {"worker_id": args.worker_id, "release_event": args.event,
+                "released": [worker["worker_id"] for worker in targets]}, True
+
+    print_json(transact(args.repo_root, args.run_id, release))
+    return 0
+
+
+def command_check_worker(args: argparse.Namespace) -> int:
+    """Answer whether one registered worker is live (#222 D2, D12).
+
+    Read-only exactly as check-launch is: no clock, no lock, and neither
+    ``transact`` nor ``workflow_paths``. The id is parsed before the ledger is
+    touched, so a malformed id exits 2 even for an unknown run.
+    """
+    runtime = _delivery()
+    repo_root = resolve_repo_root(args.repo_root)
+    if not RUN_ID_PATTERN.fullmatch(args.run_id):
+        raise WorkflowError("invalid run_id")
+    parse_worker_id(args.worker_id)
+    state_path = repo_root / ".superpowers" / "workflows" / args.run_id / "state.json"
+    state = (read_state_unlocked(state_path, args.run_id)
+             if require_regular_path(state_path, "workflow state", allow_missing=True)
+             else None)
+    current_action_id, reason = worker_verdict(runtime, state, args.worker_id)
     print_json({
-        "action_id": args.action_id,
-        "current": reason == "current",
+        "worker_id": args.worker_id,
+        "live": reason == "live",
         "current_action_id": current_action_id,
         "reason": reason,
     })
@@ -3923,9 +4254,13 @@ def command_host_route(args: argparse.Namespace) -> int:
     print_json(route_verdict(args.route))
     return 0
 
+def render_json(value: Any) -> bytes:
+    """The wire rendering of ``value``: what `print_json` writes and control validates."""
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
 def print_json(value: Any) -> None:
-    json.dump(value, sys.stdout, sort_keys=True, separators=(",", ":"))
-    sys.stdout.write("\n")
+    sys.stdout.write(render_json(value).decode("utf-8"))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -3963,6 +4298,7 @@ def build_parser() -> argparse.ArgumentParser:
     checkpoint = subparsers.add_parser("checkpoint-delivery")
     add_run_arguments(checkpoint)
     checkpoint.add_argument("--checkpoint-file", required=True)
+    checkpoint.add_argument("--worker-id")
     checkpoint.set_defaults(handler=command_checkpoint_delivery)
 
     build_delivery = subparsers.add_parser("build-delivery", description=(
@@ -4036,6 +4372,25 @@ def build_parser() -> argparse.ArgumentParser:
     current_launch.add_argument("--run-id", required=True)
     current_launch.add_argument("--action-id", required=True)
     current_launch.set_defaults(handler=command_check_launch)
+
+    register_worker = subparsers.add_parser("register-worker")
+    add_run_arguments(register_worker)
+    register_worker.add_argument("--action-id", required=True)
+    register_worker.add_argument("--parent")
+    register_worker.set_defaults(handler=command_register_worker)
+
+    release_worker = subparsers.add_parser("release-worker")
+    add_run_arguments(release_worker)
+    release_worker.add_argument("--worker-id", required=True)
+    release_worker.add_argument(
+        "--event", required=True, choices=sorted(WORKER_RELEASE_EVENTS))
+    release_worker.set_defaults(handler=command_release_worker)
+
+    check_worker = subparsers.add_parser("check-worker")
+    check_worker.add_argument("--repo-root", required=True)
+    check_worker.add_argument("--run-id", required=True)
+    check_worker.add_argument("--worker-id", required=True)
+    check_worker.set_defaults(handler=command_check_worker)
 
     host_route = subparsers.add_parser("host-route")
     host_route.add_argument("--route", required=True)

@@ -56,6 +56,10 @@ verbatim — never recomputed, never derived from `attempt` — so ship-issue's
 launch guard can re-validate it before each forge write. In `ship-handoff/v2`
 it is `custody.action_id`.
 
+With lifecycle identity, the prompt also carries the single line
+Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>
+from from-issue's **Writing workers** rule — beside the handoff, never inside the handoff.
+
 Your task:
   1. Invoke the `ship-issue` skill via the Skill tool. Read its SKILL.md and follow
      every phase 0 → 8 in order. The pre-flight checks still run — the handoff is a
@@ -126,7 +130,8 @@ locally and clean up under the same detail rule.
 For a validated `delivery_remainder` object, launch the ship owner through the
 same `from-issue-ship-owner` site with this prompt, carrying the object's
 canonical JSON verbatim. A remainder has no spec, plan or reviewed head of its
-own, so it gets no `ship-handoff/v2`:
+own, so it gets no `ship-handoff/v2`. The from-issue owner registers this
+remainder owner like the Phase-7 ship owner:
 
 ```text
 You are running ship-issue for issue #<num> in remainder mode, autonomously.
@@ -137,10 +142,17 @@ object, canonical JSON, verbatim:
 Validate it with `artifact-budget validate-report --boundary workflow-response --input -`
 before decoding any field.
 
+With lifecycle identity, the prompt also carries the single line
+Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>
+beside the remainder object, never inside it.
+
 Your task: invoke the `ship-issue` skill via the Skill tool and follow its
 `## Remainder mode` from the ledger's ready stage. You hold this remainder
-custody, so you write its `checkpoint-delivery` cycles and your own
-`workflow-state finish --summary-file -`, then return exactly that finish's
+custody, so you write its `checkpoint-delivery` cycles; after your last commit
+and immediately before your own finish (after every cycle), release your
+children and then yourself with
+`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --worker-id <worker_id> --event returned`,
+then write your own `workflow-state finish --summary-file -` and return exactly that finish's
 validated JSON stdout and nothing else. Two exceptions write no finish: after a
 denial the loop checkpointed, which already suspended this custody, return only
 the re-entry line ship-issue prints; after a `delivery_stalled` checkpoint

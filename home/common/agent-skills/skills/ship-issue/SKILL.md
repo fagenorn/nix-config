@@ -112,8 +112,8 @@ five-step apply/push flow, and the Phase-7 merge. There is no post-merge
 exemption: under lifecycle identity each post-merge effect is a `## Delivery loop`
 cycle — the remote branch delete, and Phase 8's issue close, `git worktree
 remove` and `git branch -d` — fenced by `current-launch` before and after the
-effect exactly like the merge. Phase 1's merge from the integration branch and
-Phase 3's local commits are not forge writes and are not guarded.
+effect exactly like the merge. Local commits are fenced separately
+(### Local commits).
 
 **A refusal is a stop that writes nothing anywhere.** Do not execute the write.
 Make no further forge write, **no ledger write**, and run no cleanup: leave the
@@ -138,6 +138,21 @@ invocation has no attempts and no supersession mechanism, and the handoff
 validator's all-or-nothing group means it is never partially present. That is
 the only skip, and it is a statement about the invocation, not about the
 environment.
+
+### Local commits
+
+When the prompt carries a `Lifecycle worker:` line, this run is a
+registered worker, and it creates every local commit as
+`launch-commit --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <git commit arguments>`.
+That includes Phase 1's sync, run as
+`git merge --no-commit --no-ff origin/<integration>` followed by
+`launch-commit`, and Phase 3's commits. Exit 3 is a refusal like
+`check-launch`'s: stop with the same no-write rule. An agent this run
+dispatches that can write is registered with
+`--parent <worker_id>` added to `workflow-state register-worker` (this
+handoff's `action_id` as `--action-id`), gets its own `Lifecycle worker:`
+line, and is released when it returns. Without the line, commit with plain
+`git`.
 
 ## Doc-grounded escalations
 
@@ -202,7 +217,7 @@ The load-bearing rules, in brief:
 - Foreign commits on the branch (another issue's work) → surface, never clean up silently.
 - Conflicts: the allowlist auto-resolves lockfiles, migrations and generated files, and always keeps `.claude/settings.json` out of the merge. **Everything else escalates one conflict at a time**; skipped conflicts pause the phase.
 
-Otherwise `git merge origin/<integration>`; commit the merge with the configured merge-commit message. Don't squash.
+Otherwise run `git merge --no-commit --no-ff origin/<integration>`; when it reports `Already up to date` there is nothing to commit, otherwise commit the merge with the configured merge-commit message through `launch-commit` when this run holds a `Lifecycle worker:` line (### Local commits), or plain `git commit` without one. Don't squash.
 
 ## Phase 2 — Verify locally
 
@@ -461,6 +476,10 @@ artifact-budget validate-report --boundary ship-checkpoint --input - <<'EOF' | w
 EOF
 ```
 
+When this run holds a `Lifecycle worker:` line, append `--worker-id <worker_id>`
+to every `checkpoint-delivery`: it excuses this run alone when its own
+checkpoint suspends the launch.
+
 A `ship-checkpoint/v2` has exactly `interface_version` (2), `issue`, `custody`,
 `contract_digest`, `delivery_observations`, `authority_observations`,
 `reevaluation_evidence` (each sorted by `id`), `requested_scope`,
@@ -567,7 +586,12 @@ pending cleanup cycle. `## Launch guard` fences with this custody's
 A denial or a `delivery_stalled` reply ends a remainder owner's loop exactly as
 step 6 of `## Delivery loop` says: its whole return is the re-entry line or that
 reply, and it writes no `finish`. Otherwise a remainder owner holds its custody,
-so it writes its own `finish --summary-file -`. After the last cycle, validate the `ship-summary/v2` (its `historical_owner_result` is
+so it writes its own `finish --summary-file -`. A remainder owner whose prompt
+carries a `Lifecycle worker:` line releases every worker it registered and
+then itself with
+`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --worker-id <worker_id> --event returned`
+after its last commit and immediately before its own `finish`; after that
+release it creates no commit. After the last cycle, validate the `ship-summary/v2` (its `historical_owner_result` is
 the legacy row) and write it in one command, then return exactly the validated
 reply and nothing else:
 

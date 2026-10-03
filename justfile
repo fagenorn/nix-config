@@ -66,6 +66,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_admission_replay.py \
     home/common/agent-skills/tests/test_delivery_model.py \
     home/common/agent-skills/tests/test_delivery_workflow.py \
+    home/common/agent-skills/tests/test_delivered_control.py \
     home/common/agent-skills/tests/test_workflow_delivery.py \
     home/common/agent-skills/tests/test_task_brief.py \
     home/common/agent-skills/tests/test_sdd_workspace.py \
@@ -91,6 +92,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_artifact_budget.py \
     tests/test_agent_tools_canonical.py \
     tests/test_agent_tools_siblings.py \
+    tests/test_launch_commit.py \
     tests/test_transaction_core.py \
     tests/test_transaction_custody.py \
     tests/test_transaction_invocation.py \

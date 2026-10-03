@@ -101,6 +101,18 @@ Subagent (the explicitly selected implementer or mechanic above):
     existing file before writing to it: overwriting content you have not read
     destroys work you cannot see.
 
+    ## Lifecycle Worker
+
+    Only when this prompt carries a `Lifecycle worker:` line: create every
+    commit as
+    `launch-commit --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <git commit arguments>`
+    with the three values from that line, and never run `git commit` directly.
+    If you have been given more than one `Lifecycle worker:` line (a resume
+    brings a fresh one), only the most recent one governs: the earlier ones
+    are released. If `launch-commit` exits 3, it printed one JSON line whose
+    `reason` names why your launch is no longer live: make no further change, commit or push, and
+    report status BLOCKED with `launch fence refused: <reason>`.
+
     ## Report Format
 
     Write your full report to [REPORT_FILE]: what you implemented, what you

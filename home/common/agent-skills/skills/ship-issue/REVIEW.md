@@ -65,7 +65,9 @@ Phase 6 polling CI on the stale tip." Follow this order:
 2. Re-run every retained `bindings.workflow.verification` command through
    `bindings.commands` against the modified surface.
 3. `git add` the changed files; commit `fix(issue-<num>): address PR review —
-   <short blocker>` (follow retained `bindings.vcs.commit.co_authored_by`).
+   <short blocker>` (follow retained `bindings.vcs.commit.co_authored_by`),
+   through `launch-commit` when this run holds a `Lifecycle worker:` line
+   (SKILL.md's `### Local commits`).
 4. Run `check-launch` (SKILL.md's `## Launch guard`); on anything but
    `current: true`, stop without pushing and take the no-write stop. Then
    `git push`.

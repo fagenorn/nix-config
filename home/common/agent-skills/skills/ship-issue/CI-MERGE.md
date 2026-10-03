@@ -123,10 +123,15 @@ before step 3 when the merge already landed.
 1. **Sync.** Make one merge of `origin/<integration>` into the current
    selection's head under [`SYNC.md`](./SYNC.md), so its first parent is that
    head, and fold its conflict resolutions and sweeps into that merge commit.
+   With a `Lifecycle worker:` line, make that merge as
+   `git merge --no-commit --no-ff origin/<integration>` and commit it through
+   `launch-commit` (SKILL.md's ### Local commits).
 2. **Verify.** Run the Phase 2 verification commands.
 3. **Review.** Run REVIEW.md's merge-delta check over that commit's combined
    diff, `git show --cc <merge-sha>`, through SKILL.md's merge-delta reviewer.
-   Apply findings by amending the unpushed merge commit, which keeps both
+   Apply findings by amending the unpushed merge commit (through
+   `launch-commit … -- --amend --no-edit` when this run holds a
+   `Lifecycle worker:` line), which keeps both
    parents, and after every amend re-run the Phase 2 verification commands before the push.
    The link's `review_ref` is `merge-delta-empty` for an empty delta, and
    `merge-delta-clean` once every Blocking and Should-fix finding is applied
