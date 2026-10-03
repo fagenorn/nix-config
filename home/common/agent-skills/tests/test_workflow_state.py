@@ -1110,11 +1110,11 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         )
         self.assertEqual(combined["summaries"][0]["state"], "fogged")
         self.assertEqual(combined["summaries"][0]["blockers"], [
-            {"kind": "issue", "issue": 40, "url": None},
             {
                 "kind": "decision", "issue": 41,
                 "url": "https://github.com/fagenorn/nix-config/issues/41",
             },
+            {"kind": "issue", "issue": 40, "url": None},
         ])
         finalized = self.control(
             now="2026-08-19T12:01:00Z",
