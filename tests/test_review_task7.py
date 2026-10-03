@@ -248,10 +248,12 @@ class Task7ModelTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "invalid_table")
         executable = tree_with(self.repo, self.pins.prerequisite_tree, b".claude/specs/alpha-design.md",
                                b"alpha spec\n", "100755")
+        before = snapshot(self.repo)
         with self.assertRaises(EstimateError) as caught:
             compose(self.repo, table, self.pins, base_tree=self.pins.prerequisite_tree,
                     final_tree=executable, limits=limits())
         self.assertEqual(caught.exception.code, "unsupported_composition")
+        self.assertEqual(snapshot(self.repo), before)
 
     def test_inventory_with_extra_or_missing_move_root_path_raises_inventory_mismatch(self):
         extra = commit_files(self.repo, {".claude/specs/extra.md": b"extra\n"}, "extra")
@@ -309,8 +311,11 @@ class Task7ModelTest(unittest.TestCase):
         blob = git(self.repo, "rev-parse", f"{final}:.gitignore")
         removal = (f"diff --git a/.gitignore b/.gitignore\ndeleted file mode 100644\nindex {blob}..{ZERO}\n"
                    "--- a/.gitignore\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-ignore line 0\n-ignore line 1\n")
+        # S19 allowance for 2 removed and 3 output lines: header max 12 + 4*1 + 80 + 1 = 97, first
+        # header "@@ -1,2 +1,3 @@\n" = 16, and at context 0 two extra hunks of 97 - 2 bytes each.
+        allowance = (97 - 16) + 2 * (97 - 2)
         self.assertEqual(by_path[".gitignore"], {"path": ".gitignore", "added_lines": 3, "deleted_lines": 2,
-                         "record_bytes": len(removal) + add_bound(".gitignore", 40, 3)})
+                         "record_bytes": len(removal) + add_bound(".gitignore", 40, 3) + allowance})
 
     def test_compose_unexpressible_raises_unsupported_composition(self):
         table = derive_task7(self.repo, self.pins)
@@ -331,10 +336,12 @@ class Task7ModelTest(unittest.TestCase):
             self.assertEqual(caught.exception.code, "unsupported_composition")
             self.assertEqual(snapshot(self.repo), before)
         undecodable = tree_with(self.repo, self.pins.prerequisite_tree, b"src/\xff.txt", b"x\n")
+        before = snapshot(self.repo)
         with self.assertRaises(EstimateError) as caught:
             compose(self.repo, table, self.pins, base_tree=self.pins.prerequisite_tree,
                     final_tree=undecodable, limits=limits())
         self.assertEqual(caught.exception.code, "unsupported_composition")
+        self.assertEqual(snapshot(self.repo), before)
 
     def test_compose_refuses_repository_routing_before_any_write(self):
         table, bounds, routed = derive_task7(self.repo, self.pins), limits(), self.tmp / "routed"
@@ -385,6 +392,9 @@ class Task7ModelTest(unittest.TestCase):
                 with self.subTest(extra=extra), self.assertRaises(EstimateError) as caught:
                     call()
                 self.assertEqual(caught.exception.code, "unsupported_estimate")
+        # `a` and `ab` are not path prefixes of each other, on either side.
+        adjacent = replace(self.pins, move_roots=ROOTS + ((".claude/spec", ".agents/artifacts/spec", "spec"),))
+        self.assertEqual(derive_task7(self.repo, adjacent)["rows"], table["rows"])
 
     def test_real_pins_name_three_disjoint_roots(self):
         self.assertEqual(TASK7_PINS.prerequisite_commit, "fe85677c8bd26c808ac69c2ee21b17ff6e262923")
@@ -439,6 +449,29 @@ class Task7ModelTest(unittest.TestCase):
                         final_tree=final, limits=limits())
             self.assertEqual(caught.exception.code, "unsupported_composition")
             self.assertEqual(snapshot(self.repo), before)
+
+    def test_compose_write_bound_covers_multi_hunk_write_at_every_policy_context(self):
+        c = PACKING_POLICY["initial"]["context_lines"]
+        def blocks(tag):  # 2c+1 shared empty lines keep every differing function line its own hunk
+            return b"".join(b"\n" * (2 * c + 1) + b"func_%d_%s_" % (n, tag) + b"f" * 200 + b"\n"
+                            for n in range(40))
+        output = blocks(b"new")
+        repo, pins = fixture_pins(Path(tempfile.mkdtemp(dir=self.tmp)), agents=blocks(b"old"))
+        pins = replace(pins, renderers=tuple(
+            replace(s, fixed_bytes=len(output), fixed_lines=output.count(b"\n")) if s.target == "AGENTS.md"
+            else s for s in pins.renderers))
+        base = pins.prerequisite_tree
+        head = tree_with(repo, base, b"AGENTS.md", output)
+        records = [next(r for r in item.records if r.path == "AGENTS.md")
+                   for item in actual_inputs_from_trees(repo, base, head, base=base, head=head, commits=(),
+                                                        package_name="review.json", limits=limits())]
+        self.assertGreater(sum(l.startswith(b"@@ ") for l in records[0].payload.splitlines()), 10)
+        table = derive_task7(repo, pins)
+        before = snapshot(repo)
+        rows = {r["path"]: r for r in compose(repo, table, pins, base_tree=base, final_tree=base, limits=limits())}
+        self.assertEqual(snapshot(repo), before)
+        for record in records:
+            self.assertLessEqual(record.source_bytes, rows["AGENTS.md"]["record_bytes"])
 
     def test_compose_write_takes_larger_observed_record(self):
         table = derive_task7(self.repo, self.pins)

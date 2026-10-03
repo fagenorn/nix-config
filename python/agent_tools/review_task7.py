@@ -476,7 +476,12 @@ def _composed_trees(repo, scratch, table, pins, base_tree, final_tree):
 
 def compose(repo: Path, table: dict, pins: Task7Pins, *, base_tree: str, final_tree: str,
             limits) -> tuple[dict, ...]:
-    """Every record of `base_tree` against `final_tree` plus the table, as path-sorted bounds."""
+    """Every record of `base_tree` against `final_tree` plus the table, path-sorted.
+
+    A record the composed tree already holds is measured. A target takes the
+    larger of its measured record and its bound: the measured removal of its base
+    content plus the add bound, with `_write_allowance` when the base holds it.
+    """
     validate_task7(table, pins)
     try:  # CORE's routing guard, before any source or scratch write.
         history_commit(repo, pins.prerequisite_commit)
@@ -506,6 +511,8 @@ def compose(repo: Path, table: dict, pins: Task7Pins, *, base_tree: str, final_t
     for path, row in targets.items():  # max(base removal + add bound, observed); moves relocate exactly
         removal, observed = removals.get(path, (0, 0, 0)), records.get(path, (0, 0, 0))
         bound = removal[0] + _record(path, None, row["output"], len(pins.prerequisite_commit))
+        if path in removals:  # a base-to-output write may split into many hunks (S19)
+            bound += _write_allowance({"lines": removal[2]}, row["output"])
         records[path] = (max(bound, observed[0]), max(row["output"]["lines"], observed[1]),
                          max(removal[2], observed[2]))
     return tuple({"path": path, "record_bytes": size, "added_lines": added, "deleted_lines": deleted}
