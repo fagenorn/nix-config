@@ -351,6 +351,10 @@ class DeliveryRuntime:
             for issue in candidate.get("issues", {}).values():
                 issue.pop("delivery", None)
                 issue.pop("delivery_remainders", None)
+                # A schema-2 attempt has no progress marker (#250 D4); leaving
+                # one makes `migrate` refuse this document as a hybrid.
+                for attempt in issue.get("attempts", []):
+                    attempt.pop("progress_marker", None)
         return candidate
 
     def validate(self, value: object, kind: str) -> dict[str, Any]:

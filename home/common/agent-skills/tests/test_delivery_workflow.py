@@ -264,6 +264,12 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(legacy, original); self.assertEqual(migrated["schema_version"], 6)
             self.assertEqual(migrated["issues"]["151"]["delivery"],
                              self.workflow._delivery().empty_delivery())
+        # The adjacent step hands back the schema-2 shape itself, with nothing a
+        # later schema added (#250 D4), so the migrator accepts its own output.
+        adjacent = self.workflow._delivery().migrate_1_to_2(self.legacy(1))
+        self.assertEqual(adjacent, self.legacy(2))
+        self.assertEqual(self.workflow._delivery().migrate(
+            adjacent, migration_contracts={})["schema_version"], 6)
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); run = root / ".superpowers/workflows/admission"
             run.mkdir(parents=True)
