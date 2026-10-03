@@ -60,13 +60,17 @@ Only exit 0 with `complete/within_budget` clears the gate. Exit 2 or 3 stops: no
 
 **G1, the actual gate, runs after every task and fix and at the final head.** Pin the full `HEAD` and run `core_gate source ... python3 -m agent_tools.review_package <this root> DELIVERY_BASE HEAD`. Validate the result with `artifact-budget validate-report --boundary producer`, then independently run `artifact-budget check --kind review-package`. Both must show `complete/within_budget` and identical four integer metrics. Exit 2 or 3 stops. Before each product projection, refresh `actual_evidence` (checkpoint head and tree, task `actual_ranges`, process ranges) as a process-only metadata commit, as CORE did.
 
-**G2, the source pin (D13).** After Task 6, an independent reviewer reviews the complete `python/` source at a pinned commit. That commit is the `--tool-commit` for every authoritative full-shape run. A fresh adversarial reviewer repeats the graft and rehash reproduction on disposable clones. Any later `python/` change repeats G2 and G0.
+**G2, the source pin (D13).** After Task 6, an independent reviewer reviews the complete `python/` source at a pinned commit. That commit is the `--tool-commit` for every authoritative full-shape run: G3 runs Task 8's harness at the final head with `AGENT_RETAINED_TOOL_COMMIT` set to it, and the harness requires identical `python` trees (D17). A fresh adversarial reviewer repeats the graft and rehash reproduction on disposable clones. Any later `python/` change repeats G2 and G0.
 
 **G3, the final gate.** Run the focused tests, the full `agent-workflow-tests`, the managed `just build`, `just agent-installed-skill-tests` and `just agent-retained-tests /Users/anis/tmp/nix-config`, with no skip counted as acceptance. Separate, authorship-independent conformance and correctness reviews then cover the complete fixed-base delivery. Required CI remains the merge gate. Nothing is activated.
 
 ## Decisions
 
-D1–D10 govern the behavioral contracts. D11 fixes the module and validator layout. D12 is the pin-injection test seam. D13 fixes the order and the source pin. D14 fixes the full-shape recipe. D15 fixes the forecast method. D16 covers the omitted doc edit and the subject reserves. Members cite the rows they rest on. Each task report names the recovery rows (R1–R4) it consumes.
+D1–D10 govern the behavioral contracts. D11 fixes the module and validator layout. D12 is the pin-injection test seam. D13 fixes the order and the source pin. D14 fixes the full-shape recipe. D15 fixes the forecast method. D16 covers the omitted doc edit and the subject reserves. D17 records the standards-review corrections. Members cite the rows they rest on. Each task report names the recovery rows (R1–R4) it consumes.
+
+## Standards review provenance
+
+Reviewer: Codex (gpt-6-astra, xhigh), isolated read-only, base `93e6059a`, no fallback. Five findings accepted (B1, B2, S1–S3, per D17), none rejected or deferred.
 
 ## Review feasibility delivery
 

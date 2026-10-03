@@ -25,7 +25,7 @@
 - A move needs equal blob and mode. Its bound is the exact R100 header text (`diff --git`, `similarity index 100%`, `rename from`, `rename to`) with Git C-style quoting of both paths. When identical blobs admit several pairings, each destination takes the maximum over compatible sources.
 - A write or add bounds the full delete/add record: Git and hunk headers, every line prefix, and the no-newline markers. That bound is computed from the `RendererSpec` fixed portion plus `count × max_encoded_bytes` for each field. A missing renderer or field, or a count or maximum that is not an int, raises `EstimateError("unsupported_estimate")`.
 - The project identity is labelled `authored-estimate` with `max_encoded_bytes` only. No project contract is read (D4). Unknown digests in paths are 64-hex placeholders, charged at full length.
-- `compose` relocates moves as exact blobs in a private index (`GIT_INDEX_FILE` under a private temporary directory) and measures them with the shared builder. A write takes the larger of (measured removal plus output bound) and the observed record. Anything else raises `unsupported_composition`. The source repository's refs, index and objects stay unchanged.
+- `compose` works in a disposable scratch repository whose `objects/info/alternates` names the source object store read-only, as CORE's `reconstruct_owned` does (D17). It relocates moves there as exact blobs, writes and measures every tree there with the shared builder, and removes the scratch repository only after measuring. A write takes the larger of (measured removal plus output bound) and the observed record. Anything else raises `unsupported_composition`. The source repository's refs, index and object contents stay unchanged.
 
 - [ ] **Step 1: Write the shared portable support module.** `tests/retained_review_test_support.py` exports these helpers, all on real Git:
   - `git(repo, *args, env=None) -> str`
@@ -33,7 +33,7 @@
   - `commit_files(repo, files: dict[str, bytes|None], message, *, sign_key=None) -> str`
   - `ssh_signer(tmp) -> tuple[Path, bytes]`, which generates an ephemeral key with `ssh-keygen -t ed25519 -N ''` and returns the key and its allowed-signers line
   - `HOSTILE_GIT_ENV: dict[str, str]`, which sets `GIT_CONFIG_COUNT` entries for `diff.renames=copies`, `diff.renameLimit=1`, `core.quotePath=false`, `diff.noprefix=true`, `diff.mnemonicPrefix=true`, `color.ui=always` and `diff.external=false`
-  - `snapshot(repo) -> tuple`, which captures refs (`for-each-ref`), index bytes digest, `status --porcelain=v2` and the sorted `objects/` listing
+  - `snapshot(repo) -> tuple`, which captures refs (`for-each-ref`), the index digest, `status --porcelain=v2`, and a sorted `(path, sha256)` for every file under the repository directory, `.git` included (D17). Its Git reads run with `GIT_OPTIONAL_LOCKS=0`, so collecting it writes nothing
   - `source_budget_env(tmp) -> dict`, which stages `HOME/.agents/lib/python/artifact_budget.py` and the policy from `home/common/agent-skills/` and puts the source `scripts/` directory on `PATH`, as `tests/test_review_feasibility.py` does. Tests call `describe("review-package")` under `patch.dict(os.environ, env, clear=True)`; the installed helper lacks `describe` until a switch
 - [ ] **Step 2: Write the failing tests.** These go in `tests/test_review_task7.py` (import with `from .retained_review_test_support import ...`).
 

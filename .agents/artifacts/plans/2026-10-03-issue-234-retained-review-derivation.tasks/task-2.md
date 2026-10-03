@@ -14,7 +14,7 @@
   - `class ContributionError(Exception)` with `code: str`. Every `HistoryError` or `ForecastError` raised from the history read surfaces as `ContributionError("history_unauthenticated")` with the original as `__cause__`.
   - `@dataclass(frozen=True) Issue121Pins(base: str, head: str, assignments: tuple[tuple[str, int, str | None], ...], plan_prefix: str, plan_blobs: tuple[tuple[str, str], ...], allowed_signer: bytes, task_count: int)`. Each assignment is `(commit, owner, process_reason)`, with owner 0 for process. `ISSUE_121_PINS` holds the real range `65748f48…..fe85677c…`, the twelve process pairs from issue 226 (both `design_budget_fix` rows included), the eighteen task 1–6 assignments with `8e6f0681…` as Task 3, blobs `8294252b…`/`c8c622dd…` and the SSH signer.
   - `classify(repo, pins) -> tuple[dict, ...]`, giving `{commit, owner, reason}` rows in raw range order.
-  - `contribution_edges(repo, pins, classes) -> tuple[dict, ...]`. Each edge is an `edge_facts` row plus `owner`, `parent_ordinal` and `id`, where `id` is the `telemetry_digest` of the rest. Source bodies are never kept.
+  - `contribution_edges(repo, pins, classes) -> tuple[dict, ...]`. Each edge is an `edge_facts` row plus `owner`, `parent_ordinal` and `id`, where `id` is the `telemetry_digest` of the rest. Each record also gains `hunk_header_sha256` (D17): split the same `--binary -U10` diff with CORE's record framing, require each chunk's `raw_digest` to equal the record's `record_sha256`, then digest that chunk's `@@` lines joined in order (no lines → the digest of empty bytes). `validate_121` requires the field on every record. Source bodies are never kept.
   - `plan_anchors(repo, pins) -> list[dict]`
   - `reconstruct_boundary(repo, pins, *, boundary: str, prerequisite: Mapping, edges: Sequence[dict], table: dict, task7_pins, authority) -> dict`, which returns one closed outcome row.
   - `derive_121(repo, pins, task7_pins, authority) -> dict`, the payload. Its keys are `schema_version` (3), `kind`, `range`, `classes`, `edges`, `anchors`, `aggregate{actual, projected}`, `boundaries` (`tasks-1-3`, `tasks-4-6`, `tasks-7-8`, in that order), `operational_effects` (`[TASK8_EFFECT]`) and `record_table_policy{domain, policy_sha256}`.
@@ -70,7 +70,7 @@ class AncestryTest(unittest.TestCase):
   - `test_shallow_file_is_invalid`
   - `test_alternate_replace_base_is_invalid`
   - `test_git_routing_variables_are_invalid`: `GIT_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_REPLACE_REF_BASE` and `GIT_GRAFT_FILE`.
-  - `test_rehashed_reordered_dropped_added_edges_are_invalid`
+  - `test_rehashed_reordered_dropped_added_edges_are_invalid`, including one edge whose `hunk_header_sha256` changes with its `id` recomputed
   - `test_assignment_mutations_fail`: unknown, task-zero, duplicate, multiple, observed-7/8, reordered and omitted.
   - `test_forged_or_wrong_key_signature_and_substituted_plan_blob_fail`
   - `test_unavailable_row_with_tree_metrics_or_records_fails_validation`

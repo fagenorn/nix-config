@@ -35,7 +35,7 @@
 - Output is deterministic: canonical ASCII-LF bytes, sorted members, and no clock, locale, temporary path or environment value inside any output. Two runs into fresh directories give byte-identical files.
 - The command module only parses, reads, calls, writes and maps exits (agent-helper standard 2).
 
-- [ ] **Step 1: Write the failing tests.** These go in `tests/test_review_derivation.py` and use fixture pins assembled from the support module. The support module gains two helpers. `tool_fixture(tmp)` commits a copy of the running `python/agent_tools/` bytes into a fixture tool repository. `derivation_fixture(tmp)` puts every input repository and the archive under `tmp/repos` and returns `(DeriveInputs, (task7, issue121, issue100) pins)`.
+- [ ] **Step 1: Write the failing tests.** These go in `tests/test_review_derivation.py` and use fixture pins assembled from the support module. The support module gains two helpers. `tool_fixture(tmp)` commits a copy of the running `python/agent_tools/` bytes into a fixture tool repository. `derivation_fixture(tmp)` puts every input repository and the archive under `tmp/repos` and returns `(DeriveInputs, (task7, issue121, issue100) pins)`. Its issue-121 history leaves at least one boundary `projection_unavailable`, so Task 6 has a valid unavailable control (D17).
 
 ```python
 class DerivationTest(unittest.TestCase):

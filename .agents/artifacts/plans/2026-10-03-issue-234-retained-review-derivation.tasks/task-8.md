@@ -23,7 +23,7 @@ The existing launcher class also runs under this recipe, and it must pass there 
 
 **Invariants:**
 - An unset `AGENT_RETAINED_ROOT` gives a class-level `SkipTest` that names the recipe, following the `AGENT_SKILLS_INSTALLED_HOME` precedent. When it is set, a missing commit (`fe85677c`, `65748f48`, `a7b7c6f4`, `cba57498`, `55cef035`) or archive file fails the run. It never skips.
-- The archive is `<root>/.superpowers/review-evidence/100/direct-100-000002/source-integration-a7b7c6f`. The issue-121 and issue-100 repositories are both `<root>`. The tool repository is the recipe checkout, with `--tool-commit` equal to `git rev-parse HEAD`. The controller's authoritative run happens at the reviewed pin (D13).
+- The archive is `<root>/.superpowers/review-evidence/100/direct-100-000002/source-integration-a7b7c6f`. The issue-121 and issue-100 repositories are both `<root>`. The tool repository is the recipe checkout. `--tool-commit` is `AGENT_RETAINED_TOOL_COMMIT` when set, else `git rev-parse HEAD`; `setUpClass` fails unless that commit's `python` tree id equals `HEAD:python`. The authoritative run executes this final harness with the G2 pin set there (D13, D17).
 - Every mutation runs in a disposable clone (`git clone --shared --no-checkout <root> <tmp>`, alternates-backed) or a copied bundle. The root's refs, index, `info/grafts`, `objects/` listing and archive bytes are compared before and after every test.
 - The D10 renderer run follows these rules:
   - Stage the pinned `adopt-project.py`, its five libraries, `resolve-project.py` and `platform-manifest.json` into a scratch `HOME`, using `git cat-file` from `fe85677c` exactly as the signed Task-7 brief stages them.

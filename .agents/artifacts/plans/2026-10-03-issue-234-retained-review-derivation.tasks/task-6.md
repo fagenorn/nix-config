@@ -8,7 +8,7 @@
 
 **Interfaces:**
 - Consumes:
-  - From Task 4: `authenticate`, `validate_witness`, `PAYLOAD_NAMES`, `WitnessError`.
+  - From Task 4: `authenticate`, `validate_witness`, `build_anchor`, `PAYLOAD_NAMES`, `WitnessError`.
   - Validators: `validate_task7` (Task 1), `validate_121`/`unavailable_ids` (Task 2), `validate_100` (Task 3).
   - The real pins from Tasks 1–3.
   - From Task 5: `derive_bundle` and `DeriveInputs`.
@@ -59,9 +59,12 @@ class ReplayTest(unittest.TestCase):
 
     def test_malformed_sibling_beside_unavailable_is_invalid(self):
         anchor, raw = authenticate(self.bundle, self.expected)
+        payloads = validate_bundle(anchor, raw, **self.kwargs())   # control: valid, with an unavailable outcome
+        self.assertTrue(unavailable_ids(payloads["issue-121.json"]))
         broken = dict(raw); broken["issue-100-derived.json"] = canonical_bytes({"schema_version": 1})
+        rebound = build_anchor({k: anchor[k] for k in ("tool", "issue_121", "issue_100", "archive", "estimate")}, broken)   # digests coherent; only semantics break
         with self.assertRaises(ReplayInvalid):
-            validate_bundle(anchor, broken, **self.kwargs())
+            validate_bundle(rebound, broken, **self.kwargs())
 
     def test_rehashed_121_chain_break_is_invalid(self):
         anchor, raw = authenticate(self.bundle, self.expected)
