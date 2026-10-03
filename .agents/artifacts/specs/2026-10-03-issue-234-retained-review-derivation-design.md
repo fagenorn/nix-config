@@ -221,12 +221,16 @@ The model is checked against real output in two ways:
 - In the portable tier, the real source producer runs under hostile rename,
   quoting and rename-limit configuration on real-Git fixtures that reproduce
   each operation shape.
-- In the full-shape tier, the pinned renderer closure is materialized from its
-  blobs into scratch, run by command name on a scratch `PATH` against a
-  disposable clone of the pinned tree, and every real record must be no larger
-  than its row bound.
+- In the full-shape tier, the pinned renderer runs for real (D10). The pinned
+  adopt tool, its five libraries and the resolver are materialized from their
+  blobs into a staged scratch `HOME` and run by command name on a scratch `PATH`.
+  It runs `plan` and then `apply` in a disposable, alternates-backed clone of the
+  pinned tree, signing with an ephemeral SSH key generated in scratch. Every
+  record of the resulting commit is measured with the shared builder and must be
+  no larger than its row bound.
 
-Neither touches the retained checkout or a real registry. Observed Task-7
+Neither touches the retained checkout, the user's signing key or a real
+registry: `verify --register` is never invoked. Observed Task-7
 actuals stay `null`.
 
 ### Issue-100 payload and byte domains
@@ -295,7 +299,10 @@ Replay proceeds in a fixed order:
    references, raw parent ordinals, ordered edge and contribution coverage,
    unique final records, domain policies, every issue-100 fact and criterion,
    the Task-7 table counts/bounds/identities, and every outcome row's
-   references.
+   references. Without Git, replay also re-checks the structure of the history
+   tables: issue 121 must form an exact linear chain of 30 ordinal-1 edges from
+   the pinned base to the pinned head, and every issue-100 edge's commit and
+   parent must close over the pinned range.
 4. Only then classify the outcomes.
 
 If every outcome is measured, replay exits 0 with a canonical v3
@@ -412,6 +419,7 @@ results.
 | D7 | Replay exit 0 when all outcomes are measured (including over budget); exit 2 with `projection_unavailable` stderr only after complete validation; `invalid:` stderr otherwise | Parent Task-5 outcome contract; the-bar truthful terminal states | Exit 3 for historical overflow: suggests a delivery decision; partial success objects |
 | D8 | Two tiers: the portable tier in `agent-workflow-tests`, and a full-shape tier run by a dedicated build-dependent recipe that always supplies explicit retained inputs; launcher cases stay in the installed-layout module | Retained issue-121 objects have no ref and the archive is machine-local ignored state; `AGENT_SKILLS_INSTALLED_HOME` precedent; standard 5; issue 234 forbids synthetic stand-ins | Full-shape tests in CI (they would fail with no inputs), or synthetic-only acceptance (rejected by the issue) |
 | D9 | The DERIVE plan is a v3 plan with `derived_from: null`. Published CORE must project it with the matching reviewed closure before any product work. Exit 2/3 stops without a bootstrap | Issue 234 decisions; CORE D2/D8 | Run on the ambient installed helper (it lacks `describe` until a switch), or extend the CORE bootstrap |
+| D10 | Real Task-7 output comes from running the pinned adopt tool's `plan` then `apply` in a disposable alternates-backed clone, with a staged HOME and an ephemeral scratch SSH signing key | The pinned planner keeps write bytes in memory and only `apply` materializes them; the signed contract requires `-S`; issue 234 "real rendered outputs satisfy the model" | Lend it the user's signing key or the retained checkout (credential/state exposure), or re-implement the renderer (a second answer to what adoption writes) |
 
 Design/grill frontier is closed within the approved scope. No context-map or ADR
 write route exists in the resolved bindings, so this ledger is the issue's
