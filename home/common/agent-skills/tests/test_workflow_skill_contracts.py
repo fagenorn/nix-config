@@ -278,6 +278,8 @@ POLICY_GATE_PATTERN_FILES = frozenset({
 # files, and an entry that no longer matches fails it, so the allowance cannot
 # outlive its use or widen silently.
 LEGACY_MIGRATION_INPUTS = {
+    "python/agent_tools/review_task7.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
+    "tests/test_review_task7.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
     "python/agent_tools/adopt_inspection.py": frozenset({
         ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
     }),
