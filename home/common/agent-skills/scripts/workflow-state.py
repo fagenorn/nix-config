@@ -18,7 +18,7 @@ import tempfile
 from typing import Any, Callable, Iterator
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 CONTROL_INTERFACE_VERSION = 3
 DIRECT_OWNER_INTERFACE_VERSION = 2
 ATTEMPT_STATES = frozenset(
@@ -63,6 +63,9 @@ ACTION_ID_PATTERN = re.compile(
     r"^([1-9][0-9]{0,17}):(r)?([1-9][0-9]{0,17}):([1-9][0-9]{0,17})$"
 )
 MERGE_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
+# Two lengths because a repository names commits in either the SHA-1 or the
+# SHA-256 object format (#250 D4).
+PROGRESS_MARKER_PATTERN = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 DIRECT_RUN_ID_PATTERN = re.compile(r"^direct-([1-9][0-9]*)-([0-9]{6})$")
 PHASE_ACTIONS = frozenset({"continue", "fresh_start", "handoff", "delegate"})
 PHASE_INPUT_FIELDS = (
@@ -129,6 +132,7 @@ ATTEMPT_FIELDS = frozenset(
         "blocked_on",
         "suspend_phase",
         "stalled_resumes",
+        "progress_marker",
     }
 )
 SUSPENSION_DEFAULTS = {
@@ -622,6 +626,14 @@ def validate_attempt(
     if value["suspend_phase"] is not None:
         require_plain_int(value["suspend_phase"], "attempt suspend phase")
     require_plain_int(value["stalled_resumes"], "attempt stalled resumes")
+    progress_marker = value["progress_marker"]
+    # fullmatch, not match: a marker with a trailing newline is not a commit
+    # ID (#250 D4).
+    if progress_marker is not None and not (
+        type(progress_marker) is str
+        and PROGRESS_MARKER_PATTERN.fullmatch(progress_marker)
+    ):
+        raise WorkflowError("invalid attempt progress marker")
     result_source = value["result_source"]
     if (result is None) != (value["finished_at"] is None) or (result is None) != (
         result_source is None
@@ -1961,6 +1973,7 @@ def new_control_attempt(
         "phase_action": None,
         "phase_inputs": None,
         **SUSPENSION_DEFAULTS,
+        "progress_marker": None,
     }
 
 
@@ -3665,14 +3678,14 @@ def read_state_unlocked(state_path: Path, run_id: str) -> dict[str, Any]:
     lock: `atomic_write_state` publishes by `os.replace`, so an unlocked reader
     sees either the whole prior file or the whole new one, never a torn one — and
     taking the lock would mean creating `state.lock`, which is a write. Schemas
-    1–4 are migrated and validated on a detached copy; the document is returned
+    1–5 are migrated and validated on a detached copy; the document is returned
     as stored.
     """
     try:
         raw_state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise WorkflowError("invalid workflow state") from error
-    if isinstance(raw_state, dict) and raw_state.get("schema_version") in {1, 2, 3, 4}:
+    if isinstance(raw_state, dict) and raw_state.get("schema_version") in {1, 2, 3, 4, 5}:
         candidate = _call("invalid legacy workflow state",
             _delivery().migrate, raw_state, migration_contracts={})
         validate_state(candidate, run_id=run_id)

@@ -73,6 +73,10 @@ class LifecycleHarness:
     def _as_legacy(state, version, *, keep_delivery=False):
         state = copy.deepcopy(state)
         state["schema_version"] = version
+        if version < 6:
+            for issue in state["issues"].values():
+                for attempt in issue["attempts"]:
+                    attempt.pop("progress_marker", None)
         if version < 5:
             state.pop("workers", None)
         if version < 4:
@@ -2400,7 +2404,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         stdout_json = self.finish(1, merged, now="2026-08-13T20:20:00Z")
         state = self.read_state()
         attempt = state["issues"]["14"]["attempts"][0]
-        self.assertEqual(state["schema_version"], 5)
+        self.assertEqual(state["schema_version"], 6)
         self.assertIsNone(attempt["blocked_on"])
         self.assertEqual(attempt["stalled_resumes"], 0)
         self.assertEqual(attempt["state"], "merged")
@@ -2793,10 +2797,10 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                     "last_progress_at": DEFAULT_NOW, "phase_action": "handoff",
                     "phase_inputs": expected_inputs,
                     "blocked_on": None, "suspend_phase": None,
-                    "stalled_resumes": 0,
+                    "stalled_resumes": 0, "progress_marker": None,
                 }
                 expected_state = {
-                    "schema_version": 5, "run_id": run_id, "workers": [],
+                    "schema_version": 6, "run_id": run_id, "workers": [],
                     "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
                     "prior_run": None, "admission": self.spawned_admission(14),
                     "issues": {"14": {
@@ -2841,9 +2845,10 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "last_progress_at": DEFAULT_NOW, "phase_action": "handoff",
             "phase_inputs": expected_inputs,
             "blocked_on": None, "suspend_phase": None, "stalled_resumes": 0,
+            "progress_marker": None,
         }
         expected_state = {
-            "schema_version": 5, "run_id": self.run_id, "workers": [],
+            "schema_version": 6, "run_id": self.run_id, "workers": [],
             "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
             "prior_run": None, "admission": self.spawned_admission(14),
             "issues": {"14": {
@@ -5322,7 +5327,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             schema_one, run_id=self.run_id, migration_contracts={151: contract}
         )
         self.assertEqual(schema_one, original)
-        self.assertEqual(migrated["schema_version"], 5)
+        self.assertEqual(migrated["schema_version"], 6)
         self.assertEqual(workflow.validate_state(migrated, run_id=self.run_id), migrated)
         issue = migrated["issues"]["151"]
         self.assertEqual(issue["delivery_remainders"], [])
@@ -5343,9 +5348,9 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                     lambda current: (current, False), migration_contracts={},
                 )
             self.assertEqual(state, self._as_legacy(baseline, version))
-            self.assertEqual(value["schema_version"], 5)
+            self.assertEqual(value["schema_version"], 6)
             write.assert_called_once()
-            self.assertEqual(write.call_args.args[2]["schema_version"], 5)
+            self.assertEqual(write.call_args.args[2]["schema_version"], 6)
 
     def test_locked_loader_requires_keyword_migration_context(self):
         self.init_run()
@@ -5370,11 +5375,17 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         workflow = load_source_module(SCRIPT, "workflow_state_legacy_rows")
         migrated = workflow.upgrade_state(legacy, run_id=self.run_id,
                                           migration_contracts={})
-        self.assertEqual(migrated["schema_version"], 5)
+        self.assertEqual(migrated["schema_version"], 6)
         for key, legacy_issue in legacy_rows.items():
             migrated_issue = migrated["issues"][key]
+            # Schema 6 adds one key to every attempt (#250 D4); every legacy
+            # field still migrates byte-exact.
+            attempts = copy.deepcopy(migrated_issue["attempts"])
+            for attempt in attempts:
+                self.assertIsNone(attempt.pop("progress_marker"))
             self.assertEqual(
-                {name: migrated_issue[name] for name in ("issue", "attempts", "outcome")},
+                {"issue": migrated_issue["issue"], "attempts": attempts,
+                 "outcome": migrated_issue["outcome"]},
                 legacy_issue,
             )
         self.assertEqual(workflow.validate_state(migrated, run_id=self.run_id), migrated)
@@ -6242,7 +6253,7 @@ class WorkerRegistryTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(self.check_worker("14:1:1:w9")["reason"], "unknown_worker")
         self.assertEqual(self.state_path.read_bytes(), before)
         state = self.read_state()
-        self.assertEqual(state["schema_version"], 5)
+        self.assertEqual(state["schema_version"], 6)
         self.assertEqual(state["workers"][0], {
             "worker_id": "14:1:1:w1", "launch": "14:1:1", "parent": None,
             "registered_at": "2026-08-13T20:01:00Z", "released_at": None,
@@ -6358,7 +6369,7 @@ class WorkerRegistryTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(self.state_path.read_bytes(), before)
         self.register_worker(action_id="14:1:1", now="2026-08-13T20:01:00Z")
         upgraded = self.read_state()
-        self.assertEqual(upgraded["schema_version"], 5)
+        self.assertEqual(upgraded["schema_version"], 6)
         self.assertEqual([w["worker_id"] for w in upgraded["workers"]], ["14:1:1:w1"])
         hybrid = self._as_legacy(upgraded, 4)
         hybrid["workers"] = []
@@ -6409,6 +6420,88 @@ class WorkerRegistryTest(LifecycleHarness, unittest.TestCase):
                 self.assertEqual((refused.returncode, refused.stdout), (2, ""))
                 if name in mistyped_times:
                     self.assertIn("invalid workflow workers", refused.stderr)
+
+
+class ProgressMarkerSchemaTest(LifecycleHarness, unittest.TestCase):
+    """#250 D4: schema 6 gives every attempt a nullable `progress_marker`."""
+
+    def spawn_16(self):
+        self.init_run()
+        self.worktree = str(self.root / "wt-16")
+        self.spawn(issue=16, worktree=self.worktree, budget_minutes=10)
+
+    def attempt(self):
+        return self.read_state()["issues"]["16"]["attempts"][-1]
+
+    def with_marker(self, state, marker):
+        value = copy.deepcopy(state)
+        value["issues"]["16"]["attempts"][0]["progress_marker"] = marker
+        return value
+
+    def assert_refused_unchanged(self, state):
+        self.write_state(state)
+        before = self.state_path.read_bytes()
+        refused = self.check_launch_raw(action_id="16:1:1", ok=False)
+        self.assertEqual((refused.returncode, self.state_path.read_bytes()), (2, before))
+
+    def test_a_new_attempt_starts_with_a_null_marker_at_schema_six(self):
+        self.spawn_16()
+        self.assertEqual(self.read_state()["schema_version"], 6)
+        self.assertIsNone(self.attempt()["progress_marker"])
+
+    def test_a_schema_five_ledger_keeps_its_stall_count_and_upgrades_on_first_write(self):
+        self.spawn_16()
+        self.suspend(issue=16, attempt=1, blocked_on="usage_limit",
+                     now="2026-08-13T20:01:00Z")
+        self.resume(issue=16, worktree=self.worktree, now="2026-08-13T20:02:00Z")
+        self.suspend(issue=16, attempt=1, blocked_on="usage_limit",
+                     now="2026-08-13T20:03:00Z")
+        self.assertEqual(self.attempt()["stalled_resumes"], 1)
+        legacy = self._as_legacy(self.read_state(), 5)
+        self.assertEqual(legacy["schema_version"], 5)
+        self.assertNotIn("progress_marker", legacy["issues"]["16"]["attempts"][0])
+        self.write_state(legacy)
+        before = self.state_path.read_bytes()
+        self.assertEqual(self.check_launch(action_id="16:1:2")["reason"],
+                         "inactive_attempt")
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.resume(issue=16, worktree=self.worktree, now="2026-08-13T20:04:00Z")
+        upgraded = self.read_state()
+        attempt = upgraded["issues"]["16"]["attempts"][0]
+        self.assertEqual(
+            (upgraded["schema_version"], attempt["progress_marker"],
+             attempt["stalled_resumes"], attempt["suspend_phase"]),
+            (6, None, 1, 0))
+
+    def test_a_schema_five_hybrid_is_refused_without_a_write(self):
+        self.spawn_16()
+        hybrid = self._as_legacy(self.read_state(), 5)
+        hybrid["issues"]["16"]["attempts"][0]["progress_marker"] = None
+        self.assert_refused_unchanged(hybrid)
+        before = self.state_path.read_bytes()
+        refused = self.suspend(issue=16, attempt=1, blocked_on="external",
+                               now="2026-08-13T20:02:00Z", ok=False)
+        self.assertEqual((refused.returncode, self.state_path.read_bytes()), (2, before))
+
+    def test_the_validator_closes_the_marker(self):
+        self.spawn_16()
+        valid = self.read_state()
+        for marker in ("a" * 40, "0123456789abcdef" * 4):
+            with self.subTest(accepted=marker):
+                self.write_state(self.with_marker(valid, marker))
+                self.assertEqual(self.check_launch(action_id="16:1:1")["reason"],
+                                 "current")
+        rejected = {
+            "abbreviated": "abc1234", "uppercase": "A" * 40, "41 characters": "a" * 41,
+            "63 characters": "a" * 63, "not hexadecimal": "g" * 40, "empty": "",
+            "trailing newline": "a" * 40 + "\n", "integer": 7, "boolean": True,
+        }
+        for label, marker in rejected.items():
+            with self.subTest(rejected=label):
+                self.assert_refused_unchanged(self.with_marker(valid, marker))
+        missing = copy.deepcopy(valid)
+        del missing["issues"]["16"]["attempts"][0]["progress_marker"]
+        self.assert_refused_unchanged(missing)
 
 
 class OwnerExitFenceTest(LifecycleHarness, unittest.TestCase):
