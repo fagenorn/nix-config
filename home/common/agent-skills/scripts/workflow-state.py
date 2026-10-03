@@ -1582,6 +1582,45 @@ def suspend_attempt(attempt: dict[str, Any], *, blocked_on: str, now: str) -> bo
     return True
 
 
+def record_progress_marker(
+    attempt: dict[str, Any], *, head: str, marker_is_ancestor: bool
+) -> str:
+    """Decide what the worktree's checked-out commit means for the stall count.
+
+    ``head`` is the commit the attempt's worktree has checked out and
+    ``marker_is_ancestor`` says whether the stored marker is an ancestor of it.
+    The outcome is the return value:
+
+    - ``baseline``: no marker was stored, so ``head`` becomes it. With nothing
+      to compare against, no movement is proven and the stall fields stay as
+      they are (#250 D6).
+    - ``unchanged``: ``head`` is the stored marker; nothing is written.
+    - ``diverged``: ``head`` does not descend from the stored marker; nothing
+      is written, and the marker stays where it is so that stepping back and
+      forward again can never count as new work (#250 D3).
+    - ``advanced``: ``head`` strictly descends from the stored marker. It
+      becomes the marker and the stall count starts afresh.
+
+    Only ``advanced`` starts a fresh count, and it does so through the two
+    fields a phase advance already leaves ``suspend_attempt`` to compare: with
+    ``suspend_phase`` cleared the next suspension sees a different phase and
+    counts from 0, so the suspension arithmetic itself reads no marker
+    (#250 D5).
+    """
+    stored = attempt["progress_marker"]
+    if stored is None:
+        attempt["progress_marker"] = head
+        return "baseline"
+    if stored == head:
+        return "unchanged"
+    if not marker_is_ancestor:
+        return "diverged"
+    attempt["progress_marker"] = head
+    attempt["suspend_phase"] = None
+    attempt["stalled_resumes"] = 0
+    return "advanced"
+
+
 def attempt_deadline(now: str, attempt_budget_minutes: int) -> str:
     """The instant an attempt's wall-clock budget window closes."""
     try:
@@ -3949,6 +3988,74 @@ def command_register_worker(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_mark_progress(args: argparse.Namespace) -> int:
+    """Record the attempt worktree's checked-out commit as its progress marker.
+
+    The caller names only its launch (#250 D1); the marker is the commit the
+    recorded worktree has checked out, and ``record_progress_marker`` decides
+    the outcome. ``unchanged`` and ``diverged`` are answers, not refusals: they
+    exit zero and write nothing (#250 D7). The git probe runs before the run
+    lock is taken, and the transaction then refuses unless the launch is still
+    current and the attempt still has the worktree and marker the probe used
+    (#250 D8).
+
+    The write does not pass ``fence_owner_exit``: this verb ends no launch. And
+    because the write goes through ``transact``, a pre-schema-6 ledger is
+    persisted at schema 6 even when the outcome writes nothing (#250 D12).
+    """
+    if not RUN_ID_PATTERN.fullmatch(args.run_id):
+        raise WorkflowError("invalid run_id")
+    issue, _, _ = parse_action_id(args.action_id)
+    now_value = parse_utc(args.now, "--now")
+    now = format_utc(now_value)
+    if ":r" in args.action_id:
+        raise WorkflowError(
+            "mark-progress refused: a remainder launch keeps its own bound")
+    runtime = _delivery()
+    repo_root = resolve_repo_root(args.repo_root)
+    state_path = repo_root / ".superpowers" / "workflows" / args.run_id / "state.json"
+    state = (read_state_unlocked(state_path, args.run_id)
+             if require_regular_path(state_path, "workflow state", allow_missing=True)
+             else None)
+
+    def current_attempt(state: dict[str, Any] | None) -> dict[str, Any]:
+        _, reason = launch_verdict(runtime, state, args.action_id)
+        if reason != "current":
+            raise WorkflowError(
+                f"mark-progress refused: launch {args.action_id} is {reason}")
+        assert state is not None
+        return state["issues"][str(issue)]["attempts"][-1]
+
+    attempt = current_attempt(state)
+    worktree = attempt["worktree"]
+    # The unlocked reader returns a pre-schema-6 document as stored: the key is
+    # absent there, and the migration will make it None (#250 D12).
+    stored = attempt.get("progress_marker")
+    try:
+        head, marker_is_ancestor = probe_progress_head(worktree, stored)
+    except WorktreeBranchUnavailable as unavailable:
+        raise WorkflowError(f"mark-progress refused: {unavailable}") from unavailable
+
+    def record(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        attempt = current_attempt(state)
+        if attempt["worktree"] != worktree or attempt["progress_marker"] != stored:
+            raise WorkflowError(
+                "mark-progress refused: the attempt changed during the probe")
+        assert state is not None
+        if now_value < parse_utc(state["updated_at"], "run update time"):
+            raise WorkflowError("mark-progress refused: time must not move backward")
+        outcome = record_progress_marker(
+            attempt, head=head, marker_is_ancestor=marker_is_ancestor)
+        changed = outcome in {"baseline", "advanced"}
+        if changed:
+            state["updated_at"] = now
+        return {"action_id": args.action_id, "outcome": outcome,
+                "marker": attempt["progress_marker"]}, changed
+
+    print_json(transact(args.repo_root, args.run_id, record))
+    return 0
+
+
 def command_release_worker(args: argparse.Namespace) -> int:
     """Release one worker, and on ``stopped`` its unreleased descendants (#222 D8, D12).
 
@@ -4185,6 +4292,32 @@ def live_worktree_branch(path: str) -> str:
     return branch
 
 
+def probe_progress_head(worktree: str, marker: str | None) -> tuple[str, bool]:
+    """``(head, marker_is_ancestor)`` for the commit checked out at ``worktree``.
+
+    Read-only: ``git`` by name on PATH with the shared 60-second timeout, and no
+    lock, so a slow git never holds the run lock (#250 D8). ``worktree`` must be
+    the top level of a git worktree with a branch checked out, and its ``HEAD``
+    must resolve to a commit. Ancestry is asked only when ``marker`` is a commit
+    other than ``head``; with no marker, or the same one, the answer is
+    ``False``. Anything else, including a marker git does not know, raises
+    ``WorktreeBranchUnavailable`` carrying the reason clause.
+    """
+    live_worktree_branch(worktree)
+    resolved = _worktree_git(worktree, "rev-parse", "--verify", "HEAD^{commit}")
+    if resolved.returncode != 0:
+        raise _git_failed(resolved)
+    head = resolved.stdout.decode("utf-8", "replace").rstrip("\n")
+    if not PROGRESS_MARKER_PATTERN.fullmatch(head):
+        raise WorktreeBranchUnavailable("git failed: HEAD is not a full commit id")
+    if marker is None or marker == head:
+        return head, False
+    ancestry = _worktree_git(worktree, "merge-base", "--is-ancestor", marker, head)
+    if ancestry.returncode not in {0, 1}:
+        raise _git_failed(ancestry)
+    return head, ancestry.returncode == 0
+
+
 def command_build_delivery(args: argparse.Namespace) -> int:
     """Print one sealed delivery value; read-only (no lock, clock or write).
 
@@ -4391,6 +4524,11 @@ def build_parser() -> argparse.ArgumentParser:
     register_worker.add_argument("--action-id", required=True)
     register_worker.add_argument("--parent")
     register_worker.set_defaults(handler=command_register_worker)
+
+    mark_progress = subparsers.add_parser("mark-progress")
+    add_run_arguments(mark_progress)
+    mark_progress.add_argument("--action-id", required=True)
+    mark_progress.set_defaults(handler=command_mark_progress)
 
     release_worker = subparsers.add_parser("release-worker")
     add_run_arguments(release_worker)

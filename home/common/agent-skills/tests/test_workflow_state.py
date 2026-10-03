@@ -1,5 +1,7 @@
+import contextlib
 import copy
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -814,6 +816,36 @@ class LifecycleHarness:
             args.extend(("--parent", parent))
         completed = self.run_cli(*args, ok=ok)
         return json.loads(completed.stdout) if ok else completed
+
+    def mark_progress(self, *, action_id, now, ok=True):
+        completed = self.run_cli(
+            "mark-progress", "--repo-root", self.root, "--run-id", self.run_id,
+            "--now", now, "--action-id", action_id, ok=ok)
+        return json.loads(completed.stdout) if ok else completed
+
+    @staticmethod
+    def git(worktree, *args):
+        completed = subprocess.run(["git", "-C", str(worktree), *args], check=True,
+                                   capture_output=True, text=True)
+        return completed.stdout.strip()
+
+    def init_worktree(self, path, *, branch):
+        """A real git repository at `path` with one commit on `branch` (#250 D13).
+
+        The fixture repository turns commit signing off for itself: it lives in a
+        temporary directory and must not depend on the machine's signing key.
+        """
+        Path(path).mkdir(parents=True)
+        self.git(path, "init", "--quiet", "--initial-branch", branch)
+        for key, value in (("user.name", "Fixture"),
+                           ("user.email", "fixture@example.test"),
+                           ("commit.gpgsign", "false")):
+            self.git(path, "config", key, value)
+        return self.commit(path)
+
+    def commit(self, worktree, message="work"):
+        self.git(worktree, "commit", "--quiet", "--allow-empty", "--message", message)
+        return self.git(worktree, "rev-parse", "HEAD")
 
     def release_worker(self, *, worker_id, event, now, ok=True):
         completed = self.run_cli(
@@ -6502,6 +6534,292 @@ class ProgressMarkerSchemaTest(LifecycleHarness, unittest.TestCase):
         missing = copy.deepcopy(valid)
         del missing["issues"]["16"]["attempts"][0]["progress_marker"]
         self.assert_refused_unchanged(missing)
+
+
+class ProgressMarkerTest(LifecycleHarness, unittest.TestCase):
+    """#250: `mark-progress` records durable forward movement of the attempt worktree."""
+
+    def setUp(self):
+        super().setUp()
+        self.seconds = 0
+        self.init_run()
+        self.worktree = self.root / "wt-16"
+        self.base = self.init_worktree(self.worktree, branch="issue-16")
+        self.spawn(issue=16, worktree=str(self.worktree), budget_minutes=10)
+
+    def tick(self):
+        self.seconds += 1
+        return f"2026-08-13T20:{self.seconds // 60:02d}:{self.seconds % 60:02d}Z"
+
+    def attempt(self):
+        return self.read_state()["issues"]["16"]["attempts"][-1]
+
+    def launch(self):
+        return f"16:1:{len(self.attempt()['launches'])}"
+
+    def mark(self):
+        return self.mark_progress(action_id=self.launch(), now=self.tick())
+
+    def park(self):
+        return self.suspend(issue=16, attempt=1, blocked_on="usage_limit",
+                            now=self.tick())
+
+    def wake(self):
+        self.resume(issue=16, worktree=str(self.worktree), now=self.tick())
+
+    def advance(self):
+        head = self.commit(self.worktree)
+        self.assertEqual(self.mark(), {"action_id": self.launch(),
+                                       "outcome": "advanced", "marker": head})
+        return head
+
+    def assert_refused(self, action_id, clause, *, now=None):
+        before = self.state_path.read_bytes()
+        refused = self.mark_progress(action_id=action_id, now=now or self.tick(),
+                                     ok=False)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, self.state_path.read_bytes()),
+            (2, "", before))
+        self.assertIn("mark-progress refused: " + clause, refused.stderr)
+
+    def assert_no_write(self, outcome, marker):
+        before = self.state_path.read_bytes()
+        self.assertEqual(self.mark(), {"action_id": self.launch(),
+                                       "outcome": outcome, "marker": marker})
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def assert_stalled(self, final):
+        issue = self.read_state()["issues"]["16"]
+        attempt = issue["attempts"][-1]
+        self.assertEqual((attempt["state"], attempt["result_source"]),
+                         ("stopped", "stalled"))
+        self.assertIn("stalled without phase progress", attempt["result"]["notes"])
+        self.assertEqual(issue["outcome"], attempt["result"])
+        self.assertEqual(final, {
+            "interface_version": 2, "kind": "terminal", "issue": 16,
+            "run_id": self.run_id, "source": "lifecycle", "reason": "stopped",
+            "blockers": [], "result": attempt["result"],
+            "reentry": "/from-issue 16 --auto",
+        })
+
+    def stall_through(self, between):
+        """Four suspensions, with `between()` run while each launch is active."""
+        for _ in range(3):
+            between()
+            self.assertEqual(self.park()["kind"], "suspended")
+            self.wake()
+        between()
+        self.assert_stalled(self.park())
+
+    def test_outcomes_follow_the_ancestry_of_the_checked_out_commit(self):
+        self.assertEqual(self.mark(), {"action_id": "16:1:1", "outcome": "baseline",
+                                       "marker": self.base})
+        self.assert_no_write("unchanged", self.base)
+        second = self.advance()
+        self.git(self.worktree, "reset", "--quiet", "--hard", self.base)
+        self.assert_no_write("diverged", second)
+        self.commit(self.worktree, "sibling")
+        self.assert_no_write("diverged", second)
+        self.git(self.worktree, "reset", "--quiet", "--hard", second)
+        self.assert_no_write("unchanged", second)
+
+    def test_a_baseline_keeps_the_stall_count_and_an_advance_clears_it(self):
+        for _ in range(2):
+            self.park()
+            self.wake()
+        self.assertEqual(self.mark()["outcome"], "baseline")
+        before = self.attempt()
+        self.assertEqual((before["stalled_resumes"], before["suspend_phase"]), (1, 0))
+        head = self.commit(self.worktree)
+        now = self.tick()
+        self.assertEqual(
+            self.mark_progress(action_id="16:1:3", now=now),
+            {"action_id": "16:1:3", "outcome": "advanced", "marker": head})
+        state = self.read_state()
+        after = state["issues"]["16"]["attempts"][-1]
+        self.assertEqual(state["updated_at"], now)
+        self.assertEqual(
+            (after["progress_marker"], after["stalled_resumes"], after["suspend_phase"]),
+            (head, 0, None))
+        written = {"progress_marker", "stalled_resumes", "suspend_phase"}
+        self.assertEqual({name: value for name, value in after.items()
+                          if name not in written},
+                         {name: value for name, value in before.items()
+                          if name not in written})
+
+    def test_new_commits_between_suspensions_never_stall(self):
+        self.progress(issue=16, phase=6, now=self.tick())
+        self.assertEqual(self.mark()["outcome"], "baseline")
+        for _ in range(5):
+            self.advance()
+            self.assertEqual(self.park()["kind"], "suspended")
+            attempt = self.attempt()
+            self.assertEqual((attempt["suspend_phase"], attempt["stalled_resumes"]),
+                             (6, 0))
+            self.wake()
+        self.assertEqual(self.attempt()["state"], "active")
+
+    def test_a_baseline_alone_still_stalls_at_the_fourth_suspension(self):
+        self.stall_through(self.mark)
+
+    def test_a_replayed_marker_still_stalls_at_the_fourth_suspension(self):
+        self.mark()
+        head = self.advance()
+        self.stall_through(lambda: self.assert_no_write("unchanged", head))
+
+    def test_rewinding_and_re_advancing_still_stalls_at_the_fourth_suspension(self):
+        self.mark()
+        head = self.advance()
+
+        def rewind_and_return():
+            self.git(self.worktree, "reset", "--quiet", "--hard", self.base)
+            self.assert_no_write("diverged", head)
+            self.git(self.worktree, "reset", "--quiet", "--hard", head)
+            self.assert_no_write("unchanged", head)
+
+        self.stall_through(rewind_and_return)
+
+    def test_a_recording_refused_while_suspended_still_stalls(self):
+        self.mark()
+        for _ in range(3):
+            self.assertEqual(self.park()["kind"], "suspended")
+            self.commit(self.worktree)
+            launch = self.launch()
+            self.assert_refused(launch, f"launch {launch} is inactive_attempt")
+            self.wake()
+        self.assert_stalled(self.park())
+        self.assert_refused("16:1:4", "launch 16:1:4 is inactive_attempt")
+        self.assertEqual(self.attempt()["progress_marker"], self.base)
+
+    def test_the_marker_survives_a_suspend_and_resume(self):
+        self.mark()
+        head = self.advance()
+        self.park()
+        self.assertEqual(self.attempt()["progress_marker"], head)
+        # check-launch validates the stored ledger strictly on every read.
+        self.assertEqual(self.check_launch(action_id="16:1:1")["reason"],
+                         "inactive_attempt")
+        self.wake()
+        self.assertEqual(self.attempt()["progress_marker"], head)
+        self.assert_no_write("unchanged", head)
+
+    def test_expiry_demotions_after_new_commits_never_stall(self):
+        observed = [self.worktree_fact(16, recorded={
+            "path": str(self.worktree), "state": "matching_issue_branch"})]
+        self.mark_progress(action_id="16:1:1", now="2026-08-13T20:01:00Z")
+        for index, (marked_at, expired_at) in enumerate((
+            ("2026-08-13T20:05:00Z", "2026-08-13T20:10:00Z"),
+            ("2026-08-13T20:35:00Z", "2026-08-13T20:40:00Z"),
+            ("2026-08-13T21:05:00Z", "2026-08-13T21:10:00Z"),
+            ("2026-08-13T21:35:00Z", "2026-08-13T21:40:00Z"),
+            ("2026-08-13T22:05:00Z", "2026-08-13T22:10:00Z"),
+        )):
+            self.commit(self.worktree)
+            marked = self.mark_progress(action_id=f"16:1:{index + 1}", now=marked_at)
+            self.assertEqual(marked["outcome"], "advanced")
+            swept = self.control(
+                now=expired_at, issues=[16], max_parallel=2,
+                attempt_budget_minutes=30, tracker=[self.tracker_fact(16)],
+                worktrees=observed)
+            self.assertEqual(self.dispatch_action(swept, "resume")["id"],
+                             f"16:1:{index + 2}")
+            self.assertEqual(self.attempt()["stalled_resumes"], 0)
+
+    def test_identity_and_clock_refusals_write_nothing(self):
+        self.mark()
+        for action_id, clause in (
+            ("16:1:9", "launch 16:1:9 is superseded_launch"),
+            ("16:2:1", "launch 16:2:1 is unknown_attempt"),
+            ("99:1:1", "launch 99:1:1 is unknown_issue"),
+            ("16:r1:1", "a remainder launch keeps its own bound"),
+        ):
+            with self.subTest(action_id=action_id):
+                self.assert_refused(action_id, clause)
+        self.assert_refused("16:1:1", "time must not move backward",
+                            now="2026-08-13T19:59:00Z")
+        before = self.state_path.read_bytes()
+        malformed = self.mark_progress(action_id="16:1", now=self.tick(), ok=False)
+        self.assertEqual((malformed.returncode, self.state_path.read_bytes()),
+                         (2, before))
+        absent = self.run_cli(
+            "mark-progress", "--repo-root", self.root, "--run-id", "issue-99-absent",
+            "--now", self.tick(), "--action-id", "16:1:1", ok=False)
+        self.assertEqual(absent.returncode, 2)
+        self.assertIn("mark-progress refused: launch 16:1:1 is unknown_run",
+                      absent.stderr)
+        self.park()
+        self.wake()
+        self.assert_refused("16:1:1", "launch 16:1:1 is superseded_launch")
+
+    def test_worktree_probe_refusals_write_nothing(self):
+        self.mark()
+        self.git(self.worktree, "checkout", "--quiet", "--detach")
+        self.assert_refused("16:1:1", "its HEAD is detached")
+        self.git(self.worktree, "checkout", "--quiet", "issue-16")
+        state = self.read_state()
+        state["issues"]["16"]["attempts"][0]["progress_marker"] = "0" * 40
+        self.write_state(state)
+        self.commit(self.worktree)
+        self.assert_refused("16:1:1", "git failed")  # a marker git does not know
+        shutil.rmtree(self.worktree)
+        self.assert_refused("16:1:1", "the worktree is absent")
+        self.worktree.mkdir()
+        self.assert_refused("16:1:1", "git failed")  # not a git repository
+        self.git(self.worktree, "init", "--quiet", "--initial-branch", "issue-16")
+        self.assert_refused("16:1:1", "git failed")  # an unborn branch: no commit
+
+    def test_a_schema_five_ledger_records_a_baseline_and_upgrades(self):
+        self.write_state(self._as_legacy(self.read_state(), 5))
+        self.assertEqual(self.mark(), {"action_id": "16:1:1", "outcome": "baseline",
+                                       "marker": self.base})
+        state = self.read_state()
+        self.assertEqual(
+            (state["schema_version"],
+             state["issues"]["16"]["attempts"][0]["progress_marker"]),
+            (6, self.base))
+
+    def race(self, module_name, interleave, *, now="2026-08-13T20:09:00Z"):
+        """Run `mark-progress` in-process with `interleave()` between its probe and
+        its transaction (#250 D14); returns the exit code, stderr and the ledger
+        bytes `interleave()` left behind."""
+        workflow = load_source_module(SCRIPT, module_name)
+        probe = workflow.probe_progress_head
+        left = {}
+
+        def racing_probe(worktree, marker):
+            observed = probe(worktree, marker)
+            interleave()
+            left["bytes"] = self.state_path.read_bytes()
+            return observed
+
+        stderr = io.StringIO()
+        with mock.patch.object(workflow, "probe_progress_head", racing_probe), \
+                contextlib.redirect_stderr(stderr):
+            code = workflow.main([
+                "mark-progress", "--repo-root", str(self.root), "--run-id",
+                self.run_id, "--now", now, "--action-id", "16:1:1"])
+        return code, stderr.getvalue(), left["bytes"]
+
+    def test_a_marker_recorded_during_the_probe_refuses_the_stale_write(self):
+        # A second recording lands between this call's probe and its transaction.
+        code, stderr, left = self.race("workflow_state_progress_marker_race", self.mark)
+        self.assertEqual((code, self.state_path.read_bytes()), (2, left))
+        self.assertIn("mark-progress refused: the attempt changed during the probe",
+                      stderr)
+        self.assertEqual(self.attempt()["progress_marker"], self.base)
+
+    def test_a_launch_suspended_during_the_probe_refuses_the_stale_write(self):
+        # The marker and worktree still match what the probe used, and the new
+        # commit would be `advanced`; only the locked launch re-check can refuse.
+        self.mark()
+        self.commit(self.worktree)
+        code, stderr, left = self.race("workflow_state_progress_launch_race", self.park)
+        self.assertEqual((code, self.state_path.read_bytes()), (2, left))
+        self.assertIn("mark-progress refused: launch 16:1:1 is inactive_attempt", stderr)
+        attempt = self.attempt()
+        self.assertEqual(
+            (attempt["state"], attempt["progress_marker"], attempt["suspend_phase"]),
+            ("suspended", self.base, 0))
 
 
 class OwnerExitFenceTest(LifecycleHarness, unittest.TestCase):
