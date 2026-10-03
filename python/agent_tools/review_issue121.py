@@ -587,6 +587,9 @@ def validate_121(payload: dict, pins: Issue121Pins, table: dict | None) -> None:
         if row["state"] == "projection_unavailable":
             _require(not scoped)
             _validate_failure(label, row["failure"], selection, edges, classes, null)
+            # A table fully determines tasks-7-8; only an underived one fails it, as it fails the projection.
+            _require(label != "tasks-7-8"
+                     or table is None and _same(row["failure"], aggregate["projected"].get("failure")))
             continue
         _require(not null and not (estimated and table is None) and _hex(row["result_tree"])
                  and _same(row["record_refs"], [record["id"] for record in scoped]))

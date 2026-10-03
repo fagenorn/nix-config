@@ -73,7 +73,9 @@ class AncestryTest(Fixture, unittest.TestCase):
 
     def test_clean_payload_validates_over_one_history(self):
         self.assertEqual(self.task7_pins.prerequisite_commit, self.pins.head)
+        before = snapshot(self.repo)
         payload = derive_121(self.repo, self.pins, self.task7_pins, self.authority)
+        self.assertEqual(snapshot(self.repo), before)
         self.assertIsNone(validate_121(payload, self.pins, self.table))
         self.assertEqual([r["boundary"] for r in payload["boundaries"]], ["tasks-1-3", "tasks-4-6", "tasks-7-8"])
 
@@ -238,11 +240,32 @@ class PayloadTest(Fixture, unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp)
 
-    def refused(self, mutate):
+    def refused(self, mutate, *, no_table=False):
         payload = copy.deepcopy(self.payload)
         mutate(payload)
-        with self.assertRaises(ContributionError):
-            validate_121(payload, self.pins, self.table)
+        with self.assertRaises(ContributionError) as caught:
+            validate_121(payload, self.pins, None if no_table else self.table)
+        self.assertEqual(caught.exception.code, "invalid_payload")
+
+    def unavailable(self, payload, label, code):
+        """`label`'s row as an estimate-stage failure, with its records gone."""
+        row = next(r for r in outcomes(payload) if r["boundary"] == label)
+        for key in ("result_tree", "record_refs", "measurement"):
+            row.pop(key)
+        row.update(state="projection_unavailable", failure={"stage": "estimate", "code": code, "evidence_refs": []})
+        payload["records"] = [r for r in payload["records"] if r["scope"] != label]
+
+    def test_tasks_7_8_outcome_is_bound_to_the_table(self):
+        self.refused(lambda p: self.unavailable(p, "tasks-7-8", "unsupported_composition"))
+
+        def untabled(p, future_code):  # what derive_121 writes when no Task-7 table derives
+            for label, code in (("aggregate.projected", "inventory_mismatch"), ("tasks-7-8", future_code)):
+                self.unavailable(p, label, code)
+                next(r for r in outcomes(p) if r["boundary"] == label)["estimate_refs"] = []
+        control = copy.deepcopy(self.payload)
+        untabled(control, "inventory_mismatch")
+        self.assertIsNone(validate_121(control, self.pins, None))
+        self.refused(lambda p: untabled(p, "unsupported_estimate"), no_table=True)
 
     def failed(self, payload):
         return payload["boundaries"][0]
@@ -289,10 +312,17 @@ class PayloadTest(Fixture, unittest.TestCase):
     def test_record_refs_resolve_exactly_once(self):
         actual, projected = (self.payload["aggregate"][k]["record_refs"] for k in ("actual", "projected"))
         self.assertTrue(actual and projected)
-        def other_scope(p):
-            index = p["records"].index(self.scope(p, "aggregate.projected")[0])
-            p["records"][index] = rehash({**p["records"][index], "scope": "tasks-7-8"})
-            p["aggregate"]["projected"]["record_refs"][0] = p["records"][index]["id"]
+        def other_scope(p):  # relocated in table order, so only the reference rule can refuse it
+            future = {r["path"] for r in self.scope(p, "tasks-7-8")}
+            moved = next(r for r in self.scope(p, "aggregate.projected") if r["path"] not in future)
+            p["records"].remove(moved)
+            relabeled = rehash({**moved, "scope": "tasks-7-8"})
+            first = p["records"].index(self.scope(p, "tasks-7-8")[0])
+            p["records"].insert(first + sum(path < moved["path"] for path in future), relabeled)
+            keys = [(LABELS.index(r["scope"]), r["path"]) for r in p["records"]]
+            self.assertEqual(keys, sorted(set(keys)))
+            refs = p["aggregate"]["projected"]["record_refs"]
+            refs[refs.index(moved["id"])] = relabeled["id"]
         mutations = {
             "unresolved": lambda p: p["aggregate"]["actual"]["record_refs"].__setitem__(0, "sha256:" + "0" * 64),
             "twice": lambda p: p["aggregate"]["actual"]["record_refs"].append(actual[0]),
@@ -324,6 +354,10 @@ class PayloadTest(Fixture, unittest.TestCase):
         # This fixture forces both states: the late fix stops tasks 1-3 and leaves no tasks 1-3 closure.
         self.assertEqual({states["tasks-1-3"], states["tasks-4-6"]}, {"projection_unavailable"})
         self.assertEqual(unavailable_ids(self.payload), ("tasks-1-3", "tasks-4-6"))
+        commit = self.pins.assignments[4][0]  # the late fix also fails the tasks 1-3 dependency replay
+        self.assertEqual(self.payload["boundaries"][1]["failure"],
+                         {"stage": "prerequisite", "code": "dependency_unavailable",
+                          "evidence_refs": [edge_of(self.payload, commit)]})
         for record in self.payload["records"]:
             extra = {"record_sha256", "edge_ids"} if record["kind"] == "actual" else {"added_lines", "deleted_lines"}
             self.assertEqual(set(record), {"id", "kind", "scope", "path", "record_bytes"} | extra)
