@@ -6,7 +6,7 @@
 - Modify: `tests/test_agent_tools_launchers.py` (new `RetainedLauncherTest` class; second contribution)
 
 **Interfaces:**
-- Consumes: every library entry from Tasks 1–6 with the real pins; `snapshot` from the support module; the Task-7 launchers. Recipe variables: `AGENT_RETAINED_ROOT` and `AGENT_SKILLS_INSTALLED_HOME` (D14).
+- Consumes: every library entry from Tasks 1–6 with the real pins; `snapshot` and `rehashed_with_extra_edge` from the support module; the Task-7 launchers. Recipe variables: `AGENT_RETAINED_ROOT` and `AGENT_SKILLS_INSTALLED_HOME` (D14).
 - Produces the recipe below. It is not listed in `agent-workflow-tests`, so CI does not run it (D8).
 
 ```just
@@ -43,12 +43,13 @@ The existing launcher class also runs under this recipe, and it must pass there 
         clean = contribution_edges(clone, ISSUE_121_PINS, classify(clone, ISSUE_121_PINS))
         self.assertEqual(len(clean), 30)
         target, parent = clean[10]["commit"], clean[10]["parent"]
+        forged = rehashed_with_extra_edge(clone, ISSUE_121_PINS, target, clean[3]["commit"])
         (clone / ".git/info/grafts").write_text(f"{target} {parent} {clean[3]['commit']}\n")
         with self.assertRaises(ContributionError):
             contribution_edges(clone, ISSUE_121_PINS, classify(clone, ISSUE_121_PINS))
         with self.assertRaises(ContributionError):
             reconstruct_boundary(clone, ISSUE_121_PINS, boundary="tasks-1", prerequisite={"kind": "delivery-base"},
-                                 edges=rehash_with_extra(clean, target, clean[3]["commit"]),
+                                 edges=forged,
                                  table=self.table, task7_pins=TASK7_PINS, authority=self.authority)
         out = self.tmp / "derive-grafted"
         done = self.derive_cli(issue_121_repo=clone, output_dir=out)

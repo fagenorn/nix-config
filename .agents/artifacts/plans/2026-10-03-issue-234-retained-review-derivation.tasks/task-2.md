@@ -3,7 +3,7 @@
 **Files:**
 - Create: `python/agent_tools/review_issue121.py`
 - Create: `tests/test_review_issue121.py`
-- Modify: `tests/retained_review_test_support.py` (add `linear_fixture`, `task7_fixture`, `rehashed_with_extra_edge`)
+- Modify: `tests/retained_review_test_support.py` (add `linear_fixture`, `task7_fixture`, and `rehashed_with_extra_edge(repo, pins, target, extra)`, which returns the clean raw edge table plus an ordinal-2 `extra→target` edge with every `id` recomputed)
 - Modify: `justfile` (append `tests/test_review_issue121.py` to `agent-workflow-tests`)
 
 **Recovery:** R1 (`35e6fd7a`, `review_contributions.py` and its test) supplies the fixed assignments, the plan-anchor signature check, the selector and prerequisite fact shapes, and the `reconstruct_boundary`/`derive_121` structure. Re-author all of it here. Do not copy R1's `rev-list --parents`/`--topo-order` edge enumeration or its ancestry check (D2). The task report names the R1/R2 rows it consumes and the effects it leaves out.
@@ -54,10 +54,10 @@ class AncestryTest(unittest.TestCase):
         extra = self.pins.assignments[0][0]
         target = self.pins.assignments[3][0]
         parent = git(self.repo, "cat-file", "-p", target).split("\n")[1].split()[1]
+        forged = rehashed_with_extra_edge(self.repo, self.pins, target, extra)   # built before the graft
         (self.repo / ".git/info/grafts").write_text(f"{target} {parent} {extra}\n")
         with self.assertRaises(ContributionError):
             contribution_edges(self.repo, self.pins, classify(self.repo, self.pins))
-        forged = rehashed_with_extra_edge(self.repo, self.pins, target, extra)
         with self.assertRaises(ContributionError):
             reconstruct_boundary(self.repo, self.pins, boundary="tasks-1", prerequisite={"kind": "delivery-base"},
                                  edges=forged, table=self.table, task7_pins=self.task7_pins, authority=self.authority)
