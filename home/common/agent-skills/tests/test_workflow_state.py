@@ -6397,12 +6397,18 @@ class WorkerRegistryTest(LifecycleHarness, unittest.TestCase):
                 w1={"released_at": "2026-08-13T20:01:30Z", "release_event": "returned"}),
             "stopped with an unreleased child": edited(
                 w0={"released_at": "2026-08-13T20:02:00Z", "release_event": "stopped"}),
+            "null registration time": edited(w0={"registered_at": None}),
+            "numeric release time": edited(
+                w1={"released_at": 1786651320, "release_event": "returned"}),
         }
+        mistyped_times = {"null registration time", "numeric release time"}
         for name, state in cases.items():
             with self.subTest(name):
                 self.write_state(state)
                 refused = self.check_worker_raw("14:1:1:w1", ok=False)
                 self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+                if name in mistyped_times:
+                    self.assertIn("invalid workflow workers", refused.stderr)
 
 
 class OwnerExitFenceTest(LifecycleHarness, unittest.TestCase):

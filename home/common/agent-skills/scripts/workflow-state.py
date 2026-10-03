@@ -783,6 +783,9 @@ def validate_workers(state: dict[str, Any]) -> None:
                 not isinstance(parent, str) or parent not in by_id
                 or by_id[parent]["launch"] != launch):
             raise invalid("parent is not an earlier worker of the same launch")
+        if not isinstance(record["registered_at"], str) or not (
+                record["released_at"] is None or isinstance(record["released_at"], str)):
+            raise invalid("registration and release times must be strings")
         registered_at = parse_utc(record["registered_at"], "worker registration time")
         if not created_at <= registered_at <= updated_at:
             raise invalid("registration time outside the run")
