@@ -3923,6 +3923,54 @@ def glossary_entries(glossary):
     return entries
 
 
+class LaunchFencedWorkerContractsTest(unittest.TestCase):
+    """#222: writing dispatches register, commit through launch-commit, release."""
+
+    WORKER_LINE = ("Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> "
+                   "--worker-id <worker_id>")
+    REGISTER = ("workflow-state register-worker --repo-root <ledger_repo_root> "
+                "--run-id <run-id> --now <utc> --action-id <action_id>")
+    RELEASE = ("workflow-state release-worker --repo-root <ledger_repo_root> "
+               "--run-id <run-id> --now <utc> --worker-id <worker_id> --event returned")
+    COMMIT = ("launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
+              "--worker-id <worker_id> -- ")
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def read(path):
+        return normalized(path.read_text(encoding="utf-8"))
+
+    def test_sdd_registers_writing_workers_and_stops_on_a_fence_refusal(self):
+        self.assert_ordered(
+            self.read(SDD), "### Lifecycle workers", self.REGISTER, self.WORKER_LINE,
+            self.RELEASE, "Read-only reviewers are not registered.",
+            "launch fence refused: <reason>", "no retry and no re-dispatch",
+            "### 1. Dispatch the implementer")
+
+    def test_the_implementer_commits_only_through_launch_commit(self):
+        self.assert_ordered(
+            self.read(SDD_DIR / "implementer-prompt.md"), "## Lifecycle Worker",
+            "Lifecycle worker:", self.COMMIT, "never run `git commit` directly",
+            "launch fence refused: <reason>", "## Report Format")
+
+    def test_each_fix_round_registers_afresh(self):
+        self.assert_ordered(
+            self.read(SDD_DIR / "fix-loop.md"), "Lifecycle workers",
+            "fresh `worker_id`", "release")
+
+    def test_from_issue_phase_6_hands_sdd_its_lifecycle_identity(self):
+        self.assert_ordered(
+            self.read(FROM_ISSUE), "## Phase 6 — Execute",
+            "`ledger_repo_root`, `run_id` and `action_id`", "### Lifecycle workers",
+            "register-worker", "## Phase 7 — Ship")
+
+
 class CodebaseDesignSkillContractsTest(unittest.TestCase):
     """The vendored deep-module vocabulary package.
 

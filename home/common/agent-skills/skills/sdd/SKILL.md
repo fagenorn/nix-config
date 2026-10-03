@@ -94,6 +94,27 @@ contract. Its destination is derived by the producer beneath the primary
 checkout's `.superpowers/issue-delivery/` home; callers supply issue, branch,
 run, and head identity only, never an authoritative destination.
 
+### Lifecycle workers
+
+When the caller runs this skill under a lifecycle identity — its
+`ledger_repo_root`, `run_id` and `action_id` — every agent this skill
+dispatches or resumes that can write (the implementer, the mechanic and each
+fix-round implementer) is a registered worker of that launch. Immediately
+before the dispatch or resume, run
+`workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`
+and put its printed `worker_id` into the prompt as the single line
+`Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>`.
+When that agent returns, run
+`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --worker-id <worker_id> --event returned`.
+A resumed agent is registered again and gets a fresh `worker_id`.
+Read-only reviewers are not registered.
+
+A report of `BLOCKED` with `launch fence refused: <reason>` means this
+launch was superseded: release that worker, make no retry and no re-dispatch,
+and follow from-issue's superseded route — write nothing more, print
+`/from-issue <num> --auto` on its own line, and stop. Without a lifecycle
+identity none of this applies and workers commit with plain `git`.
+
 ### 1. Dispatch the implementer
 
 Record BASE (`git rev-parse HEAD`) first — the review package and fix-round diffs need it.

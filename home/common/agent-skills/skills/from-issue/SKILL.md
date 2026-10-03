@@ -538,6 +538,13 @@ validation is required even when the producer already validated its own candidat
 
 Invoke `sdd`: it reads the plan header, dispatches an implementer per task, and reviews each output by risk lane.
 
+With lifecycle identity, invoke `sdd` with this owner's
+`ledger_repo_root`, `run_id` and `action_id` as its lifecycle identity, so
+sdd's `### Lifecycle workers` registers each writing agent under this
+launch. The mechanical route's mechanic is registered the same way:
+run `workflow-state register-worker` before dispatching it, put the
+`Lifecycle worker:` line in its prompt, and release it when it returns.
+
 If the plan is `mechanical-only`, use one mechanic plus one first-pass reviewer for the whole change:
 
 <!-- agent-dispatch: id=from-issue-mechanical-implementation role=mechanic model=sonnet effort=high -->
