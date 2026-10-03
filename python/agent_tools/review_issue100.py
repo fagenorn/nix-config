@@ -200,12 +200,12 @@ def _checked(pins: Issue100Pins) -> Issue100Pins:
     return p
 
 
-def _read(directory, relative, size, sha256=None) -> bytes:
+def _read(directory, relative, size, sha256=...) -> bytes:
     try:
         raw = read_regular(directory, relative, size)
     except (OSError, ForecastError) as exc:
         raise Issue100Error("archive_unreadable") from exc
-    _require(len(raw) == size and sha256 in (None, _sha(raw)), "archive_digest_mismatch")
+    _require(len(raw) == size and sha256 in (..., _sha(raw)), "archive_digest_mismatch")
     return raw
 
 
@@ -255,7 +255,7 @@ def _verified(archive_dir, repo, pins) -> tuple[dict, tuple]:
         "notes": "validated review package", "state": "decompose_required", "artifact": {
             "budget_status": "over_budget", "kind": "review-package", "metrics": metrics, "path": None,
             "violations": ["member_count", "aggregate_bytes"]}})
-        and isinstance(artifact["path"], str) and PurePosixPath(artifact["path"]).name == pins.manifest_name, bad)
+        and isinstance(artifact.get("path"), str) and PurePosixPath(artifact["path"]).name == pins.manifest_name, bad)
     chunks = [_read(archive_dir, item["path"], item["bytes"]) for item in shards]
     combined = b"".join(chunks)
     _require(len(combined) == domain.bytes and _sha(combined) == domain.sha256, "archive_digest_mismatch")
@@ -368,7 +368,8 @@ def _validate_history(payload, pins) -> None:
     """Raw parent edges in range order, ordinals from 1, each parent the base or an earlier range commit."""
     span, commits = payload["range"], payload["range"]["commits"]
     _require(_same({**span, "commits": 0}, {"base": pins.base, "head": pins.head, "live": pins.live, "commits": 0})
-             and isinstance(commits, list) and all(_hex(c) for c in commits) and len(set(commits)) == len(commits))
+             and isinstance(commits, list) and all(_hex(c) for c in commits) and len(set(commits)) == len(commits)
+             and commits[-1:] == [pins.head])
     position = {oid: n for n, oid in enumerate(commits)}
     parent_edges, edges, keys = payload["parent_edges"], payload["edges"], []
     _require(isinstance(parent_edges, list) and isinstance(edges, list) and len(edges) == len(parent_edges))

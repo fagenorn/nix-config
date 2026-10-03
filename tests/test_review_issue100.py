@@ -1,5 +1,5 @@
 """Issue-100 verifier: archive envelope, two byte domains and the two-level payload (issue 234; S10, S11)."""
-import os, shutil, tempfile, unittest
+import hashlib, json, os, shutil, tempfile, unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -60,6 +60,33 @@ class Issue100Test(unittest.TestCase):
                     self.assertEqual(caught.exception.code, code)
                     member.unlink(); member.write_bytes(original)
 
+    def test_none_digest_pin_never_switches_the_digest_check_off(self):
+        """Under a `None` pin a same-length forgery is refused, and so are the pinned bytes themselves."""
+        for field, name, old, new in (("producer_sha256", self.pins.producer_name, b"/archive/", b"/archivX/"),
+                                      ("manifest_sha256", self.pins.manifest_name, b'"subject":"c1"', b'"subject":"cX"')):
+            member = self.archive / name
+            original = member.read_bytes()
+            forged = original.replace(old, new)
+            self.assertEqual((len(forged), forged == original), (len(original), False))
+            for raw in (forged, original):
+                with self.subTest(field=field, forged=raw is forged):
+                    member.write_bytes(raw)
+                    with self.assertRaises(Issue100Error) as caught:
+                        verify_archive(self.archive, self.repo, replace(self.pins, **{field: None}))
+                    self.assertEqual(caught.exception.code, "archive_digest_mismatch")
+            member.write_bytes(original)
+
+    def test_digest_pinned_producer_without_an_artifact_path_is_an_archive_mismatch(self):
+        member = self.archive / self.pins.producer_name
+        envelope = json.loads(member.read_bytes())
+        del envelope["artifact"]["path"]
+        raw = json.dumps(envelope, sort_keys=True).encode()
+        member.write_bytes(raw)
+        pins = replace(self.pins, producer_bytes=len(raw), producer_sha256=hashlib.sha256(raw).hexdigest())
+        with self.assertRaises(Issue100Error) as caught:
+            verify_archive(self.archive, self.repo, pins)
+        self.assertEqual(caught.exception.code, "archive_mismatch")
+
     def test_domain_label_or_policy_swap_is_invalid(self):
         payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
         tables = payload["tables"]
@@ -76,6 +103,25 @@ class Issue100Test(unittest.TestCase):
         for changed in ([edges[1], edges[0], *edges[2:]], edges[:-1],
                         [*edges[:-1], {**edges[-1], "parent": self.pins.live}]):
             self.refused(lambda: validate_100({**payload, "parent_edges": changed}, self.pins))
+
+    def test_foreign_head_substituted_throughout_the_history_is_invalid(self):
+        """`range.commits` ends at the pinned head, even when both edge tables agree on a substitute."""
+        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        commits, foreign = payload["range"]["commits"], "f" * 40
+        self.assertEqual((commits[-1], foreign in commits), (self.pins.head, False))
+
+        def swapped(oid):
+            return foreign if oid == self.pins.head else oid
+
+        def ends(rows):
+            return [{**row, "parent": swapped(row["parent"]), "commit": swapped(row["commit"])} for row in rows]
+
+        forged = {**payload, "range": {**payload["range"], "commits": [swapped(oid) for oid in commits]},
+                  "parent_edges": ends(payload["parent_edges"]), "edges": ends(payload["edges"])}
+        self.assertEqual(forged["range"]["head"], self.pins.head)
+        with self.assertRaises(Issue100Error) as caught:
+            validate_100(forged, self.pins)
+        self.assertEqual(caught.exception.code, "invalid_payload")
 
     def test_consistently_rehashed_edge_tables_are_invalid(self):
         """Both edge levels changed together, with every contribution's references and id recomputed."""
@@ -162,6 +208,13 @@ class Issue100Test(unittest.TestCase):
         tables = payload["tables"]
         swapped = {**payload, "tables": {**tables, "fresh": {**tables["fresh"], "records": tables["historical"]["records"]}}}
         self.refused(lambda: validate_100(swapped, self.pins))
+        # Shape-valid: historical byte counts under the fresh paths and digests, so only the byte sum refuses.
+        fresh, historical = tables["fresh"]["records"], tables["historical"]["records"]
+        self.assertEqual(len(historical), len(fresh))
+        borrowed = [{**record, "bytes": old["bytes"]} for record, old in zip(fresh, historical)]
+        self.assertEqual(sum(record["bytes"] for record in borrowed), self.pins.historical.bytes)
+        bound = {**payload, "tables": {**tables, "fresh": {**tables["fresh"], "records": borrowed}}}
+        self.refused(lambda: validate_100(bound, self.pins))
 
     def test_inputs_unchanged_on_failure(self):
         before = self.archive_bytes(), snapshot(self.repo), snapshot(self.live)
