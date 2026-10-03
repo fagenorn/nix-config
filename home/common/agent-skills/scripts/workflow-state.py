@@ -1301,6 +1301,36 @@ def transact(
         return result
 
 
+def fence_owner_exit(
+    runtime: Any, mutation: Mutation, *, excused_worker: str | None = None,
+) -> Mutation:
+    """Refuse an owner-path write that ends a launch while it has a live worker.
+
+    The live workers are taken before ``mutation`` runs; any of them that is no
+    longer live after it refuses the whole write, so nothing persists. Controller
+    writes (``control``, the deadline reaper, ``direct-owner``) never pass
+    through this fence: they are the recovery path for a run whose owner died
+    with workers live. ``excused_worker`` is the calling ship owner of a
+    ``checkpoint-delivery``, itself a registered worker; it must be live, and
+    only it is excused, never its descendants (per #222 D4, D11).
+    """
+
+    def fenced(state: dict[str, Any] | None) -> tuple[Any, bool]:
+        assert state is not None
+        live = live_worker_ids(runtime, state)
+        if excused_worker is not None and excused_worker not in live:
+            raise WorkflowError(
+                f"invalid --worker-id: {worker_verdict(runtime, state, excused_worker)[1]}")
+        result, changed = mutation(state)
+        blocking = [worker for worker in live if worker != excused_worker
+                    and worker_verdict(runtime, state, worker)[1] != "live"]
+        if blocking:
+            raise WorkflowError("live workers: " + ", ".join(blocking))
+        return result, changed
+
+    return fenced
+
+
 def phase_notes_maximum() -> int:
     _, policy_path = artifact_budget_paths()
     if policy_path is None:
@@ -3317,16 +3347,20 @@ def load_result_file(path_value: str, issue: int) -> dict[str, Any]:
 
 
 def command_checkpoint_delivery(args):
+    if args.worker_id is not None and not WORKER_ID_PATTERN.fullmatch(args.worker_id):
+        raise WorkflowError("invalid worker_id")
     runtime = _delivery()
     now = format_utc(parse_utc(args.now, "--now"))
     report = artifact_budget_validate(
         "validate-report", boundary="ship-checkpoint",
         input_bytes=read_input_bytes(args.checkpoint_file, "checkpoint"))
 
-    response = transact(args.repo_root, args.run_id, lambda state: _call(
-        "checkpoint transition refused", runtime.checkpoint_state,
-        state, report, now=now, suspend_attempt=suspend_attempt,
-        ledger_repo_root=str(resolve_repo_root(args.repo_root)), run_id=args.run_id))
+    response = transact(args.repo_root, args.run_id, fence_owner_exit(
+        runtime, lambda state: _call(
+            "checkpoint transition refused", runtime.checkpoint_state,
+            state, report, now=now, suspend_attempt=suspend_attempt,
+            ledger_repo_root=str(resolve_repo_root(args.repo_root)), run_id=args.run_id),
+        excused_worker=args.worker_id))
     print_json(response)
     return 0
 
@@ -3428,7 +3462,7 @@ def command_progress(args: argparse.Namespace) -> int:
                 "custody": runtime.custody_for_record(args.issue, "implementation", attempt),
                 "action": action, "handoff_path": handoff_path}, True
 
-    print_json(transact(args.repo_root, args.run_id, progress))
+    print_json(transact(args.repo_root, args.run_id, fence_owner_exit(runtime, progress)))
     return 0
 
 
@@ -3474,7 +3508,7 @@ def command_suspend(args: argparse.Namespace) -> int:
             "reentry": reentry_command(args.issue),
         }, True
 
-    print_json(transact(args.repo_root, args.run_id, suspend))
+    print_json(transact(args.repo_root, args.run_id, fence_owner_exit(runtime, suspend)))
     return 0
 
 
@@ -3564,7 +3598,7 @@ def command_finish(args: argparse.Namespace) -> int:
         state["updated_at"] = now
         return result, True
 
-    persisted = transact(args.repo_root, args.run_id, finish)
+    persisted = transact(args.repo_root, args.run_id, fence_owner_exit(_delivery(), finish))
     print_json(persisted)
     return 0
 
@@ -3584,7 +3618,7 @@ def command_finish_delivery(args):
             ledger_repo_root=str(resolve_repo_root(args.repo_root)), run_id=args.run_id)
         return response, True
 
-    response = transact(args.repo_root, args.run_id, finish_delivery)
+    response = transact(args.repo_root, args.run_id, fence_owner_exit(runtime, finish_delivery))
     print_json(response)
     return 0
 
@@ -4225,6 +4259,7 @@ def build_parser() -> argparse.ArgumentParser:
     checkpoint = subparsers.add_parser("checkpoint-delivery")
     add_run_arguments(checkpoint)
     checkpoint.add_argument("--checkpoint-file", required=True)
+    checkpoint.add_argument("--worker-id")
     checkpoint.set_defaults(handler=command_checkpoint_delivery)
 
     build_delivery = subparsers.add_parser("build-delivery", description=(

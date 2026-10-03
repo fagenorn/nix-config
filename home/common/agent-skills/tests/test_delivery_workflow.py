@@ -655,11 +655,29 @@ class DeliveryAdmissionTest(unittest.TestCase):
                                          requested_scope=actual)
                     denied_report = validated(
                         "ship-checkpoint", json.dumps(denied_report).encode())
+                    worker = json.loads(invoke(
+                        "register-worker", "--repo-root", root, "--run-id",
+                        action["run_id"], "--now", "2026-09-21T00:00:02Z",
+                        "--action-id", action["custody"]["action_id"]).stdout)["worker_id"]
+                    denied_path = store("denied.json", denied_report)
+                    state_file = (root / ".superpowers/workflows" / action["run_id"]
+                                  / "state.json")
+                    before = state_file.read_bytes()
+                    for excuse in ((), ("--worker-id", f"{action['custody']['action_id']}:w9")):
+                        refused = invoke(
+                            "checkpoint-delivery", "--repo-root", root, "--run-id",
+                            action["run_id"], "--checkpoint-file", denied_path,
+                            "--now", "2026-09-21T00:00:02Z", *excuse)
+                        self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+                        self.assertEqual(state_file.read_bytes(), before)
+                    self.assertIn(f"live workers: {worker}".encode(), invoke(
+                        "checkpoint-delivery", "--repo-root", root, "--run-id",
+                        action["run_id"], "--checkpoint-file", denied_path,
+                        "--now", "2026-09-21T00:00:02Z").stderr)
                     denied = invoke(
                         "checkpoint-delivery", "--repo-root", root, "--run-id",
-                        action["run_id"], "--checkpoint-file",
-                        store("denied.json", denied_report), "--now",
-                        "2026-09-21T00:00:02Z")
+                        action["run_id"], "--checkpoint-file", denied_path,
+                        "--now", "2026-09-21T00:00:02Z", "--worker-id", worker)
                     self.assertEqual(denied.returncode, 0, denied.stderr.decode())
                     denied = validated("workflow-response", denied.stdout)
                     self.assertEqual((denied["state"], denied["blocked_on"]),
@@ -687,6 +705,73 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     self.assertEqual(next(item["state"] for item in saved["stage_facts"]
                                           if item["stage_id"] == "publish"), "pending")
                     self.assertEqual(denying_provider.calls, [actual])
+
+    def test_checkpoint_excuse_covers_only_the_named_worker(self):
+        contract, initial_intent = self.all_stage_contract()
+        digest = self.model.canonical_digest(contract)
+        scope = stage_scope(self.model, contract, "select")
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); worktree = str(root / "worktree")
+
+            def invoke(*args):
+                return subprocess.run(
+                    [sys.executable, str(WORKFLOW), *map(str, args)],
+                    capture_output=True, text=True, check=False)
+
+            def run(*args):
+                completed = invoke(*args)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                return json.loads(completed.stdout)
+
+            def write(name, value):
+                path = root / name; path.write_text(json.dumps(value)); return path
+
+            request = self.direct_request(contract)
+            request.update(
+                tracker={"issue": 151, "state": "open", "open_blockers": [],
+                         "decision_blockers": []},
+                worktree={"issue": 151, "recorded": None,
+                          "candidate": {"path": worktree, "state": "absent"}},
+                forge={"state": "none", "url": None, "merge_sha": None},
+                authorization_intents=[initial_intent], requested_scope=scope)
+            action = run("direct-owner", "--repo-root", root, "--request-file",
+                         write("direct.json", request))
+            custody_value = action["custody"]
+            run_id = action["run_id"]
+            parent = run("register-worker", "--repo-root", root, "--run-id", run_id,
+                         "--now", "2026-09-21T00:00:01Z",
+                         "--action-id", custody_value["action_id"])["worker_id"]
+            child = run("register-worker", "--repo-root", root, "--run-id", run_id,
+                        "--now", "2026-09-21T00:00:01Z",
+                        "--action-id", custody_value["action_id"],
+                        "--parent", parent)["worker_id"]
+            rejected = authority(self.model, contract, scope, custody_value,
+                                 verdict="rejected")
+            rejected["observed_at"] = "2026-09-21T00:00:02Z"
+            seal(self.model, rejected)
+            report = self.report_common(custody_value, digest)
+            report.update(authority_observations=[rejected], requested_scope=scope)
+            denied_path = write("denied.json", report)
+
+            def checkpoint():
+                return invoke("checkpoint-delivery", "--repo-root", root, "--run-id",
+                              run_id, "--checkpoint-file", denied_path, "--now",
+                              "2026-09-21T00:00:02Z", "--worker-id", parent)
+
+            state_file = root / ".superpowers/workflows" / run_id / "state.json"
+            before = state_file.read_bytes()
+            refused = checkpoint()
+            self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+            self.assertIn(f"live workers: {child}\n", refused.stderr)
+            self.assertEqual(state_file.read_bytes(), before)
+            run("release-worker", "--repo-root", root, "--run-id", run_id,
+                "--now", "2026-09-21T00:00:02Z", "--worker-id", child,
+                "--event", "returned")
+            denied = checkpoint()
+            self.assertEqual(denied.returncode, 0, denied.stderr)
+            self.assertEqual(
+                {key: json.loads(denied.stdout)[key] for key in ("state", "blocked_on")},
+                {"state": "suspended", "blocked_on": "human_gate"})
 
     def test_all_stages_fold_before_delivery_completion(self):
         contract, initial_intent = self.all_stage_contract()
@@ -770,6 +855,22 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 "delivery_observations": [integrated], "authority_observations": [],
                 "reevaluation_evidence": [], "detail_state": "none",
                 "report_path": None, "notes": "delivered"}
+            worker = run("register-worker", "--repo-root", root, "--run-id",
+                         action["run_id"], "--now", "2026-09-21T00:00:04Z",
+                         "--action-id", custody_value["action_id"])["worker_id"]
+            state_file = root / ".superpowers/workflows" / action["run_id"] / "state.json"
+            before = state_file.read_bytes()
+            refused = subprocess.run(
+                [sys.executable, str(WORKFLOW), "finish", "--repo-root", str(root),
+                 "--run-id", action["run_id"], "--summary-file",
+                 str(write("summary.json", summary)), "--now", "2026-09-21T00:00:05Z"],
+                capture_output=True, text=True, check=False)
+            self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+            self.assertIn(f"live workers: {worker}", refused.stderr)
+            self.assertEqual(state_file.read_bytes(), before)
+            run("release-worker", "--repo-root", root, "--run-id", action["run_id"],
+                "--now", "2026-09-21T00:00:05Z", "--worker-id", worker,
+                "--event", "returned")
             finished = run("finish", "--repo-root", root, "--run-id", action["run_id"],
                 "--summary-file", write("summary.json", summary), "--now",
                 "2026-09-21T00:00:05Z")

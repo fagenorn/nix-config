@@ -6405,6 +6405,97 @@ class WorkerRegistryTest(LifecycleHarness, unittest.TestCase):
                 self.assertEqual((refused.returncode, refused.stdout), (2, ""))
 
 
+class OwnerExitFenceTest(LifecycleHarness, unittest.TestCase):
+    """Owner-path writes that end a launch refuse while it has a live worker (#222)."""
+
+    def spawn_with_worker(self):
+        self.init_run()
+        self.spawn(issue=14, worktree=str(self.root / "wt-14"))
+        return self.register_worker(action_id="14:1:1",
+                                    now="2026-08-13T20:01:00Z")["worker_id"]
+
+    def assert_refused(self, completed, before, *workers):
+        self.assertEqual((completed.returncode, completed.stdout), (2, ""))
+        self.assertIn("live workers: " + ", ".join(workers), completed.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_suspend_refuses_until_the_worker_returns(self):
+        worker = self.spawn_with_worker()
+        before = self.state_path.read_bytes()
+        self.assert_refused(
+            self.suspend(issue=14, attempt=1, blocked_on="external",
+                         now="2026-08-13T20:02:00Z", ok=False), before, worker)
+        self.release_worker(worker_id=worker, event="returned",
+                            now="2026-08-13T20:03:00Z")
+        self.assertEqual(
+            self.suspend(issue=14, attempt=1, blocked_on="external",
+                         now="2026-08-13T20:03:00Z")["kind"], "suspended")
+
+    def test_suspend_proceeds_once_the_worker_tree_is_stopped(self):
+        worker = self.spawn_with_worker()
+        child = self.register_worker(action_id="14:1:1", now="2026-08-13T20:01:00Z",
+                                     parent=worker)["worker_id"]
+        before = self.state_path.read_bytes()
+        self.assert_refused(
+            self.suspend(issue=14, attempt=1, blocked_on="agent_dispatch",
+                         now="2026-08-13T20:02:00Z", ok=False), before, worker, child)
+        self.release_worker(worker_id=worker, event="stopped",
+                            now="2026-08-13T20:03:00Z")
+        self.assertEqual(
+            self.suspend(issue=14, attempt=1, blocked_on="agent_dispatch",
+                         now="2026-08-13T20:03:00Z")["kind"], "suspended")
+
+    def test_a_handoff_progress_refuses_but_plain_progress_does_not(self):
+        worker = self.spawn_with_worker()
+        self.progress(issue=14, phase=1, now="2026-08-13T20:02:00Z")
+        handoff = self.write_handoff(14)
+        before = self.state_path.read_bytes()
+        self.assert_refused(
+            self.progress(issue=14, phase=1, now="2026-08-13T20:03:00Z",
+                          turn_count=118, handoff_path=handoff, ok=False),
+            before, worker)
+        self.release_worker(worker_id=worker, event="returned",
+                            now="2026-08-13T20:04:00Z")
+        handed = self.progress(issue=14, phase=1, now="2026-08-13T20:04:00Z",
+                               turn_count=118, handoff_path=handoff)
+        self.assertEqual(handed["action"], "handoff")
+
+    def test_legacy_finish_refuses_until_the_worker_returns(self):
+        worker = self.spawn_with_worker()
+        # The harness `finish` round-trips through schema 2, which drops the
+        # registry, so this case writes the contractless v5 state directly.
+        state = self.read_state()
+        state["issues"]["14"]["delivery"] = self.empty_delivery()
+        state["issues"]["14"]["delivery_remainders"] = []
+        self.write_state(state)
+        result_path = self.root / "result-14-1.json"
+        result_path.write_text(json.dumps({
+            **self.merged_result(), "state": "failed", "pr_url": None,
+            "merge_sha": None, "issue_closed": False, "notes": "owner failed"}),
+            encoding="utf-8")
+
+        def finish(now, ok):
+            return self.run_cli("finish", "--repo-root", self.root, "--run-id",
+                                self.run_id, "--issue", 14, "--attempt", 1,
+                                "--result-file", result_path, "--now", now, ok=ok)
+
+        before = self.state_path.read_bytes()
+        self.assert_refused(finish("2026-08-13T20:02:00Z", False), before, worker)
+        self.release_worker(worker_id=worker, event="returned",
+                            now="2026-08-13T20:03:00Z")
+        self.assertEqual(
+            json.loads(finish("2026-08-13T20:03:00Z", True).stdout)["state"], "failed")
+
+    def test_another_issues_worker_never_blocks(self):
+        self.init_run()
+        self.spawn(issue=14, worktree=str(self.root / "wt-14"))
+        self.spawn(issue=15, worktree=str(self.root / "wt-15"))
+        self.register_worker(action_id="15:1:1", now="2026-08-13T20:01:00Z")
+        self.assertEqual(
+            self.suspend(issue=14, attempt=1, blocked_on="external",
+                         now="2026-08-13T20:02:00Z")["kind"], "suspended")
+
+
 class PhaseGateReplyTest(LifecycleHarness, unittest.TestCase):
     """#191 D5: `progress` replies with one closed, validated `phase_gate`."""
 
