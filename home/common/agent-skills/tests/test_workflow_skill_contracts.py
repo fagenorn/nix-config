@@ -4045,6 +4045,63 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
             "workflow-state check-worker", "is refused while a registered worker")
 
 
+class ProgressMarkerContractsTest(unittest.TestCase):
+    """#250: the Phase 6 owner records a progress marker after each completed task."""
+
+    MARK = ("workflow-state mark-progress --repo-root <ledger_repo_root> "
+            "--run-id <run-id> --now <utc> --action-id <action_id>")
+    BOUND = "without a phase advance or a newly recorded progress marker"
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def read(path):
+        return normalized(path.read_text(encoding="utf-8"))
+
+    def test_sdd_records_a_marker_before_the_first_task_and_after_each_one(self):
+        self.assert_ordered(
+            self.read(SDD), "### Lifecycle workers", self.MARK,
+            "once before dispatching the first task this session will execute",
+            "after each task completes (step 5)",
+            "### 1. Dispatch the implementer", "### 5. Complete the task",
+            "appends `Task <N>: complete", self.MARK, "## Final review")
+
+    def test_a_refused_marker_is_no_suspension_cause_in_sdd(self):
+        self.assert_ordered(
+            self.read(SDD), "### Lifecycle workers", self.MARK,
+            "The reply's `outcome` is informational.",
+            "A refusal changes nothing, is not a suspension cause and never stops "
+            "the task loop", "### 1. Dispatch the implementer")
+
+    def test_from_issue_phase_6_names_the_marker_on_both_routes(self):
+        self.assert_ordered(
+            self.read(FROM_ISSUE), "## Phase 6 — Execute",
+            "`ledger_repo_root`, `run_id` and `action_id`",
+            "records a progress marker after each completed task", self.MARK,
+            "once before dispatching the mechanic and once after its change is "
+            "committed", "is not a suspension cause", "## Phase 7 — Ship")
+
+    def test_the_bound_is_described_as_progress_not_phase(self):
+        for path, retired in ((FROM_ISSUE, "at the same recorded phase too many times"),
+                              (ORCHESTRATE, "at the same phase too many times")):
+            with self.subTest(path=path.name):
+                text = self.read(path)
+                self.assertIn(self.BOUND, text)
+                self.assertNotIn(retired, text)
+
+    def test_claude_md_describes_the_marker(self):
+        self.assert_ordered(
+            self.read(REPO_ROOT / "CLAUDE.md"),
+            "The anti-zombie bound counts progress, not phase changes", self.MARK,
+            "`progress_marker`", "`baseline`", "`advanced`", "`unchanged`",
+            "`diverged`")
+
+
 class CodebaseDesignSkillContractsTest(unittest.TestCase):
     """The vendored deep-module vocabulary package.
 
