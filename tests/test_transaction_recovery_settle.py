@@ -10,7 +10,7 @@ import unittest
 from agent_tools.transaction_core import (
     CreationConflict, RecoveryRefused, StaleCustody, TransactionStore, TransitionRefused)
 
-from .test_transaction_custody import KEYS, SUBJECT, TTL, plain
+from .test_transaction_custody import AUTHORITY, KEYS, SUBJECT, TTL, plain
 from .test_transaction_invocation import FakeEffect, renumbered
 from .test_transaction_recovery import RecoveryCase
 from .test_transaction_recovery_plan import PROOF, RECOVERY
@@ -46,9 +46,10 @@ class SettleTest(SettleCase):
         self.assertEqual(settled["residue"], [
             {"unit": build, "residue": "old build stays cached"},
             {"unit": start, "residue": "cache cleared"}])
-        self.assertEqual([e["type"] for e in after.events[-3:]],
-                         ["recovery_settled", "transitioned", "lease_released"])
-        moved = after.events[-2]
+        self.assertEqual([e["type"] for e in after.events[-4:]],
+                         ["recovery_settled", "transitioned", "lease_released",
+                          "receipt_sealed"])
+        moved = after.events[-3]
         self.assertEqual((moved["from"], moved["to"], moved["reason"], moved["external_state"]),
                          ("recovering", "rolled_back", "recovery_settled", "known"))
         self.assertEqual((after.state, after.custody), ("rolled_back", None))
@@ -198,7 +199,8 @@ class RollForwardTest(SettleCase):
                 subject={**SUBJECT, "candidate": "sha256:def"}):
         return (store or self.store).roll_forward(
             self.custody, grant_id=grant_id, reason="unit_not_restorable", creation_key=key,
-            subject=subject, concurrency_keys=KEYS, proof=PROOF, recovery=RECOVERY)
+            subject=subject, concurrency_keys=KEYS, proof=PROOF, recovery=RECOVERY,
+            authority_class=AUTHORITY)
 
     def test_the_child_has_its_own_id_and_the_parent_records_the_link_without_rewrite(self):
         self.parked()
