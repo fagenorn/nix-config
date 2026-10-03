@@ -12,6 +12,10 @@ import os
 import subprocess
 from pathlib import Path
 
+from agent_tools.canonical import telemetry_digest
+from agent_tools.review_issue121 import Issue121Pins
+from agent_tools.review_task7 import MODEL_VERSION, TARGETS, TASK7_PINS, RendererSpec, Task7Pins, derive_task7
+
 SOURCE = Path(__file__).resolve().parents[1]
 
 _IDENTITY = {
@@ -113,3 +117,66 @@ def source_budget_env(tmp) -> dict:
     (home / ".agents/share/artifact-budget-policy.json").symlink_to(legacy / "artifact-budget-policy.json")
     return dict(os.environ, HOME=str(home), PYTHONPATH=str(SOURCE / "python"),
                 PATH=str(legacy / "scripts") + os.pathsep + os.environ["PATH"])
+
+
+PLAN_PREFIX = ".claude/plans/fixture-adoption"
+# The Task-7 inventory beside the plan: one file under each other move root,
+# every rewrite target (named only through `TARGETS`) and the renderer source the fixture pins name.
+_TASK7_SEED = {
+    ".claude/specs/fixture-design.md": b"fixture spec\n", ".out-of-scope/fixture.md": b"fixture decision\n",
+    **{target: f"fixture {target}\n".encode() for target, operation, _ in TARGETS if operation == "write"},
+    "tools/render.py": b"# fixture renderer\n"}
+
+
+def linear_fixture(tmp, owners=(1, 1, 2, 3, 3, 4, 5, 6), touches=None) -> tuple:
+    """A linear repository and its `Issue121Pins`.
+
+    The SSH-signed first commit (the base) writes the plan root, its eight task
+    members and the Task-7 seed. Commit `k` then writes `src/c<k>.txt` for owner
+    `owners[k]` (owner 0 is process) and, with `touches={k: j}`, also edits
+    commit `j`'s file.
+    """
+    key, signer = ssh_signer(tmp)
+    repo = init_repo(tmp)
+    plan = {f"{PLAN_PREFIX}.md": b"fixture plan root\n",
+            **{f"{PLAN_PREFIX}.tasks/task-{n}.md": f"fixture task {n}\n".encode() for n in range(1, 9)}}
+    base = commit_files(repo, {**plan, **_TASK7_SEED}, "seed", sign_key=key)
+    assignments = []
+    for k, owner in enumerate(owners):
+        files = {f"src/c{k}.txt": f"commit {k}\n".encode()}
+        if touches and k in touches:
+            other = f"src/c{touches[k]}.txt"
+            files[other] = (repo / other).read_bytes() + f"touched by {k}\n".encode()
+        assignments.append((commit_files(repo, files, f"commit {k}"), owner, None if owner else "process"))
+    blobs = tuple((path, git(repo, "rev-parse", f"{base}:{path}"))
+                  for path in (f"{PLAN_PREFIX}.md", f"{PLAN_PREFIX}.tasks/task-7.md"))
+    return repo, Issue121Pins(base, assignments[-1][0], tuple(assignments), PLAN_PREFIX, blobs, signer, 8)
+
+
+def task7_fixture(repo, pins) -> tuple:
+    """Task-7 pins at the linear fixture's head (the seed renderer, the plan blobs) and their table."""
+    head = pins.head
+    tree = git(repo, "rev-parse", head + "^{tree}")
+    renderer = git(repo, "rev-parse", f"{head}:tools/render.py")
+    roots = TASK7_PINS.move_roots
+    moves = sum(1 for path in git(repo, "ls-tree", "-r", "--name-only", tree).splitlines()
+                if any(path.startswith(old + "/") for old, _, _ in roots))
+    book = "bookkeeping_operations:"
+    fields = {"project_id": ("amended_contract:project_id", 1, 40), "migration_id": (book + "migration_id", 1, 64),
+              "moves.old_path": (book + "moves.old_path", moves, 120),
+              "moves.new_path": (book + "moves.new_path", moves, 120),
+              "plan_id": (book + "plan_id", 1, 64), "path_migration_map": (book + "path_migration_map", 1, 64),
+              "base_revision": (book + "base_revision", 1, 40), "sources.before": (book + "sources.before", 3, 64)}
+    renderers = tuple(RendererSpec(target, "tools/render.py", renderer, 60, 3,
+                                   tuple(fields[name] for name in members))
+                      for target, _, members in TARGETS)
+    blobs = dict(pins.plan_blobs)
+    task7_pins = Task7Pins(head, tree, blobs[f"{pins.plan_prefix}.md"],
+                           blobs[f"{pins.plan_prefix}.tasks/task-7.md"], MODEL_VERSION,
+                           TASK7_PINS.subject_template, roots, renderers, 40)
+    return task7_pins, derive_task7(repo, task7_pins)
+
+
+def rehash_edges(edges) -> list:
+    """Copies of `edges`, each with its `id` recomputed over every other member."""
+    return [{**edge, "id": telemetry_digest({k: v for k, v in edge.items() if k != "id"})} for edge in edges]
