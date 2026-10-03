@@ -241,6 +241,29 @@ class Issue100Test(unittest.TestCase):
             with self.subTest(case=name):
                 self.refused(lambda: validate_100(forged(path, **change), self.pins))
 
+    def test_file_and_directory_swaps_within_one_commit_validate(self):
+        """`edge_facts` names the directory an added file replaces, or a deleted file becomes, as a tree entry;
+        a file entry forged onto that side is refused, however rehashed."""
+        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        pairs = list(zip(payload["parent_edges"], payload["edges"]))
+        validate_100(self.rebuilt(payload, pairs), self.pins)  # the clean rehashed control
+        sides = {("A", "tmp"): "before", ("D", "legacy"): "after"}
+        found = [(e, n, sides[key]) for e, (_, edge) in enumerate(pairs) for n, r in enumerate(edge["records"])
+                 if (key := (r["operation"], r["path"])) in sides]
+        self.assertEqual(len(found), 4)  # each swap on its own commit's edge and on the merge's side-branch edge
+        head = {row["path"]: row["head_entry"] for row in payload["contributions"]}
+        self.assertEqual((head["legacy"]["kind"], head["tmp"]["kind"]), ("tree", "blob"))
+        for e, n, side in found:
+            (raw, edge), record = pairs[e], pairs[e][1]["records"][n]
+            self.assertEqual(record[side]["kind"], "tree")
+            self.assertNotEqual(record[side]["oid"], head["legacy"]["oid"])  # c4 changed the directory since
+            with self.subTest(edge=e, path=record["path"]):
+                records = [*edge["records"][:n], {**record, side: head["tmp"]}, *edge["records"][n + 1:]]
+                changed = [*pairs[:e], (raw, {**edge, "records": records}), *pairs[e + 1:]]
+                with self.assertRaises(Issue100Error) as caught:
+                    validate_100(self.rebuilt(payload, changed), self.pins)
+                self.assertEqual(caught.exception.code, "invalid_payload")
+
     def test_summary_disagreeing_with_tables_is_invalid(self):
         payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
         summary = {**payload["summary"], "integrated": payload["summary"]["integrated"] + 1}

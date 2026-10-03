@@ -201,9 +201,11 @@ def issue100_fixture(tmp) -> tuple:
     """An issue repository, a clone of it as the live repository, an archive directory and their pins.
 
     From the base, c1 adds the process path `docs/plan.md` and `tmp/scratch.txt`; c2 adds `src/a.txt`,
-    edits `ci.yaml` and deletes the scratch file; c3 edits `justfile` and deletes the base file `legacy`;
-    s1, branched at c1, adds `src/b.txt`; m merges s1 into c3; c4 renames `src/b.txt` to `src/c.txt`
-    and adds `legacy/note.txt`, so `legacy` is a directory at the head. The `live` branch from
+    edits `ci.yaml` and replaces the directory `tmp` with a file; c3 edits `justfile` and replaces the
+    base file `legacy` with the directory holding `legacy/note.txt`; s1, branched at c1, adds `src/b.txt`;
+    m merges s1 into c3; c4 renames `src/b.txt` to `src/c.txt` and edits `legacy/note.txt`, so the head's
+    `legacy` is no longer the tree c3 left. Both swaps happen within one commit, so that edge's record of
+    the file names the directory on its other side. The `live` branch from
     the base writes head's `src/a.txt` and its own `ci.yaml`. The archive's two `shard-NNN.diff` shards,
     manifest and producer come from running the pinned recipe over the base and head trees. The pinned
     digest of the raw parent edges is taken from plain `git rev-list --parents`, apart from the module.
@@ -213,13 +215,14 @@ def issue100_fixture(tmp) -> tuple:
                                "legacy": b"legacy\n"}, "base")
     commit_files(repo, {"docs/plan.md": b"plan\n", "tmp/scratch.txt": b"scratch\n"}, "c1")
     git(repo, "branch", "side")
-    commit_files(repo, {"src/a.txt": b"a\n", "ci.yaml": b"ci: head\n", "tmp/scratch.txt": None}, "c2")
-    commit_files(repo, {"justfile": b"head:\n", "legacy": None}, "c3")
+    commit_files(repo, {"src/a.txt": b"a\n", "ci.yaml": b"ci: head\n", "tmp/scratch.txt": None,
+                        "tmp": b"file\n"}, "c2")
+    commit_files(repo, {"justfile": b"head:\n", "legacy": None, "legacy/note.txt": b"note\n"}, "c3")
     git(repo, "checkout", "-q", "side")
     commit_files(repo, {"src/b.txt": b"b\n"}, "s1")
     git(repo, "checkout", "-q", "main")
     git(repo, "merge", "-q", "--no-ff", "-m", "merge side", "side")
-    head = commit_files(repo, {"src/b.txt": None, "src/c.txt": b"b\n", "legacy/note.txt": b"note\n"}, "c4")
+    head = commit_files(repo, {"src/b.txt": None, "src/c.txt": b"b\n", "legacy/note.txt": b"note 2\n"}, "c4")
     git(repo, "checkout", "-q", "-b", "live", base)
     live = commit_files(repo, {"src/a.txt": b"a\n", "ci.yaml": b"ci: live\n"}, "live")
     git(repo, "checkout", "-q", "main")
@@ -254,12 +257,13 @@ def issue100_fixture(tmp) -> tuple:
         "notes": "validated review package", "state": "decompose_required"}, sort_keys=True).encode()
     (archive / f"{stem}.json").write_bytes(manifest)
     (archive / "producer.raw").write_bytes(producer)
-    # Counts by construction: commits c1 c2 c3 s1 m c4; edge records 2+3+2+1 for c1 c2 c3 s1, 1+5 for
-    # m's two parents (c3: src/b.txt; s1: ci.yaml justfile legacy src/a.txt tmp/scratch.txt), 2 for c4;
-    # final paths: docs/plan.md (process), src/a.txt (integrated), ci.yaml and justfile (pending), and
-    # the ordinary candidates src/c.txt, legacy and legacy/note.txt.
-    counts = {"commits": 6, "parent_edges": 7, "merge_edges": 1, "edge_records": 16, "contributions": 7,
-              "historical_process": 1, "integrated": 1, "candidate": 5, "candidate_ordinary": 3,
+    # Counts by construction: commits c1 c2 c3 s1 m c4; edge records 2+4+3+1 for c1 c2 c3 s1 (c2:
+    # ci.yaml src/a.txt tmp tmp/scratch.txt; c3: justfile legacy legacy/note.txt), 1+7 for m's two
+    # parents (c3: src/b.txt; s1: ci.yaml justfile legacy legacy/note.txt src/a.txt tmp tmp/scratch.txt),
+    # 2 for c4; final paths: docs/plan.md (process), src/a.txt (integrated), ci.yaml and justfile
+    # (pending), and the ordinary candidates src/c.txt, legacy, legacy/note.txt and tmp.
+    counts = {"commits": 6, "parent_edges": 7, "merge_edges": 1, "edge_records": 20, "contributions": 8,
+              "historical_process": 1, "integrated": 1, "candidate": 6, "candidate_ordinary": 4,
               "candidate_reconciliation": 2, "pending_overlaps": 2, "reconciled": 0}
     # Git's own raw parents in range order: one `{parent, commit, parent_ordinal}` row per parent.
     listed = git(repo, "rev-list", "--parents", "--reverse", "--topo-order", f"{base}..{head}").splitlines()

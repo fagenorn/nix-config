@@ -362,9 +362,14 @@ def derive_100(issue_repo: Path, live_repo: Path, archive_dir: Path, pins: Issue
     return payload
 
 
-def _entry(value) -> bool:
-    return value is None or (_closed(value, ("mode", "kind", "oid")) and _match("[0-7]{6}", value["mode"])
-                             and value["kind"] in ("blob", "tree", "commit") and _hex(value["oid"]))
+def _entry(value, file=None) -> bool:
+    """A `tree_entry` fact. An edge record's side says whether its operation has a `file` there: a file
+    where it has one, else nothing or the directory at that path (as `review_issue121._entry`)."""
+    if value is None:
+        return not file
+    kinds = ("blob", "tree", "commit") if file is None else ("blob", "commit") if file else ("tree",)
+    return (_closed(value, ("mode", "kind", "oid")) and _match("[0-7]{6}", value["mode"])
+            and value["kind"] in kinds and _hex(value["oid"]))
 
 
 def _validate_history(payload, pins) -> None:
@@ -390,8 +395,8 @@ def _validate_history(payload, pins) -> None:
             _closed(record, ("operation", "path", "old_path", "before", "after", "record_bytes", "record_sha256"))
             operation, path, old, before, after = (record[k] for k in ("operation", "path", "old_path", "before", "after"))
             _require(operation in ("A", "M", "D", "T", "R100") and _text(path) and _text(old)
-                     and (operation == "R100") == (path != old) and _entry(before) and _entry(after)
-                     and (before is None) == (operation == "A") and (after is None) == (operation == "D")
+                     and (operation == "R100") == (path != old)
+                     and _entry(before, operation != "A") and _entry(after, operation != "D")
                      and _count(record["record_bytes"]) and _match("sha256:[0-9a-f]{64}", record["record_sha256"]))
     _require(keys == sorted(set(keys)) and {n for n, _ in keys} == set(range(len(commits)))
              and all(ordinal == 1 or (i and keys[i - 1] == (n, ordinal - 1)) for i, (n, ordinal) in enumerate(keys)))
@@ -414,12 +419,14 @@ def _validate_tables(payload, pins) -> list:
 
 def _at_head(payload, pins) -> dict:
     """Each recorded path's file entry at the head, None where it holds no file: its latest record along the
-    first-parent chain, whose edges are the whole tree difference of each step from the base to the head."""
+    first-parent chain, whose edges are the whole tree difference of each step from the base to the head.
+    A deletion leaves no file, though it may name the directory that replaced it, whose tree later changes."""
     first = {edge["commit"]: edge for edge in payload["edges"] if edge["parent_ordinal"] == 1}
     entries, oid = {}, pins.head
     while oid != pins.base:
         records, oid = first[oid]["records"], first[oid]["parent"]
-        entries = {**{r["old_path"]: None for r in records}, **{r["path"]: r["after"] for r in records}, **entries}
+        after = {r["path"]: None if r["operation"] == "D" else r["after"] for r in records}
+        entries = {**{r["old_path"]: None for r in records}, **after, **entries}
     return entries
 
 
