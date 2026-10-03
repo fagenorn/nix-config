@@ -242,6 +242,23 @@
         "type": "github"
       }
     },
+    "impeccable": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790908449,
+        "narHash": "sha256-bWmBWThANkAyJ5xd6rrO3UXL/QMm7sut4nf0tgqVk74=",
+        "owner": "pbakaus",
+        "repo": "impeccable",
+        "rev": "508d7e8955de3b3caf2d8676e85206723d41a887",
+        "type": "github"
+      },
+      "original": {
+        "owner": "pbakaus",
+        "ref": "skill-v4.5.0",
+        "repo": "impeccable",
+        "type": "github"
+      }
+    },
     "nikitabobko-tap": {
       "flake": false,
       "locked": {
@@ -406,6 +423,7 @@
         "homebrew-bundle": "homebrew-bundle",
         "homebrew-cask": "homebrew-cask",
         "homebrew-core": "homebrew-core",
+        "impeccable": "impeccable",
         "nikitabobko-tap": "nikitabobko-tap",
         "nix-darwin": "nix-darwin",
         "nix-homebrew": "nix-homebrew",
@@ -414,8 +432,7 @@
         "nixpkgs-darwin": "nixpkgs-darwin",
         "nixpkgs-unstable": "nixpkgs-unstable",
         "sops-nix": "sops-nix",
-        "spotx-bash": "spotx-bash",
-        "ui-ux-pro-max": "ui-ux-pro-max"
+        "spotx-bash": "spotx-bash"
       }
     },
     "sops-nix": {
@@ -497,22 +514,6 @@
       "original": {
         "owner": "nix-systems",
         "repo": "default",
-        "type": "github"
-      }
-    },
-    "ui-ux-pro-max": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1789995669,
-        "narHash": "sha256-yg4O0KIAMOBh3pceig7FVTkxpwnV7DaN2A3a5lqAJns=",
-        "owner": "nextlevelbuilder",
-        "repo": "ui-ux-pro-max-skill",
-        "rev": "dcc40ff5133ef78276117db0cc34e7b83cc8aeba",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nextlevelbuilder",
-        "repo": "ui-ux-pro-max-skill",
         "type": "github"
       }
     },

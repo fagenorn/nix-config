@@ -26,6 +26,13 @@ Agent(subagent_type="implementer", model="opus", effort="high") owns the fifth a
 
 Every round: the implementer fixes, re-runs the covering tests, appends a fix report (what changed, covering tests, command, output) to the same report file, and returns the short contract. Confirm all three fix-report elements before dispatching the re-review — reviewers do not re-run tests.
 
+**Lifecycle workers.** Under a lifecycle identity, every fix round's
+implementer — resumed or fresh — is registered as SKILL.md's
+`### Lifecycle workers` says before the round and gets a fresh `worker_id`.
+Its `Lifecycle worker:` line goes in the prompt of a fresh implementer, and in
+the resume message of a resumed one. Run the release when it returns. A `launch fence refused`
+report ends the loop.
+
 The re-review is scoped: run `review-package PLAN_FILE FIX_BASE HEAD`
 (FIX_BASE = the head the previous review saw), capture stdout unchanged, and
 validate it through

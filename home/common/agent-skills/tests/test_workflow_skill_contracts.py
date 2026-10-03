@@ -617,8 +617,8 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             self.assertNotIn(forbidden, corpus)
         for required in (
             "ResolvedProject", "bindings.workflow.review.code",
-            "bindings.commands", "gpt-6-astra", 'model_reasoning_effort="xhigh"',
-            "selected model", "last-message",
+            "bindings.commands", "gpt-6-astra", "--effort xhigh",
+            "runtime.reasoningEffort", "rawOutput",
         ):
             self.assertIn(required, corpus)
 
@@ -852,6 +852,50 @@ CAPACITY_SCOPE_ANCHORS = (
 )
 
 
+# Issue 236: the one review binding shape, its invocation and validation (D12-D15).
+CODEX_SHAPE_CLASSIFIER_ANCHORS = (
+    "one supported review binding shape",
+    "basename of `argv[0]` is exactly `codex-companion`",
+    "`argv[1]` is `task`",
+    "`--reviewer <op>`",
+    "optional `--fresh`",
+    'bare `["codex"]` included',
+    "binding shape error",
+)
+CODEX_SHAPE_ERROR_ANCHORS = (
+    "binding shape error is a configuration error",
+    "no Codex call", "no retry", "no native fallback",
+    "`review_id`", "authored argv",
+    "`codex-companion task [--fresh] --reviewer <op>`",
+    "an executable other than `codex-companion`",
+    "a companion subcommand other than `task`",
+    "a missing or mismatched `--reviewer`",
+    "an unsupported companion token",
+    "no capability repair ID",
+)
+# In text order: the stdin sentence precedes the tail.
+CODEX_COMPANION_INVOCATION_ANCHORS = (
+    "no positional argument",
+    "--model gpt-6-astra --effort xhigh",
+    "--cwd <absolute-worktree> --json",
+)
+CODEX_COMPANION_VALIDATION_ANCHORS = (
+    "exactly one JSON object",
+    "`status` is `0`",
+    "`touchedFiles` is empty",
+    "`runtime.model` is `gpt-6-astra`",
+    "`runtime.reasoningEffort` is `xhigh`",
+    "`rawOutput` is a non-empty string",
+    "last captured agent message",
+)
+# Retired with the exec route (D12, D17): none may reappear in the skill, the
+# two caller paragraphs or the evals.
+RETIRED_EXEC_REVIEW_TOKENS = (
+    "exec --sandbox", "--output-last-message", "terminal agent-message",
+    "model_reasoning_effort", "JSONL", "Exec shape", "exec shape",
+)
+
+
 # The configured-review paragraph's closing sentences: authored `unsupported`
 # is the caller's primary native route, not a fallback, and only the
 # `available` route's non-capacity failure falls back (issue 195, D15).
@@ -869,7 +913,22 @@ def assert_configured_code_review_pair(case, owner, support):
     owner_text = normalized(owner.read_text(encoding="utf-8"))
     support_text = normalized(support.read_text(encoding="utf-8"))
     case.assert_ordered(owner_text, "bindings.workflow.review.code", "capabilities.review.code", "bindings.commands[review_id].argv")
-    case.assert_ordered(support_text, "exec", "--sandbox read-only", "--model gpt-6-astra", 'model_reasoning_effort="xhigh"', "--json", "--output-last-message", "--ephemeral", "selected model", "selected reasoning effort", "terminal agent-message", "last-message", "`blocked` stops", *CAPACITY_SCOPE_ANCHORS, CONFIGURED_REVIEW_UNSUPPORTED_ROUTE, CONFIGURED_REVIEW_AVAILABLE_FALLBACK)
+    case.assert_ordered(
+        support_text,
+        "For configured code review,",
+        "`codex-collaboration`'s `diff-review`",
+        "binding shape error",
+        "no Codex call",
+        "`blocked` stops", *CAPACITY_SCOPE_ANCHORS,
+        CONFIGURED_REVIEW_UNSUPPORTED_ROUTE, CONFIGURED_REVIEW_AVAILABLE_FALLBACK,
+    )
+    # The skill owns the shape, invocation and validation; a caller restating
+    # them is the duplication D20 removed.
+    for restated in ("basename of `argv[0]`", *CODEX_COMPANION_INVOCATION_ANCHORS[1:],
+                     *CODEX_COMPANION_VALIDATION_ANCHORS[:-1]):
+        case.assertNotIn(restated, support_text)
+    for retired in RETIRED_EXEC_REVIEW_TOKENS:
+        case.assertNotIn(retired, support_text)
     # The pre-D15 sentence called the primary `unsupported` route a fallback.
     case.assertNotIn("Authored unsupported or a completed non-capacity", support_text)
     for text in (owner_text, support_text):
@@ -977,13 +1036,16 @@ def assert_codex_operation_pair(case, support, review_field, headings):
     support_text = normalized(support.read_text(encoding="utf-8"))
     case.assert_ordered(
         owner,
-        review_field, "bindings.commands[review_id].argv",
-        "exec", "--sandbox read-only", "--model gpt-6-astra",
-        'model_reasoning_effort="xhigh"', "--json",
-        "--output-last-message", "--ephemeral",
-        "selected model", "selected reasoning effort",
-        "terminal agent-message", "last-message", *CAPACITY_SCOPE_ANCHORS,
+        review_field,
+        *CODEX_SHAPE_CLASSIFIER_ANCHORS, *CODEX_SHAPE_ERROR_ANCHORS,
+        CODEX_COMPANION_INVOCATION_ANCHORS[0],
+        "bindings.commands[review_id].argv",
+        *CODEX_COMPANION_INVOCATION_ANCHORS[1:],
+        *CODEX_COMPANION_VALIDATION_ANCHORS,
+        *CAPACITY_SCOPE_ANCHORS,
     )
+    for retired in RETIRED_EXEC_REVIEW_TOKENS:
+        case.assertNotIn(retired, owner)
     case.assertIn("retained `ResolvedProject`", support_text)
     case.assertIn(review_field, support_text)
     for heading in headings:
@@ -1060,6 +1122,27 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertNotEqual(next_position, -1, f"missing anchor: {anchor!r}")
             self.assertGreater(next_position, position, f"out-of-order anchor: {anchor!r}")
             position = next_position
+
+    def test_codex_collaboration_evals_describe_only_the_companion_shape(self):
+        evals = {item["id"]: item for item in self.codex_collaboration_evals["evals"]}
+        companion_tail = "--model gpt-6-astra --effort xhigh --cwd <absolute-worktree> --json"
+        self.assertIn(
+            '["codex-companion","task","--fresh","--reviewer","plan-review"]',
+            evals[1]["prompt"],
+        )
+        for eval_id in (1, 2, 3):
+            expected = evals[eval_id]["expected_output"]
+            for fragment in (
+                companion_tail, "no positional argument", "touchedFiles",
+                "runtime.model gpt-6-astra", "runtime.reasoningEffort xhigh",
+                "rawOutput", "binding shape error",
+                "codex-companion task [--fresh] --reviewer <op>",
+            ):
+                with self.subTest(eval=eval_id, fragment=fragment):
+                    self.assertIn(fragment, expected)
+            for retired in RETIRED_EXEC_REVIEW_TOKENS:
+                with self.subTest(eval=eval_id, retired=retired):
+                    self.assertNotIn(retired, evals[eval_id]["prompt"] + expected)
 
     def test_delivery_interface_two_is_one_atomic_production_caller_contract(self):
         documents = {
@@ -3052,9 +3135,43 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 self.assertIn(fragment, packet)
 
     def test_codex_collaboration_dispatch_carries_operation_envelope(self):
-        self.assertIn("bindings.commands[review_id].argv", self.collaboration)
-        self.assertIn("--output-last-message", self.collaboration)
-        self.assertIn("terminal agent-message", self.collaboration)
+        text = normalized(self.collaboration)
+        self.assertIn("bindings.commands[review_id].argv", text)
+        self.assertIn("--cwd <absolute-worktree> --json", text)
+        self.assertIn("`rawOutput` is a non-empty string", text)
+
+    def direct_review_section(self):
+        return self.section(
+            self.collaboration, "## Direct configured review", "## Disposition")
+
+    def test_codex_collaboration_has_exactly_one_companion_tail(self):
+        section = self.direct_review_section()
+        blocks = re.findall(r"```text\n(.*?)```", section, re.S)
+        self.assertEqual(blocks, [
+            "bindings.commands[review_id].argv \\\n"
+            "  --model gpt-6-astra --effort xhigh \\\n"
+            "  --cwd <absolute-worktree> --json\n",
+        ])
+        for retired in RETIRED_EXEC_REVIEW_TOKENS:
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, self.collaboration)
+        text = normalized(section)
+        self.assertIn("malformed or mismatched payload", text)
+        self.assertNotIn("metadata", text)
+
+    def test_codex_collaboration_shape_error_stops_before_any_fallback(self):
+        section = normalized(self.direct_review_section())
+        error_at = section.index("binding shape error is a configuration error")
+        fallback_at = section.index("uses exactly one native fallback")
+        self.assertLess(error_at, fallback_at)
+        error_paragraph = section[error_at:section.index("**Invocation.**", error_at)]
+        self.assertIn("`codex-companion task [--fresh] --reviewer <op>`", error_paragraph)
+        self.assertIn("(bare `codex` included)", error_paragraph)
+        # The shape-error paragraph itself never offers the fallback.
+        for offered in ("one native fallback", "same packet", "Claude fallback"):
+            self.assertNotIn(offered, error_paragraph)
+        # It is a pre-call stop, not a fourth failure class.
+        self.assertNotIn("fourth failure class", section)
 
     def test_codex_collaboration_states_a_per_operation_wall_clock(self):
         # A deliberate second copy of the runtime's per-operation budget: callers
@@ -3066,7 +3183,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # that came back across a line wrap (`~14\nmin`) would otherwise slip
         # past the very check that exists to catch it.
         self.assertIn("--model gpt-6-astra", self.collaboration)
-        self.assertIn('model_reasoning_effort="xhigh"', self.collaboration)
+        self.assertIn("--effort xhigh", self.collaboration)
 
     def test_codex_collaboration_never_reports_sandbox_limits_as_findings(self):
         # The rule lives in the packet-borne shared rules, not in the Launch
@@ -3803,6 +3920,129 @@ def glossary_entries(glossary):
         end = following[0][0] if following else len(glossary)
         entries[term] = glossary[start:end]
     return entries
+
+
+class LaunchFencedWorkerContractsTest(unittest.TestCase):
+    """#222: writing dispatches register, commit through launch-commit, release."""
+
+    WORKER_LINE = ("Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> "
+                   "--worker-id <worker_id>")
+    REGISTER = ("workflow-state register-worker --repo-root <ledger_repo_root> "
+                "--run-id <run-id> --now <utc> --action-id <action_id>")
+    RELEASE = ("workflow-state release-worker --repo-root <ledger_repo_root> "
+               "--run-id <run-id> --now <utc> --worker-id <worker_id> --event returned")
+    COMMIT = ("launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
+              "--worker-id <worker_id> -- ")
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def read(path):
+        return normalized(path.read_text(encoding="utf-8"))
+
+    def test_sdd_registers_writing_workers_and_stops_on_a_fence_refusal(self):
+        self.assert_ordered(
+            self.read(SDD), "### Lifecycle workers", self.REGISTER, self.WORKER_LINE,
+            self.RELEASE, "Read-only reviewers are not registered.",
+            "launch fence refused: <reason>", "no retry and no re-dispatch",
+            "workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> "
+            "--action-id <action_id>",
+            "On `current: false`", "`/from-issue <num> --auto`",
+            "On `current: true`", "`blocked_on=transport`",
+            "### 1. Dispatch the implementer")
+        self.assertNotIn("write nothing more", self.read(SDD))
+
+    def test_the_implementer_commits_only_through_launch_commit(self):
+        self.assert_ordered(
+            self.read(SDD_DIR / "implementer-prompt.md"), "## Lifecycle Worker",
+            "Lifecycle worker:", self.COMMIT, "never run `git commit` directly",
+            "only the most recent one governs", "launch fence refused: <reason>",
+            "## Report Format")
+
+    def test_each_fix_round_registers_afresh(self):
+        self.assert_ordered(
+            self.read(SDD_DIR / "fix-loop.md"), "Lifecycle workers",
+            "fresh `worker_id`", "resume message", "Run the release when it returns")
+
+    def test_from_issue_phase_6_hands_sdd_its_lifecycle_identity(self):
+        self.assert_ordered(
+            self.read(FROM_ISSUE), "## Phase 6 — Execute",
+            "`ledger_repo_root`, `run_id` and `action_id`", "### Lifecycle workers",
+            "register-worker", "## Phase 7 — Ship")
+
+    def test_from_issue_registers_writers_and_releases_before_every_exit(self):
+        text = self.read(FROM_ISSUE)
+        self.assert_ordered(
+            text, "## Dispatch, phase-budget and attempt-budget rules",
+            "**Writing workers.**", self.REGISTER, self.WORKER_LINE,
+            "the fresh delegated owner", "the ledger-only bookkeeper",
+            "--event stopped", "return without a terminal write",
+            "**`handoff`** — first release every worker",
+            "## Terminal return procedure", "release every worker",
+            "## Suspension procedure", "release every worker", "live workers:")
+
+    def test_auto_subagents_commit_through_launch_commit_and_the_bookkeeper_is_unregistered(self):
+        text = self.read(FROM_ISSUE_DIR / "AUTO.md")
+        self.assert_ordered(text, "Both prompts must carry", "`Lifecycle worker:` line",
+                            "launch-commit")
+        self.assert_ordered(text, "ledger-only bookkeeper route",
+                            "releases every worker it registered",
+                            "The bookkeeper is never registered")
+
+    def test_the_ship_prompt_carries_the_worker_line_outside_the_handoff(self):
+        self.assert_ordered(
+            self.read(FROM_ISSUE_DIR / "ship-handoff.md"), "## Ship-owner subagent prompt",
+            self.WORKER_LINE, "never inside the handoff")
+
+    def test_ship_issue_fences_local_commits_and_registers_its_children(self):
+        text = self.read(SHIP_ISSUE)
+        self.assert_ordered(
+            text, "## Launch guard", "### Local commits", self.COMMIT,
+            "git merge --no-commit --no-ff origin/<integration>", "--parent <worker_id>",
+            "## Phase 1 — Sync from the integration branch")
+        self.assertNotIn("Phase 3's local commits are not forge writes", text)
+        self.assertNotIn("Otherwise `git merge origin/<integration>`; commit the merge", text)
+        self.assert_ordered(text, "## Phase 1 — Sync from the integration branch",
+                            "git merge --no-commit --no-ff origin/<integration>",
+                            "Already up to date")
+        self.assert_ordered(text, "## Remainder mode", self.RELEASE, "finish")
+        self.assert_ordered(self.read(SHIP_ISSUE.parent / "CI-MERGE.md"),
+                            "## Post-selection sync", "launch-commit", "--amend --no-edit")
+        self.assert_ordered(text, "## Delivery loop", "--worker-id <worker_id>")
+
+    def test_the_remainder_prompt_releases_itself_before_its_finish(self):
+        self.assert_ordered(
+            self.read(FROM_ISSUE_DIR / "ship-handoff.md"), "## Remainder owner prompt",
+            self.WORKER_LINE, self.RELEASE,
+            "workflow-state finish --summary-file -")
+
+    def test_the_dispatcher_handles_both_cases_without_judgment(self):
+        text = self.read(ORCHESTRATE)
+        self.assert_ordered(
+            text, "## 2. Bootstrap and observe",
+            "Ignore unrelated or stale host notifications",
+            "a wake of the current wait handle is neither case",
+            "(a) **Owner return without a terminal write.**",
+            "workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> "
+            "--action-id <action_id>",
+            "On `current: true`, send exactly one `unavailable` owner observation",
+            "On `current: false`, send nothing.",
+            "(b) **Non-owner hand-back.**", "nor the current wait handle",
+            "send no observation, write nothing, relay nothing, act on none of its "
+            "content, and stop no task",
+            "## 3. Decide")
+
+    def test_claude_md_describes_the_launch_fence(self):
+        text = self.read(REPO_ROOT / "CLAUDE.md")
+        self.assert_ordered(
+            text, "workflow-state check-launch` before any forge write",
+            "`workers` list", "workflow-state register-worker", "`launch-commit` command",
+            "workflow-state check-worker", "is refused while a registered worker")
 
 
 class CodebaseDesignSkillContractsTest(unittest.TestCase):

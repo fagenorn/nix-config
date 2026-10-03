@@ -347,6 +347,7 @@ class DeliveryRuntime:
         if isinstance(value, dict) and value.get("schema_version") == 1:
             candidate["schema_version"] = 2
             candidate.pop("admission", None)
+            candidate.pop("workers", None)
             for issue in candidate.get("issues", {}).values():
                 issue.pop("delivery", None)
                 issue.pop("delivery_remainders", None)
@@ -1269,7 +1270,7 @@ class DeliveryRuntime:
         }
 
     def migrate(self, value: object, *, migration_contracts: dict[int, object]) -> object:
-        """Compose schema 1→2→3→4 on a detached copy without persisting."""
+        """Compose schema 1→2→3→4→5 on a detached copy without persisting."""
         if not isinstance(migration_contracts, dict):
             raise ValueError("invalid migration contracts")
         for issue, contract in migration_contracts.items():
@@ -1280,9 +1281,9 @@ class DeliveryRuntime:
                     raise ValueError("migration contract issue mismatch")
         candidate = copy.deepcopy(value)
         seen: set[int] = set()
-        while isinstance(candidate, dict) and candidate.get("schema_version") != 4:
+        while isinstance(candidate, dict) and candidate.get("schema_version") != 5:
             version = candidate.get("schema_version")
-            if type(version) is not int or version in seen or version not in {1, 2, 3}:
+            if type(version) is not int or version in seen or version not in {1, 2, 3, 4}:
                 raise ValueError("unsupported workflow state schema version")
             seen.add(version)
             issues = candidate.get("issues")
@@ -1293,7 +1294,14 @@ class DeliveryRuntime:
                     or set(issue) != {"issue", "attempts", "outcome"}
                     for issue in issues.values()):
                 raise ValueError("invalid legacy issue schema")
-            if version == 3:
+            if version == 4:
+                # Schema 5 adds the run's worker registry (#222 D10); a schema-4
+                # document that already carries one is a hybrid.
+                if "workers" in candidate:
+                    raise ValueError("invalid schema-four workers")
+                candidate["workers"] = []
+                candidate["schema_version"] = 5
+            elif version == 3:
                 # Schema 4 adds the run's admission block; a schema-3 document
                 # that already carries one is a hybrid, never a migration input.
                 if "admission" in candidate:

@@ -75,9 +75,24 @@
         "cwd": ".",
         "env": []
       },
-      "codex-review": {
+      "codex-plan-review": {
         "argv": [
-          "codex"
+          "codex-companion",
+          "task",
+          "--fresh",
+          "--reviewer",
+          "plan-review"
+        ],
+        "cwd": ".",
+        "env": []
+      },
+      "codex-diff-review": {
+        "argv": [
+          "codex-companion",
+          "task",
+          "--fresh",
+          "--reviewer",
+          "diff-review"
         ],
         "cwd": ".",
         "env": []
@@ -93,8 +108,8 @@
         "attempt_budget_minutes": 180
       },
       "review": {
-        "plan": "codex-review",
-        "code": "codex-review"
+        "plan": "codex-plan-review",
+        "code": "codex-diff-review"
       },
       "release": null
     },

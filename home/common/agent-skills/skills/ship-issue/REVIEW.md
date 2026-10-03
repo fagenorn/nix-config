@@ -4,7 +4,7 @@ Read this when Phase 5 picks its path. It owns the reviewer templates, severity
 mapping, and the apply/push fix flow. The dispatch selections themselves live in
 SKILL.md — never inline a review.
 
-For configured code review, copy the selected command entry, unset only its declared environment names, and execute its base argv followed exactly by `exec --sandbox read-only --model gpt-6-astra -c model_reasoning_effort="xhigh" --json --output-last-message <absolute-last-message> --ephemeral -C <absolute-worktree> -`. Keep JSONL and last-message files outside worktrees under unconditional cleanup. Validate the selected model and selected reasoning effort, then require terminal agent-message equality with the non-empty last-message before operation headings identify Codex. `blocked` stops. On the `available` route, a capacity rejection has no retry and no native fallback. A Codex call made under `unsupported` is a routing error, never a capacity rejection. Authored `unsupported` takes the caller's native correctness route directly and makes no Codex call. On the `available` route, a completed non-capacity runtime/output failure uses the existing single native fallback and records why.
+For configured code review, the correctness axis reaches Codex only through `codex-collaboration`'s `diff-review`, which alone owns the review binding shape, its invocation and its validation; a binding shape error it reports stops this review with no Codex call, no retry and no native fallback. `blocked` stops. On the `available` route, a capacity rejection has no retry and no native fallback. A Codex call made under `unsupported` is a routing error, never a capacity rejection. Authored `unsupported` takes the caller's native correctness route directly and makes no Codex call. On the `available` route, a completed non-capacity runtime/output failure uses the existing single native fallback and records why.
 
 ## Merge-delta check (degraded path)
 
@@ -65,7 +65,9 @@ Phase 6 polling CI on the stale tip." Follow this order:
 2. Re-run every retained `bindings.workflow.verification` command through
    `bindings.commands` against the modified surface.
 3. `git add` the changed files; commit `fix(issue-<num>): address PR review —
-   <short blocker>` (follow retained `bindings.vcs.commit.co_authored_by`).
+   <short blocker>` (follow retained `bindings.vcs.commit.co_authored_by`),
+   through `launch-commit` when this run holds a `Lifecycle worker:` line
+   (SKILL.md's `### Local commits`).
 4. Run `check-launch` (SKILL.md's `## Launch guard`); on anything but
    `current: true`, stop without pushing and take the no-write stop. Then
    `git push`.
