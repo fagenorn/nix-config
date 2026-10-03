@@ -1,9 +1,9 @@
-"""The transaction-state/v5 document model of the transaction core (#205 D33, #206 D2, #207
-D13, #208 D12): the lifecycle vocabularies, the `Custody` credential and `Transaction`
-snapshot types, the credential shape checks, shared validating history walk and snapshot
-fold. `append_events` builds detached complete candidates with that walk; `validate_state`
-admits stored metadata and compares its projections with the same walk's results. The
-walk hands each action event to `agent_tools.transaction_invocation`, whose
+"""The transaction-state/v6 document model of the transaction core (#205 D33, #206 D2, #207
+D13, #208 D12, #209 D17): the lifecycle vocabularies, `ACTOR_KINDS`, the `Custody` credential
+and `Transaction` snapshot types, the credential shape checks, shared validating history
+walk and snapshot fold. `append_events` builds detached complete candidates with that
+walk; `validate_state` admits stored metadata and compares its projections with the same
+walk's results. The walk hands each action event to `agent_tools.transaction_invocation`, whose
 fold also derives the snapshot's per-action `actions` view on every load, and each proof
 event to `agent_tools.transaction_proof`, whose `proof_view` derives the snapshot's `proof`
 view on every load too; an `obligation_observed` joins the evidence-id fold exactly as an
@@ -19,14 +19,25 @@ on every load (#208 D6, D12), its `recovery_event_violation` checks each recover
 `recovery_transition_violation` gates each transition and its `recovery_pairing_violation`
 binds `recovery_started` to the entry into `recovering`, `recovery_settled` to the entry into
 `rolled_back` and `recovery_incomplete` to its park (#208 D7, D9, D10); a
-`roll_forward_linked` must also name a transaction id (#208 D11). It reads no file, lock
-or clock: `validate_state` takes the creation-key index lookup as a callable, which
-`agent_tools.transaction_core` binds to its store root. It also composes event fields for
-a lapsed span's reap (`reap_events`) and a late owner result (`owner_result_event`),
-and answers whether an executor and fence were ever issued a span (`span_issued`). The
-`at`-timestamp codec (`format_at`, `parse_at`) and the strict JSON object rule
-(`json_object_violation`) that a created `subject` and a late `result` share are imported
-from `agent_tools.transaction_storage`, not held here.
+`roll_forward_linked` must also name a transaction id (#208 D11). The `created` event carries
+a non-empty `authority_class`, and each `grant_issued` an `actor_kind` in `ACTOR_KINDS` and a
+non-empty `authority_class` (#209 D11, D22); `agent_tools.transaction_disposition`'s
+`failure_event_violation` re-derives each `failure_disposed`, its
+`disposition_pairing_violation` binds that event and every entry into `failed` as the
+recovery pairing does, and its `terminal_blocker` names the action no terminal transition
+may cross (#209 D21). A terminal's last event is `receipt_sealed`, admitted once
+after the terminal transition or its release and checked by
+`agent_tools.transaction_receipt`'s `receipt_event_violation`; `append_events` stamps its
+digest through that module's `terminal_receipt`, and `terminal_view` derives the snapshot's
+`terminal` view on every load (#209 D7, D24, D25). It reads no file, lock or clock:
+`validate_state` takes the creation-key index lookup as a callable, which
+`agent_tools.transaction_core` binds to its store root, and the core reads the receipt file
+itself. It also composes event fields for a lapsed span's reap (`reap_events`) and a late
+owner result (`owner_result_event`), and answers whether an executor and fence were ever
+issued a span (`span_issued`). The `at`-timestamp codec (`format_at`, `parse_at`), the
+strict JSON object rule (`json_object_violation`) that a created `subject` and a late
+`result` share, and the transaction id rule (`is_id`; #209 D30) are imported from
+`agent_tools.transaction_storage`, not held here.
 """
 
 import copy
@@ -41,21 +52,25 @@ from typing import Any
 from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_custody import (
     CUSTODY_EVENTS, EVIDENCE_EVENTS, EVIDENCE_FORMS, admissibility, fence_violation)
+from agent_tools.transaction_disposition import (
+    DISPOSITION_EVENT_KEYS, disposition_pairing_violation, failure_event_violation,
+    terminal_blocker)
 from agent_tools.transaction_invocation import (
-    ACTION_EVENT_KEYS, action_event_violation, action_views, apply_action_event, status,
-    unresolved)
+    ACTION_EVENT_KEYS, action_event_violation, action_views, apply_action_event, status)
 from agent_tools.transaction_plan import plan_violation
 from agent_tools.transaction_proof import (
     PROOF_EVENT_KEYS, ProofFold, apply_proof_event, gate_violation, pairing_violation,
     proof_event_violation, proof_view)
+from agent_tools.transaction_receipt import (
+    RECEIPT_EVENT_KEYS, receipt_event_violation, terminal_receipt, terminal_view)
 from agent_tools.transaction_recovery import (
     RECOVERY_EVENT_KEYS, recovery_event_violation, recovery_pairing_violation,
     recovery_transition_violation, recovery_view, selection_refusal)
 from agent_tools.transaction_recovery_plan import recovery_plan_violation
 from agent_tools.transaction_storage import (
-    StateInvalid, format_at, json_object_violation, parse_at, serialize)
+    StateInvalid, format_at, is_id, json_object_violation, parse_at, serialize)
 
-SCHEMA = "transaction-state/v5"
+SCHEMA = "transaction-state/v6"
 
 FORWARD = ("created", "awaiting_verification", "ready", "publishing", "published",
            "activating", "proving")
@@ -80,16 +95,15 @@ TRANSITIONS: Mapping[str, frozenset[str]] = MappingProxyType({
     "failed": frozenset(),
 })
 EXTERNAL_STATES = ("known", "unknown", None)
+ACTOR_KINDS = ("human", "agent")
 
-_ID_PATTERN = re.compile(
-    r"rel_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 _AT_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z")
 _STATE_KEYS = frozenset({"schema", "transaction_id", "creation_key", "subject", "state",
                          "parked_from", "revision", "events", "concurrency_keys", "custody",
                          "proof_plan", "recovery_plan"})
 _KEY_COLLECTIONS = (list, tuple, set, frozenset)
 _CREATED_KEYS = frozenset({"seq", "type", "at", "proof_plan_digest", "recovery_plan_digest",
-                           "recovers"})
+                           "recovers", "authority_class"})
 _TRANSITIONED_KEYS = frozenset({"seq", "type", "at", "from", "to", "reason",
                                 "external_state"})
 _ENVELOPE_KEYS = frozenset({"seq", "type", "at"})
@@ -102,7 +116,8 @@ _EVENT_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
     "lease_lapse_detected": _ENVELOPE_KEYS | {"fence", "executor_id"},
     "evidence_recorded": _ENVELOPE_KEYS | {"evidence_id", "form", "reference", "fence"},
     "interval_opened": _ENVELOPE_KEYS | {"evidence_id", "fence"},
-    "grant_issued": _ENVELOPE_KEYS | {"grant_id", "actor", "fence"},
+    "grant_issued": _ENVELOPE_KEYS | {"grant_id", "actor", "actor_kind", "authority_class",
+                                      "fence"},
     "stop_synthesized": _ENVELOPE_KEYS | {"fence", "executor_id", "reason"},
     "owner_result": _ENVELOPE_KEYS | {"executor_id", "fence", "custody", "supersedes",
                                       "result"},
@@ -141,7 +156,8 @@ class Transaction:
     `proof_plan` is the stored plan fixed at creation, a read-only view over a deep copy,
     and `proof` a read-only view over `proof_view`, derived on every load and never stored
     (#207 D3, D13). `recovery_plan` and `recovery` are the same pair for the recovery plan,
-    over `recovery_view` (#208 D6, D12).
+    over `recovery_view` (#208 D6, D12). `terminal` is `terminal_view`'s `{receipt_digest,
+    outcome, terminal_qualifier}`, or None before a terminal (#209 D7).
     """
 
     transaction_id: str
@@ -160,6 +176,7 @@ class Transaction:
     proof: Mapping[str, Any]
     recovery_plan: Mapping[str, Any]
     recovery: Mapping[str, Any]
+    terminal: Mapping[str, Any] | None
 
 
 def edge_allowed(source: str, parked_from: str | None, target: str) -> bool:
@@ -170,10 +187,6 @@ def edge_allowed(source: str, parked_from: str | None, target: str) -> bool:
     if source == "attention_required" and target in FORWARD:
         return target == parked_from
     return True
-
-
-def is_id(value: object) -> bool:
-    return type(value) is str and _ID_PATTERN.fullmatch(value) is not None
 
 
 def parked_since(events: list[dict]) -> int | None:
@@ -384,6 +397,8 @@ def _fold_fenced(event: dict, seq: int, fold: _CustodyFold,
     if event_type == "evidence_recorded" and (type(event["form"]) is not str
                                               or event["form"] not in EVIDENCE_FORMS):
         raise refuse(f"event {seq} form is not event, snapshot or interval")
+    if event_type == "grant_issued" and event["actor_kind"] not in ACTOR_KINDS:
+        raise refuse(f"event {seq} actor_kind is not human or agent")
     if fold.custody is None:
         raise refuse(f"event {seq} {event_type} sits outside an open custody span")
     violation = fence_violation(event["fence"], fold.keys)
@@ -447,15 +462,16 @@ def _fold_custody(event: dict, seq: int, fold: _CustodyFold, state: str,
 
 def validate_state(document: Any, transaction_id: str,
                    indexed: Callable[[str], str | None]) -> None:
-    """Refuse (StateInvalid) any document that is not a valid transaction-state/v5. The stored
+    """Refuse (StateInvalid) any document that is not a valid transaction-state/v6. The stored
     `proof_plan` must be the materialization of its own declaration for `transaction_id`, and
     the `created` event must pin its `telemetry_digest` (#207 D3, D24); so must the stored
     `recovery_plan`, bound to the proof plan's declaration, and the `created` event's
-    `recovers` is null or another transaction's id (#208 D6, D12); each action event is
-    checked by `action_event_violation` against the actions before it, and each
-    `invocation_intended` then by `selection_refusal` (#208 D15), and a transition into
-    a terminal while `unresolved` names an action is refused (#206 D20). Each proof event is
-    checked by `proof_event_violation` against the history before it and then, for an
+    `recovers` is null or another transaction's id (#208 D6, D12) and its `authority_class` a
+    non-empty string, and each `grant_issued`'s `actor_kind` is in `ACTOR_KINDS` (#209 D11,
+    D22); each action event is checked by `action_event_violation` against the actions
+    before it, and each `invocation_intended` then by `selection_refusal` (#208 D15), and a
+    transition into a terminal while `terminal_blocker` names an action is refused (#206
+    D20; #209 D21). Each proof event is checked by `proof_event_violation` against the history before it and then, for an
     `obligation_observed`, by the evidence-id fold (#207 D25). Cohorts are numbered from 1,
     at most `MAX_COHORT_ATTEMPTS`, one open at a time; a seal names the cohort open under
     its fence and passes `seal_violation`, which settlement also uses (#207 D31); and
@@ -467,8 +483,14 @@ def validate_state(document: Any, transaction_id: str,
     included, is checked by `recovery_event_violation`, after a `roll_forward_linked`'s child
     is checked to be a transaction id (#208 D11), and `recovery_pairing_violation` binds each
     recovery event and reserved recovery reason as `pairing_violation` does (#208 D7, D9, D10,
-    D22). Metadata checks precede `_history_projection`; strict stored-projection
-    comparisons follow it without repairing the document."""
+    D22), and `disposition_pairing_violation` binds `failure_disposed`, every transition into
+    `failed` and the reserved reason `failure_disposed` likewise, after
+    `failure_event_violation` re-derives each `failure_disposed` (#209 D21). A `receipt_sealed`
+    is admitted only after the terminal transition or its terminal release, once, and is
+    checked by `receipt_event_violation`; a terminal whose last event is not `receipt_sealed`
+    is refused (#209 D7, D24). Metadata checks
+    precede `_history_projection`; strict stored-projection comparisons follow it without
+    repairing the document."""
     def refuse(rule: str) -> StateInvalid:
         return StateInvalid(f"{transaction_id}: {rule}")
 
@@ -549,19 +571,23 @@ def _history_projection(document: dict,
     recovers = first["recovers"]
     if recovers is not None and (not is_id(recovers) or recovers == transaction_id):
         raise refuse("event 1 recovers is neither null nor another transaction's rel_ UUIDv7")
-    state, parked, entered_terminal = "created", None, None
+    if type(first["authority_class"]) is not str or not first["authority_class"]:
+        raise refuse("event 1 authority_class is not a non-empty string")
+    state, parked, entered_terminal, sealed = "created", None, None, False
     fold = _CustodyFold(keys)
     actions: dict = {}
     proof_fold = ProofFold()
     for seq, event in enumerate(events[1:], start=2):
-        if state in TERMINALS and not (
-                entered_terminal == seq - 1 and type(event) is dict
-                and event.get("type") == "lease_released" and event.get("reason") == "terminal"):
+        if state in TERMINALS and not (type(event) is dict and (
+                entered_terminal == seq - 1 and event.get("type") == "lease_released"
+                and event.get("reason") == "terminal"
+                or event.get("type") == "receipt_sealed" and not sealed)):
             raise refuse(f"event {seq} follows the terminal state {state}")
         if type(event) is not dict:
             raise refuse(f"event {seq} is not a JSON object")
         violation = (pairing_violation(events[seq - 2], event)
-                     or recovery_pairing_violation(events[seq - 2], event))
+                     or recovery_pairing_violation(events[seq - 2], event)
+                     or disposition_pairing_violation(events[seq - 2], event))
         if violation is not None:
             raise refuse(f"event {seq} {violation}")
         event_type = event.get("type")
@@ -572,7 +598,7 @@ def _history_projection(document: dict,
                 if violation is not None:
                     raise refuse(f"event {seq} {violation}")
                 if state in TERMINALS:
-                    blocker = unresolved(actions)
+                    blocker = terminal_blocker(actions, events[seq - 2])
                     if blocker is not None:
                         raise refuse(f"event {seq} reaches terminal {state} over unresolved "
                                      f"action {blocker.action_id} ({status(blocker)})")
@@ -582,6 +608,14 @@ def _history_projection(document: dict,
                     None if fold.custody is None else fold.custody["fence"])
                 if violation is not None:
                     raise refuse(f"event {seq} {violation}")
+            case "receipt_sealed":
+                _check_envelope(event, seq, RECEIPT_EVENT_KEYS, refuse)
+                if state not in TERMINALS:
+                    raise refuse(f"event {seq} receipt_sealed outside a terminal state")
+                violation = receipt_event_violation(event, events[:seq - 1], document)
+                if violation is not None:
+                    raise refuse(f"event {seq} {violation}")
+                sealed = True
             case str() if event_type in CUSTODY_EVENTS:
                 _fold_custody(event, seq, fold, state, entered_terminal, refuse)
             case str() if event_type in _FENCED_EVENTS:
@@ -615,6 +649,14 @@ def _history_projection(document: dict,
                 if event_type == "obligation_observed":
                     _note_id(event, fold)
                 apply_proof_event(event, proof_fold)
+            case str() if event_type in DISPOSITION_EVENT_KEYS:
+                _check_envelope(event, seq, DISPOSITION_EVENT_KEYS[event_type], refuse)
+                violation = failure_event_violation(
+                    event, events[:seq - 1], document,
+                    open_fence=None if fold.custody is None else fold.custody["fence"],
+                    state=state)
+                if violation is not None:
+                    raise refuse(f"event {seq} {violation}")
             case str() if event_type in RECOVERY_EVENT_KEYS:
                 _check_envelope(event, seq, RECOVERY_EVENT_KEYS[event_type], refuse)
                 if (event_type == "roll_forward_linked"
@@ -630,12 +672,15 @@ def _history_projection(document: dict,
             case _:
                 raise refuse(f"event {seq} has unknown event type {event_type!r}")
     violation = (pairing_violation(events[-1], None)
-                 or recovery_pairing_violation(events[-1], None))
+                 or recovery_pairing_violation(events[-1], None)
+                 or disposition_pairing_violation(events[-1], None))
     if violation is not None:
         raise refuse(f"event {len(events)} {violation}")
     custody = fold.custody
     if state in TERMINALS and custody is not None:
         raise refuse(f"terminal state {state} still holds custody")
+    if state in TERMINALS and not sealed:
+        raise refuse(f"terminal state {state} has no receipt_sealed as its last event")
     return state, parked, custody, len(events)
 
 
@@ -644,11 +689,19 @@ def append_events(prior: dict, event_fields: list[dict], *, at: str) -> dict:
 
     The store admits the prior under its transaction lock and supplies one timestamp.
     Fields omit `seq` and `at`; this constructor owns those envelopes and installs the
-    shared history walk's projection.
+    shared history walk's projection. A field that is exactly `{"type": "receipt_sealed"}`
+    is completed with `receipt_digest`, the `telemetry_digest` of `terminal_receipt` over
+    the candidate's events before it; one with any other key is `StateInvalid` (#209 D24,
+    D29). The walk then runs once and re-derives that digest.
     """
     candidate = copy.deepcopy(prior)
     events = candidate["events"]
     for fields in copy.deepcopy(event_fields):
+        if fields.get("type") == "receipt_sealed":
+            if fields != {"type": "receipt_sealed"}:
+                raise StateInvalid(f"{candidate['transaction_id']}: receipt_sealed fields "
+                                   f"carry more than their type")
+            fields["receipt_digest"] = telemetry_digest(terminal_receipt(candidate, events))
         events.append({"seq": len(events) + 1, "at": at, **fields})
     (candidate["state"], candidate["parked_from"], candidate["custody"],
      candidate["revision"]) = _history_projection(candidate, candidate["transaction_id"])
@@ -684,6 +737,7 @@ def snapshot(document: dict) -> Transaction:
         proof=MappingProxyType(proof_view(document)),
         recovery_plan=MappingProxyType(copy.deepcopy(document["recovery_plan"])),
         recovery=MappingProxyType(recovery_view(document)),
+        terminal=terminal_view(document),
     )
 
 

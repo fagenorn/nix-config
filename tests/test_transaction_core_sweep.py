@@ -2,12 +2,14 @@
 
 The prototype's autopilot printed where each (shape, scenario) cell landed; this table
 asserts it against persisted history, including each scenario's custody events and the
-evidence forms it voids.
+evidence forms it voids. Every terminal cell's receipt is read back and asserted against its
+bytes, and every parked cell has none (#209 D15).
 
 Run: just agent-workflow-tests
 """
 
 import ast
+import hashlib
 import inspect
 import io
 import re
@@ -21,7 +23,8 @@ from agent_tools.transaction_core import RecoveryPlanRejected, TransactionStore
 
 from .transaction_core_shapes import SHAPES
 from .transaction_core_sweep_support import (
-    SCENARIOS, drive, shape_declaration, shape_recovery)
+    AUTHORITY_CLASS, GAP_CELLS, PROTOTYPE_SCENARIOS, SCENARIOS, drive, shape_declaration,
+    shape_recovery)
 from .transaction_core_world import World
 
 WITH_ACTIVATION = ("created", "awaiting_verification", "ready", "publishing", "published",
@@ -170,6 +173,9 @@ RECOVERIES = {
        for shape, binding in (("platform", "nix"), ("product", "api"), ("daemon", "job"),
                               ("library", "index"))},
 }
+# (shape, scenario) -> (final, path): the unobservable release parks and stays parked (#209 D14).
+DISPOSALS = {(shape, "unknown_external_state"): ("attention_required", PUB_PARK)
+             for shape in SHAPES}
 
 
 def declared_nodes(shape):
@@ -188,8 +194,25 @@ def states_passed(transaction):
 
 
 class SweepTableTest(unittest.TestCase):
+    def assertReceipt(self, root, persisted):
+        types = [e["type"] for e in persisted.events]
+        if persisted.state not in ("succeeded", "rolled_back", "abandoned"):
+            self.assertNotIn("receipt_sealed", types)
+            return
+        seal = persisted.events[-1]
+        self.assertEqual(seal["type"], "receipt_sealed")
+        receipt = TransactionStore(root).read_receipt(seal["receipt_digest"])
+        self.assertEqual(receipt["outcome"], persisted.state)
+        path = root / "receipts" / (seal["receipt_digest"].removeprefix("sha256:") + ".json")
+        self.assertEqual("sha256:" + hashlib.sha256(path.read_bytes()[:-1]).hexdigest(),
+                         seal["receipt_digest"])
+        if persisted.state == "succeeded":
+            self.assertTrue(receipt["postconditions"])
+            self.assertTrue(all(p["observed"] is not None and p["effected"]
+                                for p in receipt["postconditions"]))
+
     def test_the_table_covers_every_shape_for_every_ported_scenario(self):
-        tables = (set(SWEEP), set(LANDINGS), set(RECOVERIES))
+        tables = (set(SWEEP), set(LANDINGS), set(RECOVERIES), set(DISPOSALS))
         self.assertEqual(set().union(*tables), {(shape, scenario) for shape in SHAPES
                                                 for scenario in SCENARIOS})
         for i, first in enumerate(tables):
@@ -204,6 +227,7 @@ class SweepTableTest(unittest.TestCase):
                 world = World()
                 transaction_id = drive(root, shape, scenario, world=world)
                 persisted = TransactionStore(root).load(transaction_id)
+                self.assertReceipt(root, persisted)
                 self.assertEqual(persisted.creation_key, f"{shape}:{scenario}")
                 self.assertEqual(persisted.state, final)
                 self.assertEqual(states_passed(persisted), path)
@@ -275,6 +299,7 @@ class SweepTableTest(unittest.TestCase):
                 world = World()
                 transaction_id = drive(Path(tmp), shape, scenario, world=world)
                 persisted = TransactionStore(Path(tmp)).load(transaction_id)
+                self.assertReceipt(Path(tmp), persisted)
                 types = [e["type"] for e in persisted.events]
                 self.assertEqual((persisted.state, states_passed(persisted)), (final, path))
                 self.assertTrue(set(world.invokes.values()) <= {1})
@@ -339,6 +364,7 @@ class SweepTableTest(unittest.TestCase):
                 transaction_id = drive(root, shape, scenario, world=world)
                 store = TransactionStore(root)
                 persisted = store.load(transaction_id)
+                self.assertReceipt(root, persisted)
                 types = [e["type"] for e in persisted.events]
                 self.assertEqual((persisted.state, states_passed(persisted)),
                                  (final, path or WITHOUT_ACTIVATION))
@@ -388,12 +414,61 @@ class SweepTableTest(unittest.TestCase):
                         self.assertEqual([names[a["unit"]] for a in anchors["anchors"]],
                                          expect["anchors"])
 
+    def test_an_unobservable_release_parks_and_no_disposition_is_admitted(self):
+        for (shape, scenario), (final, path) in DISPOSALS.items():
+            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as tmp:
+                root, world = Path(tmp), World()
+                transaction_id = drive(root, shape, scenario, world=world)
+                persisted = TransactionStore(root).load(transaction_id)
+                self.assertReceipt(root, persisted)
+                self.assertEqual((persisted.state, states_passed(persisted)), (final, path))
+                self.assertEqual(transitions(persisted)[-1]["external_state"], "unknown")
+                first = next(e["action_id"] for e in persisted.events
+                             if e["type"] == "action_declared")
+                self.assertIn(first, {u["action_id"] for u in persisted.proof_plan["units"]
+                                      if u["phase"] == "publication"})
+                self.assertEqual(world.invokes, {first: 1})
+                self.assertEqual({a["action_id"]: a["status"] for a in persisted.actions
+                                  if a["attempts"]}, {first: "unknown"})
+                self.assertEqual([note.split(" refused: ")[1].split(":")[0]
+                                  for note in world.notes],
+                                 ["effect_uncertain", "effect_uncertain", "human_required"])
+                types = [e["type"] for e in persisted.events]
+                self.assertNotIn("failure_disposed", types)
+                self.assertFalse((root / "receipts").exists())
+                self.assertIsNotNone(persisted.custody)
+
+    def test_the_gate_is_the_fourteen_prototype_scenarios_by_four_shapes(self):
+        self.assertEqual(PROTOTYPE_SCENARIOS, (
+            "success", "throttled_retry", "resume_after_crash", "partial_publication",
+            "failed_activation", "stale_false_positive_health", "expired_snapshot",
+            "fleet_stall", "rollback", "irreversible_migration", "incompatible_restore",
+            "missing_rollback_anchor", "unsupported_operation", "unknown_external_state"))
+        self.assertEqual(set(SCENARIOS) - set(PROTOTYPE_SCENARIOS),
+                         {"lease_renewal", "lease_lapse"})
+        self.assertEqual((len(SHAPES) * len(PROTOTYPE_SCENARIOS), len(SHAPES) * len(SCENARIOS)),
+                         (56, 64))
+
+    def test_the_four_gap_cells_sit_on_the_rows_that_exhibit_them(self):
+        self.assertEqual(GAP_CELLS, {
+            "subject identity": "stale_false_positive_health", "lease loss": "resume_after_crash",
+            "convergence livelock": "expired_snapshot",
+            "unobservable release": "unknown_external_state"})
+        self.assertTrue(set(GAP_CELLS.values()) <= set(PROTOTYPE_SCENARIOS))
+        self.assertEqual(LANDINGS[("platform", GAP_CELLS["subject identity"])][2]["reason"],
+                         "proof_rejected")
+        self.assertIn("lease_reacquired", CUSTODY_EVENTS[GAP_CELLS["lease loss"]])
+        self.assertEqual(LANDINGS[("platform", GAP_CELLS["convergence livelock"])][2]["reason"],
+                         "proof_did_not_converge")
+        self.assertIn(("platform", GAP_CELLS["unobservable release"]), DISPOSALS)
+
     def test_every_shape_declares_a_feasible_plan_whose_units_are_its_nodes(self):
         for shape in SHAPES:
             with self.subTest(shape=shape), tempfile.TemporaryDirectory() as tmp:
                 created = TransactionStore(Path(tmp)).create(
                     "probe", {"s": shape}, concurrency_keys=["k"],
-                    proof=shape_declaration(shape), recovery=shape_recovery(shape))
+                    proof=shape_declaration(shape), recovery=shape_recovery(shape),
+                    authority_class=AUTHORITY_CLASS)
                 plan = created.proof_plan
                 self.assertEqual(sorted(u["name"] for u in plan["units"]),
                                  declared_nodes(shape))
@@ -444,7 +519,8 @@ class SweepTableTest(unittest.TestCase):
             again = store.create("library:success", dict(persisted.subject),
                                  concurrency_keys=list(persisted.concurrency_keys),
                                  proof=shape_declaration("library"),
-                                 recovery=shape_recovery("library"))
+                                 recovery=shape_recovery("library"),
+                                 authority_class=AUTHORITY_CLASS)
             self.assertEqual(again.transaction_id, first)
             self.assertEqual(len(again.events), len(persisted.events))
 
@@ -491,13 +567,15 @@ def neutrality_findings(source):
     return findings
 
 
-from agent_tools import (transaction_custody, transaction_history, transaction_invocation,
-                         transaction_plan, transaction_proof, transaction_recovery,
-                         transaction_recovery_plan, transaction_storage)
+from agent_tools import (transaction_custody, transaction_disposition, transaction_history,
+                         transaction_invocation, transaction_plan, transaction_proof,
+                         transaction_receipt, transaction_recovery, transaction_recovery_plan,
+                         transaction_storage)
 
-NEUTRAL_MODULES = (transaction_core, transaction_history, transaction_recovery,
-                   transaction_recovery_plan, transaction_proof, transaction_plan,
-                   transaction_invocation, transaction_custody, transaction_storage)
+NEUTRAL_MODULES = (transaction_core, transaction_history, transaction_receipt,
+                   transaction_disposition, transaction_recovery, transaction_recovery_plan,
+                   transaction_proof, transaction_plan, transaction_invocation,
+                   transaction_custody, transaction_storage)
 
 
 class NeutralityTest(unittest.TestCase):

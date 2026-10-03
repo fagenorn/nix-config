@@ -10,7 +10,8 @@ from agent_tools.transaction_core import (
     RECOVERY_REFUSAL_REASONS, EffectResultInvalid, InvocationRefused, RecoveryRefused,
     StaleCustody, TransactionError, TransactionStore, TransitionRefused, action_id)
 
-from .test_transaction_custody import KEYS, SUBJECT, TTL, CustodyCase, plain, serialize
+from .test_transaction_custody import (
+    AUTHORITY, KEYS, SUBJECT, TTL, CustodyCase, plain, serialize)
 from .test_transaction_invocation import Crash, FakeEffect, FakeWorld, malformed_results, renumbered
 from .test_transaction_recovery_plan import ANCHOR, COMPATIBLE, PROOF, RECOVERY, edge, with_unit
 
@@ -70,7 +71,8 @@ class RecoveryCase(CustodyCase):
 
     def start_with(self, recovery, key="recovery", keys=KEYS):
         self.transaction_id = self.store.create(key, SUBJECT, concurrency_keys=keys,
-                                                proof=PROOF, recovery=recovery).transaction_id
+                                                proof=PROOF, recovery=recovery,
+                                                authority_class=AUTHORITY).transaction_id
         self.custody = self.acquire(self.transaction_id)
 
     def act(self, name, **parameters):
@@ -86,7 +88,8 @@ class RecoveryCase(CustodyCase):
         return self.store.verify_anchors(self.custody, observer=checker or Checker())
 
     def grant(self, grant_id="g-1"):
-        return self.store.issue_grant(self.custody, grant_id=grant_id, actor="operator")
+        return self.store.issue_grant(self.custody, grant_id=grant_id, actor="operator",
+                                      actor_kind="agent", authority_class=AUTHORITY)
 
     def begin(self, grant_id="g-1", checker=None):
         return self.store.begin_recovery(self.custody, grant_id=grant_id,
@@ -199,7 +202,8 @@ class AnchorsTest(RecoveryCase):
 
     def test_a_history_grown_during_the_call_is_refused(self):
         self.to("awaiting_verification", "ready")
-        grow = lambda: self.store.issue_grant(self.custody, grant_id="during", actor="op")
+        grow = lambda: self.store.issue_grant(self.custody, grant_id="during", actor="op",
+                                              actor_kind="agent", authority_class=AUTHORITY)
         with self.assertRaises(RecoveryRefused) as caught:
             self.verify(Checker(during=grow))
         self.assertEqual(caught.exception.reason, "history_changed")
@@ -338,7 +342,8 @@ class BeginTest(RecoveryCase):
     def test_a_history_grown_during_the_check_is_refused(self):
         self.parked()
         self.grant()
-        grow = lambda: self.store.issue_grant(self.custody, grant_id="during", actor="op")
+        grow = lambda: self.store.issue_grant(self.custody, grant_id="during", actor="op",
+                                              actor_kind="agent", authority_class=AUTHORITY)
         with self.assertRaises(RecoveryRefused) as caught:
             self.begin(checker=Checker(during=grow))
         self.assertEqual(caught.exception.reason, "history_changed")

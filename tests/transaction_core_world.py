@@ -32,6 +32,7 @@ FAULTS = (
     "crash_after_invoke",       # executor dies between invoke and observation
     "crash_before_invoke",      # executor dies between its recorded intent and the call
     "slow_collection",          # every collection inside a cohort takes 250 s
+    "unobservable_after_invoke",  # the first applied invoke leaves every later inspection unknown
 )
 
 
@@ -135,10 +136,18 @@ class SimAdapter:
             if fault in self.world.faults and (modes is None or op in modes):
                 self.world.effects[key] = {"subject": env["expected_subject"],
                                            "state": state, "reason": reason}
+                self._arm_unobservable()
                 return {"result": "accepted", "correlation": f"{self.name}:{key}"}
         self.world.effects[key] = {"subject": env["expected_subject"], "state": "satisfied",
                                    "reason": "exact expected subject observed"}
+        self._arm_unobservable()
         return {"result": "accepted", "correlation": f"{self.name}:{key}"}
+
+    def _arm_unobservable(self) -> None:
+        """Once an invoke is applied under `unobservable_after_invoke`, nothing more can be
+        observed (#209 D14)."""
+        if "unobservable_after_invoke" in self.world.faults:
+            self.world.faults.add("unknown_inspection")
 
 
 # ---------------------------------------------------------------------------

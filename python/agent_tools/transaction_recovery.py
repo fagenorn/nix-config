@@ -17,9 +17,10 @@ naming a unit says `<name> (<action id>)` (D23).
 
 An action's `effect_class` comes from its #206 fold: `no_effect` with no intended attempt, else
 `in_progress` while open, else its latest inspection's outcome (D8, D19); a unit is affected
-while its forward action or any of its edges is not `no_effect`. `begin_requests`
-refuses with `begin_refusal`'s first reason in D8's order, else asks one compatibility check
-per affected `restorable` unit; `begin_events` refuses `restore_incompatible`, else yields
+while its forward action or any of its edges is not `no_effect`. `begin_requests` refuses
+with `begin_refusal`'s first reason in D8's order (an action `unreconciled` names is
+`reconciliation_required`), else asks one compatibility check per affected `restorable`
+unit; `begin_events` refuses `restore_incompatible`, else yields
 `recovery_started` (the `effect_snapshot`, the `selection` of every affected unit's edges and
 the checks) and the transition into `recovering`. `recovery_settlement` judges the latest
 selection in one write (D9): every edge `satisfied` yields `recovery_settled`, citing
@@ -219,6 +220,13 @@ def fresh_grant(events: Sequence[Mapping], grant_id: Any, fence: Any) -> bool:
                and event["fence"] == fence and event["seq"] > parked for event in events)
 
 
+def unreconciled(actions: Mapping[str, ActionFold], held: Any) -> ActionFold | None:
+    """The first action, in declaration order, with an intended attempt that is open or
+    whose latest inspection was not made under the `held` fence, or None (D8)."""
+    return next((entry for entry in actions.values() if entry.attempts
+                 and (entry.open or entry.inspection["fence"] != held)), None)
+
+
 def _parked_refusal(document: dict, grant_id: Any, operation: str) -> tuple[str, str] | None:
     state = document["state"]
     if state != "attention_required":
@@ -236,12 +244,11 @@ def begin_refusal(document: dict, grant_id: Any) -> tuple[str, str] | None:
     parked = _parked_refusal(document, grant_id, "begin_recovery")
     if parked is not None:
         return parked
-    held = document["custody"]["fence"]
     actions = fold_actions(document["events"])
-    for entry in actions.values():
-        if entry.attempts and (entry.open or entry.inspection["fence"] != held):
-            return "reconciliation_required", (f"action {entry.action_id} is not inspected "
-                                               f"under the held fence")
+    entry = unreconciled(actions, document["custody"]["fence"])
+    if entry is not None:
+        return "reconciliation_required", (f"action {entry.action_id} is not inspected "
+                                           f"under the held fence")
     plan = document["recovery_plan"]
     declared = {identity for unit in plan["units"] for identity in
                 [unit["action_id"], *(edge["action_id"] for edge in unit["edges"])]}

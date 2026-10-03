@@ -1,5 +1,5 @@
 """Scenario fixture and fixture executor for the transaction core sweep (#204 D6, D17;
-#206 D12, D18; #207 D14-D17, D29; #208 D13, D14, D23).
+#206 D12, D18; #207 D14-D17, D29; #208 D13, D14, D23; #209 D14, D15).
 
 The executor is a happy-path walker over the simulated world that asks the shipped core to
 advance at each lifecycle boundary through the public store API, on a store whose clock is
@@ -36,18 +36,25 @@ the first publication action's recorded intent and its call, lets the lease expi
 reacquires, checks that a blind invoke is refused `inspection_required`, and resumes
 publication through a fresh inspection. The recovery step runs only in `recover`-flagged
 scenarios, after a park, and `drive` lets a rejected recovery declaration propagate
-(#208 D13, D23). Any action view other than `absent` or `satisfied`, and any invocation or
+(#208 D13, D23). When `begin_recovery` is refused `effect_uncertain`, and only then, the
+executor tries `dispose_failed` twice under the same agent grant, first with the known-state
+ground `no_recovery_path` and then with the observability ground `authority_retired` naming
+every attempted action possibly live, and records each `DispositionRefused` in `World.notes`;
+it never issues a `human` grant, so `unknown_external_state` stays parked (#209 D14). Any
+action view other than `absent` or `satisfied`, and any invocation or
 proof refusal not named above, parks the transaction in attention_required with the
 observation or the refusal's reason.
 """
 
 from agent_tools.transaction_core import (
-    InvocationRefused, ProofRefused, RecoveryRefused, StaleCustody, TransactionStore)
+    DispositionRefused, InvocationRefused, ProofRefused, RecoveryRefused, StaleCustody,
+    TransactionStore)
 
 from .transaction_core_shapes import SHAPES
 from .transaction_core_world import ExecutorCrash, World
 
 TTL_MS = 600_000
+AUTHORITY_CLASS = "fixture-release"
 
 
 def _add_unsupported_publication(profile, registry):
@@ -80,7 +87,8 @@ def _first_activation_supersedable(profile, registry):
 # `lease_renewal` and `lease_lapse` are new in #205 (D22, D29); `throttled_retry` and
 # `resume_after_crash` are ported from dc98ba9 in #206 (D12), the crash moved to between
 # the recorded intent and the call. The last five come from dc98ba9 in #207 (D14), with
-# `expired_snapshot`'s 250 s tick moved into cohort collection.
+# `expired_snapshot`'s 250 s tick moved into cohort collection. Of the rows after them,
+# `unknown_external_state` comes from dc98ba9 in #209 (D14).
 SCENARIOS = {
     "success": {"faults": frozenset(),
                 "note": "clean path: publish, activate, prove, seal a terminal receipt."},
@@ -117,8 +125,9 @@ SCENARIOS = {
                     "note": "one frozen member of a convergent unit never reports the "
                             "desired digest, so activation stays in_progress and nothing "
                             "is re-invoked."},
-    # The last five come from dc98ba9 in #208 (D14): `irreversible_migration` is
+    # The next five come from dc98ba9 in #208 (D14): `irreversible_migration` is
     # redefined, and `incompatible_restore` rolls forward instead of disposing `failed`.
+    # The last comes from dc98ba9 in #209 (D14).
     "rollback": {"faults": frozenset({"activation_failure"}), "recover": True,
                  "note": "failed_activation recovered: restore and compensate the selected "
                          "edges, then settle into rolled_back."},
@@ -140,7 +149,23 @@ SCENARIOS = {
                               "mutate": _add_unsupported_publication,
                               "note": "a unit's operation is not offered by its effect: "
                                       "creation is rejected and nothing is written."},
+    "unknown_external_state": {"faults": frozenset({"unobservable_after_invoke"}),
+                               "recover": True,
+                               "note": "the first publication action is applied and then "
+                                       "becomes unobservable: recovery and both "
+                                       "dispositions are refused and the cell stays "
+                                       "parked."},
 }
+
+# The fourteen scenarios ported from dc98ba9, whose 56 cells are #209's gate; the other two
+# rows are #205's own (#209 D15).
+PROTOTYPE_SCENARIOS = tuple(name for name in SCENARIOS
+                            if name not in ("lease_renewal", "lease_lapse"))
+# Each prototype gap, by the row that exhibits it (#209 D15).
+GAP_CELLS = {"subject identity": "stale_false_positive_health",
+             "lease loss": "resume_after_crash",
+             "convergence livelock": "expired_snapshot",
+             "unobservable release": "unknown_external_state"}
 
 
 # The reason a derived obligation's `unknown` observation carries, per class (#207 D29).
@@ -319,7 +344,8 @@ def drive(root, shape, scenario, world=None):
     proof = proof_declaration(profile, registry)
     recovery = recovery_declaration(profile, registry)
     transaction_id = store.create(f"{shape}:{scenario}", subject, concurrency_keys=keys,
-                                  proof=proof, recovery=recovery).transaction_id
+                                  proof=proof, recovery=recovery,
+                                  authority_class=AUTHORITY_CLASS).transaction_id
     definite = {"all": True}
     held = {"custody": None}
 
@@ -473,9 +499,26 @@ def drive(root, shape, scenario, world=None):
                 world.tick(30)
             snapshot = store.invoke_action(held["custody"], **call)
 
+    def dispose():
+        """Both dispositions an agent grant can attempt, each refusal noted (#209 D14)."""
+        units = [{"unit": view["action_id"], "consequence": "effects_possibly_live_unobservable",
+                  "residue_bound": "unbounded", "recheck": "fixture: re-read the target"}
+                 for view in store.load(transaction_id).actions if view["attempts"]]
+        known = {"ground": "no_recovery_path", "reference": "fixture: no recovery path",
+                 "occurred_at": None, "successor": None, "units": []}
+        unobservable = {"ground": "authority_retired", "reference": "fixture: authority retired",
+                        "occurred_at": world.clock * 1000, "successor": None, "units": units}
+        for disposition in (known, unobservable):
+            try:
+                store.dispose_failed(held["custody"], grant_id="recovery-1",
+                                     disposition=disposition)
+            except DispositionRefused as refused:
+                world.notes.append(str(refused))
+
     def recover():
-        """The one recovery step after a park (#208 D13, D14)."""
-        store.issue_grant(held["custody"], grant_id="recovery-1", actor="fixture-operator")
+        """The one recovery step after a park (#208 D13, D14; #209 D14)."""
+        store.issue_grant(held["custody"], grant_id="recovery-1", actor="fixture-operator",
+                          actor_kind="agent", authority_class=AUTHORITY_CLASS)
         try:
             begun = store.begin_recovery(held["custody"], grant_id="recovery-1", observer=router)
         except RecoveryRefused as refused:
@@ -487,7 +530,10 @@ def drive(root, shape, scenario, world=None):
                     held["custody"], grant_id="recovery-1", reason=refused.reason,
                     creation_key=f"{shape}:{scenario}:forward",
                     subject={**subject, "candidate": subject["candidate"] + "-forward"},
-                    concurrency_keys=keys, proof=proof, recovery=recovery)
+                    concurrency_keys=keys, proof=proof, recovery=recovery,
+                    authority_class=AUTHORITY_CLASS)
+            elif refused.reason == "effect_uncertain":
+                dispose()
             return
         edges = {edge["action_id"]: (unit, edge) for unit in begun.recovery_plan["units"]
                  for edge in unit["edges"]}
