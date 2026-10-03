@@ -5,6 +5,7 @@
 - Create: `tests/retained_review_test_support.py` (shared portable fixtures, per D12)
 - Create: `tests/test_review_task7.py`
 - Modify: `justfile` (append `tests/test_review_task7.py` to `agent-workflow-tests`)
+- Modify: `home/common/agent-skills/tests/test_workflow_skill_contracts.py` (`LEGACY_MIGRATION_INPUTS` entries for `review_task7.py` and its test)
 
 **Interfaces:**
 - Consumes (CORE, base `93e6059`): `review_actual.RECORD_POLICY`, `PACKING_POLICY_SHA256`, `actual_inputs_from_trees(repo, base_tree, head_tree, *, base, head, commits, package_name, limits)`, `select_candidate(inputs, limits, *, transform=None, measurement_only=False)`; `review_budget.describe("review-package") -> BudgetAuthority` (`.limits`, `.policy_sha256`); `review_forecast.history_commit`, `tree_entry`, `canonical_bytes`, `strict_json`; `agent_tools.canonical.telemetry_digest`.
@@ -95,10 +96,10 @@ All forecasts are estimates per D15 (lines × bytes + one prefix byte per line +
 | `tests/retained_review_test_support.py` | 240 / 12,500 → 13,252 |
 | `tests/test_review_task7.py` | 380 / 21,000 → 21,892 |
 
-`justfile` is the first of seven ordered cumulative contributions (horizon 8). Its U10 record is 2,048 B / +2. The support module is the first of four contributions (horizon 5).
+`justfile` is the first of seven ordered cumulative contributions (horizon 8). Its U10 record is 2,048 B / +2. The contracts-test record is 2,560 B / +4 (measured 1,763 B). The support module is the first of four contributions (horizon 5).
 
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":1,"records":[{"bounds":[{"added_lines":500,"boundary":"derive","deleted_lines":0,"record_bytes":27012,"support":{"covers":["t1-1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t1-1","last_task":1,"owner":1,"path":"python/agent_tools/review_task7.py"},{"bounds":[{"added_lines":240,"boundary":"derive","deleted_lines":0,"record_bytes":13252,"support":{"covers":["t1-2"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t1-2","last_task":5,"owner":1,"path":"tests/retained_review_test_support.py"},{"bounds":[{"added_lines":380,"boundary":"derive","deleted_lines":0,"record_bytes":21892,"support":{"covers":["t1-3"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t1-3","last_task":1,"owner":1,"path":"tests/test_review_task7.py"},{"bounds":[{"added_lines":2,"boundary":"derive","deleted_lines":0,"record_bytes":2048,"support":{"covers":["t1-4"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t1-4","last_task":8,"owner":1,"path":"justfile"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":1,"records":[{"bounds":[{"added_lines":500,"boundary":"derive","deleted_lines":0,"record_bytes":27012,"support":{"covers":["t1-1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t1-1","last_task":1,"owner":1,"path":"python/agent_tools/review_task7.py"},{"bounds":[{"added_lines":240,"boundary":"derive","deleted_lines":0,"record_bytes":13252,"support":{"covers":["t1-2"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t1-2","last_task":5,"owner":1,"path":"tests/retained_review_test_support.py"},{"bounds":[{"added_lines":380,"boundary":"derive","deleted_lines":0,"record_bytes":21892,"support":{"covers":["t1-3"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t1-3","last_task":1,"owner":1,"path":"tests/test_review_task7.py"},{"bounds":[{"added_lines":2,"boundary":"derive","deleted_lines":0,"record_bytes":2048,"support":{"covers":["t1-4"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t1-4","last_task":8,"owner":1,"path":"justfile"},{"bounds":[{"added_lines":4,"boundary":"derive","deleted_lines":0,"record_bytes":2560,"support":{"covers":["t1-5"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t1-5","last_task":1,"owner":1,"path":"home/common/agent-skills/tests/test_workflow_skill_contracts.py"}]}}
 ```

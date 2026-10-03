@@ -37,7 +37,7 @@ Subject reserves are two 64-byte subjects per task (implementation plus one fix)
 
 ## Task index
 
-Task 1 — Task-7 estimate model and Task-8 effect — python/agent_tools/review_task7.py, tests/retained_review_test_support.py, tests/test_review_task7.py, justfile — full — [task-1.md](2026-10-03-issue-234-retained-review-derivation.tasks/task-1.md)
+Task 1 — Task-7 estimate model and Task-8 effect — python/agent_tools/review_task7.py, tests/retained_review_test_support.py, tests/test_review_task7.py, justfile, home/common/agent-skills/tests/test_workflow_skill_contracts.py — full — [task-1.md](2026-10-03-issue-234-retained-review-derivation.tasks/task-1.md)
 Task 2 — Issue-121 adapter, raw-parent ancestry, outcomes and payload — python/agent_tools/review_issue121.py, tests/test_review_issue121.py, tests/retained_review_test_support.py, justfile — full — [task-2.md](2026-10-03-issue-234-retained-review-derivation.tasks/task-2.md)
 Task 3 — Issue-100 verifier and byte domains — python/agent_tools/review_issue100.py, tests/test_review_issue100.py, tests/retained_review_test_support.py, justfile — full — [task-3.md](2026-10-03-issue-234-retained-review-derivation.tasks/task-3.md)
 Task 4 — Witness, anchor and tool closure — python/agent_tools/review_witness.py, tests/test_review_witness.py, justfile — full — [task-4.md](2026-10-03-issue-234-retained-review-derivation.tasks/task-4.md)
