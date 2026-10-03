@@ -1,86 +1,27 @@
-#!/usr/bin/env python3
-"""Build bounded, deterministic review-package manifests and shards (D4/D9/D12-D16)."""
-
+"""Review package operations and exclusive, custody-checked publication."""
 from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 from pathlib import Path
 import re
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 from typing import Callable, Mapping, Sequence
 
+from agent_tools.review_actual import (GenerationError, InvocationError, SHA_RE,
+    _run_git, _full_commit, actual_inputs, select_candidate)
+from agent_tools.review_budget import BudgetAuthority, BudgetError, BudgetCheck
+from agent_tools.review_pack import (ReviewRecord, canonical_manifest as _canonical,
+    pack_whole_records, measure_candidate)
 
-SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-DIFF_BOUNDARY = re.compile(br"(?m)^diff --git ")
-MIGRATION_ID_RE = re.compile(br'\[Migration\("([^"\r\n]+)"\)\]')
-PRODUCT_VERSION_RE = re.compile(
-    br'\.HasAnnotation\("ProductVersion",\s*"([^"\r\n]+)"\)'
-)
-
-
-class InvocationError(Exception):
-    """The caller supplied invalid syntax, identity, or destination authority."""
-
-
-class GenerationError(Exception):
-    """The package could not be generated, measured, or published."""
-
 
 class PublicationError(GenerationError):
     """Exclusive publication failed without replacing an existing entry."""
-
-
-class _Parser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
-        raise InvocationError(message)
-
-    def exit(self, status: int = 0, message: str | None = None) -> None:
-        raise InvocationError(message or "unsupported parser exit")
-
-
-def _canonical(value: object) -> bytes:
-    return (
-        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        + "\n"
-    ).encode("utf-8")
-
-
-def _run_git(repo: Path, *args: str, binary: bool = False) -> bytes | str:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), *args],
-            check=True,
-            capture_output=True,
-            text=not binary,
-        )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise GenerationError("git command failed") from exc
-    return result.stdout
-
-
-def _full_commit(repo: Path, value: str, label: str) -> str:
-    if not value or value.startswith("-"):
-        raise InvocationError(f"invalid {label}")
-    try:
-        output = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--verify", f"{value}^{{commit}}"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise InvocationError(f"invalid {label}") from exc
-    if SHA_RE.fullmatch(output) is None:
-        raise InvocationError(f"invalid {label}")
-    return output
 
 
 def _display_path(root: Path, repository: Path) -> str:
@@ -88,229 +29,6 @@ def _display_path(root: Path, repository: Path) -> str:
         return root.relative_to(repository).as_posix()
     except ValueError:
         return str(root)
-
-
-def _split_diff(raw: bytes) -> list[bytes]:
-    if not raw:
-        return []
-    starts = [match.start() for match in DIFF_BOUNDARY.finditer(raw)]
-    if not starts or starts[0] != 0:
-        raise GenerationError("diff is not split at file boundaries")
-    return [raw[start:end] for start, end in zip(starts, starts[1:] + [len(raw)])]
-
-
-def _group_whole(records: Sequence[bytes], ceiling: int) -> list[bytes]:
-    shards: list[bytes] = []
-    current = bytearray()
-    for record in records:
-        if current and len(current) + len(record) > ceiling:
-            shards.append(bytes(current))
-            current.clear()
-        current.extend(record)
-        if len(current) > ceiling:
-            shards.append(bytes(current))
-            current.clear()
-    if current:
-        shards.append(bytes(current))
-    return shards
-
-
-def _first_fit_whole(records: Sequence[bytes], ceiling: int) -> list[bytes]:
-    """Pack whole file diffs deterministically without splitting their bytes."""
-    shards: list[bytearray] = []
-    for record in records:
-        for shard in shards:
-            if len(shard) + len(record) <= ceiling:
-                shard.extend(record)
-                break
-        else:
-            shards.append(bytearray(record))
-    return [bytes(shard) for shard in shards]
-
-
-def _changed_paths(raw: bytes) -> list[str]:
-    if not raw:
-        return []
-    items = raw.split(b"\0")
-    if items[-1] != b"" or any(not item for item in items[:-1]):
-        raise GenerationError("malformed Git path list")
-    try:
-        return [item.decode("utf-8", errors="strict") for item in items[:-1]]
-    except UnicodeDecodeError as exc:
-        raise GenerationError("Git path is not UTF-8") from exc
-
-
-def _blob_at(repo: Path, commit: str, path: str) -> tuple[str, bytes] | None:
-    try:
-        listed = subprocess.run(
-            ["git", "-C", str(repo), "ls-tree", "-z", commit, "--", path],
-            check=True,
-            capture_output=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise GenerationError("git tree lookup failed") from exc
-    if not listed:
-        return None
-    rows = listed.split(b"\0")
-    if rows[-1] != b"" or len(rows) != 2 or b"\t" not in rows[0]:
-        raise GenerationError("ambiguous git tree lookup")
-    metadata, listed_path = rows[0].split(b"\t", 1)
-    fields = metadata.split(b" ")
-    if (len(fields) != 3 or fields[1] != b"blob"
-            or SHA_RE.fullmatch(fields[2].decode("ascii", errors="ignore")) is None
-            or listed_path != path.encode("utf-8")):
-        raise GenerationError("invalid git tree entry")
-    sha = fields[2].decode("ascii")
-    try:
-        raw = subprocess.run(
-            ["git", "-C", str(repo), "cat-file", "blob", sha],
-            check=True,
-            capture_output=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise GenerationError("git blob lookup failed") from exc
-    return sha, raw
-
-
-def _ef_designer_side(blob: tuple[str, bytes] | None) -> dict[str, object] | None:
-    if blob is None:
-        return None
-    sha, raw = blob
-    migration = MIGRATION_ID_RE.search(raw)
-    if migration is None:
-        raise GenerationError("invalid EF migration designer")
-    product = PRODUCT_VERSION_RE.search(raw)
-    try:
-        migration_id = migration.group(1).decode("utf-8", errors="strict")
-        product_version = (
-            product.group(1).decode("utf-8", errors="strict")
-            if product is not None else None
-        )
-    except UnicodeDecodeError as exc:
-        raise GenerationError("invalid EF migration metadata") from exc
-    return {
-        "blob_sha": sha,
-        "bytes": len(raw),
-        "content_sha256": hashlib.sha256(raw).hexdigest(),
-        "migration_id": migration_id,
-        "product_version": product_version,
-        "entity_types": raw.count(b"modelBuilder.Entity("),
-        "properties": raw.count(b"b.Property<"),
-        "indexes": raw.count(b"b.HasIndex("),
-        "foreign_keys": raw.count(b"b.HasOne("),
-        "tables": raw.count(b"b.ToTable("),
-    }
-
-
-def _ef_designer_evidence(
-    repo: Path, base: str, head: str, path: str, source_diff_bytes: int,
-) -> dict[str, object] | None:
-    parts = path.split("/")
-    if "Migrations" not in parts or not path.endswith(".Designer.cs"):
-        return None
-    base_blob = _blob_at(repo, base, path)
-    head_blob = _blob_at(repo, head, path)
-    probe = head_blob or base_blob
-    if probe is None:
-        raise GenerationError("changed path has no Git blob")
-    first_lines = b"\n".join(probe[1][:8192].splitlines()[:5])
-    if (b"<auto-generated" not in first_lines
-            or b"BuildTargetModel" not in probe[1]
-            or MIGRATION_ID_RE.search(probe[1]) is None):
-        return None
-    return {
-        "path": path,
-        "kind": "ef-core-migration-designer",
-        "source_diff_bytes": source_diff_bytes,
-        "base": _ef_designer_side(base_blob),
-        "head": _ef_designer_side(head_blob),
-    }
-
-
-def _bounded_diff_records(
-    repo: Path,
-    base: str,
-    head: str,
-    paths: Sequence[str],
-    records: Sequence[bytes],
-    ceiling: int,
-) -> tuple[list[bytes], list[dict[str, object]]]:
-    if len(paths) != len(records):
-        raise GenerationError("diff coverage does not match paths")
-    bounded: list[bytes] = []
-    evidence: list[dict[str, object]] = []
-    for path, record in zip(paths, records):
-        if len(record) <= ceiling:
-            bounded.append(record)
-            continue
-        item = _ef_designer_evidence(repo, base, head, path, len(record))
-        if item is None:
-            bounded.append(record)
-            continue
-        compact = _canonical({"review-package-generated-evidence": item})
-        if len(compact) > ceiling:
-            bounded.append(record)
-            continue
-        bounded.append(compact)
-        evidence.append(item)
-    return bounded, evidence
-
-
-def _parse_numstat(raw: bytes) -> dict[str, int]:
-    position = 0
-    files = insertions = deletions = 0
-    while position < len(raw):
-        first = raw.find(b"\t", position)
-        second = raw.find(b"\t", first + 1) if first >= 0 else -1
-        end = raw.find(b"\0", second + 1) if second >= 0 else -1
-        if min(first, second, end) < 0:
-            raise GenerationError("malformed Git numstat")
-        added, removed = raw[position:first], raw[first + 1 : second]
-        for value, label in ((added, "insertions"), (removed, "deletions")):
-            if value == b"-":
-                amount = 0
-            elif value and all(48 <= byte <= 57 for byte in value):
-                amount = int(value)
-            else:
-                raise GenerationError("malformed Git numstat count")
-            if label == "insertions":
-                insertions += amount
-            else:
-                deletions += amount
-        path = raw[second + 1 : end]
-        position = end + 1
-        if not path:
-            old_end = raw.find(b"\0", position)
-            new_end = raw.find(b"\0", old_end + 1) if old_end >= 0 else -1
-            if min(old_end, new_end) < 0:
-                raise GenerationError("malformed Git rename numstat")
-            position = new_end + 1
-        files += 1
-    return {
-        "files_changed": files,
-        "insertions": insertions,
-        "deletions": deletions,
-    }
-
-
-def _commits(repo: Path, base: str, head: str) -> list[dict[str, str]]:
-    listed = _run_git(repo, "rev-list", "--reverse", f"{base}..{head}")
-    assert isinstance(listed, str)
-    try:
-        commits: list[dict[str, str]] = []
-        for sha in listed.splitlines():
-            if SHA_RE.fullmatch(sha) is None:
-                raise GenerationError("malformed Git commit list")
-            subject = _run_git(repo, "show", "-s", "--format=%s", sha, binary=True)
-            assert isinstance(subject, bytes)
-            if subject.endswith(b"\n"):
-                subject = subject[:-1]
-            commits.append(
-                {"sha": sha, "subject": subject.decode("utf-8", errors="strict")}
-            )
-        return commits
-    except UnicodeDecodeError as exc:
-        raise GenerationError("commit metadata is not UTF-8") from exc
 
 
 def _write_stage(
@@ -520,7 +238,7 @@ def _cleanup_stage(staging: Path) -> None:
 def _artifact_report(
     state: str,
     path: str,
-    check: artifact_budget.CheckResult,
+    check: BudgetCheck,
 ) -> dict[str, object]:
     artifact: dict[str, object] = {
         "kind": "review-package",
@@ -531,66 +249,6 @@ def _artifact_report(
     if check.status == "over_budget":
         artifact["violations"] = list(check.violations)
     return {"state": state, "artifact": artifact, "notes": "validated review package"}
-
-
-def _validated_report(candidate: Mapping[str, object]) -> bytes:
-    path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(prefix="review-package-report-", suffix=".json", delete=False) as handle:
-            path = Path(handle.name)
-            handle.write(_canonical(candidate))
-        validator = Path(artifact_budget.__file__)
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(validator),
-                "validate-report",
-                "--boundary",
-                "producer",
-                "--input",
-                str(path),
-            ],
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode != 0 or result.stderr or not result.stdout:
-            raise GenerationError("producer report validation failed")
-        return result.stdout
-    except OSError as exc:
-        raise GenerationError("producer report validation failed") from exc
-    finally:
-        if path is not None:
-            try:
-                path.unlink()
-            except OSError:
-                pass
-
-
-def _validated_detail(path: Path) -> dict[str, object]:
-    validator = Path(artifact_budget.__file__)
-    try:
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(validator),
-                "validate-detail-input",
-                "--input",
-                str(path),
-            ],
-            capture_output=True,
-            check=False,
-        )
-    except OSError as exc:
-        raise InvocationError("invalid detail input") from exc
-    if result.returncode != 0 or result.stderr or not result.stdout:
-        raise InvocationError("invalid detail input")
-    try:
-        value = json.loads(result.stdout)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise GenerationError("validated detail input was malformed") from exc
-    if not isinstance(value, dict):
-        raise GenerationError("validated detail input was malformed")
-    return value
 
 
 def _real_directory(path: Path) -> None:
@@ -814,7 +472,7 @@ def _assert_output(raw: str, expected: Path, primary: Path) -> None:
             raise InvocationError("invalid asserted output")
 
 
-def _build_diff(args: argparse.Namespace) -> tuple[dict[str, object], int]:
+def build_diff(args: argparse.Namespace, authority: BudgetAuthority) -> tuple[dict[str, object], int]:
     repo_raw = _run_git(Path.cwd(), "rev-parse", "--show-toplevel")
     assert isinstance(repo_raw, str)
     repo = Path(os.path.abspath(repo_raw.strip()))
@@ -822,11 +480,10 @@ def _build_diff(args: argparse.Namespace) -> tuple[dict[str, object], int]:
     if not plan.is_absolute():
         plan = Path.cwd() / plan
     try:
-        plan_check = artifact_budget.check_artifact("implementation-plan", plan)
+        plan_check = authority.check("implementation-plan", plan)
         if plan_check.status != "within_budget":
             raise InvocationError("invalid plan package")
-        limits = artifact_budget.load_limits()["review-package"]
-    except artifact_budget.ArtifactBudgetError as exc:
+    except BudgetError as exc:
         raise InvocationError("invalid plan package") from exc
     base = _full_commit(repo, args.items[1], "base")
     head = _full_commit(repo, args.items[2], "head")
@@ -836,10 +493,9 @@ def _build_diff(args: argparse.Namespace) -> tuple[dict[str, object], int]:
             final_root = Path.cwd() / final_root
         final_root = Path(os.path.abspath(final_root))
     else:
-        workspace_script = Path(__file__).with_name("sdd-workspace")
         try:
             output = subprocess.run(
-                [str(workspace_script), str(plan)],
+                ["sdd-workspace", str(plan)],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -849,122 +505,14 @@ def _build_diff(args: argparse.Namespace) -> tuple[dict[str, object], int]:
         final_root = Path(output) / f"review-{base[:7]}..{head[:7]}.json"
     if final_root.suffix != ".json" or not final_root.parent.is_dir():
         raise InvocationError("invalid output path")
-    diff = _run_git(
-        repo, "diff", "--no-ext-diff", "--binary", "-U10", f"{base}..{head}",
-        binary=True,
+    candidate = select_candidate(
+        actual_inputs(repo, base, head, final_root.name, authority.limits), authority.limits
     )
-    numstat = _run_git(
-        repo, "diff", "--no-ext-diff", "--numstat", "-z", f"{base}..{head}",
-        binary=True,
-    )
-    path_list = _run_git(
-        repo, "diff", "--no-ext-diff", "--name-only", "-z", f"{base}..{head}",
-        binary=True,
-    )
-    assert isinstance(diff, bytes) and isinstance(numstat, bytes)
-    assert isinstance(path_list, bytes)
-    chunks = _split_diff(diff)
-    paths = _changed_paths(path_list)
-    stat_value = _parse_numstat(numstat)
-    if len(chunks) != stat_value["files_changed"] or len(paths) != len(chunks):
-        raise GenerationError("diff coverage does not match numstat")
-    shard_dir_name = final_root.with_suffix(".shards").name
-    commits = _commits(repo, base, head)
-
-    def candidate(
-        source: bytes,
-        records: Sequence[bytes],
-        *,
-        adaptive_context: int | None,
-    ) -> tuple[dict[str, object], list[bytes]]:
-        bounded, generated = _bounded_diff_records(
-            repo, base, head, paths, records, limits.member_max_bytes
-        )
-        shards = (
-            _group_whole(bounded, limits.member_max_bytes)
-            if adaptive_context is None
-            else _first_fit_whole(bounded, limits.member_max_bytes)
-        )
-        common = {
-            "kind": "review-package",
-            "purpose": "diff-review",
-            "range": {"base": base, "head": head},
-            "commits": commits,
-            "stat": stat_value,
-            "shards": [
-                {"path": f"{shard_dir_name}/shard-{number:03d}.diff",
-                 "bytes": len(raw)}
-                for number, raw in enumerate(shards, 1)
-            ],
-        }
-        if adaptive_context is not None:
-            manifest = {
-                "interface_version": 3,
-                **common,
-                "source_diff_bytes": len(source),
-                "total_review_bytes": sum(len(raw) for raw in shards),
-                "generated_evidence": generated,
-                "packaging": {
-                    "context_lines": adaptive_context,
-                    "shard_strategy": "stable-first-fit-whole-file",
-                },
-                "coverage": {
-                    "complete": True,
-                    "file_diff_count": len(records),
-                    "byte_complete_file_count": len(records) - len(generated),
-                    "generated_evidence_file_count": len(generated),
-                },
-            }
-        elif generated:
-            manifest = {
-                "interface_version": 2,
-                **common,
-                "source_diff_bytes": len(source),
-                "total_review_bytes": sum(len(raw) for raw in shards),
-                "generated_evidence": generated,
-                "coverage": {
-                    "complete": True,
-                    "file_diff_count": len(records),
-                    "byte_complete_file_count": len(records) - len(generated),
-                    "generated_evidence_file_count": len(generated),
-                },
-            }
-        else:
-            manifest = {
-                "interface_version": 1,
-                **common,
-                "total_diff_bytes": len(source),
-                "coverage": {"complete": True, "file_diff_count": len(records)},
-            }
-        return manifest, shards
-
-    manifest, shard_bytes = candidate(diff, chunks, adaptive_context=None)
-    initial = _measure_candidate(final_root, manifest, shard_bytes, "diff")
-    if (initial.status == "over_budget"
-            and set(initial.violations).issubset({"member_count", "aggregate_bytes"})):
-        for context_lines in (7, 5, 3, 1, 0):
-            adaptive_diff = _run_git(
-                repo, "diff", "--no-ext-diff", "--binary", f"-U{context_lines}",
-                f"{base}..{head}", binary=True,
-            )
-            assert isinstance(adaptive_diff, bytes)
-            adaptive_chunks = _split_diff(adaptive_diff)
-            if len(adaptive_chunks) != len(paths):
-                raise GenerationError("adaptive diff coverage does not match paths")
-            adaptive_manifest, adaptive_shards = candidate(
-                adaptive_diff, adaptive_chunks, adaptive_context=context_lines
-            )
-            adaptive = _measure_candidate(
-                final_root, adaptive_manifest, adaptive_shards, "diff"
-            )
-            if adaptive.status == "within_budget":
-                return _publish_candidate(
-                    repo, final_root, adaptive_manifest, adaptive_shards, "diff"
-                )
-    return _publish_candidate(repo, final_root, manifest, shard_bytes, "diff")
+    return _publish_candidate(repo, final_root, candidate.manifest, candidate.shards,
+                              "diff", authority=authority)
 
 
-def _build_detail(args: argparse.Namespace) -> tuple[dict[str, object], int]:
+def build_detail(args: argparse.Namespace, authority: BudgetAuthority) -> tuple[dict[str, object], int]:
     repo_raw = _run_git(Path.cwd(), "rev-parse", "--show-toplevel")
     assert isinstance(repo_raw, str)
     repo = Path(os.path.abspath(repo_raw.strip()))
@@ -1015,15 +563,16 @@ def _build_detail(args: argparse.Namespace) -> tuple[dict[str, object], int]:
     source = Path(args.detail_input)
     if not source.is_absolute():
         source = Path.cwd() / source
-    detail = _validated_detail(source)
+    try:
+        detail = authority.validate_detail(source)
+    except BudgetError as exc:
+        raise InvocationError("invalid detail input") from exc
     findings = detail["findings"]
     assert isinstance(findings, list)
-    records = [_canonical(finding) for finding in findings]
-    try:
-        limits = artifact_budget.load_limits()["review-package"]
-    except artifact_budget.ArtifactBudgetError as exc:
-        raise GenerationError("cannot load review limits") from exc
-    shard_bytes = _group_whole(records, limits.member_max_bytes)
+    records = tuple(ReviewRecord(str(number), _canonical(finding), len(_canonical(finding)), None)
+                    for number, finding in enumerate(findings))
+    shard_bytes = pack_whole_records(records, authority.limits.member_max_bytes,
+                                    strategy="sequential")
     shard_dir_name = final_root.with_suffix(".shards").name
     shards = [
         {"path": f"{shard_dir_name}/shard-{number:03d}.jsonl", "bytes": len(raw)}
@@ -1035,7 +584,7 @@ def _build_detail(args: argparse.Namespace) -> tuple[dict[str, object], int]:
         "purpose": "delivery-detail",
         "context": {"issue": issue, "branch": args.branch, "producer": args.producer},
         "shards": shards,
-        "total_detail_bytes": sum(len(raw) for raw in records),
+        "total_detail_bytes": sum(len(record.payload) for record in records),
         "coverage": {"complete": True, "finding_count": len(findings)},
     }
     _ensure_directories(primary, [".superpowers", "issue-delivery"])
@@ -1048,27 +597,10 @@ def _build_detail(args: argparse.Namespace) -> tuple[dict[str, object], int]:
     try:
         return _publish_candidate(
             primary, final_root, manifest, shard_bytes, "jsonl",
-            trusted_parent=trusted_parent,
+            trusted_parent=trusted_parent, authority=authority,
         )
     finally:
         trusted_parent.close()
-
-
-def _measure_candidate(
-    final_root: Path,
-    manifest: Mapping[str, object],
-    shards: Sequence[bytes],
-    suffix: str,
-) -> artifact_budget.CheckResult:
-    staging: Path | None = None
-    try:
-        staging, stage_root = _write_stage(final_root, manifest, shards, suffix)
-        return artifact_budget.check_artifact("review-package", stage_root)
-    except artifact_budget.ArtifactBudgetError as exc:
-        raise GenerationError("review package measurement failed") from exc
-    finally:
-        if staging is not None:
-            _cleanup_stage(staging)
 
 
 def _publish_candidate(
@@ -1078,6 +610,7 @@ def _publish_candidate(
     shards: Sequence[bytes],
     suffix: str,
     *,
+    authority: BudgetAuthority,
     trusted_parent: _DirectoryChain | None = None,
     before_mutation: Callable[[str, Path], None] | None = None,
 ) -> tuple[dict[str, object], int]:
@@ -1091,14 +624,17 @@ def _publish_candidate(
             os.fchdir(trusted_parent.leaf)
             final_root = Path(final_root.name)
         staging, stage_root = _write_stage(final_root, manifest, shards, suffix)
-        check = artifact_budget.check_artifact("review-package", stage_root)
+        check = authority.check("review-package", stage_root)
+        expected = measure_candidate(manifest, shards, authority.limits)
+        if (dict(check.metrics), check.status, check.violations) != expected:
+            raise GenerationError("review package metric disagreement")
         publish_package(
             stage_root, final_root, before_mutation,
             verify_final_parent=(
                 trusted_parent.verify if trusted_parent is not None else None
             ),
         )
-    except artifact_budget.ArtifactBudgetError as exc:
+    except BudgetError as exc:
         raise GenerationError("review package measurement failed") from exc
     finally:
         if staging is not None:
@@ -1109,77 +645,3 @@ def _publish_candidate(
     state = "complete" if check.status == "within_budget" else "decompose_required"
     report = _artifact_report(state, _display_path(published_root, repository), check)
     return report, 0 if state == "complete" else 3
-
-
-def _parser() -> _Parser:
-    parser = _Parser(prog="review-package", add_help=False)
-    parser.add_argument("items", nargs="*")
-    parser.add_argument("--detail-input")
-    parser.add_argument("--producer")
-    parser.add_argument("--issue")
-    parser.add_argument("--branch")
-    parser.add_argument("--run-id")
-    parser.add_argument("--head")
-    parser.add_argument("--output")
-    return parser
-
-
-def _mode(args: argparse.Namespace) -> str:
-    detail_values = (
-        args.detail_input, args.producer, args.issue, args.branch, args.run_id,
-        args.head, args.output,
-    )
-    if args.detail_input is not None:
-        if args.items or any(value is None for value in detail_values[:-1]):
-            raise InvocationError("invalid detail invocation")
-        return "detail"
-    if any(value is not None for value in detail_values) or len(args.items) not in {3, 4}:
-        raise InvocationError("invalid diff invocation")
-    return "diff"
-
-
-def _bootstrap_validator() -> bool:
-    global artifact_budget
-    sys.path.insert(0, str(Path.home() / ".agents/lib/python"))
-    try:
-        import artifact_budget as loaded_validator
-        required = (
-            "ArtifactBudgetError", "CheckResult", "check_artifact", "load_limits",
-        )
-        if (not getattr(loaded_validator, "__file__", None)
-                or any(not hasattr(loaded_validator, name) for name in required)):
-            return False
-    except Exception:
-        return False
-    artifact_budget = loaded_validator
-    return True
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    if not _bootstrap_validator():
-        sys.stderr.write("review-package: validator unavailable\n")
-        return 2
-    try:
-        args = _parser().parse_args(argv)
-        mode = _mode(args)
-        report, status = _build_detail(args) if mode == "detail" else _build_diff(args)
-        sys.stdout.buffer.write(_validated_report(report))
-        return status
-    except InvocationError:
-        sys.stderr.write("review-package: invalid invocation\n")
-        return 2
-    except (GenerationError, OSError, ValueError):
-        try:
-            sys.stdout.buffer.write(
-                _validated_report(
-                    {"state": "failed", "artifact": None,
-                     "notes": "review package generation failed"}
-                )
-            )
-        except GenerationError:
-            sys.stderr.write("review-package: generation failed\n")
-        return 2
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -47,6 +47,8 @@ let
     "launch-commit"
     "promotion"
     "resolve-project"
+    "review-feasibility"
+    "review-package"
   ];
 
   # -I drops every PYTHON* variable, the working directory and the user site.

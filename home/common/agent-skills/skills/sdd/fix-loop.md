@@ -33,7 +33,7 @@ Its `Lifecycle worker:` line goes in the prompt of a fresh implementer, and in
 the resume message of a resumed one. Run the release when it returns. A `launch fence refused`
 report ends the loop.
 
-The re-review is scoped: run `scripts/review-package PLAN_FILE FIX_BASE HEAD`
+The re-review is scoped: run `review-package PLAN_FILE FIX_BASE HEAD`
 (FIX_BASE = the head the previous review saw), capture stdout unchanged, and
 validate it through
 `artifact-budget validate-report --boundary producer --input -`. Generator

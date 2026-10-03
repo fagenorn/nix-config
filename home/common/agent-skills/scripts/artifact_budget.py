@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from dataclasses import dataclass
 import importlib.util
 import json
@@ -158,10 +159,19 @@ def _read_regular(path: Path, *, limit: int | None = None) -> bytes:
 
 
 def _load_policy(path: Path) -> tuple[dict[str, ArtifactLimits], int, int, int]:
+    return _load_policy_identity(path)[0]
+
+
+def _load_policy_identity(path: Path) -> tuple[tuple[dict[str, ArtifactLimits], int, int, int], str]:
     try:
-        value = _decode_json(_read_regular(path))
+        raw = _read_regular(path)
     except InputReadError as exc:
         raise ArtifactBudgetError("cannot read policy") from exc
+    return _parse_policy(raw), "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _parse_policy(raw: bytes) -> tuple[dict[str, ArtifactLimits], int, int, int]:
+    value = _decode_json(raw)
     if not _exact_keys(value, {"schema_version", "unit", "artifacts", "phase_reports",
                                "workflow_responses"}):
         raise ArtifactBudgetError("invalid policy keys")
@@ -598,6 +608,11 @@ def check_artifact(kind: str, root: str | os.PathLike[str],
                    policy_path: str | os.PathLike[str] | None = None) -> CheckResult:
     """Validate shape, measure encoded bytes, and classify one artifact root."""
     limits = load_limits(policy_path)
+    return _check_artifact(kind, root, limits)
+
+
+def _check_artifact(kind: str, root: str | os.PathLike[str],
+                    limits: Mapping[str, ArtifactLimits]) -> CheckResult:
     if kind not in limits:
         raise ArtifactBudgetError("unknown artifact kind")
     root_path = Path(root)
@@ -936,23 +951,41 @@ def _parser() -> argparse.ArgumentParser:
     detail = subparsers.add_parser("validate-detail-input")
     detail.add_argument("--input", required=True)
     detail.add_argument("--policy")
+    describe = subparsers.add_parser("describe")
+    describe.add_argument("--kind", choices=KINDS, required=True)
+    describe.add_argument("--format", choices=("json",), required=True)
+    describe.add_argument("--policy")
+    for operation in (check, report, detail):
+        operation.add_argument("--expected-policy-sha256")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = _parser().parse_args(argv)
-        if args.command == "check":
-            result = check_artifact(args.kind, args.root, args.policy)
-            sys.stdout.buffer.write(_canonical(result.to_dict()))
-            return 0 if result.status == "within_budget" else 3
         try:
-            _, notes_max, report_wire_max, response_wire_max = _load_policy(
+            loaded, identity = _load_policy_identity(
                 _policy_path(args.policy))
+            expected = getattr(args, "expected_policy_sha256", None)
+            if expected is not None and expected != identity:
+                raise ArtifactBudgetError("policy identity disagreement")
         except ArtifactBudgetError:
+            if args.command in {"check", "describe"}:
+                raise
             label = "report" if args.command == "validate-report" else "detail input"
             sys.stderr.write(f"artifact-budget: invalid {label}\n")
             return 2
+        limits, notes_max, report_wire_max, response_wire_max = loaded
+        if args.command == "describe":
+            sys.stdout.buffer.write(_canonical({"schema_version": 1,
+                "kind": "artifact-budget-description", "artifact_kind": args.kind,
+                "limits": vars(limits[args.kind]), "report_wire_max_bytes": report_wire_max,
+                "policy_sha256": identity}))
+            return 0
+        if args.command == "check":
+            result = _check_artifact(args.kind, args.root, limits)
+            sys.stdout.buffer.write(_canonical(result.to_dict()))
+            return 0 if result.status == "within_budget" else 3
         wire_max = (response_wire_max if args.command == "validate-report"
                     and args.boundary in {"workflow-response", "ship-handoff"}
                     else report_wire_max)

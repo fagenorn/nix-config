@@ -5,7 +5,7 @@ risk lane — lanes narrow per-task review, never this one.
 
 For configured code review, the correctness axis reaches Codex only through `codex-collaboration`'s `diff-review`, which alone owns the review binding shape, its invocation and its validation; a binding shape error it reports stops this review with no Codex call, no retry and no native fallback. `blocked` stops. On the `available` route, a capacity rejection has no retry and no native fallback. A Codex call made under `unsupported` is a routing error, never a capacity rejection. Authored `unsupported` takes the caller's native correctness route directly and makes no Codex call. On the `available` route, a completed non-capacity runtime/output failure uses the existing single native fallback and records why.
 
-Run `scripts/review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD` once, using the
+Run `review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD` once, using the
 full SHA values pinned in the ledger by the cumulative delivery gate. Do not
 recompute a merge base against a local integration branch. Capture its stdout unchanged and pass those bytes through
 `artifact-budget validate-report --boundary producer --input -` before either
@@ -52,7 +52,7 @@ Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") re-verdict
 Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") re-verdicts the named correctness findings against the bounded fix diff.
 
 For either axis, generate a fix-range package with
-`scripts/review-package PLAN_FILE FIX_BASE HEAD` (FIX_BASE = the head that
+`review-package PLAN_FILE FIX_BASE HEAD` (FIX_BASE = the head that
 axis's first pass reviewed), then apply the same generator/validator exit gate
 above before dispatch. Supply (1) the axis's findings list verbatim, (2) the
 manifest root path and all four metrics, never shard lists or diff contents, and

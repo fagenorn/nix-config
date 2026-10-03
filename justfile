@@ -71,6 +71,10 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_task_brief.py \
     home/common/agent-skills/tests/test_sdd_workspace.py \
     home/common/agent-skills/tests/test_review_package.py \
+    tests/test_review_pack.py \
+    tests/test_review_feasibility.py \
+    tests/test_review_projection_cases.py \
+    tests/test_review_history.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
     home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_shell_example_contracts.py \

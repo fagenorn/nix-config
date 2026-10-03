@@ -10,9 +10,12 @@ top-level `agent_platform` on the
 channels.
 """
 
+import hashlib
+import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,11 +41,10 @@ NOT_LAUNCHERS = ("workflow-state",)
 # The commands #175, #179 and #177 accepted as launchers: a floor, not the full
 # set, which the command table in lib/agent-tools.nix owns (#175 D8).
 LAUNCHER_FLOOR = ("adopt-project", "agent-evidence", "agent-model-matrix", "conformance",
-                  "context-map-lint", "diff-scope", "resolve-project")
-# Commands without an argparse parser answer `--help` as misuse, with the
-# module docstring on stderr and exit 2. Their CLI is promised unchanged
-# (parent D15), so the probe pins that answer by a line only the module's own
-# docstring prints.
+                  "context-map-lint", "diff-scope", "resolve-project", "review-feasibility",
+                  "review-package")
+# Legacy commands may treat --help as misuse, including parser-backed commands
+# with help disabled; pin each existing exit/stdout/stderr contract.
 MISUSE_USAGE = {"context-map-lint": "Usage: context-map-lint --repo-root "}
 
 
@@ -107,10 +109,6 @@ class AgentToolsLauncherTest(unittest.TestCase):
         return subprocess.run(argv, env=env, cwd=cwd, capture_output=True, text=True,
                               timeout=TIMEOUT_SECONDS, check=False)
 
-    def hostile_env(self):
-        return dict(os.environ, PYTHONPATH=str(self.hostile),
-                    NIX_PYTHONPATH=str(self.hostile))
-
     def test_the_command_table_generates_each_deployed_command(self):
         launchers = self.launchers()
         for name in LAUNCHER_FLOOR:
@@ -122,26 +120,43 @@ class AgentToolsLauncherTest(unittest.TestCase):
             with self.subTest(launcher=name):
                 self.assertEqual(name, module.replace("_", "-"))
 
+    def dependency_env(self):
+        home = self.hostile / 'dependencies'
+        bins = self.hostile / 'dependency-bin'
+        if not home.exists():
+            home.mkdir(); bins.mkdir()
+            (home / '.agents').symlink_to(self.root / '.agents', target_is_directory=True)
+            (bins / 'python3').symlink_to(self.launchers()['review-package'][0])
+        return dict(os.environ, HOME=str(home),
+                    PATH=str(bins) + os.pathsep + str(self.root / '.agents/bin')
+                    + os.pathsep + os.environ['PATH'])
+
+    def hostile_env(self):
+        return dict(self.dependency_env(), PYTHONPATH=str(self.hostile),
+                    NIX_PYTHONPATH=str(self.hostile))
+
     def test_a_hostile_agent_tools_on_every_channel_is_ignored(self):
         for name in self.launchers():
             with self.subTest(launcher=name):
                 completed = self.run_child(
-                    [str(self.root / ".agents" / "bin" / name), "--help"],
+                    [str(self.root / '.agents/bin' / name), '--help'],
                     self.hostile_env(), self.hostile)
-                if name in MISUSE_USAGE:
+                if name == 'review-package':
+                    self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
+                                     (2, '', 'review-package: invalid invocation\n'))
+                elif name in MISUSE_USAGE:
                     self.assertEqual(completed.returncode, 2, completed.stderr)
-                    self.assertEqual(completed.stdout, "")
+                    self.assertEqual(completed.stdout, '')
                     self.assertIn(MISUSE_USAGE[name], completed.stderr)
                 else:
                     self.assertEqual(completed.returncode, 0, completed.stderr)
-                    self.assertTrue(completed.stdout.startswith(f"usage: {name} "),
-                                    completed.stdout[:200])
+                    self.assertTrue(completed.stdout.startswith(f'usage: {name} '), completed.stdout[:200])
                 self.assertNotIn(MARKER, completed.stdout + completed.stderr)
 
     def test_each_hostile_channel_is_live_without_the_launcher(self):
         # Each control opens exactly one channel, so a dead channel cannot hide
         # behind a live one.
-        clean = {key: value for key, value in os.environ.items()
+        clean = {key: value for key, value in self.dependency_env().items()
                  if key not in ("PYTHONPATH", "NIX_PYTHONPATH")}
         pythonpath_only = dict(clean, PYTHONPATH=str(self.hostile))
         nix_only = dict(clean, NIX_PYTHONPATH=str(self.hostile))
@@ -165,6 +180,192 @@ class AgentToolsLauncherTest(unittest.TestCase):
                     self.assertEqual(completed.returncode, HOSTILE_EXIT, completed.stderr)
                     self.assertIn(MARKER, completed.stderr)
 
+
+    def test_relocated_actual_command_matches_source(self):
+        source = Path(__file__).resolve().parents[1]
+        top = self.hostile / 'actual-parity'
+        top.mkdir()
+        repo = top / 'repo'; repo.mkdir()
+        home = top / 'home'; home.mkdir()
+        (home / '.agents').symlink_to(self.root / '.agents', target_is_directory=True)
+        env = {k: v for k, v in os.environ.items() if k not in
+               ('PYTHONPATH', 'NIX_PYTHONPATH', 'NIX_PYTHONPREFIX', 'NIX_PYTHONEXECUTABLE')}
+        env.update(HOME=str(home), PYTHONPATH=str(source / 'python'),
+                   PATH=self.dependency_env()['PATH'])
+        def git(*args):
+            result = subprocess.run(['git', *args], cwd=repo, env=env, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.decode().strip()
+        git('init', '-q'); git('config', 'user.name', 'Fixture')
+        git('config', 'user.email', 'fixture@example.test'); git('config', 'commit.gpgsign', 'false')
+        (repo / 'value.txt').write_text('before\n')
+        git('add', '-A'); git('commit', '-qm', 'base'); base = git('rev-parse', 'HEAD')
+        (repo / 'value.txt').write_text('after\n')
+        (repo / 'plan.md').write_text('# Plan\n\n## Task index\n\nTask 1 — Case — value.txt — full — '
+                                    '[task-1.md](plan.tasks/task-1.md)\n')
+        (repo / 'plan.tasks').mkdir(); (repo / 'plan.tasks/task-1.md').write_text('# Task 1\n')
+        git('add', '-A'); git('commit', '-qm', 'change'); head = git('rev-parse', 'HEAD')
+        roots = []
+        for label in ('source', 'built'):
+            out = top / label; out.mkdir(); root = out / 'review.json'; roots.append(root)
+            childenv = dict(env)
+            argv = [sys.executable, '-m', 'agent_tools.review_package']
+            if label == 'built':
+                argv = [str(self.root / '.agents/bin/review-package')]
+                childenv.update(PYTHONPATH=str(self.hostile), NIX_PYTHONPATH=str(self.hostile))
+            produced = subprocess.run([*argv, str(repo / 'plan.md'), base, head, str(root)],
+                                      cwd=repo, env=childenv, capture_output=True)
+            self.assertEqual(produced.returncode, 0, produced.stderr)
+            self.assertNotIn(MARKER.encode(), produced.stdout + produced.stderr)
+            checked = subprocess.run(['artifact-budget', 'check', '--kind', 'review-package',
+                '--root', str(root), '--format', 'json'], env=env, capture_output=True)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            self.assertEqual(json.loads(produced.stdout)['artifact']['metrics'],
+                             json.loads(checked.stdout)['metrics'])
+        self.assertEqual(roots[0].read_bytes(), roots[1].read_bytes())
+        for member in roots[0].with_suffix('.shards').iterdir():
+            self.assertEqual(member.read_bytes(), (roots[1].with_suffix('.shards') / member.name).read_bytes())
+
+    def test_review_source_and_built_canonical_actual_parity(self):
+        source = Path(__file__).resolve().parents[1]
+        top = self.hostile / 'review-case'
+        top.mkdir()
+        repo = top / 'repo'
+        repo.mkdir()
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ('PYTHONPATH', 'NIX_PYTHONPATH',
+                              'NIX_PYTHONPREFIX', 'NIX_PYTHONEXECUTABLE')}
+        envs = {}
+        for label, agents in (('source', source / 'home/common/agent-skills'),
+                              ('built', self.root / '.agents')):
+            home = top / (label + '-home')
+            home.mkdir()
+            if label == 'built':
+                (home / '.agents').symlink_to(agents, target_is_directory=True)
+                bins = agents / 'bin'
+            else:
+                lib = home / '.agents/lib/python'
+                lib.mkdir(parents=True)
+                (lib / 'artifact_budget.py').symlink_to(agents / 'scripts/artifact_budget.py')
+                (lib / 'delivery_model').symlink_to(agents / 'scripts/delivery_model',
+                                                    target_is_directory=True)
+                (home / '.agents/share').mkdir()
+                (home / '.agents/share/artifact-budget-policy.json').symlink_to(
+                    agents / 'artifact-budget-policy.json')
+                bins = agents / 'scripts'
+            runtime = top / (label + '-bin'); runtime.mkdir()
+            interpreter = sys.executable if label == 'source' else self.launchers()['review-package'][0]
+            (runtime / 'python3').symlink_to(interpreter)
+            envs[label] = dict(clean, HOME=str(home),
+                PATH=str(runtime) + os.pathsep + str(bins) + os.pathsep + clean['PATH'])
+        envs['source']['PYTHONPATH'] = str(source / 'python')
+        envs['built'].update(PYTHONPATH=str(self.hostile),
+            NIX_PYTHONPATH=str(self.hostile), NIX_PYTHONPREFIX=str(self.hostile),
+            NIX_PYTHONEXECUTABLE=str(self.hostile / 'no-python'))
+        def run(argv, *, label='source', payload=None):
+            return subprocess.run(argv, cwd=repo, env=envs[label], input=payload,
+                                  capture_output=True, timeout=60)
+        def git(*args):
+            result = run(['git', *args])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.decode().strip()
+        def write(path, value):
+            target = repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(value if isinstance(value, bytes) else value.encode())
+        def commit(subject):
+            git('add', '-A'); git('commit', '-qm', subject)
+            return git('rev-parse', 'HEAD')
+        def wire(value):
+            return (json.dumps(value, sort_keys=True, separators=(',', ':'),
+                               ensure_ascii=True) + '\n').encode()
+        def command(label, name, *args, payload=None):
+            argv = ([sys.executable, '-m', 'agent_tools.' + name.replace('-', '_')]
+                    if label == 'source' else [str(self.root / '.agents/bin' / name)])
+            result = run([*argv, *args], label=label, payload=payload)
+            self.assertNotIn(MARKER.encode(), result.stdout + result.stderr)
+            return result
+        git('init', '-q'); git('config', 'user.name', 'Fixture')
+        git('config', 'user.email', 'fixture@example.test')
+        git('config', 'commit.gpgsign', 'false')
+        write('seed.txt', 'seed\n'); base = commit('base')
+        write('seed.txt', 'seed\nchanged\n'); product = commit('product')
+        package = dict(spec='spec.md', plan='plan.md', tasks=['plan.tasks/task-1.md'])
+        paths = [package['spec'], package['plan'], *package['tasks']]
+        records = [dict(id=f'p{n}', owner=0, path=path, change='add', last_task=1,
+            bounds=[dict(boundary='core', added_lines=1, deleted_lines=0, record_bytes=1,
+                support=dict(kind='authored-cumulative/v1', covers=[f'p{n}']))])
+            for n, path in enumerate(paths)]
+        delivery = dict(schema_version=3, kind='review-feasibility-delivery',
+            delivery_base=base, proposed_boundary='core', derived_from=None,
+            boundaries=[dict(id='core', parent=None, tasks=[1], acceptance='Generic source/built parity',
+                depends_on=[], prerequisite=dict(kind='delivery-base'), process_package=package,
+                process_forecast_ids=[r['id'] for r in records], process_commit_subject_bytes=[])],
+            process_records=records, actual_evidence=dict(kind='git-range-ownership/v1',
+                head=product, tree=git('rev-parse', product + '^{tree}'), process_ranges=[]))
+        task = dict(schema_version=3, kind='review-feasibility-task', task=dict(id=1,
+            commit_subject_bytes=[], actual_ranges=[dict(base=base, head=product)], records=[]))
+        write('spec.md', '# Generic parity\n')
+        write('plan.md', '# Plan\n\n## Task index\n\nTask 1 — Case — seed.txt — full — '
+            '[task-1.md](plan.tasks/task-1.md)\n\n## Review feasibility delivery\n\n```json\n'
+            + wire(delivery).decode() + '```\n')
+        write('plan.tasks/task-1.md', '# Task 1\n\n## Review feasibility task\n\n```json\n'
+            + wire(task).decode() + '```\n')
+        head = commit('process package')
+        before = git('status', '--porcelain'), git('rev-parse', 'HEAD^{tree}')
+        projected = {}
+        for label in ('source', 'built'):
+            outdir = top / (label + '-out'); outdir.mkdir()
+            root = outdir / 'review.json'
+            actual = command(label, 'review-package', str(repo / 'plan.md'), base, head, str(root))
+            self.assertEqual(actual.returncode, 0, actual.stderr)
+            # The external checker uses the same private layout but no hostile startup variables.
+            checkenv = dict(envs[label])
+            for key in ('PYTHONPATH', 'NIX_PYTHONPATH', 'NIX_PYTHONPREFIX', 'NIX_PYTHONEXECUTABLE'):
+                checkenv.pop(key, None)
+            checked = subprocess.run(['artifact-budget', 'check', '--kind', 'review-package',
+                '--root', str(root), '--format', 'json'], env=checkenv, capture_output=True)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            metrics = json.loads(actual.stdout)['artifact']['metrics']
+            self.assertEqual(metrics, json.loads(checked.stdout)['metrics'])
+            result = command(label, 'review-feasibility', 'project', '--plan', str(repo / 'plan.md'),
+                '--base', base, '--head', head, '--completed-through', '1', '--package-name', 'review.json')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            value = json.loads(result.stdout)
+            self.assertEqual(value['metrics'], metrics)
+            self.assertEqual((value['base'], value['head'], value['tree']),
+                             (base, head, git('rev-parse', head + '^{tree}')))
+            self.assertEqual((value['completed_through'], value['boundary'], value['package_name']),
+                             (1, 'core', 'review.json'))
+            self.assertEqual((value['state'], value['budget_status'], value['violations'],
+                              value['recommended_boundary']), ('complete', 'within_budget', [], None))
+            validated = command(label, 'review-feasibility', 'validate-result', '--input', '-',
+                                '--producer-exit', '0', payload=result.stdout)
+            self.assertEqual((validated.returncode, validated.stdout), (0, result.stdout), validated.stderr)
+            for bad, status in ((b'', '0'), (result.stdout + b' ', '0'),
+                    (result.stdout.replace(b'"schema_version":3', b'"schema_version":true'), '0'),
+                    (result.stdout, '3')):
+                refused = command(label, 'review-feasibility', 'validate-result', '--input', '-',
+                                  '--producer-exit', status, payload=bad)
+                self.assertEqual((refused.returncode, refused.stdout), (2, b''), refused.stderr)
+            projected[label] = result.stdout
+            description = subprocess.run(['artifact-budget', 'describe', '--kind', 'review-package',
+                '--format', 'json'], env=checkenv, capture_output=True)
+            self.assertEqual(description.returncode, 0, description.stderr)
+            policy = Path(checkenv['HOME']) / '.agents/share/artifact-budget-policy.json'
+            self.assertEqual(json.loads(description.stdout)['policy_sha256'],
+                             'sha256:' + hashlib.sha256(policy.read_bytes()).hexdigest())
+            self.assertEqual(value['artifact_policy_sha256'], json.loads(description.stdout)['policy_sha256'])
+            refused = subprocess.run(['artifact-budget', 'check', '--kind', 'review-package',
+                '--root', str(root), '--format', 'json', '--expected-policy-sha256', 'sha256:' + '0' * 64],
+                env=checkenv, capture_output=True)
+            self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertEqual(projected['source'], projected['built'])
+        self.assertEqual((top / 'source-out/review.json').read_bytes(),
+                         (top / 'built-out/review.json').read_bytes())
+        for a in (top / 'source-out/review.shards').iterdir():
+            self.assertEqual(a.read_bytes(), (top / 'built-out/review.shards' / a.name).read_bytes())
+        self.assertEqual(before, (git('status', '--porcelain'), git('rev-parse', 'HEAD^{tree}')))
 
 if __name__ == "__main__":
     unittest.main()

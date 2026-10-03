@@ -53,7 +53,7 @@ Resolve the integration branch from the project bindings, then pin
 origin/<integration-branch>`. Never derive it from an independently advanced
 local integration branch. Before the first implementer, and after each completed
 task before any next dispatch, pin `DELIVERY_HEAD` to the full `git rev-parse
-HEAD` SHA and run `scripts/review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD`.
+HEAD` SHA and run `review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD`.
 Apply the producer-boundary validation and independent `artifact-budget check
 --kind review-package` metric comparison defined in the task loop. This
 cumulative gate supplements the task-scoped package and review; it does not
@@ -147,7 +147,7 @@ Template: [implementer-prompt.md](implementer-prompt.md)
 
 ### 2. Handle the report
 
-- **DONE** → run `scripts/review-package PLAN_FILE BASE HEAD` (BASE from step 1 — never `HEAD~1`, which silently drops all but the last commit), capture its compact JSON stdout unchanged, and pass those bytes through `artifact-budget validate-report --boundary producer --input -` before the step-3 gate.
+- **DONE** → run `review-package PLAN_FILE BASE HEAD` (BASE from step 1 — never `HEAD~1`, which silently drops all but the last commit), capture its compact JSON stdout unchanged, and pass those bytes through `artifact-budget validate-report --boundary producer --input -` before the step-3 gate.
 - **DONE_WITH_CONCERNS** → correctness/scope concerns get addressed before review; observations get noted, review proceeds.
 - **NEEDS_CONTEXT** → provide it, re-dispatch.
 - **BLOCKED** → a `launch fence refused` report follows `### Lifecycle workers` and is never re-dispatched. Otherwise: context problem: add context, re-dispatch same tier. Reasoning problem: re-dispatch `implementer` (or bump the model). Too large: split it. Plan wrong: escalate to the human. Never force an unchanged retry — if the implementer said it's stuck, something must change.
