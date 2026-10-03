@@ -1,13 +1,13 @@
-"""The Task-7 adoption estimate table and the fileless Task-8 effect (issue 234 D4, D17).
+"""The Task-7 adoption estimate table and the fileless Task-8 effect (issue 234 D4, D17, D18).
 
-Each `task7-estimate/v1` row bounds one whole review record of the adoption
-commit, with no multiplier or reserve. A move's bound is its exact R100 header,
-both paths C-quoted, maximized over every source with the same blob and mode.
-A write or add bounds one full delete/add record: headers, a prefix byte per
-line and a no-newline marker per side. Its output sums, over the target's
-`RendererSpec`s, `fixed_bytes` plus `count * max_encoded_bytes` per field, and
-`fixed_lines`; a field adds no line. A spec with neither binds a tool source
-that adds no bytes. The project identity is an `authored-estimate`.
+A `task7-estimate/v1` row bounds one whole review record of the adoption commit
+with no reserve: a move by its exact C-quoted R100 header, maximized over every
+same-blob, same-mode source; a write or add by one full delete/add record whose
+output sums each `RendererSpec`'s fixed portion and `count * max_encoded_bytes`
+per field. Zero specs are the tool closure, bound once if every target runs it.
+Rows keep only what the pins cannot re-derive (D18): a move's old path, class
+and rule follow from its root, its output is its input, and `rows_sha256`
+digests the rows. The project identity is an `authored-estimate`.
 """
 from __future__ import annotations
 
@@ -31,7 +31,8 @@ PROJECT_ID_FIELD, FRAGMENT_FIELD = "<project_id>", "<12-char fragment>"
 NO_NEWLINE = len(b"\n\\ No newline at end of file\n")
 CODES = ("unsupported_estimate", "unsupported_composition", "invalid_table", "inventory_mismatch")
 MOVE_FIELDS = ("moves.old_path", "moves.new_path")
-# The signed Task-7 brief's typed operations: target, operation, bounded fields.
+RULES = {"move": "r100-compatible-maximum/v1", "write": "full-delete-add/v1", "add": "full-add/v1"}
+# The signed Task-7 brief's typed targets: path, operation, bounded fields.
 TARGETS = (
     (".agents/project.json", "write", ("project_id",)), (".gitignore", "write", ()),
     (".claude/skills.config.json", "write", ()), ("AGENTS.md", "write", ()),
@@ -43,10 +44,6 @@ TARGETS = (
 )
 TASK8_EFFECT = {"task": 8, "repository_bytes": 0, "state": "unexecuted",
                 "acceptance": "post-integration-registration-evidence"}
-HISTORICAL_SCOPE = {"tasks": [7, 8], "repository_commits": 1, "operational_effects": [TASK8_EFFECT]}
-_TABLE_KEYS = {"schema_version", "kind", "identities", "subject", "rows", "counts",
-               "historical_scope", "projection_estimate", "observed_actual"}
-_ROW_KEYS = {"id", "operation", "old_path", "new_path", "input", "facts", "output", "record_bytes", "rule"}
 
 
 class EstimateError(Exception):
@@ -142,8 +139,8 @@ def _pins(pins):
 
 
 def _renderers(pins, hexlen):
-    """Each target's renderer facts, and the sorted renderer identities."""
-    groups, identities = {}, {}
+    """Each target's contributing renderer facts, the tool closure and the renderer identities."""
+    groups, closure, identities = {}, {}, {}
     for spec in pins.renderers:
         if (not isinstance(spec, RendererSpec) or not isinstance(spec.renderer_path, str)
                 or not _hex(spec.renderer_blob, hexlen) or not isinstance(spec.fields, tuple)
@@ -156,30 +153,37 @@ def _renderers(pins, hexlen):
                     or field[0].count(":") != 1 or not _count(field[1]) or not _count(field[2])):
                 raise EstimateError("unsupported_estimate")
             source, member = field[0].split(":")
-            if not source or not member or (member == "project_id"
-                                            and field[2] != pins.project_id_max_bytes):
+            if not source or not member or member == "project_id" and field[2] != pins.project_id_max_bytes:
                 raise EstimateError("unsupported_estimate")
-            fields.append({"name": member, "source": source, "count": field[1],
-                           "max_encoded_bytes": field[2]})
-        groups.setdefault(spec.target, []).append({
-            "path": spec.renderer_path, "blob": spec.renderer_blob, "fixed_bytes": spec.fixed_bytes,
-            "fixed_lines": spec.fixed_lines, "fields": fields})
-    if set(groups) - {target for target, _, _ in TARGETS}:
+            fields.append({"name": member, "source": source, "count": field[1], "max_encoded_bytes": field[2]})
+        facts = {"path": spec.renderer_path, "fixed_bytes": spec.fixed_bytes, "fixed_lines": spec.fixed_lines}
+        if spec.fixed_bytes or spec.fixed_lines or fields:
+            groups.setdefault(spec.target, []).append({**facts, "fields": fields})
+        else:
+            closure.setdefault(spec.target, set()).add(spec.renderer_path)
+    targets = {target for target, _, _ in TARGETS}
+    shared = {frozenset(closure.get(target, ())) for target in targets}
+    if set(groups) - targets or set(closure) - targets or len(shared) != 1:
         raise EstimateError("unsupported_estimate")
-    return groups, [{"path": path, "blob": identities[path]} for path in sorted(identities)]
+    return groups, sorted(shared.pop()), [{"path": p, "blob": blob} for p, blob in sorted(identities.items())]
+
+
+def _moved(pins, path, side):
+    """`path` through its one move root's old (0) or new (1) prefix, and that root's class."""
+    roots = [root for root in pins.move_roots if path.startswith(root[side] + "/")]
+    return (roots[0][1 - side] + path[len(roots[0][side]):], roots[0][2]) if len(roots) == 1 else (None, None)
 
 
 def _assemble(pins, moves, inputs):
     """The complete table from move input facts, write input facts and the pins."""
     hexlen = _pins(pins)
-    groups, renderers = _renderers(pins, hexlen)
+    groups, closure, renderers = _renderers(pins, hexlen)
     mapped = {}
     for old, source in moves.items():
-        roots = [root for root in pins.move_roots if old.startswith(root[0] + "/")]
-        new = roots[0][1] + old[len(roots[0][0]):] if len(roots) == 1 else None
+        new, kind = _moved(pins, old, 0)
         if new is None or new in mapped or new in {target for target, _, _ in TARGETS}:
             raise EstimateError("inventory_mismatch")
-        mapped[new] = (old, roots[0][2], source)
+        mapped[new] = (old, kind, source)
     if not {pins.plan_root_blob, pins.task7_blob} <= {source["blob"] for source in moves.values()}:
         raise EstimateError("inventory_mismatch")
     widest = dict(zip(MOVE_FIELDS, (max(map(_encoded, paths), default=0) for paths in (moves, mapped))))
@@ -192,10 +196,9 @@ def _assemble(pins, moves, inputs):
     compatible = {}
     for old, source in moves.items():
         compatible.setdefault((source["blob"], source["mode"]), []).append(old)
-    rows = [{"operation": "move", "old_path": old, "new_path": new, "input": source,
-             "facts": {"class": kind}, "output": {"blob": source["blob"], "mode": source["mode"]},
-             "record_bytes": max(_r100(other, new) for other in compatible[source["blob"], source["mode"]]),
-             "rule": "r100-compatible-maximum/v1"} for new, (old, kind, source) in mapped.items()]
+    rows = [{"operation": "move", "new_path": new, "input": source,
+             "record_bytes": max(_r100(other, new) for other in compatible[source["blob"], source["mode"]])}
+            for new, (old, kind, source) in mapped.items()]
     for target, operation, members in TARGETS:
         specs = groups.get(target)
         if not specs or not set(members) <= {f["name"] for spec in specs for f in spec["fields"]}:
@@ -206,34 +209,31 @@ def _assemble(pins, moves, inputs):
         output = {"bytes": sum(spec["fixed_bytes"] + sum(f["count"] * f["max_encoded_bytes"]
                                                          for f in spec["fields"]) for spec in specs),
                   "lines": sum(spec["fixed_lines"] for spec in specs)}
-        rows.append({"operation": operation, "old_path": source and target, "new_path": target,
-                     "input": source, "facts": {"renderers": specs}, "output": output,
-                     "record_bytes": _record(target, source, output, hexlen),
-                     "rule": "full-delete-add/v1" if source else "full-add/v1"})
-    for row in rows:
-        row["id"] = telemetry_digest(row)
+        rows.append({"operation": operation, "new_path": target, "input": source, "facts": {"renderers": specs},
+                     "output": output, "record_bytes": _record(target, source, output, hexlen)})
     rows.sort(key=lambda row: row["new_path"])
-    kinds = [row["facts"].get("class", row["operation"]) for row in rows]
+    kinds = [kind for _, kind, _ in mapped.values()] + [operation for _, operation, _ in TARGETS]
     subject = (len(pins.subject_template.encode("utf-8")) - len(PROJECT_ID_FIELD) - len(FRAGMENT_FIELD)
                + pins.project_id_max_bytes + 12)
     return {
         "schema_version": 1, "kind": "task7-estimate",
-        "identities": {"record_policy_sha256": telemetry_digest(RECORD_POLICY),
-                       "packing_policy_sha256": PACKING_POLICY_SHA256,
-                       "prerequisite_commit": pins.prerequisite_commit,
-                       "prerequisite_tree": pins.prerequisite_tree,
-                       "plan_root_blob": pins.plan_root_blob, "task7_blob": pins.task7_blob,
-                       "model_version": pins.model_version, "renderers": renderers,
-                       "project_identity": {"kind": "authored-estimate",
-                                            "max_encoded_bytes": pins.project_id_max_bytes}},
-        "subject": {"template": pins.subject_template, "max_bytes": subject}, "rows": rows,
+        "identities": {
+            "record_policy_sha256": telemetry_digest(RECORD_POLICY), "rules": dict(RULES),
+            "packing_policy_sha256": PACKING_POLICY_SHA256, "model_version": pins.model_version,
+            "prerequisite_commit": pins.prerequisite_commit, "prerequisite_tree": pins.prerequisite_tree,
+            "plan_root_blob": pins.plan_root_blob, "task7_blob": pins.task7_blob, "tool_closure": closure,
+            "move_roots": [list(root) for root in pins.move_roots], "renderers": renderers,
+            "project_identity": {"kind": "authored-estimate", "max_encoded_bytes": pins.project_id_max_bytes}},
+        "subject": {"template": pins.subject_template, "max_bytes": subject},
+        "rows": rows, "rows_sha256": telemetry_digest(rows),
         "counts": {"paths": len(rows), "moves": len(moves), "specs": kinds.count("spec"),
                    "plans": kinds.count("plan"), "decisions": kinds.count("decision"),
                    "rewrites": kinds.count("write"), "additions": kinds.count("add")},
-        "historical_scope": HISTORICAL_SCOPE,
+        "historical_scope": {"tasks": [7, 8], "repository_commits": 1,
+                             "operational_effects": [dict(TASK8_EFFECT)]},
         "projection_estimate": {
             "paths": len(rows), "record_bytes": sum(row["record_bytes"] for row in rows),
-            "added_lines": sum(row["output"].get("lines", 0) for row in rows),
+            "added_lines": sum(row["output"]["lines"] for row in rows if "output" in row),
             "deleted_lines": sum(row["input"]["lines"] for row in rows if row["operation"] == "write"),
             "commit_subject_bytes": [subject]},
         "observed_actual": None,
@@ -257,7 +257,7 @@ def _entries(repo, tree, code):
         try:
             entries[path.decode("utf-8")] = tuple(metadata.decode("ascii").split())
         except UnicodeDecodeError as exc:
-            raise EstimateError("unsupported_estimate") from exc
+            raise EstimateError(code) from exc
     return entries
 
 
@@ -336,20 +336,18 @@ def _source(value):
 
 def validate_task7(table: dict, pins: Task7Pins) -> None:
     """Refuse a table that differs from its Git-free rebuild from its own input facts."""
-    _plain(table)
-    if not isinstance(table, dict) or set(table) != _TABLE_KEYS or not isinstance(table["rows"], list):
+    _plain(table)  # Only input facts are read; equality closes every shape.
+    if not isinstance(table, dict) or not isinstance(table.get("rows"), list):
         raise EstimateError("invalid_table")
     moves, inputs = {}, {}
     for row in table["rows"]:
-        if not isinstance(row, dict) or set(row) != _ROW_KEYS or not isinstance(row["new_path"], str):
+        if not isinstance(row, dict) or row.get("operation") not in RULES:
             raise EstimateError("invalid_table")
-        move = row["operation"] == "move"
-        key = row["old_path"] if move else row["new_path"]
+        move, key, source = row["operation"] == "move", row.get("new_path"), row.get("input")
+        key = _moved(pins, key, 1)[0] if move and isinstance(key, str) else key
         if not isinstance(key, str) or key in (moves if move else inputs):
             raise EstimateError("invalid_table")
-        (moves if move else inputs)[key] = None if row["input"] is None and not move else _source(row["input"])
-    if set(inputs) != {target for target, _, _ in TARGETS}:
-        raise EstimateError("invalid_table")
+        (moves if move else inputs)[key] = None if source is None and not move else _source(source)
     try:
         expected = _assemble(pins, moves, inputs)
     except EstimateError as exc:
@@ -370,7 +368,7 @@ def _measure(scratch, base_tree, tree, limits):
     return measured
 
 
-def _composed_trees(repo, scratch, table, base_tree, final_tree):
+def _composed_trees(repo, scratch, table, pins, base_tree, final_tree):
     """The final tree with every move relocated, and the base tree without the targets."""
     code = "unsupported_composition"
     _git(scratch.parent, "init", "-q", scratch.name, code=code)
@@ -382,9 +380,10 @@ def _composed_trees(repo, scratch, table, base_tree, final_tree):
     for row in table["rows"]:
         path, source = row["new_path"], row["input"]
         if row["operation"] == "move":
-            if final.get(row["old_path"]) != (source["mode"], "blob", source["blob"]) or path in final:
+            old = _moved(pins, path, 1)[0]
+            if final.get(old) != (source["mode"], "blob", source["blob"]) or path in final:
                 raise EstimateError(code)
-            relocate += [f"0 {zero}\t{row['old_path']}", f"{source['mode']} {source['blob']}\t{path}"]
+            relocate += [f"0 {zero}\t{old}", f"{source['mode']} {source['blob']}\t{path}"]
             continue
         if any(entries.get(path, ("", "blob"))[1] != "blob" for entries in (final, base)):
             raise EstimateError(code)
@@ -402,17 +401,17 @@ def _composed_trees(repo, scratch, table, base_tree, final_tree):
 
 def compose(repo: Path, table: dict, pins: Task7Pins, *, base_tree: str, final_tree: str,
             limits) -> tuple[dict, ...]:
-    """Every record of `base_tree` against `final_tree` plus the table, as path-sorted bounds.
-
-    Moves are exact relocations, within R100 bounds over the pinned tree; a target
-    takes the larger of base removal plus add bound and its observed record.
-    """
+    """Every record of `base_tree` against `final_tree` plus the table, as path-sorted bounds."""
     validate_task7(table, pins)
+    try:  # CORE's routing guard, before any source or scratch write.
+        history_commit(repo, pins.prerequisite_commit)
+    except ForecastError as exc:
+        raise EstimateError("unsupported_composition") from exc
     targets = {row["new_path"]: row for row in table["rows"] if row["operation"] != "move"}
     try:
         with tempfile.TemporaryDirectory(prefix="review-task7-") as raw:
             scratch = Path(raw) / "repo"
-            composed, removed = _composed_trees(repo, scratch, table, base_tree, final_tree)
+            composed, removed = _composed_trees(repo, scratch, table, pins, base_tree, final_tree)
             status = git_diff(scratch, base_tree, composed, "--name-status", "-z").split(b"\0")[:-1]
             records = _measure(scratch, base_tree, composed, limits)
             removals = _measure(scratch, base_tree, removed, limits)
@@ -429,7 +428,7 @@ def compose(repo: Path, table: dict, pins: Task7Pins, *, base_tree: str, final_t
             records.get(row["new_path"], (row["record_bytes"] + 1,))[0] > row["record_bytes"]
             for row in table["rows"] if row["operation"] == "move"):
         raise EstimateError("unsupported_composition")
-    for path, row in targets.items():
+    for path, row in targets.items():  # max(base removal + add bound, observed); moves relocate exactly
         removal, observed = removals.get(path, (0, 0, 0)), records.get(path, (0, 0, 0))
         bound = removal[0] + _record(path, None, row["output"], len(pins.prerequisite_commit))
         records[path] = (max(bound, observed[0]), max(row["output"]["lines"], observed[1]),
@@ -442,8 +441,7 @@ _SCRIPTS = "home/common/agent-skills/scripts/"
 _PLANNING = (_SCRIPTS + "adopt_planning.py", "bcdc442f43204e81cac3dbef8b28a007de98681c")
 _INSPECTION = (_SCRIPTS + "adopt_inspection.py", "9fa03acab904616bcc33a5a7af99659782661e24")
 _RESOLVER = (_SCRIPTS + "resolve-project.py", "f2dc141dbee07429b50ef52b67fc20207faa286d")
-# The rest of the pinned tool: `adopt-project` will not run unless all of it is
-# staged, so every target's renderer runs it, adding no bytes.
+# The rest of the pinned tool, which `adopt-project` needs staged: no bytes of its own.
 _CLOSURE = ((_SCRIPTS + "adopt-project.py", "21ece399359ee60ffa72847dbf228a057e0bc88e"),
             (_SCRIPTS + "adopt_apply.py", "949cd46d1fd476077ddcc0bea6e38ed06ba091e9"),
             (_SCRIPTS + "adopt_verify.py", "e88b7f08ad873679e37f2419d42138e4367fe9dc"),
@@ -451,8 +449,7 @@ _CLOSURE = ((_SCRIPTS + "adopt-project.py", "21ece399359ee60ffa72847dbf228a057e0
             ("home/common/agent-skills/platform-manifest.json", "dd912a0180f8aff8309e699dadf983f2bf16e0a9"))
 PROJECT_ID_MAX_BYTES = 140  # authored estimate: a GitHub owner (39) + "/" + repository (100)
 _BOOK = "bookkeeping_operations:"
-# Fixed portions: the pinned renderers' output over the pinned tree less each
-# field, which carries a value the run supplies.
+# Fixed portions: the pinned renderers' output over the pinned tree less every field.
 _PRIMARY = (
     (_PLANNING, 3074, 153, (("amended_contract:project_id", 1, PROJECT_ID_MAX_BYTES),)),
     (_PLANNING, 405, 15, ()), (_PLANNING, 212, 9, ()), (_RESOLVER, 1403, 22, ()),

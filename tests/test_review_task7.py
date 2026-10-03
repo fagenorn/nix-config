@@ -1,6 +1,7 @@
 """Task-7 estimate table, composition and Task-8 effect (issue 234 D4, D12, D17)."""
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
@@ -10,11 +11,11 @@ from unittest.mock import patch
 from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import actual_inputs_from_trees
 from agent_tools.review_budget import describe
-from agent_tools.review_forecast import history_commit
-from agent_tools.review_task7 import (TASK8_EFFECT, EstimateError, RendererSpec, Task7Pins,
+from agent_tools.review_forecast import ForecastError, canonical_bytes, history_commit
+from agent_tools.review_task7 import (TASK7_PINS, TASK8_EFFECT, EstimateError, RendererSpec, Task7Pins,
                                       compose, derive_task7, validate_task7)
 
-from .retained_review_test_support import (HOSTILE_GIT_ENV, commit_files, git, init_repo,
+from .retained_review_test_support import (HOSTILE_GIT_ENV, SOURCE, commit_files, git, init_repo,
                                            snapshot, source_budget_env)
 
 ZERO = "0" * 40
@@ -121,9 +122,21 @@ def add_bound(path, out_bytes, out_lines):
     return len(header) + out_bytes + out_lines + NO_NEWLINE
 
 
-def rehash(row):
-    row["id"] = telemetry_digest({k: v for k, v in row.items() if k != "id"})
-    return row
+def rehash(table, rows):
+    return {**table, "rows": rows, "rows_sha256": telemetry_digest(rows)}
+
+
+def tree_with(repo, base_tree, path, data, mode="100644"):
+    """`base_tree` plus one blob at raw `path`, built without touching the work tree."""
+    env = dict(os.environ, GIT_INDEX_FILE=str(repo / ".git" / "fixture-index"))
+    blob = git(repo, "hash-object", "-w", "--stdin", input=data.decode())
+    run = lambda *args, data=None: subprocess.run(["git", "-C", str(repo), *args], input=data, env=env,
+                                                  check=True, capture_output=True).stdout
+    run("read-tree", base_tree)
+    run("update-index", "-z", "--index-info", data=f"{mode} {blob}\t".encode() + path + b"\0")
+    tree = run("write-tree").decode().strip()
+    os.unlink(env["GIT_INDEX_FILE"])
+    return tree
 
 
 class Task7ModelTest(unittest.TestCase):
@@ -133,10 +146,8 @@ class Task7ModelTest(unittest.TestCase):
 
     def forged(self, table, path, change):
         rows = [dict(r) for r in table["rows"]]
-        index = next(n for n, r in enumerate(rows) if r["new_path"] == path)
-        change(rows[index])
-        rows[index] = rehash(rows[index])
-        return {**table, "rows": rows}
+        change(next(r for r in rows if r["new_path"] == path))
+        return rehash(table, rows)
 
     def test_counts_are_recomputed_and_exact(self):
         table = derive_task7(self.repo, self.pins)
@@ -144,6 +155,41 @@ class Task7ModelTest(unittest.TestCase):
                                            "decisions": 1, "rewrites": 5, "additions": 3})
         self.assertIsNone(table["observed_actual"])
         validate_task7(table, self.pins)
+
+    def test_compact_rows_carry_no_rederivable_member(self):
+        table = derive_task7(self.repo, self.pins)
+        self.assertEqual(set(table), {"schema_version", "kind", "identities", "subject", "rows", "rows_sha256",
+                                      "counts", "historical_scope", "projection_estimate", "observed_actual"})
+        self.assertEqual(table["rows_sha256"], telemetry_digest(table["rows"]))
+        identities = table["identities"]
+        self.assertEqual(identities["move_roots"], [list(root) for root in ROOTS])
+        self.assertEqual(identities["rules"], {"move": "r100-compatible-maximum/v1",
+                                               "write": "full-delete-add/v1", "add": "full-add/v1"})
+        self.assertEqual(identities["tool_closure"], [])
+        move = {"operation", "new_path", "input", "record_bytes"}
+        for row in table["rows"]:
+            self.assertEqual(set(row), move if row["operation"] == "move" else move | {"facts", "output"})
+        self.assertEqual(table["rows"][-3]["facts"], {"renderers": [  # .gitignore
+            {"path": "tools/render.py", "fixed_bytes": 40, "fixed_lines": 3, "fields": []}]})
+        # A zero-byte tool-closure source is bound once, and only when every target runs it.
+        app = git(self.repo, "rev-parse", f"{self.pins.prerequisite_commit}:src/app.txt")
+        closure = tuple(RendererSpec(s.target, "src/app.txt", app, 0, 0, ()) for s in self.pins.renderers)
+        bound = derive_task7(self.repo, replace(self.pins, renderers=self.pins.renderers + closure))
+        self.assertEqual(bound["identities"]["tool_closure"], ["src/app.txt"])
+        self.assertEqual(bound["rows"], table["rows"])
+        with self.assertRaises(EstimateError) as caught:
+            derive_task7(self.repo, replace(self.pins, renderers=self.pins.renderers + closure[1:]))
+        self.assertEqual(caught.exception.code, "unsupported_estimate")
+
+    def test_real_table_fits_one_review_record(self):
+        try:
+            history_commit(SOURCE, TASK7_PINS.prerequisite_commit)
+        except ForecastError:
+            self.skipTest("the pinned prerequisite commit is not in this checkout's history")
+        table = derive_task7(SOURCE, TASK7_PINS)
+        self.assertEqual(list(table["counts"].values()), [173, 165, 54, 108, 3, 5, 3])
+        validate_task7(table, TASK7_PINS)
+        self.assertLessEqual(len(canonical_bytes(table)), 49152)
 
     def test_removing_a_field_bound_is_unsupported(self):
         broken = replace(self.pins, renderers=self.pins.renderers[:-1])
@@ -159,8 +205,7 @@ class Task7ModelTest(unittest.TestCase):
     def test_rehashed_fact_change_is_invalid(self):
         table = derive_task7(self.repo, self.pins)
         row = dict(table["rows"][0]); row["output"] = {**row["output"], "bytes": 1}
-        row["id"] = telemetry_digest({k: v for k, v in row.items() if k != "id"})
-        forged = {**table, "rows": [row, *table["rows"][1:]]}
+        forged = rehash(table, [row, *table["rows"][1:]])
         with self.assertRaises(EstimateError):
             validate_task7(forged, self.pins)
 
@@ -185,11 +230,18 @@ class Task7ModelTest(unittest.TestCase):
 
     def test_unequal_mode_move_is_invalid(self):
         table = derive_task7(self.repo, self.pins)
+        # A move's output is its input, so a row stating another mode is outside the closed shape.
         forged = self.forged(table, ".agents/artifacts/specs/alpha-design.md",
-                             lambda row: row.update(output={**row["output"], "mode": "100755"}))
+                             lambda row: row.update(output={"blob": row["input"]["blob"], "mode": "100755"}))
         with self.assertRaises(EstimateError) as caught:
             validate_task7(forged, self.pins)
         self.assertEqual(caught.exception.code, "invalid_table")
+        executable = tree_with(self.repo, self.pins.prerequisite_tree, b".claude/specs/alpha-design.md",
+                               b"alpha spec\n", "100755")
+        with self.assertRaises(EstimateError) as caught:
+            compose(self.repo, table, self.pins, base_tree=self.pins.prerequisite_tree,
+                    final_tree=executable, limits=limits())
+        self.assertEqual(caught.exception.code, "unsupported_composition")
 
     def test_inventory_with_extra_or_missing_move_root_path_raises_inventory_mismatch(self):
         extra = commit_files(self.repo, {".claude/specs/extra.md": b"extra\n"}, "extra")
@@ -268,11 +320,32 @@ class Task7ModelTest(unittest.TestCase):
                         final_tree=git(self.repo, "rev-parse", final + "^{tree}"), limits=limits())
             self.assertEqual(caught.exception.code, "unsupported_composition")
             self.assertEqual(snapshot(self.repo), before)
+        undecodable = tree_with(self.repo, self.pins.prerequisite_tree, b"src/\xff.txt", b"x\n")
+        with self.assertRaises(EstimateError) as caught:
+            compose(self.repo, table, self.pins, base_tree=self.pins.prerequisite_tree,
+                    final_tree=undecodable, limits=limits())
+        self.assertEqual(caught.exception.code, "unsupported_composition")
+
+    def test_compose_refuses_repository_routing_before_any_write(self):
+        table, bounds, routed = derive_task7(self.repo, self.pins), limits(), self.tmp / "routed"
+        before = snapshot(self.repo)
+        for key, value in (("GIT_DIR", self.repo / ".git"), ("GIT_DIR", routed), ("GIT_INDEX_FILE", routed)):
+            with patch.dict(os.environ, {key: str(value)}), self.assertRaises(EstimateError) as caught:
+                compose(self.repo, table, self.pins, base_tree=self.pins.prerequisite_tree,
+                        final_tree=self.pins.prerequisite_tree, limits=bounds)
+            self.assertEqual(caught.exception.code, "unsupported_composition")
+            self.assertEqual(snapshot(self.repo), before)
+            self.assertFalse(routed.exists(), key)
 
     def test_task8_effect_is_fileless_and_unexecuted(self):
         self.assertEqual(TASK8_EFFECT, {"task": 8, "repository_bytes": 0, "state": "unexecuted",
                                         "acceptance": "post-integration-registration-evidence"})
         self.assertIs(type(TASK8_EFFECT["repository_bytes"]), int)
+        table = derive_task7(self.repo, self.pins)
+        self.assertEqual(table["historical_scope"], {"tasks": [7, 8], "repository_commits": 1,
+                                                     "operational_effects": [TASK8_EFFECT]})
+        table["historical_scope"]["operational_effects"][0]["state"] = "executed"
+        self.assertEqual(TASK8_EFFECT["state"], "unexecuted")
 
 
 if __name__ == "__main__":
