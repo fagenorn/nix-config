@@ -139,7 +139,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
     def legacy(self, version):
         value = self.state_with_attempt()
         value["schema_version"] = version
-        value.pop("admission")
+        value.pop("admission"); value.pop("workers")
         for issue in value["issues"].values():
             issue.pop("delivery"); issue.pop("delivery_remainders")
         if version == 1:
@@ -260,7 +260,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             legacy = self.legacy(version); original = copy.deepcopy(legacy)
             migrated = self.workflow.upgrade_state(
                 legacy, run_id="admission", migration_contracts={151: contract})
-            self.assertEqual(legacy, original); self.assertEqual(migrated["schema_version"], 4)
+            self.assertEqual(legacy, original); self.assertEqual(migrated["schema_version"], 5)
             self.assertEqual(migrated["issues"]["151"]["delivery"],
                              self.workflow._delivery().empty_delivery())
         with tempfile.TemporaryDirectory() as raw:
@@ -273,8 +273,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     str(root), "admission", lambda state: (state, False),
                     migration_contracts={151: contract})
             write.assert_called_once()
-            self.assertEqual(write.call_args.args[2]["schema_version"], 4)
-            self.assertEqual(result["schema_version"], 4)
+            self.assertEqual(write.call_args.args[2]["schema_version"], 5)
+            self.assertEqual(result["schema_version"], 5)
 
     def test_model_owns_nonempty_delivery_validation(self):
         contract, delivery = contract_and_delivery(self.model)
@@ -2006,7 +2006,7 @@ class HelperInputTest(BuilderHarness, unittest.TestCase):
         workflow = load(WORKFLOW, "workflow_state_inputs")
         legacy = workflow.new_run_state(run_id="legacy-inputs", now=NOW, issues={})
         legacy["schema_version"] = 2
-        legacy.pop("admission")
+        legacy.pop("admission"); legacy.pop("workers")
         legacy["issues"]["151"] = {"issue": 151, "outcome": None, "attempts": [
             workflow.new_control_attempt(issue=151, attempt_number=1,
                 worktree=str(self.root / "wt-151"), now=NOW,
@@ -2611,8 +2611,10 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
             "--request-file", "-", stdin=json.dumps(request).encode(), ok=ok)
         return json.loads(completed.stdout) if ok else completed
 
-    def write_run(self, run_id, attempts, *, schema=4):
+    def write_run(self, run_id, attempts, *, schema=5):
         state = self.workflow.new_run_state(run_id=run_id, now=NOW, issues={})
+        if schema < 5:
+            state.pop("workers")
         if schema < 4:
             state.pop("admission")
         issue = {"issue": attempts[0]["issue"], "attempts": attempts,
@@ -3075,7 +3077,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         self.project()
         state = self.workflow.new_run_state(run_id="survive", now=NOW, issues={})
         state["schema_version"] = 2
-        state.pop("admission")
+        state.pop("admission"); state.pop("workers")
         for issue in (151, 152):
             state["issues"][str(issue)] = {"issue": issue, "outcome": None, "attempts": [
                 self.workflow.new_control_attempt(issue=issue, attempt_number=1,
@@ -3087,7 +3089,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         boot = json.loads(self.cli("init-run", *run, "--now", NOW).stdout)
         self.assertEqual([(item["issue"], item["contract_digest"]) for item in boot["requirements"]],
                          [(151, None), (152, None)])
-        self.assertEqual(json.loads(path.read_text())["schema_version"], 4)
+        self.assertEqual(json.loads(path.read_text())["schema_version"], 5)
         swept = self.control("survive", self.control_request([151, 152]))
         self.assertEqual([action["kind"] for action in swept["actions"]], ["wait"])
         self.cli("progress", *run, "--now", LATER, "--issue", 151, "--attempt", 1,

@@ -231,7 +231,7 @@ class ClaimLedgerTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(self.check_launch(action_id="14:1:1")["reason"], "current")
         self.init_run()  # a locked read persists the migration
         state = self.read_state()
-        self.assertEqual((state["schema_version"], state["admission"]), (4, None))
+        self.assertEqual((state["schema_version"], state["admission"]), (5, None))
 
     def test_direct_runs_carry_no_admission(self):
         self.acquire_direct()
