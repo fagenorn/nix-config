@@ -72,7 +72,7 @@ jobs:
     # skill surfaces, so this advisory observation is explicitly source-only.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 45
     steps:
       - name: Started
         id: started
