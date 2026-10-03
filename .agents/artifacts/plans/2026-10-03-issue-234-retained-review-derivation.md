@@ -27,7 +27,7 @@
 
 ## Delivery estimate and boundaries
 
-These are estimates, not measurements (D15). The delivery changes 20 product paths across 8 tasks; `justfile` (seven contributions), the support module (four) and the launcher test (two) carry cumulative support. The product forecast is about 340 KB, and the process forecast is about 135 KB (the spec, this root and eight members). Path-ordered first-fit packing of these bounds needs exactly eight 64 KiB payloads. The planning G0 precheck measured 489,095 B in total, with the fullest payload at 65,534 of 65,536 B, so any growth past a bound needs a forecast revision.
+These are estimates, not measurements (D15). The delivery changes 20 product paths across 8 tasks; `justfile` (seven contributions), the support module (four) and the launcher test (two) carry cumulative support. The product forecast is about 340 KB, and the process forecast is about 135 KB (the spec, this root and eight members). Path-ordered first-fit packing of these bounds needs exactly eight 64 KiB payloads. The planning G0 precheck measured about 489 KB in total, with the fullest payload at 65,534 of 65,536 B, so any growth past a bound needs a forecast revision.
 
 The aggregate-growth risk sits in tests and the Task-7 model. If an actual gate shows that a contribution exceeds its bound, the committed forecast must be revised and re-projected; truncating or lowering a bound is not allowed.
 
