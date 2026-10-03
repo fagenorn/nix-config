@@ -27,7 +27,7 @@
 
 ## Delivery estimate and boundaries
 
-These are estimates (parent D15, S13, S14). Product: nine paths in three tasks, about 197 KB of forecast records; the support module and `justfile` carry three ordered cumulative contributions each. Process: the spec, this root and three members, about 101 KB. The growth risk sits in the three test modules and `review_task7.py`; an actual record above its bound needs a committed forecast revision and a renewed G0, never truncation or a lowered bound.
+These are estimates (parent D15, S13, S14). Product: nine paths in three tasks, about 201 KB of forecast records; the support module and `justfile` carry three ordered cumulative contributions each. Process: the spec, this root and three members, about 101 KB. The growth risk sits in the three test modules and `review_task7.py`; an actual record above its bound needs a committed forecast revision and a renewed G0, never truncation or a lowered bound.
 
 There is one boundary, `source`: the issue's three models are its smallest independently acceptable slice, and the decomposition already removed every command. Subject reserves are two 64-byte subjects per task (implementation plus one fix) and ten for process; a third fix needs a forecast revision.
 
@@ -56,7 +56,7 @@ Only exit 0 with `complete/within_budget` clears G0. Exit 2 or 3 stops with no T
 
 ## Decisions
 
-S1, S12 and parent D16 bound the file set. S3–S8 and S15 govern Task 1; S9 governs Task 2; S10 and S11 govern Task 3; S7 and S13 govern G2 and the forecasts; S14 governs the forecast prices, the evidence checkpoint and the pin/table error split; S16 governs Task 2's final-record table, and S17 governs its forcing fixtures, Task 1's generated-evidence fixture and the support ceiling. Each task report names the recovery rows it consumes.
+S1, S12 and parent D16 bound the file set. S3–S8 and S15 govern Task 1; S9 governs Task 2; S10 and S11 govern Task 3; S7 and S13 govern G2 and the forecasts; S14 governs the forecast prices, the evidence checkpoint and the pin/table error split; S16 governs Task 2's final-record table, S17 governs its forcing fixtures, Task 1's generated-evidence fixture and the support ceiling, and S18 governs Task 1's blob-mode set, matrix scope and test bound. Each task report names the recovery rows it consumes.
 
 ## Standards review provenance
 

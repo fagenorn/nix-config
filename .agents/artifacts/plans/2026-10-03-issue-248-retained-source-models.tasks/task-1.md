@@ -15,7 +15,7 @@
 - Produces (support, for Tasks 2–3): `SOURCE`, `git`, `init_repo`, `commit_files`, `ssh_signer`, `HOSTILE_GIT_ENV`, `snapshot`, `source_budget_env`, exactly as recovered.
 
 **Invariants:**
-- **Pin faults vs table faults (S3, S14).** `validate_task7` first runs the pin checks (`_pins`, `_renderers`) outside its translation, so a bad pin set raises `unsupported_estimate` from `derive_task7` and `validate_task7` alike. After that, every table fault raises `invalid_table`. Before any member is used as a key, index or set member, it is type-checked: a row is a `dict`; `operation` is a `str` in `RULES`; `new_path` is a `str`; `input` is `None` (adds only) or exactly `{blob, mode, bytes, lines}` with `blob` lowercase hex of the pinned length, `mode` a `str` and both counts non-Boolean `int`s. No `except Exception`, `except TypeError` or other broad catch exists in the module.
+- **Pin faults vs table faults (S3, S14).** `validate_task7` first runs the pin checks (`_pins`, `_renderers`) outside its translation, so a bad pin set raises `unsupported_estimate` from `derive_task7` and `validate_task7` alike. After that, every table fault raises `invalid_table`. Before any member is used as a key, index or set member, it is type-checked: a row is a `dict`; `operation` is a `str` in `RULES`; `new_path` is a `str`; `input` is `None` (adds only) or exactly `{blob, mode, bytes, lines}` with `blob` lowercase hex of the pinned length, `mode` a `str` in the closed Git blob-mode set `{"100644", "100755", "120000"}` and both counts non-Boolean `int`s (S18). No `except Exception`, `except TypeError` or other broad catch exists in the module.
 - **One move-root resolver (S4).** `_pins` raises `unsupported_estimate` when two old prefixes or two new prefixes are equal, or one is a path prefix of the other (`a` and `a/b`; `a` and `ab` do not overlap). Derive, validate and `compose` all map paths through one resolver function; after that check every path has at most one root on each side, so they cannot disagree.
 - **M2 (S5).** `compose` takes every record's `added_lines`/`deleted_lines` from `git_diff(scratch, base_tree, tree, "--numstat", "-z")` over the same trees it measures, never from payload parsing. A measured record without a numstat row raises `unsupported_composition`. A binary row (`-\t-`) counts 0 and 0.
 - **M5 (S5, S15).** A `write` row's `record_bytes` is the full delete/add record (unchanged `_record`) plus the multi-hunk allowance below. `add` and `move` bounds are unchanged. The admitted contexts are read from `PACKING_POLICY` (`initial` and every `adaptive` entry), never copied. With `n = min(input.lines, output.lines)` and `w` the decimal width of `max(input.lines, output.lines) + 1`:
@@ -63,8 +63,11 @@ def interleaved(tag, count=40):
                 variants += [with_row(n, {**row, key: kind}) for kind in KINDS if not same(kind, value)]
                 variants.append(with_row(n, {k: v for k, v in row.items() if k != key}))
             for key, value in (row["input"] or {}).items():
+                # S18: a move row's counts feed no rebuilt member; derive_task7 equality owns them.
                 variants += [with_row(n, {**row, "input": {**row["input"], key: kind}})
-                             for kind in KINDS if not same(kind, value)]
+                             for kind in KINDS if not same(kind, value)
+                             and not (row["operation"] == "move" and key in ("bytes", "lines")
+                                      and type(kind) is int)]
         self.assertGreater(len(variants), 500)
         for variant in variants:
             with self.subTest(variant=repr(variant)[:160]):
@@ -183,7 +186,7 @@ Priced per parent D15 (bytes + lines + 512) from the measured recovered blobs pl
 | Path | Measured blob | Fix delta | Bound |
 |---|---|---|---|
 | `review_task7.py` | 26,018 B / 477 | about +3,600 B / +80 (N1 checks, resolver, numstat, M5 constants and docstrings) | 30,720 B / +560 |
-| `tests/test_review_task7.py` | 20,807 B / 352 | about +5,900 B / +118, net of the removed real-table test | 27,648 B / +470 |
+| `tests/test_review_task7.py` | 20,807 B / 352 | measured 28,478 B / +466 with the briefed tests, plus a fix-round reserve (S18) | 31,744 B / +560 |
 | `tests/retained_review_test_support.py` | 5,144 B / 115 | reserve +1,024 B / +15 | 6,912 B / +130 |
 
 `justfile` contribution 1 of 3: 2,048 B / +2. Contracts test: 2,560 B / +4 (the recovered record measured 1,763 B).
@@ -191,5 +194,5 @@ Priced per parent D15 (bytes + lines + 512) from the measured recovered blobs pl
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":1,"records":[{"bounds":[{"added_lines":560,"boundary":"source","deleted_lines":0,"record_bytes":30720,"support":{"covers":["t1-1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t1-1","last_task":1,"owner":1,"path":"python/agent_tools/review_task7.py"},{"bounds":[{"added_lines":130,"boundary":"source","deleted_lines":0,"record_bytes":6912,"support":{"covers":["t1-2"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t1-2","last_task":3,"owner":1,"path":"tests/retained_review_test_support.py"},{"bounds":[{"added_lines":470,"boundary":"source","deleted_lines":0,"record_bytes":27648,"support":{"covers":["t1-3"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t1-3","last_task":1,"owner":1,"path":"tests/test_review_task7.py"},{"bounds":[{"added_lines":2,"boundary":"source","deleted_lines":0,"record_bytes":2048,"support":{"covers":["t1-4"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t1-4","last_task":3,"owner":1,"path":"justfile"},{"bounds":[{"added_lines":4,"boundary":"source","deleted_lines":0,"record_bytes":2560,"support":{"covers":["t1-5"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t1-5","last_task":1,"owner":1,"path":"home/common/agent-skills/tests/test_workflow_skill_contracts.py"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":1,"records":[{"bounds":[{"added_lines":560,"boundary":"source","deleted_lines":0,"record_bytes":30720,"support":{"covers":["t1-1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t1-1","last_task":1,"owner":1,"path":"python/agent_tools/review_task7.py"},{"bounds":[{"added_lines":130,"boundary":"source","deleted_lines":0,"record_bytes":6912,"support":{"covers":["t1-2"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t1-2","last_task":3,"owner":1,"path":"tests/retained_review_test_support.py"},{"bounds":[{"added_lines":560,"boundary":"source","deleted_lines":0,"record_bytes":31744,"support":{"covers":["t1-3"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t1-3","last_task":1,"owner":1,"path":"tests/test_review_task7.py"},{"bounds":[{"added_lines":2,"boundary":"source","deleted_lines":0,"record_bytes":2048,"support":{"covers":["t1-4"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t1-4","last_task":3,"owner":1,"path":"justfile"},{"bounds":[{"added_lines":4,"boundary":"source","deleted_lines":0,"record_bytes":2560,"support":{"covers":["t1-5"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t1-5","last_task":1,"owner":1,"path":"home/common/agent-skills/tests/test_workflow_skill_contracts.py"}]}}
 ```
