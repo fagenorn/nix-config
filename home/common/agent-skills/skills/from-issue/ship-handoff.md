@@ -148,8 +148,9 @@ beside the remainder object, never inside it.
 
 Your task: invoke the `ship-issue` skill via the Skill tool and follow its
 `## Remainder mode` from the ledger's ready stage. You hold this remainder
-custody, so you write its `checkpoint-delivery` cycles; after your last commit,
-release your children and then yourself with
+custody, so you write its `checkpoint-delivery` cycles; after your last commit
+and immediately before your own finish (after every cycle), release your
+children and then yourself with
 `workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --worker-id <worker_id> --event returned`,
 then write your own `workflow-state finish --summary-file -` and return exactly that finish's
 validated JSON stdout and nothing else. Two exceptions write no finish: after a

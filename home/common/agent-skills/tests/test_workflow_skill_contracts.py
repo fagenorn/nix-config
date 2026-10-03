@@ -3951,7 +3951,12 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
             self.read(SDD), "### Lifecycle workers", self.REGISTER, self.WORKER_LINE,
             self.RELEASE, "Read-only reviewers are not registered.",
             "launch fence refused: <reason>", "no retry and no re-dispatch",
+            "workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> "
+            "--action-id <action_id>",
+            "On `current: false`", "`/from-issue <num> --auto`",
+            "On `current: true`", "`blocked_on=transport`",
             "### 1. Dispatch the implementer")
+        self.assertNotIn("write nothing more", self.read(SDD))
 
     def test_the_implementer_commits_only_through_launch_commit(self):
         self.assert_ordered(

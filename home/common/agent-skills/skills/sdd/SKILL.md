@@ -110,11 +110,16 @@ A resumed agent is registered again and gets a fresh `worker_id`.
 Read-only reviewers are not registered.
 
 A report of `BLOCKED` with `launch fence refused: <reason>` means that
-worker's launch fence refused its commit. Whatever the reason, treat this
-launch as superseded: release that worker, make no retry and no re-dispatch,
-and follow from-issue's superseded route — write nothing more, print
-`/from-issue <num> --auto` on its own line, and stop. Without a lifecycle
-identity none of this applies and workers commit with plain `git`.
+worker's launch fence refused its commit. Whatever the reason, release that
+worker and make no retry and no re-dispatch; not every reason means a
+supersession, so then run
+`workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
+on this launch. On `current: false` or any helper failure, follow from-issue's
+superseded route: after that release nothing more is written; print
+`/from-issue <num> --auto` on its own line and stop. On `current: true` the
+refusal was no supersession: follow from-issue's suspension procedure with
+`blocked_on=transport`. Without a lifecycle identity none of this applies and
+workers commit with plain `git`.
 
 ### 1. Dispatch the implementer
 

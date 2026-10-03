@@ -132,6 +132,13 @@ worktree-relative, not main-root-relative (REVIEW.md §"Durable
 Minor/Discussion detail"). Phase 8 does not run and no delivery detail is
 published: the successor owns that worktree and will produce its own.
 
+Without lifecycle identity — a standalone `/ship-issue <num>`, or a handoff
+whose lifecycle group is all-null — skip the guard silently: a ledger-free
+invocation has no attempts and no supersession mechanism, and the handoff
+validator's all-or-nothing group means it is never partially present. That is
+the only skip, and it is a statement about the invocation, not about the
+environment.
+
 ### Local commits
 
 When the prompt carries a `Lifecycle worker:` line, this run is a
@@ -146,13 +153,6 @@ dispatches that can write is registered with
 handoff's `action_id` as `--action-id`), gets its own `Lifecycle worker:`
 line, and is released when it returns. Without the line, commit with plain
 `git`.
-
-Without lifecycle identity — a standalone `/ship-issue <num>`, or a handoff
-whose lifecycle group is all-null — skip the guard silently: a ledger-free
-invocation has no attempts and no supersession mechanism, and the handoff
-validator's all-or-nothing group means it is never partially present. That is
-the only skip, and it is a statement about the invocation, not about the
-environment.
 
 ## Doc-grounded escalations
 
