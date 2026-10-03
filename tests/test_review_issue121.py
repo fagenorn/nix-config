@@ -239,6 +239,38 @@ class RouteTest(Fixture, unittest.TestCase):
         self.assertEqual([facts["A", "dir"]["before"]["kind"], facts["D", "dir"]["after"]["kind"]], ["tree", "tree"])
         self.assertEqual([facts["D", "dir/inner.txt"]["after"], facts["A", "dir/again.txt"]["before"]], [None, None])
 
+    def test_rehashed_anchor_is_bound_to_the_latest_edge_writing_its_path(self):
+        """The range writes one plan member twice, then another path: the payload's own edges name the
+        member's latest writer and the blob it leaves, whatever commit and blob a rehashed anchor claims."""
+        repo, pins = linear_fixture(self.tmp, owners=(1, 2))
+        member = f"{pins.plan_prefix}.tasks/task-3.md"
+        writers = [commit_files(repo, {member: text}, "plan", sign_key=self.tmp / "signer")
+                   for text in (b"first rewrite\n", b"second rewrite\n")]
+        late = commit_files(repo, {"src/late.txt": b"late\n"}, "late")
+        pins = replace(pins, head=late,
+                       assignments=pins.assignments + tuple((c, 0, "process") for c in (*writers, late)))
+        task7_pins, table = task7_fixture(repo, pins)
+        with patch.dict(os.environ, source_budget_env(self.tmp), clear=True):
+            payload = derive_121(repo, pins, task7_pins, describe("review-package"))
+        anchors = payload["anchors"]
+        n = next(n for n, row in enumerate(anchors) if row["path"] == member)
+        blobs = [git(repo, "rev-parse", f"{commit}:{member}") for commit in (pins.base, *writers)]
+        self.assertEqual(len(set(blobs)), 3)
+        self.assertEqual((anchors[n]["commit"], anchors[n]["blob"]), (writers[1], blobs[2]))  # Git's own answer
+
+        def forged(**change):
+            return {**payload, "anchors": [*anchors[:n], rehash({**anchors[n], **change}), *anchors[n + 1:]]}
+        self.assertIsNone(validate_121(forged(), pins, table))  # the clean rehashed control
+        cases = {"foreign_commit": {"commit": "f" * 40}, "earlier_writer": {"commit": writers[0]},
+                 "later_non_writer": {"commit": late}, "base": {"commit": pins.base},
+                 "earlier_blob": {"blob": blobs[1]}, "base_blob": {"blob": blobs[0]},
+                 "earlier_writer_and_its_blob": {"commit": writers[0], "blob": blobs[1]}}
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                with self.assertRaises(ContributionError) as caught:
+                    validate_121(forged(**change), pins, table)
+                self.assertEqual(caught.exception.code, "invalid_payload")
+
 
 class PayloadTest(Fixture, unittest.TestCase):
     """Mutations of one clean payload: tasks 1-3 stop at commit 4, and commit 5 follows the failure."""

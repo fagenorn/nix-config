@@ -232,6 +232,11 @@ def plan_anchors(repo: Path, pins: Issue121Pins) -> list[dict]:
     return _anchors(repo, pins, contribution_edges(repo, pins, classify(repo, pins)))
 
 
+def _written(edges: Sequence[dict], path: str) -> list[tuple]:
+    """`(commit, resulting entry)` per edge record that writes `path`, in edge order."""
+    return [(edge["commit"], r["after"]) for edge in edges for r in edge["records"] if r["path"] == path]
+
+
 def _anchors(repo: Path, pins: Issue121Pins, edges: Sequence[dict]) -> list[dict]:
     pinned, signer, rows, verified = dict(pins.plan_blobs), raw_digest(pins.allowed_signer), [], set()
     with _authenticated(), tempfile.TemporaryDirectory(prefix="review-issue121-signers-") as scratch:
@@ -243,7 +248,7 @@ def _anchors(repo: Path, pins: Issue121Pins, edges: Sequence[dict]) -> list[dict
             entry = tree_entry(repo, head_tree, path)
             if entry is None or entry["kind"] != "blob" or pinned.get(path, entry["oid"]) != entry["oid"]:
                 raise ContributionError("anchor_blob_mismatch")
-            written = [(edge["commit"], r["after"]) for edge in edges for r in edge["records"] if r["path"] == path]
+            written = _written(edges, path)
             writer, after = written[-1] if written else (_writer(repo, pins.base, path, entry), entry)
             if after != entry:
                 raise ContributionError("anchor_blob_mismatch")
@@ -516,6 +521,11 @@ def _validate_tables(payload: dict, pins: Issue121Pins, classes: list[dict]) -> 
         _require(anchor["path"] == path and _hex(anchor["commit"]) and _hex(anchor["blob"])
                  and pinned.get(path, anchor["blob"]) == anchor["blob"]
                  and anchor["signer_sha256"] == raw_digest(pins.allowed_signer))
+        # As `_anchors` derives it: the latest edge that writes the path is its writer and leaves its blob.
+        # A path the range never writes was last written at or before the base, which no edge here names.
+        for commit, after in _written(edges, path)[-1:]:
+            _require(anchor["commit"] == commit and after is not None
+                     and _same([after["kind"], after["oid"]], ["blob", anchor["blob"]]))
     _require(isinstance(records, list))
     keys = []
     for record in records:
