@@ -224,6 +224,21 @@ class RouteTest(Fixture, unittest.TestCase):
         self.assertEqual(row["edge_ids"], [edge_of(payload, commits[n]) for n in (2, 4, 5)])
         self.assertIn("tasks-4-6", unavailable_ids(payload))
 
+    def test_file_and_directory_swaps_at_one_path_validate(self):
+        """`edge_facts` names the directory an added file replaces, or a deleted file becomes, as a tree entry."""
+        repo, pins = linear_fixture(self.tmp, owners=(1, 2))
+        swaps = [commit_files(repo, files, "swap") for files in (
+            {"dir/inner.txt": b"inner\n"}, {"dir/inner.txt": None, "dir": b"file\n"},
+            {"dir": None, "dir/again.txt": b"again\n"})]
+        pins = replace(pins, head=swaps[-1], assignments=pins.assignments + tuple((c, 3, None) for c in swaps))
+        task7_pins, table = task7_fixture(repo, pins)
+        with patch.dict(os.environ, source_budget_env(self.tmp), clear=True):
+            payload = derive_121(repo, pins, task7_pins, describe("review-package"))
+        self.assertIsNone(validate_121(payload, pins, table))
+        facts = {(r["operation"], r["path"]): r for edge in payload["edges"][-2:] for r in edge["records"]}
+        self.assertEqual([facts["A", "dir"]["before"]["kind"], facts["D", "dir"]["after"]["kind"]], ["tree", "tree"])
+        self.assertEqual([facts["D", "dir/inner.txt"]["after"], facts["A", "dir/again.txt"]["before"]], [None, None])
+
 
 class PayloadTest(Fixture, unittest.TestCase):
     """Mutations of one clean payload: tasks 1-3 stop at commit 4, and commit 5 follows the failure."""
@@ -337,6 +352,74 @@ class PayloadTest(Fixture, unittest.TestCase):
         for name, mutate in mutations.items():
             with self.subTest(case=name):
                 self.refused(mutate)
+
+    def relineage(self, payload, path, edge_ids):
+        """`path`'s whole-range record given `edge_ids`, its id and the outcome's reference recomputed."""
+        records, refs = payload["records"], payload["aggregate"]["actual"]["record_refs"]
+        n = next(n for n, r in enumerate(records) if (r["scope"], r["path"]) == ("aggregate.actual", path))
+        forged = rehash({**records[n], "edge_ids": edge_ids})
+        refs[refs.index(records[n]["id"])] = forged["id"]
+        records[n] = forged
+
+    def test_rehashed_final_record_lineage_is_recomputed(self):
+        ids = [edge_of(self.payload, commit) for commit, _, _ in self.pins.assignments]
+        lineage = {f"src/c{k}.txt": [ids[k]] for k in range(6)}  # by construction: commit k writes src/c<k>.txt
+        lineage["src/c3.txt"].append(ids[4])  # and commit 4 also edits commit 3's file
+        self.assertEqual({r["path"]: r["edge_ids"] for r in self.scope(self.payload, "aggregate.actual")}, lineage)
+        control = copy.deepcopy(self.payload)
+        self.relineage(control, "src/c0.txt", [ids[0]])
+        self.assertIsNone(validate_121(control, self.pins, self.table))
+        cases = {"unrelated": ("src/c0.txt", [ids[1]]), "extra": ("src/c0.txt", [ids[0], ids[1]]),
+                 "first_only": ("src/c3.txt", [ids[3]]), "last_only": ("src/c3.txt", [ids[4]])}
+        for name, (path, edge_ids) in cases.items():
+            with self.subTest(case=name):
+                self.refused(lambda p: self.relineage(p, path, edge_ids))
+
+    def reedge(self, payload, **facts):
+        """The first edge's one record given `facts`, with the edge id and every row, record and reference
+        that names it recomputed."""
+        edge = payload["edges"][0]
+        edge["records"][0].update(facts)
+        old, new = edge["id"], rehash(edge)["id"]
+        edge["id"] = new
+        def swap(ids):
+            return [new if i == old else i for i in ids]
+        renamed = {}
+        for n, record in enumerate(payload["records"]):
+            if record["kind"] == "actual":
+                payload["records"][n] = rehash({**record, "edge_ids": swap(record["edge_ids"])})
+                renamed[record["id"]] = payload["records"][n]["id"]
+        for row in outcomes(payload):
+            row["edge_ids"] = swap(row["edge_ids"])
+            if row["state"] == "measured":
+                row["record_refs"] = [renamed.get(i, i) for i in row["record_refs"]]
+            else:
+                row["failure"]["evidence_refs"] = swap(row["failure"]["evidence_refs"])
+
+    def test_rehashed_malformed_edge_fact_is_invalid(self):
+        record = self.payload["edges"][0]["records"][0]
+        entry = record["after"]
+        self.assertEqual([record[k] for k in ("operation", "path", "old_path", "before")],
+                         ["A", "src/c0.txt", "src/c0.txt", None])
+        self.assertEqual((set(entry), entry["kind"]), ({"mode", "kind", "oid"}, "blob"))
+        control = copy.deepcopy(self.payload)  # a shape-valid change, rehashed the same way, still validates
+        self.reedge(control, record_bytes=record["record_bytes"] + 1)
+        self.assertNotEqual(control["edges"][0]["id"], self.payload["edges"][0]["id"])
+        self.assertIsNone(validate_121(control, self.pins, self.table))
+        cases = {
+            "null_path": {"path": None}, "null_old_path": {"old_path": None, "path": None},
+            "invented_operation": {"operation": "C100"}, "list_operation": {"operation": ["A"]},
+            "added_over_a_file": {"before": entry}, "added_as_nothing": {"after": None},
+            "added_as_a_directory": {"after": {**entry, "mode": "040000", "kind": "tree"}},
+            "modified_from_nothing": {"operation": "M"}, "deleted_into_a_file": {"operation": "D", "before": entry},
+            "rename_onto_itself": {"operation": "R100", "before": entry},
+            "rename_under_an_add": {"old_path": "src/elsewhere.txt"},
+            "entry_not_closed": {"after": {**entry, "size": 1}}, "entry_mode": {"after": {**entry, "mode": 100644}},
+            "entry_oid": {"after": {**entry, "oid": "f" * 39}}, "entry_kind": {"after": {**entry, "kind": "file"}},
+        }
+        for name, facts in cases.items():
+            with self.subTest(case=name):
+                self.refused(lambda p: self.reedge(p, **facts))
 
     def test_payload_rows_are_closed(self):
         states = {}

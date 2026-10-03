@@ -157,6 +157,15 @@ def _count(value) -> bool:
     return type(value) is int and value >= 0
 
 
+def _entry(value, file: bool) -> bool:
+    """A `tree_entry` fact: a file where the operation has one, else nothing or the directory at that path."""
+    if value is None:
+        return not file
+    _closed(value, "mode", "kind", "oid")
+    return (isinstance(value["mode"], str) and re.fullmatch("[0-7]{6}", value["mode"]) is not None
+            and _hex(value["oid"]) and value["kind"] in (("blob", "commit") if file else ("tree",)))
+
+
 def _identified(row: dict) -> dict:
     return {**row, "id": telemetry_digest(row)}
 
@@ -315,8 +324,8 @@ def _measured(row: dict, tree: str, inputs: list, authority: BudgetAuthority, re
             "measurement": measurement}, records
 
 
-def _actual(label: str, item, edges: Sequence[dict]) -> list[dict]:
-    """Whole initial-context final records, each with its ordered, non-empty edge lineage."""
+def _lineage(edges: Sequence[dict]) -> dict[str, list[str]]:
+    """Each path's edge ids in edge order: the edges that record it or a path it was renamed from."""
     lineage: dict[str, set] = {}
     for edge in edges:
         for record in edge["records"]:
@@ -324,9 +333,14 @@ def _actual(label: str, item, edges: Sequence[dict]) -> list[dict]:
             lineage[new] = lineage.get(old, set()) | lineage.get(new, set()) | {edge["id"]}
             if old != new:  # the rename also ends the old path's record
                 lineage[old] = lineage.get(old, set()) | {edge["id"]}
-    rows = []
+    return {path: [edge["id"] for edge in edges if edge["id"] in ids] for path, ids in lineage.items()}
+
+
+def _actual(label: str, item, edges: Sequence[dict]) -> list[dict]:
+    """Whole initial-context final records, each with its ordered, non-empty edge lineage."""
+    lineage, rows = _lineage(edges), []
     for record in sorted(item.records, key=lambda r: r.path):
-        refs = [edge["id"] for edge in edges if edge["id"] in lineage.get(record.path, ())]
+        refs = lineage.get(record.path)
         if not refs:
             raise ContributionError("record_lineage_missing")
         if record.generated_evidence is not None:  # a compact summary is not the whole record
@@ -491,6 +505,10 @@ def _validate_tables(payload: dict, pins: Issue121Pins, classes: list[dict]) -> 
                     "hunk_header_sha256")
             _require(_count(record["record_bytes"]) and _digest(record["record_sha256"])
                      and _digest(record["hunk_header_sha256"]))
+            operation, path, old = record["operation"], record["path"], record["old_path"]
+            _require(operation in ("A", "M", "D", "T", "R100") and all(isinstance(p, str) and p for p in (path, old))
+                     and (operation == "R100") == (path != old) and _entry(record["before"], operation != "A")
+                     and _entry(record["after"], operation != "D"))
     paths, pinned = _plan_paths(pins), dict(pins.plan_blobs)
     _require(isinstance(anchors, list) and len(anchors) == len(paths))
     for anchor, path in zip(anchors, paths):
@@ -576,7 +594,8 @@ def validate_121(payload: dict, pins: Issue121Pins, table: dict | None) -> None:
         _require(isinstance(row, dict) and isinstance(row.get("state"), str) and row["state"] in _STATES)
         _closed(row, "boundary", "state", "prerequisite", "edge_ids", "estimate_refs", *_STATES[row["state"]])
         whole = label.startswith("aggregate.")
-        selection = [e["id"] for e in edges if whole or e["owner"] in _TASKS[label]]
+        selected = [e for e in edges if whole or e["owner"] in _TASKS[label]]
+        selection = [e["id"] for e in selected]
         prerequisite = _expected_prerequisite(label, pins, classes, row["prerequisite"])
         estimated = label in _ESTIMATED
         _require(row["boundary"] == label and _same(row["edge_ids"], selection)
@@ -596,9 +615,10 @@ def validate_121(payload: dict, pins: Issue121Pins, table: dict | None) -> None:
         start = prerequisite.get("commit") or pins.base
         owned = [c["commit"] for c in classes if c["owner"] in _TASKS.get(label, ())]
         _validate_measurement(row["measurement"], _package(start, pins.head if whole else (owned or [start])[-1]))
+        lineage = _lineage(selected)  # recomputed from the payload's own edge records, as `_actual` derives it
         for record in scoped:
             _require(record["kind"] == ("estimate" if estimated else "actual"))
-            _require(estimated or [i for i in selection if i in record["edge_ids"]] == record["edge_ids"])
+            _require(estimated or _same(record["edge_ids"], lineage.get(record["path"])))
         if label == "tasks-7-8":
             _require(row["result_tree"] == prerequisite["tree"]
                      and _same([{k: v for k, v in r.items() if k != "id"} for r in scoped], bounds))
