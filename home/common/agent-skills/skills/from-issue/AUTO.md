@@ -107,6 +107,8 @@ beyond the exceptions named below):
 - the retained fields it needs (`bindings.paths.artifacts`, `bindings.paths.context`,
   `bindings.paths.hints`, `bindings.tracker`, `bindings.vcs`, and `bindings.workflow`),
 - the absolute worktree path, and an instruction to `cd` there and commit its artifacts there,
+- with lifecycle identity, the `Lifecycle worker:` line from `SKILL.md`'s **Writing workers** rule, and the
+  instruction to create every commit through `launch-commit` with its three values,
 - the self-answer pattern above and the `## Decision ledger` table format with its non-obvious-only
   filter, pasted verbatim from `decision-ledger.md`,
 - the two sentences of `SKILL.md`'s **Leaf-agent clauses** rule, verbatim, as a paragraph of their own,
@@ -320,6 +322,8 @@ After validating the ship report's `ship-summary/v2` bytes, call
 fed those validated summary bytes on stdin, the ledger-only remainder; use
 truthful available usage and the same three gate values, require persisted
 `delegate`, and use the existing ledger-only bookkeeper route.
+Before dispatching it, the owner releases every worker it registered. The
+bookkeeper is never registered: a registered bookkeeper would block its own finish.
 Give the bookkeeper an exact two-command sequence and nothing else: first
 `~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <issue:attempt:launch>`
 with this owner's own `action_id`, then the exact `workflow-state finish` command,

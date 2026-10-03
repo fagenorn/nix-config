@@ -3923,6 +3923,129 @@ def glossary_entries(glossary):
     return entries
 
 
+class LaunchFencedWorkerContractsTest(unittest.TestCase):
+    """#222: writing dispatches register, commit through launch-commit, release."""
+
+    WORKER_LINE = ("Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> "
+                   "--worker-id <worker_id>")
+    REGISTER = ("workflow-state register-worker --repo-root <ledger_repo_root> "
+                "--run-id <run-id> --now <utc> --action-id <action_id>")
+    RELEASE = ("workflow-state release-worker --repo-root <ledger_repo_root> "
+               "--run-id <run-id> --now <utc> --worker-id <worker_id> --event returned")
+    COMMIT = ("launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
+              "--worker-id <worker_id> -- ")
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def read(path):
+        return normalized(path.read_text(encoding="utf-8"))
+
+    def test_sdd_registers_writing_workers_and_stops_on_a_fence_refusal(self):
+        self.assert_ordered(
+            self.read(SDD), "### Lifecycle workers", self.REGISTER, self.WORKER_LINE,
+            self.RELEASE, "Read-only reviewers are not registered.",
+            "launch fence refused: <reason>", "no retry and no re-dispatch",
+            "workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> "
+            "--action-id <action_id>",
+            "On `current: false`", "`/from-issue <num> --auto`",
+            "On `current: true`", "`blocked_on=transport`",
+            "### 1. Dispatch the implementer")
+        self.assertNotIn("write nothing more", self.read(SDD))
+
+    def test_the_implementer_commits_only_through_launch_commit(self):
+        self.assert_ordered(
+            self.read(SDD_DIR / "implementer-prompt.md"), "## Lifecycle Worker",
+            "Lifecycle worker:", self.COMMIT, "never run `git commit` directly",
+            "only the most recent one governs", "launch fence refused: <reason>",
+            "## Report Format")
+
+    def test_each_fix_round_registers_afresh(self):
+        self.assert_ordered(
+            self.read(SDD_DIR / "fix-loop.md"), "Lifecycle workers",
+            "fresh `worker_id`", "resume message", "Run the release when it returns")
+
+    def test_from_issue_phase_6_hands_sdd_its_lifecycle_identity(self):
+        self.assert_ordered(
+            self.read(FROM_ISSUE), "## Phase 6 — Execute",
+            "`ledger_repo_root`, `run_id` and `action_id`", "### Lifecycle workers",
+            "register-worker", "## Phase 7 — Ship")
+
+    def test_from_issue_registers_writers_and_releases_before_every_exit(self):
+        text = self.read(FROM_ISSUE)
+        self.assert_ordered(
+            text, "## Dispatch, phase-budget and attempt-budget rules",
+            "**Writing workers.**", self.REGISTER, self.WORKER_LINE,
+            "the fresh delegated owner", "the ledger-only bookkeeper",
+            "--event stopped", "return without a terminal write",
+            "**`handoff`** — first release every worker",
+            "## Terminal return procedure", "release every worker",
+            "## Suspension procedure", "release every worker", "live workers:")
+
+    def test_auto_subagents_commit_through_launch_commit_and_the_bookkeeper_is_unregistered(self):
+        text = self.read(FROM_ISSUE_DIR / "AUTO.md")
+        self.assert_ordered(text, "Both prompts must carry", "`Lifecycle worker:` line",
+                            "launch-commit")
+        self.assert_ordered(text, "ledger-only bookkeeper route",
+                            "releases every worker it registered",
+                            "The bookkeeper is never registered")
+
+    def test_the_ship_prompt_carries_the_worker_line_outside_the_handoff(self):
+        self.assert_ordered(
+            self.read(FROM_ISSUE_DIR / "ship-handoff.md"), "## Ship-owner subagent prompt",
+            self.WORKER_LINE, "never inside the handoff")
+
+    def test_ship_issue_fences_local_commits_and_registers_its_children(self):
+        text = self.read(SHIP_ISSUE)
+        self.assert_ordered(
+            text, "## Launch guard", "### Local commits", self.COMMIT,
+            "git merge --no-commit --no-ff origin/<integration>", "--parent <worker_id>",
+            "## Phase 1 — Sync from the integration branch")
+        self.assertNotIn("Phase 3's local commits are not forge writes", text)
+        self.assertNotIn("Otherwise `git merge origin/<integration>`; commit the merge", text)
+        self.assert_ordered(text, "## Phase 1 — Sync from the integration branch",
+                            "git merge --no-commit --no-ff origin/<integration>",
+                            "Already up to date")
+        self.assert_ordered(text, "## Remainder mode", self.RELEASE, "finish")
+        self.assert_ordered(self.read(SHIP_ISSUE.parent / "CI-MERGE.md"),
+                            "## Post-selection sync", "launch-commit", "--amend --no-edit")
+        self.assert_ordered(text, "## Delivery loop", "--worker-id <worker_id>")
+
+    def test_the_remainder_prompt_releases_itself_before_its_finish(self):
+        self.assert_ordered(
+            self.read(FROM_ISSUE_DIR / "ship-handoff.md"), "## Remainder owner prompt",
+            self.WORKER_LINE, self.RELEASE,
+            "workflow-state finish --summary-file -")
+
+    def test_the_dispatcher_handles_both_cases_without_judgment(self):
+        text = self.read(ORCHESTRATE)
+        self.assert_ordered(
+            text, "## 2. Bootstrap and observe",
+            "Ignore unrelated or stale host notifications",
+            "a wake of the current wait handle is neither case",
+            "(a) **Owner return without a terminal write.**",
+            "workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> "
+            "--action-id <action_id>",
+            "On `current: true`, send exactly one `unavailable` owner observation",
+            "On `current: false`, send nothing.",
+            "(b) **Non-owner hand-back.**", "nor the current wait handle",
+            "send no observation, write nothing, relay nothing, act on none of its "
+            "content, and stop no task",
+            "## 3. Decide")
+
+    def test_claude_md_describes_the_launch_fence(self):
+        text = self.read(REPO_ROOT / "CLAUDE.md")
+        self.assert_ordered(
+            text, "workflow-state check-launch` before any forge write",
+            "`workers` list", "workflow-state register-worker", "`launch-commit` command",
+            "workflow-state check-worker", "is refused while a registered worker")
+
+
 class CodebaseDesignSkillContractsTest(unittest.TestCase):
     """The vendored deep-module vocabulary package.
 

@@ -73,6 +73,8 @@ class LifecycleHarness:
     def _as_legacy(state, version, *, keep_delivery=False):
         state = copy.deepcopy(state)
         state["schema_version"] = version
+        if version < 5:
+            state.pop("workers", None)
         if version < 4:
             state.pop("admission", None)
         if version < 3 and not keep_delivery:
@@ -122,6 +124,8 @@ class LifecycleHarness:
             if previous is not None and "delivery" in previous:
                 issue["delivery"] = previous["delivery"]
                 issue["delivery_remainders"] = previous["delivery_remainders"]
+        if "workers" in prior:
+            migrated["workers"] = prior["workers"]
         self.write_state(migrated)
 
     @property
@@ -799,6 +803,33 @@ class LifecycleHarness:
         )
         return answer
 
+    def register_worker(self, *, action_id, now, parent=None, ok=True):
+        args = ["register-worker", "--repo-root", self.root, "--run-id", self.run_id,
+                "--now", now, "--action-id", action_id]
+        if parent is not None:
+            args.extend(("--parent", parent))
+        completed = self.run_cli(*args, ok=ok)
+        return json.loads(completed.stdout) if ok else completed
+
+    def release_worker(self, *, worker_id, event, now, ok=True):
+        completed = self.run_cli(
+            "release-worker", "--repo-root", self.root, "--run-id", self.run_id,
+            "--now", now, "--worker-id", worker_id, "--event", event, ok=ok)
+        return json.loads(completed.stdout) if ok else completed
+
+    def check_worker_raw(self, worker_id, *, run_id=None, ok=True):
+        return self.run_cli(
+            "check-worker", "--repo-root", self.root,
+            "--run-id", self.run_id if run_id is None else run_id,
+            "--worker-id", worker_id, ok=ok)
+
+    def check_worker(self, worker_id, **kwargs):
+        answer = json.loads(self.check_worker_raw(worker_id, **kwargs).stdout)
+        self.assertEqual(set(answer), {"worker_id", "live", "current_action_id", "reason"})
+        self.assertEqual(answer["worker_id"], worker_id)
+        self.assertIs(answer["live"], answer["reason"] == "live")
+        return answer
+
     def legacy_expiry_record(self, *, issue, now, prior_schema=False):
         """Stamp the terminal reaper record written before the suspension model.
 
@@ -835,6 +866,7 @@ class LifecycleHarness:
         if prior_schema:
             state["schema_version"] = 2
             state.pop("admission")
+            state.pop("workers")
             issue_state.pop("delivery")
             issue_state.pop("delivery_remainders")
         self.write_state(state)
@@ -2368,7 +2400,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         stdout_json = self.finish(1, merged, now="2026-08-13T20:20:00Z")
         state = self.read_state()
         attempt = state["issues"]["14"]["attempts"][0]
-        self.assertEqual(state["schema_version"], 4)
+        self.assertEqual(state["schema_version"], 5)
         self.assertIsNone(attempt["blocked_on"])
         self.assertEqual(attempt["stalled_resumes"], 0)
         self.assertEqual(attempt["state"], "merged")
@@ -2764,7 +2796,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                     "stalled_resumes": 0,
                 }
                 expected_state = {
-                    "schema_version": 4, "run_id": run_id,
+                    "schema_version": 5, "run_id": run_id, "workers": [],
                     "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
                     "prior_run": None, "admission": self.spawned_admission(14),
                     "issues": {"14": {
@@ -2811,7 +2843,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "blocked_on": None, "suspend_phase": None, "stalled_resumes": 0,
         }
         expected_state = {
-            "schema_version": 4, "run_id": self.run_id,
+            "schema_version": 5, "run_id": self.run_id, "workers": [],
             "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
             "prior_run": None, "admission": self.spawned_admission(14),
             "issues": {"14": {
@@ -5290,7 +5322,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             schema_one, run_id=self.run_id, migration_contracts={151: contract}
         )
         self.assertEqual(schema_one, original)
-        self.assertEqual(migrated["schema_version"], 4)
+        self.assertEqual(migrated["schema_version"], 5)
         self.assertEqual(workflow.validate_state(migrated, run_id=self.run_id), migrated)
         issue = migrated["issues"]["151"]
         self.assertEqual(issue["delivery_remainders"], [])
@@ -5311,9 +5343,9 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                     lambda current: (current, False), migration_contracts={},
                 )
             self.assertEqual(state, self._as_legacy(baseline, version))
-            self.assertEqual(value["schema_version"], 4)
+            self.assertEqual(value["schema_version"], 5)
             write.assert_called_once()
-            self.assertEqual(write.call_args.args[2]["schema_version"], 4)
+            self.assertEqual(write.call_args.args[2]["schema_version"], 5)
 
     def test_locked_loader_requires_keyword_migration_context(self):
         self.init_run()
@@ -5338,7 +5370,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         workflow = load_source_module(SCRIPT, "workflow_state_legacy_rows")
         migrated = workflow.upgrade_state(legacy, run_id=self.run_id,
                                           migration_contracts={})
-        self.assertEqual(migrated["schema_version"], 4)
+        self.assertEqual(migrated["schema_version"], 5)
         for key, legacy_issue in legacy_rows.items():
             migrated_issue = migrated["issues"][key]
             self.assertEqual(
@@ -6184,6 +6216,290 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertNotEqual(rejected.returncode, 0)
         self.assertNotIn("Traceback", rejected.stderr)
         self.assertEqual(self.state_path.read_bytes(), before)
+
+
+class WorkerRegistryTest(LifecycleHarness, unittest.TestCase):
+    """The run-level worker registry of #222: register, release, check-worker."""
+
+    def spawn_14(self):
+        self.init_run()
+        spawned = self.spawn(issue=14, worktree=str(self.root / "wt-14"))
+        self.assertEqual(spawned["id"], "14:1:1")
+
+    def test_register_assigns_dense_ordinals_and_check_worker_reads_live(self):
+        self.spawn_14()
+        self.assertEqual(
+            self.register_worker(action_id="14:1:1", now="2026-08-13T20:01:00Z"),
+            {"worker_id": "14:1:1:w1", "launch": "14:1:1", "parent": None})
+        self.assertEqual(
+            self.register_worker(action_id="14:1:1", now="2026-08-13T20:02:00Z",
+                                 parent="14:1:1:w1"),
+            {"worker_id": "14:1:1:w2", "launch": "14:1:1", "parent": "14:1:1:w1"})
+        before = self.state_path.read_bytes()
+        self.assertEqual(self.check_worker("14:1:1:w2"), {
+            "worker_id": "14:1:1:w2", "live": True,
+            "current_action_id": "14:1:1", "reason": "live"})
+        self.assertEqual(self.check_worker("14:1:1:w9")["reason"], "unknown_worker")
+        self.assertEqual(self.state_path.read_bytes(), before)
+        state = self.read_state()
+        self.assertEqual(state["schema_version"], 5)
+        self.assertEqual(state["workers"][0], {
+            "worker_id": "14:1:1:w1", "launch": "14:1:1", "parent": None,
+            "registered_at": "2026-08-13T20:01:00Z", "released_at": None,
+            "release_event": None})
+
+    def test_register_refuses_without_writing(self):
+        self.spawn_14()
+        self.register_worker(action_id="14:1:1", now="2026-08-13T20:01:00Z")
+        before = self.state_path.read_bytes()
+        cases = {
+            "unknown parent": dict(action_id="14:1:1", now="2026-08-13T20:02:00Z",
+                                   parent="14:1:1:w7"),
+            "superseded launch": dict(action_id="14:1:9", now="2026-08-13T20:02:00Z"),
+            "clock moved backward": dict(action_id="14:1:1", now="2026-08-13T19:59:00Z"),
+            "malformed launch": dict(action_id="14:1", now="2026-08-13T20:02:00Z"),
+        }
+        for name, arguments in cases.items():
+            with self.subTest(name):
+                refused = self.register_worker(ok=False, **arguments)
+                self.assertEqual(refused.returncode, 2)
+                self.assertEqual(refused.stdout, "")
+                self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_register_refuses_an_inactive_launch(self):
+        self.spawn_14()
+        self.suspend(issue=14, attempt=1, blocked_on="transport",
+                     now="2026-08-13T20:05:00Z")
+        before = self.state_path.read_bytes()
+        refused = self.register_worker(action_id="14:1:1", now="2026-08-13T20:06:00Z",
+                                       ok=False)
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("inactive_attempt", refused.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_returned_release_waits_for_live_children_and_stopped_cascades(self):
+        self.spawn_14()
+        self.register_worker(action_id="14:1:1", now="2026-08-13T20:01:00Z")
+        self.register_worker(action_id="14:1:1", now="2026-08-13T20:02:00Z",
+                             parent="14:1:1:w1")
+        self.register_worker(action_id="14:1:1", now="2026-08-13T20:02:00Z",
+                             parent="14:1:1:w2")
+        refused = self.release_worker(worker_id="14:1:1:w1", event="returned",
+                                      now="2026-08-13T20:03:00Z", ok=False)
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("14:1:1:w2", refused.stderr)
+        self.assertEqual(
+            self.release_worker(worker_id="14:1:1:w1", event="stopped",
+                                now="2026-08-13T20:03:00Z"),
+            {"worker_id": "14:1:1:w1", "release_event": "stopped",
+             "released": ["14:1:1:w1", "14:1:1:w2", "14:1:1:w3"]})
+        for worker in ("14:1:1:w1", "14:1:1:w2", "14:1:1:w3"):
+            self.assertEqual(self.check_worker(worker)["reason"], "released")
+        self.assertEqual(
+            {w["released_at"] for w in self.read_state()["workers"]},
+            {"2026-08-13T20:03:00Z"})
+        before = self.state_path.read_bytes()
+        self.assertEqual(
+            self.release_worker(worker_id="14:1:1:w1", event="stopped",
+                                now="2026-08-13T20:04:00Z")["released"], [])
+        self.assertEqual(self.state_path.read_bytes(), before)
+        conflict = self.release_worker(worker_id="14:1:1:w2", event="returned",
+                                       now="2026-08-13T20:04:00Z", ok=False)
+        self.assertEqual(conflict.returncode, 2)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_a_returned_child_lets_its_parent_return(self):
+        self.spawn_14()
+        self.register_worker(action_id="14:1:1", now="2026-08-13T20:01:00Z")
+        self.register_worker(action_id="14:1:1", now="2026-08-13T20:01:00Z",
+                             parent="14:1:1:w1")
+        self.release_worker(worker_id="14:1:1:w2", event="returned",
+                            now="2026-08-13T20:02:00Z")
+        self.assertEqual(
+            self.release_worker(worker_id="14:1:1:w1", event="returned",
+                                now="2026-08-13T20:02:00Z")["released"],
+            ["14:1:1:w1"])
+
+    def test_a_resume_after_an_unavailable_owner_fences_its_workers(self):
+        self.spawn_14()
+        self.register_worker(action_id="14:1:1", now="2026-08-13T20:01:00Z")
+        resumed = self.resume(issue=14, worktree=str(self.root / "wt-14"),
+                              now="2026-08-13T20:06:00Z", owner_unavailable=True)
+        self.assertEqual(resumed["id"], "14:1:2")
+        self.assertEqual(self.check_worker("14:1:1:w1"), {
+            "worker_id": "14:1:1:w1", "live": False,
+            "current_action_id": "14:1:2", "reason": "superseded_launch"})
+        self.assertIsNone(self.read_state()["workers"][0]["released_at"])
+        self.assertEqual(
+            self.register_worker(action_id="14:1:2",
+                                 now="2026-08-13T20:07:00Z")["worker_id"],
+            "14:1:2:w1")
+        refused = self.register_worker(action_id="14:1:1", now="2026-08-13T20:07:00Z",
+                                       parent="14:1:1:w1", ok=False)
+        self.assertEqual(refused.returncode, 2)
+
+    def test_check_worker_answers_an_unknown_run_without_creating_anything(self):
+        inventory = sorted(self.root.rglob("*"))
+        self.assertEqual(self.check_worker("14:1:1:w1"), {
+            "worker_id": "14:1:1:w1", "live": False,
+            "current_action_id": None, "reason": "unknown_run"})
+        self.assertEqual(sorted(self.root.rglob("*")), inventory)
+        malformed = self.check_worker_raw("14:1:1:w0", ok=False)
+        self.assertEqual((malformed.returncode, malformed.stdout), (2, ""))
+
+    def test_a_schema_four_ledger_reads_unlocked_and_upgrades_on_first_write(self):
+        self.spawn_14()
+        legacy = self._as_legacy(self.read_state(), 4)
+        self.assertNotIn("workers", legacy)
+        self.write_state(legacy)
+        before = self.state_path.read_bytes()
+        self.assertEqual(self.check_worker("14:1:1:w1")["reason"], "unknown_worker")
+        self.assertEqual(self.check_launch(action_id="14:1:1")["reason"], "current")
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.register_worker(action_id="14:1:1", now="2026-08-13T20:01:00Z")
+        upgraded = self.read_state()
+        self.assertEqual(upgraded["schema_version"], 5)
+        self.assertEqual([w["worker_id"] for w in upgraded["workers"]], ["14:1:1:w1"])
+        hybrid = self._as_legacy(upgraded, 4)
+        hybrid["workers"] = []
+        self.write_state(hybrid)
+        self.assertEqual(self.check_worker_raw("14:1:1:w1", ok=False).returncode, 2)
+
+    def test_the_validator_closes_every_worker_record(self):
+        self.spawn_14()
+        self.register_worker(action_id="14:1:1", now="2026-08-13T20:01:00Z")
+        self.register_worker(action_id="14:1:1", now="2026-08-13T20:02:00Z",
+                             parent="14:1:1:w1")
+        valid = self.read_state()
+
+        def edited(**fields_by_index):
+            value = copy.deepcopy(valid)
+            for index, fields in fields_by_index.items():
+                value["workers"][int(index[1:])].update(fields)
+            return value
+
+        cases = {
+            "not a list": self._changed(valid, ("workers",), {}),
+            "extra field": edited(w0={"note": "x"}),
+            "zero ordinal": edited(w0={"worker_id": "14:1:1:w0"}),
+            "id outside its launch": edited(w0={"launch": "14:1:2"}),
+            "unknown launch": edited(w0={"worker_id": "14:1:9:w1", "launch": "14:1:9"},
+                                     w1={"parent": None}),
+            "ordinal gap": edited(w1={"worker_id": "14:1:1:w3"}),
+            "parent not earlier": edited(w0={"parent": "14:1:1:w2"}),
+            "release time without event": edited(
+                w1={"released_at": "2026-08-13T20:02:00Z"}),
+            "event without release time": edited(w1={"release_event": "returned"}),
+            "unknown event": edited(
+                w1={"released_at": "2026-08-13T20:02:00Z", "release_event": "vanished"}),
+            "registered after update": edited(w0={"registered_at": "2099-01-01T00:00:00Z"}),
+            "released before registered": edited(
+                w1={"released_at": "2026-08-13T20:01:30Z", "release_event": "returned"}),
+            "stopped with an unreleased child": edited(
+                w0={"released_at": "2026-08-13T20:02:00Z", "release_event": "stopped"}),
+            "null registration time": edited(w0={"registered_at": None}),
+            "numeric release time": edited(
+                w1={"released_at": 1786651320, "release_event": "returned"}),
+        }
+        mistyped_times = {"null registration time", "numeric release time"}
+        for name, state in cases.items():
+            with self.subTest(name):
+                self.write_state(state)
+                refused = self.check_worker_raw("14:1:1:w1", ok=False)
+                self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+                if name in mistyped_times:
+                    self.assertIn("invalid workflow workers", refused.stderr)
+
+
+class OwnerExitFenceTest(LifecycleHarness, unittest.TestCase):
+    """Owner-path writes that end a launch refuse while it has a live worker (#222)."""
+
+    def spawn_with_worker(self):
+        self.init_run()
+        self.spawn(issue=14, worktree=str(self.root / "wt-14"))
+        return self.register_worker(action_id="14:1:1",
+                                    now="2026-08-13T20:01:00Z")["worker_id"]
+
+    def assert_refused(self, completed, before, *workers):
+        self.assertEqual((completed.returncode, completed.stdout), (2, ""))
+        self.assertIn("live workers: " + ", ".join(workers), completed.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_suspend_refuses_until_the_worker_returns(self):
+        worker = self.spawn_with_worker()
+        before = self.state_path.read_bytes()
+        self.assert_refused(
+            self.suspend(issue=14, attempt=1, blocked_on="external",
+                         now="2026-08-13T20:02:00Z", ok=False), before, worker)
+        self.release_worker(worker_id=worker, event="returned",
+                            now="2026-08-13T20:03:00Z")
+        self.assertEqual(
+            self.suspend(issue=14, attempt=1, blocked_on="external",
+                         now="2026-08-13T20:03:00Z")["kind"], "suspended")
+
+    def test_suspend_proceeds_once_the_worker_tree_is_stopped(self):
+        worker = self.spawn_with_worker()
+        child = self.register_worker(action_id="14:1:1", now="2026-08-13T20:01:00Z",
+                                     parent=worker)["worker_id"]
+        before = self.state_path.read_bytes()
+        self.assert_refused(
+            self.suspend(issue=14, attempt=1, blocked_on="agent_dispatch",
+                         now="2026-08-13T20:02:00Z", ok=False), before, worker, child)
+        self.release_worker(worker_id=worker, event="stopped",
+                            now="2026-08-13T20:03:00Z")
+        self.assertEqual(
+            self.suspend(issue=14, attempt=1, blocked_on="agent_dispatch",
+                         now="2026-08-13T20:03:00Z")["kind"], "suspended")
+
+    def test_a_handoff_progress_refuses_but_plain_progress_does_not(self):
+        worker = self.spawn_with_worker()
+        self.progress(issue=14, phase=1, now="2026-08-13T20:02:00Z")
+        handoff = self.write_handoff(14)
+        before = self.state_path.read_bytes()
+        self.assert_refused(
+            self.progress(issue=14, phase=1, now="2026-08-13T20:03:00Z",
+                          turn_count=118, handoff_path=handoff, ok=False),
+            before, worker)
+        self.release_worker(worker_id=worker, event="returned",
+                            now="2026-08-13T20:04:00Z")
+        handed = self.progress(issue=14, phase=1, now="2026-08-13T20:04:00Z",
+                               turn_count=118, handoff_path=handoff)
+        self.assertEqual(handed["action"], "handoff")
+
+    def test_legacy_finish_refuses_until_the_worker_returns(self):
+        worker = self.spawn_with_worker()
+        # The harness `finish` round-trips through schema 2, which drops the
+        # registry, so this case writes the contractless v5 state directly.
+        state = self.read_state()
+        state["issues"]["14"]["delivery"] = self.empty_delivery()
+        state["issues"]["14"]["delivery_remainders"] = []
+        self.write_state(state)
+        result_path = self.root / "result-14-1.json"
+        result_path.write_text(json.dumps({
+            **self.merged_result(), "state": "failed", "pr_url": None,
+            "merge_sha": None, "issue_closed": False, "notes": "owner failed"}),
+            encoding="utf-8")
+
+        def finish(now, ok):
+            return self.run_cli("finish", "--repo-root", self.root, "--run-id",
+                                self.run_id, "--issue", 14, "--attempt", 1,
+                                "--result-file", result_path, "--now", now, ok=ok)
+
+        before = self.state_path.read_bytes()
+        self.assert_refused(finish("2026-08-13T20:02:00Z", False), before, worker)
+        self.release_worker(worker_id=worker, event="returned",
+                            now="2026-08-13T20:03:00Z")
+        self.assertEqual(
+            json.loads(finish("2026-08-13T20:03:00Z", True).stdout)["state"], "failed")
+
+    def test_another_issues_worker_never_blocks(self):
+        self.init_run()
+        self.spawn(issue=14, worktree=str(self.root / "wt-14"))
+        self.spawn(issue=15, worktree=str(self.root / "wt-15"))
+        self.register_worker(action_id="15:1:1", now="2026-08-13T20:01:00Z")
+        self.assertEqual(
+            self.suspend(issue=14, attempt=1, blocked_on="external",
+                         now="2026-08-13T20:02:00Z")["kind"], "suspended")
 
 
 class PhaseGateReplyTest(LifecycleHarness, unittest.TestCase):

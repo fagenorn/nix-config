@@ -94,6 +94,33 @@ contract. Its destination is derived by the producer beneath the primary
 checkout's `.superpowers/issue-delivery/` home; callers supply issue, branch,
 run, and head identity only, never an authoritative destination.
 
+### Lifecycle workers
+
+When the caller runs this skill under a lifecycle identity — its
+`ledger_repo_root`, `run_id` and `action_id` — every agent this skill
+dispatches or resumes that can write (the implementer, the mechanic and each
+fix-round implementer) is a registered worker of that launch. Immediately
+before the dispatch or resume, run
+`workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`
+and put its printed `worker_id` into the prompt as the single line
+`Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>`.
+When that agent returns, run
+`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --worker-id <worker_id> --event returned`.
+A resumed agent is registered again and gets a fresh `worker_id`.
+Read-only reviewers are not registered.
+
+A report of `BLOCKED` with `launch fence refused: <reason>` means that
+worker's launch fence refused its commit. Whatever the reason, release that
+worker and make no retry and no re-dispatch; not every reason means a
+supersession, so then run
+`workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
+on this launch. On `current: false` or any helper failure, follow from-issue's
+superseded route: after that release nothing more is written; print
+`/from-issue <num> --auto` on its own line and stop. On `current: true` the
+refusal was no supersession: follow from-issue's suspension procedure with
+`blocked_on=transport`. Without a lifecycle identity none of this applies and
+workers commit with plain `git`.
+
 ### 1. Dispatch the implementer
 
 Record BASE (`git rev-parse HEAD`) first — the review package and fix-round diffs need it.
@@ -123,7 +150,7 @@ Template: [implementer-prompt.md](implementer-prompt.md)
 - **DONE** → run `scripts/review-package PLAN_FILE BASE HEAD` (BASE from step 1 — never `HEAD~1`, which silently drops all but the last commit), capture its compact JSON stdout unchanged, and pass those bytes through `artifact-budget validate-report --boundary producer --input -` before the step-3 gate.
 - **DONE_WITH_CONCERNS** → correctness/scope concerns get addressed before review; observations get noted, review proceeds.
 - **NEEDS_CONTEXT** → provide it, re-dispatch.
-- **BLOCKED** → context problem: add context, re-dispatch same tier. Reasoning problem: re-dispatch `implementer` (or bump the model). Too large: split it. Plan wrong: escalate to the human. Never force an unchanged retry — if the implementer said it's stuck, something must change.
+- **BLOCKED** → a `launch fence refused` report follows `### Lifecycle workers` and is never re-dispatched. Otherwise: context problem: add context, re-dispatch same tier. Reasoning problem: re-dispatch `implementer` (or bump the model). Too large: split it. Plan wrong: escalate to the human. Never force an unchanged retry — if the implementer said it's stuck, something must change.
 
 If the implementer asks questions — before or during — answer completely; don't rush it.
 
