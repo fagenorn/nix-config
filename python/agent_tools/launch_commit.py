@@ -50,7 +50,8 @@ def check_reply(stdout: bytes, worker_id: str) -> str:
     if (type(live) is not bool or reply["worker_id"] != worker_id
             or not isinstance(reason, str)
             or not (current is None or isinstance(current, str))
-            or live is not (reason == LIVE)):
+            or live is not (reason == LIVE)
+            or (live and current != worker_id.rpartition(":w")[0])):
         return MALFORMED_REPLY
     return reason
 

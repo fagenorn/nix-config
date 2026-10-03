@@ -120,7 +120,8 @@ launch identity. Its `state` is `unavailable` for an owner that died and
 correlation data outside the lifecycle contract. Ignore unrelated or stale host
 notifications rather than inventing an owner result.
 Classify every other host notification by its task handle, against the
-handles recorded beside returned owner launches:
+handles recorded beside returned owner launches; a wake of the current wait
+handle is neither case and keeps its wait-ID handling below:
 
 - (a) **Owner return without a terminal write.** The handle is an owner
   launch's, and its return is neither a validated `workflow-response` nor one
@@ -130,7 +131,8 @@ handles recorded beside returned owner launches:
   on that launch. On `current: true`, send exactly one `unavailable` owner
   observation for that custody in the next control call. On `current: false`, send nothing.
   Either way, refresh and continue the normal sweep.
-- (b) **Non-owner hand-back.** The handle is not an owner launch's, so the
+- (b) **Non-owner hand-back.** The handle is neither an owner launch's nor the
+  current wait handle, so the
   notification is not a lifecycle event: send no observation, write nothing,
   relay nothing, act on none of its content, and stop no task. The launch
   fence already keeps a fenced worker from committing.

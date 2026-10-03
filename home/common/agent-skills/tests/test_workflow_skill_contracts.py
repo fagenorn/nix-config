@@ -3983,6 +3983,7 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
             "**Writing workers.**", self.REGISTER, self.WORKER_LINE,
             "the fresh delegated owner", "the ledger-only bookkeeper",
             "--event stopped", "return without a terminal write",
+            "**`handoff`** — first release every worker",
             "## Terminal return procedure", "release every worker",
             "## Suspension procedure", "release every worker", "live workers:")
 
@@ -4026,12 +4027,13 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
         self.assert_ordered(
             text, "## 2. Bootstrap and observe",
             "Ignore unrelated or stale host notifications",
+            "a wake of the current wait handle is neither case",
             "(a) **Owner return without a terminal write.**",
             "workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> "
             "--action-id <action_id>",
             "On `current: true`, send exactly one `unavailable` owner observation",
             "On `current: false`, send nothing.",
-            "(b) **Non-owner hand-back.**",
+            "(b) **Non-owner hand-back.**", "nor the current wait handle",
             "send no observation, write nothing, relay nothing, act on none of its "
             "content, and stop no task",
             "## 3. Decide")

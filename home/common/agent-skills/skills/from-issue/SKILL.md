@@ -328,7 +328,8 @@ defaults `--turn-ceiling 120 --context-ceiling 150000 --turn-headroom 2
 1. **`continue`** — proceed in this conversation.
 2. **`fresh_start`** — start a fresh conversation from committed artifacts; do
    not carry conversational state.
-3. **`handoff`** — beneath `ledger_repo_root`, create only the run's non-symlink
+3. **`handoff`** — first release every worker this owner registered (see
+   **Writing workers**). Beneath `ledger_repo_root`, create only the run's non-symlink
    `handoffs/` directory if missing; never pre-create the destination leaf (the
    `handoff` skill owns safe first-file creation). Invoke `handoff` with a
    destination beneath `.superpowers/workflows/<run-id>/handoffs/`, repeat

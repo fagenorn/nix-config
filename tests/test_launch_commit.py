@@ -169,6 +169,8 @@ class CheckReplyTest(unittest.TestCase):
             b'{"worker_id":"1:1:1:w1","live":true,"current_action_id":NaN,'
             b'"reason":"live"}': "malformed_reply",
             json.dumps({**good, "current_action_id": 7}).encode(): "malformed_reply",
+            json.dumps({**good, "current_action_id": None}).encode(): "malformed_reply",
+            json.dumps({**good, "current_action_id": "1:1:2"}).encode(): "malformed_reply",
             json.dumps(good).encode(): "live",
             json.dumps({**good, "live": False, "reason": "superseded_launch"}).encode():
                 "superseded_launch",
