@@ -179,9 +179,9 @@ It has exactly 173 unique final logical paths:
 
 Mappings are derived from the pinned tree and typed rules. Unknown digest
 contents in paths use fixed-length 64-hex placeholders and are charged at full
-encoded length. A row records operation, old/new path, input blob/mode/bytes/
-lines, shape-fact references, output bytes/lines, record bytes and derivation
-rule. Counts are non-Boolean integers.
+encoded length. A row records operation, new path, input blob/mode/bytes/lines,
+shape-fact references, output bytes/lines and record bytes; old path, class and
+derivation rule are re-derived from the bound roots and rules (D18). Counts are non-Boolean integers.
 
 Bounds are relative to the table's prerequisite (the pinned tree).
 
@@ -427,6 +427,7 @@ results.
 | D15 | Forecasts for unwritten files are line-count estimates, priced as written bytes plus one prefix byte per line plus 512 header bytes. Shared paths carry ordered cumulative support. Plan members stay compact so the process package costs well under a quarter of the review aggregate | CORE plan forecast basis; review-package caps 65,536/8/524,288; parent overflow at 550,674 | Pricing from the recovered R1/R3 byte counts: most files are newly authored, and those counts would understate them |
 | D16 | DERIVE makes no CLAUDE.md edit; the command table and module docstrings document the two commands, and EVIDENCE, which publishes the trust identity, owns the architecture sentence. Subjects are capped at 64 bytes, with two per task and ten process reserves | A planning G0 precheck: at 120-byte × 34 reserves the root manifest was 28,124 B against 16,384 (six manifest bytes per reserved byte), and with the CLAUDE.md record (about 13 KB, mostly one-line context) the bounds needed nine payloads against eight | A CLAUDE.md sentence now, or 120-byte reserves: either makes the honest forecast exceed the unchanged review caps |
 | D17 | Standards-review corrections: Task-1 `compose` writes trees only in an alternates-backed scratch repository; preservation snapshots hash every file content; edge records carry `hunk_header_sha256` bound to `record_sha256`; replay's precedence test starts from a valid unavailable control with coherent anchor digests; the full-shape harness runs at the final head against the G2 pin via `AGENT_RETAINED_TOOL_COMMIT` with equal `python` trees | Codex plan review (B1, B2, S1–S3), verified against `review_projection.py`, `review_forecast.edge_facts` and this spec's edge-row and D13 contracts | A private index alone (objects still land in the source store); running the harness at the Task-6 commit (it lacks Tasks 7–8) |
+| D18 | `task7-estimate/v1` uses a compact encoding whose real canonical bytes are at most 49,152. Each row keeps its operation, new path, input facts and record bytes; writes and additions also keep renderer facts and output. A move's old path, class and rule are re-derived from `identities.move_roots` and `identities.rules`, and its output is its input. The zero-byte tool closure is bound once in `identities.tool_closure`, and one `rows_sha256` replaces the per-row ids. Validation still rebuilds the whole table from its facts plus the pins (measured 43,755 B) | EVIDENCE (#235) commits `task7-estimate.json` as one whole review record under the unchanged 65,536 B member cap, and source defects are fixed in the owning dependency; the Task-1 row shape measured 99,184 B (moves alone 86,157) | Keep the shape (EVIDENCE cannot commit it); split the file (changes CORE's four fixed payload names, D3) |
 
 Design/grill frontier is closed within the approved scope. No context-map or ADR
 write route exists in the resolved bindings, so this ledger is the issue's

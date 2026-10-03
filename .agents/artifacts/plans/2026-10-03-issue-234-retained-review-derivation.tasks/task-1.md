@@ -14,10 +14,10 @@
   - `@dataclass(frozen=True) Task7Pins(prerequisite_commit: str, prerequisite_tree: str, plan_root_blob: str, task7_blob: str, model_version: str, subject_template: str, move_roots: tuple[tuple[str, str, str], ...], renderers: tuple[RendererSpec, ...], project_id_max_bytes: int)`. Each move root is `(old_prefix, new_prefix, class)`, where class is one of `spec`, `plan` or `decision`.
   - `TASK7_PINS: Task7Pins`, holding the real values: commit `fe85677c8bd26c808ac69c2ee21b17ff6e262923`, its tree, blobs `8294252b…` and `c8c622dd…`, the adopt tool sources at `fe85677c` (`adopt-project.py`, `adopt_apply.py`, `adopt_inspection.py`, `adopt_planning.py`, `adopt_verify.py`, `agent_platform.py`, `resolve-project.py`, `platform-manifest.json`), and the subject template `chore(adopt): adopt <project_id> at plan <12-char fragment>`.
   - `TASK8_EFFECT = {"task": 8, "repository_bytes": 0, "state": "unexecuted", "acceptance": "post-integration-registration-evidence"}`.
-  - `derive_task7(repo: Path, pins: Task7Pins) -> dict`, which returns the `task7-estimate/v1` table. Its keys are `schema_version`, `kind`, `identities`, `subject`, `rows`, `counts`, `historical_scope`, `projection_estimate` and `observed_actual` (always `null`).
+  - `derive_task7(repo: Path, pins: Task7Pins) -> dict`, which returns the `task7-estimate/v1` table. Its keys are `schema_version`, `kind`, `identities` (with `rules`, `move_roots` and `tool_closure`), `subject`, `rows`, `rows_sha256` (the `telemetry_digest` of `rows`), `counts`, `historical_scope`, `projection_estimate` and `observed_actual` (always `null`).
   - `validate_task7(table: dict, pins: Task7Pins) -> None`.
   - `compose(repo: Path, table: dict, pins: Task7Pins, *, base_tree: str, final_tree: str, limits) -> tuple[dict, ...]`. It returns rows `{path, record_bytes, added_lines, deleted_lines}` sorted by path.
-  - Row shape: `{id, operation, old_path, new_path, input, facts, output, record_bytes, rule}`, where `operation` is one of `move`, `write` or `add`. `id` is `telemetry_digest` of every other member.
+  - Row shape (compact, D18): a move is `{operation, new_path, input, record_bytes}`; a write or add is `{operation, new_path, input, facts, output, record_bytes}`, where `facts.renderers` lists only the contributing specs (blobs live in `identities.renderers`). A move's old path, class and rule are re-derived from `identities.move_roots` and `identities.rules`, and its output is its input. The real table's canonical bytes are at most 49,152.
 
 **Invariants:**
 - Rows are derived from `pins.prerequisite_tree` and the typed rules only. The table covers exactly 173 unique final paths, with counts 165/54/108/3/5/3 (D4). `counts` is recomputed from `rows` and never authored.
@@ -59,8 +59,8 @@ class Task7ModelTest(unittest.TestCase):
     def test_rehashed_fact_change_is_invalid(self):
         table = derive_task7(self.repo, self.pins)
         row = dict(table["rows"][0]); row["output"] = {**row["output"], "bytes": 1}
-        row["id"] = telemetry_digest({k: v for k, v in row.items() if k != "id"})
-        forged = {**table, "rows": [row, *table["rows"][1:]]}
+        rows = [row, *table["rows"][1:]]
+        forged = {**table, "rows": rows, "rows_sha256": telemetry_digest(rows)}
         with self.assertRaises(EstimateError):
             validate_task7(forged, self.pins)
 
