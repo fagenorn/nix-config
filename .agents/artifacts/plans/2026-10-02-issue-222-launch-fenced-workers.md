@@ -18,7 +18,7 @@ orchestrate-issues routes writing dispatches through the registry and the fence.
 command table), Markdown skills.
 
 Spec: `.agents/artifacts/specs/2026-10-02-issue-222-launch-fenced-workers-design.md`.
-Its `## Decision ledger` (D1–D14) is authoritative, and this plan cites rows by ID.
+Its `## Decision ledger` (D1–D15) is authoritative, and this plan cites rows by ID.
 
 ## Global Constraints
 
@@ -54,7 +54,7 @@ Task 1 — Ledger schema v5 and worker registry verbs — home/common/agent-skil
 Task 2 — Owner-exit refusal while workers live — home/common/agent-skills/scripts/workflow-state.py, home/common/agent-skills/tests/test_workflow_state.py, home/common/agent-skills/tests/test_delivery_workflow.py — full — [task-2.md](2026-10-02-issue-222-launch-fenced-workers.tasks/task-2.md)
 Task 3 — `launch-commit` command and acceptance test — python/agent_tools/launch_commit.py, lib/agent-tools.nix, justfile, tests/test_launch_commit.py — full — [task-3.md](2026-10-02-issue-222-launch-fenced-workers.tasks/task-3.md)
 Task 4 — sdd registers writing workers and fences their commits — home/common/agent-skills/skills/sdd/SKILL.md, home/common/agent-skills/skills/sdd/implementer-prompt.md, home/common/agent-skills/skills/sdd/fix-loop.md, home/common/agent-skills/skills/from-issue/SKILL.md, home/common/agent-skills/instruction-load.json, home/common/agent-skills/tests/test_workflow_skill_contracts.py — full — [task-4.md](2026-10-02-issue-222-launch-fenced-workers.tasks/task-4.md)
-Task 5 — from-issue and ship-issue register, fence and release before exit — home/common/agent-skills/skills/from-issue/SKILL.md, home/common/agent-skills/skills/from-issue/AUTO.md, home/common/agent-skills/skills/from-issue/ship-handoff.md, home/common/agent-skills/skills/ship-issue/SKILL.md, home/common/agent-skills/instruction-load.json, home/common/agent-skills/tests/test_workflow_skill_contracts.py — full — [task-5.md](2026-10-02-issue-222-launch-fenced-workers.tasks/task-5.md)
+Task 5 — from-issue and ship-issue register, fence and release before exit — home/common/agent-skills/skills/from-issue/SKILL.md, home/common/agent-skills/skills/from-issue/AUTO.md, home/common/agent-skills/skills/from-issue/ship-handoff.md, home/common/agent-skills/skills/ship-issue/SKILL.md, home/common/agent-skills/skills/ship-issue/CI-MERGE.md, home/common/agent-skills/instruction-load.json, home/common/agent-skills/tests/test_workflow_skill_contracts.py — full — [task-5.md](2026-10-02-issue-222-launch-fenced-workers.tasks/task-5.md)
 Task 6 — Dispatcher rules (a) and (b), and CLAUDE.md — home/common/claude-code/skills/orchestrate-issues/SKILL.md, CLAUDE.md, home/common/agent-skills/instruction-load.json, home/common/agent-skills/tests/test_workflow_skill_contracts.py — full — [task-6.md](2026-10-02-issue-222-launch-fenced-workers.tasks/task-6.md)
 
 ## Decisions
@@ -62,6 +62,13 @@ Task 6 — Dispatcher rules (a) and (b), and CLAUDE.md — home/common/claude-co
 Spec rows D1–D10 govern the design. Planning added D11 (owner-exit predicate and
 the checkpoint `--worker-id` excuse), D12 (reply shapes and refusal vocabulary),
 D13 (a fresh `worker_id` per dispatch, carried as a prompt line) and D14
-(acceptance-test seam).
+(acceptance-test seam). Standards review added D15 (remainder-owner self-release
+and fenced sync merges).
 
 Final verification after Task 6: `just agent-workflow-tests` and `just build` both pass.
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), isolated and read-only; no fallback.
+- Base SHA: f40c09fc98b9291dbf304d5c68ad7fe796e9c784; reviewed plan head 5d7de04.
+- Findings: 5 accepted (B1 Task 1 schema literals and legacy builders; B2 remainder owner self-release, per D15; B3 fenced Phase 1 and post-selection sync merges, per D15; S1 strict nonfinite and `current_action_id` checks in Task 3; S2 checkpoint-excuse descendant test in Task 2), 0 rejected, 0 deferred.

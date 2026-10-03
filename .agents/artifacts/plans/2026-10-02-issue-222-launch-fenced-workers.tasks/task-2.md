@@ -164,6 +164,8 @@ In `test_typed_effect_uses_raw_validation_and_both_launch_fences`, `provider_den
                         "--now", "2026-09-21T00:00:02Z", "--worker-id", worker)
 ```
 
+Add a second method beside it, `test_checkpoint_excuse_covers_only_the_named_worker`: register a worker `P`, then a child `C` with `--parent P`, write the denied checkpoint with `--worker-id P` and assert exit 2, empty stdout, `live workers: C` on stderr and an unchanged `state.json`; then `release-worker --worker-id C --event returned` and assert the same checkpoint with `--worker-id P` now succeeds. This pins the invariant that the excuse names exactly one worker and never its descendants.
+
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py -k OwnerExitFence 2>&1 | tail -3`

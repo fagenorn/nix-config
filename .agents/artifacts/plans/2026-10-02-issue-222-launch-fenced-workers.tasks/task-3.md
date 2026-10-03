@@ -17,7 +17,7 @@
 
 **Invariants:**
 - No `git` process runs unless `check-worker` answered `live: true` for this exact `worker_id` (per D5, D12).
-- A strict reply load composes `agent_tools.canonical.reject_duplicate_keys`. A reply counts as well-formed only when it is a JSON object with exactly the four keys, a boolean `live` (`type(...) is bool`), `worker_id` equal to the asked id, a string `reason`, and `live is (reason == "live")`.
+- A strict reply load composes `agent_tools.canonical.reject_duplicate_keys` (as `object_pairs_hook`) and `agent_tools.canonical.reject_nonfinite_literal` (as `parse_constant`), so `NaN`, `Infinity` and `-Infinity` anywhere in the reply make it `malformed_reply`. A reply counts as well-formed only when it is a JSON object with exactly the four keys, a boolean `live` (`type(...) is bool`), `worker_id` equal to the asked id, a string `reason`, `current_action_id` that is `None` or a `str`, and `live is (reason == "live")`. The tests add malformed **positive** replies (`"live": true, "reason": "live"` with `"current_action_id": NaN`, with `"current_action_id": 7`, and with a duplicated key) to the `check_reply` cases and assert `malformed_reply` and, through `fenced_commit`, that no commit is created.
 - argv is split at the **first** `--`: everything before it goes to argparse, and everything after it goes verbatim to `git commit`. A missing `--` is a usage error (exit 2). `--help` works without `--`.
 - The module never edits `sys.path`, never uses `importlib` and never reads `__file__` (agent-helpers rule 3).
 - The module docstring states the residual window: a supersession landing between the check and the commit is not caught, and the fence narrows the window to one call.
@@ -186,6 +186,9 @@ class CheckReplyTest(unittest.TestCase):
             json.dumps({**good, "reason": "released"}).encode(): "malformed_reply",
             b'{"worker_id":"1:1:1:w1","worker_id":"1:1:1:w1","live":true,'
             b'"current_action_id":"1:1:1","reason":"live"}': "malformed_reply",
+            b'{"worker_id":"1:1:1:w1","live":true,"current_action_id":NaN,'
+            b'"reason":"live"}': "malformed_reply",
+            json.dumps({**good, "current_action_id": 7}).encode(): "malformed_reply",
             json.dumps(good).encode(): "live",
             json.dumps({**good, "live": False, "reason": "superseded_launch"}).encode():
                 "superseded_launch",

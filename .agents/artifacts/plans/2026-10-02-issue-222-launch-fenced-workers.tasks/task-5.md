@@ -4,7 +4,9 @@
 - Modify: `home/common/agent-skills/skills/from-issue/SKILL.md` (`## Dispatch, phase-budget and attempt-budget rules`, `## Suspension procedure`, `## Terminal return procedure`)
 - Modify: `home/common/agent-skills/skills/from-issue/AUTO.md` (the Phases 2–4 prompt requirements list and the bookkeeper paragraph)
 - Modify: `home/common/agent-skills/skills/from-issue/ship-handoff.md` (the ship-owner prompt)
-- Modify: `home/common/agent-skills/skills/ship-issue/SKILL.md` (`## Launch guard` and `## Delivery loop`)
+- Modify: `home/common/agent-skills/skills/from-issue/ship-handoff.md` (`## Remainder owner prompt`)
+- Modify: `home/common/agent-skills/skills/ship-issue/SKILL.md` (`## Launch guard`, `## Phase 1 — Sync from the integration branch`, `## Delivery loop` and `## Remainder mode`)
+- Modify: `home/common/agent-skills/skills/ship-issue/CI-MERGE.md` (`## Post-selection sync`, steps 1 and 3)
 - Modify: `home/common/agent-skills/instruction-load.json` (ceilings only)
 - Test: `home/common/agent-skills/tests/test_workflow_skill_contracts.py` (methods added to `LaunchFencedWorkerContractsTest`)
 
@@ -17,6 +19,8 @@
 - `worker_id` reaches a worker only as the `Lifecycle worker:` prompt line, never inside `ship-handoff/v2` (per D13).
 - Before `suspend`, a handoff `progress`, or the bookkeeper's `finish`, the owner releases every worker it registered. A background worker it cannot wait for is first stopped through the host's task-stop and released with `--event stopped`. A host with no stop capability waits for the worker. An owner that can neither wait nor stop returns without a terminal write.
 - The ship owner adds `--worker-id <worker_id>` to every `checkpoint-delivery` it writes while it holds one (per D11).
+- The remainder ship owner (launched from `ship-handoff.md`'s `## Remainder owner prompt`) is a registered writing worker too: it can commit a post-selection sync. Because it writes its own `finish`, it releases every child it registered and then itself (`release-worker --worker-id <worker_id> --event returned`) after its last commit and immediately before that `finish`; a `delivery_stalled` or denial checkpoint it writes carries `--worker-id <worker_id>` instead. The launching owner's later `--event returned` release of the same id is the documented no-op repeat (per D11, D12, D13).
+- Every instruction that creates a merge or amend commit from the integration branch is fenced: Phase 1's `git merge origin/<integration>` sentence is rewritten to the fenced form, and CI-MERGE.md's post-selection sync merge (step 1) and its review amends (step 3) run through `launch-commit` (`-- --amend --no-edit` for an amend). An already-up-to-date merge creates no commit and needs no `launch-commit`.
 - The stale sentence "Phase 1's merge from the integration branch and Phase 3's local commits are not forge writes and are not guarded." is replaced. No other ship-issue guard text changes.
 
 - [ ] **Step 1: Write the failing tests**
@@ -54,6 +58,19 @@ Add these methods to `LaunchFencedWorkerContractsTest`:
             "git merge --no-commit --no-ff origin/<integration>", "--parent <worker_id>",
             "## Phase 1 — Sync from the integration branch")
         self.assertNotIn("Phase 3's local commits are not forge writes", text)
+        self.assertNotIn("Otherwise `git merge origin/<integration>`; commit the merge", text)
+        self.assert_ordered(text, "## Phase 1 — Sync from the integration branch",
+                            "git merge --no-commit --no-ff origin/<integration>",
+                            "Already up to date")
+        self.assert_ordered(text, "## Remainder mode", self.RELEASE, "finish")
+        self.assert_ordered(self.read(SHIP_ISSUE.parent / "CI-MERGE.md"),
+                            "## Post-selection sync", "launch-commit", "--amend --no-edit")
+
+    def test_the_remainder_prompt_releases_itself_before_its_finish(self):
+        self.assert_ordered(
+            self.read(FROM_ISSUE_DIR / "ship-handoff.md"), "## Remainder owner prompt",
+            self.WORKER_LINE, self.RELEASE,
+            "workflow-state finish --summary-file -")
         self.assert_ordered(text, "## Delivery loop", "--worker-id <worker_id>")
 ```
 
@@ -109,6 +126,14 @@ Expected: FAIL. `**Writing workers.**` is not found.
    `git`.
    ```
 
+5a. `ship-issue/SKILL.md`, `## Phase 1 — Sync from the integration branch`: replace the sentence ``Otherwise `git merge origin/<integration>`; commit the merge with the configured merge-commit message. Don't squash.`` with ``Otherwise run `git merge --no-commit --no-ff origin/<integration>`; when it reports `Already up to date` there is nothing to commit, otherwise commit the merge with the configured merge-commit message through `launch-commit` when this run holds a `Lifecycle worker:` line (### Local commits), or plain `git commit` without one. Don't squash.``
+
+5b. `ship-issue/CI-MERGE.md`, `## Post-selection sync`: in step 1 add ``With a `Lifecycle worker:` line, make that merge as `git merge --no-commit --no-ff origin/<integration>` and commit it through `launch-commit` (SKILL.md's ### Local commits).`` In step 3, after "amending the unpushed merge commit", add ``(through `launch-commit … -- --amend --no-edit` when this run holds a `Lifecycle worker:` line)``.
+
+5c. `ship-issue/SKILL.md`, `## Remainder mode`: add ``A remainder owner whose prompt carries a `Lifecycle worker:` line releases every worker it registered and then itself with `workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --worker-id <worker_id> --event returned` after its last commit and immediately before its own `finish`; after that release it creates no commit.``
+
+5d. `ship-handoff.md`, `## Remainder owner prompt`: before `Your task:` in the template add ``With lifecycle identity, the prompt also carries the single line Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> beside the remainder object, never inside it.`` and, in the task paragraph before "your own `workflow-state finish --summary-file -`", add ``release your children and then yourself with `workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --worker-id <worker_id> --event returned`, then write``. The from-issue owner registers this remainder owner like the Phase-7 ship owner.
+
 6. `ship-issue/SKILL.md`, `## Delivery loop`: right after the `checkpoint-delivery` code block, add: `When this run holds a \`Lifecycle worker:\` line, append \`--worker-id <worker_id>\` to every \`checkpoint-delivery\`: it excuses this run alone when its own checkpoint suspends the launch.`
 
 7. Ceilings: run the Task-4 procedure (`test_instruction_load.py`, then set each breached `ceiling_bytes.<H>` to the measured `<N>`) with the note sentence ` Ceiling raised for #222: from-issue and ship-issue register writing workers, fence local commits and release before exit (#155 D10).`
@@ -121,8 +146,8 @@ Expected: `OK`.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add home/common/agent-skills/skills/from-issue/SKILL.md home/common/agent-skills/skills/from-issue/AUTO.md home/common/agent-skills/skills/from-issue/ship-handoff.md home/common/agent-skills/skills/ship-issue/SKILL.md home/common/agent-skills/instruction-load.json home/common/agent-skills/tests/test_workflow_skill_contracts.py
+git add home/common/agent-skills/skills/from-issue/SKILL.md home/common/agent-skills/skills/from-issue/AUTO.md home/common/agent-skills/skills/from-issue/ship-handoff.md home/common/agent-skills/skills/ship-issue/SKILL.md home/common/agent-skills/skills/ship-issue/CI-MERGE.md home/common/agent-skills/instruction-load.json home/common/agent-skills/tests/test_workflow_skill_contracts.py
 git commit -m "docs(from-issue,ship-issue): register writers, fence local commits, release before exit (#222)"
 ```
 
-Decisions: per D4, D6, D11, D13.
+Decisions: per D4, D6, D11, D13, D15.
