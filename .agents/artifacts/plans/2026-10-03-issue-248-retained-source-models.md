@@ -27,7 +27,7 @@
 
 ## Delivery estimate and boundaries
 
-These are estimates (parent D15, S13, S14). Product: nine paths in three tasks, about 209 KB of forecast records; the support module and `justfile` carry three ordered cumulative contributions each. Process: the spec, this root and three members, about 101 KB. The growth risk sits in the three test modules and `review_task7.py`; an actual record above its bound needs a committed forecast revision and a renewed G0, never truncation or a lowered bound.
+These are estimates (parent D15, S13, S14). Product: nine paths in three tasks, about 212 KB of forecast records; the support module and `justfile` carry three ordered cumulative contributions each. Process: the spec, this root and three members, about 101 KB. The growth risk sits in the three test modules and `review_task7.py`; an actual record above its bound needs a committed forecast revision and a renewed G0, never truncation or a lowered bound.
 
 There is one boundary, `source`: the issue's three models are its smallest independently acceptable slice, and the decomposition already removed every command. Subject reserves are two 64-byte subjects per task (implementation plus one fix) and fourteen for process; a third fix needs a forecast revision.
 
@@ -35,7 +35,7 @@ There is one boundary, `source`: the issue's three models are its smallest indep
 
 Task 1 — Recover and fix the Task-7 estimate and Task-8 effect — python/agent_tools/review_task7.py, tests/retained_review_test_support.py, tests/test_review_task7.py, justfile, home/common/agent-skills/tests/test_workflow_skill_contracts.py — full — [task-1.md](2026-10-03-issue-248-retained-source-models.tasks/task-1.md)
 Task 2 — Issue-121 adapter, raw-parent ancestry, outcomes and payload — python/agent_tools/review_issue121.py, tests/test_review_issue121.py, tests/retained_review_test_support.py, justfile — full — [task-2.md](2026-10-03-issue-248-retained-source-models.tasks/task-2.md)
-Task 3 — Issue-100 verifier and byte domains — python/agent_tools/review_issue100.py, tests/test_review_issue100.py, tests/retained_review_test_support.py, justfile — full — [task-3.md](2026-10-03-issue-248-retained-source-models.tasks/task-3.md)
+Task 3 — Issue-100 verifier and byte domains — python/agent_tools/review_issue100.py, tests/test_review_issue100.py, tests/retained_review_test_support.py, justfile, home/common/agent-skills/tests/test_workflow_skill_contracts.py — full — [task-3.md](2026-10-03-issue-248-retained-source-models.tasks/task-3.md)
 
 ## Execution gates
 
@@ -56,7 +56,7 @@ Only exit 0 with `complete/within_budget` clears G0. Exit 2 or 3 stops with no T
 
 ## Decisions
 
-S1, S12 and parent D16 bound the file set. S3–S8 and S15 govern Task 1; S9 governs Task 2; S10 and S11 govern Task 3; S7 and S13 govern G2 and the forecasts; S14 governs the forecast prices, the evidence checkpoint and the pin/table error split; S16 governs Task 2's final-record table, S17 governs its forcing fixtures, Task 1's generated-evidence fixture and the support ceiling, S18 governs Task 1's blob-mode set, matrix scope and test bound, S19 governs `compose`'s write allowance and module bound, and S20 governs Task 2's module bound and the process subject reserve. Each task report names the recovery rows it consumes.
+S1, S12 and parent D16 bound the file set. S3–S8 and S15 govern Task 1; S9 governs Task 2; S10 and S11 govern Task 3; S7 and S13 govern G2 and the forecasts; S14 governs the forecast prices, the evidence checkpoint and the pin/table error split; S16 governs Task 2's final-record table, S17 governs its forcing fixtures, Task 1's generated-evidence fixture and the support ceiling, S18 governs Task 1's blob-mode set, matrix scope and test bound, S19 governs `compose`'s write allowance and module bound, S20 governs Task 2's module bound and the process subject reserve, and S21 governs Task 3's legacy-scan allowance. Each task report names the recovery rows it consumes.
 
 ## Standards review provenance
 
