@@ -88,6 +88,11 @@ class DeliveryProjection:
                         ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         if self.delivery_complete(issue_state):
             return None, None
+        return self.nonterminal_custody(issue, issue_state)
+
+    def nonterminal_custody(self, issue: int, issue_state: dict[str, Any]
+                            ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """The issue's one nonterminal record and its custody, ignoring delivery (#220 D4)."""
         live = [(kind, record)
                 for kind, records in (("implementation", issue_state["attempts"]),
                                       ("remainder", issue_state["delivery_remainders"]))
@@ -360,6 +365,10 @@ class DeliveryProjection:
         result = None if latest is None or latest["result"] is None else {
             field: copy.deepcopy(latest["result"][field]) for field in result_fields}
         custody = None if latest is None else self.custody_for_record(issue, latest_kind, latest)
+        if issue_state is not None and self.delivery_complete(issue_state):
+            # A delivered issue holds no custody; a nonterminal record left behind
+            # is stale custody control never dispatches, so name it (#220 D4).
+            custody, _ = self.nonterminal_custody(issue, issue_state)
         delivery = None if issue_state is None else issue_state["delivery"]
         # A null digest asks for a contract only where a dispatch would follow;
         # idle live custody and lifecycle-only verdicts ask for nothing (D31).

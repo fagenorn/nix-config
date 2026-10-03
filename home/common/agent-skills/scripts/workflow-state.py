@@ -422,7 +422,8 @@ def artifact_budget_validate(
         argv.extend(("--policy", str(policy)))
     completed = subprocess.run(argv, input=input_bytes, capture_output=True, check=False)
     if completed.returncode != 0 or not completed.stdout:
-        raise WorkflowError(f"artifact-budget {command} rejected the terminal result")
+        subject = "detail input" if boundary is None else f"{boundary} boundary"
+        raise WorkflowError(f"artifact-budget {command} rejected the {subject}")
     try:
         canonical = json.loads(completed.stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -1844,7 +1845,9 @@ def control_summary(
 ) -> dict[str, Any]:
     return _delivery().control_summary(
         issue=issue, tracker=tracker, issue_state=issue_state, reduction=reduction,
-        blockers=control_blockers(tracker), result_fields=RESULT_FIELDS,
+        blockers=sorted(control_blockers(tracker),
+                        key=lambda item: (item["kind"], item["issue"])),
+        result_fields=RESULT_FIELDS,
         contract_required=contract_required, unresumable=unresumable)
 
 
@@ -2299,7 +2302,7 @@ def command_control(args: argparse.Namespace) -> int:
         return {"holder": holder, "roles": dict(roles), "acquired_at": now,
                 "released_at": None, "release_event": None, "release_seq": None}
 
-    def control(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+    def control(state: dict[str, Any] | None) -> tuple[bytes, bool]:
         assert state is not None
         if now_value < parse_utc(state["updated_at"], "run update time"):
             raise WorkflowError("control time must not move backward")
@@ -2368,8 +2371,28 @@ def command_control(args: argparse.Namespace) -> int:
                     release_claim(admission, claim, event="owner_unavailable", at=now)
             admission_changed = admission_changed or admission["releases"] != releases_before
 
+        # A delivered issue has nothing left to launch: its persisted ledger is
+        # delivery-complete after the opening settle, so no lane plans it and the
+        # one-issue policy never runs for it here (#220 D1, D2, D9).
+        delivered = frozenset(
+            issue for issue in request["issues"]
+            if str(issue) in state["issues"]
+            and runtime.delivery_complete(state["issues"][str(issue)]))
+
+        def delivered_verdict(issue: int) -> dict[str, Any]:
+            """The fixed verdict for a delivered issue: terminal, unchanged, no dispatch."""
+            issue_state = state["issues"][str(issue)]
+            return {"operation": "terminal", "changed": False,
+                    "issue_state": copy.deepcopy(issue_state),
+                    "attempt": issue_state["attempts"][-1] if issue_state["attempts"] else None,
+                    "requirements": [], "uses_candidate": False, "desired": "terminal",
+                    "expired": False}
+
         analysis: dict[int, dict[str, Any]] = {}
         for issue in request["issues"]:
+            if issue in delivered:
+                analysis[issue] = delivered_verdict(issue)
+                continue
             issue_state = state["issues"].get(str(issue))
             analysis[issue] = _apply_one_issue_policy(
                 ledger_issue=copy.deepcopy(issue_state),
@@ -2500,6 +2523,9 @@ def command_control(args: argparse.Namespace) -> int:
             return True
 
         def apply_policy(issue: int, dispatch_permitted: bool) -> dict[str, Any]:
+            if issue in delivered:
+                planned[issue] = delivered_verdict(issue)
+                return planned[issue]
             issue_state = state["issues"].get(str(issue))
             result = _apply_one_issue_policy(
                 ledger_issue=copy.deepcopy(issue_state),
@@ -2653,7 +2679,7 @@ def command_control(args: argparse.Namespace) -> int:
         actionless_replay = not dispatch_results
         for issue in request["issues"]:
             issue_state = state["issues"].get(str(issue))
-            if issue_state is None or not issue_state["attempts"]:
+            if issue_state is None or not issue_state["attempts"] or issue in delivered:
                 continue
             if "remainder" in (analysis[issue].get("custody_kind"),
                                planned.get(issue, {}).get("custody_kind")):
@@ -2830,7 +2856,7 @@ def command_control(args: argparse.Namespace) -> int:
                 declared_slots=declared_slots,
                 available=max(0, declared_slots - sum(reserved.values())),
                 waiting=[issue for issue in request["issues"] if issue in waiting])
-        return {
+        reply = render_json({
             "interface_version": CONTROL_INTERFACE_VERSION,
             "run_id": args.run_id,
             "now": now,
@@ -2839,11 +2865,17 @@ def command_control(args: argparse.Namespace) -> int:
             "actions": actions,
             "next_deadline": next_deadline,
             "admission": report,
-        }, changed
+        })
+        # The reply is the only source of action order, so a reply the boundary
+        # rejects must not commit: validation raises before `transact` commits,
+        # and the validated bytes are the bytes printed (#220 D5).
+        artifact_budget_validate(
+            "validate-report", boundary="workflow-response", input_bytes=reply)
+        return reply, changed
 
-    response = transact(args.repo_root, args.run_id, control,
-                        migration_contracts=migration_contracts)
-    print_json(response)
+    reply = transact(args.repo_root, args.run_id, control,
+                     migration_contracts=migration_contracts)
+    sys.stdout.buffer.write(reply)
     return 0
 
 
@@ -3923,9 +3955,13 @@ def command_host_route(args: argparse.Namespace) -> int:
     print_json(route_verdict(args.route))
     return 0
 
+def render_json(value: Any) -> bytes:
+    """The wire rendering of ``value``: what `print_json` writes and control validates."""
+    return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
 def print_json(value: Any) -> None:
-    json.dump(value, sys.stdout, sort_keys=True, separators=(",", ":"))
-    sys.stdout.write("\n")
+    sys.stdout.write(render_json(value).decode("utf-8"))
 
 
 def build_parser() -> argparse.ArgumentParser:

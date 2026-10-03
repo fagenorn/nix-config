@@ -66,6 +66,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_admission_replay.py \
     home/common/agent-skills/tests/test_delivery_model.py \
     home/common/agent-skills/tests/test_delivery_workflow.py \
+    home/common/agent-skills/tests/test_delivered_control.py \
     home/common/agent-skills/tests/test_workflow_delivery.py \
     home/common/agent-skills/tests/test_task_brief.py \
     home/common/agent-skills/tests/test_sdd_workspace.py \
