@@ -440,8 +440,13 @@ class ReceiptStore:
             raise receipt_invalid(str(path), f"unreadable ({error.strerror})") from error
 
     def _directory(self, directory: Path) -> None:
-        """Create each missing level of `directory` below the root, fsyncing its parent; a
-        level that is a symlink or not a directory is refused."""
+        """Create each missing level of `directory` below the root and fsync every level's
+        parent; a level that is a symlink or not a directory is refused.
+
+        The parent is fsynced whether or not this call made the level: a writer that died
+        between `mkdir` and its fsync, or a concurrent first writer still inside that
+        window, leaves an entry this caller must not assume durable before it seals.
+        """
         parent = self.root
         for part in directory.relative_to(self.root).parts:
             level = parent / part
@@ -449,10 +454,9 @@ class ReceiptStore:
                 try:
                     level.mkdir()
                 except FileExistsError:  # a concurrent first writer made it
-                    require_directory(level, missing_ok=False)
-                else:
-                    require_directory(level, missing_ok=False)
-                    fsync_directory(parent)
+                    pass
+                require_directory(level, missing_ok=False)
+            fsync_directory(parent)
             parent = level
 
     def _create_once(self, path: Path, content: bytes, *, exclusive: bool = False) -> None:

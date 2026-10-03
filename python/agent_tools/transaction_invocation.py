@@ -19,7 +19,9 @@ Two predicates over the fold tie the actions to custody and the lifecycle (#206 
 `observed` is true while some action is `open` or last read `in_progress`, which keeps a
 parked transaction's custody from quiescing, and `unresolved` names the first action that is
 `open`, `in_progress` or `unknown`, over which neither `advance` nor the history validator
-admits a terminal. The module reads no file, lock or clock; the caller passes the time
+admits a terminal, save the one exception `transaction_disposition.terminal_blocker` carves
+out: an observability-ground `failed` disposition may cross an `unknown` action its units
+name (#209 D21). The module reads no file, lock or clock; the caller passes the time
 `refusal` judges at.
 """
 
@@ -300,7 +302,9 @@ def observed(actions: dict[str, ActionFold]) -> bool:
 
 def unresolved(actions: dict[str, ActionFold]) -> ActionFold | None:
     """The first action, in declaration order, whose `status` is `open`, `in_progress` or
-    `unknown`, or None; no terminal is entered over it (#206 D9, D20)."""
+    `unknown`, or None; no terminal is entered over it (#206 D9, D20), except the `unknown`
+    actions an observability-ground `failed` disposition names, which
+    `transaction_disposition.terminal_blocker` lets that terminal cross (#209 D21)."""
     return next((entry for entry in actions.values()
                  if status(entry) in ("open", "in_progress", "unknown")), None)
 
