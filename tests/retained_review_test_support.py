@@ -201,22 +201,24 @@ def issue100_fixture(tmp) -> tuple:
     """An issue repository, a clone of it as the live repository, an archive directory and their pins.
 
     From the base, c1 adds the process path `docs/plan.md` and `tmp/scratch.txt`; c2 adds `src/a.txt`,
-    edits `ci.yaml` and deletes the scratch file; c3 edits `justfile`; s1, branched at c1, adds
-    `src/b.txt`; m merges s1 into c3; c4 renames `src/b.txt` to `src/c.txt`. The `live` branch from
+    edits `ci.yaml` and deletes the scratch file; c3 edits `justfile` and deletes the base file `legacy`;
+    s1, branched at c1, adds `src/b.txt`; m merges s1 into c3; c4 renames `src/b.txt` to `src/c.txt`
+    and adds `legacy/note.txt`, so `legacy` is a directory at the head. The `live` branch from
     the base writes head's `src/a.txt` and its own `ci.yaml`. The archive's two `shard-NNN.diff` shards,
     manifest and producer come from running the pinned recipe over the base and head trees.
     """
     repo = init_repo(tmp)
-    base = commit_files(repo, {"README": b"fixture\n", "ci.yaml": b"ci: base\n", "justfile": b"base:\n"}, "base")
+    base = commit_files(repo, {"README": b"fixture\n", "ci.yaml": b"ci: base\n", "justfile": b"base:\n",
+                               "legacy": b"legacy\n"}, "base")
     commit_files(repo, {"docs/plan.md": b"plan\n", "tmp/scratch.txt": b"scratch\n"}, "c1")
     git(repo, "branch", "side")
     commit_files(repo, {"src/a.txt": b"a\n", "ci.yaml": b"ci: head\n", "tmp/scratch.txt": None}, "c2")
-    commit_files(repo, {"justfile": b"head:\n"}, "c3")
+    commit_files(repo, {"justfile": b"head:\n", "legacy": None}, "c3")
     git(repo, "checkout", "-q", "side")
     commit_files(repo, {"src/b.txt": b"b\n"}, "s1")
     git(repo, "checkout", "-q", "main")
     git(repo, "merge", "-q", "--no-ff", "-m", "merge side", "side")
-    head = commit_files(repo, {"src/b.txt": None, "src/c.txt": b"b\n"}, "c4")
+    head = commit_files(repo, {"src/b.txt": None, "src/c.txt": b"b\n", "legacy/note.txt": b"note\n"}, "c4")
     git(repo, "checkout", "-q", "-b", "live", base)
     live = commit_files(repo, {"src/a.txt": b"a\n", "ci.yaml": b"ci: live\n"}, "live")
     git(repo, "checkout", "-q", "main")
@@ -251,11 +253,12 @@ def issue100_fixture(tmp) -> tuple:
         "notes": "validated review package", "state": "decompose_required"}, sort_keys=True).encode()
     (archive / f"{stem}.json").write_bytes(manifest)
     (archive / "producer.raw").write_bytes(producer)
-    # Counts by construction: commits c1 c2 c3 s1 m c4; edge records 2+3+1+1 for c1 c2 c3 s1, 1+4 for
-    # m's two parents (c3: src/b.txt; s1: ci.yaml justfile src/a.txt tmp/scratch.txt), 1 for c4; final
-    # paths: docs/plan.md (process), src/a.txt (integrated), ci.yaml and justfile (pending), src/c.txt.
-    counts = {"commits": 6, "parent_edges": 7, "merge_edges": 1, "edge_records": 13, "contributions": 5,
-              "historical_process": 1, "integrated": 1, "candidate": 3, "candidate_ordinary": 1,
+    # Counts by construction: commits c1 c2 c3 s1 m c4; edge records 2+3+2+1 for c1 c2 c3 s1, 1+5 for
+    # m's two parents (c3: src/b.txt; s1: ci.yaml justfile legacy src/a.txt tmp/scratch.txt), 2 for c4;
+    # final paths: docs/plan.md (process), src/a.txt (integrated), ci.yaml and justfile (pending), and
+    # the ordinary candidates src/c.txt, legacy and legacy/note.txt.
+    counts = {"commits": 6, "parent_edges": 7, "merge_edges": 1, "edge_records": 16, "contributions": 7,
+              "historical_process": 1, "integrated": 1, "candidate": 5, "candidate_ordinary": 3,
               "candidate_reconciliation": 2, "pending_overlaps": 2, "reconciled": 0}
     pins = replace(ISSUE_100_PINS, base=base, head=head, live=live, producer_name="producer.raw",
                    manifest_name=f"{stem}.json", producer_bytes=len(producer), manifest_bytes=len(manifest),

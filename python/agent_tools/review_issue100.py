@@ -407,9 +407,21 @@ def _validate_tables(payload, pins) -> list:
     return records
 
 
+def _at_head(payload, pins) -> dict:
+    """Each recorded path's file entry at the head, None where it holds no file: its latest record along the
+    first-parent chain, whose edges are the whole tree difference of each step from the base to the head."""
+    first = {edge["commit"]: edge for edge in payload["edges"] if edge["parent_ordinal"] == 1}
+    entries, oid = {}, pins.head
+    while oid != pins.base:
+        records, oid = first[oid]["records"], first[oid]["parent"]
+        entries = {**{r["old_path"]: None for r in records}, **{r["path"]: r["after"] for r in records}, **entries}
+    return entries
+
+
 def _validate_contributions(payload, pins, fresh) -> None:
-    """A row per fresh record, each label recomputed, each overlap referenced once."""
-    overlaps, rows = payload["pending_overlaps"], payload["contributions"]
+    """A row per fresh record, each label recomputed, each overlap referenced once, each head entry the one
+    `_at_head` finds: where that is no file but a file lies below the path, a directory of whatever oid."""
+    overlaps, rows, at_head = payload["pending_overlaps"], payload["contributions"], _at_head(payload, pins)
     _require(isinstance(overlaps, list) and len(overlaps) == len(pins.pending_paths))
     by_id = {}
     for row, path in zip(overlaps, pins.pending_paths):
@@ -421,7 +433,7 @@ def _validate_contributions(payload, pins, fresh) -> None:
     referenced = []
     for row, record in zip(rows, fresh):
         _closed(row, ("path", "record_sha256", "head_entry", "live_entry", "edge_refs", "disposition", "pending", "id"))
-        path, label = row["path"], row["disposition"]
+        path, label, head = row["path"], row["disposition"], row["head_entry"]
         _require(path == record["path"] and row["record_sha256"] == record["sha256"]
                  and _entry(row["head_entry"]) and _entry(row["live_entry"])
                  and _same(row["edge_refs"], _refs(payload["edges"], path)) and label in DISPOSITIONS
@@ -429,6 +441,9 @@ def _validate_contributions(payload, pins, fresh) -> None:
                  and (label == "integrated") == (not process and _same(row["head_entry"], row["live_entry"]))
                  and (row["pending"] is not None) == (label == "candidate" and path in pins.pending_paths)
                  and _rehashed(row))
+        below = at_head[path] is None and any(e and name.startswith(path + "/") for name, e in at_head.items())
+        _require(_same(head, {"mode": "040000", "kind": "tree", "oid": (head or {}).get("oid")}) if below
+                 else _same(head, at_head[path]))
         if row["pending"] is not None:
             overlap = by_id.get(row["pending"], {})
             _require(_same([overlap.get(k) for k in ("path", "head_entry", "live_entry")],

@@ -12,7 +12,7 @@ from agent_tools.review_git import HistoryError
 from agent_tools.review_issue100 import (ISSUE_100_PINS, Issue100Error, derive_100, fresh_records, historical_records,
                                          validate_100, verify_archive)
 
-from .retained_review_test_support import issue100_fixture, snapshot, source_budget_env
+from .retained_review_test_support import git, issue100_fixture, snapshot, source_budget_env
 
 
 def rehashed(row, **change):
@@ -174,6 +174,45 @@ class Issue100Test(unittest.TestCase):
         overlap = payload["pending_overlaps"][0]
         changed = [rehashed(overlap, live_entry=overlap["head_entry"]), *payload["pending_overlaps"][1:]]
         self.refused(lambda: validate_100({**payload, "pending_overlaps": changed}, self.pins))
+
+    def test_rehashed_head_entry_is_bound_to_the_history(self):
+        """Each head entry is what the path's latest first-parent record leaves: here through a merge, a
+        rename and a file that became a directory."""
+        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        rows, overlaps = payload["contributions"], payload["pending_overlaps"]
+        merge = next(edge["commit"] for edge in payload["parent_edges"] if edge["parent_ordinal"] == 2)
+        self.assertEqual(payload["parent_edges"][-1], {"parent": merge, "commit": self.pins.head, "parent_ordinal": 1})
+
+        def forged(path, **change):
+            """`path`'s row changed, with its id, its overlap's head entry and id and the reference recomputed."""
+            n = next(n for n, row in enumerate(rows) if row["path"] == path)
+            row, pending = {**rows[n], **change}, list(overlaps)
+            for m, overlap in enumerate(overlaps):
+                if overlap["id"] == row["pending"]:
+                    pending[m] = rehashed(overlap, head_entry=row["head_entry"])
+                    row["pending"] = pending[m]["id"]
+            return {**payload, "contributions": [*rows[:n], rehashed(row), *rows[n + 1:]], "pending_overlaps": pending}
+
+        at_head = {}
+        for row in rows:  # Git's own answer, read apart from the module, rebuilds every row
+            listed = git(self.repo, "ls-tree", self.pins.head, "--", row["path"])
+            at_head[row["path"]] = dict(zip(("mode", "kind", "oid"), listed.split("\t")[0].split())) if listed else None
+            validate_100(forged(row["path"], head_entry=at_head[row["path"]]), self.pins)
+        self.assertEqual(at_head["legacy"]["kind"], "tree")
+        blob, side = at_head["src/c.txt"], overlaps[0]["base_entry"]  # ci.yaml as the merged side branch has it
+        self.assertEqual((overlaps[0]["path"], rows[0]["pending"]), ("ci.yaml", overlaps[0]["id"]))
+        cases = {"ordinary_oid": ("src/c.txt", {"head_entry": {**blob, "oid": "f" * 40}}),
+                 "ordinary_mode": ("src/c.txt", {"head_entry": {**blob, "mode": "100755"}}),
+                 "process_oid": ("docs/plan.md", {"head_entry": blob}),
+                 "integrated_pair": ("src/a.txt", {"head_entry": blob, "live_entry": blob}),
+                 "pending_side_branch_entry": ("ci.yaml", {"head_entry": side}),
+                 "directory_as_nothing": ("legacy", {"head_entry": None}),
+                 "directory_as_a_file": ("legacy", {"head_entry": blob}),
+                 "directory_mode": ("legacy", {"head_entry": {**at_head["legacy"], "mode": "100644"}}),
+                 "file_as_a_directory": ("src/c.txt", {"head_entry": at_head["legacy"]})}
+        for name, (path, change) in cases.items():
+            with self.subTest(case=name):
+                self.refused(lambda: validate_100(forged(path, **change), self.pins))
 
     def test_summary_disagreeing_with_tables_is_invalid(self):
         payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
