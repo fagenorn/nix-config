@@ -28,8 +28,9 @@ Every round: the implementer fixes, re-runs the covering tests, appends a fix re
 
 **Lifecycle workers.** Under a lifecycle identity, every fix round's
 implementer — resumed or fresh — is registered as SKILL.md's
-`### Lifecycle workers` says before the round and gets a fresh `worker_id`
-in its prompt. Run the release when it returns. A `launch fence refused`
+`### Lifecycle workers` says before the round and gets a fresh `worker_id`.
+Its `Lifecycle worker:` line goes in the prompt of a fresh implementer, and in
+the resume message of a resumed one. Run the release when it returns. A `launch fence refused`
 report ends the loop.
 
 The re-review is scoped: run `scripts/review-package PLAN_FILE FIX_BASE HEAD`

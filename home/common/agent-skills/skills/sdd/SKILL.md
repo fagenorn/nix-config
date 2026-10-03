@@ -109,8 +109,9 @@ When that agent returns, run
 A resumed agent is registered again and gets a fresh `worker_id`.
 Read-only reviewers are not registered.
 
-A report of `BLOCKED` with `launch fence refused: <reason>` means this
-launch was superseded: release that worker, make no retry and no re-dispatch,
+A report of `BLOCKED` with `launch fence refused: <reason>` means that
+worker's launch fence refused its commit. Whatever the reason, treat this
+launch as superseded: release that worker, make no retry and no re-dispatch,
 and follow from-issue's superseded route — write nothing more, print
 `/from-issue <num> --auto` on its own line, and stop. Without a lifecycle
 identity none of this applies and workers commit with plain `git`.
@@ -144,7 +145,7 @@ Template: [implementer-prompt.md](implementer-prompt.md)
 - **DONE** → run `scripts/review-package PLAN_FILE BASE HEAD` (BASE from step 1 — never `HEAD~1`, which silently drops all but the last commit), capture its compact JSON stdout unchanged, and pass those bytes through `artifact-budget validate-report --boundary producer --input -` before the step-3 gate.
 - **DONE_WITH_CONCERNS** → correctness/scope concerns get addressed before review; observations get noted, review proceeds.
 - **NEEDS_CONTEXT** → provide it, re-dispatch.
-- **BLOCKED** → context problem: add context, re-dispatch same tier. Reasoning problem: re-dispatch `implementer` (or bump the model). Too large: split it. Plan wrong: escalate to the human. Never force an unchanged retry — if the implementer said it's stuck, something must change.
+- **BLOCKED** → a `launch fence refused` report follows `### Lifecycle workers` and is never re-dispatched. Otherwise: context problem: add context, re-dispatch same tier. Reasoning problem: re-dispatch `implementer` (or bump the model). Too large: split it. Plan wrong: escalate to the human. Never force an unchanged retry — if the implementer said it's stuck, something must change.
 
 If the implementer asks questions — before or during — answer completely; don't rush it.
 

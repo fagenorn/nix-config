@@ -107,8 +107,10 @@ Subagent (the explicitly selected implementer or mechanic above):
     commit as
     `launch-commit --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <git commit arguments>`
     with the three values from that line, and never run `git commit` directly.
-    If it exits 3, it printed one JSON line whose `reason` names why your
-    launch is no longer live: make no further change, commit or push, and
+    If you have been given more than one `Lifecycle worker:` line (a resume
+    brings a fresh one), only the most recent one governs: the earlier ones
+    are released. If `launch-commit` exits 3, it printed one JSON line whose
+    `reason` names why your launch is no longer live: make no further change, commit or push, and
     report status BLOCKED with `launch fence refused: <reason>`.
 
     ## Report Format

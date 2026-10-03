@@ -104,7 +104,7 @@
         "from-issue/REVIEW-CONTRACT.md": "handed to the plan reviewer by absolute path, never read into this conversation"
       },
       "ceiling_bytes": {
-        "claude": 153722
+        "claude": 154077
       },
       "note": "Dispatcher-owned `--auto` run of Phases 0–7 in one owner: from-issue with AUTO.md, sdd at Phase 6 and the ship prompt at Phase 7. It carries from-issue's top-level acquisition routes and AUTO.md's rollover, which its route never takes (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `sdd/SKILL.md` and `sdd/final-review.md` (#155 D10). Ceiling raised for #198: from-issue/SKILL.md grew with the Phase-7 dispatch-gap fallback, AUTO.md with its relay and the ship prompt with the gap line (#155 D10). On that fallback's named branch this owner runs ship-issue itself, so the ship owner's documents are conditional here (#155 D7). Ceiling re-measured after merging origin/main at 6ab576e, where #195's and #198's raises met (#155 D19). Ceiling raised for #191's validated `progress` and `suspend` replies, which grew `from-issue/SKILL.md` (#155 D10). Ceiling raised for #192: AUTO.md's fresh delegated owner checks its worktree against the contract's remove_worktree target (#155 D10). Ceiling raised for #192's review fix: a remainder owner probes reviewer dispatch before a post-selection sync (#155 D10). Ceiling raised for #221: from-issue/SKILL.md's durable interactive route answers control's `delivery_contract` (#221 D10). Ceiling raised for #222: sdd and from-issue Phase 6 register writing workers and fence their commits (#155 D10)."
     },
@@ -208,8 +208,8 @@
         "codex-collaboration/PLAN-REVIEW.md": "plan-review ran at Phase 5"
       },
       "ceiling_bytes": {
-        "claude": 144845,
-        "codex": 144845
+        "claude": 145200,
+        "codex": 145200
       },
       "note": "Post-rollover Phases 6–7: from-issue with AUTO.md, sdd and the ship prompt; the Phase 0–5 documents stay unread. It carries from-issue's top-level acquisition routes, whose route-scoping is deferred (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `sdd/SKILL.md`, `sdd/correctness-reviewer-prompt.md` and `sdd/final-review.md` (#155 D10). Ceiling raised for #198: from-issue/SKILL.md grew with the Phase-7 dispatch-gap fallback, AUTO.md with its relay and the ship prompt with the gap line (#155 D10). On that fallback's named branch this owner runs ship-issue itself, so the ship owner's documents are conditional here (#155 D7). Ceiling re-measured after merging origin/main at 6ab576e, where #195's and #198's raises met (#155 D19). Ceiling raised for #191's validated `progress` and `suspend` replies, which grew `from-issue/SKILL.md` (#155 D10). Ceiling raised for #192: AUTO.md's fresh delegated owner checks its worktree against the contract's remove_worktree target (#155 D10). Ceiling raised for #192's review fix: a remainder owner probes reviewer dispatch before a post-selection sync (#155 D10). Ceiling raised for #221: from-issue/SKILL.md's durable interactive route answers control's `delivery_contract` (#221 D10). Ceiling raised for #222: sdd and from-issue Phase 6 register writing workers and fence their commits (#155 D10)."
     },

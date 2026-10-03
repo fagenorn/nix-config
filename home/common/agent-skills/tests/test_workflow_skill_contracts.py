@@ -3957,12 +3957,13 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
         self.assert_ordered(
             self.read(SDD_DIR / "implementer-prompt.md"), "## Lifecycle Worker",
             "Lifecycle worker:", self.COMMIT, "never run `git commit` directly",
-            "launch fence refused: <reason>", "## Report Format")
+            "only the most recent one governs", "launch fence refused: <reason>",
+            "## Report Format")
 
     def test_each_fix_round_registers_afresh(self):
         self.assert_ordered(
             self.read(SDD_DIR / "fix-loop.md"), "Lifecycle workers",
-            "fresh `worker_id`", "release")
+            "fresh `worker_id`", "resume message", "Run the release when it returns")
 
     def test_from_issue_phase_6_hands_sdd_its_lifecycle_identity(self):
         self.assert_ordered(
