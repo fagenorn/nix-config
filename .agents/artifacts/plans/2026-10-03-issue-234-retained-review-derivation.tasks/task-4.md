@@ -71,7 +71,7 @@ class WitnessTest(unittest.TestCase):
 - [ ] **Step 2: Run the tests and watch them fail.** Run `PYTHONPATH=python python3 -m unittest tests/test_review_witness.py`. The expected result is an ImportError.
 - [ ] **Step 3: Implement the module.** Implement the interfaces above. Error codes are short slugs, among them `anchor_digest`, `member_set`, `member_digest`, `noncanonical`, `component_mismatch` and `tool_closure`.
 - [ ] **Step 4: Verify.** The focused command must pass, and `just agent-workflow-tests` must report zero failures. To confirm the check can fail: before Step 3, `grep -c review_witness justfile` prints `0`.
-- [ ] **Step 5: Commit.** Stage only these three files and commit `feat(review): authenticate retained bundles with an acyclic anchor (#234)`.
+- [ ] **Step 5: Commit.** Stage only these three files and commit `feat(review): anchor retained bundles acyclically (#234)`.
 
 ## Forecast basis
 
@@ -83,5 +83,5 @@ Estimates per D15:
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[120,120,120],"id":4,"records":[{"bounds":[{"added_lines":300,"boundary":"derive","deleted_lines":0,"record_bytes":15812,"support":{"covers":["t4-1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t4-1","last_task":4,"owner":4,"path":"python/agent_tools/review_witness.py"},{"bounds":[{"added_lines":260,"boundary":"derive","deleted_lines":0,"record_bytes":15272,"support":{"covers":["t4-2"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t4-2","last_task":4,"owner":4,"path":"tests/test_review_witness.py"},{"bounds":[{"added_lines":5,"boundary":"derive","deleted_lines":0,"record_bytes":3584,"support":{"covers":["t1-4","t2-4","t3-4","t4-3"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t4-3","last_task":8,"owner":4,"path":"justfile"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":4,"records":[{"bounds":[{"added_lines":300,"boundary":"derive","deleted_lines":0,"record_bytes":15812,"support":{"covers":["t4-1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t4-1","last_task":4,"owner":4,"path":"python/agent_tools/review_witness.py"},{"bounds":[{"added_lines":260,"boundary":"derive","deleted_lines":0,"record_bytes":15272,"support":{"covers":["t4-2"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t4-2","last_task":4,"owner":4,"path":"tests/test_review_witness.py"},{"bounds":[{"added_lines":5,"boundary":"derive","deleted_lines":0,"record_bytes":3584,"support":{"covers":["t1-4","t2-4","t3-4","t4-3"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t4-3","last_task":8,"owner":4,"path":"justfile"}]}}
 ```
