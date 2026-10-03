@@ -91,6 +91,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_artifact_budget.py \
     tests/test_agent_tools_canonical.py \
     tests/test_agent_tools_siblings.py \
+    tests/test_launch_commit.py \
     tests/test_transaction_core.py \
     tests/test_transaction_custody.py \
     tests/test_transaction_invocation.py \

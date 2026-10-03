@@ -44,6 +44,7 @@ let
     "conformance"
     "context-map-lint"
     "diff-scope"
+    "launch-commit"
     "promotion"
     "resolve-project"
   ];
