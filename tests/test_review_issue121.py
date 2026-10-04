@@ -150,6 +150,16 @@ class AncestryTest(Fixture, unittest.TestCase):
                 classify(self.repo, replace(self.pins, assignments=tuple(mutated)))
             self.assertEqual(caught.exception.code, "assignment_mismatch")
 
+    def test_last_assignment_must_be_the_pinned_head(self):
+        payload = derive_121(self.repo, self.pins, self.task7_pins, self.authority)
+        cases = {"short": replace(self.pins, assignments=self.pins.assignments[:-1]),
+                 "foreign_head": replace(self.pins, head="f" * 40),
+                 "empty": replace(self.pins, assignments=())}
+        for name, pins in cases.items():
+            with self.subTest(case=name), self.assertRaises(ContributionError) as caught:
+                validate_121(payload, pins, self.table)
+            self.assertEqual(caught.exception.code, "assignment_mismatch")
+
     def test_forged_or_wrong_key_signature_and_substituted_plan_blob_fail(self):
         anchors = plan_anchors(self.repo, self.pins)
         self.assertEqual(len(anchors), 9)

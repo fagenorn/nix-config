@@ -78,6 +78,9 @@ agent-workflow-tests:
     tests/test_review_task7.py \
     tests/test_review_issue121.py \
     tests/test_review_issue100.py \
+    tests/test_review_witness.py \
+    tests/test_review_derivation.py \
+    tests/test_review_replay.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
     home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_shell_example_contracts.py \
@@ -148,6 +151,27 @@ agent-installed-skill-tests: build
       tests/test_agent_tools_launchers.py \
       tests/test_promotion_installed.py \
       tests/test_impeccable_installed.py
+
+# Full-shape retained tier (#249): the real retained objects and archive under `root`. Not part of agent-workflow-tests.
+agent-retained-tests root: build
+  @set -- $(nix-store --query --requisites ./result \
+    | grep -- '-home-manager-files$' || true); \
+    if [ "$#" -ne 1 ]; then \
+      echo "expected exactly one built home-manager-files output; found $#" >&2; \
+      exit 1; \
+    fi; \
+    log=$(mktemp "${TMPDIR:-/tmp}/agent-retained-XXXXXX") || exit 1; \
+    trap 'rm -f -- "$log"' EXIT; \
+    status=0; \
+    AGENT_RETAINED_ROOT="{{root}}" AGENT_SKILLS_INSTALLED_HOME="$1" PYTHONPATH="{{agent_tools_path}}" \
+      python3 -m unittest -v tests/test_review_retained_full.py tests/test_agent_tools_launchers.py \
+      >"$log" 2>&1 || status=$?; \
+    cat "$log"; \
+    if [ "$status" -ne 0 ]; then exit "$status"; fi; \
+    if grep -Eq '\.\.\. skipped|^OK \(.*skipped=' "$log"; then \
+      echo "agent-retained-tests: a skipped test is not acceptance" >&2; \
+      exit 1; \
+    fi
 
 ## claude code
 # Print the Nix-generated ~/.claude/settings.json exactly as the next switch will write it.

@@ -421,7 +421,7 @@ def _numstat(scratch, base_tree, tree):
         raise EstimateError("unsupported_composition")
     fields = iter(fields)
     for row in fields:
-        parts = row.split(b"\t")
+        parts = row.split(b"\t", 2)
         if len(parts) != 3 or not all(part == b"-" or part.isdigit() for part in parts[:2]):
             raise EstimateError("unsupported_composition")
         path = parts[2] or (next(fields, None), next(fields, None))[1]  # a rename: old, then new

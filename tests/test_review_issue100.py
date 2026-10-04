@@ -77,21 +77,21 @@ class Issue100Test(unittest.TestCase):
                     self.assertEqual(caught.exception.code, code)
                     member.unlink(); member.write_bytes(original)
 
-    def test_none_digest_pin_never_switches_the_digest_check_off(self):
-        """Under a `None` pin a same-length forgery is refused, and so are the pinned bytes themselves."""
-        for field, name, old, new in (("producer_sha256", self.pins.producer_name, b"/archive/", b"/archivX/"),
-                                      ("manifest_sha256", self.pins.manifest_name, b'"subject":"c1"', b'"subject":"cX"')):
-            member = self.archive / name
-            original = member.read_bytes()
-            forged = original.replace(old, new)
-            self.assertEqual((len(forged), forged == original), (len(original), False))
-            for raw in (forged, original):
-                with self.subTest(field=field, forged=raw is forged):
-                    member.write_bytes(raw)
-                    with self.assertRaises(Issue100Error) as caught:
-                        verify_archive(self.archive, self.repo, replace(self.pins, **{field: None}))
-                    self.assertEqual(caught.exception.code, "archive_digest_mismatch")
-            member.write_bytes(original)
+    def malformed_digest_pin(self, field):
+        good = getattr(self.pins, field)
+        before = self.archive_bytes()
+        for value in (None, good[:-1], good.upper(), "sha256:" + good, good.encode()):
+            for call in (lambda p: verify_archive(self.archive, self.repo, p), lambda p: validate_100({}, p)):
+                with self.subTest(value=value), self.assertRaises(Issue100Error) as caught:
+                    call(replace(self.pins, **{field: value}))
+                self.assertEqual(caught.exception.code, "invalid_pins")
+        self.assertEqual(self.archive_bytes(), before)
+
+    def test_malformed_producer_digest_pin_is_invalid_pins(self):
+        self.malformed_digest_pin("producer_sha256")
+
+    def test_malformed_manifest_digest_pin_is_invalid_pins(self):
+        self.malformed_digest_pin("manifest_sha256")
 
     def test_digest_pinned_producer_without_an_artifact_path_is_an_archive_mismatch(self):
         member = self.archive / self.pins.producer_name

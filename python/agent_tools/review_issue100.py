@@ -179,11 +179,13 @@ def _authenticated():
 
 
 def _checked(pins: Issue100Pins) -> Issue100Pins:
-    """Closed pins over R3's criteria, each text hashing to its original digest."""
+    """Closed pins over R3's criteria, each text hashing to its original digest; each archive digest pin
+    is a `str` of 64 lowercase hex."""
     p, bad = pins, "invalid_pins"
     _require(isinstance(p, Issue100Pins), bad)
     pending, domains = p.pending_paths, (p.historical, p.fresh)
     _require(all(_hex(v) for v in (p.base, p.head, p.live)) and isinstance(p.manifest_name, str)
+             and all(_hex(v, 64) for v in (p.producer_sha256, p.manifest_sha256))
              and p.manifest_name.endswith(".json") and p.producer_name != p.manifest_name
              and all(type(n) is int and n > 0 for n in (p.producer_bytes, p.manifest_bytes))
              and isinstance(p.process_paths, frozenset) and all(_text(path) for path in p.process_paths)

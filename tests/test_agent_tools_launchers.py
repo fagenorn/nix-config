@@ -38,14 +38,18 @@ TIMEOUT_SECONDS = 60
 # and import `agent_tools.host_admission` from source (#177 D6, D13). #178
 # deletes this entry with them.
 NOT_LAUNCHERS = ("workflow-state",)
-# The commands #175, #179 and #177 accepted as launchers: a floor, not the full
+# The commands #175, #179, #177 and #249 accepted as launchers: a floor, not the full
 # set, which the command table in lib/agent-tools.nix owns (#175 D8).
 LAUNCHER_FLOOR = ("adopt-project", "agent-evidence", "agent-model-matrix", "conformance",
-                  "context-map-lint", "diff-scope", "resolve-project", "review-feasibility",
-                  "review-package")
+                  "context-map-lint", "derive-review-feasibility-fixtures", "diff-scope",
+                  "replay-retained", "resolve-project", "review-feasibility", "review-package")
+# The retained commands (#249) and their modules: refusal parity cases below.
+RETAINED = {"derive-review-feasibility-fixtures": "derive_review_feasibility_fixtures",
+            "replay-retained": "replay_retained"}
 # Legacy commands may treat --help as misuse, including parser-backed commands
 # with help disabled; pin each existing exit/stdout/stderr contract.
-MISUSE_USAGE = {"context-map-lint": "Usage: context-map-lint --repo-root "}
+MISUSE_USAGE = {"context-map-lint": "Usage: context-map-lint --repo-root ",
+                **{name: f"{name}: invalid: usage\n" for name in RETAINED}}
 
 
 class AgentToolsLauncherTest(unittest.TestCase):
@@ -366,6 +370,109 @@ class AgentToolsLauncherTest(unittest.TestCase):
         for a in (top / 'source-out/review.shards').iterdir():
             self.assertEqual(a.read_bytes(), (top / 'built-out/review.shards' / a.name).read_bytes())
         self.assertEqual(before, (git('status', '--porcelain'), git('rev-parse', 'HEAD^{tree}')))
+
+    def retained_pair(self, command, args):
+        """`(built, source)` outcomes of one retained command: (exit, stdout bytes, stderr bytes) each."""
+        source_env = dict(self.dependency_env(), PYTHONPATH=str(Path(__file__).resolve().parents[1] / "python"))
+        clean = self.hostile / "clean"; clean.mkdir(exist_ok=True)
+        runs = (([str(self.root / ".agents/bin" / command)], self.hostile_env(), self.hostile),
+                ([sys.executable, "-m", "agent_tools." + RETAINED[command]], source_env, clean))
+        outcomes = []
+        for argv, env, cwd in runs:
+            done = subprocess.run([*argv, *args], env=env, cwd=cwd, capture_output=True,
+                                  timeout=TIMEOUT_SECONDS, check=False)
+            self.assertNotIn(MARKER.encode(), done.stdout + done.stderr)
+            outcomes.append((done.returncode, done.stdout, done.stderr))
+        return outcomes
+
+    def test_retained_commands_refuse_alike_from_source_and_built(self):
+        existing = self.hostile / "exists"; existing.mkdir()
+        repo = self.hostile / "repo"; repo.mkdir()
+        # A repository input must answer `git rev-parse --git-common-dir`, or the refusal is `invalid_inputs`.
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True, timeout=TIMEOUT_SECONDS)
+        cases = (("replay-retained", "anchor_unreadable",
+                  ["--fixtures-dir", str(self.hostile / "missing"), "--expected-anchor-sha256", "sha256:" + "0" * 64]),
+                 ("replay-retained", "usage", ["--fixtures-dir", str(repo)]),
+                 ("derive-review-feasibility-fixtures", "output_exists",
+                  ["--issue-121-repo", str(repo), "--issue-100-repo", str(repo), "--archive-dir", str(repo),
+                   "--tool-repo", str(repo), "--tool-commit", "0" * 40, "--output-dir", str(existing)]))
+        for command, code, args in cases:
+            with self.subTest(command=command, code=code):
+                built, source = self.retained_pair(command, args)
+                self.assertEqual(built, source)
+                self.assertEqual(built, (2, b"", f"{command}: invalid: {code}\n".encode()))
+        self.assertEqual(list(existing.iterdir()), [])
+
+    def test_replay_refuses_a_forged_bundle_alike_from_source_and_built(self):
+        forged = self.hostile / "forged"; forged.mkdir()
+        names = ("derivation-anchor.json", "derivation-witness.json", "issue-100-derived.json",
+                 "issue-121.json", "task7-estimate.json")
+        for name in names:
+            (forged / name).write_bytes(b"{}\n")
+        digest = "sha256:" + hashlib.sha256(b"{}").hexdigest()   # telemetry_digest({}): coherent with the anchor
+        built, source = self.retained_pair(
+            "replay-retained", ["--fixtures-dir", str(forged), "--expected-anchor-sha256", digest])
+        self.assertEqual(built, source)
+        self.assertEqual(built, (2, b"", b"replay-retained: invalid: anchor_shape\n"))
+        self.assertEqual(sorted(p.name for p in forged.iterdir()), sorted(names))
+
+
+RETAINED_ROOT_ENV = "AGENT_RETAINED_ROOT"
+RETAINED_RECIPE = "just agent-retained-tests <root>"
+# One derivation over the real retained inputs takes minutes, not `TIMEOUT_SECONDS`.
+DERIVE_TIMEOUT_SECONDS = 60 * 60
+
+
+class RetainedLauncherTest(AgentToolsLauncherTest):
+    """Full-shape parity (#249): both retained commands, built and from source, over the real retained inputs.
+
+    Run: just agent-retained-tests <root>. That recipe sets AGENT_RETAINED_ROOT beside the built tree; without
+    it the class skips, which is never acceptance. The retained root is compared before and after each test.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if os.environ.get(RETAINED_ROOT_ENV) is None:
+            raise unittest.SkipTest(f"{RETAINED_ROOT_ENV} is unset; run `{RETAINED_RECIPE}` for the full-shape tier")
+        if os.environ.get(INSTALLED_HOME_ENV) is None:  # nothing skips once the retained root is named
+            raise AssertionError(f"{INSTALLED_HOME_ENV} is unset; `{RETAINED_RECIPE}` sets it")
+        super().setUpClass()
+
+    def setUp(self):
+        super().setUp()
+        # Imported here, not above: it imports `agent_tools`, which only the retained recipe puts on the path.
+        from . import test_review_retained_full as full
+        self.full, self.retained = full, full.retained_root()
+        full.watch_root(self, self.retained)
+
+    def test_real_derivation_and_replay_match_from_source_and_built(self):
+        derive, replay = RETAINED
+        clean = self.hostile / "clean"; clean.mkdir()
+        source_env = dict(self.dependency_env(), PYTHONPATH=str(Path(__file__).resolve().parents[1] / "python"))
+        runs = {"built": ([str(self.root / ".agents/bin" / derive)], self.hostile_env(), self.hostile),
+                "source": ([sys.executable, "-m", "agent_tools." + RETAINED[derive]], source_env, clean)}
+        commit, summaries, bundles = self.full.tool_commit(), {}, {}
+        for label, (argv, env, cwd) in runs.items():
+            out = self.hostile / f"{label}-bundle"
+            done = subprocess.run([*argv, *self.full.derive_argv(self.retained, commit, output_dir=out)], env=env,
+                                  cwd=cwd, capture_output=True, timeout=DERIVE_TIMEOUT_SECONDS, check=False)
+            self.assertEqual((done.returncode, done.stderr), (0, b""), label)
+            summaries[label], bundles[label] = done.stdout, {p.name: p.read_bytes() for p in out.iterdir()}
+        self.assertEqual(summaries["built"], summaries["source"])
+        self.assertEqual(bundles["built"], bundles["source"])
+        self.assertEqual(len(bundles["built"]), 5)
+        built, source = self.retained_pair(replay, [
+            "--fixtures-dir", str(self.hostile / "built-bundle"),
+            "--expected-anchor-sha256", json.loads(summaries["built"])["anchor_sha256"]])
+        self.assertEqual(built, source)
+        # Whatever the proof produced, the outcome is a row of the exit table that is not a refusal.
+        status, stdout, stderr = built
+        if status == 0:
+            self.assertEqual((json.loads(stdout)["schema_version"], stderr), (3, b""))
+        else:
+            self.assertEqual((status, stdout), (2, b""))
+            self.assertRegex(stderr.decode(), rf"\A{replay}: projection_unavailable: [a-z0-9.,-]+\n\Z")
+
 
 if __name__ == "__main__":
     unittest.main()

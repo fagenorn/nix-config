@@ -438,6 +438,15 @@ class Task7ModelTest(unittest.TestCase):
         self.assertEqual((rows[path]["added_lines"], rows[path]["deleted_lines"]), (designer.count(b"\n"), 0))
         self.assertEqual(snapshot(self.repo), before)
 
+    def test_compose_measures_a_path_holding_a_tab(self):
+        table = derive_task7(self.repo, self.pins)
+        base = self.pins.prerequisite_tree
+        final = tree_with(self.repo, base, b"src/tab\there.txt", b"one\ntwo\n")
+        rows = {r["path"]: r for r in compose(self.repo, table, self.pins, base_tree=base, final_tree=final,
+                                              limits=limits())}
+        row = rows["src/tab\there.txt"]
+        self.assertEqual((row["added_lines"], row["deleted_lines"]), (2, 0))
+
     def test_compose_refuses_rename_into_target_and_non_blob_target(self):
         table = derive_task7(self.repo, self.pins)
         into = commit_files(self.repo, {"src/app.txt": None, ".agents/runtime/.gitignore": b"app\n"}, "into")
