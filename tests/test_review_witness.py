@@ -7,8 +7,8 @@ from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import PACKING_POLICY_SHA256, RECORD_POLICY_SHA256
 from agent_tools.review_budget import describe
 from agent_tools.review_forecast import _derivation, canonical_bytes, raw_digest
-from agent_tools.review_issue100 import Issue100Error, derive_100, verify_archive
-from agent_tools.review_issue121 import derive_121, unavailable_ids
+from agent_tools.review_issue100 import Issue100Error, derive_100, expand_100, verify_archive
+from agent_tools.review_issue121 import ContributionError, derive_121, expand_121, unavailable_ids
 from agent_tools.review_task7 import EstimateError, derive_task7
 from agent_tools.review_witness import (ANCHOR_MAX_BYTES, ANCHOR_NAME, MEMBER_MAX_BYTES, PAYLOAD_NAMES, WitnessError,
                                         authenticate, build_anchor, build_witness, tool_closure, validate_bundle,
@@ -53,12 +53,18 @@ def derived(tmp, **shape):
     return components, payloads, pins
 
 
+def models(payloads):
+    """What the witness tables digest: the payloads, with the two retained payloads expanded to their models."""
+    return {**payloads, "issue-100-derived.json": expand_100(payloads["issue-100-derived.json"]),
+            "issue-121.json": expand_121(payloads["issue-121.json"])}
+
+
 def bound(components, payloads):
     """`(anchor, raw)` with every in-bundle digest recomputed: the test-only trust injection."""
     components = {**components, "estimate": {**components["estimate"],
                                              "table_sha256": telemetry_digest(payloads["task7-estimate.json"])}}
     raw = {name: canonical_bytes(payloads[name]) for name in FIXTURES}
-    raw["derivation-witness.json"] = canonical_bytes(build_witness(components, payloads, raw))
+    raw["derivation-witness.json"] = canonical_bytes(build_witness(components, models(payloads), raw))
     return build_anchor(components, raw), raw
 
 
@@ -124,7 +130,7 @@ class WitnessTest(unittest.TestCase):
         control = validate_bundle(*authenticate(self.dir, self.expected), **self.kwargs())
         self.assertEqual(unavailable_ids(control["issue-121.json"]), ("tasks-1-3", "tasks-4-6"))
         hundred = copy.deepcopy(self.payloads["issue-100-derived.json"])
-        hundred["summary"]["integrated"] += 1
+        hundred["process"] = []  # the process path relabelled: neither its label nor the counts are the pinned ones
         table = copy.deepcopy(self.payloads["task7-estimate.json"])
         table["rows"] = table["rows"][:-1]
         for name, broken, error in (("issue-100-derived.json", hundred, Issue100Error),
@@ -141,7 +147,8 @@ class WitnessTest(unittest.TestCase):
         self.assertEqual(anchor, {"schema_version": 2, "kind": "review-feasibility-derivation-anchor",
                                   **self.components, "payload": payload})
         self.assertEqual(validate_bundle(anchor, raw, **self.kwargs()),
-                         {**self.payloads, WITNESS: json.loads(raw[WITNESS])})
+                         {**models(self.payloads), WITNESS: json.loads(raw[WITNESS])})
+        self.assertEqual([json.loads(raw[name])["schema_version"] for name in FIXTURES[:2]], [2, 4])
 
     def test_replacement_anchor_fails_the_unchanged_digest(self):
         self.write({**self.anchor, "tool": {**self.anchor["tool"], "commit": "0" * 40}})
@@ -212,7 +219,7 @@ class WitnessTest(unittest.TestCase):
                      **self.kwargs())
 
     def test_witness_binds_components_fixtures_tables_and_policies(self):
-        witness, (hundred, issue121, estimate) = json.loads(self.raw[WITNESS]), map(self.payloads.get, FIXTURES)
+        witness, (hundred, issue121, estimate) = json.loads(self.raw[WITNESS]), map(models(self.payloads).get, FIXTURES)
         self.assertEqual(witness["components"], self.components)
         self.assertEqual(witness["fixtures"], [row(self.raw, name) for name in FIXTURES])
         named = {"issue-121.json": {name: issue121[name] for name in ("classes", "edges", "anchors", "records")},
@@ -252,20 +259,30 @@ class WitnessTest(unittest.TestCase):
         self.refused("policy_mismatch", validate_bundle, *bound({**parts, "tool": policy}, self.payloads),
                      **self.kwargs())
         stale = {**parts, "estimate": {**parts["estimate"], "table_sha256": flip(parts["estimate"]["table_sha256"])}}
-        raw = {**self.raw, WITNESS: canonical_bytes(build_witness(stale, self.payloads, self.raw))}
+        raw = {**self.raw, WITNESS: canonical_bytes(build_witness(stale, models(self.payloads), self.raw))}
         self.refused("component_mismatch", validate_bundle, build_anchor(stale, raw), raw, **self.kwargs())
 
     def test_forged_issue_121_head_tree_is_component_mismatch(self):
         tree = flip(self.components["issue_121"]["tree"])  # RP16: the pins determine the head's tree
-        for spot in ("actual", "projected", 2):
+        for spot in (0, 1, 4):
             forged = copy.deepcopy(self.payloads["issue-121.json"])
-            row = forged["boundaries" if spot == 2 else "aggregate"][spot]
+            row = forged["outcomes"][spot]
             row["result_tree"] = tree
-            if spot == 2:
+            if spot == 4:
                 row["prerequisite"]["tree"] = tree
             with self.subTest(spot):
                 self.refused("component_mismatch", validate_bundle,
                              *bound(self.components, {**self.payloads, "issue-121.json": forged}), **self.kwargs())
+
+    def test_source_encoded_member_is_invalid_payload_whatever_its_witness(self):
+        clean = models(self.payloads)
+        for name, error in (("issue-121.json", ContributionError), ("issue-100-derived.json", Issue100Error)):
+            raw = {**self.raw, name: canonical_bytes(clean[name])}  # SOURCE's encoding of the same facts
+            raw[WITNESS] = canonical_bytes(build_witness(self.components, clean, raw))
+            with self.subTest(member=name):
+                with self.assertRaises(error) as caught:
+                    validate_bundle(build_anchor(self.components, raw), raw, **self.kwargs())
+                self.assertEqual(caught.exception.code, "invalid_payload")
 
     def test_stale_table_digest_or_policy_is_table_mismatch(self):
         witness, key = json.loads(self.raw[WITNESS]), "issue-121.json#records"

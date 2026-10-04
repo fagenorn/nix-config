@@ -5,7 +5,9 @@ the five bundle files `review_witness` defines. It refuses a bad input or
 output before it reads a Git object, requires the running `agent_tools` package
 to be the tool commit's, derives the three fixture payloads with SOURCE's
 derivers, builds the witness and the anchor over them, and runs
-`validate_bundle`, the validation replay runs, before it publishes.
+`validate_bundle`, the validation replay runs, before it publishes. The
+issue-100 and issue-121 files are the compact payloads; the witness digests the
+tables of their models, which `expand_100` and `expand_121` yield (issue 254).
 
 Every output byte is `canonical_bytes` of a value the pins, the repositories,
 the archive and the budget authority determine: no path, clock, hostname,
@@ -26,8 +28,8 @@ from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import PACKING_POLICY_SHA256, RECORD_POLICY_SHA256, GenerationError, _run_git
 from agent_tools.review_budget import BudgetAuthority
 from agent_tools.review_forecast import canonical_bytes, raw_digest
-from agent_tools.review_issue100 import Issue100Pins, derive_100, verify_archive
-from agent_tools.review_issue121 import Issue121Pins, derive_121
+from agent_tools.review_issue100 import Issue100Pins, derive_100, expand_100, verify_archive
+from agent_tools.review_issue121 import Issue121Pins, derive_121, expand_121
 from agent_tools.review_task7 import Task7Pins, derive_task7
 from agent_tools.review_witness import (ANCHOR_MAX_BYTES, ANCHOR_NAME, MEMBER_MAX_BYTES, PAYLOAD_NAMES, build_anchor,
                                         build_witness, tool_closure, validate_bundle, verify_running_closure)
@@ -110,7 +112,8 @@ def derive_bundle(inputs: DeriveInputs, *, task7_pins: Task7Pins, issue121_pins:
        repository as both its issue and its live repository (RP4);
     4. each payload is encoded, and one above `MEMBER_MAX_BYTES` is `member_oversize`;
     5. the witness, held to the same bound, and then the anchor, held to `ANCHOR_MAX_BYTES` under the same
-       code, are built over the five component groups, each assembled once (RP16);
+       code, are built over the five component groups, each assembled once (RP16); the witness's tables
+       are those of the two retained payloads' expansions and of the estimate table;
     6. `validate_bundle` accepts the anchor and the four raw members;
     7. the files are written into one private scratch directory beside the output, which is renamed onto
        the output. A failure from there on removes the scratch, so it leaves neither output nor scratch.
@@ -136,7 +139,9 @@ def derive_bundle(inputs: DeriveInputs, *, task7_pins: Task7Pins, issue121_pins:
         "estimate": {**{name: getattr(task7_pins, name) for name in (
             "prerequisite_commit", "prerequisite_tree", "plan_root_blob", "task7_blob", "model_version")},
             "table_sha256": telemetry_digest(table)}}
-    raw[_WITNESS] = _encoded(build_witness(components, payloads, raw), MEMBER_MAX_BYTES)
+    models = {**payloads, _ISSUE_100: expand_100(payloads[_ISSUE_100]),
+              _ISSUE_121: expand_121(payloads[_ISSUE_121])}
+    raw[_WITNESS] = _encoded(build_witness(components, models, raw), MEMBER_MAX_BYTES)
     anchor = build_anchor(components, raw)
     files = {**raw, ANCHOR_NAME: _encoded(anchor, ANCHOR_MAX_BYTES)}
     validate_bundle(anchor, raw, task7_pins=task7_pins, issue121_pins=issue121_pins, issue100_pins=issue100_pins)

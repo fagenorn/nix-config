@@ -9,8 +9,8 @@ from agent_tools.review_actual import RECORD_POLICY_SHA256
 from agent_tools.review_budget import describe
 from agent_tools.review_forecast import ForecastError
 from agent_tools.review_git import HistoryError
-from agent_tools.review_issue100 import (ISSUE_100_PINS, Issue100Error, derive_100, fresh_records, historical_records,
-                                         validate_100, verify_archive)
+from agent_tools.review_issue100 import (ISSUE_100_PINS, Issue100Error, compact_100, derive_100, fresh_records,
+                                         historical_records, model_100, validate_100, verify_archive)
 
 from .retained_review_test_support import git, issue100_fixture, snapshot, source_budget_env
 
@@ -18,6 +18,11 @@ from .retained_review_test_support import git, issue100_fixture, snapshot, sourc
 def rehashed(row, **change):
     body = {**{k: v for k, v in row.items() if k != "id"}, **change}
     return {**body, "id": telemetry_digest(body)}
+
+
+def validated(model, pins):
+    """The model `validate_100` returns for the payload of `model`."""
+    return validate_100(compact_100(model), pins)
 
 
 class Issue100Test(unittest.TestCase):
@@ -53,8 +58,11 @@ class Issue100Test(unittest.TestCase):
 
     def test_derive_validates_and_preserves_inputs(self):
         before = self.archive_bytes(), snapshot(self.repo), snapshot(self.live)
-        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
-        validate_100(payload, self.pins)
+        payload = model_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        self.assertEqual(validated(payload, self.pins), payload)
+        self.assertEqual(derive_100(self.repo, self.live, self.archive, self.pins, self.limits), compact_100(payload))
+        for malformed in ({}, None, {**payload, "criteria": [1]}):  # no member, no object, a criterion that is none
+            self.refused(lambda: compact_100(malformed))
         merges = [e for e in payload["parent_edges"] if e["parent_ordinal"] > 1]
         self.assertEqual(len(merges), self.pins.expected_counts["merge_edges"])
         self.assertGreater(self.pins.expected_counts["merge_edges"], 0)
@@ -105,25 +113,25 @@ class Issue100Test(unittest.TestCase):
         self.assertEqual(caught.exception.code, "archive_mismatch")
 
     def test_domain_label_or_policy_swap_is_invalid(self):
-        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        payload = model_100(self.repo, self.live, self.archive, self.pins, self.limits)
         tables = payload["tables"]
         h, f = tables["historical"]["record_table_policy"], tables["fresh"]["record_table_policy"]
         for historical, fresh in ((f, h), ({**h, "domain": f["domain"]}, f),
                                   ({**h, "policy_sha256": f["policy_sha256"]}, f)):
             swapped = {**payload, "tables": {"historical": {**tables["historical"], "record_table_policy": historical},
                                              "fresh": {**tables["fresh"], "record_table_policy": fresh}}}
-            self.refused(lambda: validate_100(swapped, self.pins))
+            self.refused(lambda: validated(swapped, self.pins))
 
     def test_rehashed_edge_order_or_coverage_change_is_invalid(self):
-        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        payload = model_100(self.repo, self.live, self.archive, self.pins, self.limits)
         edges = payload["parent_edges"]
         for changed in ([edges[1], edges[0], *edges[2:]], edges[:-1],
                         [*edges[:-1], {**edges[-1], "parent": self.pins.live}]):
-            self.refused(lambda: validate_100({**payload, "parent_edges": changed}, self.pins))
+            self.refused(lambda: validated({**payload, "parent_edges": changed}, self.pins))
 
     def test_foreign_head_substituted_throughout_the_history_is_invalid(self):
         """`range.commits` ends at the pinned head, even when both edge tables agree on a substitute."""
-        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        payload = model_100(self.repo, self.live, self.archive, self.pins, self.limits)
         commits, foreign = payload["range"]["commits"], "f" * 40
         self.assertEqual((commits[-1], foreign in commits), (self.pins.head, False))
 
@@ -137,28 +145,28 @@ class Issue100Test(unittest.TestCase):
                   "parent_edges": ends(payload["parent_edges"]), "edges": ends(payload["edges"])}
         self.assertEqual(forged["range"]["head"], self.pins.head)
         with self.assertRaises(Issue100Error) as caught:
-            validate_100(forged, self.pins)
+            validated(forged, self.pins)
         self.assertEqual(caught.exception.code, "invalid_payload")
 
     def test_consistently_rehashed_edge_tables_are_invalid(self):
         """Both edge levels changed together, with every contribution's references and id recomputed."""
-        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        payload = model_100(self.repo, self.live, self.archive, self.pins, self.limits)
         raw, edges = payload["parent_edges"], payload["edges"]
         pairs = list(zip(raw, edges))
-        validate_100(self.rebuilt(payload, pairs), self.pins)  # the independent rebuild agrees with derivation
+        validated(self.rebuilt(payload, pairs), self.pins)  # the independent rebuild agrees with derivation
         merge = next(n for n, (p, _) in enumerate(pairs) if p["parent_ordinal"] == 2)
         outside = {"parent": self.pins.live}
         for changed in ([pairs[1], pairs[0], *pairs[2:]], pairs[:-1], [*pairs[:merge], *pairs[merge + 1:]],
                         [*pairs[:-1], tuple({**side, **outside} for side in pairs[-1])]):
-            self.refused(lambda: validate_100(self.rebuilt(payload, changed), self.pins))
+            self.refused(lambda: validated(self.rebuilt(payload, changed), self.pins))
 
     def test_rehashed_raw_parent_substitution_is_invalid(self):
         """A raw parent swapped for the base or an earlier range commit, as the real range's live commit is,
         keeps every count and reference: only the pinned digest of the raw parent edges refuses it (S23)."""
-        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        payload = model_100(self.repo, self.live, self.archive, self.pins, self.limits)
         commits = payload["range"]["commits"]
         pairs = list(zip(payload["parent_edges"], payload["edges"]))
-        validate_100(self.rebuilt(payload, pairs), self.pins)  # the clean rehashed control
+        validated(self.rebuilt(payload, pairs), self.pins)  # the clean rehashed control
         order = [self.pins.base, *commits]
         merge = next(n for n, (p, _) in enumerate(pairs) if p["parent_ordinal"] == 2)
         side = next(n for n, (p, _) in enumerate(pairs) if p["commit"] == pairs[merge][0]["parent"])
@@ -173,11 +181,11 @@ class Issue100Test(unittest.TestCase):
                 self.assertLess(order.index(parent), order.index(raw["commit"]))
                 changed = [*pairs[:n], tuple({**level, "parent": parent} for level in pairs[n]), *pairs[n + 1:]]
                 with self.assertRaises(Issue100Error) as caught:
-                    validate_100(self.rebuilt(payload, changed), self.pins)
+                    validated(self.rebuilt(payload, changed), self.pins)
                 self.assertEqual(caught.exception.code, "invalid_payload")
 
     def test_rehashed_contribution_fact_change_is_invalid(self):
-        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        payload = model_100(self.repo, self.live, self.archive, self.pins, self.limits)
         rows = payload["contributions"]
         by = {row["disposition"]: n for n, row in reversed(list(enumerate(rows)))}
         pending = next(n for n, row in enumerate(rows) if row["pending"] is not None)
@@ -197,15 +205,15 @@ class Issue100Test(unittest.TestCase):
         for index, change in changes:
             with self.subTest(index=index, change=change):
                 changed = [*rows[:index], rehashed(rows[index], **change), *rows[index + 1:]]
-                self.refused(lambda: validate_100({**payload, "contributions": changed}, self.pins))
+                self.refused(lambda: validated({**payload, "contributions": changed}, self.pins))
         overlap = payload["pending_overlaps"][0]
         changed = [rehashed(overlap, live_entry=overlap["head_entry"]), *payload["pending_overlaps"][1:]]
-        self.refused(lambda: validate_100({**payload, "pending_overlaps": changed}, self.pins))
+        self.refused(lambda: validated({**payload, "pending_overlaps": changed}, self.pins))
 
     def test_rehashed_head_entry_is_bound_to_the_history(self):
         """Each head entry is what the path's latest first-parent record leaves: here through a merge, a
         rename and a file that became a directory."""
-        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        payload = model_100(self.repo, self.live, self.archive, self.pins, self.limits)
         rows, overlaps = payload["contributions"], payload["pending_overlaps"]
         merge = next(edge["commit"] for edge in payload["parent_edges"] if edge["parent_ordinal"] == 2)
         self.assertEqual(payload["parent_edges"][-1], {"parent": merge, "commit": self.pins.head, "parent_ordinal": 1})
@@ -224,7 +232,7 @@ class Issue100Test(unittest.TestCase):
         for row in rows:  # Git's own answer, read apart from the module, rebuilds every row
             listed = git(self.repo, "ls-tree", self.pins.head, "--", row["path"])
             at_head[row["path"]] = dict(zip(("mode", "kind", "oid"), listed.split("\t")[0].split())) if listed else None
-            validate_100(forged(row["path"], head_entry=at_head[row["path"]]), self.pins)
+            validated(forged(row["path"], head_entry=at_head[row["path"]]), self.pins)
         self.assertEqual(at_head["legacy"]["kind"], "tree")
         blob, side = at_head["src/c.txt"], overlaps[0]["base_entry"]  # ci.yaml as the merged side branch has it
         self.assertEqual((overlaps[0]["path"], rows[0]["pending"]), ("ci.yaml", overlaps[0]["id"]))
@@ -239,14 +247,14 @@ class Issue100Test(unittest.TestCase):
                  "file_as_a_directory": ("src/c.txt", {"head_entry": at_head["legacy"]})}
         for name, (path, change) in cases.items():
             with self.subTest(case=name):
-                self.refused(lambda: validate_100(forged(path, **change), self.pins))
+                self.refused(lambda: validated(forged(path, **change), self.pins))
 
     def test_file_and_directory_swaps_within_one_commit_validate(self):
         """`edge_facts` names the directory an added file replaces, or a deleted file becomes, as a tree entry;
         a file entry forged onto that side is refused, however rehashed."""
-        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        payload = model_100(self.repo, self.live, self.archive, self.pins, self.limits)
         pairs = list(zip(payload["parent_edges"], payload["edges"]))
-        validate_100(self.rebuilt(payload, pairs), self.pins)  # the clean rehashed control
+        validated(self.rebuilt(payload, pairs), self.pins)  # the clean rehashed control
         sides = {("A", "tmp"): "before", ("D", "legacy"): "after"}
         found = [(e, n, sides[key]) for e, (_, edge) in enumerate(pairs) for n, r in enumerate(edge["records"])
                  if (key := (r["operation"], r["path"])) in sides]
@@ -261,49 +269,65 @@ class Issue100Test(unittest.TestCase):
                 records = [*edge["records"][:n], {**record, side: head["tmp"]}, *edge["records"][n + 1:]]
                 changed = [*pairs[:e], (raw, {**edge, "records": records}), *pairs[e + 1:]]
                 with self.assertRaises(Issue100Error) as caught:
-                    validate_100(self.rebuilt(payload, changed), self.pins)
+                    validated(self.rebuilt(payload, changed), self.pins)
                 self.assertEqual(caught.exception.code, "invalid_payload")
 
     def test_summary_disagreeing_with_tables_is_invalid(self):
-        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        payload = model_100(self.repo, self.live, self.archive, self.pins, self.limits)
         summary = {**payload["summary"], "integrated": payload["summary"]["integrated"] + 1}
-        self.refused(lambda: validate_100({**payload, "summary": summary}, self.pins))
+        self.refused(lambda: validated({**payload, "summary": summary}, self.pins))
 
     def test_edge_record_count_is_recomputed(self):
-        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        payload = model_100(self.repo, self.live, self.archive, self.pins, self.limits)
         edges = payload["edges"]
         used = {tuple(ref) for row in payload["contributions"] for ref in row["edge_refs"]}
         # The last record of an edge that no contribution references: only the count can change.
         n = next(n for n, edge in enumerate(edges) if edge["records"] and (n, len(edge["records"]) - 1) not in used)
         changed = [*edges[:n], {**edges[n], "records": edges[n]["records"][:-1]}, *edges[n + 1:]]
         with self.assertRaises(Issue100Error) as caught:
-            validate_100({**payload, "edges": changed}, self.pins)
+            validated({**payload, "edges": changed}, self.pins)
         self.assertEqual(caught.exception.code, "invalid_payload")
         summary = {**payload["summary"], "edge_records": payload["summary"]["edge_records"] - 1}
-        self.refused(lambda: validate_100({**payload, "edges": changed, "summary": summary}, self.pins))
+        self.refused(lambda: validated({**payload, "edges": changed, "summary": summary}, self.pins))
+
+    def test_edge_record_of_another_shape_is_invalid(self):
+        payload = model_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        cases = {"renamed_to": lambda r: dict(operation="R100", path="", after=r["before"]) if not r["after"] else {},
+                 "renamed_from": lambda r: {"old_path": ""} if r["operation"] == "R100" else {},
+                 "operation": lambda r: {"operation": "X"} if r["operation"] == "M" else {},
+                 "negative_bytes": lambda r: {"record_bytes": -1} if r["operation"] == "M" else {}}
+        for name, change in cases.items():
+            edges = [{**edge, "records": [{**r, **change(r)} for r in edge["records"]]} for edge in payload["edges"]]
+            with self.subTest(case=name):
+                pairs = list(zip(payload["parent_edges"], edges))
+                self.refused(lambda: validated(self.rebuilt(payload, pairs), self.pins))
 
     def test_missing_superseded_criterion_is_invalid(self):
-        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        payload = model_100(self.repo, self.live, self.archive, self.pins, self.limits)
         criteria = [row for row in payload["criteria"] if row["id"] != "AC-OLD-01"]
         self.assertEqual(len(criteria), len(payload["criteria"]) - 1)
-        self.refused(lambda: validate_100({**payload, "criteria": criteria}, self.pins))
+        self.refused(lambda: validated({**payload, "criteria": criteria}, self.pins))
         revived = [{**row, "state": "governing", "superseded_by": None} if row["id"] == "AC-OLD-01" else row
                    for row in payload["criteria"]]
-        self.refused(lambda: validate_100({**payload, "criteria": revived}, self.pins))
+        self.refused(lambda: validated({**payload, "criteria": revived}, self.pins))
+        lone = [{**payload["criteria"][0], "text": "\ud800"}, *payload["criteria"][1:]]  # a lone surrogate
+        self.refused(lambda: validated({**payload, "criteria": lone}, self.pins))
 
     def test_historical_bytes_never_bound_fresh(self):
         self.assertNotEqual(self.pins.historical.bytes, self.pins.fresh.bytes)
-        payload = derive_100(self.repo, self.live, self.archive, self.pins, self.limits)
+        payload = model_100(self.repo, self.live, self.archive, self.pins, self.limits)
         tables = payload["tables"]
         swapped = {**payload, "tables": {**tables, "fresh": {**tables["fresh"], "records": tables["historical"]["records"]}}}
-        self.refused(lambda: validate_100(swapped, self.pins))
+        self.refused(lambda: validated(swapped, self.pins))
         # Shape-valid: historical byte counts under the fresh paths and digests, so only the byte sum refuses.
         fresh, historical = tables["fresh"]["records"], tables["historical"]["records"]
         self.assertEqual(len(historical), len(fresh))
         borrowed = [{**record, "bytes": old["bytes"]} for record, old in zip(fresh, historical)]
         self.assertEqual(sum(record["bytes"] for record in borrowed), self.pins.historical.bytes)
         bound = {**payload, "tables": {**tables, "fresh": {**tables["fresh"], "records": borrowed}}}
-        self.refused(lambda: validate_100(bound, self.pins))
+        self.refused(lambda: validated(bound, self.pins))
+        longer = {"historical": {**tables["historical"], "records": [*historical, {"bytes": 0, "sha256": "0" * 64}]}}
+        self.refused(lambda: validated({**payload, "tables": {**tables, **longer}}, self.pins))  # the count refuses
 
     def test_inputs_unchanged_on_failure(self):
         before = self.archive_bytes(), snapshot(self.repo), snapshot(self.live)
