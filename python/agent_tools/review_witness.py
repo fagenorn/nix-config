@@ -183,10 +183,11 @@ def build_anchor(components: dict, raw: Mapping[str, bytes]) -> dict:
 
 
 def _anchor(raw: bytes) -> dict:
-    """The decoded anchor; `anchor_shape` unless it is the closed, canonical version-2 envelope."""
+    """The decoded anchor; `anchor_shape` unless it is the closed, canonical version-2 envelope. Bytes
+    nested too deeply to decode are `anchor_shape` too."""
     try:
         anchor = strict_json(raw)
-    except ForecastError as exc:
+    except (ForecastError, RecursionError) as exc:
         raise WitnessError("anchor_shape") from exc
     _require(_closed(anchor, ("schema_version", "kind", *_GROUPS, "payload"))
              and type(anchor["schema_version"]) is int and anchor["schema_version"] == 2
@@ -205,16 +206,19 @@ def authenticate(bundle_dir: Path, expected_anchor_sha256: str) -> tuple[dict, d
     """The anchor under the caller's digest and the four payloads' raw bytes under the anchor.
 
     The anchor is read below `ANCHOR_MAX_BYTES`, strictly decoded, required to be the closed canonical
-    envelope and compared with `expected_anchor_sha256`. The directory then holds exactly the five names,
-    each a regular file and not a symlink, and each payload is read up to its declared size (at most
-    `MEMBER_MAX_BYTES`) with its length and SHA-256 matching the anchor. No payload is decoded here.
+    envelope and compared with `expected_anchor_sha256`. A failed read is `anchor_unreadable`: a missing or
+    symlinked directory or anchor, or an anchor that is oversized or not a regular file. The directory then
+    holds exactly the five names, each a regular file and not a symlink, and each payload is read up to its
+    declared size (at most `MEMBER_MAX_BYTES`) with its length and SHA-256 matching the anchor. No payload is
+    decoded here.
     """
     _require(_digest(expected_anchor_sha256), "expected_digest")
     bundle_dir = Path(bundle_dir)
     try:
-        anchor = _anchor(read_regular(bundle_dir, ANCHOR_NAME, ANCHOR_MAX_BYTES))
-    except ForecastError as exc:
+        data = read_regular(bundle_dir, ANCHOR_NAME, ANCHOR_MAX_BYTES)
+    except (ForecastError, OSError) as exc:
         raise WitnessError("anchor_unreadable") from exc
+    anchor = _anchor(data)
     _require(telemetry_digest(anchor) == expected_anchor_sha256, "anchor_digest")
     names = {ANCHOR_NAME, *PAYLOAD_NAMES}
     _require(set(os.listdir(bundle_dir)) == names

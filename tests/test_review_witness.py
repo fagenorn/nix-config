@@ -156,6 +156,18 @@ class WitnessTest(unittest.TestCase):
         (self.dir / ANCHOR_NAME).write_bytes(b"{" * (ANCHOR_MAX_BYTES + 1))
         self.refused("anchor_unreadable", authenticate, self.dir, self.expected)
 
+    def test_missing_or_symlinked_anchor_is_unreadable_and_a_too_deep_one_is_shape(self):
+        anchor, link, moved = self.dir / ANCHOR_NAME, self.tmp / "link", self.tmp / "moved.json"
+        link.symlink_to(self.dir)  # a whole valid bundle, reached through a symlinked directory
+        for bundle in (self.tmp / "absent", link):
+            self.refused("anchor_unreadable", authenticate, bundle, self.expected)
+        anchor.rename(moved)
+        self.refused("anchor_unreadable", authenticate, self.dir, self.expected)
+        anchor.symlink_to(moved)
+        self.refused("anchor_unreadable", authenticate, self.dir, self.expected)
+        anchor.unlink(); anchor.write_bytes(b"[" * (ANCHOR_MAX_BYTES // 2) + b"]" * (ANCHOR_MAX_BYTES // 2))
+        self.refused("anchor_shape", authenticate, self.dir, self.expected)  # well-formed, nested past decoding
+
     def test_noncanonical_or_open_anchor_is_anchor_shape(self):
         for label, raw in (("indented", json.dumps(self.anchor, indent=1).encode() + b"\n"),
                            ("extra key", canonical_bytes({**self.anchor, "extra": 1})),
@@ -239,12 +251,16 @@ class WitnessTest(unittest.TestCase):
         policy = {**parts["tool"], "artifact_policy_sha256": flip(parts["tool"]["artifact_policy_sha256"])}
         self.refused("policy_mismatch", validate_bundle, *bound({**parts, "tool": policy}, self.payloads),
                      **self.kwargs())
+        stale = {**parts, "estimate": {**parts["estimate"], "table_sha256": flip(parts["estimate"]["table_sha256"])}}
+        raw = {**self.raw, WITNESS: canonical_bytes(build_witness(stale, self.payloads, self.raw))}
+        self.refused("component_mismatch", validate_bundle, build_anchor(stale, raw), raw, **self.kwargs())
 
     def test_stale_table_digest_or_policy_is_table_mismatch(self):
         witness, key = json.loads(self.raw[WITNESS]), "issue-121.json#records"
         (table, *tables), policies = witness["tables"], witness["table_policies"]
         policy = {**policies[key], "policy_sha256": flip(policies[key]["policy_sha256"])}
         for label, change in (("table", {"tables": [{**table, "sha256": flip(table["sha256"])}, *tables]}),
+                              ("rows", {"tables": [{**table, "rows": table["rows"] + 1}, *tables]}),
                               ("policy", {"table_policies": {**policies, key: policy}})):
             with self.subTest(label):
                 self.refused("table_mismatch", validate_bundle, *self.rewitnessed({**witness, **change}),
