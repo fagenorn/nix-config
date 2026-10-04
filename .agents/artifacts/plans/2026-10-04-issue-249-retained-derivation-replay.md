@@ -78,6 +78,10 @@ Planning G0 at `--completed-through 0`: at plan commit `9fcfdf9`, exit 0 and `co
 
 RP1 fixes the six tasks and Task 1's scope, with RP15 for its two consequences. RP2, RP3, RP7, RP8 and RP16 govern Task 2; RP4, RP5, RP6, RP9 and RP16 govern Task 3; RP2, RP8 and RP17 govern Task 4; parent D16 and RP12 govern Task 5; RP7, RP10 and RP11 govern Task 6; RP13 keeps the encodings; RP14 and RP18 govern the forecasts, reserves and G0 renewal.
 
+## Standards review provenance
+
+Reviewer Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated and read-only, base `218f5bc`, plan head `2dc6bc7`, no fallback. Four findings (2 Blocking, 2 Should fix), all verified against the live tree and accepted; none rejected or deferred: Task 5 runs the source side from a clean `cwd`; Task 6 maps the two digest-named adoption records to their placeholder rows and ignores punctuation-only policy lines; Task 3 adds a publication-failure cleanup case.
+
 ## Review feasibility delivery
 
 ```json

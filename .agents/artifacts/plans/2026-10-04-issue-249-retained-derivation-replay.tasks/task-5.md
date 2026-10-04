@@ -13,7 +13,7 @@ Two command-table rows and the portable source/built parity cases (spec § *Publ
 
 **Invariants:**
 - `commands` stays sorted: `"derive-review-feasibility-fixtures"` directly after `"context-map-lint"`, `"replay-retained"` directly after `"promotion"`. Nothing else in the Nix file changes; no wrapper and no second mapping.
-- Source and built runs of one case give the same exit code, stdout bytes and stderr bytes. The built run uses `self.hostile_env()` with the hostile directory as `cwd`; the source run is `sys.executable -m agent_tools.<module>` with `dict(self.dependency_env(), PYTHONPATH=<source python/>)`.
+- Source and built runs of one case give the same exit code, stdout bytes and stderr bytes. The built run uses `self.hostile_env()` with the hostile directory as `cwd`; the source run is `sys.executable -m agent_tools.<module>` with `dict(self.dependency_env(), PYTHONPATH=<source python/>)` from a clean `cwd` (`-m` puts the working directory ahead of `PYTHONPATH`, so the hostile package would win there).
 - No case needs a retained input, and no case may skip inside `just agent-installed-skill-tests`.
 - No CLAUDE.md or other living-document edit (parent D16).
 
@@ -26,11 +26,12 @@ RETAINED = {"derive-review-feasibility-fixtures": "derive_review_feasibility_fix
     def retained_pair(self, command, args):
         """`(built, source)` outcomes of one retained command: (exit, stdout bytes, stderr bytes) each."""
         source_env = dict(self.dependency_env(), PYTHONPATH=str(Path(__file__).resolve().parents[1] / "python"))
-        runs = (([str(self.root / ".agents/bin" / command)], self.hostile_env()),
-                ([sys.executable, "-m", "agent_tools." + RETAINED[command]], source_env))
+        clean = self.hostile / "clean"; clean.mkdir(exist_ok=True)
+        runs = (([str(self.root / ".agents/bin" / command)], self.hostile_env(), self.hostile),
+                ([sys.executable, "-m", "agent_tools." + RETAINED[command]], source_env, clean))
         outcomes = []
-        for argv, env in runs:
-            done = subprocess.run([*argv, *args], env=env, cwd=self.hostile, capture_output=True,
+        for argv, env, cwd in runs:
+            done = subprocess.run([*argv, *args], env=env, cwd=cwd, capture_output=True,
                                   timeout=TIMEOUT_SECONDS, check=False)
             self.assertNotIn(MARKER.encode(), done.stdout + done.stderr)
             outcomes.append((done.returncode, done.stdout, done.stderr))

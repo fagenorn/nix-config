@@ -77,7 +77,7 @@ class DerivationTest(unittest.TestCase):
         self.assertEqual((self.state(), self.leftovers()), (before, []))
 ```
 
-  Add these named cases with exact assertions; every refusal also asserts `leftovers() == []`, no output path, and `state()` unchanged:
+  Add these named cases with exact assertions; every refusal also asserts `leftovers() == []`, no output path, and `state()` unchanged. One of them, `test_publication_failure_removes_scratch`, patches `os.rename` in the derivation module to raise `OSError` (a failure after the scratch exists) and asserts the same three facts through `derive_bundle`, and exit 2 with `invalid: io_error` through `main`:
   - `test_summary_names_the_written_bundle`: `anchor_sha256 == telemetry_digest` of the decoded anchor file; `members` lists the five names sorted, each row's `bytes` and `raw_sha256` equal to the file; every file equals `canonical_bytes` of its decoded value.
   - `test_existing_or_dangling_output_is_output_exists`: an existing directory, an existing file, a dangling symlink, and an output whose parent is missing; the existing entries are untouched.
   - `test_aliasing_output_is_refused`: outputs `issue_121_repo/"out"`, `archive_dir/"out"`, `issue_100_repo/".git"/"out"`, and, with `tool_repo` replaced by a `git worktree add` checkout of the tool fixture, an output inside the tool fixture's `.git` → `output_aliases_input` each.
