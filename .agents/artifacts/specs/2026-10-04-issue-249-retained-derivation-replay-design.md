@@ -168,8 +168,8 @@ on `PATH` (parent D9), and its policy identity is bound in the `tool` group.
 3. **Payloads.** `derive_task7` on the issue-121 repository, then `derive_121`,
    then `derive_100` with the issue-100 repository as both its issue and live
    repository (RP4). Any `EstimateError` is fatal (RP5).
-4. **Encode** the three payloads; refuse a member above `MEMBER_MAX_BYTES`
-   (`member_oversize`).
+4. **Encode** the three payloads; refuse a member above `MEMBER_MAX_BYTES`,
+   and later an anchor above `ANCHOR_MAX_BYTES` (`member_oversize`, RP21).
 5. **Witness, then anchor**, as above.
 6. **Self-validate.** `validate_bundle` over the anchor and the raw members: the
    same function replay runs (parent D11, RP2).
@@ -182,7 +182,9 @@ It returns `{anchor_sha256, members}` over all five files in path order, each
 `{path, bytes, raw_sha256}`. The command prints `canonical_bytes` of it.
 
 **Determinism.** No clock, locale, hostname, path, environment value or
-directory order reaches an output. Two derivations are byte-identical.
+directory order reaches an output through this child's code. Two derivations
+on one host configuration are byte-identical. Git attributes and diff settings
+that change CORE's record view are outside this guarantee (RP24).
 
 **Inputs stay unchanged** by construction: derivation issues only read-only
 plumbing, SOURCE's scratch work happens in alternates-backed temporaries, and
@@ -211,7 +213,8 @@ Replay runs no Git, needs no budget authority and reads only `DIR`. Each parser'
    `component_mismatch`, `table_mismatch`); the components against the pins and
    policy constants (`component_mismatch`); `validate_task7`; `validate_121`
    with that table; `validate_100`; every measured outcome's
-   `artifact_policy_sha256` equal to the `tool` group's (`policy_mismatch`).
+   `artifact_policy_sha256` equal to the `tool` group's (`policy_mismatch`);
+   every measured issue-121 head tree equal to the pinned tree (RP22).
    The SOURCE validators already own the Git-free chain checks: issue 121's
    ordinal-1 chain from the pinned base through the pinned assignments, and
    issue 100's pinned raw-parent edges over the pinned range.
@@ -294,9 +297,11 @@ archive file fails. The five checks:
    the rehashed 31-edge table, and the derive command all refuse; the command
    exits 2 with empty stdout and no output directory.
 2. **Renderer.** The pinned adopt tool runs `plan` then `apply` in a disposable
-   clone with an ephemeral SSH key; every record of its commit, measured with
-   `actual_inputs_from_trees`, is at most its row bound. `verify --register` is
-   never run.
+   clone with an ephemeral SSH key; every record of the tree `apply` stages,
+   measured with `actual_inputs_from_trees`, is at most its row bound. At the
+   pinned commit `apply` stops at its own `workflow-verification-commands`
+   gate and makes no commit; the check asserts exactly that stop (RP23).
+   `verify --register` is never run.
 3. **Domains.** Archive and fresh issue-100 domains are exactly 1,005,707 B /
    115 records and 1,012,913 B / 115 records, distinct, and a label swap fails.
 4. **Substitution.** Over the real bundle, per RP7: each component,
@@ -465,6 +470,9 @@ issue-121 objects: an absent object fails closed.
 | RP19 | Witness refusals the spec left open: a witness whose `fixtures` differ from the payloads is `witness_shape`; witness `tables` follow fixture path order; a malformed `tool.artifact_policy_sha256` is `component_mismatch` | Task 2 review; each is the nearest closed code and the order is the one `build_witness` already emits | New codes for each case: the closed set is the spec's, and no consumer distinguishes them |
 | RP20 | In `authenticate`, any `OSError` while reading the anchor (missing directory, missing or symlinked anchor) is `anchor_unreadable`, and an anchor nested too deeply to decode is `anchor_shape`. A payload member that deep still propagates as an unexpected exception (RP8) | Replay step 1 names `anchor_unreadable` for the read; Task 5's parity case expects it for a missing directory | Leaving the bare `OSError` to the shell's `io_error`: source and built would then disagree with step 1 |
 | RP21 | Derivation refuses an anchor above `ANCHOR_MAX_BYTES` as `member_oversize` before publishing. Output aliasing stays a resolved-path comparison, and a missing `git` stays `invalid_inputs` | Task 3 review: a larger anchor would publish and then never replay; the anchor is a bundle member, so the existing code fits | A new code, or device-and-inode aliasing checks: the plan fixes both mechanisms and neither gap overwrites anything |
+| RP22 | `validate_bundle` also requires every measured issue-121 outcome's head tree (`aggregate.*.result_tree`, and the `tasks-7-8` row's `result_tree` and `prerequisite.tree`) to equal `components.issue_121.tree`, as `component_mismatch`. `tool_closure` reads with `ls-tree --full-tree` and reports a missing object or a non-UTF-8 name as `tool_closure` | G2 source review I2, M2, M3: RP7 promises every pin-determined substitution is refused under trust injection, and the pinned tree determines these members | Leaving the check to the trusted digest alone: full-shape check 4 could not then claim the second layer |
+| RP23 | Full-shape check 2 measures the tree the pinned `apply` stages, and asserts that `apply` stops at exactly its `workflow-verification-commands` gate with its five other gates passed. Refines parent D10's "its commit" | Measured at Task 6: at `fe85677c` the pinned tree's own suite fails one case on the adopted config, deterministically, so no adoption commit can exist; `apply` runs every operation before its gates, so the staged tree is the renderers' whole output. Issue 249 asks that "its output stays within every row bound" | Stubbing `just` so the gate passes (fakes a gate); dropping the check (loses the row-bound acceptance) |
+| RP24 | The determinism claim covers this child's code only. Git attributes (`info/attributes`, the user attributes file) and `diff.orderFile` change CORE's record view and so the issue-121 payload, and derivation does not refuse them. A CORE follow-up owns the guard | G2 source review I1: the root cause is in CORE's `review_actual` and `review_git`, which this child may not edit; issue 100's domain digests fail closed under the real pins | Guarding attributes in `review_derivation`: a second, partial copy of CORE's Git guard |
 
 Design and grill frontier: closed within the approved scope. The resolved
 bindings carry no context-map or ADR route, so this ledger is the issue's
