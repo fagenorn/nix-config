@@ -292,7 +292,7 @@ class Issue100Test(unittest.TestCase):
 
     def test_edge_record_of_another_shape_is_invalid(self):
         payload = model_100(self.repo, self.live, self.archive, self.pins, self.limits)
-        cases = {"deleted_file": lambda r: {"path": "", "old_path": ""} if r["path"] == "tmp/scratch.txt" else {},
+        cases = {"renamed_to": lambda r: dict(operation="R100", path="", after=r["before"]) if not r["after"] else {},
                  "renamed_from": lambda r: {"old_path": ""} if r["operation"] == "R100" else {},
                  "operation": lambda r: {"operation": "X"} if r["operation"] == "M" else {},
                  "negative_bytes": lambda r: {"record_bytes": -1} if r["operation"] == "M" else {}}
