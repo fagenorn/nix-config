@@ -4,7 +4,7 @@
 
 **Goal:** Give the retained `issue-121.json` and `issue-100-derived.json` payloads compact encodings that keep every fact, so that each of the five bundle files is one whole review record under CORE's unchanged caps.
 
-**Architecture:** Each model module keeps SOURCE's Git derivation as `model_*` and gains a pure `compact_*`/`expand_*` pair; `derive_*` returns the payload and `validate_*` expands it, checks the expansion against the pins, requires the canonical form and returns the model. The witness digests the models, and replay reads them. The [spec](../specs/2026-10-04-issue-254-compact-retained-encodings-design.md) owns every contract and the ledger CP1–CP20; it cites the SOURCE and REPLAY specs for the rest.
+**Architecture:** Each model module keeps SOURCE's Git derivation as `model_*` and gains a pure `compact_*`/`expand_*` pair; `derive_*` returns the payload and `validate_*` returns the model. The witness digests the models, and replay reads them. The [spec](../specs/2026-10-04-issue-254-compact-retained-encodings-design.md) owns every contract and the ledger CP1–CP20; it cites the SOURCE and REPLAY specs for the rest.
 
 **Tech stack:** Python standard library, Git plumbing, canonical JSON, unittest, Nix, just.
 
@@ -14,7 +14,7 @@
 - Caps do not move: 65,536 B per member, eight members, 524,288 B in all. No cap, bound, packing-policy or generated-exemption change, no split file, no omitted or truncated fact (parent D3).
 - No new module, command, option or bundle file under `python/`. `MEMBER_MAX_BYTES` and `ANCHOR_MAX_BYTES` stay decode bounds, and the Task-7 table, its validator and its bytes are untouched (CP10). Both command shells keep their options, exits and stderr lines.
 - The closed error codes are the published ones; no code is added (CP8). Pin faults keep `invalid_pins` and `assignment_mismatch`.
-- Agent-helper standards 1–5 (`docs/standards/agent-helpers.md`): no dynamic import, `sys.path` edit or `__file__` lookup in the package; digests via `telemetry_digest` or CORE's `canonical_bytes`.
+- Agent-helper standards 1–5 (`docs/standards/agent-helpers.md`).
 - No CLAUDE.md edit. Task 3 changes no `python/` byte; any later `python/` change repeats G2, its post and G0.
 - Nothing writes the retained root, its object store, the issue-100 archive, parent evidence or lifecycle state, and no ref is added.
 - Size bounds: every changed file stays one whole review record within its task's forecast. An actual record above its bound needs a committed forecast revision and a renewed G0, never truncation or a lowered bound.
@@ -28,7 +28,7 @@
 - A forged case changes a model or a payload and, where it needs one, calls `compact_*`; no test reads a private name. Published forged-model cases reach validation through `compact_*` (CP14).
 - Payload-level cases live in two new portable suites, `test_review_compact121` and `test_review_compact100`, listed in `agent-workflow-tests` (CP15). The full-shape classes run only under `just agent-retained-tests <root>`, where a skip fails the recipe (RP10).
 - Test-only trust injection is a direct `validate_bundle` call with a rebuilt witness and anchor, or the replay command under the forger's own digest (RP7). New built replay parity runs are sealed: a scratch `HOME` and a `PATH` of one empty directory (CP19).
-- Verification command IDs: `agent-workflow-tests` and `nix-build` (`just build`), run in this worktree.
+- Verification command IDs: `agent-workflow-tests` and `nix-build`, run in this worktree.
 
 ## Delivery estimate and boundaries
 
@@ -53,7 +53,7 @@ Every gate runs in the matching gate environment: define `core_gate` exactly as 
 
 `N` is 0 before Task 1 and, once task `N` is accepted and its ranges are recorded, `N` (RP14). Only exit 0 with `complete/within_budget` clears G0. Exit 2 or 3 stops with no bootstrap; exit 3 stops for decomposition.
 
-Planning G0 at `--completed-through 0`: at the plan-review head `307096e`, exit 0 and `complete/within_budget`: root 8,878 of 16,384 B, total 421,038 of 524,288 B, largest member 65,536 B, `file_count` 9 (eight of eight payload members, so a forecast revision has no spare member), validated and reproduced byte for byte. The commit that records this line changes no forecast, and a re-run there also cleared. The controller renews G0 at each later head.
+Planning G0 at `--completed-through 0`: at head `c789543`, exit 0 and `complete/within_budget`: root 8,997 of 16,384 B, total 421,157 of 524,288 B, largest member 65,536 B, `file_count` 9 (eight of eight payload members, so a forecast revision has no spare member), validated and reproduced. The recording commit changes no forecast, and a re-run there also cleared.
 
 **G1, the complete fixed-base actual gate, after every task and fix and at the final head.** Pin `HEAD`; run `core_gate source ... python3 -m agent_tools.review_package <this root> DELIVERY_BASE HEAD`, validate it through `artifact-budget validate-report --boundary producer`, then independently run `artifact-budget check --kind review-package`. Both must show `complete/within_budget` with identical metrics. After each task, record its `actual_ranges` and refresh `actual_evidence` in a process-only commit, then renew G0.
 
@@ -84,7 +84,7 @@ That commit is the `AGENT_RETAINED_TOOL_COMMIT` of every authoritative full-shap
 
 ## Decisions
 
-CP1, CP4, CP6, CP8, CP13 and CP14 govern both model tasks; CP3 governs Task 1; CP2, CP5 and CP16 govern Task 2; CP7 governs the witness edits of both; CP9 governs the swap cases; CP15 places the new suites; CP17 bounds what the refusal cases claim; CP10, CP11 and CP18–CP20 govern Task 3; CP12 governs the gates and the exit-3 split.
+CP1, CP4, CP6–CP9 and CP13–CP15 govern both model tasks; CP3 governs Task 1; CP2, CP5 and CP16 govern Task 2; CP17 bounds what the refusal cases claim; CP10, CP11 and CP18–CP20 govern Task 3; CP12 governs the gates.
 
 ## Standards review provenance
 
