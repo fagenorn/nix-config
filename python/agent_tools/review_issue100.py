@@ -380,7 +380,11 @@ def _packed(hexes) -> str:
 
 
 def _unpacked(text, size: int) -> list:
-    """The hex digests, `size` bytes each, that a packed string holds."""
+    """The hex digests, `size` bytes each, that a packed string holds. `text` must be a `str` that
+    `b85decode` accepts and that decodes to whole items. Its text need not be whole tokens: one dangling
+    character after the last whole token decodes to no byte (unless it overflows its group, which
+    `b85decode` rejects), so such a string yields the same digests here. The canonical-form check in
+    `validate_100` refuses it."""
     _require(isinstance(text, str))
     try:
         raw = base64.b85decode(text)
@@ -482,14 +486,20 @@ def _at(rows, index):
 
 def expand_100(payload: dict) -> dict:
     """The schema-1 model that the schema-2 `payload` encodes. Pure: it reads the payload alone and leaves
-    it unchanged. Given a JSON value it returns or raises `invalid_payload`, nothing else. Anything but the
-    closed version-2 object of this kind is refused, and so are a value of the wrong type where one is read,
-    a row or a column of the wrong length, an index that is not an in-range `int` and a packed string that
-    is not base85 text of whole items. So that the first-parent walk ends, the base and the commits are
-    distinct, the head is one of them, and each commit names a parent, every one the base or an earlier
-    commit. A fresh path and an overlap path have a head entry to take: the first is recorded on the walk,
-    the second is a fresh path. Edge identity, repeated records, head entries, labels, references, ids, the
-    summary and criterion digests are recomputed, never read."""
+    it unchanged. Every refusal it makes of a JSON value is `invalid_payload`. That describes its checks; it
+    guards no interpreter limit: a value nested about as deep as the JSON decoder allows raises
+    `RecursionError`, and nothing bounds the memory that the model of a large payload takes. Anything but
+    the closed version-2 object of this kind is refused, and so are a value of the wrong type where one is
+    read, a row or a column of the wrong length, an index that is not an in-range `int`, and a packed string
+    that is not a `str`, that `b85decode` rejects, or whose bytes are not whole items. One second spelling
+    passes that last test (see `_unpacked`): a single dangling character after the last whole token decodes
+    to no byte, so the string expands to the same items. Expansion does not refuse it; the canonical-form
+    check in `validate_100` does. So that the first-parent walk ends, the base and the commits are distinct,
+    the head is one of them, and each commit names a parent, every one the base or an earlier commit. A
+    fresh path and an overlap path have a head entry to take: the first is recorded on the walk, the second
+    is a fresh path. Edge identity, repeated records, labels, references, ids, the summary and criterion
+    digests are recomputed, never read. So is a head entry, except for a path that `head_trees` lists, a
+    directory at the head: that entry is read from its row."""
     c = _closed(payload, ("schema_version", "kind", "range", "commits", "parents", "paths", "entries", "records",
                           "record_sha256", "edges", "tables", "live", "head_trees", "process", "pending_overlaps",
                           "overlap_sha256", "criteria"))
