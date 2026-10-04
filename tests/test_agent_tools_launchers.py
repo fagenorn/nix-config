@@ -41,11 +41,15 @@ NOT_LAUNCHERS = ("workflow-state",)
 # The commands #175, #179 and #177 accepted as launchers: a floor, not the full
 # set, which the command table in lib/agent-tools.nix owns (#175 D8).
 LAUNCHER_FLOOR = ("adopt-project", "agent-evidence", "agent-model-matrix", "conformance",
-                  "context-map-lint", "diff-scope", "resolve-project", "review-feasibility",
-                  "review-package")
+                  "context-map-lint", "derive-review-feasibility-fixtures", "diff-scope",
+                  "replay-retained", "resolve-project", "review-feasibility", "review-package")
+# The retained commands (#249) and their modules: refusal parity cases below.
+RETAINED = {"derive-review-feasibility-fixtures": "derive_review_feasibility_fixtures",
+            "replay-retained": "replay_retained"}
 # Legacy commands may treat --help as misuse, including parser-backed commands
 # with help disabled; pin each existing exit/stdout/stderr contract.
-MISUSE_USAGE = {"context-map-lint": "Usage: context-map-lint --repo-root "}
+MISUSE_USAGE = {"context-map-lint": "Usage: context-map-lint --repo-root ",
+                **{name: f"{name}: invalid: usage\n" for name in RETAINED}}
 
 
 class AgentToolsLauncherTest(unittest.TestCase):
@@ -366,6 +370,51 @@ class AgentToolsLauncherTest(unittest.TestCase):
         for a in (top / 'source-out/review.shards').iterdir():
             self.assertEqual(a.read_bytes(), (top / 'built-out/review.shards' / a.name).read_bytes())
         self.assertEqual(before, (git('status', '--porcelain'), git('rev-parse', 'HEAD^{tree}')))
+
+    def retained_pair(self, command, args):
+        """`(built, source)` outcomes of one retained command: (exit, stdout bytes, stderr bytes) each."""
+        source_env = dict(self.dependency_env(), PYTHONPATH=str(Path(__file__).resolve().parents[1] / "python"))
+        clean = self.hostile / "clean"; clean.mkdir(exist_ok=True)
+        runs = (([str(self.root / ".agents/bin" / command)], self.hostile_env(), self.hostile),
+                ([sys.executable, "-m", "agent_tools." + RETAINED[command]], source_env, clean))
+        outcomes = []
+        for argv, env, cwd in runs:
+            done = subprocess.run([*argv, *args], env=env, cwd=cwd, capture_output=True,
+                                  timeout=TIMEOUT_SECONDS, check=False)
+            self.assertNotIn(MARKER.encode(), done.stdout + done.stderr)
+            outcomes.append((done.returncode, done.stdout, done.stderr))
+        return outcomes
+
+    def test_retained_commands_refuse_alike_from_source_and_built(self):
+        existing = self.hostile / "exists"; existing.mkdir()
+        empty = self.hostile / "empty"; empty.mkdir()
+        # A repository input must answer `git rev-parse --git-common-dir`, or the refusal is `invalid_inputs`.
+        subprocess.run(["git", "init", "-q", str(empty)], check=True, capture_output=True, timeout=TIMEOUT_SECONDS)
+        cases = (("replay-retained", "anchor_unreadable",
+                  ["--fixtures-dir", str(self.hostile / "missing"), "--expected-anchor-sha256", "sha256:" + "0" * 64]),
+                 ("replay-retained", "usage", ["--fixtures-dir", str(empty)]),
+                 ("derive-review-feasibility-fixtures", "output_exists",
+                  ["--issue-121-repo", str(empty), "--issue-100-repo", str(empty), "--archive-dir", str(empty),
+                   "--tool-repo", str(empty), "--tool-commit", "0" * 40, "--output-dir", str(existing)]))
+        for command, code, args in cases:
+            with self.subTest(command=command, code=code):
+                built, source = self.retained_pair(command, args)
+                self.assertEqual(built, source)
+                self.assertEqual(built, (2, b"", f"{command}: invalid: {code}\n".encode()))
+        self.assertEqual(list(existing.iterdir()), [])
+
+    def test_replay_refuses_a_forged_bundle_alike_from_source_and_built(self):
+        forged = self.hostile / "forged"; forged.mkdir()
+        names = ("derivation-anchor.json", "derivation-witness.json", "issue-100-derived.json",
+                 "issue-121.json", "task7-estimate.json")
+        for name in names:
+            (forged / name).write_bytes(b"{}\n")
+        digest = "sha256:" + hashlib.sha256(b"{}").hexdigest()   # telemetry_digest({}): coherent with the anchor
+        built, source = self.retained_pair(
+            "replay-retained", ["--fixtures-dir", str(forged), "--expected-anchor-sha256", digest])
+        self.assertEqual(built, source)
+        self.assertEqual(built, (2, b"", b"replay-retained: invalid: anchor_shape\n"))
+        self.assertEqual(sorted(p.name for p in forged.iterdir()), sorted(names))
 
 if __name__ == "__main__":
     unittest.main()
