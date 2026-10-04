@@ -264,10 +264,10 @@ test "$(git diff --name-only "$PIN" HEAD -- python | wc -l)" -eq 0
 
 ## Forecast basis
 
-Estimates, priced as in Task 1. Applied to the base files at planning, the edits above measure 24,169 B / +124 / −40 for the tier module and 9,911 B / +73 / −2 for the launcher module. With room for the module docstring and review fixes: 30,720 B / +160 / −55 and 13,312 B / +95 / −6.
+Estimates, priced as in Task 1. Applied to the base files at planning, the edits above measure 24,169 B / +124 / −40 for the tier module and 9,911 B / +73 / −2 for the launcher module. With room for the module docstring and review fixes: 30,720 B / +160 / −55 and 11,264 B / +85 / −6.
 
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":3,"records":[{"bounds":[{"added_lines":160,"boundary":"compact","deleted_lines":55,"record_bytes":30720,"support":{"covers":["t3-1"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t3-1","last_task":3,"owner":3,"path":"tests/test_review_retained_full.py"},{"bounds":[{"added_lines":95,"boundary":"compact","deleted_lines":6,"record_bytes":13312,"support":{"covers":["t3-2"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t3-2","last_task":3,"owner":3,"path":"tests/test_agent_tools_launchers.py"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":3,"records":[{"bounds":[{"added_lines":160,"boundary":"compact","deleted_lines":55,"record_bytes":30720,"support":{"covers":["t3-1"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t3-1","last_task":3,"owner":3,"path":"tests/test_review_retained_full.py"},{"bounds":[{"added_lines":85,"boundary":"compact","deleted_lines":6,"record_bytes":11264,"support":{"covers":["t3-2"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t3-2","last_task":3,"owner":3,"path":"tests/test_agent_tools_launchers.py"}]}}
 ```

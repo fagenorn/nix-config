@@ -32,7 +32,7 @@
 
 ## Delivery estimate and boundaries
 
-These are estimates (parent D15, RP14). Product: fourteen paths in three tasks, two of them new, about 249 KB of forecast records; five paths carry two ordered cumulative contributions. Process: the spec, this root and three members, about 157 KB. Growth risk sits in the two model modules.
+These are estimates (parent D15, RP14). Product: fourteen paths in three tasks, two of them new, about 247 KB of forecast records; five paths carry two ordered cumulative contributions. Process: the spec, this root and three members, about 157 KB. Growth risk sits in the two model modules.
 
 There is one boundary, `compact`. If G0 returns exit 3, the split is by model: Task 1 alone, then Task 2 with Task 3 (CP12). Subject reserves are two 64-byte subjects per task (implementation plus one fix) and ten for process; a second fix round needs one ruling that adds one subject.
 
