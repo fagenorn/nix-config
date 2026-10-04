@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -50,6 +51,38 @@ RETAINED = {"derive-review-feasibility-fixtures": "derive_review_feasibility_fix
 # with help disabled; pin each existing exit/stdout/stderr contract.
 MISUSE_USAGE = {"context-map-lint": "Usage: context-map-lint --repo-root ",
                 **{name: f"{name}: invalid: usage\n" for name in RETAINED}}
+# Stub retained members (#254): a kind and an old schema version, and no fact. They are no compact payload,
+# so replay refuses them once the envelope around them is authentic. `RetainedLauncherTest` holds the proof
+# for each whole SOURCE encoding.
+STUB_MEMBERS = {"issue-100-derived.json": {"kind": "issue-100-retained-history", "schema_version": 1},
+                "issue-121.json": {"kind": "issue-121-retained-history", "schema_version": 3}}
+
+
+def canonical(value) -> bytes:
+    """CORE's canonical JSON bytes, spelled here because this module imports no `agent_tools`."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii") + b"\n"
+
+
+def stub_bundle(directory) -> str:
+    """Write a five-file bundle around `STUB_MEMBERS` into the new `directory`; the anchor's digest.
+
+    The anchor, the witness and the member rows agree with one another, so replay authenticates the bundle
+    and refuses it only for what it reads inside the retained members."""
+    groups = dict.fromkeys(("tool", "issue_121", "issue_100", "archive", "estimate"), {})
+    raw = {name: canonical(value) for name, value in {**STUB_MEMBERS, "task7-estimate.json": {}}.items()}
+
+    def rows():
+        return [{"path": name, "bytes": len(raw[name]), "raw_sha256": hashlib.sha256(raw[name]).hexdigest()}
+                for name in sorted(raw)]
+    raw["derivation-witness.json"] = canonical({
+        "schema_version": 2, "kind": "review-feasibility-derivation-witness", "components": groups,
+        "fixtures": rows(), "tables": [], "table_policies": {}})
+    anchor = {"schema_version": 2, "kind": "review-feasibility-derivation-anchor", **groups,
+              "payload": {"encoding": "canonical-json-ascii-lf/v1", "members": rows()}}
+    directory.mkdir()
+    for name, data in {**raw, "derivation-anchor.json": canonical(anchor)}.items():
+        (directory / name).write_bytes(data)
+    return "sha256:" + hashlib.sha256(canonical(anchor)[:-1]).hexdigest()
 
 
 class AgentToolsLauncherTest(unittest.TestCase):
@@ -395,13 +428,60 @@ class AgentToolsLauncherTest(unittest.TestCase):
                  ("replay-retained", "usage", ["--fixtures-dir", str(repo)]),
                  ("derive-review-feasibility-fixtures", "output_exists",
                   ["--issue-121-repo", str(repo), "--issue-100-repo", str(repo), "--archive-dir", str(repo),
-                   "--tool-repo", str(repo), "--tool-commit", "0" * 40, "--output-dir", str(existing)]))
+                   "--tool-repo", str(repo), "--tool-commit", "0" * 40, "--output-dir", str(existing)]),
+                 ("derive-review-feasibility-fixtures", "tool_closure",
+                  ["--issue-121-repo", str(repo), "--issue-100-repo", str(repo), "--archive-dir", str(repo),
+                   "--tool-repo", str(repo), "--tool-commit", "0" * 40, "--output-dir", str(self.hostile / "absent")]))
         for command, code, args in cases:
             with self.subTest(command=command, code=code):
                 built, source = self.retained_pair(command, args)
                 self.assertEqual(built, source)
                 self.assertEqual(built, (2, b"", f"{command}: invalid: {code}\n".encode()))
         self.assertEqual(list(existing.iterdir()), [])
+        self.assertFalse((self.hostile / "absent").exists())
+
+    def sealed_replay_pair(self, bundle, digest):
+        """`(built, source)` outcomes of `replay-retained` with the sources unreachable: `HOME` is a scratch
+        directory and `PATH` one empty directory, so neither run can find Git or the budget helper. The built
+        launcher names its interpreter by store path and the source run is this interpreter, so neither needs
+        `PATH`. The built run keeps the hostile package on every channel; the source run names the source tree."""
+        sealed = self.hostile / "sealed"
+        (sealed / "bin").mkdir(parents=True, exist_ok=True)
+        env = {"HOME": str(sealed), "PATH": str(sealed / "bin")}
+        self.assertEqual([shutil.which(name, path=env["PATH"]) for name in ("git", "artifact-budget")], [None, None])
+        args = ["--fixtures-dir", str(bundle), "--expected-anchor-sha256", digest]
+        hostile, source = str(self.hostile), str(Path(__file__).resolve().parents[1] / "python")
+        runs = (([str(self.root / ".agents/bin/replay-retained")],
+                 dict(env, PYTHONPATH=hostile, NIX_PYTHONPATH=hostile), self.hostile),
+                ([sys.executable, "-m", "agent_tools." + RETAINED["replay-retained"]],
+                 dict(env, PYTHONPATH=source), sealed))
+        outcomes = []
+        for argv, run_env, cwd in runs:
+            done = subprocess.run([*argv, *args], env=run_env, cwd=cwd, capture_output=True,
+                                  timeout=TIMEOUT_SECONDS, check=False)
+            self.assertNotIn(MARKER.encode(), done.stdout + done.stderr)
+            outcomes.append((done.returncode, done.stdout, done.stderr))
+        return outcomes
+
+    def test_replay_refuses_stub_bundles_alike_from_source_and_built(self):
+        """The envelope refusals on a bundle that holds no retained fact, with the sources unreachable: a stub
+        member under coherent digests, a replacement anchor, a changed member and a partial bundle."""
+        def replace_anchor(bundle):
+            path = bundle / "derivation-anchor.json"
+            path.write_bytes(canonical({**json.loads(path.read_bytes()), "tool": {"commit": "0" * 40}}))
+        cases = (("invalid_payload", lambda bundle: None), ("anchor_digest", replace_anchor),
+                 ("member_digest", lambda bundle: (bundle / "issue-121.json").write_bytes(canonical({}))),
+                 ("member_set", lambda bundle: (bundle / "task7-estimate.json").unlink()))
+        for code, alter in cases:
+            with self.subTest(code=code):
+                bundle = self.hostile / f"stub-{code}"
+                digest = stub_bundle(bundle)
+                alter(bundle)
+                before = {path.name: path.read_bytes() for path in bundle.iterdir()}
+                built, source = self.sealed_replay_pair(bundle, digest)
+                self.assertEqual(built, source)
+                self.assertEqual(built, (2, b"", f"replay-retained: invalid: {code}\n".encode()))
+                self.assertEqual({path.name: path.read_bytes() for path in bundle.iterdir()}, before)
 
     def test_replay_refuses_a_forged_bundle_alike_from_source_and_built(self):
         forged = self.hostile / "forged"; forged.mkdir()
@@ -472,6 +552,22 @@ class RetainedLauncherTest(AgentToolsLauncherTest):
         else:
             self.assertEqual((status, stdout), (2, b""))
             self.assertRegex(stderr.decode(), rf"\A{replay}: projection_unavailable: [a-z0-9.,-]+\n\Z")
+        # Rehashed alterations of the real bundle, with the sources unreachable: each is invalid under the
+        # forger's own digest and never authentic under the trusted one. They are a changed fact, then a
+        # missing edge, a reordered edge, a duplicate record and the whole SOURCE encoding, for each payload.
+        full, trusted = self.full, json.loads(summaries["built"])["anchor_sha256"]
+        changes = [("issue-100 process path", full.substituted(full.ISSUE_100, "process", 0)),
+                   *((label, change) for _, label, change in full.REHASHED_FORGERIES)]
+        for n, (label, change) in enumerate(changes):
+            forged = Path(shutil.copytree(self.hostile / "built-bundle", self.hostile / f"forged-{n}"))
+            anchor, raw = full.rebuilt(forged, trusted, change)
+            for name, data in {**raw, full.ANCHOR_NAME: full.canonical_bytes(anchor)}.items():
+                (forged / name).write_bytes(data)
+            for digest, code in ((full.telemetry_digest(anchor), "invalid_payload"), (trusted, "anchor_digest")):
+                with self.subTest(forgery=label, code=code):
+                    built, source = self.sealed_replay_pair(forged, digest)
+                    self.assertEqual(built, source)
+                    self.assertEqual(built, (2, b"", f"{replay}: invalid: {code}\n".encode()))
 
 
 if __name__ == "__main__":

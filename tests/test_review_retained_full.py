@@ -1,4 +1,5 @@
-"""Full-shape retained tier: both commands and SOURCE's models over the real objects (issue 249; RP7, RP10, RP11).
+"""Full-shape retained tier: both commands and SOURCE's models over the real objects (issues 249 and 254; RP7,
+RP10, RP11).
 
 Run: just agent-retained-tests <root>. The recipe names the retained root in
 `AGENT_RETAINED_ROOT`. Without that variable the class skips, which is never
@@ -9,6 +10,10 @@ evidence directory and the tool repository is this checkout. Every mutation
 happens in a `git clone --shared --no-checkout` of the root or in a copied
 bundle. The root is compared before and after each test, and a difference
 voids the run (RP11).
+
+The two retained members are the compact payloads of issue 254: each bundle
+file is held to CORE's whole-record cap, and each payload's expansion is
+compared with SOURCE's model of the same objects, byte for byte.
 """
 import hashlib, json, os, shutil, subprocess, sys, tempfile, unittest
 from pathlib import Path
@@ -19,9 +24,10 @@ from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import actual_inputs_from_trees
 from agent_tools.review_budget import describe
 from agent_tools.review_forecast import canonical_bytes
-from agent_tools.review_issue100 import ISSUE_100_PINS, Issue100Error, fresh_records, historical_records, validate_100
-from agent_tools.review_issue121 import (ISSUE_121_PINS, ContributionError, classify, contribution_edges, plan_anchors,
-                                         reconstruct_boundary)
+from agent_tools.review_issue100 import (ISSUE_100_PINS, Issue100Error, expand_100, fresh_records, historical_records,
+                                         model_100, validate_100)
+from agent_tools.review_issue121 import (ISSUE_121_PINS, ContributionError, classify, contribution_edges, expand_121,
+                                         model_121, plan_anchors, reconstruct_boundary, validate_121)
 from agent_tools.review_task7 import DIGEST_PLACEHOLDER, TASK7_PINS, EstimateError, derive_task7
 from agent_tools.review_witness import (ANCHOR_MAX_BYTES, ANCHOR_NAME, WitnessError, authenticate, build_anchor,
                                         build_witness, validate_bundle)
@@ -48,17 +54,23 @@ PASSED_GATES = ("worktree-status-matches-operations", "projections-in-sync", "no
                 "cold-clone-resolves", "resolve-capabilities-available")
 FAILED_GATE = "workflow-verification-commands"
 
-# RP7 layer 1: one member of each component group, one record digest in each fixture and one edge reference.
-# A site is a component group or a fixture name, then the keys and indices down to one string or count.
+EXPANDERS = {ISSUE_100: expand_100, ISSUE_121: expand_121}
+# CORE's whole-record cap for one review member, and this tier's bound on the five files together: three
+# members' worth of the 524,288 B aggregate (CP10).
+MEMBER_CAP, BUNDLE_CAP = 65536, 3 * 65536
+
+# RP7 layer 1: one member of each component group, one record digest in each retained payload, one estimate
+# blob and one edge's record reference. A site is a component group or a fixture name, then the keys and
+# indices down to one string or count; a packed string is one site.
 TRUSTED_SITES = (
     ("tool", "commit"), ("issue_121", "head"), ("issue_100", "live"), ("archive", "manifest_sha256"),
-    ("estimate", "task7_blob"), (ISSUE_121, "records", 0, "record_sha256"),
-    (ISSUE_100, "tables", "fresh", "records", 0, "sha256"), (ESTIMATE, "rows", -1, "input", "blob"),
-    (ISSUE_121, "aggregate", "actual", "edge_ids", 0))
-# RP7 layer 2: every component member the pins determine and every cross-table reference, under the error
-# that refuses it. Each site exists whatever the proof produced: `aggregate.actual` and `tasks-7-8`
-# (boundary 2) are measured in every bundle. `tool.commit`, `tool.files`, `archive.shards` and a
-# re-measured record's bytes or digest are not determined without Git, so they are not here.
+    ("estimate", "task7_blob"), (ISSUE_121, "records", "aggregate.actual", "rows", 0, 2),
+    (ISSUE_100, "record_sha256"), (ESTIMATE, "rows", -1, "input", "blob"), (ISSUE_100, "edges", 0, 0))
+# RP7 layer 2: every component member the pins determine and the payload members that the pins, the estimate
+# table or the payload's own tables determine, under the error that refuses it. Each site exists whatever
+# the proof produced: `aggregate.actual` (outcome 0) and `tasks-7-8` (outcome 4) are measured in every
+# bundle. `tool.commit`, `tool.files`, `archive.shards`, a record's bytes or digest, an entry id and a
+# candidate's live entry are not determined without Git (RP7, CP17), so they are not here.
 GIT_FREE_SITES = {
     WitnessError: (
         *(("issue_121", member) for member in ("base", "head", "tree", "signer_sha256")),
@@ -67,22 +79,22 @@ GIT_FREE_SITES = {
         *(("estimate", member) for member in ("prerequisite_commit", "prerequisite_tree", "plan_root_blob",
                                                "task7_blob", "model_version", "table_sha256")),
         *(("tool", member) for member in ("artifact_policy_sha256", "packing_policy_sha256", "record_policy_sha256")),
-        (ISSUE_121, "aggregate", "actual", "result_tree")),
+        (ISSUE_121, "outcomes", 0, "result_tree"), (ISSUE_121, "outcomes", 0, "measurement", "artifact_policy_sha256")),
     EstimateError: ((ESTIMATE, "rows_sha256"), (ESTIMATE, "identities", "task7_blob"),
                     (ESTIMATE, "rows", -1, "record_bytes"), (ESTIMATE, "counts", "moves")),
     ContributionError: (
-        (ISSUE_121, "range", "head"), (ISSUE_121, "classes", 0, "commit"), (ISSUE_121, "edges", 0, "parent"),
-        (ISSUE_121, "edges", 0, "commit"), (ISSUE_121, "anchors", 0, "commit"), (ISSUE_121, "anchors", 0, "blob"),
-        (ISSUE_121, "anchors", 0, "signer_sha256"), (ISSUE_121, "records", 0, "edge_ids", 0),
-        (ISSUE_121, "aggregate", "actual", "edge_ids", 0), (ISSUE_121, "aggregate", "actual", "record_refs", 0),
-        (ISSUE_121, "aggregate", "projected", "estimate_refs", 0), (ISSUE_121, "boundaries", 2, "result_tree"),
-        (ISSUE_121, "boundaries", 2, "prerequisite", "tree"), (ISSUE_121, "boundaries", 2, "record_refs", 0)),
+        (ISSUE_121, "range", "head"), (ISSUE_121, "classes", 0, 0), (ISSUE_121, "classes", 0, 1),
+        (ISSUE_121, "anchors", 0, 0), (ISSUE_121, "anchors", 0, 1), (ISSUE_121, "anchors", 0, 2),
+        (ISSUE_121, "signer_sha256"), (ISSUE_121, "records", "aggregate.actual", "rows", 0, 0),
+        (ISSUE_121, "records", "tasks-7-8", "rows", 0, 1), (ISSUE_121, "outcomes", 1, "estimate_refs", 0),
+        (ISSUE_121, "outcomes", 4, "result_tree"), (ISSUE_121, "outcomes", 4, "prerequisite", "tree"),
+        (ISSUE_121, "record_table_policy", "policy_sha256")),
     Issue100Error: (
-        (ISSUE_100, "range", "commits", 0), (ISSUE_100, "parent_edges", 0, "parent"), (ISSUE_100, "edges", 0, "commit"),
-        (ISSUE_100, "contributions", 0, "record_sha256"), (ISSUE_100, "tables", "fresh", "records", 0, "sha256"),
-        (ISSUE_100, "contributions", 0, "edge_refs", 0, 0), (ISSUE_100, "contributions", 0, "head_entry", "oid"),
-        (ISSUE_100, "pending_overlaps", 0, "head_entry", "oid"), (ISSUE_100, "pending_overlaps", 0, "path"),
-        (ISSUE_100, "criteria", 0, "text_sha256"), (ISSUE_100, "summary", "edge_records")),
+        (ISSUE_100, "range", "live"), (ISSUE_100, "commits"), (ISSUE_100, "parents", 0, 0), (ISSUE_100, "edges", 0, 0),
+        (ISSUE_100, "tables", "fresh", "paths", 0), (ISSUE_100, "tables", "fresh", "bytes", 0),
+        (ISSUE_100, "tables", "historical", "bytes", 0),
+        (ISSUE_100, "tables", "fresh", "record_table_policy", "policy_sha256"), (ISSUE_100, "process", 0),
+        (ISSUE_100, "pending_overlaps", 0, 0), (ISSUE_100, "criteria", 0, "text")),
 }
 
 
@@ -163,6 +175,70 @@ def substituted(*site):
     return change
 
 
+def rebuilt(bundle, digest, change=lambda components, payloads: None):
+    """`(anchor, raw)` of the bundle in `bundle` after `change(components, payloads)`, with every in-bundle hash
+    recomputed as a forger would: the estimate group's table digest when the table changed, each member's
+    bytes and digest, the witness and the anchor. The witness digests each changed payload's own expansion,
+    and the bundle's where the change leaves none. Without a change it is the bundle itself."""
+    anchor, raw = authenticate(bundle, digest)
+    components = {group: anchor[group] for group in GROUPS}
+    payloads = {name: json.loads(raw[name]) for name in (ISSUE_100, ISSUE_121, ESTIMATE)}
+    models = {name: expand(payloads[name]) for name, expand in EXPANDERS.items()}
+    change(components, payloads)
+    forged = {name: canonical_bytes(payload) for name, payload in payloads.items()}
+    if forged[ESTIMATE] != raw[ESTIMATE]:
+        components["estimate"]["table_sha256"] = telemetry_digest(payloads[ESTIMATE])
+    for name, expand in EXPANDERS.items():
+        try:
+            models[name] = expand(payloads[name])
+        except (ContributionError, Issue100Error):
+            pass
+    forged[WITNESS] = canonical_bytes(build_witness(components, {**models, ESTIMATE: payloads[ESTIMATE]}, forged))
+    return build_anchor(components, forged), forged
+
+
+def _reordered_100(_, payloads):
+    """The first two range commits exchanged, as 25-character tokens of the packed string."""
+    packed = payloads[ISSUE_100]["commits"]
+    payloads[ISSUE_100]["commits"] = packed[25:50] + packed[:25] + packed[50:]
+
+
+def _repeated_100(_, payloads):
+    """A second `records` row equal to the first, with its digest token, which the first edge then names."""
+    hundred = payloads[ISSUE_100]
+    hundred["records"].append(list(hundred["records"][0]))
+    hundred["record_sha256"] += hundred["record_sha256"][:40]
+    hundred["edges"][0][0] = len(hundred["records"]) - 1
+
+
+def _reordered_121(_, payloads):
+    classes = payloads[ISSUE_121]["classes"]
+    classes[0], classes[1] = classes[1], classes[0]
+
+
+def _repeated_121(_, payloads):
+    rows = payloads[ISSUE_121]["records"]["aggregate.actual"]["rows"]
+    rows.insert(1, list(rows[0]))
+
+
+# Issue 254 criteria 6 and 8, as changes for `rebuilt`: a missing edge, a reordered edge and a duplicate logical
+# record in each compact payload, then each payload replaced by its whole SOURCE encoding. Every one is the
+# listed error's `invalid_payload`, whatever digests the forger recomputes. In issue 121 a reordered edge is
+# an exchanged `classes` row (CP17).
+REHASHED_FORGERIES = (
+    (Issue100Error, "issue-100 edge missing", lambda _, payloads: payloads[ISSUE_100]["edges"].pop()),
+    (Issue100Error, "issue-100 edges reordered", _reordered_100),
+    (Issue100Error, "issue-100 record repeated", _repeated_100),
+    (ContributionError, "issue-121 edge missing", lambda _, payloads: payloads[ISSUE_121]["edges"].pop()),
+    (ContributionError, "issue-121 edges reordered", _reordered_121),
+    (ContributionError, "issue-121 record repeated", _repeated_121),
+    (Issue100Error, "issue-100 in SOURCE's encoding",
+     lambda _, payloads: payloads.update({ISSUE_100: expand_100(payloads[ISSUE_100])})),
+    (ContributionError, "issue-121 in SOURCE's encoding",
+     lambda _, payloads: payloads.update({ISSUE_121: expand_121(payloads[ISSUE_121])})),
+)
+
+
 class RetainedFullTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -223,18 +299,8 @@ class RetainedFullTest(unittest.TestCase):
         return Path(shutil.copytree(self.bundle, Path(tempfile.mkdtemp(dir=self.tmp, prefix="bundle-")) / "bundle"))
 
     def forged(self, change=lambda components, payloads: None):
-        """`(anchor, raw)` of the class bundle after `change(components, payloads)`, with every in-bundle hash
-        recomputed as a forger would: the estimate group's table digest when the table changed, each member's
-        bytes and digest, the witness and the anchor. Without a change it is the class bundle itself."""
-        anchor, raw = authenticate(self.bundle, self.digest)
-        components = {group: anchor[group] for group in GROUPS}
-        payloads = {name: json.loads(raw[name]) for name in (ISSUE_100, ISSUE_121, ESTIMATE)}
-        change(components, payloads)
-        forged = {name: canonical_bytes(payload) for name, payload in payloads.items()}
-        if forged[ESTIMATE] != raw[ESTIMATE]:
-            components["estimate"]["table_sha256"] = telemetry_digest(payloads[ESTIMATE])
-        forged[WITNESS] = canonical_bytes(build_witness(components, payloads, forged))
-        return build_anchor(components, forged), forged
+        """`rebuilt` of the class bundle under the class digest after `change`."""
+        return rebuilt(self.bundle, self.digest, change)
 
     def test_grafted_clone_reproduces_i1_and_every_entry_point_refuses(self):
         clone = self.disposable_clone()
@@ -357,6 +423,67 @@ class RetainedFullTest(unittest.TestCase):
         self.assertEqual(set(files[0]), {ANCHOR_NAME, WITNESS, ISSUE_100, ISSUE_121, ESTIMATE})
         self.assertLessEqual(len(files[0][ANCHOR_NAME]), ANCHOR_MAX_BYTES)
 
+    def test_bundle_files_fit_the_whole_record_caps(self):
+        sizes = {path.name: path.stat().st_size for path in self.bundle.iterdir()}
+        self.assertEqual(set(sizes), {ANCHOR_NAME, WITNESS, ISSUE_100, ISSUE_121, ESTIMATE})
+        for name, size in sizes.items():
+            with self.subTest(name):
+                self.assertLessEqual(size, MEMBER_CAP)
+        self.assertLessEqual(sum(sizes.values()), BUNDLE_CAP)
+        self.assertEqual(self.authority.limits.member_max_bytes, MEMBER_CAP)  # CORE's cap, as the policy states it
+        versions = [json.loads((self.bundle / name).read_bytes())["schema_version"] for name in (ISSUE_100, ISSUE_121)]
+        self.assertEqual(versions, [2, 4])
+
+    def test_issue100_expansion_is_the_source_model_fact_for_fact(self):
+        model = model_100(self.root, self.root, self.root / ARCHIVE, ISSUE_100_PINS, self.authority.limits)
+        payload = json.loads((self.bundle / ISSUE_100).read_bytes())
+        expansion = expand_100(payload)
+        self.assertEqual((payload["schema_version"], model["schema_version"]), (2, 1))
+        self.assertEqual(canonical_bytes(expansion), canonical_bytes(model))  # SOURCE's encoding, byte for byte
+        self.assertEqual(canonical_bytes(validate_100(payload, ISSUE_100_PINS)), canonical_bytes(model))
+        self.assertEqual((len(expansion["parent_edges"]), sum(len(edge["records"]) for edge in expansion["edges"])),
+                         (91, 543))
+        labels = [row["disposition"] for row in expansion["contributions"]]
+        self.assertEqual([labels.count(name) for name in ("historical_process", "integrated", "candidate")],
+                         [8, 38, 69])
+        pending = [row["pending"] is not None for row in expansion["contributions"]
+                   if row["disposition"] == "candidate"]
+        self.assertEqual((len(labels), pending.count(False), pending.count(True)), (115, 65, 4))
+        self.assertEqual((len(expansion["pending_overlaps"]), expansion["summary"]["reconciled"]), (4, 0))
+        self.assertEqual([row["state"] for row in expansion["criteria"]], ["superseded"] * 5 + ["governing"] * 5)
+        self.assertEqual({name: (sum(record["bytes"] for record in table["records"]), len(table["records"]))
+                          for name, table in expansion["tables"].items()},
+                         {"historical": (1005707, 115), "fresh": (1012913, 115)})
+
+    def test_issue121_expansion_is_the_source_model_fact_for_fact(self):
+        model = model_121(self.root, ISSUE_121_PINS, TASK7_PINS, self.authority)
+        payload = json.loads((self.bundle / ISSUE_121).read_bytes())
+        expansion = expand_121(payload)
+        self.assertEqual((payload["schema_version"], model["schema_version"]), (4, 3))
+        self.assertEqual(canonical_bytes(expansion), canonical_bytes(model))  # SOURCE's encoding, byte for byte
+        self.assertEqual(canonical_bytes(validate_121(payload, ISSUE_121_PINS, self.table)), canonical_bytes(model))
+        commits = [commit for commit, _, _ in ISSUE_121_PINS.assignments]
+        owners = [row["owner"] for row in expansion["classes"]]
+        self.assertEqual((len(owners), owners.count(0), sum(1 for owner in owners if owner)), (30, 12, 18))
+        late = commits.index("8e6f0681908cb1ba3d352be5d26540dab731ffeb")  # the late Task-3 fix, after Task 6 began
+        self.assertEqual((late, owners[late], 6 in owners[:late]), (24, 3, True))
+        self.assertEqual([(edge["commit"], edge["parent"]) for edge in expansion["edges"]],
+                         list(zip(commits, [ISSUE_121_PINS.base, *commits])))
+        self.assertEqual(len(expansion["anchors"]), 9)
+        rows = [expansion["aggregate"]["actual"], expansion["aggregate"]["projected"], *expansion["boundaries"]]
+        self.assertEqual([row["boundary"] for row in rows], list(LABELS))
+        common = {"boundary", "state", "prerequisite", "edge_ids", "estimate_refs"}
+        for row in rows:  # each outcome is measured or an authenticated unavailable one, with no other field
+            scoped = [record for record in expansion["records"] if record["scope"] == row["boundary"]]
+            with self.subTest(outcome=row["boundary"]):
+                if row["state"] == "measured":
+                    self.assertEqual(set(row), common | {"result_tree", "record_refs", "measurement"})
+                    self.assertEqual(row["record_refs"], [record["id"] for record in scoped])
+                else:
+                    self.assertEqual((row["state"], set(row), scoped),
+                                     ("projection_unavailable", common | {"failure"}, []))
+                    self.assertEqual(set(row["failure"]), {"stage", "code", "evidence_refs"})
+
     def test_dirty_or_mismatched_tool_tree_refuses(self):
         clone, path = self.disposable_clone(SOURCE), "python/agent_tools/canonical.py"
         source = git(clone, "cat-file", "blob", f"{self.tool_commit}:{path}")
@@ -374,7 +501,7 @@ class RetainedFullTest(unittest.TestCase):
     def test_replay_with_sources_unreachable(self):
         bundle = self.copied_bundle()
         status, stdout, stderr = self.replay_cli(bundle)
-        payload = json.loads((bundle / ISSUE_121).read_bytes())
+        payload = expand_121(json.loads((bundle / ISSUE_121).read_bytes()))
         rows = [*payload["aggregate"].values(), *payload["boundaries"]]
         unavailable = [label for label in LABELS  # in outcome order, whichever outcomes the proof left unavailable
                        for row in rows if row["boundary"] == label and row["state"] == "projection_unavailable"]
@@ -413,11 +540,16 @@ class RetainedFullTest(unittest.TestCase):
         changes = [(error, site, substituted(*site)) for error, sites in GIT_FREE_SITES.items() for site in sites]
         # Beside the unaltered issue-121 payload, a malformed sibling is invalid whatever that payload's outcomes.
         changes += [
-            (Issue100Error, "issue-100 without its summary", lambda _, payloads: payloads[ISSUE_100].pop("summary")),
-            (EstimateError, "estimate truncated by a row", lambda _, payloads: payloads[ESTIMATE]["rows"].pop())]
+            (Issue100Error, "issue-100 without its process list",
+             lambda _, payloads: payloads[ISSUE_100].pop("process")),
+            (EstimateError, "estimate truncated by a row", lambda _, payloads: payloads[ESTIMATE]["rows"].pop()),
+            *REHASHED_FORGERIES]
         for error, site, change in changes:
-            with self.subTest(site=site), self.assertRaises(error):
-                validate_bundle(*self.forged(change), **PINS)
+            with self.subTest(site=site):
+                with self.assertRaises(error) as caught:
+                    validate_bundle(*self.forged(change), **PINS)
+                if (error, site, change) in REHASHED_FORGERIES:
+                    self.assertEqual(caught.exception.code, "invalid_payload")
 
     def test_outputs_hold_no_bodies_paths_or_credentials(self):
         outputs = {path.name: path.read_bytes() for path in self.bundle.iterdir()}
