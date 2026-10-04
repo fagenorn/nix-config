@@ -55,7 +55,7 @@ Every gate runs in the matching gate environment: define `core_gate` exactly as 
 
 `N` is 0 before Task 1 and, once task `N` is accepted and its ranges are recorded, `N` (RP14). Only exit 0 with `complete/within_budget` clears G0. Exit 2 or 3 stops with no bootstrap; exit 3 stops for decomposition.
 
-Planning G0 at `--completed-through 0`: pending
+Planning G0 at `--completed-through 0`: at plan commit `9fcfdf9`, exit 0 and `complete/within_budget`: root 11,047 of 16,384 B, total 364,327 of 524,288 B, largest member 61,440 B, `file_count` 8 (seven of eight payload members under the initial sequential packing, with the first-fit strategies behind it), validated and reproduced byte for byte. The result for the final planning head is kept at `.superpowers/review-evidence/249/run-20261003-248-249/g0-result.json` under the primary checkout.
 
 **G1, the complete fixed-base actual gate, after every task and fix and at the final head.** Pin `HEAD`; run `core_gate source ... python3 -m agent_tools.review_package <this root> DELIVERY_BASE HEAD`, validate it through `artifact-budget validate-report --boundary producer`, then independently run `artifact-budget check --kind review-package`. Both must show `complete/within_budget` with identical metrics. After each task, record its `actual_ranges` and refresh `actual_evidence` in a process-only commit, then renew G0.
 
