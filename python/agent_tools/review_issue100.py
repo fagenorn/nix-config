@@ -2,15 +2,21 @@
 
 Archive members come from an explicit directory, bounded and unfollowed, with raw sizes and digests checked
 before any decode. Historical and fresh records are separate domains, each under its own policy.
+
+The model is SOURCE's object, `schema_version` 1: `model_100` reads it from Git and it exists only in
+memory. The payload is the compact object, `schema_version` 2, whose canonical bytes are the bundle file
+(issue 254). `compact_100` and `expand_100` map each to the other, and they and `validate_100` are Git-free.
 """
 from __future__ import annotations
 
+import base64
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
+from types import SimpleNamespace
 
 from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import (RECORD_POLICY, RECORD_POLICY_SHA256, GenerationError, _split_diff,
@@ -158,10 +164,6 @@ def _text(value) -> bool:
 
 def _identified(row: dict) -> dict:
     return {**row, "id": telemetry_digest(row)}
-
-
-def _rehashed(row: dict) -> bool:
-    return row["id"] == telemetry_digest({k: v for k, v in row.items() if k != "id"})
 
 
 def _policy(domain: Domain) -> dict:
@@ -323,8 +325,9 @@ def _counts(payload: dict) -> dict:
             "pending_overlaps": len(payload["pending_overlaps"])}
 
 
-def derive_100(issue_repo: Path, live_repo: Path, archive_dir: Path, pins: Issue100Pins, limits) -> dict:
-    """The validated payload: archive and domains verified, then raw parent edges in range order."""
+def model_100(issue_repo: Path, live_repo: Path, archive_dir: Path, pins: Issue100Pins, limits) -> dict:
+    """The schema-1 model, read from Git as SOURCE's derivation reads it: archive and domains verified, then
+    raw parent edges in range order."""
     pins, repo, live_repo = _checked(pins), Path(issue_repo), Path(live_repo)
     _, historical = _verified(Path(archive_dir), repo, pins)
     fresh = fresh_records(repo, pins, limits)
@@ -360,8 +363,203 @@ def derive_100(issue_repo: Path, live_repo: Path, archive_dir: Path, pins: Issue
                "contributions": contributions, "pending_overlaps": overlaps, "tables": tables,
                "criteria": [{**row, "obligations": list(row["obligations"])} for row in pins.criteria]}
     payload["summary"] = _counts(payload)
+    return payload
+
+
+def derive_100(issue_repo: Path, live_repo: Path, archive_dir: Path, pins: Issue100Pins, limits) -> dict:
+    """The validated schema-2 payload of the model `model_100` returns."""
+    payload = compact_100(model_100(issue_repo, live_repo, archive_dir, pins, limits))
     validate_100(payload, pins)
     return payload
+
+
+def _packed(hexes) -> str:
+    """Hex digests as RFC 1924 base85 of their concatenated bytes: one token of 25 characters per object
+    id, of 40 per SHA-256."""
+    return base64.b85encode(bytes.fromhex("".join(hexes))).decode("ascii")
+
+
+def _unpacked(text, size: int) -> list:
+    """The hex digests, `size` bytes each, that a packed string holds."""
+    _require(isinstance(text, str))
+    try:
+        raw = base64.b85decode(text)
+    except ValueError as exc:
+        raise Issue100Error("invalid_payload") from exc
+    _require(len(raw) % size == 0)
+    return [raw[i:i + size].hex() for i in range(0, len(raw), size)]
+
+
+def _pack(m: dict) -> dict:
+    """The schema-2 members of model `m`: digests packed, paths and tree entries interned in sorted tables,
+    each distinct edge record stored once in first-use order, and none of the members `expand_100` recomputes."""
+    commits, rows = m["range"]["commits"], m["contributions"]
+    nodes, records = [m["range"]["base"], *commits], [r for e in m["edges"] for r in e["records"]]
+    used = [x for r in records for x in (r["before"], r["after"])]
+    used += [row[k] for row in rows for k in ("head_entry", "live_entry")]
+    used += [o["base_entry"] for o in m["pending_overlaps"]]
+    groups = {}
+    for e in used:
+        if e is not None:
+            groups.setdefault((e["mode"], e["kind"]), set()).add(e["oid"])
+    entries, index = [], {}
+    for key in sorted(groups):
+        for oid in sorted(groups[key]):
+            index[(*key, oid)] = len(index)
+        entries.append([*key, _packed(sorted(groups[key]))])  # [mode, kind, packed oids]
+
+    def ref(e):
+        return None if e is None else index[(e["mode"], e["kind"], e["oid"])]
+    fresh, historical = m["tables"]["fresh"], m["tables"]["historical"]
+    paths = sorted({p for r in records for p in (r["path"], r["old_path"])}
+                   | {r["path"] for r in fresh["records"]} | {o["path"] for o in m["pending_overlaps"]})
+    at = {p: i for i, p in enumerate(paths)}
+    table, seen, digests, edges = [], {}, [], []
+    for edge in m["edges"]:
+        refs = []
+        for r in edge["records"]:
+            key = canonical_bytes(r)
+            if key not in seen:
+                seen[key] = len(table)
+                # [operation, path, before, after, record_bytes] and, for a rename, the old path
+                table.append([r["operation"], at[r["path"]], ref(r["before"]), ref(r["after"]), r["record_bytes"],
+                              *([at[r["old_path"]]] if r["old_path"] != r["path"] else [])])
+                digests.append(r["record_sha256"][len("sha256:"):])
+            refs.append(seen[key])
+        edges.append(refs)
+    parents, position = [[] for _ in commits], {c: i for i, c in enumerate(commits)}
+    for edge in m["parent_edges"]:
+        parents[position[edge["commit"]]].append(nodes.index(edge["parent"]))
+    return {"schema_version": 2, "kind": m["kind"], "range": {k: m["range"][k] for k in ("base", "head", "live")},
+            "commits": _packed(commits), "parents": parents, "paths": paths, "entries": entries, "records": table,
+            "record_sha256": _packed(digests), "edges": edges,
+            "tables": {"historical": {"record_table_policy": historical["record_table_policy"],
+                                      "bytes": [r["bytes"] for r in historical["records"]],
+                                      "sha256": _packed([r["sha256"] for r in historical["records"]])},
+                       "fresh": {"record_table_policy": fresh["record_table_policy"],
+                                 "paths": [at[r["path"]] for r in fresh["records"]],
+                                 "bytes": [r["bytes"] for r in fresh["records"]],
+                                 "sha256": _packed([r["sha256"] for r in fresh["records"]])}},
+            "live": [ref(row["live_entry"]) for row in rows],
+            # [fresh index, entry] where the head holds a directory; [path, base entry] per overlap
+            "head_trees": [[i, ref(row["head_entry"])] for i, row in enumerate(rows)
+                           if row["head_entry"] and row["head_entry"]["kind"] == "tree"],
+            "process": [i for i, row in enumerate(rows) if row["disposition"] == "historical_process"],
+            "pending_overlaps": [[at[o["path"]], ref(o["base_entry"])] for o in m["pending_overlaps"]],
+            "overlap_sha256": _packed([o[f"{a}_{b}_sha256"] for o in m["pending_overlaps"] for a, b in _PAIRS]),
+            "criteria": [{k: v for k, v in row.items() if k != "text_sha256"} for row in m["criteria"]]}
+
+
+def compact_100(model: dict) -> dict:
+    """The schema-2 payload of `model`. Pure. A model that `expand_100` of its payload does not equal
+    canonically, a malformed model included, is `invalid_payload`."""
+    try:
+        payload = _pack(model)
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+        raise Issue100Error("invalid_payload") from exc
+    _require(_same(expand_100(payload), model))
+    return payload
+
+
+def _rows(value, *sizes: int) -> list:
+    """`value`, a list of lists, each of a length among `sizes` where any is given."""
+    _require(isinstance(value, list)
+             and all(isinstance(row, list) and (not sizes or len(row) in sizes) for row in value))
+    return value
+
+
+def _columns(*columns) -> zip:
+    """The rows across `columns`, lists of one length."""
+    _require(all(isinstance(column, list) for column in columns) and len({len(column) for column in columns}) == 1)
+    return zip(*columns)
+
+
+def _at(rows, index):
+    """`rows[index]`, for an in-range `int` that is not a `bool`."""
+    _require(type(index) is int and 0 <= index < len(rows))
+    return rows[index]
+
+
+def expand_100(payload: dict) -> dict:
+    """The schema-1 model that the schema-2 `payload` encodes. Pure: it reads the payload alone and leaves
+    it unchanged. Given a JSON value it returns or raises `invalid_payload`, nothing else. Anything but the
+    closed version-2 object of this kind is refused, and so are a value of the wrong type where one is read,
+    a row or a column of the wrong length, an index that is not an in-range `int` and a packed string that
+    is not base85 text of whole items. So that the first-parent walk ends, the base and the commits are
+    distinct, the head is one of them, and each commit names a parent, every one the base or an earlier
+    commit. A fresh path and an overlap path have a head entry to take: the first is recorded on the walk,
+    the second is a fresh path. Edge identity, repeated records, head entries, labels, references, ids, the
+    summary and criterion digests are recomputed, never read."""
+    c = _closed(payload, ("schema_version", "kind", "range", "commits", "parents", "paths", "entries", "records",
+                          "record_sha256", "edges", "tables", "live", "head_trees", "process", "pending_overlaps",
+                          "overlap_sha256", "criteria"))
+    _require(type(c["schema_version"]) is int and c["schema_version"] == 2 and c["kind"] == KIND)
+    span, tables = _closed(c["range"], ("base", "head", "live")), _closed(c["tables"], ("historical", "fresh"))
+    paths, commits, criteria = c["paths"], _unpacked(c["commits"], 20), c["criteria"]
+    nodes = [span["base"], *commits]
+    _require(isinstance(paths, list) and all(isinstance(path, str) for path in paths)
+             and isinstance(c["process"], list) and isinstance(criteria, list)
+             and all(isinstance(row, dict) and isinstance(row.get("text"), str) for row in criteria)
+             and isinstance(span["base"], str) and len(set(nodes)) == len(nodes) and span["head"] in nodes
+             and all(_rows(c["parents"])))
+    parent_edges = [{"parent": _at(nodes[:i + 1], p), "commit": commit, "parent_ordinal": n}
+                    for i, (commit, listed) in enumerate(_columns(commits, c["parents"]))
+                    for n, p in enumerate(listed, 1)]
+    entries = [{"mode": mode, "kind": kind, "oid": oid}
+               for mode, kind, packed in _rows(c["entries"], 3) for oid in _unpacked(packed, 20)]
+
+    def entry(index):
+        return None if index is None else dict(_at(entries, index))
+    facts = list(_columns(_rows(c["records"], 5, 6), _unpacked(c["record_sha256"], 32)))
+
+    def record(index):
+        row, digest = _at(facts, index)
+        old = row[5] if len(row) > 5 else row[1]
+        return {"operation": row[0], "path": _at(paths, row[1]), "old_path": _at(paths, old),
+                "before": entry(row[2]), "after": entry(row[3]), "record_bytes": row[4],
+                "record_sha256": "sha256:" + digest}
+    edges = [{**raw, "records": [record(i) for i in refs]} for raw, refs in _columns(parent_edges, _rows(c["edges"]))]
+    old, new = (_closed(tables[name], ("record_table_policy", "bytes", "sha256", *more))
+                for name, more in (("historical", ()), ("fresh", ("paths",))))
+    historical = [{"bytes": size, "sha256": digest}
+                  for size, digest in _columns(old["bytes"], _unpacked(old["sha256"], 32))]
+    fresh = [{"path": _at(paths, path), "bytes": size, "sha256": digest}
+             for path, size, digest in _columns(new["paths"], new["bytes"], _unpacked(new["sha256"], 32))]
+    m = {"schema_version": 1, "kind": KIND, "parent_edges": parent_edges, "edges": edges,
+         "range": {**span, "commits": commits}}
+    # `_at_head` reads `head` and `base` alone from its second argument, so the stored range stands for pins.
+    at_head = _at_head(m, SimpleNamespace(**span))
+    slots = range(len(fresh))  # `_at(slots, i)` is `i`, checked as a fresh index
+    trees = {_at(slots, i): ref for i, ref in _rows(c["head_trees"], 2)}
+    process, rows = {_at(slots, i) for i in c["process"]}, []
+    for i, (row, live) in enumerate(_columns(fresh, c["live"])):
+        path = row["path"]
+        _require(path in at_head)
+        head, live = entry(trees[i]) if i in trees else at_head[path], entry(live)
+        label = "historical_process" if i in process else "integrated" if head == live else "candidate"
+        rows.append({"path": path, "record_sha256": row["sha256"], "head_entry": head, "live_entry": live,
+                     "edge_refs": _refs(edges, path), "disposition": label, "pending": None})
+    by_path = {row["path"]: row for row in rows}
+    stored, digests, overlaps = _rows(c["pending_overlaps"], 2), _unpacked(c["overlap_sha256"], 32), []
+    _require(len(digests) == len(_PAIRS) * len(stored))
+    for n, (path, before) in enumerate(stored):
+        path = _at(paths, path)
+        _require(path in by_path)
+        overlaps.append(_identified({
+            "path": path, "base_entry": entry(before), "live_entry": by_path[path]["live_entry"],
+            "head_entry": by_path[path]["head_entry"],
+            **{f"{a}_{b}_sha256": digests[len(_PAIRS) * n + k] for k, (a, b) in enumerate(_PAIRS)}}))
+    pending = {row["path"]: row["id"] for row in overlaps}
+    for row in rows:
+        if row["disposition"] == "candidate":
+            row["pending"] = pending.get(row["path"])
+    m.update(contributions=[_identified(row) for row in rows], pending_overlaps=overlaps,
+             tables={"historical": {"record_table_policy": old["record_table_policy"], "records": historical},
+                     "fresh": {"record_table_policy": new["record_table_policy"], "records": fresh}},
+             # A lone surrogate, which JSON can spell, is hashed rather than raised on.
+             criteria=[{**row, "text_sha256": _sha(row["text"].encode("utf-8", "surrogatepass"))} for row in criteria])
+    m["summary"] = _counts(m)
+    return m
 
 
 def _entry(value, file=None) -> bool:
@@ -370,53 +568,36 @@ def _entry(value, file=None) -> bool:
     if value is None:
         return not file
     kinds = ("blob", "tree", "commit") if file is None else ("blob", "commit") if file else ("tree",)
-    return (_closed(value, ("mode", "kind", "oid")) and _match("[0-7]{6}", value["mode"])
-            and value["kind"] in kinds and _hex(value["oid"]))
+    return _match("[0-7]{6}", value["mode"]) and value["kind"] in kinds
 
 
 def _validate_history(payload, pins) -> None:
-    """Raw parent edges in range order, ordinals from 1, each parent the base or an earlier range commit, and
-    the whole ordered list hashing to its pin: no parent is substituted, dropped or moved, however rehashed."""
+    """The pinned range ending at its head, the raw parent edges hashing to their pin (no parent is
+    substituted, dropped or moved, however rehashed) and the shape of each edge record."""
     span, commits = payload["range"], payload["range"]["commits"]
     _require(_same({**span, "commits": 0}, {"base": pins.base, "head": pins.head, "live": pins.live, "commits": 0})
-             and isinstance(commits, list) and all(_hex(c) for c in commits) and len(set(commits)) == len(commits)
              and commits[-1:] == [pins.head])
-    position = {oid: n for n, oid in enumerate(commits)}
-    parent_edges, edges, keys = payload["parent_edges"], payload["edges"], []
-    _require(isinstance(parent_edges, list) and isinstance(edges, list) and len(edges) == len(parent_edges)
-             and telemetry_digest(parent_edges) == pins.parent_edges_sha256)
-    for raw, edge in zip(parent_edges, edges):
-        _closed(raw, ("parent", "commit", "parent_ordinal"))
-        _closed(edge, (*raw, "records"))
-        parent, commit, ordinal = raw["parent"], raw["commit"], raw["parent_ordinal"]
-        _require(_same(raw, {k: edge[k] for k in raw}) and commit in position and type(ordinal) is int and ordinal > 0
-                 and isinstance(edge["records"], list)
-                 and (parent == pins.base or position.get(parent, len(commits)) < position[commit]))
-        keys.append((position[commit], ordinal))
+    _require(telemetry_digest(payload["parent_edges"]) == pins.parent_edges_sha256)
+    for edge in payload["edges"]:
         for record in edge["records"]:
-            _closed(record, ("operation", "path", "old_path", "before", "after", "record_bytes", "record_sha256"))
             operation, path, old, before, after = (record[k] for k in ("operation", "path", "old_path", "before", "after"))
             _require(operation in ("A", "M", "D", "T", "R100") and _text(path) and _text(old)
                      and (operation == "R100") == (path != old)
                      and _entry(before, operation != "A") and _entry(after, operation != "D")
-                     and _count(record["record_bytes"]) and _match("sha256:[0-9a-f]{64}", record["record_sha256"]))
-    _require(keys == sorted(set(keys)) and {n for n, _ in keys} == set(range(len(commits)))
-             and all(ordinal == 1 or (i and keys[i - 1] == (n, ordinal - 1)) for i, (n, ordinal) in enumerate(keys)))
+                     and _count(record["record_bytes"]))
 
 
-def _validate_tables(payload, pins) -> list:
-    tables = _closed(payload["tables"], ("historical", "fresh"))
-    for name, domain, keys in (("historical", pins.historical, ()), ("fresh", pins.fresh, ("path",))):
-        table = _closed(tables[name], ("record_table_policy", "records"))
+def _validate_tables(payload, pins) -> None:
+    """Each domain under its pinned policy, record count and byte sum, and each fresh path once."""
+    for name, domain in (("historical", pins.historical), ("fresh", pins.fresh)):
+        table = payload["tables"][name]
         records = table["records"]
-        _require(_same(table["record_table_policy"], _policy(domain)) and isinstance(records, list)
+        _require(_same(table["record_table_policy"], _policy(domain))
                  and len(records) == domain.records)
         for record in records:
-            _closed(record, ("bytes", "sha256", *keys))
-            _require(_count(record["bytes"]) and _hex(record["sha256"], 64) and all(_text(record[k]) for k in keys))
+            _require(_count(record["bytes"]))
         _require(sum(record["bytes"] for record in records) == domain.bytes)
     _require(len({record["path"] for record in records}) == len(records))
-    return records
 
 
 def _at_head(payload, pins) -> dict:
@@ -432,52 +613,38 @@ def _at_head(payload, pins) -> dict:
     return entries
 
 
-def _validate_contributions(payload, pins, fresh) -> None:
-    """A row per fresh record, each label recomputed, each overlap referenced once, each head entry the one
-    `_at_head` finds: where that is no file but a file lies below the path, a directory of whatever oid."""
+def _validate_contributions(payload, pins) -> None:
+    """The overlaps on the pinned paths, each referenced once, each process label where the pins name the
+    path, each stored entry shaped as one, and each head entry the one `_at_head` finds: where that is no
+    file but a file lies below the path, a directory of whatever oid."""
     overlaps, rows, at_head = payload["pending_overlaps"], payload["contributions"], _at_head(payload, pins)
-    _require(isinstance(overlaps, list) and len(overlaps) == len(pins.pending_paths))
+    _require(len(overlaps) == len(pins.pending_paths))
     by_id = {}
     for row, path in zip(overlaps, pins.pending_paths):
-        _closed(row, ("path", "base_entry", "live_entry", "head_entry", *(f"{a}_{b}_sha256" for a, b in _PAIRS), "id"))
-        _require(row["path"] == path and all(_entry(row[f"{name}_entry"]) for name in ("base", "live", "head"))
-                 and all(_hex(row[f"{a}_{b}_sha256"], 64) for a, b in _PAIRS) and _rehashed(row))
+        _require(row["path"] == path and _entry(row["base_entry"]))
         by_id[row["id"]] = row
-    _require(isinstance(rows, list) and len(rows) == len(fresh))
     referenced = []
-    for row, record in zip(rows, fresh):
-        _closed(row, ("path", "record_sha256", "head_entry", "live_entry", "edge_refs", "disposition", "pending", "id"))
+    for row in rows:
         path, label, head = row["path"], row["disposition"], row["head_entry"]
-        _require(path == record["path"] and row["record_sha256"] == record["sha256"]
-                 and _entry(row["head_entry"]) and _entry(row["live_entry"])
-                 and _same(row["edge_refs"], _refs(payload["edges"], path)) and label in DISPOSITIONS
-                 and (label == "historical_process") == (process := path in pins.process_paths)
-                 and (label == "integrated") == (not process and _same(row["head_entry"], row["live_entry"]))
-                 and (row["pending"] is not None) == (label == "candidate" and path in pins.pending_paths)
-                 and _rehashed(row))
+        _require(_entry(row["live_entry"]) and (label == "historical_process") == (path in pins.process_paths))
         below = at_head[path] is None and any(e and name.startswith(path + "/") for name, e in at_head.items())
         _require(_same(head, {"mode": "040000", "kind": "tree", "oid": (head or {}).get("oid")}) if below
                  else _same(head, at_head[path]))
         if row["pending"] is not None:
-            overlap = by_id.get(row["pending"], {})
-            _require(_same([overlap.get(k) for k in ("path", "head_entry", "live_entry")],
-                           [path, row["head_entry"], row["live_entry"]]))
             referenced.append(row["pending"])
     _require(sorted(referenced) == sorted(by_id))
 
 
-def validate_100(payload: dict, pins: Issue100Pins) -> None:
-    """Git-free: closed shapes, edge order and coverage, both domains, labels, criteria, and every count
-    recomputed from the tables, never trusted (S10)."""
+def validate_100(payload: dict, pins: Issue100Pins) -> dict:
+    """Git-free: the model of a schema-2 `payload`. In order, the pins are checked, the payload is expanded,
+    an expansion that the pins do not determine is refused (range, raw parent edges, record shapes, both
+    domains, overlaps, labels, head entries, criteria and the counts, which expansion recomputes from the
+    tables: S10), and so is a payload that is not `compact_100` of its expansion."""
     pins = _checked(pins)
-    try:
-        _closed(payload, ("schema_version", "kind", "range", "parent_edges", "edges", "contributions",
-                          "pending_overlaps", "criteria", "tables", "summary"))
-        _require(_same([payload["schema_version"], payload["kind"]], [1, KIND]))
-        _validate_history(payload, pins)
-        _validate_contributions(payload, pins, _validate_tables(payload, pins))
-        _require(_same(payload["criteria"], pins.criteria))
-        counts = _counts(payload)
-        _require(_same(payload["summary"], counts) and _same(counts, pins.expected_counts))
-    except (KeyError, TypeError, AttributeError, ValueError) as exc:
-        raise Issue100Error("invalid_payload") from exc
+    model = expand_100(payload)
+    _validate_history(model, pins)
+    _validate_tables(model, pins)
+    _validate_contributions(model, pins)
+    _require(_same(model["criteria"], pins.criteria) and _same(model["summary"], pins.expected_counts))
+    _require(_same(compact_100(model), payload))
+    return model

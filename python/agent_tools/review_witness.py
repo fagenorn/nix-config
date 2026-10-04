@@ -5,9 +5,10 @@ issue-100 payload, the issue-121 payload and the Task-7 estimate table), the
 witness digests them, and the anchor hashes all four. Five provenance groups,
 the components, appear identically in the witness and in the anchor.
 
-The issue-121 file is the compact schema-4 payload. Its model, SOURCE's
-schema-3 object, is what `expand_121` yields: the witness digests the model's
-tables, and `validate_bundle` returns the model (issue 254).
+The issue-100 and issue-121 files are the compact payloads, schema versions 2
+and 4. The model of each, SOURCE's object, is what `expand_100` or `expand_121`
+yields: the witness digests the models' tables, and `validate_bundle` returns
+the models (issue 254).
 
 Construction is acyclic: the witness reads the components and the fixtures, the
 anchor reads the components and the four payloads, and no payload names the
@@ -35,7 +36,7 @@ from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import PACKING_POLICY_SHA256, RECORD_POLICY_SHA256, GenerationError, _run_git
 from agent_tools.review_forecast import (ForecastError, canonical_bytes, full_commit, raw_digest, read_regular,
                                          strict_json)
-from agent_tools.review_issue100 import validate_100
+from agent_tools.review_issue100 import expand_100, validate_100
 from agent_tools.review_issue121 import expand_121, validate_121
 from agent_tools.review_task7 import validate_task7
 
@@ -56,8 +57,8 @@ _WITNESS_KIND = "review-feasibility-derivation-witness"
 _ENCODING = "canonical-json-ascii-lf/v1"
 _PACKAGE = "python/agent_tools/"
 _MEMBER = ("path", "bytes", "raw_sha256")
-# Every table the witness digests, by fixture in path order, read from the issue-121 model and the other two
-# payloads. A dotted name is that member's `records` list.
+# Every table the witness digests, by fixture in path order, read from the two retained models and the
+# estimate table. A dotted name is that member's `records` list.
 # A `records` list is a raw-record table, and its `record_table_policy` sits beside it.
 _TABLES = ((_ISSUE_100, ("parent_edges", "edges", "contributions", "pending_overlaps", "criteria",
                          "tables.historical", "tables.fresh")),
@@ -177,7 +178,7 @@ def _tables(models: Mapping[str, object]) -> tuple[list[dict], dict]:
 
 def build_witness(components: dict, models: Mapping[str, dict], raw: Mapping[str, bytes]) -> dict:
     """The version-2 witness over the components and the three fixtures. `models` holds what the tables
-    digest, by fixture name: the issue-121 model and the other two payloads. `raw` holds the bundle files'
+    digest, by fixture name: the two retained models and the estimate table. `raw` holds the bundle files'
     bytes. The witness holds no anchor identity and no digest of itself."""
     tables, policies = _tables(models)
     return {"schema_version": 2, "kind": _WITNESS_KIND, "components": {group: components[group] for group in _GROUPS},
@@ -273,15 +274,15 @@ def _components(components: dict, table: object, task7_pins, issue121_pins, issu
 
 def validate_bundle(anchor: dict, raw: Mapping[str, bytes], *, task7_pins, issue121_pins,
                     issue100_pins) -> dict[str, dict]:
-    """The four members by name, the issue-121 one as its model, after the one full semantic validation of
-    a bundle.
+    """The four members by name, the two retained ones as their models, after the one full semantic
+    validation of a bundle.
 
     `anchor` is an authenticated or freshly built anchor and `raw` its four payloads' bytes. In order:
     each payload strictly decodes to its own canonical bytes (`member_noncanonical`); the witness is the
     closed version-2 object whose fixtures are the anchor's (`witness_shape`), whose components are the
-    anchor's (`component_mismatch`) and whose table rows, digests and policies are those of the issue-121
-    payload's expansion and the other two fixtures (`table_mismatch`, or that expansion's own refusal,
-    which passes through); the components match the pins and policy constants (`component_mismatch`); the
+    anchor's (`component_mismatch`) and whose table rows, digests and policies are those of the two retained
+    payloads' expansions and the estimate table (`table_mismatch`, or an expansion's own refusal, which
+    passes through); the components match the pins and policy constants (`component_mismatch`); the
     three SOURCE validators accept the fixtures, their own errors passing through unchanged; every
     measured issue-121 outcome carries the tool group's artifact policy (`policy_mismatch`); and the
     outcomes the pinned head determines carry the pinned tree (`component_mismatch`, RP16): a measured
@@ -301,13 +302,14 @@ def validate_bundle(anchor: dict, raw: Mapping[str, bytes], *, task7_pins, issue
     _require(_same(witness["components"], components), "component_mismatch")
     _require(_same(witness["fixtures"], [m for m in anchor["payload"]["members"] if m["path"] != _WITNESS]),
              "witness_shape")
-    models = {**payloads, _ISSUE_121: expand_121(payloads[_ISSUE_121])}
+    models = {**payloads, _ISSUE_100: expand_100(payloads[_ISSUE_100]),
+              _ISSUE_121: expand_121(payloads[_ISSUE_121])}
     _require(_same([witness["tables"], witness["table_policies"]], list(_tables(models))), "table_mismatch")
     table = payloads[_ESTIMATE]
     _components(components, table, task7_pins, issue121_pins, issue100_pins)
     validate_task7(table, task7_pins)
     issue121 = models[_ISSUE_121] = validate_121(payloads[_ISSUE_121], issue121_pins, table)
-    validate_100(payloads[_ISSUE_100], issue100_pins)
+    models[_ISSUE_100] = validate_100(payloads[_ISSUE_100], issue100_pins)
     outcomes = [issue121["aggregate"]["actual"], issue121["aggregate"]["projected"], *issue121["boundaries"]]
     _require(all(row["measurement"]["artifact_policy_sha256"] == components["tool"]["artifact_policy_sha256"]
                  for row in outcomes if row["state"] == "measured"), "policy_mismatch")

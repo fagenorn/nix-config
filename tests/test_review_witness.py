@@ -7,7 +7,7 @@ from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import PACKING_POLICY_SHA256, RECORD_POLICY_SHA256
 from agent_tools.review_budget import describe
 from agent_tools.review_forecast import _derivation, canonical_bytes, raw_digest
-from agent_tools.review_issue100 import Issue100Error, derive_100, verify_archive
+from agent_tools.review_issue100 import Issue100Error, derive_100, expand_100, verify_archive
 from agent_tools.review_issue121 import ContributionError, derive_121, expand_121, unavailable_ids
 from agent_tools.review_task7 import EstimateError, derive_task7
 from agent_tools.review_witness import (ANCHOR_MAX_BYTES, ANCHOR_NAME, MEMBER_MAX_BYTES, PAYLOAD_NAMES, WitnessError,
@@ -54,8 +54,9 @@ def derived(tmp, **shape):
 
 
 def models(payloads):
-    """What the witness tables digest: the payloads, with the issue-121 payload expanded to its model."""
-    return {**payloads, "issue-121.json": expand_121(payloads["issue-121.json"])}
+    """What the witness tables digest: the payloads, with the two retained payloads expanded to their models."""
+    return {**payloads, "issue-100-derived.json": expand_100(payloads["issue-100-derived.json"]),
+            "issue-121.json": expand_121(payloads["issue-121.json"])}
 
 
 def bound(components, payloads):
@@ -129,7 +130,7 @@ class WitnessTest(unittest.TestCase):
         control = validate_bundle(*authenticate(self.dir, self.expected), **self.kwargs())
         self.assertEqual(unavailable_ids(control["issue-121.json"]), ("tasks-1-3", "tasks-4-6"))
         hundred = copy.deepcopy(self.payloads["issue-100-derived.json"])
-        hundred["summary"]["integrated"] += 1
+        hundred["process"] = []  # the process path relabelled: neither its label nor the counts are the pinned ones
         table = copy.deepcopy(self.payloads["task7-estimate.json"])
         table["rows"] = table["rows"][:-1]
         for name, broken, error in (("issue-100-derived.json", hundred, Issue100Error),
@@ -147,7 +148,7 @@ class WitnessTest(unittest.TestCase):
                                   **self.components, "payload": payload})
         self.assertEqual(validate_bundle(anchor, raw, **self.kwargs()),
                          {**models(self.payloads), WITNESS: json.loads(raw[WITNESS])})
-        self.assertEqual(json.loads(raw["issue-121.json"])["schema_version"], 4)
+        self.assertEqual([json.loads(raw[name])["schema_version"] for name in FIXTURES[:2]], [2, 4])
 
     def test_replacement_anchor_fails_the_unchanged_digest(self):
         self.write({**self.anchor, "tool": {**self.anchor["tool"], "commit": "0" * 40}})
@@ -275,7 +276,7 @@ class WitnessTest(unittest.TestCase):
 
     def test_source_encoded_member_is_invalid_payload_whatever_its_witness(self):
         clean = models(self.payloads)
-        for name, error in (("issue-121.json", ContributionError),):
+        for name, error in (("issue-121.json", ContributionError), ("issue-100-derived.json", Issue100Error)):
             raw = {**self.raw, name: canonical_bytes(clean[name])}  # SOURCE's encoding of the same facts
             raw[WITNESS] = canonical_bytes(build_witness(self.components, clean, raw))
             with self.subTest(member=name):

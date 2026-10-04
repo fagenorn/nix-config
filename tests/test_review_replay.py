@@ -9,6 +9,7 @@ from agent_tools.replay_retained import main
 from agent_tools.review_budget import describe
 from agent_tools.review_derivation import DeriveInputs, derive_bundle
 from agent_tools.review_forecast import canonical_bytes
+from agent_tools.review_issue100 import Issue100Error, expand_100
 from agent_tools.review_issue121 import ContributionError, expand_121
 from agent_tools.review_replay import ReplayUnavailable, replay
 from agent_tools.review_witness import ANCHOR_NAME, WitnessError, authenticate, build_anchor, build_witness
@@ -73,10 +74,16 @@ class ReplayTest(unittest.TestCase):
         stdout.flush()
         return status, stdout.buffer.getvalue(), stderr.getvalue()
 
+    @staticmethod
+    def models(payloads):
+        """`payloads` by name, the two retained ones expanded to their models."""
+        return {**payloads, "issue-100-derived.json": expand_100(payloads["issue-100-derived.json"]),
+                "issue-121.json": expand_121(payloads["issue-121.json"])}
+
     def rebound(self, bundle, components, payloads, raw, models=None):
         """Write `raw` into `bundle` under a rebuilt witness and anchor: `(the forger's own digest, anchor)`.
         The witness digests `models`, else the expansions of `payloads` (trust injection, RP7)."""
-        models = models or {**payloads, "issue-121.json": expand_121(payloads["issue-121.json"])}
+        models = models or self.models(payloads)
         raw["derivation-witness.json"] = canonical_bytes(build_witness(components, models, raw))
         anchor = build_anchor(components, raw)
         for name, data in {**raw, ANCHOR_NAME: canonical_bytes(anchor)}.items():
@@ -86,11 +93,12 @@ class ReplayTest(unittest.TestCase):
     def test_source_encoded_members_are_refused_as_invalid_payload(self):
         """The SOURCE encoding of the same facts, under a witness and an anchor that are coherent with it."""
         source, expected, kwargs = self.shared()
-        for name, error, versions in (("issue-121.json", ContributionError, (3, 4)),):
+        for name, error, versions in (("issue-121.json", ContributionError, (3, 4)),
+                                      ("issue-100-derived.json", Issue100Error, (1, 2))):
             bundle = Path(shutil.copytree(source, self.tmp / name))
             trusted_anchor, raw = authenticate(bundle, expected)
             payloads = {member: json.loads(data) for member, data in raw.items()}
-            models = {**payloads, "issue-121.json": expand_121(payloads["issue-121.json"])}
+            models = self.models(payloads)
             self.assertEqual((models[name]["schema_version"], payloads[name]["schema_version"]), versions)
             raw = {**raw, name: canonical_bytes(models[name])}
             components = {group: trusted_anchor[group] for group in GROUPS}
