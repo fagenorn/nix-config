@@ -9,7 +9,7 @@ from agent_tools.replay_retained import main
 from agent_tools.review_budget import describe
 from agent_tools.review_derivation import DeriveInputs, derive_bundle
 from agent_tools.review_forecast import canonical_bytes
-from agent_tools.review_issue121 import ContributionError
+from agent_tools.review_issue121 import ContributionError, expand_121
 from agent_tools.review_replay import ReplayUnavailable, replay
 from agent_tools.review_witness import ANCHOR_NAME, WitnessError, authenticate, build_anchor, build_witness
 
@@ -73,6 +73,37 @@ class ReplayTest(unittest.TestCase):
         stdout.flush()
         return status, stdout.buffer.getvalue(), stderr.getvalue()
 
+    def rebound(self, bundle, components, payloads, raw, models=None):
+        """Write `raw` into `bundle` under a rebuilt witness and anchor: `(the forger's own digest, anchor)`.
+        The witness digests `models`, else the expansions of `payloads` (trust injection, RP7)."""
+        models = models or {**payloads, "issue-121.json": expand_121(payloads["issue-121.json"])}
+        raw["derivation-witness.json"] = canonical_bytes(build_witness(components, models, raw))
+        anchor = build_anchor(components, raw)
+        for name, data in {**raw, ANCHOR_NAME: canonical_bytes(anchor)}.items():
+            (bundle / name).write_bytes(data)
+        return telemetry_digest(anchor), anchor
+
+    def test_source_encoded_members_are_refused_as_invalid_payload(self):
+        """The SOURCE encoding of the same facts, under a witness and an anchor that are coherent with it."""
+        source, expected, kwargs = self.shared()
+        for name, error, versions in (("issue-121.json", ContributionError, (3, 4)),):
+            bundle = Path(shutil.copytree(source, self.tmp / name))
+            trusted_anchor, raw = authenticate(bundle, expected)
+            payloads = {member: json.loads(data) for member, data in raw.items()}
+            models = {**payloads, "issue-121.json": expand_121(payloads["issue-121.json"])}
+            self.assertEqual((models[name]["schema_version"], payloads[name]["schema_version"]), versions)
+            raw = {**raw, name: canonical_bytes(models[name])}
+            components = {group: trusted_anchor[group] for group in GROUPS}
+            forger, anchor = self.rebound(bundle, components, payloads, raw, models)
+            self.assertEqual(authenticate(bundle, forger), (anchor, raw))
+            with self.subTest(member=name):
+                with self.assertRaises(error) as caught:
+                    replay(bundle, forger, **kwargs)
+                self.assertEqual(caught.exception.code, "invalid_payload")
+                self.assertEqual(self.main(bundle, forger, kwargs), (2, b"", PREFIX + "invalid: invalid_payload\n"))
+                (bundle / ANCHOR_NAME).write_bytes(canonical_bytes(trusted_anchor))  # the trusted anchor again
+                self.refused("member_digest", bundle, expected, kwargs)
+
     def test_unavailable_bundle_replays_without_sources_in_outcome_order(self):
         bundle, expected, kwargs = derived_bundle(self.tmp, **UNAVAILABLE)
         moved = self.tmp / "portable"; shutil.copytree(bundle, moved)
@@ -106,8 +137,8 @@ class ReplayTest(unittest.TestCase):
         anchor, raw = authenticate(bundle, expected)
         payloads = {name: json.loads(data) for name, data in raw.items()}
         issue121, forged = payloads["issue-121.json"], "f" * 40
-        future = issue121["boundaries"][2]
-        heads = (*issue121["aggregate"].values(), future)
+        future = issue121["outcomes"][4]
+        heads = (*issue121["outcomes"][:2], future)
         self.assertEqual([row["result_tree"] for row in heads] + [future["prerequisite"]["tree"]],
                          [anchor["issue_121"]["tree"]] * 4)  # as derived: the pinned head's tree (RP16)
         for row in heads:
@@ -115,11 +146,7 @@ class ReplayTest(unittest.TestCase):
         future["prerequisite"]["tree"] = forged
         components = {group: anchor[group] for group in GROUPS}
         raw = {**raw, "issue-121.json": canonical_bytes(issue121)}
-        raw["derivation-witness.json"] = canonical_bytes(build_witness(components, payloads, raw))
-        rebound = build_anchor(components, raw)
-        for name, data in {**raw, ANCHOR_NAME: canonical_bytes(rebound)}.items():
-            (bundle / name).write_bytes(data)
-        trusted = telemetry_digest(rebound)  # trust injection (RP7): the forger's own, coherent digest
+        trusted, rebound = self.rebound(bundle, components, payloads, raw)  # the forger's own, coherent digest
         self.assertEqual(authenticate(bundle, trusted), (rebound, raw))
         self.refused("component_mismatch", bundle, trusted, kwargs)
 
@@ -130,7 +157,7 @@ class ReplayTest(unittest.TestCase):
         self.assertEqual(result["issue_100"], {
             "history_edge_count": 20, "disposition_counts": {"historical_process": 1, "integrated": 1, "candidate": 6},
             "pending_overlap_count": 2, "fixture_sha256": hashlib.sha256(member).hexdigest()})
-        payload = json.loads((bundle / "issue-121.json").read_bytes())
+        payload = expand_121(json.loads((bundle / "issue-121.json").read_bytes()))
         self.assertEqual(result["issue_121"],
                          {name: payload[name] for name in ("aggregate", "boundaries", "operational_effects")})
         self.assertEqual((set(result), result["schema_version"], result["kind"], result["anchor_sha256"]),

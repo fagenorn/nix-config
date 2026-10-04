@@ -5,7 +5,9 @@ authenticates the anchor and the four payloads under that digest
 (`review_witness.authenticate`), runs the one full semantic validation
 (`review_witness.validate_bundle`), and only then classifies the bundle: a
 bundle holding an unavailable issue-121 outcome is `ReplayUnavailable`, and any
-other valid bundle is the retained result.
+other valid bundle is the retained result. The issue-121 file is the compact
+payload; what replay classifies and reports is its model, the expansion that
+`validate_bundle` returns (issue 254).
 
 It validates nothing itself, so a bundle is valid here exactly when derivation
 would publish it (RP2). It runs no Git, asks no budget authority and reads only
@@ -25,7 +27,7 @@ _KIND = "review-feasibility-retained-result"
 
 
 class ReplayUnavailable(Exception):
-    """A valid bundle whose issue-121 payload holds unavailable outcomes; `ids` names them in outcome order."""
+    """A valid bundle whose issue-121 model holds unavailable outcomes; `ids` names them in outcome order."""
 
     def __init__(self, ids: tuple[str, ...]):
         self.ids = tuple(ids)
@@ -37,11 +39,11 @@ def replay(bundle_dir: Path, expected_anchor_sha256: str, *, task7_pins, issue12
 
     In order: `authenticate` binds the anchor to the expected digest and the four payloads to the anchor;
     `validate_bundle` validates them against the three pins; then, with validation passed, a non-empty
-    `unavailable_ids` of the issue-121 payload raises `ReplayUnavailable` with those ids. The two calls'
+    `unavailable_ids` of the issue-121 model raises `ReplayUnavailable` with those ids. The two calls'
     errors (`WitnessError`, `EstimateError`, `ContributionError`, `Issue100Error`) pass through unchanged.
 
     The result has exactly five members: `schema_version` 3; `kind`; `anchor_sha256`, the expected digest;
-    `issue_121`, the payload's `aggregate`, `boundaries` and `operational_effects`; and `issue_100`, which
+    `issue_121`, the model's `aggregate`, `boundaries` and `operational_effects`; and `issue_100`, which
     holds `history_edge_count` (the validated summary's `edge_records`), `disposition_counts` (its three
     dispositions), `pending_overlap_count` (its `pending_overlaps`) and `fixture_sha256`, the anchor's
     `raw_sha256` for the issue-100 member. Over-budget measured outcomes are a result, not a refusal.

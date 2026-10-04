@@ -12,8 +12,8 @@ from agent_tools.canonical import telemetry_digest
 from agent_tools.review_budget import describe
 from agent_tools.review_forecast import ForecastError
 from agent_tools.review_git import HistoryError
-from agent_tools.review_issue121 import (ContributionError, classify, contribution_edges, derive_121, plan_anchors,
-                                         reconstruct_boundary, unavailable_ids, validate_121)
+from agent_tools.review_issue121 import (ContributionError, classify, compact_121, contribution_edges, derive_121,
+                                         model_121, plan_anchors, reconstruct_boundary, unavailable_ids, validate_121)
 
 from .retained_review_test_support import (commit_files, git, linear_fixture, rehash_edges, snapshot,
                                            source_budget_env, ssh_signer, task7_fixture)
@@ -32,6 +32,11 @@ def rehash(row):
 
 def edge_of(payload, commit):
     return next(e["id"] for e in payload["edges"] if e["commit"] == commit)
+
+
+def validated(model, pins, table):
+    """The model `validate_121` returns for the payload of `model`."""
+    return validate_121(compact_121(model), pins, table)
 
 
 class Fixture:
@@ -74,9 +79,10 @@ class AncestryTest(Fixture, unittest.TestCase):
     def test_clean_payload_validates_over_one_history(self):
         self.assertEqual(self.task7_pins.prerequisite_commit, self.pins.head)
         before = snapshot(self.repo)
-        payload = derive_121(self.repo, self.pins, self.task7_pins, self.authority)
+        payload = model_121(self.repo, self.pins, self.task7_pins, self.authority)
+        self.assertEqual(derive_121(self.repo, self.pins, self.task7_pins, self.authority), compact_121(payload))
         self.assertEqual(snapshot(self.repo), before)
-        self.assertIsNone(validate_121(payload, self.pins, self.table))
+        self.assertEqual(validated(payload, self.pins, self.table), payload)
         self.assertEqual([r["boundary"] for r in payload["boundaries"]], ["tasks-1-3", "tasks-4-6", "tasks-7-8"])
 
     def test_virtualized_history_is_invalid_at_both_entry_points(self):
@@ -151,7 +157,7 @@ class AncestryTest(Fixture, unittest.TestCase):
             self.assertEqual(caught.exception.code, "assignment_mismatch")
 
     def test_last_assignment_must_be_the_pinned_head(self):
-        payload = derive_121(self.repo, self.pins, self.task7_pins, self.authority)
+        payload = compact_121(model_121(self.repo, self.pins, self.task7_pins, self.authority))
         cases = {"short": replace(self.pins, assignments=self.pins.assignments[:-1]),
                  "foreign_head": replace(self.pins, head="f" * 40),
                  "empty": replace(self.pins, assignments=())}
@@ -182,7 +188,7 @@ class AncestryTest(Fixture, unittest.TestCase):
         self.assertEqual(caught.exception.code, "anchor_blob_mismatch")
 
     def test_future_only_boundary_has_prerequisite_tree_and_table_records(self):
-        payload = derive_121(self.repo, self.pins, self.task7_pins, self.authority)
+        payload = model_121(self.repo, self.pins, self.task7_pins, self.authority)
         row = payload["boundaries"][2]
         head_tree = git(self.repo, "rev-parse", self.pins.head + "^{tree}")
         self.assertEqual(row["state"], "measured")  # this fixture's table composes
@@ -207,8 +213,8 @@ class RouteTest(Fixture, unittest.TestCase):
 
     def test_late_fix_touching_excluded_path_yields_unavailable_with_that_edge(self):
         repo, pins, task7_pins, table, authority = self.build(self.tmp, owners=(1, 2, 3, 6, 3), touches={4: 3})
-        payload = derive_121(repo, pins, task7_pins, authority)
-        self.assertIsNone(validate_121(payload, pins, table))
+        payload = model_121(repo, pins, task7_pins, authority)
+        self.assertEqual(validated(payload, pins, table), payload)
         commits = [c for c, _, _ in pins.assignments]
         row = payload["boundaries"][0]
         self.assertEqual(row["state"], "projection_unavailable")
@@ -223,8 +229,8 @@ class RouteTest(Fixture, unittest.TestCase):
 
     def test_prerequisite_without_matching_closure_is_unavailable(self):
         repo, pins, task7_pins, table, authority = self.build(self.tmp, owners=(1, 2, 4, 3, 5, 6))
-        payload = derive_121(repo, pins, task7_pins, authority)
-        self.assertIsNone(validate_121(payload, pins, table))
+        payload = model_121(repo, pins, task7_pins, authority)
+        self.assertEqual(validated(payload, pins, table), payload)
         commits = [c for c, _, _ in pins.assignments]
         row = payload["boundaries"][1]
         self.assertEqual(row["prerequisite"], {"kind": "completed-tasks", "tasks": [1, 2, 3],
@@ -243,8 +249,8 @@ class RouteTest(Fixture, unittest.TestCase):
         pins = replace(pins, head=swaps[-1], assignments=pins.assignments + tuple((c, 3, None) for c in swaps))
         task7_pins, table = task7_fixture(repo, pins)
         with patch.dict(os.environ, source_budget_env(self.tmp), clear=True):
-            payload = derive_121(repo, pins, task7_pins, describe("review-package"))
-        self.assertIsNone(validate_121(payload, pins, table))
+            payload = model_121(repo, pins, task7_pins, describe("review-package"))
+        self.assertEqual(validated(payload, pins, table), payload)
         facts = {(r["operation"], r["path"]): r for edge in payload["edges"][-2:] for r in edge["records"]}
         self.assertEqual([facts["A", "dir"]["before"]["kind"], facts["D", "dir"]["after"]["kind"]], ["tree", "tree"])
         self.assertEqual([facts["D", "dir/inner.txt"]["after"], facts["A", "dir/again.txt"]["before"]], [None, None])
@@ -261,7 +267,7 @@ class RouteTest(Fixture, unittest.TestCase):
                        assignments=pins.assignments + tuple((c, 0, "process") for c in (*writers, late)))
         task7_pins, table = task7_fixture(repo, pins)
         with patch.dict(os.environ, source_budget_env(self.tmp), clear=True):
-            payload = derive_121(repo, pins, task7_pins, describe("review-package"))
+            payload = model_121(repo, pins, task7_pins, describe("review-package"))
         anchors = payload["anchors"]
         n = next(n for n, row in enumerate(anchors) if row["path"] == member)
         blobs = [git(repo, "rev-parse", f"{commit}:{member}") for commit in (pins.base, *writers)]
@@ -270,7 +276,7 @@ class RouteTest(Fixture, unittest.TestCase):
 
         def forged(**change):
             return {**payload, "anchors": [*anchors[:n], rehash({**anchors[n], **change}), *anchors[n + 1:]]}
-        self.assertIsNone(validate_121(forged(), pins, table))  # the clean rehashed control
+        self.assertEqual(validated(forged(), pins, table), payload)  # the clean rehashed control
         cases = {"foreign_commit": {"commit": "f" * 40}, "earlier_writer": {"commit": writers[0]},
                  "later_non_writer": {"commit": late}, "base": {"commit": pins.base},
                  "earlier_blob": {"blob": blobs[1]}, "base_blob": {"blob": blobs[0]},
@@ -278,7 +284,7 @@ class RouteTest(Fixture, unittest.TestCase):
         for name, change in cases.items():
             with self.subTest(case=name):
                 with self.assertRaises(ContributionError) as caught:
-                    validate_121(forged(**change), pins, table)
+                    validated(forged(**change), pins, table)
                 self.assertEqual(caught.exception.code, "invalid_payload")
 
 
@@ -290,8 +296,8 @@ class PayloadTest(Fixture, unittest.TestCase):
         cls.tmp = Path(tempfile.mkdtemp())
         cls.repo, cls.pins, _, cls.table, _ = shape = cls().build(cls.tmp, owners=(1, 2, 3, 6, 3, 2),
                                                                    touches={4: 3})
-        cls.payload = derive_121(cls.repo, cls.pins, shape[2], shape[4])
-        validate_121(cls.payload, cls.pins, cls.table)
+        cls.payload = model_121(cls.repo, cls.pins, shape[2], shape[4])
+        validated(cls.payload, cls.pins, cls.table)
 
     @classmethod
     def tearDownClass(cls):
@@ -301,7 +307,7 @@ class PayloadTest(Fixture, unittest.TestCase):
         payload = copy.deepcopy(self.payload)
         mutate(payload)
         with self.assertRaises(ContributionError) as caught:
-            validate_121(payload, self.pins, None if no_table else self.table)
+            validated(payload, self.pins, None if no_table else self.table)
         self.assertEqual(caught.exception.code, "invalid_payload")
 
     def unavailable(self, payload, label, code):
@@ -321,7 +327,7 @@ class PayloadTest(Fixture, unittest.TestCase):
                 next(r for r in outcomes(p) if r["boundary"] == label)["estimate_refs"] = []
         control = copy.deepcopy(self.payload)
         untabled(control, "inventory_mismatch")
-        self.assertIsNone(validate_121(control, self.pins, None))
+        self.assertEqual(validated(control, self.pins, None), control)
         self.refused(lambda p: untabled(p, "unsupported_estimate"), no_table=True)
 
     def failed(self, payload):
@@ -410,7 +416,7 @@ class PayloadTest(Fixture, unittest.TestCase):
         self.assertEqual({r["path"]: r["edge_ids"] for r in self.scope(self.payload, "aggregate.actual")}, lineage)
         control = copy.deepcopy(self.payload)
         self.relineage(control, "src/c0.txt", [ids[0]])
-        self.assertIsNone(validate_121(control, self.pins, self.table))
+        self.assertEqual(validated(control, self.pins, self.table), control)
         cases = {"unrelated": ("src/c0.txt", [ids[1]]), "extra": ("src/c0.txt", [ids[0], ids[1]]),
                  "first_only": ("src/c3.txt", [ids[3]]), "last_only": ("src/c3.txt", [ids[4]])}
         for name, (path, edge_ids) in cases.items():
@@ -447,7 +453,7 @@ class PayloadTest(Fixture, unittest.TestCase):
         control = copy.deepcopy(self.payload)  # a shape-valid change, rehashed the same way, still validates
         self.reedge(control, record_bytes=record["record_bytes"] + 1)
         self.assertNotEqual(control["edges"][0]["id"], self.payload["edges"][0]["id"])
-        self.assertIsNone(validate_121(control, self.pins, self.table))
+        self.assertEqual(validated(control, self.pins, self.table), control)
         cases = {
             "null_path": {"path": None}, "null_old_path": {"old_path": None, "path": None},
             "invented_operation": {"operation": "C100"}, "list_operation": {"operation": ["A"]},

@@ -4,7 +4,12 @@ Both entry points recompute every edge through `contribution_edges`, whose commi
 each have one raw parent, the preceding member. A virtualized history is therefore
 `history_unauthenticated`, never an outcome; only CORE's `ReconstructionUnavailable`
 is an unavailable route (S9). A measured outcome references its final records in
-the payload's `records` table (S16). `validate_121` is Git-free.
+the model's `records` table (S16).
+
+The model is SOURCE's object, `schema_version` 3: `model_121` reads it from Git and
+it exists only in memory. The payload is the compact object, `schema_version` 4,
+whose canonical bytes are the bundle file (issue 254). `compact_121` and `expand_121`
+map each to the other, and they and `validate_121` are Git-free.
 """
 from __future__ import annotations
 
@@ -36,7 +41,6 @@ _ESTIMATED = ("aggregate.projected", "tasks-7-8")  # the outcomes that consume t
 _ROUTES = {"aggregate.actual": (), "aggregate.projected": ("estimate",), "tasks-1-3": ("reconstruction",),
            "tasks-4-6": ("prerequisite", "reconstruction"), "tasks-7-8": ("estimate",)}
 _STATES = {"measured": ("result_tree", "record_refs", "measurement"), "projection_unavailable": ("failure",)}
-_RECORDS = {"actual": ("record_sha256", "edge_ids"), "estimate": ("added_lines", "deleted_lines")}
 _VIOLATIONS = ("root_bytes", "member_bytes", "member_count", "aggregate_bytes")
 _REPLAY_CODES = ("owned_root_unproved", "merge_effects_unproved", "whole_path_preimage_unproved",
                  "patch_application_unproved", "whole_path_postimage_unproved")
@@ -161,7 +165,6 @@ def _entry(value, file: bool) -> bool:
     """A `tree_entry` fact: a file where the operation has one, else nothing or the directory at that path."""
     if value is None:
         return not file
-    _closed(value, "mode", "kind", "oid")
     return (isinstance(value["mode"], str) and re.fullmatch("[0-7]{6}", value["mode"]) is not None
             and _hex(value["oid"]) and value["kind"] in (("blob", "commit") if file else ("tree",)))
 
@@ -437,8 +440,8 @@ def reconstruct_boundary(repo: Path, pins: Issue121Pins, *, boundary: str, prere
         return _boundary(repo, pins, classes, fresh, boundary, tasks, prerequisite, authority)[0]
 
 
-def derive_121(repo: Path, pins: Issue121Pins, task7_pins: Task7Pins, authority: BudgetAuthority) -> dict:
-    """The validated issue-121 payload. Without a derivable Task-7 table both table outcomes are
+def _model(repo: Path, pins: Issue121Pins, task7_pins: Task7Pins, authority: BudgetAuthority) -> tuple:
+    """`(model, Task-7 table or None)`. Without a derivable Task-7 table both table outcomes are
     unavailable at stage `estimate`, with no estimate ref."""
     classes = classify(repo, pins)
     edges = contribution_edges(repo, pins, classes)
@@ -484,43 +487,175 @@ def derive_121(repo: Path, pins: Issue121Pins, task7_pins: Task7Pins, authority:
             boundaries.append(_measured(row, head_tree, empty, authority,
                                         *_estimated(LABELS[4], _bounds(table), subjects)))
     outcomes = [actual, projected, *boundaries]
-    payload = {"schema_version": 3, "kind": KIND, "range": {"base": pins.base, "head": pins.head},
+    derived = {"schema_version": 3, "kind": KIND, "range": {"base": pins.base, "head": pins.head},
                "classes": list(classes), "edges": list(edges), "anchors": anchors,
                "records": [record for _, records in outcomes for record in records],
                "aggregate": {"actual": actual[0], "projected": projected[0]},
                "boundaries": [row for row, _ in boundaries], "operational_effects": [dict(TASK8_EFFECT)],
                "record_table_policy": dict(_POLICY)}
+    return derived, table
+
+
+def model_121(repo: Path, pins: Issue121Pins, task7_pins: Task7Pins, authority: BudgetAuthority) -> dict:
+    """The schema-3 model, read from Git as SOURCE's derivation reads it."""
+    return _model(repo, pins, task7_pins, authority)[0]
+
+
+def derive_121(repo: Path, pins: Issue121Pins, task7_pins: Task7Pins, authority: BudgetAuthority) -> dict:
+    """The validated schema-4 payload of the model `model_121` returns."""
+    model, table = _model(repo, pins, task7_pins, authority)
+    payload = compact_121(model)
     validate_121(payload, pins, table)
     return payload
 
 
-def _identities(rows) -> None:
-    _require(isinstance(rows, list))
-    for row in rows:
-        _require(row["id"] == telemetry_digest({k: v for k, v in row.items() if k != "id"}))
+def _pack(m: dict) -> dict:
+    """The schema-4 members of model `m`: paths and tree entries interned in sorted tables, rows as lists,
+    and none of the members `expand_121` recomputes."""
+    edges = m["edges"]
+    position = {edge["id"]: n for n, edge in enumerate(edges)}
+    facts = [r for edge in edges for r in edge["records"]]
+    paths = sorted({p for r in facts for p in (r["path"], r["old_path"])} | {r["path"] for r in m["records"]}
+                   | {a["path"] for a in m["anchors"]})
+    at, groups = {p: i for i, p in enumerate(paths)}, {}
+    for r in facts:
+        for e in (r["before"], r["after"]):
+            if e is not None:
+                groups.setdefault((e["mode"], e["kind"]), set()).add(e["oid"])
+    entries, index = [], {}
+    for key in sorted(groups):
+        for oid in sorted(groups[key]):
+            index[(*key, oid)] = len(index)
+        entries.append([*key, sorted(groups[key])])
+
+    def ref(e):
+        return None if e is None else index[(e["mode"], e["kind"], e["oid"])]
+
+    def fact(r):
+        return [r["operation"], at[r["path"]], ref(r["before"]), ref(r["after"]), r["record_bytes"], r["record_sha256"],
+                r["hunk_header_sha256"], *([at[r["old_path"]]] if r["old_path"] != r["path"] else [])]
+    records = {}
+    for r in m["records"]:
+        slot = records.setdefault(r["scope"], {"kind": r["kind"], "rows": []})
+        slot["rows"].append([at[r["path"]], r["record_bytes"], *(
+            (r["record_sha256"],) if r["kind"] == "actual" else (r["added_lines"], r["deleted_lines"]))])
+
+    def outcome(row):
+        out = {k: v for k, v in row.items() if k not in ("boundary", "edge_ids", "record_refs")}
+        if "failure" in out:
+            out["failure"] = {**out["failure"], "evidence_refs": [position[i] for i in out["failure"]["evidence_refs"]]}
+        return out
+    (signer,) = {a["signer_sha256"] for a in m["anchors"]}
+    classes = [[c["commit"], c["owner"], *([] if c["reason"] is None else [c["reason"]])] for c in m["classes"]]
+    return {"schema_version": 4, "kind": m["kind"], "range": m["range"], "classes": classes,
+            "paths": paths, "entries": entries, "edges": [[fact(r) for r in edge["records"]] for edge in edges],
+            "signer_sha256": signer, "anchors": [[at[a["path"]], a["commit"], a["blob"]] for a in m["anchors"]],
+            "records": records,
+            "outcomes": [outcome(r) for r in (m["aggregate"]["actual"], m["aggregate"]["projected"], *m["boundaries"])],
+            "operational_effects": m["operational_effects"], "record_table_policy": m["record_table_policy"]}
 
 
-def _validate_tables(payload: dict, pins: Issue121Pins, classes: list[dict]) -> None:
-    """Edges in class order from the base, anchors on the plan paths, records unique by scope and path."""
-    edges, anchors, records = payload["edges"], payload["anchors"], payload["records"]
-    _require(isinstance(edges, list) and len(edges) == len(classes))
-    for edge, row, parent in zip(edges, classes, [pins.base] + [c["commit"] for c in classes]):
-        _closed(edge, "parent", "commit", "parent_ordinal", "records", "owner", "id")
-        _require(_same([edge[k] for k in ("parent", "commit", "parent_ordinal", "owner")],
-                       [parent, row["commit"], 1, row["owner"]]) and isinstance(edge["records"], list))
+def compact_121(model: dict) -> dict:
+    """The schema-4 payload of `model`. Pure. A model that `expand_121` of its payload does not equal
+    canonically, a malformed model included, is `invalid_payload`."""
+    try:
+        payload = _pack(model)
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+        raise ContributionError("invalid_payload") from exc
+    _require(_same(expand_121(payload), model))
+    return payload
+
+
+def _rows(value, *sizes: int) -> list:
+    """`value`, a list of lists whose lengths are among `sizes`."""
+    _require(isinstance(value, list) and all(isinstance(row, list) and len(row) in sizes for row in value))
+    return value
+
+
+def _at(rows: list, index):
+    """`rows[index]`, for an in-range `int` that is not a `bool`."""
+    _require(type(index) is int and 0 <= index < len(rows))
+    return rows[index]
+
+
+def expand_121(payload: dict) -> dict:
+    """The schema-3 model that the schema-4 `payload` encodes. Pure: it reads the payload alone and leaves
+    it unchanged. Anything but the closed version-4 object of this kind is `invalid_payload`, and so are
+    a value of the wrong type where one is read, a row of the wrong length and an index that is not an
+    in-range `int`. Ids, edge identity, lineage and outcome references are recomputed, never read."""
+    c = _closed(payload, "schema_version", "kind", "range", "classes", "paths", "entries", "edges", "signer_sha256",
+                "anchors", "records", "outcomes", "operational_effects", "record_table_policy")
+    paths, slots, stored = c["paths"], c["records"], c["outcomes"]
+    _require(type(c["schema_version"]) is int and c["schema_version"] == 4 and c["kind"] == KIND
+             and isinstance(paths, list) and all(isinstance(path, str) for path in paths)
+             and isinstance(c["edges"], list) and isinstance(slots, dict)
+             and isinstance(stored, list) and len(stored) == len(LABELS))
+    entries = []
+    for mode, kind, oids in _rows(c["entries"], 3):
+        _require(isinstance(oids, list))
+        entries.extend({"mode": mode, "kind": kind, "oid": oid} for oid in oids)
+
+    def entry(index):
+        return None if index is None else dict(_at(entries, index))
+    classes = [{"commit": r[0], "owner": r[1], "reason": r[2] if len(r) > 2 else None}
+               for r in _rows(c["classes"], 2, 3)]
+    edges, parent = [], _closed(c["range"], "base", "head")["base"]
+    for row, facts in zip(classes, c["edges"]):
+        records = [{"operation": r[0], "path": _at(paths, r[1]), "old_path": _at(paths, r[7] if len(r) > 7 else r[1]),
+                    "before": entry(r[2]), "after": entry(r[3]), "record_bytes": r[4], "record_sha256": r[5],
+                    "hunk_header_sha256": r[6]} for r in _rows(facts, 7, 8)]
+        edges.append(_identified({"parent": parent, "commit": row["commit"], "parent_ordinal": 1, "records": records,
+                                  "owner": row["owner"]}))
+        parent = row["commit"]
+    anchors = [_identified({"path": _at(paths, path), "commit": commit, "blob": blob,
+                            "signer_sha256": c["signer_sha256"]}) for path, commit, blob in _rows(c["anchors"], 3)]
+    selected = {label: [e for e in edges if label.startswith("aggregate.") or e["owner"] in _TASKS[label]]
+                for label in LABELS}
+    records, refs = [], {label: [] for label in LABELS}
+    for label in LABELS:
+        if label not in slots:
+            continue
+        slot = _closed(slots[label], "kind", "rows")
+        _require(slot["kind"] in ("actual", "estimate"))
+        actual, lineage = slot["kind"] == "actual", _lineage(selected[label])
+        for r in _rows(slot["rows"], 3 if actual else 4):
+            row = {"kind": slot["kind"], "scope": label, "path": _at(paths, r[0]), "record_bytes": r[1]}
+            row.update({"record_sha256": r[2], "edge_ids": lineage.get(row["path"])} if actual
+                       else {"added_lines": r[2], "deleted_lines": r[3]})
+            records.append(_identified(row))
+            refs[label].append(records[-1]["id"])
+    outcomes = []
+    for label, row in zip(LABELS, stored):
+        _require(isinstance(row, dict))
+        row = {**row, "boundary": label, "edge_ids": [e["id"] for e in selected[label]]}
+        if row.get("state") == "measured":
+            row["record_refs"] = refs[label]
+        else:
+            failure = row.get("failure")
+            _require(isinstance(failure, dict) and isinstance(failure.get("evidence_refs"), list))
+            row["failure"] = {**failure, "evidence_refs": [_at(edges, n)["id"] for n in failure["evidence_refs"]]}
+        outcomes.append(row)
+    return {"schema_version": 3, "kind": KIND, "range": c["range"], "classes": classes, "edges": edges,
+            "anchors": anchors, "records": records, "aggregate": {"actual": outcomes[0], "projected": outcomes[1]},
+            "boundaries": outcomes[2:], "operational_effects": c["operational_effects"],
+            "record_table_policy": c["record_table_policy"]}
+
+
+def _validate_tables(model: dict, pins: Issue121Pins, classes: list[dict]) -> None:
+    """One edge per class, anchors on the plan paths, records unique by scope and path."""
+    edges, anchors, records = model["edges"], model["anchors"], model["records"]
+    _require(len(edges) == len(classes))
+    for edge in edges:
         for record in edge["records"]:
-            _closed(record, "operation", "path", "old_path", "before", "after", "record_bytes", "record_sha256",
-                    "hunk_header_sha256")
             _require(_count(record["record_bytes"]) and _digest(record["record_sha256"])
                      and _digest(record["hunk_header_sha256"]))
             operation, path, old = record["operation"], record["path"], record["old_path"]
-            _require(operation in ("A", "M", "D", "T", "R100") and all(isinstance(p, str) and p for p in (path, old))
+            _require(operation in ("A", "M", "D", "T", "R100") and path and old
                      and (operation == "R100") == (path != old) and _entry(record["before"], operation != "A")
                      and _entry(record["after"], operation != "D"))
     paths, pinned = _plan_paths(pins), dict(pins.plan_blobs)
-    _require(isinstance(anchors, list) and len(anchors) == len(paths))
+    _require(len(anchors) == len(paths))
     for anchor, path in zip(anchors, paths):
-        _closed(anchor, "path", "commit", "blob", "signer_sha256", "id")
         _require(anchor["path"] == path and _hex(anchor["commit"]) and _hex(anchor["blob"])
                  and pinned.get(path, anchor["blob"]) == anchor["blob"]
                  and anchor["signer_sha256"] == raw_digest(pins.allowed_signer))
@@ -529,21 +664,15 @@ def _validate_tables(payload: dict, pins: Issue121Pins, classes: list[dict]) -> 
         for commit, after in _written(edges, path)[-1:]:
             _require(anchor["commit"] == commit and after is not None
                      and _same([after["kind"], after["oid"]], ["blob", anchor["blob"]]))
-    _require(isinstance(records, list))
     keys = []
     for record in records:
-        _require(isinstance(record, dict) and isinstance(record.get("kind"), str) and record["kind"] in _RECORDS)
-        _closed(record, "id", "kind", "scope", "path", "record_bytes", *_RECORDS[record["kind"]])
-        _require(isinstance(record["scope"], str) and record["scope"] in LABELS and isinstance(record["path"], str)
-                 and record["path"] and _count(record["record_bytes"]))
+        _require(record["path"] and _count(record["record_bytes"]))
         if record["kind"] == "actual":
-            _require(_digest(record["record_sha256"]) and isinstance(record["edge_ids"], list) and record["edge_ids"])
+            _require(_digest(record["record_sha256"]) and record["edge_ids"])
         else:
             _require(_count(record["added_lines"]) and _count(record["deleted_lines"]))
         keys.append((LABELS.index(record["scope"]), record["path"]))
     _require(keys == sorted(set(keys)))
-    for rows in (edges, anchors, records):
-        _identities(rows)
 
 
 def _expected_prerequisite(label: str, pins: Issue121Pins, classes: list[dict], given) -> dict:
@@ -562,7 +691,7 @@ def _validate_failure(label: str, failure, selection: list[str], edges: list[dic
     stage, code, refs = (_closed(failure, "stage", "code", "evidence_refs")[k]
                          for k in ("stage", "code", "evidence_refs"))
     _require(isinstance(stage, str) and stage in _ROUTES[label] and isinstance(code, str)
-             and isinstance(refs, list) and (stage == "prerequisite") == null)
+             and (stage == "prerequisite") == null)
     if stage == "estimate":
         _require(code in ESTIMATE_CODES and refs == [])
     elif stage == "reconstruction":
@@ -586,58 +715,51 @@ def _validate_measurement(value, name: str) -> None:
              and measurement["budget_status"] == ("over_budget" if violations else "within_budget"))
 
 
-def validate_121(payload: dict, pins: Issue121Pins, table: dict | None) -> None:
-    """Git-free: refuse a payload whose shape or references the pins and `table` (`derive_121`'s Task-7
-    table, or None when it derived none) do not determine."""
+def validate_121(payload: dict, pins: Issue121Pins, table: dict | None) -> dict:
+    """Git-free: the model of a schema-4 `payload`. In order, the pins are checked, the payload is expanded,
+    an expansion whose shape or references the pins and `table` (`derive_121`'s Task-7 table, or None when
+    it derived none) do not determine is refused, and so is a payload that is not `compact_121` of it."""
     classes = _assigned(pins)
-    payload = _closed(payload, "schema_version", "kind", "range", "classes", "edges", "anchors", "records",
-                      "aggregate", "boundaries", "operational_effects", "record_table_policy")
-    _require(_same([payload[k] for k in ("schema_version", "kind", "range", "classes", "operational_effects",
-                                         "record_table_policy")],
-                   [3, KIND, {"base": pins.base, "head": pins.head}, classes, [TASK8_EFFECT], _POLICY]))
-    _validate_tables(payload, pins, classes)
-    edges, records = payload["edges"], payload["records"]
-    aggregate = _closed(payload["aggregate"], "actual", "projected")
-    _require(isinstance(payload["boundaries"], list) and len(payload["boundaries"]) == 3)
+    model = expand_121(payload)
+    _require(_same([model[k] for k in ("range", "classes", "operational_effects", "record_table_policy")],
+                   [{"base": pins.base, "head": pins.head}, classes, [TASK8_EFFECT], _POLICY]))
+    _validate_tables(model, pins, classes)
+    edges, records, aggregate = model["edges"], model["records"], model["aggregate"]
     try:
         bounds = None if table is None else [{"kind": "estimate", "scope": "tasks-7-8", **r} for r in _bounds(table)]
     except (KeyError, TypeError, AttributeError) as exc:
         raise ContributionError("invalid_payload") from exc
-    for label, row in zip(LABELS, [aggregate["actual"], aggregate["projected"], *payload["boundaries"]]):
-        _require(isinstance(row, dict) and isinstance(row.get("state"), str) and row["state"] in _STATES)
+    for label, row in zip(LABELS, [aggregate["actual"], aggregate["projected"], *model["boundaries"]]):
+        _require(isinstance(row.get("state"), str) and row["state"] in _STATES)
         _closed(row, "boundary", "state", "prerequisite", "edge_ids", "estimate_refs", *_STATES[row["state"]])
         whole = label.startswith("aggregate.")
-        selected = [e for e in edges if whole or e["owner"] in _TASKS[label]]
-        selection = [e["id"] for e in selected]
         prerequisite = _expected_prerequisite(label, pins, classes, row["prerequisite"])
         estimated = label in _ESTIMATED
-        _require(row["boundary"] == label and _same(row["edge_ids"], selection)
-                 and _same(row["prerequisite"], prerequisite)
+        _require(_same(row["prerequisite"], prerequisite)
                  and _same(row["estimate_refs"], [telemetry_digest(table)] if estimated and table is not None else []))
         scoped = [record for record in records if record["scope"] == label]
         null = label == "tasks-4-6" and prerequisite["commit"] is None
         if row["state"] == "projection_unavailable":
             _require(not scoped)
-            _validate_failure(label, row["failure"], selection, edges, classes, null)
+            _validate_failure(label, row["failure"], row["edge_ids"], edges, classes, null)
             # A table fully determines tasks-7-8; only an underived one fails it, as it fails the projection.
             _require(label != "tasks-7-8"
                      or table is None and _same(row["failure"], aggregate["projected"].get("failure")))
             continue
-        _require(not null and not (estimated and table is None) and _hex(row["result_tree"])
-                 and _same(row["record_refs"], [record["id"] for record in scoped]))
+        _require(not null and not (estimated and table is None) and _hex(row["result_tree"]))
         start = prerequisite.get("commit") or pins.base
         owned = [c["commit"] for c in classes if c["owner"] in _TASKS.get(label, ())]
         _validate_measurement(row["measurement"], _package(start, pins.head if whole else (owned or [start])[-1]))
-        lineage = _lineage(selected)  # recomputed from the payload's own edge records, as `_actual` derives it
         for record in scoped:
             _require(record["kind"] == ("estimate" if estimated else "actual"))
-            _require(estimated or _same(record["edge_ids"], lineage.get(record["path"])))
         if label == "tasks-7-8":
             _require(row["result_tree"] == prerequisite["tree"]
                      and _same([{k: v for k, v in r.items() if k != "id"} for r in scoped], bounds))
+    _require(_same(compact_121(model), payload))
+    return model
 
 
-def unavailable_ids(payload: dict) -> tuple[str, ...]:
-    """The labels of a validated payload's unavailable outcomes, in outcome order."""
-    rows = [payload["aggregate"]["actual"], payload["aggregate"]["projected"], *payload["boundaries"]]
+def unavailable_ids(model: dict) -> tuple[str, ...]:
+    """The labels of a validated model's unavailable outcomes, in outcome order."""
+    rows = [model["aggregate"]["actual"], model["aggregate"]["projected"], *model["boundaries"]]
     return tuple(row["boundary"] for row in rows if row["state"] == "projection_unavailable")
