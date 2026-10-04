@@ -60,7 +60,7 @@ Planning G0 at `--completed-through 0`: pending.
 **G2, the source pin, after Task 2** (spec § *Delivery gates*; CP11, CP12). It has three parts, at one pinned commit:
 1. An authorship-independent review of the complete `python/` source.
 2. A fresh adversarial reviewer, working in disposable alternates-backed clones of the retained root. The reviewer repeats REPLAY's graft and rehash reproduction against `contribution_edges`, `reconstruct_boundary` (selector `tasks-1`) and the source derive command. The reviewer derives a scratch bundle at the pin and requires `expand_100` and `expand_121` of its members to equal, byte for byte, the payloads that the modules at `7e17c81` derive from the same objects, run from a detached checkout of that commit outside this worktree. The reviewer also tries non-canonical payloads against `validate_100` and `validate_121`.
-3. The controller posts on https://github.com/fagenorn/nix-config/issues/235 the pin's full SHA, the five file sizes measured at the pin and the two schema versions (2 and 4).
+3. The controller posts on https://github.com/fagenorn/nix-config/issues/235 the pin's full SHA, the five file sizes of that scratch bundle and the two schema versions (2 and 4), with full URLs.
 
 That commit is the `AGENT_RETAINED_TOOL_COMMIT` of every authoritative full-shape run. Evidence, with before and after root digests, goes to the SDD workspace. The tier module names SOURCE members until Task 3, so the tier is not run before Task 3.
 

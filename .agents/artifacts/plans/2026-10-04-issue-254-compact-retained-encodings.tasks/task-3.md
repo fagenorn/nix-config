@@ -1,6 +1,6 @@
 # Task 3: Built parity and the full-shape tier
 
-The real-input acceptance of both encodings and the built-launcher parity of their refusals (spec § *Measured feasibility*, § *Published refusals*, § *Test seams*; CP10, CP11, CP17, CP18; RP7, RP10, RP11). No `python/` byte changes: the tool this task runs is the G2 pin.
+The real-input acceptance of both encodings and the built-launcher parity of their refusals (spec § *Measured feasibility*, § *Published refusals on the compact encodings*, § *Test seams*; CP10, CP11, CP17, CP18; RP7, RP10, RP11). No `python/` byte changes: the tool this task runs is the G2 pin.
 
 **Files:**
 - Modify: `tests/test_review_retained_full.py`

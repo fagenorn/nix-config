@@ -394,12 +394,12 @@ if __name__ == "__main__":
     def test_source_encoded_members_are_refused_as_invalid_payload(self):
         """The SOURCE encoding of the same facts, under a witness and an anchor that are coherent with it."""
         source, expected, kwargs = self.shared()
-        for name, error in (("issue-121.json", ContributionError),):
+        for name, error, versions in (("issue-121.json", ContributionError, (3, 4)),):
             bundle = Path(shutil.copytree(source, self.tmp / name))
             trusted_anchor, raw = authenticate(bundle, expected)
             payloads = {member: json.loads(data) for member, data in raw.items()}
             models = {**payloads, "issue-121.json": expand_121(payloads["issue-121.json"])}
-            self.assertEqual((models[name]["schema_version"], payloads[name]["schema_version"]), (3, 4))
+            self.assertEqual((models[name]["schema_version"], payloads[name]["schema_version"]), versions)
             raw = {**raw, name: canonical_bytes(models[name])}
             components = {group: trusted_anchor[group] for group in GROUPS}
             forger, anchor = self.rebound(bundle, components, payloads, raw, models)

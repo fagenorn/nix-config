@@ -378,7 +378,7 @@ if __name__ == "__main__":
   Then edit the published suites.
   - `tests/test_review_issue100.py` (CP14, CP15): import `compact_100` and `model_100`, and add `validated(model, pins)`, which returns `validate_100(compact_100(model), pins)`. Every case that reads or forges SOURCE members takes its object from `model_100(...)` where it called `derive_100(...)`, and calls `validated(...)` where it called `validate_100(...)` on that object. Unchanged: the three `validate_100({}, ...)` pin cases and the two `derive_100` failure cases. `test_derive_validates_and_preserves_inputs` asserts `validated(payload, self.pins) == payload` and `derive_100(...) == compact_100(payload)`. No case is dropped: measured at planning, all 21 pass against a stand-in with this routing.
   - `tests/test_review_witness.py`: `models(payloads)` also expands `issue-100-derived.json` with `expand_100`. The source-encoded case's tuple gains `("issue-100-derived.json", Issue100Error)`, and the authenticated-bundle case asserts schema versions `[2, 4]` for the two retained members. In `test_malformed_sibling_beside_an_unavailable_outcome_is_invalid` the issue-100 forgery becomes `hundred["process"] = []`: the process path relabelled, so the counts are no longer the pinned ones.
-  - `tests/test_review_replay.py`: import `Issue100Error` and `expand_100`. `rebound`'s default models and the models of `test_source_encoded_members_are_refused_as_invalid_payload` also expand the issue-100 member, and that test's tuple gains `("issue-100-derived.json", Issue100Error)`, with schema versions `(1, 2)` for that member.
+  - `tests/test_review_replay.py`: import `Issue100Error` and `expand_100`. `rebound`'s default models and the models of `test_source_encoded_members_are_refused_as_invalid_payload` also expand the issue-100 member, and that test's tuple gains `("issue-100-derived.json", Issue100Error, (1, 2))`.
 
 - [ ] **Step 2: Run them and watch them fail.**
 
@@ -405,7 +405,7 @@ just build 2>&1 | tail -3
 
   The five suites end `OK` within the timeout; a timeout means `expand_100` does not terminate (CP16). The `--stat` line names exactly five files.
 
-- [ ] **Step 5: Commit.** Stage only the nine Files. Check that `printf %s "$subject" | wc -c` is at most 64, then commit `feat(review): compact issue-100 payload to schema 2 (#254)`. A review-fix commit uses `fix(review): address Task-2 review findings (#254)`.
+- [ ] **Step 5: Commit.** Stage only the eight Files. Check that `printf %s "$subject" | wc -c` is at most 64, then commit `feat(review): compact issue-100 payload to schema 2 (#254)`. A review-fix commit uses `fix(review): address Task-2 review findings (#254)`.
 
 - [ ] **Step 6: G1, then G2 (controller).** Run the plan root's G1 at the new `HEAD`, record this task's `actual_ranges` and refresh `actual_evidence` in a process-only commit, and renew G0 at `--completed-through 2`. Then run G2 at that accepted head and post its pin, as the plan root describes.
 
