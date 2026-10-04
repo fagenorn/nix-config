@@ -255,6 +255,18 @@ class WitnessTest(unittest.TestCase):
         raw = {**self.raw, WITNESS: canonical_bytes(build_witness(stale, self.payloads, self.raw))}
         self.refused("component_mismatch", validate_bundle, build_anchor(stale, raw), raw, **self.kwargs())
 
+    def test_forged_issue_121_head_tree_is_component_mismatch(self):
+        tree = flip(self.components["issue_121"]["tree"])  # RP16: the pins determine the head's tree
+        for spot in ("actual", "projected", 2):
+            forged = copy.deepcopy(self.payloads["issue-121.json"])
+            row = forged["boundaries" if spot == 2 else "aggregate"][spot]
+            row["result_tree"] = tree
+            if spot == 2:
+                row["prerequisite"]["tree"] = tree
+            with self.subTest(spot):
+                self.refused("component_mismatch", validate_bundle,
+                             *bound(self.components, {**self.payloads, "issue-121.json": forged}), **self.kwargs())
+
     def test_stale_table_digest_or_policy_is_table_mismatch(self):
         witness, key = json.loads(self.raw[WITNESS]), "issue-121.json#records"
         (table, *tables), policies = witness["tables"], witness["table_policies"]
@@ -275,6 +287,7 @@ class WitnessTest(unittest.TestCase):
         self.assertEqual(tool_closure(repo, head), {"commit": head, "files": [
             {"path": path, "blob": hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest(),
              "raw_sha256": hashlib.sha256(data).hexdigest()} for path, data in sorted(files.items())]})
+        self.assertEqual(tool_closure(repo / "python", head)["files"], self.components["tool"]["files"])
         self.refused("tool_closure", tool_closure, repo, head[:12])
         self.refused("tool_closure", tool_closure, self.root / "repos/100/repo", self.pins[2].head)  # no package
         linked = init_repo(self.tmp / "linked")

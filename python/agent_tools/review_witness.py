@@ -28,7 +28,7 @@ import stat
 from typing import Mapping
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.review_actual import PACKING_POLICY_SHA256, RECORD_POLICY_SHA256, _run_git
+from agent_tools.review_actual import PACKING_POLICY_SHA256, RECORD_POLICY_SHA256, GenerationError, _run_git
 from agent_tools.review_forecast import (ForecastError, canonical_bytes, full_commit, raw_digest, read_regular,
                                          strict_json)
 from agent_tools.review_issue100 import validate_100
@@ -113,20 +113,22 @@ def tool_closure(tool_repo: Path, tool_commit: str) -> dict:
     """`{commit, files}`: every blob under `python/agent_tools/` at the full, original-history-authenticated
     `tool_commit`, as `{path, blob, raw_sha256}` rows sorted by `path`.
 
-    `path` is relative to the package directory. An unauthenticated commit, an entry that is not a regular
-    blob and a commit without the package are `tool_closure`.
+    `path` is relative to the package directory, which is read from the commit's root tree wherever in the
+    worktree `tool_repo` points. An unauthenticated commit, an entry that is not a regular blob, a name that
+    is not UTF-8, a failed Git read and a commit without the package are `tool_closure`.
     """
+    files = []
     try:
         full_commit(tool_repo, tool_commit)
-    except ForecastError as exc:
+        listing = _run_git(tool_repo, "ls-tree", "-r", "-z", "--full-tree", tool_commit, "--", _PACKAGE, binary=True)
+        for entry in listing.split(b"\0")[:-1]:
+            metadata, path = entry.split(b"\t", 1)
+            mode, _, blob = metadata.decode("ascii").split()
+            _require(mode in ("100644", "100755"), "tool_closure")
+            files.append({"path": path.decode("utf-8")[len(_PACKAGE):], "blob": blob,
+                          "raw_sha256": _sha(_run_git(tool_repo, "cat-file", "blob", blob, binary=True))})
+    except (ForecastError, GenerationError, UnicodeDecodeError) as exc:
         raise WitnessError("tool_closure") from exc
-    files = []
-    for entry in _run_git(tool_repo, "ls-tree", "-r", "-z", tool_commit, "--", _PACKAGE, binary=True).split(b"\0")[:-1]:
-        metadata, path = entry.split(b"\t", 1)
-        mode, _, blob = metadata.decode("ascii").split()
-        _require(mode in ("100644", "100755"), "tool_closure")
-        files.append({"path": path.decode("utf-8")[len(_PACKAGE):], "blob": blob,
-                      "raw_sha256": _sha(_run_git(tool_repo, "cat-file", "blob", blob, binary=True))})
     _require(files, "tool_closure")
     return {"commit": tool_commit, "files": sorted(files, key=lambda row: row["path"])}
 
@@ -272,8 +274,10 @@ def validate_bundle(anchor: dict, raw: Mapping[str, bytes], *, task7_pins, issue
     closed version-2 object whose fixtures are the anchor's (`witness_shape`), whose components are the
     anchor's (`component_mismatch`) and whose table rows, digests and policies are the fixtures'
     (`table_mismatch`); the components match the pins and policy constants (`component_mismatch`); the
-    three SOURCE validators accept the fixtures, their own errors passing through unchanged; and every
-    measured issue-121 outcome carries the tool group's artifact policy (`policy_mismatch`).
+    three SOURCE validators accept the fixtures, their own errors passing through unchanged; every
+    measured issue-121 outcome carries the tool group's artifact policy (`policy_mismatch`); and the
+    outcomes the pinned head determines carry the pinned tree (`component_mismatch`, RP16): a measured
+    aggregate's and a measured `tasks-7-8`'s `result_tree`, and the `tasks-7-8` prerequisite's `tree`.
     """
     payloads = {}
     for name in PAYLOAD_NAMES:
@@ -298,4 +302,8 @@ def validate_bundle(anchor: dict, raw: Mapping[str, bytes], *, task7_pins, issue
     outcomes = [issue121["aggregate"]["actual"], issue121["aggregate"]["projected"], *issue121["boundaries"]]
     _require(all(row["measurement"]["artifact_policy_sha256"] == components["tool"]["artifact_policy_sha256"]
                  for row in outcomes if row["state"] == "measured"), "policy_mismatch")
+    tree, (actual, projected, _, _, future) = components["issue_121"]["tree"], outcomes
+    _require(future["prerequisite"]["tree"] == tree
+             and all(row["result_tree"] == tree for row in (actual, projected, future) if row["state"] == "measured"),
+             "component_mismatch")
     return payloads
