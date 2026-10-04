@@ -175,7 +175,8 @@ def _plan_paths(pins: Issue121Pins) -> list[str]:
 
 
 def _assigned(pins: Issue121Pins) -> list[dict]:
-    """The pins' assignment rows; an owner is 0 (process, with a reason) or a task 1-6."""
+    """The pins' assignment rows; an owner is 0 (process, with a reason) or a task 1-6, and the last
+    row's commit is the pinned head."""
     if (not isinstance(pins, Issue121Pins) or not _hex(pins.base) or not _hex(pins.head)
             or not (isinstance(pins.plan_prefix, str) and pins.plan_prefix and isinstance(pins.allowed_signer, bytes)
                     and pins.allowed_signer and type(pins.task_count) is int and pins.task_count > 0)
@@ -189,6 +190,8 @@ def _assigned(pins: Issue121Pins) -> list[dict]:
                 or (row[2] is None) == (row[1] == 0) or not (row[2] is None or isinstance(row[2], str) and row[2])):
             raise ContributionError("assignment_mismatch")
         rows.append({"commit": row[0], "owner": row[1], "reason": row[2]})
+    if not rows or rows[-1]["commit"] != pins.head:
+        raise ContributionError("assignment_mismatch")
     return rows
 
 
