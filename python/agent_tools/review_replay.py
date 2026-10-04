@@ -5,9 +5,9 @@ authenticates the anchor and the four payloads under that digest
 (`review_witness.authenticate`), runs the one full semantic validation
 (`review_witness.validate_bundle`), and only then classifies the bundle: a
 bundle holding an unavailable issue-121 outcome is `ReplayUnavailable`, and any
-other valid bundle is the retained result. The issue-121 file is the compact
-payload; what replay classifies and reports is its model, the expansion that
-`validate_bundle` returns (issue 254).
+other valid bundle is the retained result. The issue-121 and issue-100 files
+are compact payloads; what replay classifies and reports comes from their
+models, the expansions that `validate_bundle` returns (issue 254).
 
 It validates nothing itself, so a bundle is valid here exactly when derivation
 would publish it (RP2). It runs no Git, asks no budget authority and reads only
