@@ -1,6 +1,7 @@
 """Issue-121 retained history: ownership, raw-parent edges, plan anchors and outcomes (issue 234 D2, D5, D17).
 
-Both entry points recompute every edge through `contribution_edges`, whose commits
+`plan_anchors`, `reconstruct_boundary`, `model_121` and `derive_121` each recompute
+every edge through `contribution_edges`, whose commits
 each have one raw parent, the preceding member. A virtualized history is therefore
 `history_unauthenticated`, never an outcome; only CORE's `ReconstructionUnavailable`
 is an unavailable route (S9). A measured outcome references its final records in
