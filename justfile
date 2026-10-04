@@ -78,6 +78,7 @@ agent-workflow-tests:
     tests/test_review_task7.py \
     tests/test_review_issue121.py \
     tests/test_review_issue100.py \
+    tests/test_review_witness.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
     home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_shell_example_contracts.py \

@@ -182,6 +182,30 @@ def task7_fixture(repo, pins) -> tuple:
     return task7_pins, derive_task7(repo, task7_pins)
 
 
+def retained_fixture(tmp, **shape) -> tuple:
+    """`(issue_121_repo, issue_100_repo, archive_dir, (task7_pins, issue121_pins, issue100_pins))` under `tmp/repos`.
+
+    The issue-121 side is `linear_fixture` with `task7_fixture` on that repository; the issue-100 repository
+    also holds the live commit. The default shape measures every outcome, and
+    `owners=(1, 2, 3, 6, 3), touches={4: 3}` leaves `tasks-1-3` and `tasks-4-6` unavailable.
+    """
+    root = Path(tmp) / "repos"
+    (root / "121").mkdir(parents=True)
+    repo121, pins121 = linear_fixture(root / "121", **shape)
+    repo100, _, archive, pins100 = issue100_fixture(root / "100")
+    return repo121, repo100, archive, (task7_fixture(repo121, pins121)[0], pins121, pins100)
+
+
+def tool_fixture(tmp) -> tuple:
+    """A repository under `tmp/repos/tool` and its one commit: this source tree's `python/agent_tools` files
+    at that path, without `__pycache__` directories."""
+    package = SOURCE / "python/agent_tools"
+    files = {path.relative_to(SOURCE).as_posix(): path.read_bytes() for path in sorted(package.rglob("*"))
+             if path.is_file() and "__pycache__" not in path.relative_to(package).parts}
+    repo = init_repo(Path(tmp) / "repos/tool")
+    return repo, commit_files(repo, files, "tool")
+
+
 def rehash_edges(edges) -> list:
     """Copies of `edges`, each with its `id` recomputed over every other member."""
     return [{**edge, "id": telemetry_digest({k: v for k, v in edge.items() if k != "id"})} for edge in edges]
