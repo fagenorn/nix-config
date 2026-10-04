@@ -87,11 +87,13 @@ GIT_FREE_SITES = {
 
 
 def retained_root() -> Path:
-    """The retained root the recipe names; a class-level skip naming the recipe when the variable is unset."""
+    """The retained root the recipe names, absolute: a relative one is resolved here, against this process's
+    working directory, because the commands it is handed to run in scratch directories. A class-level skip
+    naming the recipe when the variable is unset."""
     root = os.environ.get(ROOT_ENV)
     if root is None:
         raise unittest.SkipTest(f"{ROOT_ENV} is unset; run `{RECIPE}` for the full-shape tier")
-    return Path(root)
+    return Path(root).resolve()
 
 
 def tool_commit() -> str:
