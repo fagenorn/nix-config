@@ -142,6 +142,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
         value.pop("admission"); value.pop("workers")
         for issue in value["issues"].values():
             issue.pop("delivery"); issue.pop("delivery_remainders")
+            for attempt in issue["attempts"]: attempt.pop("progress_marker")
         if version == 1:
             value.pop("prior_run")
             for attempt in value["issues"]["151"]["attempts"]:
@@ -260,9 +261,15 @@ class DeliveryAdmissionTest(unittest.TestCase):
             legacy = self.legacy(version); original = copy.deepcopy(legacy)
             migrated = self.workflow.upgrade_state(
                 legacy, run_id="admission", migration_contracts={151: contract})
-            self.assertEqual(legacy, original); self.assertEqual(migrated["schema_version"], 5)
+            self.assertEqual(legacy, original); self.assertEqual(migrated["schema_version"], 6)
             self.assertEqual(migrated["issues"]["151"]["delivery"],
                              self.workflow._delivery().empty_delivery())
+        # The adjacent step hands back the schema-2 shape itself, with nothing a
+        # later schema added (#250 D4), so the migrator accepts its own output.
+        adjacent = self.workflow._delivery().migrate_1_to_2(self.legacy(1))
+        self.assertEqual(adjacent, self.legacy(2))
+        self.assertEqual(self.workflow._delivery().migrate(
+            adjacent, migration_contracts={})["schema_version"], 6)
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); run = root / ".superpowers/workflows/admission"
             run.mkdir(parents=True)
@@ -273,8 +280,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     str(root), "admission", lambda state: (state, False),
                     migration_contracts={151: contract})
             write.assert_called_once()
-            self.assertEqual(write.call_args.args[2]["schema_version"], 5)
-            self.assertEqual(result["schema_version"], 5)
+            self.assertEqual(write.call_args.args[2]["schema_version"], 6)
+            self.assertEqual(result["schema_version"], 6)
 
     def test_model_owns_nonempty_delivery_validation(self):
         contract, delivery = contract_and_delivery(self.model)
@@ -2112,6 +2119,7 @@ class HelperInputTest(BuilderHarness, unittest.TestCase):
             workflow.new_control_attempt(issue=151, attempt_number=1,
                 worktree=str(self.root / "wt-151"), now=NOW,
                 deadline_at="2026-09-21T01:00:00Z")]}
+        legacy["issues"]["151"]["attempts"][0].pop("progress_marker")
         legacy_state = self.root / ".superpowers/workflows/legacy-inputs/state.json"
         legacy_state.parent.mkdir(parents=True)
         legacy_state.write_text(json.dumps(legacy), encoding="utf-8")
@@ -2712,8 +2720,11 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
             "--request-file", "-", stdin=json.dumps(request).encode(), ok=ok)
         return json.loads(completed.stdout) if ok else completed
 
-    def write_run(self, run_id, attempts, *, schema=5):
+    def write_run(self, run_id, attempts, *, schema=6):
         state = self.workflow.new_run_state(run_id=run_id, now=NOW, issues={})
+        if schema < 6:
+            attempts = [{name: value for name, value in attempt.items()
+                         if name != "progress_marker"} for attempt in attempts]
         if schema < 5:
             state.pop("workers")
         if schema < 4:
@@ -3184,13 +3195,14 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
                 self.workflow.new_control_attempt(issue=issue, attempt_number=1,
                     worktree=str(self.root / f"wt-{issue}"), now=NOW,
                     deadline_at="2026-09-21T01:00:00Z")]}
+            state["issues"][str(issue)]["attempts"][0].pop("progress_marker")
         path = self.root / ".superpowers/workflows/survive/state.json"
         path.parent.mkdir(parents=True); path.write_text(json.dumps(state), encoding="utf-8")
         run = ("--repo-root", self.root, "--run-id", "survive")
         boot = json.loads(self.cli("init-run", *run, "--now", NOW).stdout)
         self.assertEqual([(item["issue"], item["contract_digest"]) for item in boot["requirements"]],
                          [(151, None), (152, None)])
-        self.assertEqual(json.loads(path.read_text())["schema_version"], 5)
+        self.assertEqual(json.loads(path.read_text())["schema_version"], 6)
         swept = self.control("survive", self.control_request([151, 152]))
         self.assertEqual([action["kind"] for action in swept["actions"]], ["wait"])
         self.cli("progress", *run, "--now", LATER, "--issue", 151, "--attempt", 1,
