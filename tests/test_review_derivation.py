@@ -76,10 +76,38 @@ class DerivationTest(unittest.TestCase):
                               env={**self.env, **env}, capture_output=True)
         return done.returncode, done.stdout, done.stderr
 
+    def command_refused(self, code, out, cases, **env):
+        """Each command line exits 2 with the one `code` line, and together they leave no scratch, whatever
+        was at `out` and the class inputs unchanged."""
+        before, there = self.state(), entry(out)
+        for argv in cases:
+            with self.subTest(argv=[word for word in argv if word.startswith("-")]):
+                self.assertEqual(self.run_command(argv, **env), (2, b"", (INVALID + code + "\n").encode()))
+        self.assertEqual((self.state(), self.leftovers(), entry(out)), (before, [], there))
+
+    def main(self, out):
+        """`(status, stdout, stderr)` of the command in process. It passes only its real pins, so its three
+        pin names carry the fixture's here (RP17)."""
+        names = ("TASK7_PINS", "ISSUE_121_PINS", "ISSUE_100_PINS")
+        stdout, stderr = io.TextIOWrapper(io.BytesIO()), io.StringIO()
+        with patch.multiple(command, **dict(zip(names, self.pins))), patch("sys.stdout", stdout), \
+                patch("sys.stderr", stderr), patch.dict(os.environ, self.env, clear=True):
+            status = command.main(self.argv(out))
+        stdout.flush()
+        return status, stdout.buffer.getvalue(), stderr.getvalue()
+
+    def shared(self):
+        """`(directory, summary)` of one derivation that the cases which only read a bundle share."""
+        cls = type(self)
+        if not hasattr(cls, "bundle"):
+            cls.bundle = self.tmp / "shared", self.derive(self.tmp / "shared")
+        return cls.bundle
+
     def test_two_derivations_are_byte_identical_and_inputs_unchanged(self):
         before = self.state()
         a, b = self.tmp / "a", self.tmp / "b"
-        self.assertEqual(self.derive(a), self.derive(b))
+        summary = self.derive(a)
+        self.assertEqual(self.main(b), (0, canonical_bytes(summary), ""))  # the command's success mapping
         files = {p.name: p.read_bytes() for p in a.iterdir()}
         self.assertEqual(files, {p.name: p.read_bytes() for p in b.iterdir()})
         self.assertEqual(set(files), {ANCHOR_NAME, *PAYLOAD_NAMES})
@@ -100,8 +128,7 @@ class DerivationTest(unittest.TestCase):
             DerivationError("io_error")
 
     def test_summary_names_the_written_bundle(self):
-        out = self.tmp / "summary"
-        summary = self.derive(out)
+        out, summary = self.shared()
         files = {p.name: p.read_bytes() for p in out.iterdir()}
         members = [{"path": name, "bytes": len(files[name]), "raw_sha256": hashlib.sha256(files[name]).hexdigest()}
                    for name in ("derivation-anchor.json", "derivation-witness.json", "issue-100-derived.json",
@@ -158,52 +185,44 @@ class DerivationTest(unittest.TestCase):
         bad = replace(self.pins[0], prerequisite_tree="0" * 40)
         self.refused(EstimateError, "inventory_mismatch", self.tmp / "unestimated", task7_pins=bad)
 
-    def test_oversized_member_is_refused(self):
-        with patch("agent_tools.review_derivation.MEMBER_MAX_BYTES", 64):
-            self.refused(DerivationError, "member_oversize", self.tmp / "oversized")
+    def test_oversized_member_or_anchor_is_refused(self):
+        for bound in ("MEMBER_MAX_BYTES", "ANCHOR_MAX_BYTES"):  # the anchor is a bundle member too
+            with self.subTest(bound), patch(f"agent_tools.review_derivation.{bound}", 64):
+                self.refused(DerivationError, "member_oversize", self.tmp / "oversized")
 
     def test_publication_failure_removes_scratch(self):
-        out, stdout, stderr = self.tmp / "unpublished", io.TextIOWrapper(io.BytesIO()), io.StringIO()
+        out = self.tmp / "unpublished"
         with patch("agent_tools.review_derivation.os.rename", side_effect=OSError("rename")) as rename:
             self.refused(OSError, None, out)
-            # The command passes only its real pins, so its three pin names carry the fixture's here (RP17).
-            before, names = self.state(), ("TASK7_PINS", "ISSUE_121_PINS", "ISSUE_100_PINS")
-            with patch.multiple(command, **dict(zip(names, self.pins))), patch("sys.stdout", stdout), \
-                    patch("sys.stderr", stderr), patch.dict(os.environ, self.env, clear=True):
-                status = command.main(self.argv(out))
-        stdout.flush()
-        self.assertEqual((status, stdout.buffer.getvalue(), stderr.getvalue()), (2, b"", INVALID + "io_error\n"))
+            before = self.state()
+            self.assertEqual(self.main(out), (2, b"", INVALID + "io_error\n"))
         self.assertEqual((self.state(), self.leftovers(), entry(out)), (before, [], None))
         # Both calls reached publication: each renamed its own scratch directory, beside the output, onto it.
         self.assertEqual([(Path(call.args[0]).parent, call.args[0] != call.args[1], call.args[1])
                           for call in rename.call_args_list], [(self.tmp, True, out)] * 2)
 
     def test_outputs_hold_no_scratch_or_home_path(self):
-        out = self.tmp / "portable"
-        self.derive(out)
-        files = {p.name: p.read_bytes() for p in out.iterdir()}
+        files = {p.name: p.read_bytes() for p in self.shared()[0].iterdir()}
         self.assertEqual(len(files), 5)
         for name, data in files.items():
             for value in (str(self.tmp), os.environ["HOME"], os.getcwd()):
                 self.assertNotIn(value.encode(), data, (name, value))
 
-    def test_command_missing_option_is_usage(self):
+    def test_command_line_that_is_not_the_six_options_is_usage(self):
         out = self.tmp / "usage"
         argv = self.argv(out)
-        for case in [argv[:n] + argv[n + 2:] for n in range(0, 12, 2)] + [argv + ["--pin", "x"]]:
-            with self.subTest(argv=[word for word in case if word.startswith("--")]):
-                self.assertEqual(self.run_command(case), (2, b"", (INVALID + "usage\n").encode()))
+        self.command_refused("usage", out, [argv[:n] + argv[n + 2:] for n in range(0, 12, 2)] + [
+            argv + ["--pin", "x"], argv + ["--help"], argv + ["-h"], argv[:10] + ["--out", str(out)]])
         self.assertIsNone(entry(out))
 
     def test_command_refuses_an_existing_output_dir(self):
         out = self.tmp / "existing"
         out.mkdir()
-        self.assertEqual(self.run_command(self.argv(out)), (2, b"", (INVALID + "output_exists\n").encode()))
+        self.command_refused("output_exists", out, [self.argv(out)])
         self.assertEqual(entry(out), [])
 
     def test_command_without_a_budget_helper_is_budget_unavailable(self):
         out, empty = self.tmp / "unbudgeted", self.tmp / "empty-path"
         empty.mkdir()
-        self.assertEqual(self.run_command(self.argv(out), PATH=str(empty)),
-                         (2, b"", (INVALID + "budget_unavailable\n").encode()))
+        self.command_refused("budget_unavailable", out, [self.argv(out)], PATH=str(empty))
         self.assertIsNone(entry(out))
