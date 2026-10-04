@@ -370,7 +370,8 @@ follow the suspension procedure — print the canonical re-entry line and stop,
 and never write a terminal `workflow-state finish` for it (the helper rejects a
 finish on a non-active attempt). That rejection carries one outcome more than
 the suspension it usually means. At the anti-zombie bound — an attempt parked
-at the same recorded phase too many times in a row — the reaper ends the work
+too many times in a row without a phase advance or a newly recorded progress
+marker — the reaper ends the work
 instead of parking it: the attempt becomes a `stopped(stalled)` terminal and
 the run is over, not paused. The rejection reads the same either way, so print
 the re-entry line and stop without asserting which one you got; the reaper has
@@ -564,9 +565,14 @@ Invoke `sdd`: it reads the plan header, dispatches an implementer per task, and 
 With lifecycle identity, invoke `sdd` with this owner's
 `ledger_repo_root`, `run_id` and `action_id` as its lifecycle identity, so
 sdd's `### Lifecycle workers` registers each writing agent under this
-launch. The mechanical route's mechanic is registered the same way:
-run `workflow-state register-worker` before dispatching it, put the
-`Lifecycle worker:` line in its prompt, and release it when it returns.
+launch and records a progress marker after each completed task. The
+mechanical route's mechanic is registered the same way: run
+`workflow-state register-worker` before dispatching it, put the
+`Lifecycle worker:` line in its prompt, and release it when it returns. On
+that route this owner records the marker itself: run
+`workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`
+once before dispatching the mechanic and once after its change is
+committed. A refusal changes nothing and is not a suspension cause.
 
 If the plan is `mechanical-only`, use one mechanic plus one first-pass reviewer for the whole change:
 
