@@ -1,6 +1,6 @@
 # Task 3: Built parity and the full-shape tier
 
-The real-input acceptance of both encodings and the built-launcher parity of their refusals (spec § *Measured feasibility*, § *Published refusals on the compact encodings*, § *Test seams*; CP10, CP11, CP17, CP18; RP7, RP10, RP11). No `python/` byte changes: the tool this task runs is the G2 pin.
+The real-input acceptance of both encodings and the built-launcher parity of their refusals (spec § *Measured feasibility*, § *Published refusals on the compact encodings*, § *Test seams*; CP10, CP11, CP17, CP18, CP19, CP20; RP7, RP10, RP11). No `python/` byte changes: the tool this task runs is the G2 pin.
 
 **Files:**
 - Modify: `tests/test_review_retained_full.py`
@@ -9,11 +9,13 @@ The real-input acceptance of both encodings and the built-launcher parity of the
 **Interfaces:**
 - Consumes (Tasks 1 and 2): `model_100(issue_repo, live_repo, archive_dir, pins, limits)`, `expand_100(payload)`, `validate_100(payload, pins) -> model`, `model_121(repo, pins, task7_pins, authority)`, `expand_121(payload)`, `validate_121(payload, pins, table) -> model`, `build_witness(components, models, raw)`, `validate_bundle(...)` returning the two models by member name.
 - Consumes (the tier module today): `RetainedFullTest` with `cls.root`, `cls.bundle`, `cls.digest`, `cls.table`, `cls.authority`, `forged(change)`, `copied_bundle()`, `replay_cli(bundle)`; `substituted(*site)`, `retained_root()`, `tool_commit()`, `derive_argv(...)`, `watch_root(...)`; the constants `ARCHIVE`, `GROUPS`, `LABELS`, `WITNESS`, `ISSUE_100`, `ISSUE_121`, `ESTIMATE`, `PINS`. In the launcher module: `AgentToolsLauncherTest.retained_pair(command, args)`, `self.hostile`, `RETAINED`, `RetainedLauncherTest` and its `self.full`.
-- Produces (tier module): `MEMBER_CAP`, `BUNDLE_CAP`, `EXPANDERS`, the module function `rebuilt(bundle, digest, change)`, which the launcher class calls through `self.full`, and three new cases. Produces (launcher module): `canonical(value)`, `stub_bundle(directory) -> str` and one new portable case.
+- Produces (tier module): `MEMBER_CAP`, `BUNDLE_CAP`, `EXPANDERS`, the module function `rebuilt(bundle, digest, change)` and the table `REHASHED_FORGERIES` of `(error, label, change)` rows, both of which the launcher class reads through `self.full`, and three new cases. Produces (launcher module): `canonical(value)`, `stub_bundle(directory) -> str`, `AgentToolsLauncherTest.sealed_replay_pair(bundle, digest)` and one new portable case.
 
 **Invariants:**
 - The launcher module still imports no `agent_tools` at module level; `stub_bundle` uses `json` and `hashlib` only (CP18). The retained class reaches the tier module through `self.full`, as it does today.
-- Every site in `TRUSTED_SITES` and `GIT_FREE_SITES` exists whatever the proof produced, and each `GIT_FREE_SITES` row is refused with the error it is listed under. They were measured at planning on a bundle derived from the real retained objects. A site that is accepted Git-free (a record's bytes or digest, an entry id, a candidate's live entry, exchanged issue-121 `edges` rows) must not be added (CP17).
+- Every new replay parity run is sealed (CP19): `HOME` is a scratch directory and `PATH` one empty directory, and the helper asserts that `shutil.which` finds neither `git` nor `artifact-budget` there before either run. A built launcher names its interpreter by store path and the source run is `sys.executable`, so neither side needs `PATH`. `retained_pair` and its existing callers are unchanged.
+- The stub bundle proves the envelope refusals only. Each old encoding is proved separately, in the retained class, by replacing one member with its whole SOURCE encoding under a coherent witness and anchor (CP20). A missing edge, a reordered edge and a duplicate logical record are proved there too, for each payload, built and from source.
+- Every site in `TRUSTED_SITES` and `GIT_FREE_SITES` exists whatever the proof produced, and each `GIT_FREE_SITES` row is refused with the error it is listed under. They, and every `REHASHED_FORGERIES` row, were measured at planning on a bundle derived from the real retained objects. A site that is accepted Git-free (a record's bytes or digest, an entry id, a candidate's live entry, exchanged issue-121 `edges` rows) must not be added (CP17).
 - The size case asserts bounds, never the measured sizes (CP10). No case pins an output digest (CP11).
 - Nothing skips once `AGENT_RETAINED_ROOT` is set, the retained root is compared before and after each test, and every mutation happens in a copied bundle (RP10, RP11). `model_100` and `model_121` only read the root.
 - `substituted` and every case this task does not name are unchanged.
@@ -74,7 +76,7 @@ GIT_FREE_SITES = {
 }
 ```
 
-  Add this module function before `RetainedFullTest`, and reduce `RetainedFullTest.forged` to `return rebuilt(self.bundle, self.digest, change)`:
+  Add this module function and the forgery table before `RetainedFullTest`, and reduce `RetainedFullTest.forged` to `return rebuilt(self.bundle, self.digest, change)`:
 
 ```python
 def rebuilt(bundle, digest, change=lambda components, payloads: None):
@@ -97,6 +99,48 @@ def rebuilt(bundle, digest, change=lambda components, payloads: None):
             pass
     forged[WITNESS] = canonical_bytes(build_witness(components, {**models, ESTIMATE: payloads[ESTIMATE]}, forged))
     return build_anchor(components, forged), forged
+
+
+def _reordered_100(_, payloads):
+    """The first two range commits exchanged, as 25-character tokens of the packed string."""
+    packed = payloads[ISSUE_100]["commits"]
+    payloads[ISSUE_100]["commits"] = packed[25:50] + packed[:25] + packed[50:]
+
+
+def _repeated_100(_, payloads):
+    """A second `records` row equal to the first, with its digest token, which the first edge then names."""
+    hundred = payloads[ISSUE_100]
+    hundred["records"].append(list(hundred["records"][0]))
+    hundred["record_sha256"] += hundred["record_sha256"][:40]
+    hundred["edges"][0][0] = len(hundred["records"]) - 1
+
+
+def _reordered_121(_, payloads):
+    classes = payloads[ISSUE_121]["classes"]
+    classes[0], classes[1] = classes[1], classes[0]
+
+
+def _repeated_121(_, payloads):
+    rows = payloads[ISSUE_121]["records"]["aggregate.actual"]["rows"]
+    rows.insert(1, list(rows[0]))
+
+
+# Issue 254 criteria 6 and 8, as changes for `rebuilt`: a missing edge, a reordered edge and a duplicate logical
+# record in each compact payload, then each payload replaced by its whole SOURCE encoding. Every one is the
+# listed error's `invalid_payload`, whatever digests the forger recomputes. In issue 121 a reordered edge is
+# an exchanged `classes` row (CP17).
+REHASHED_FORGERIES = (
+    (Issue100Error, "issue-100 edge missing", lambda _, payloads: payloads[ISSUE_100]["edges"].pop()),
+    (Issue100Error, "issue-100 edges reordered", _reordered_100),
+    (Issue100Error, "issue-100 record repeated", _repeated_100),
+    (ContributionError, "issue-121 edge missing", lambda _, payloads: payloads[ISSUE_121]["edges"].pop()),
+    (ContributionError, "issue-121 edges reordered", _reordered_121),
+    (ContributionError, "issue-121 record repeated", _repeated_121),
+    (Issue100Error, "issue-100 in SOURCE's encoding",
+     lambda _, payloads: payloads.update({ISSUE_100: expand_100(payloads[ISSUE_100])})),
+    (ContributionError, "issue-121 in SOURCE's encoding",
+     lambda _, payloads: payloads.update({ISSUE_121: expand_121(payloads[ISSUE_121])})),
+)
 ```
 
   Add these three cases:
@@ -164,13 +208,15 @@ def rebuilt(bundle, digest, change=lambda components, payloads: None):
                     self.assertEqual(set(row["failure"]), {"stage", "code", "evidence_refs"})
 ```
 
-  Three small edits follow. `test_replay_with_sources_unreachable` reads `payload = expand_121(json.loads(...))`. In `test_git_free_substitutions_refused_under_trust_injection` the issue-100 extra change becomes `payloads[ISSUE_100].pop("process")`, labelled "issue-100 without its process list", and two changes are added that put a member back into SOURCE's encoding: `payloads.update({ISSUE_100: expand_100(payloads[ISSUE_100])})` under `Issue100Error`, and the same for `ISSUE_121` with `expand_121` under `ContributionError`. `test_issue100_domains_are_exact_and_distinct` needs no edit: the compact payload keeps `tables.<name>.record_table_policy`.
+  Three small edits follow. `test_replay_with_sources_unreachable` reads `payload = expand_121(json.loads(...))`. In `test_git_free_substitutions_refused_under_trust_injection` the issue-100 extra change becomes `payloads[ISSUE_100].pop("process")`, labelled "issue-100 without its process list"; the extra changes gain every `REHASHED_FORGERIES` row; and the loop also asserts `caught.exception.code == "invalid_payload"` for those rows. `test_issue100_domains_are_exact_and_distinct` needs no edit: the compact payload keeps `tables.<name>.record_table_policy`.
 
 - [ ] **Step 3: Edit the launcher module.** Add `import shutil`. Add before `AgentToolsLauncherTest`:
 
 ```python
-# SOURCE's encodings of the two retained members (#254): replay refuses them whatever digests surround them.
-SOURCE_ENCODED = {"issue-100-derived.json": {"kind": "issue-100-retained-history", "schema_version": 1},
+# Stub retained members (#254): a kind and an old schema version, and no fact. They are no compact payload,
+# so replay refuses them once the envelope around them is authentic. `RetainedLauncherTest` holds the proof
+# for each whole SOURCE encoding.
+STUB_MEMBERS = {"issue-100-derived.json": {"kind": "issue-100-retained-history", "schema_version": 1},
                   "issue-121.json": {"kind": "issue-121-retained-history", "schema_version": 3}}
 
 
@@ -180,12 +226,12 @@ def canonical(value) -> bytes:
 
 
 def stub_bundle(directory) -> str:
-    """Write a five-file bundle around `SOURCE_ENCODED` into the new `directory`; the anchor's digest.
+    """Write a five-file bundle around `STUB_MEMBERS` into the new `directory`; the anchor's digest.
 
     The anchor, the witness and the member rows agree with one another, so replay authenticates the bundle
     and refuses it only for what it reads inside the retained members."""
     groups = dict.fromkeys(("tool", "issue_121", "issue_100", "archive", "estimate"), {})
-    raw = {name: canonical(value) for name, value in {**SOURCE_ENCODED, "task7-estimate.json": {}}.items()}
+    raw = {name: canonical(value) for name, value in {**STUB_MEMBERS, "task7-estimate.json": {}}.items()}
 
     def rows():
         return [{"path": name, "bytes": len(raw[name]), "raw_sha256": hashlib.sha256(raw[name]).hexdigest()}
@@ -204,9 +250,32 @@ def stub_bundle(directory) -> str:
   In `test_retained_commands_refuse_alike_from_source_and_built`, add a fourth case: the derive command with the same four repository options, `--tool-commit` of forty zeros and `--output-dir` of `self.hostile / "absent"` gives `tool_closure`; the closing assertion also requires that this directory does not exist. Add to `AgentToolsLauncherTest`:
 
 ```python
+    def sealed_replay_pair(self, bundle, digest):
+        """`(built, source)` outcomes of `replay-retained` with the sources unreachable: `HOME` is a scratch
+        directory and `PATH` one empty directory, so neither run can find Git or the budget helper. The built
+        launcher names its interpreter by store path and the source run is this interpreter, so neither needs
+        `PATH`. The built run keeps the hostile package on every channel; the source run names the source tree."""
+        sealed = self.hostile / "sealed"
+        (sealed / "bin").mkdir(parents=True, exist_ok=True)
+        env = {"HOME": str(sealed), "PATH": str(sealed / "bin")}
+        self.assertEqual([shutil.which(name, path=env["PATH"]) for name in ("git", "artifact-budget")], [None, None])
+        args = ["--fixtures-dir", str(bundle), "--expected-anchor-sha256", digest]
+        hostile, source = str(self.hostile), str(Path(__file__).resolve().parents[1] / "python")
+        runs = (([str(self.root / ".agents/bin/replay-retained")],
+                 dict(env, PYTHONPATH=hostile, NIX_PYTHONPATH=hostile), self.hostile),
+                ([sys.executable, "-m", "agent_tools." + RETAINED["replay-retained"]],
+                 dict(env, PYTHONPATH=source), sealed))
+        outcomes = []
+        for argv, run_env, cwd in runs:
+            done = subprocess.run([*argv, *args], env=run_env, cwd=cwd, capture_output=True,
+                                  timeout=TIMEOUT_SECONDS, check=False)
+            self.assertNotIn(MARKER.encode(), done.stdout + done.stderr)
+            outcomes.append((done.returncode, done.stdout, done.stderr))
+        return outcomes
+
     def test_replay_refuses_stub_bundles_alike_from_source_and_built(self):
-        """The bundle refusals of #254 on a bundle that holds no retained fact, so no source is reachable: SOURCE's
-        encodings under coherent digests, a replacement anchor, a changed member and a partial bundle."""
+        """The envelope refusals on a bundle that holds no retained fact, with the sources unreachable: a stub
+        member under coherent digests, a replacement anchor, a changed member and a partial bundle."""
         def replace_anchor(bundle):
             path = bundle / "derivation-anchor.json"
             path.write_bytes(canonical({**json.loads(path.read_bytes()), "tool": {"commit": "0" * 40}}))
@@ -219,8 +288,7 @@ def stub_bundle(directory) -> str:
                 digest = stub_bundle(bundle)
                 alter(bundle)
                 before = {path.name: path.read_bytes() for path in bundle.iterdir()}
-                built, source = self.retained_pair(
-                    "replay-retained", ["--fixtures-dir", str(bundle), "--expected-anchor-sha256", digest])
+                built, source = self.sealed_replay_pair(bundle, digest)
                 self.assertEqual(built, source)
                 self.assertEqual(built, (2, b"", f"replay-retained: invalid: {code}\n".encode()))
                 self.assertEqual({path.name: path.read_bytes() for path in bundle.iterdir()}, before)
@@ -229,19 +297,22 @@ def stub_bundle(directory) -> str:
   Append to `RetainedLauncherTest.test_real_derivation_and_replay_match_from_source_and_built`:
 
 ```python
-        # A rehashed alteration of the real bundle: invalid under the forger's own digest, and never authentic
-        # under the trusted one.
+        # Rehashed alterations of the real bundle, with the sources unreachable: each is invalid under the
+        # forger's own digest and never authentic under the trusted one. They are a changed fact, then a
+        # missing edge, a reordered edge, a duplicate record and the whole SOURCE encoding, for each payload.
         full, trusted = self.full, json.loads(summaries["built"])["anchor_sha256"]
-        forged = Path(shutil.copytree(self.hostile / "built-bundle", self.hostile / "forged-bundle"))
-        anchor, raw = full.rebuilt(forged, trusted, full.substituted(full.ISSUE_100, "process", 0))
-        for name, data in {**raw, full.ANCHOR_NAME: full.canonical_bytes(anchor)}.items():
-            (forged / name).write_bytes(data)
-        for digest, code in ((full.telemetry_digest(anchor), "invalid_payload"), (trusted, "anchor_digest")):
-            with self.subTest(code=code):
-                built, source = self.retained_pair(
-                    replay, ["--fixtures-dir", str(forged), "--expected-anchor-sha256", digest])
-                self.assertEqual(built, source)
-                self.assertEqual(built, (2, b"", f"{replay}: invalid: {code}\n".encode()))
+        changes = [("issue-100 process path", full.substituted(full.ISSUE_100, "process", 0)),
+                   *((label, change) for _, label, change in full.REHASHED_FORGERIES)]
+        for n, (label, change) in enumerate(changes):
+            forged = Path(shutil.copytree(self.hostile / "built-bundle", self.hostile / f"forged-{n}"))
+            anchor, raw = full.rebuilt(forged, trusted, change)
+            for name, data in {**raw, full.ANCHOR_NAME: full.canonical_bytes(anchor)}.items():
+                (forged / name).write_bytes(data)
+            for digest, code in ((full.telemetry_digest(anchor), "invalid_payload"), (trusted, "anchor_digest")):
+                with self.subTest(forgery=label, code=code):
+                    built, source = self.sealed_replay_pair(forged, digest)
+                    self.assertEqual(built, source)
+                    self.assertEqual(built, (2, b"", f"{replay}: invalid: {code}\n".encode()))
 ```
 
 - [ ] **Step 4: Verify.**
@@ -256,7 +327,7 @@ if ! grep -q 'def stub_bundle' tests/test_agent_tools_launchers.py; then exit 1;
 test "$(git diff --name-only "$PIN" HEAD -- python | wc -l)" -eq 0
 ```
 
-  Before the run, set `MEMBER_CAP = 60000` once and run `test_bundle_files_fit_the_whole_record_caps` as in Step 1: it must fail on `issue-100-derived.json`. Restore the constant. The retained run ends `OK` with no `skipped`, and it must be quiescent (RP11): if the root comparison differs, the run is void and is repeated. The installed run ends `OK` and includes the four stub cases and the `tool_closure` case. The last line shows that no `python/` byte changed since the pin; if this task finds a `python/` defect, stop: the fix reopens Task 1 or 2 and repeats G2.
+  Before the run, set `MEMBER_CAP = 60000` once and run `test_bundle_files_fit_the_whole_record_caps` as in Step 1: it must fail on `issue-100-derived.json`. Restore the constant. The retained run ends `OK` with no `skipped`, and it must be quiescent (RP11): if the root comparison differs, the run is void and is repeated. The installed run ends `OK` and includes the four sealed stub cases and the `tool_closure` case; the retained run includes nine sealed forgeries of the real bundle, each under two digests. The last line shows that no `python/` byte changed since the pin; if this task finds a `python/` defect, stop: the fix reopens Task 1 or 2 and repeats G2.
 
 - [ ] **Step 5: Commit.** Stage only the two Files. Check that `printf %s "$subject" | wc -c` is at most 64, then commit `test(review): prove compact payloads on the retained tier (#254)`. A review-fix commit uses `fix(review): address Task-3 review findings (#254)`.
 
@@ -264,10 +335,10 @@ test "$(git diff --name-only "$PIN" HEAD -- python | wc -l)" -eq 0
 
 ## Forecast basis
 
-Estimates, priced as in Task 1. Applied to the base files at planning, the edits above measure 24,169 B / +124 / −40 for the tier module and 9,911 B / +73 / −2 for the launcher module. With room for the module docstring and review fixes: 30,720 B / +160 / −55 and 11,264 B / +85 / −6.
+Estimates, priced as in Task 1. Applied to the base files at planning, the edits above measure 26,594 B / +168 / −42 for the tier module and 11,976 B / +100 / −2 for the launcher module. With room for the module docstring and review fixes: 32,768 B / +200 / −55 and 13,312 B / +110 / −6.
 
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":3,"records":[{"bounds":[{"added_lines":160,"boundary":"compact","deleted_lines":55,"record_bytes":30720,"support":{"covers":["t3-1"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t3-1","last_task":3,"owner":3,"path":"tests/test_review_retained_full.py"},{"bounds":[{"added_lines":85,"boundary":"compact","deleted_lines":6,"record_bytes":11264,"support":{"covers":["t3-2"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t3-2","last_task":3,"owner":3,"path":"tests/test_agent_tools_launchers.py"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64,64],"id":3,"records":[{"bounds":[{"added_lines":200,"boundary":"compact","deleted_lines":55,"record_bytes":32768,"support":{"covers":["t3-1"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t3-1","last_task":3,"owner":3,"path":"tests/test_review_retained_full.py"},{"bounds":[{"added_lines":110,"boundary":"compact","deleted_lines":6,"record_bytes":13312,"support":{"covers":["t3-2"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t3-2","last_task":3,"owner":3,"path":"tests/test_agent_tools_launchers.py"}]}}
 ```
