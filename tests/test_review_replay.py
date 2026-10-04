@@ -9,13 +9,15 @@ from agent_tools.replay_retained import main
 from agent_tools.review_budget import describe
 from agent_tools.review_derivation import DeriveInputs, derive_bundle
 from agent_tools.review_forecast import canonical_bytes
+from agent_tools.review_issue121 import ContributionError
 from agent_tools.review_replay import ReplayUnavailable, replay
-from agent_tools.review_witness import ANCHOR_NAME, WitnessError, authenticate, build_anchor
+from agent_tools.review_witness import ANCHOR_NAME, WitnessError, authenticate, build_anchor, build_witness
 
 from .retained_review_test_support import SOURCE, retained_fixture, source_budget_env, tool_fixture
 
 UNAVAILABLE = dict(owners=(1, 2, 3, 6, 3), touches={4: 3})
 NAMES = ("task7_pins", "issue121_pins", "issue100_pins")
+GROUPS = ("tool", "issue_121", "issue_100", "archive", "estimate")
 PREFIX = "replay-retained: "
 ZERO = "sha256:" + "0" * 64
 
@@ -92,11 +94,34 @@ class ReplayTest(unittest.TestCase):
         bundle, expected, kwargs = derived_bundle(self.tmp, **UNAVAILABLE)
         anchor, raw = authenticate(bundle, expected)
         broken = {**raw, "issue-100-derived.json": canonical_bytes({"schema_version": 1})}
-        rebound = build_anchor({k: anchor[k] for k in ("tool", "issue_121", "issue_100", "archive", "estimate")}, broken)
+        rebound = build_anchor({group: anchor[group] for group in GROUPS}, broken)
         (bundle / "issue-100-derived.json").write_bytes(broken["issue-100-derived.json"])
         (bundle / ANCHOR_NAME).write_bytes(canonical_bytes(rebound))
-        with self.assertRaises(WitnessError):   # coherent anchor digest, stale witness: invalid, never unavailable
-            replay(bundle, telemetry_digest(rebound), **kwargs)
+        # A coherent anchor digest over a witness whose fixture rows are stale: invalid, never unavailable.
+        self.refused("witness_shape", bundle, telemetry_digest(rebound), kwargs)
+
+    def test_forged_head_tree_is_refused_under_its_rebuilt_digest(self):
+        source, expected, kwargs = self.shared()
+        bundle = Path(shutil.copytree(source, self.tmp / "forged"))
+        anchor, raw = authenticate(bundle, expected)
+        payloads = {name: json.loads(data) for name, data in raw.items()}
+        issue121, forged = payloads["issue-121.json"], "f" * 40
+        future = issue121["boundaries"][2]
+        heads = (*issue121["aggregate"].values(), future)
+        self.assertEqual([row["result_tree"] for row in heads] + [future["prerequisite"]["tree"]],
+                         [anchor["issue_121"]["tree"]] * 4)  # as derived: the pinned head's tree (RP16)
+        for row in heads:
+            row["result_tree"] = forged
+        future["prerequisite"]["tree"] = forged
+        components = {group: anchor[group] for group in GROUPS}
+        raw = {**raw, "issue-121.json": canonical_bytes(issue121)}
+        raw["derivation-witness.json"] = canonical_bytes(build_witness(components, payloads, raw))
+        rebound = build_anchor(components, raw)
+        for name, data in {**raw, ANCHOR_NAME: canonical_bytes(rebound)}.items():
+            (bundle / name).write_bytes(data)
+        trusted = telemetry_digest(rebound)  # trust injection (RP7): the forger's own, coherent digest
+        self.assertEqual(authenticate(bundle, trusted), (rebound, raw))
+        self.refused("component_mismatch", bundle, trusted, kwargs)
 
     def test_result_reports_the_issue100_summary(self):
         bundle, expected, kwargs = self.shared()
@@ -149,3 +174,11 @@ class ReplayTest(unittest.TestCase):
                          (0, canonical_bytes(replay(bundle, expected, **kwargs)), ""))
         self.assertEqual(self.main(*self.shared("unavailable", **UNAVAILABLE)),
                          (2, b"", PREFIX + "projection_unavailable: tasks-1-3,tasks-4-6\n"))
+
+    def test_main_maps_an_os_error_and_a_source_error(self):
+        pins = dict.fromkeys(NAMES)  # `replay` is replaced, so no pin is read
+        for error, code in ((PermissionError(13, "denied"), "io_error"),
+                            (ContributionError("assignment_mismatch"), "assignment_mismatch")):
+            with self.subTest(code), patch("agent_tools.replay_retained.replay", side_effect=error) as replayed:
+                self.assertEqual(self.main(self.tmp, ZERO, pins), (2, b"", f"{PREFIX}invalid: {code}\n"))
+                replayed.assert_called_once_with(self.tmp, ZERO, **pins)

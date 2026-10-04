@@ -20,7 +20,7 @@ from agent_tools.review_issue100 import DISPOSITIONS
 from agent_tools.review_issue121 import unavailable_ids
 from agent_tools.review_witness import PAYLOAD_NAMES, authenticate, validate_bundle
 
-_ISSUE_100, _ISSUE_121 = PAYLOAD_NAMES[1:3]
+_WITNESS, _ISSUE_100, _ISSUE_121, _ESTIMATE = PAYLOAD_NAMES
 _KIND = "review-feasibility-retained-result"
 
 
