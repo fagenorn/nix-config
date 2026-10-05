@@ -90,10 +90,10 @@ test "$(git log --format=%H --no-merges 8971e41802fd2ee4de8d1c85626ea1cdcf2d384d
 
 ## Forecast basis
 
-Estimates. The `CLAUDE.md` record measured 11,594 B / +1 / −1 at planning with the sentence above, because the paragraph and its neighbours are very long lines, and is forecast at 13,312 B. The audit is priced from its row count: about sixty rows of about 330 B, the deliveries table and the prose, 26,000 B at most, which is a 28,672 B record with its lines and header, / +130.
+Estimates. The `CLAUDE.md` record measured 11,594 B / +1 / −1 at planning with the sentence above, because the paragraph and its neighbours are very long lines, and is forecast at 13,312 B. The audit is priced from its row count: about sixty rows of about 330 B, the deliveries table and the prose, 26,000 B at most, which is a 28,672 B record with its lines and header, / +130. Revised after Task 4: the audit's record measures 28,733 B by the tool's measure, because the review's rulings added disclosures; its bound is now 28,800 B.
 
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[{"base":"229b33fc209e8bc27a387ece8625a8fae41ef5ad","head":"5c740510554fa53403f29004678ddbf1a1a4d4e3"}],"commit_subject_bytes":[64,64],"id":4,"records":[{"bounds":[{"added_lines":1,"boundary":"evidence","deleted_lines":1,"record_bytes":13312,"support":{"covers":["t4-1"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t4-1","last_task":4,"owner":4,"path":"CLAUDE.md"},{"bounds":[{"added_lines":130,"boundary":"evidence","deleted_lines":0,"record_bytes":28672,"support":{"covers":["t4-2"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t4-2","last_task":4,"owner":4,"path":".agents/artifacts/specs/2026-10-05-issue-226-parent-audit.md"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[{"base":"229b33fc209e8bc27a387ece8625a8fae41ef5ad","head":"5c740510554fa53403f29004678ddbf1a1a4d4e3"}],"commit_subject_bytes":[64,64],"id":4,"records":[{"bounds":[{"added_lines":1,"boundary":"evidence","deleted_lines":1,"record_bytes":13312,"support":{"covers":["t4-1"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t4-1","last_task":4,"owner":4,"path":"CLAUDE.md"},{"bounds":[{"added_lines":130,"boundary":"evidence","deleted_lines":0,"record_bytes":28800,"support":{"covers":["t4-2"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t4-2","last_task":4,"owner":4,"path":".agents/artifacts/specs/2026-10-05-issue-226-parent-audit.md"}]}}
 ```
