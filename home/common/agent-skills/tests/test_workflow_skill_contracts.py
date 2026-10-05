@@ -281,6 +281,13 @@ LEGACY_MIGRATION_INPUTS = {
     "python/agent_tools/review_task7.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
     "tests/test_review_task7.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
     "python/agent_tools/review_issue100.py": frozenset({"resolve-bindings"}),  # policy-gate-pattern
+    # The committed retained evidence (https://github.com/fagenorn/nix-config/issues/235) records the same
+    # historical paths as facts of the retained ranges.
+    "tests/fixtures/retained-review-evidence/issue-100-derived.json": frozenset({
+        ".claude/skills.config.json", "resolve-bindings",  # policy-gate-pattern
+    }),
+    "tests/fixtures/retained-review-evidence/issue-121.json": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
+    "tests/fixtures/retained-review-evidence/task7-estimate.json": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
     "python/agent_tools/adopt_inspection.py": frozenset({
         ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
     }),
