@@ -83,6 +83,7 @@ agent-workflow-tests:
     tests/test_review_witness.py \
     tests/test_review_derivation.py \
     tests/test_review_replay.py \
+    tests/test_review_evidence.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
     home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_shell_example_contracts.py \
