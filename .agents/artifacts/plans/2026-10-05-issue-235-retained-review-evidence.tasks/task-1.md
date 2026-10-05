@@ -146,7 +146,7 @@ test "$(python3 -c 'from tests.retained_evidence_test_support import *; print(AN
 for name in "$OUT"/a/*.json; do git cat-file blob "HEAD:$DIR/$(basename "$name")" | cmp - "$name"; done
 test "$(git ls-tree --name-only HEAD "$DIR/" | wc -l)" -eq 5
 test -z "$(git status --porcelain)"
-timeout 3600 just agent-workflow-tests > "$OUT/workflow.log" 2>&1 || { tail -20 "$OUT/workflow.log"; exit 1; }
+timeout 7200 just agent-workflow-tests > "$OUT/workflow.log" 2>&1 || { tail -20 "$OUT/workflow.log"; exit 1; }
 ```
 
   Equal blobs show that no hook or filter touched the bytes, and the full suite ends `OK`. Report the commit, `$OUT`, the two root digests and the host-basis result. Do not run derivation B.

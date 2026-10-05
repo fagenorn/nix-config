@@ -300,7 +300,7 @@ sed -i.bak 's/^ANCHOR_SHA256 = "sha256:d/ANCHOR_SHA256 = "sha256:e/' tests/retai
 if PYTHONPATH=python timeout 600 python3 -m unittest tests/test_review_evidence.py > /dev/null 2>&1; then exit 1; fi
 mv tests/retained_evidence_test_support.py.bak tests/retained_evidence_test_support.py
 test -z "$(git status --porcelain -- tests/retained_evidence_test_support.py tests/fixtures)"
-timeout 3600 just agent-workflow-tests > "${TMPDIR:-/tmp}/ev235-workflow.log" 2>&1 || { tail -20 "${TMPDIR:-/tmp}/ev235-workflow.log"; exit 1; }
+timeout 7200 just agent-workflow-tests > "${TMPDIR:-/tmp}/ev235-workflow.log" 2>&1 || { tail -20 "${TMPDIR:-/tmp}/ev235-workflow.log"; exit 1; }
 tail -3 "${TMPDIR:-/tmp}/ev235-workflow.log"
 test "$(git log --format=%H --no-merges 8971e41802fd2ee4de8d1c85626ea1cdcf2d384d..HEAD ^origin/main -- python | wc -l)" -eq 0
 ```

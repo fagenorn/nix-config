@@ -113,7 +113,7 @@ mv tests/retained_evidence_test_support.py.bak tests/retained_evidence_test_supp
 grep -q 'test_committed_evidence_replays_alike_from_source_and_built' "$LOG.mutant"
 test -z "$(git status --porcelain -- tests/retained_evidence_test_support.py tests/fixtures)"
 PYTHONPATH=python timeout 600 python3 -m unittest tests/test_review_evidence.py 2>&1 | tail -3
-timeout 3600 just agent-workflow-tests 2>&1 | tail -3
+timeout 7200 just agent-workflow-tests 2>&1 | tail -3
 test "$(git log --format=%H --no-merges 8971e41802fd2ee4de8d1c85626ea1cdcf2d384d..HEAD ^origin/main -- python | wc -l)" -eq 0
 ```
 

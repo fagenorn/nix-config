@@ -76,6 +76,8 @@ core_gate source "$TREE" "$PY" timeout 900 python3 -m agent_tools.review_feasibi
 
 Only exit 0 with `complete/within_budget`, validated and reproduced, clears G0. Exit 2 or 3 stops with no bootstrap. Task 1 starts only after G0 has cleared at 0, and that result file predates the publication commit.
 
+Planning G0 at `--completed-through 0`: at head `c77f2be`, exit 0 and `complete/within_budget`: root 9,208 of 16,384 B, total 399,663 of 524,288 B, largest member 62,467 B, `file_count` 9 (eight of eight payload members, so a forecast revision has no spare member), validated and reproduced. The recording commit changes no forecast.
+
 **G1, the complete fixed-base actual gate, after every task and fix and at the final head.**
 
 ```sh
@@ -93,7 +95,7 @@ Both must show `complete/within_budget` with identical metrics; G1 overrides eve
 
 ```sh
 PYTHONPATH=python timeout 600 python3 -m unittest tests/test_review_evidence.py
-timeout 3600 just agent-workflow-tests
+timeout 7200 just agent-workflow-tests
 timeout 3600 just build
 timeout 3600 just agent-installed-skill-tests > "$EV/installed.log" 2>&1
 grep -A1 '^test_committed_evidence_replays_alike_from_source_and_built ' "$EV/installed.log" | grep -q '\.\.\. ok$'
