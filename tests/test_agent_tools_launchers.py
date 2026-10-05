@@ -21,6 +21,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from .retained_evidence_test_support import ANCHOR_SHA256, BUNDLE
+
 INSTALLED_HOME_ENV = "AGENT_SKILLS_INSTALLED_HOME"
 INSTALLED_RECIPE = "just agent-installed-skill-tests"
 PACKAGE_BYTES = b"agent_tools"
@@ -482,6 +484,47 @@ class AgentToolsLauncherTest(unittest.TestCase):
                 self.assertEqual(built, source)
                 self.assertEqual(built, (2, b"", f"replay-retained: invalid: {code}\n".encode()))
                 self.assertEqual({path.name: path.read_bytes() for path in bundle.iterdir()}, before)
+
+    def test_committed_evidence_replays_alike_from_source_and_built(self):
+        """Issue 235: copies of the committed bundle, with the sources unreachable. The authentic copy is the
+        historical refusal, and each changed copy is refused under the trusted digest. The last copy is rebuilt
+        as a forger would and replayed under the forger's own digest, where the malformed issue-100 member is
+        invalid beside the unchanged issue-121 refusal."""
+        def changed(bundle):
+            path = bundle / "issue-121.json"
+            data = path.read_bytes()
+            path.write_bytes(data[:100] + (b"1" if data[100:101] != b"1" else b"0") + data[101:])
+
+        def replaced(bundle):
+            path = bundle / "derivation-anchor.json"
+            anchor = json.loads(path.read_bytes())
+            path.write_bytes(canonical({**anchor, "tool": {**anchor["tool"], "commit": "0" * 40}}))
+
+        def malformed(bundle):
+            decoded = {path.name: json.loads(path.read_bytes()) for path in bundle.iterdir()}
+            del decoded["issue-100-derived.json"]["process"]
+            anchor, witness = decoded["derivation-anchor.json"], decoded["derivation-witness.json"]
+            for name, rows in (("issue-100-derived.json", witness["fixtures"]),
+                               ("issue-100-derived.json", anchor["payload"]["members"]),
+                               ("derivation-witness.json", anchor["payload"]["members"])):
+                raw = canonical(decoded[name])
+                (row,) = (row for row in rows if row["path"] == name)
+                row.update(bytes=len(raw), raw_sha256=hashlib.sha256(raw).hexdigest())
+            for name, value in decoded.items():
+                (bundle / name).write_bytes(canonical(value))
+            return "sha256:" + hashlib.sha256(canonical(anchor)[:-1]).hexdigest()
+
+        cases = (("projection_unavailable: tasks-1-3,tasks-4-6", lambda bundle: None),
+                 ("invalid: member_digest", changed),
+                 ("invalid: member_set", lambda bundle: (bundle / "task7-estimate.json").unlink()),
+                 ("invalid: anchor_digest", replaced), ("invalid: invalid_payload", malformed))
+        for n, (reason, alter) in enumerate(cases):
+            with self.subTest(reason=reason):
+                bundle = Path(shutil.copytree(BUNDLE, self.hostile / f"evidence-{n}"))
+                digest = alter(bundle) or ANCHOR_SHA256
+                built, source = self.sealed_replay_pair(bundle, digest)
+                self.assertEqual(built, source)
+                self.assertEqual(built, (2, b"", f"replay-retained: {reason}\n".encode()))
 
     def test_replay_refuses_a_forged_bundle_alike_from_source_and_built(self):
         forged = self.hostile / "forged"; forged.mkdir()

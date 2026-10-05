@@ -107,8 +107,9 @@ def snapshot(repo) -> tuple:
     return refs, index, status, tuple(sorted(files))
 
 
-def source_budget_env(tmp) -> dict:
-    """An environment whose `artifact-budget` is this source tree's helper and policy.
+def source_budget_env(tmp, source=SOURCE) -> dict:
+    """An environment whose `artifact-budget` and `agent_tools` are those of the source tree `source`, this
+    checkout unless another is named.
 
     Tests call `describe("review-package")` under
     `patch.dict(os.environ, env, clear=True)`: the installed helper lacks
@@ -117,10 +118,10 @@ def source_budget_env(tmp) -> dict:
     home = Path(tmp) / "budget-home"
     (home / ".agents/lib/python").mkdir(parents=True)
     (home / ".agents/share").mkdir(parents=True)
-    legacy = SOURCE / "home/common/agent-skills"
+    legacy = Path(source) / "home/common/agent-skills"
     (home / ".agents/lib/python/artifact_budget.py").symlink_to(legacy / "scripts/artifact_budget.py")
     (home / ".agents/share/artifact-budget-policy.json").symlink_to(legacy / "artifact-budget-policy.json")
-    return dict(os.environ, HOME=str(home), PYTHONPATH=str(SOURCE / "python"),
+    return dict(os.environ, HOME=str(home), PYTHONPATH=str(Path(source) / "python"),
                 PATH=str(legacy / "scripts") + os.pathsep + os.environ["PATH"])
 
 

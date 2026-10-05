@@ -14,6 +14,10 @@ voids the run (RP11).
 The two retained members are the compact payloads of issue 254: each bundle
 file is held to CORE's whole-record cap, and each payload's expansion is
 compared with SOURCE's model of the same objects, byte for byte.
+
+`test_committed_evidence_reproduces_with_the_reviewed_tool` (issue 235) derives
+the bundle again from the root, with the package of a clone at the reviewed
+tool commit, and compares the five files with the committed copy byte for byte.
 """
 import hashlib, json, os, shutil, subprocess, sys, tempfile, unittest
 from pathlib import Path
@@ -32,6 +36,7 @@ from agent_tools.review_task7 import DIGEST_PLACEHOLDER, TASK7_PINS, EstimateErr
 from agent_tools.review_witness import (ANCHOR_MAX_BYTES, ANCHOR_NAME, WitnessError, authenticate, build_anchor,
                                         build_witness, validate_bundle)
 
+from .retained_evidence_test_support import ANCHOR_SHA256, BUNDLE, TOOL_COMMIT
 from .retained_review_test_support import SOURCE, git, rehash_edges, source_budget_env, ssh_signer
 
 ROOT_ENV, TOOL_COMMIT_ENV = "AGENT_RETAINED_ROOT", "AGENT_RETAINED_TOOL_COMMIT"
@@ -422,6 +427,22 @@ class RetainedFullTest(unittest.TestCase):
         self.assertEqual(files[0], files[1])
         self.assertEqual(set(files[0]), {ANCHOR_NAME, WITNESS, ISSUE_100, ISSUE_121, ESTIMATE})
         self.assertLessEqual(len(files[0][ANCHOR_NAME]), ANCHOR_MAX_BYTES)
+
+    def test_committed_evidence_reproduces_with_the_reviewed_tool(self):
+        """Issue 235 (EV4): the reviewed tool derives the committed bundle again from the retained objects. The
+        package, the budget helper and its policy come from a clone of this checkout at `TOOL_COMMIT`, not from
+        the class's tool commit, so the case holds after this checkout's package moves on."""
+        clone = self.disposable_clone(SOURCE)
+        git(clone, "checkout", "-q", "--detach", TOOL_COMMIT)
+        env = source_budget_env(tempfile.mkdtemp(dir=self.tmp, prefix="reviewed-"), clone)
+        out = self.tmp / "reproduced"
+        done = subprocess.run([sys.executable, "-m", "agent_tools." + DERIVE.replace("-", "_"),
+                               *derive_argv(self.root, TOOL_COMMIT, tool_repo=clone, output_dir=out)],
+                              env=env, cwd=self.tmp, capture_output=True)
+        self.assertEqual((done.returncode, done.stderr), (0, b""))
+        self.assertEqual(json.loads(done.stdout)["anchor_sha256"], ANCHOR_SHA256)
+        self.assertEqual({path.name: path.read_bytes() for path in out.iterdir()},
+                         {path.name: path.read_bytes() for path in BUNDLE.iterdir()})
 
     def test_bundle_files_fit_the_whole_record_caps(self):
         sizes = {path.name: path.stat().st_size for path in self.bundle.iterdir()}
