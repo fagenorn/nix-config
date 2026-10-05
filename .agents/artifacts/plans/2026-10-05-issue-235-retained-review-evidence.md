@@ -119,7 +119,11 @@ The retained run is quiescent (RP11); a changed root voids it and it is repeated
 
 ## Decisions
 
-EV1, EV2, EV5 and EV13 govern Task 1; EV3, EV6 and EV11 govern Task 2; EV3, EV4 and EV10 govern Task 3; EV7, EV9 and EV12 govern Task 4; EV8 governs the gates.
+EV1, EV2, EV5 and EV13 govern Task 1; EV3, EV6 and EV11 govern Task 2; EV3, EV4, EV10 and EV14 govern Task 3; EV7, EV9 and EV12 govern Task 4; EV8 governs the gates.
+
+## Standards review provenance
+
+Reviewer: Codex (`plan-review`, isolated, read-only, no fallback), plan head `e56bf56`, base `8971e41802fd2ee4de8d1c85626ea1cdcf2d384d`. Blocking 0. Should fix 1, accepted with a narrower correction (EV14): Task 3's claim about `AGENT_RETAINED_TOOL_COMMIT` now matches the class setup. Rejected 0, deferred 0.
 
 ## Review feasibility delivery
 

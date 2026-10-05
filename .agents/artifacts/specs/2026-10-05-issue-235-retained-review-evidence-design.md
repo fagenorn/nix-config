@@ -256,8 +256,8 @@ It derives with the reviewed tool, not with the checkout's: a disposable
 package, the budget helper and its policy all come from that clone (EV4). The
 committed evidence therefore stays reproducible after `python/` moves on, and
 the case fails only when the retained objects, the archive or the host basis
-changed. It ignores `AGENT_RETAINED_TOOL_COMMIT`. The tier's other cases keep
-their meaning. The case runs under the recipe's no-skip rule and the root
+changed. The case never reads `AGENT_RETAINED_TOOL_COMMIT`; the class setup
+keeps its selector (EV14). The tier's other cases keep their meaning. The case runs under the recipe's no-skip rule and the root
 comparison (RP10, RP11).
 
 ### Architecture sentence
@@ -396,6 +396,7 @@ evidence or lifecycle state.
 | EV11 | The late Task-3 fact is asserted as the literal owner sequence of the eighteen task assignments: commit `8e6f0681908cb1ba3d352be5d26540dab731ffeb` is assignment 25 of 30, after five Task-6 assignments and before the last one. Refines § *Committed facts*, which says it follows the last Task-6 assignment | Read from a bundle derived at the pin during planning; the tier's own case asserts position 24 "after Task 6 began"; EV6 | Asserting the sentence as written: false on the authentic bundle, so the case could never pass |
 | EV12 | In the parent audit, the clauses that can only become true at this child's merge (the final reviews, required CI) share one row, `open follow-up` tracked by issue 235, and the verdict line is conditional on that merge. The controller confirms the condition when it posts the verdict. Refines EV7 | EV7 (the reviewers read the audit, so it is written before their verdicts; the post follows the merge); the-bar *Truthful terminal states* | `delivered` for reviews that have not happened. An audit commit after the final reviews: it moves the head both reviews accepted |
 | EV13 | Three bundle files (`issue-100-derived.json`, `issue-121.json`, `task7-estimate.json`) hold legacy policy names as facts of the retained ranges. The publication task lists them, with their exact tokens, in `LEGACY_MIGRATION_INPUTS` of `home/common/agent-skills/tests/test_workflow_skill_contracts.py`. Refines § *Solution*: this is a fourth existing file with a small edit | Found at planning: `test_living_source_has_no_legacy_policy_surface` scans every tracked JSON file under `tests/` and fails on the bundle; that table already exempts `review_task7.py` and `review_issue100.py` for the same names, and an entry whose token is no longer seen fails the scan | Moving the bundle outside `tests/`: reverses EV1 and changes the measured record headers. A prefix exemption for the directory: any later file there would pass unread. Changing a bundle byte: forbidden |
+| EV14 | Refines EV4: the reproduction case itself never reads `AGENT_RETAINED_TOOL_COMMIT`, but it stays in `RetainedFullTest`, whose setup still refuses a named commit whose `python` tree is not `HEAD`'s. The tier is run with the variable unset (the recipe never sets it) or naming such a commit; the plan and the case's docstring claim no more | Plan review S1 (Codex): `tool_commit()` in `tests/test_review_retained_full.py` raises in `setUpClass` before any case runs; parent D17 owns that selector; after `python/` moves on, an unset variable selects `HEAD` and the case still derives at `TOOL_COMMIT` | A separate class with its own setup: duplicates the input and root checks and enlarges the forecast records to serve an invocation the recipe never makes |
 
 Design and grill frontier: closed within the approved scope. The resolved
 bindings carry no context-map or ADR route, so this ledger is the issue's

@@ -15,7 +15,7 @@ The committed copy replays alike from the built launcher and from source, and th
 
 **Invariants:**
 - The launcher module still imports no `agent_tools` at module level. Its new case builds every change with `json` and `hashlib` (CP18) and every replay run is the existing sealed pair (CP19).
-- The reproduction case derives with the package, the budget helper and the policy of a disposable clone checked out at `TOOL_COMMIT`. It does not read `AGENT_RETAINED_TOOL_COMMIT` and does not use this checkout's `python/` (EV4).
+- The reproduction case derives with the package, the budget helper and the policy of a disposable clone checked out at `TOOL_COMMIT`. It does not read `AGENT_RETAINED_TOOL_COMMIT` and does not use this checkout's `python/` (EV4). The class setup is unchanged and still applies its own selector, so the tier runs with that variable unset or naming a commit whose `python` tree is `HEAD`'s (EV14).
 - `source_budget_env(tmp)` with one argument behaves exactly as today; every existing caller is unchanged.
 - Nothing skips once `AGENT_RETAINED_ROOT` is set, and the root is compared around the new case like every other (RP10, RP11). A changed root voids the run: repeat it on a quiescent root, with no commit, fetch or gc in any worktree of the root meanwhile.
 - No recipe changes (EV10). `RetainedLauncherTest` inherits the new launcher case, so the retained recipe runs it too.
@@ -25,8 +25,8 @@ The committed copy replays alike from the built launcher and from source, and th
 ```python
     def test_committed_evidence_reproduces_with_the_reviewed_tool(self):
         """Issue 235 (EV4): the reviewed tool derives the committed bundle again from the retained objects. The
-        package, the budget helper and its policy come from a clone of this checkout at `TOOL_COMMIT`, whatever
-        `AGENT_RETAINED_TOOL_COMMIT` names, so the case holds after this checkout's package moves on."""
+        package, the budget helper and its policy come from a clone of this checkout at `TOOL_COMMIT`, not from
+        the class's tool commit, so the case holds after this checkout's package moves on."""
         clone = self.disposable_clone(SOURCE)
         git(clone, "checkout", "-q", "--detach", TOOL_COMMIT)
         env = source_budget_env(tempfile.mkdtemp(dir=self.tmp, prefix="reviewed-"), clone)
