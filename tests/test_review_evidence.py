@@ -39,8 +39,8 @@ PROCESS = (
     ("97d566aabdd5b87b6fc5d6949fcd05c23894d7ba", "design_budget_fix"),
     ("c150cfca5c591c3114cfbef5b1a15864acc7f39a", "design_grounding_fix"),
     ("fe85677c8bd26c808ac69c2ee21b17ff6e262923", "task7_staging_fix"))
-# The eighteen task assignments, in range order. The sixth 3 is the late Task-3 fix: five Task-6
-# assignments precede it and one follows.
+# The eighteen task assignments, in range order. The third 3, the seventeenth entry, is the late
+# Task-3 fix: five Task-6 assignments precede it and one follows.
 TASK_OWNERS = [1, 1, 1, 2, 2, 3, 3, 4, 4, 4, 5, 6, 6, 6, 6, 6, 3, 6]
 LATE_FIX = "8e6f0681908cb1ba3d352be5d26540dab731ffeb"
 TASK8 = {"task": 8, "repository_bytes": 0, "state": "unexecuted",
@@ -249,8 +249,19 @@ class CommittedEvidenceTest(unittest.TestCase):
                     self.assertEqual(self.replay(bundle, telemetry_digest(anchor)), self.refused(code))
 
     def test_committed_bytes_hold_no_paths_keys_or_policy_lines(self):
-        policy = (SOURCE / "home/common/agent-skills/artifact-budget-policy.json").read_bytes()
-        secrets = {line.strip() for line in policy.split(b"\n") if len(line.strip()) > 16}
+        source = (SOURCE / "home/common/agent-skills/artifact-budget-policy.json").read_text()
+        policy = json.loads(source)
+        # A canonical document can hold the policy as an object, or its canonical or authored text as a
+        # string. The needles are each dict-valued entry as the first writes it, and each such entry and
+        # each authored line as the others escape it.
+        compact = lambda value: canonical_bytes(value)[:-1]
+        entries = {f'"{key}":'.encode() + compact(value)
+                   for key, value in {**policy, **policy["artifacts"]}.items() if type(value) is dict}
+        texts = {*(entry.decode() for entry in entries), *(line.strip() for line in source.splitlines())}
+        secrets = {needle for needle in entries | {compact(text)[1:-1] for text in texts} if len(needle) > 16}
+        carrier = canonical_bytes([policy, compact(policy).decode(), source])  # holds all three forms
+        self.assertTrue(entries and entries <= secrets)
+        self.assertEqual([secret[:80] for secret in secrets if secret not in carrier], [])
         secrets |= {*LEAKS, os.path.expanduser("~").encode(), tempfile.gettempdir().encode()}
         for name, data in self.committed.items():
             self.assertEqual([secret[:80] for secret in secrets if secret in data], [], name)
