@@ -72,8 +72,9 @@ Your task:
      zero (empty review range) or two first-pass reviewer subagents. Before that,
      ship-issue's Phase-0 reviewer-dispatch probe confirms that this context
      can launch them.
-  3. In Phase 6, block on `<tracker-cli> pr checks --watch` per ship-issue's
-     instructions.
+  3. In Phase 6, block on `<tracker-cli> pr checks --required --watch` per
+     ship-issue's instructions, which fall back to the all-checks watch when no
+     required check is reported.
   4. If auto is true, apply ship-issue's auto-mode rules throughout: apply Blocking
      and Should-fix items inline rather than surfacing; only Discussion items and
      genuinely blocked situations should return to me. If auto is false, honor every

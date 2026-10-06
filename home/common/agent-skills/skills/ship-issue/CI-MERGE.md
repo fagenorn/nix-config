@@ -7,7 +7,7 @@ rules.
 ## Why the blocking watch is shaped that way
 
 ```
-timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30
+timeout 300 gh pr checks <pr-num> --required --watch --fail-fast --interval 30
 ```
 
 The 5-minute ceiling forces an assistant turn every ~5 min, which keeps the
@@ -15,6 +15,12 @@ subagent stream alive; the harness reaps a subagent that goes silent for ~9+ min
 on a blocking Bash (which is what a 540s timeout produced). `--fail-fast` exits
 on the first check to flip into a failing bucket, so failures surface without
 waiting on parallel checks.
+
+**Why `--required`.** gh keeps only the checks the forge reports as required
+for this PR's base, so the rule set is branch protection's own and ship never
+keeps a copy of a check list. A check that is not required cannot block the
+merge, so ship does not wait on it; the guard and branch protection still
+refuse a merge whose required checks have not passed.
 
 **Foreground only — do NOT background this.** No `run_in_background: true`, no
 `Monitor`. The harness yields a subagent indefinitely when it sees a
@@ -35,7 +41,8 @@ from its final output (or one `--json name,bucket` call afterwards).
 
 ## Exit codes
 
-- **`0`** → all checks pass; continue to Phase 7.
+- **`0`** → every required check passed; list advisory states (below), then
+  continue to Phase 7.
 - **`124`** (`timeout` fired) → still running past ~5 min. **Emit one short
   narration turn** (`CI: still pending at 5m, retry 2/8`) as the keep-alive, then
   re-run the identical command. Up to **8 times (~40 min)**. Still pending after
@@ -45,13 +52,36 @@ from its final output (or one `--json name,bucket` call afterwards).
   (a) wait another 10 min, (b) close+reopen to re-trigger checks, (c) merge
   without CI if the project allows admin-merge, (d) abort and investigate
   manually."
-- **any other non-zero** → a check failed (or `gh` errored). Pull
+- **`1` with `no required checks reported`** → gh refuses a `--required` watch
+  at once, without waiting, when no required check has been reported: either
+  the base marks none required (a declared integration branch the guard exempts
+  from the protection demand) or the required check run does not exist yet on a
+  just-pushed head. The two cannot be told apart, and both take today's
+  all-checks watch, `timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30`,
+  for the rest of the phase with the same exit codes and retry budget. Every
+  check gated, so no advisory states are listed, and notes say
+  `CI: no required checks reported; waited on all`. A required-only wait never
+  merges with fewer gates than the all-checks wait it replaced.
+- **any other non-zero** → a gating check failed (or `gh` errored). Pull
   `gh run view <run-id> --log-failed`, ground against the failing surface
   (lint → standards doc, test → area spec/plan), surface.
 
 **JSON-field note.** `conclusion` is not a valid field on `gh pr checks` — `gh`
 rejects it (`--help` lists the real set). When you need structured output,
 `bucket` (pass/fail/pending/skipping/cancel) is the cleanest decision field.
+
+## Advisory states
+
+After the required watch exits `0`, run `gh pr checks <pr-num> --json name,bucket`
+once. That is this phase's one non-watching call, and it exits 0 whether or not
+checks are pending. Every row whose `bucket` is not `pass` (`pending`, `fail`,
+`cancel`, `skipping`) is a check that was not required, because every required
+one has passed. Append them to the ship summary's `notes` as
+`advisory CI: <name>=<bucket>, …`. When they do not fit the shared notes bound,
+end the list with `+<n> more`, and keep a non-null `report_path` named first.
+Under lifecycle identity the line goes in the legacy row's `notes`, which
+`ship-summary/v2` carries as `historical_owner_result`. An advisory `fail` does
+not block the merge; report it as it is.
 
 ## Merge quirks (Phase 7)
 

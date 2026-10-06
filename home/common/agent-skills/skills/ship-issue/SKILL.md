@@ -53,7 +53,7 @@ review prompt.
 3. Consolidate learnings   → see CONSOLIDATE.md; drop most candidates
 4. Open PR                 → push -u; gh pr create with "Closes #<num>"
 5. Review the PR           → review-range picks delta, empty or full; two-axis review over it
-6. Wait for CI             → gh pr checks --watch (one blocking call)
+6. Wait for CI             → gh pr checks --required --watch (one blocking call; all checks when none is required)
    Selection gate          → lifecycle identity only: select the CI-green head (## Delivery loop)
 7. Merge                   → gh pr merge <pr-num> --repo <resolved-repository> --merge [--subject "<rendered subject>"] --delete-branch (true merge commit)
 8. Cleanup                 → issue closed; worktree + branches removed
@@ -346,13 +346,13 @@ at the same point. Divergence here is also evidence of a superseded launch,
 which is why `## Launch guard` runs before the merge regardless of how this
 check came out.
 
-Then block with `gh`'s built-in watch — one Bash call, **300s timeout**:
+Then block on the required checks with `gh`'s built-in watch — one Bash call, **300s timeout**:
 
 ```
-timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30
+timeout 300 gh pr checks <pr-num> --required --watch --fail-fast --interval 30
 ```
 
-**Foreground only — never backgrounded, and the blocking watch is the only sanctioned wait shape: no bare re-polls, no no-op keep-alive commands.** Exit `0` → Phase 7. Exit `124` → one short narration turn, re-run the identical command, up to 8 times (~40 min), then escalate. Other non-zero → a check failed; pull `gh run view <run-id> --log-failed`, ground, surface. Rationale, escalation script, and JSON-field notes: [`CI-MERGE.md`](./CI-MERGE.md).
+**Foreground only — never backgrounded, and the blocking watch is the only sanctioned wait shape: no bare re-polls, no no-op keep-alive commands.** Exit `0` → list advisory states, then Phase 7. Exit `124` → one short narration turn, re-run the identical command, up to 8 times (~40 min), then escalate. Exit `1` with gh's `no required checks reported` error → the base marks no check required, or the required check is not reported yet: run `timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30` for the rest of the phase under the same exit codes and retry budget, list no advisory states, and note `CI: no required checks reported; waited on all`. Other non-zero → a gating check failed; pull `gh run view <run-id> --log-failed`, ground, surface. After the required watch exits `0`, run `gh pr checks <pr-num> --json name,bucket` once and append each non-`pass` row to the ship summary's notes as `advisory CI: <name>=<bucket>, …`. An advisory failure does not block the merge. Rationale, escalation script, advisory format and JSON-field notes: [`CI-MERGE.md`](./CI-MERGE.md).
 
 ## Phase 7 — Merge
 

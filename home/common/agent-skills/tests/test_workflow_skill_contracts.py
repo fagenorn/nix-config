@@ -62,6 +62,9 @@ CODEX_COLLABORATION_EVALS = (
 # and its eval are both checked against these two strings so they cannot drift.
 GATE_LINE_BOUNDARY = "≤1,000 product lines"
 GATE_FILE_BOUNDARY = "≤20 product files"
+REQUIRED_WATCH = "timeout 300 gh pr checks <pr-num> --required --watch --fail-fast --interval 30"
+ALL_CHECKS_WATCH = "timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30"
+ADVISORY_CALL = "gh pr checks <pr-num> --json name,bucket"
 
 SKILL_ROOTS = (
     REPO_ROOT / "home/common/agent-skills/skills",
@@ -3372,6 +3375,51 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("`git show --cc <merge-commit>`", merge_delta)
         self.assertNotIn("after the head sdd reviewed", review)
         self.assertNotIn("merge-delta empty, nothing to review", review)
+
+    def test_phase_six_waits_on_required_checks_and_lists_advisory_states(self):
+        # #264 D6-D8: block on the forge's required set, fall back to every
+        # check when none is reported, and report the rest in notes.
+        phase_six = self.section(self.ship_issue, "## Phase 6 — Wait for CI",
+                                 "## Phase 7 — Merge")
+        self.assertIn(REQUIRED_WATCH, re.findall(r"```\n(.*?)\n```", phase_six, re.S))
+        collapsed = normalized(phase_six)
+        self.assert_ordered(collapsed, REQUIRED_WATCH, "Exit `124`",
+                            "`no required checks reported`", ALL_CHECKS_WATCH,
+                            "`CI: no required checks reported; waited on all`",
+                            "a gating check failed", ADVISORY_CALL,
+                            "`advisory CI: <name>=<bucket>, …`")
+        self.assertNotIn("Nix Eval", phase_six)
+        flow = normalized(self.section(self.ship_issue, "## The flow", "## Standing authorization"))
+        self.assertIn("6. Wait for CI → gh pr checks --required --watch (one blocking call;"
+                      " all checks when none is required)", flow)
+        self.assertIn("block on `<tracker-cli> pr checks --required --watch`",
+                      normalized(self.ship_handoff))
+
+    def test_ci_merge_explains_the_required_watch_and_its_fallback(self):
+        why = self.section(self.ship_ci_merge, "## Why the blocking watch is shaped that way",
+                           "## Exit codes")
+        self.assertIn(REQUIRED_WATCH, why)
+        self.assertIn("branch protection's own", normalized(why))
+        exits = normalized(self.section(self.ship_ci_merge, "## Exit codes", "## Advisory states"))
+        self.assert_ordered(exits, "**`0`**", "**`124`**", "`no required checks reported`",
+                            ALL_CHECKS_WATCH, "same exit codes and retry budget",
+                            "**any other non-zero**")
+        advisory = normalized(self.section(self.ship_ci_merge, "## Advisory states",
+                                           "## Merge quirks (Phase 7)"))
+        for fragment in (ADVISORY_CALL, "is not `pass`", "`advisory CI: <name>=<bucket>, …`",
+                         "`+<n> more`", "`historical_owner_result`",
+                         "does not block the merge"):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, advisory)
+
+    def test_ship_issue_eval_restates_the_required_ci_wait(self):
+        expected = next(case for case in self.ship_issue_evals["evals"]
+                        if case["id"] == 1)["expected_output"]
+        for fragment in (f"CI is exactly foreground `{REQUIRED_WATCH}`",
+                         f"falling back to `{ALL_CHECKS_WATCH}` when gh reports no required checks",
+                         f"`{ADVISORY_CALL}`"):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, expected)
 
     def test_ship_issue_merge_is_bound_to_the_resolved_repository(self):
         optional_subject = (
