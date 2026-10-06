@@ -7000,6 +7000,40 @@ class ResumePackTest(ResumePackHarness, unittest.TestCase):
         self.assertEqual(after, before)
         self.assertFalse((self.worktree / ".superpowers").exists())
 
+    def signed_commit(self, subject):
+        """A commit carrying an SSH signature header, written without any key.
+
+        `log.showSignature` prints its verification result (no allowed-signers
+        file is configured, so "No signature") on stdout, even under `--format`.
+        """
+        tree = self.git(self.worktree, "rev-parse", "HEAD^{tree}")
+        parent = self.git(self.worktree, "rev-parse", "HEAD")
+        body = (f"tree {tree}\nparent {parent}\n"
+                "author Fixture <fixture@example.test> 1700000000 +0000\n"
+                "committer Fixture <fixture@example.test> 1700000000 +0000\n"
+                "gpgsig -----BEGIN SSH SIGNATURE-----\n U1NIU0lH\n"
+                " -----END SSH SIGNATURE-----\n\n" + subject + "\n")
+        sha = subprocess.run(
+            ["git", "-C", str(self.worktree), "hash-object", "-t", "commit", "-w",
+             "--stdin"], input=body, check=True, capture_output=True,
+            text=True).stdout.strip()
+        self.git(self.worktree, "reset", "--quiet", "--hard", sha)
+        return sha
+
+    def test_the_commit_list_ignores_log_show_signature(self):
+        # #265 D4: no signature line `log.showSignature` adds may become a commit.
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        first = self.signed_commit("first task")
+        second = self.signed_commit("second task")
+        self.git(self.worktree, "config", "log.showSignature", "true")
+        self.assertIn("No signature", self.git(
+            self.worktree, "log", "--max-count=1", "--format=%H%x1f%s"))
+        self.assertEqual(self.pack("16:1:1")["commits_since_marker"], {
+            "base": self.base, "relation": "ahead", "count": 2,
+            "commits": [{"sha": second[:12], "subject": "second task"},
+                        {"sha": first[:12], "subject": "first task"}],
+            "truncated": False})
+
     def test_the_commit_list_is_bounded(self):
         self.mark_progress(action_id="16:1:1", now=self.tick())
         for number in range(25):

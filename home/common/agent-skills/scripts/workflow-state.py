@@ -4482,15 +4482,23 @@ def probe_resume_worktree(worktree: str, marker: str | None
         counted = _worktree_git(worktree, "rev-list", "--count", f"{marker}..{head}")
         if counted.returncode != 0:
             raise _git_failed(counted)
-        count = int(counted.stdout.decode("utf-8", "replace").strip())
-        listed = _worktree_git(worktree, "log", f"--max-count={RESUME_PACK_COMMITS}",
+        try:
+            count = int(counted.stdout.decode("utf-8", "replace").strip())
+        except ValueError as error:
+            raise WorktreeBranchUnavailable(
+                "git failed: rev-list did not print a commit count") from error
+        # `log.showSignature` in user or repo config adds verification lines
+        # to stdout even under `--format`; the flag turns them off, and a line
+        # that is not `<full commit id>\x1f<subject>` is never a commit (#265 D4).
+        listed = _worktree_git(worktree, "log", "--no-show-signature",
+                               f"--max-count={RESUME_PACK_COMMITS}",
                                "--format=%H%x1f%s", f"{marker}..{head}")
         if listed.returncode != 0:
             raise _git_failed(listed)
         for line in listed.stdout.decode("utf-8", "replace").splitlines():
-            if not line:
+            sha, separator, subject = line.partition("\x1f")
+            if not separator or not PROGRESS_MARKER_PATTERN.fullmatch(sha):
                 continue
-            sha, _, subject = line.partition("\x1f")
             commits.append({"sha": sha[:12],
                             "subject": subject[:RESUME_PACK_SUBJECT_CHARS]})
     return ({"path": worktree, "branch": branch, "head": head, "dirty_paths": dirty},
