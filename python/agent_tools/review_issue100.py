@@ -23,7 +23,7 @@ from agent_tools.review_actual import (RECORD_POLICY, RECORD_POLICY_SHA256, Gene
                                        actual_inputs_from_trees)
 from agent_tools.review_forecast import (ForecastError, canonical_bytes, edge_facts, read_regular, strict_json,
                                          tree_entry)
-from agent_tools.review_git import HistoryError, original_commit, original_range
+from agent_tools.review_git import HistoryError, original_commit, original_commits, original_range
 
 KIND = "issue-100-retained-history"
 HISTORICAL_DOMAIN = "retained-git-records/v1"
@@ -227,7 +227,7 @@ def _recipe(repo, pins, old_tree, new_tree, *paths) -> bytes:
 def _historical(repo, pins) -> tuple[bytes, tuple]:
     """The recipe over the authenticated trees: its bytes and a `{bytes, sha256}` row per record."""
     with _authenticated():
-        base, head = (original_commit(repo, oid).tree for oid in (pins.base, pins.head))
+        base, head = (c.tree for c in original_commits(repo, (pins.base, pins.head)))
         raw = _recipe(repo, pins, base, head)
         rows = tuple({"bytes": len(chunk), "sha256": _sha(chunk)} for chunk in _split_diff(raw))
     domain = pins.historical
@@ -290,7 +290,7 @@ def fresh_records(issue_repo: Path, pins: Issue100Pins, limits) -> tuple[dict, .
     """`{path, bytes, sha256}` per initial `actual_inputs_from_trees` record."""
     pins, repo = _checked(pins), Path(issue_repo)
     with _authenticated():
-        base, head = (original_commit(repo, oid).tree for oid in (pins.base, pins.head))
+        base, head = (c.tree for c in original_commits(repo, (pins.base, pins.head)))
         initial = next(actual_inputs_from_trees(repo, base, head, base=pins.base, head=pins.head, commits=(),
                                                 package_name="issue-100.json", limits=limits))
     records, domain = initial.records, pins.fresh
@@ -334,10 +334,11 @@ def model_100(issue_repo: Path, live_repo: Path, archive_dir: Path, pins: Issue1
     with _authenticated():
         commits = original_range(repo, pins.base, pins.head)
         original_commit(live_repo, pins.live)  # the live repository holds the same commit
-        trees = {name: original_commit(repo, getattr(pins, name)).tree for name in ("base", "live", "head")}
+        trees = dict(zip(("base", "live", "head"), (c.tree for c in original_commits(repo, (pins.base, pins.live, pins.head)))))
         parent_edges, edges = [], []
+        held = dict(zip(commits, original_commits(repo, commits)))
         for oid in commits:
-            for ordinal, parent in enumerate(original_commit(repo, oid).parents, 1):
+            for ordinal, parent in enumerate(held[oid].parents, 1):
                 parent_edges.append({"parent": parent, "commit": oid, "parent_ordinal": ordinal})
                 edges.append(edge_facts(repo, parent, oid, ordinal))
         overlaps = []

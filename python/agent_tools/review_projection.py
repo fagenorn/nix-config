@@ -13,7 +13,7 @@ from agent_tools.review_actual import (PACKING_POLICY_SHA256, CandidateInput, Fu
 from agent_tools.review_budget import BudgetAuthority, describe
 from agent_tools.review_forecast import (ForecastError, ForecastPlan, ancestor, canonical_bytes,
     closed, commit_range, digest, edge_facts, full_commit, identity, integer, load_plan,
-    name, path_name, strict_json, tree_entry, history_commit, _ownership)
+    name, path_name, strict_json, tree_entry, history_commit, history_commits, _ownership)
 from agent_tools.review_git import HistoryError, original_edge, _original_walk
 from agent_tools.review_pack import ReviewRecordSize
 
@@ -66,7 +66,7 @@ def reconstruct_owned(repo: Path, prerequisite_commit: str,
         manifest_order = _original_walk(repo, prerequisite_commit, requested, topological=False)
     except HistoryError as exc:
         raise ForecastError("invalid original reconstruction history") from exc
-    originals = {commit: history_commit(repo, commit) for commit in ordered}
+    originals = dict(zip(ordered, history_commits(repo, ordered)))
     facts = {commit: tuple(edge_facts(repo, parent, commit, n)
              for n, parent in enumerate(originals[commit].parents, 1)) for commit in ordered}
     scratch = tempfile.TemporaryDirectory(prefix="review-owned-")

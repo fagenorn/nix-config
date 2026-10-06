@@ -29,7 +29,7 @@ from agent_tools.review_actual import (PACKING_POLICY_SHA256, RECORD_POLICY, REC
                                        git_diff, select_candidate)
 from agent_tools.review_budget import BudgetAuthority
 from agent_tools.review_forecast import ForecastError, canonical_bytes, edge_facts, raw_digest, tree_entry
-from agent_tools.review_git import HistoryError, original_commit, original_range
+from agent_tools.review_git import HistoryError, original_commit, original_commits, original_range
 from agent_tools.review_pack import ReviewRecordSize
 from agent_tools.review_projection import ReconstructionUnavailable, reconstruct_owned
 from agent_tools.review_task7 import CODES as ESTIMATE_CODES
@@ -217,9 +217,8 @@ def contribution_edges(repo: Path, pins: Issue121Pins, classes: Sequence[dict]) 
         raise ContributionError("class_table_mismatch")
     edges = []
     with _authenticated():
-        parent = original_commit(repo, pins.base)
-        for row in expected:
-            commit = original_commit(repo, row["commit"])
+        parent, *chain = original_commits(repo, (pins.base, *(row["commit"] for row in expected)))
+        for row, commit in zip(expected, chain):
             if commit.parents != (parent.oid,):
                 raise ContributionError("history_nonlinear")
             edge = edge_facts(repo, parent.oid, commit.oid, 1)
@@ -269,8 +268,8 @@ def _anchors(repo: Path, pins: Issue121Pins, edges: Sequence[dict]) -> list[dict
 def _writer(repo: Path, oid: str, path: str, entry: dict) -> str:
     """The latest raw writer at or before `oid`, following a parent that holds the same entry."""
     while True:
-        same = [parent for parent in original_commit(repo, oid).parents
-                if tree_entry(repo, original_commit(repo, parent).tree, path) == entry]
+        commit = original_commit(repo, oid)
+        same = [c.oid for c in original_commits(repo, commit.parents) if tree_entry(repo, c.tree, path) == entry]
         if not same:
             return oid
         oid = same[0]
@@ -450,7 +449,7 @@ def _model(repo: Path, pins: Issue121Pins, task7_pins: Task7Pins, authority: Bud
     _context(pins, task7_pins, authority)
     limits = authority.limits
     with _authenticated():
-        base_tree, head_tree = (original_commit(repo, oid).tree for oid in (pins.base, pins.head))
+        base_tree, head_tree = (c.tree for c in original_commits(repo, (pins.base, pins.head)))
         try:
             table, unestimated = derive_task7(repo, task7_pins), None
         except EstimateError as exc:
