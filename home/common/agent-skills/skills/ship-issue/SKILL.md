@@ -39,7 +39,7 @@ checker-valid root/metric objects. The worktree state — not the handoff — is
 ground truth.
 
 Only after the plan's successful artifact-budget check, discover the plan members
-locally from its validated index for `diff-scope` exclusion. Supply one argument for the plan root and each discovered member.
+locally from its validated index for `review-range` exclusion. Supply one argument for the plan root and each discovered member.
 Keep that private
 list inside ship-issue: do not put the member list in the handoff, report, or
 review prompt.
@@ -52,7 +52,7 @@ review prompt.
 2. Verify locally          → lint + tests inside the worktree
 3. Consolidate learnings   → see CONSOLIDATE.md; drop most candidates
 4. Open PR                 → push -u; gh pr create with "Closes #<num>"
-5. Review the PR           → merge-delta check or full two-axis review
+5. Review the PR           → review-range picks delta, empty or full; two-axis review over it
 6. Wait for CI             → gh pr checks --watch (one blocking call)
    Selection gate          → lifecycle identity only: select the CI-green head (## Delivery loop)
 7. Merge                   → gh pr merge <pr-num> --repo <resolved-repository> --merge [--subject "<rendered subject>"] --delete-branch (true merge commit)
@@ -178,7 +178,7 @@ nothing and makes no trial dispatch. It proves the tool is present, not that a
 later launch will succeed: a Phase-5 launch that fails after a passing probe
 keeps its existing failure handling. It runs in every review-bearing
 invocation — a `ship-handoff/v2` or legacy handoff, or a standalone
-`/ship-issue <num>` — even when the merge delta may turn out empty, because the
+`/ship-issue <num>` — even when the review range may turn out empty, because the
 delta is unknown until the sync this probe precedes. Remainder mode skips
 Phases 0–5 and probes only before a post-selection sync, per CI-MERGE.md.
 
@@ -286,21 +286,21 @@ HEAD_SHA=$(git rev-parse HEAD)
 
 The branch normally arrives already reviewed on two axes by sdd's final review (conformance ∥ correctness); this phase reviews only what that review could not have seen — unless a risk signal calls for the full ladder. **Read [`REVIEW.md`](./REVIEW.md) before dispatching or applying anything.**
 
-**Pick the path first.** Degrade to the merge-delta check when ALL of these hold; otherwise run the full two-axis review:
+**Pick the range first.** The *final-review head* is the handoff's `head_sha` when `review_state` is `clean`; it is distinct from the reviewed `HEAD_SHA` this phase fixes. Check the first, second and fourth conditions first; when any fails, the range is full and `review-range` does not run. Select the range with `review-range` when ALL of these hold:
 
 - `review_state` is `clean` (handoff / sdd report: both axis verdicts clean, or every residual parked-with-ruling). `unknown` never degrades.
 - The Phase-1 sync needed no manual conflict escalation (allowlist auto-resolves count as clean).
-- The branch diff is small: **≤1,000 product lines AND ≤20 product files**. Measure, never hand-count: start with `~/.agents/bin/diff-scope $BASE_SHA..$HEAD_SHA --format text --artifact-path <spec_path> --artifact-path <plan_path>`, then append one argument for each plan member and any other process artifact this run wrote. Each exclusion is an individual `--artifact-path <path>` argument. Its first line reads `product: <lines> lines, <files> files`, after the helper drops lockfiles, generated-header files, and those exact artifacts. The gate measures PRODUCT changes, not process artifacts; never exclude the resolved artifact directories themselves, which hold every artifact this repo has ever accepted, and a historical artifact that is itself the requested product still counts. No measurement, invalid plan discovery, or non-zero exit is not a small diff: run the full two-axis review.
+- The delta since the final-review head is small: **≤1,000 product lines AND ≤20 product files**. Measure, never hand-count: start with `~/.agents/bin/review-range --integration-ref origin/<integration> --head $HEAD_SHA --final-review-head <final-review head> --max-lines 1000 --max-files 20 --artifact-path <spec_path> --artifact-path <plan_path>`, then append one argument for each plan member and any other process artifact this run wrote. Each exclusion is an individual `--artifact-path <path>` argument. It prints one JSON object whose `route` is `delta`, `empty` or `full`, with a closed `reason`; its `product_lines` and `product_files` measure `<review_base>..$HEAD_SHA` after dropping lockfiles, generated-header files, and those exact artifacts. The gate measures PRODUCT changes, not process artifacts; never exclude the resolved artifact directories themselves, which hold every artifact this repo has ever accepted, and a historical artifact that is itself the requested product still counts. No measurement — exit 1, unparseable stdout, or invalid plan discovery — is not a small diff: the range is full, recorded as `review-range unavailable`.
 - The issue does NOT carry the `risky` label (`<tracker-cli> issue view <num> --json labels`; with an unsupported tracker capability the condition passes), and the retained `capabilities.review.code` state permits the documented review route.
 
-**Merge-delta check (degraded path).** Scope and checklist per REVIEW.md; over exactly the non-empty merge delta, dispatch:
+**Route the review.** `delta` → the full two-axis review below over `<review_base>..$HEAD_SHA`, with REVIEW.md's delta-route conformance brief. `empty` → nothing to review: record it and skip to Phase 6. `full`, a failed prerequisite, or an unavailable helper → the full two-axis review below over `$BASE_SHA..$HEAD_SHA`. Record the route in the PR body per REVIEW.md.
+
+**Merge-delta reviewer (post-selection sync only).** Phase 5 never dispatches it: CI-MERGE.md's `## Post-selection sync` reviews each later sync merge with it, over REVIEW.md's merge-delta scope and checklist:
 
 <!-- agent-dispatch: id=ship-issue-merge-delta-review role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") reviews exactly the non-empty merge delta.
 
-An empty delta is recorded in the PR body ("merge-delta empty, nothing to review") and skips to Phase 6.
-
-**Full two-axis review.** Templates and fallback rubrics per REVIEW.md, over the post-sync range `$BASE_SHA..$HEAD_SHA`. Launch the native conformance axis with:
+**Full two-axis review.** Both the `delta` and `full` routes run it. Templates and fallback rubrics per REVIEW.md, over the selected range: `<review_base>..$HEAD_SHA` on `delta`, `$BASE_SHA..$HEAD_SHA` otherwise. Launch the native conformance axis with:
 
 <!-- agent-dispatch: id=ship-issue-full-conformance-review role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") performs the full conformance review.

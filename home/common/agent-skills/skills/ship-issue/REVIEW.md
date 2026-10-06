@@ -6,14 +6,14 @@ SKILL.md — never inline a review.
 
 For configured code review, the correctness axis reaches Codex only through `codex-collaboration`'s `diff-review`, which alone owns the review binding shape, its invocation and its validation; a binding shape error it reports stops this review with no Codex call, no retry and no native fallback. `blocked` stops. On the `available` route, a capacity rejection has no retry and no native fallback. A Codex call made under `unsupported` is a routing error, never a capacity rejection. Authored `unsupported` takes the caller's native correctness route directly and makes no Codex call. On the `available` route, a completed non-capacity runtime/output failure uses the existing single native fallback and records why.
 
-## Merge-delta check (degraded path)
+## Merge-delta check (post-selection sync)
 
-The reviewable delta is the sync-merge commit's combined diff (`git show --cc
-<merge-commit>` — conflict resolutions and scope-creep sweeps) plus any commits
-made after the head sdd reviewed. Empty → record "merge-delta empty, nothing to
-review" in the PR body and continue to Phase 6. Non-empty → dispatch SKILL.md's
-merge-delta reviewer over only that delta (SKILL.md's Phase-0 reviewer-dispatch
-probe has already confirmed this context can launch it), with Phase 1's
+CI-MERGE.md's `## Post-selection sync` runs this for each later sync merge;
+Phase 5 never does. The reviewable delta is that sync-merge commit's combined
+diff (`git show --cc <merge-commit>` — conflict resolutions and scope-creep
+sweeps). Dispatch SKILL.md's merge-delta reviewer over only that delta
+(SKILL.md's Phase-0 reviewer-dispatch probe has already confirmed this context
+can launch it), with Phase 1's
 scope-creep categories (retirement /
 addition, see SYNC.md) as its checklist plus every review hint path passed in
 the retained snapshot. Findings come back Blocking / Should-fix /
@@ -21,8 +21,8 @@ Discussion, ≤400 words, file:line anchors.
 
 ## Full two-axis review — templates
 
-Same machinery and rubrics as sdd's final review, over the post-sync range
-`$BASE_SHA..$HEAD_SHA`. The conformance axis uses sdd's
+Same machinery and rubrics as sdd's final review, over the range SKILL.md's
+Phase 5 selected. The conformance axis uses sdd's
 `conformance-reviewer-prompt.md`, deployed beside its SKILL.md; the native
 correctness form uses `correctness-reviewer-prompt.md`. At ship there is no
 sdd ledger or diff package: omit the ledger-triage placeholder and let each
@@ -40,10 +40,31 @@ kept separate.
 When the correctness axis came through `codex-collaboration`'s `diff-review`, it returns
 a scope alongside its verdict: `full` | `scoped: <N> of <M> product files` |
 `unmeasured`. Record that scope in the PR body beside the correctness verdict — the
-same surface a degraded run uses for "merge-delta empty, nothing to review". A scoped
+same surface as Phase 5's `review range:` record. A scoped
 Clean that reaches the PR body without its scope reads as full coverage, which is
 exactly what this record prevents. ship-issue records no reviewer identity; this records
 the scope only.
+
+## Delta route
+
+On `delta`, both axes run the templates above over `<review_base>..$HEAD_SHA`,
+the range `review-range` printed. Correctness keeps its unchanged rubric and
+correctness route. The conformance brief adds three things to the template's
+issue, spec and plan paths. First, the final-review head R, with the statement
+that sdd's final review already graded delivered-vs-promised for the branch at
+R. Second, its job: judge whether each delta change — a fix commit resolving a
+finding, a sync resolution, a learning doc — keeps the branch consistent with
+the issue, spec, plan and standards without breaking a promise R already kept,
+with Phase 1's scope-creep categories (retirement / addition, see SYNC.md) and
+every review hint path passed in the retained snapshot as its checklist. Third,
+a stale-prose audit limited to files the delta touches. It never grades the
+whole branch's delivery again.
+
+**Range record.** Phase 5 records its route in the PR body as
+`review range: delta <review_base7>..<head7> since final-review <R7> (<L> lines, <F> files)`,
+`review range: empty since final-review <R7>`, or `review range: full (<reason>)`,
+where `<reason>` is `review-range`'s `reason`, `review-range unavailable`, or the
+name of the failed prerequisite.
 
 ## Severity mapping (full path)
 

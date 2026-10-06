@@ -68,8 +68,8 @@ Your task:
   1. Invoke the `ship-issue` skill via the Skill tool. Read its SKILL.md and follow
      every phase 0 → 8 in order. The pre-flight checks still run — the handoff is a
      hint, the worktree state is ground truth.
-  2. In Phase 5 (PR review), follow ship-issue's path selection — it may dispatch
-     zero (empty merge-delta), one, or two reviewer subagents. Before that,
+  2. In Phase 5 (PR review), follow ship-issue's range selection — it dispatches
+     zero (empty review range) or two first-pass reviewer subagents. Before that,
      ship-issue's Phase-0 reviewer-dispatch probe confirms that this context
      can launch them.
   3. In Phase 6, block on `<tracker-cli> pr checks --watch` per ship-issue's
