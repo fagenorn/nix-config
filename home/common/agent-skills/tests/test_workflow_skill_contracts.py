@@ -1275,8 +1275,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "`mergeable: UNKNOWN`", "proceed to the merge",
             "not an authority denial", "no `authority-observation`")
         self.assert_ordered(route, "**Sync.**", "[`SYNC.md`](./SYNC.md)", "**Verify.**",
-            "Phase 2 verification", "**Review.**", "`git show --cc", "merge-delta reviewer",
-            "re-run the Phase 2 verification commands before the push",
+            "Run Phase 2's verification step.", "**Review.**", "`git show --cc", "merge-delta reviewer",
+            "re-run Phase 2's verification step before the push",
             "`merge-delta-empty`", "`merge-delta-clean`", "**Push.**", "`check-launch`",
             "`git push origin <branch>`", "**Wait for CI.**", "Phase 6's CI wait",
             "**Select.**", "--kind sync-selection", "`git rev-list --parents -n 1",
@@ -5092,6 +5092,46 @@ class CheckpointVerificationContractsTest(unittest.TestCase):
             "No task names the full declared verification as a per-task gate",
             "sdd's final gate runs it once on the final head",
             "## Package construction and budget boundary")
+
+    def test_ship_phase_two_skips_only_on_a_verified_tree(self):
+        phase = self.read(SHIP_ISSUE).split("## Phase 2 — Verify locally", 1)[1]
+        phase = phase.split("## Phase 3", 1)[0]
+        self.assert_ordered(
+            phase, "This is the one verification step.",
+            "Phase 3 after a promotion commit, REVIEW.md's apply/push step 2 and CI-MERGE.md's post-selection sync run it too.",
+            "A blocked verification capability stops",
+            "1. **Check.** Run `verified-tree check --verification <id>`",
+            "in order, and keep the `tree` it prints.",
+            "2. **Skip only on `verified`.**", "Exit 0 with `verified`", "skip the run",
+            "`verification reused: tree <id>`",
+            "3. **Otherwise run and record.**", "On any other answer, run every command id",
+            "When every command passes, run `verified-tree record --tree <the checked tree>`",
+            "`tree_changed` is a failing verification",
+            "A `check` that exits 2 leaves no tree to record",
+            "These failure rules apply only to an actual run.",
+            "On a failing verification command, pause, ground, and surface",
+            "baselining the same project in a scratch worktree")
+        self.assertEqual(phase.count("verified-tree record"), 1)
+
+    def test_review_and_ci_merge_reruns_use_phase_two(self):
+        review = self.read(SHIP_ISSUE_REVIEW)
+        self.assert_ordered(
+            review, "## The five-step apply/push flow", "1. Edit the file(s).",
+            "2. Run Phase 2's verification step (SKILL.md's `## Phase 2 — Verify locally`)",
+            "3. `git add`")
+        consolidate = self.read(SHIP_ISSUE).split("## Phase 3 — Consolidate learnings", 1)[1]
+        consolidate = consolidate.split("## Phase 4", 1)[0]
+        self.assert_ordered(
+            consolidate, "Promoted candidates commit as",
+            "When Phase 3 commits anything, run Phase 2's verification step again before Phase 4.")
+        self.assertNotIn("Re-run every retained `bindings.workflow.verification` command",
+                         review)
+        ci_merge = self.read(SHIP_ISSUE_CI_MERGE)
+        self.assert_ordered(
+            ci_merge, "## Post-selection sync",
+            "2. **Verify.** Run Phase 2's verification step.",
+            "after every amend re-run Phase 2's verification step before the push.")
+        self.assertNotIn("Phase 2 verification commands", ci_merge)
 
 
 if __name__ == "__main__":

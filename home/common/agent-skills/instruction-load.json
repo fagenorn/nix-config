@@ -241,10 +241,10 @@
         "codex-collaboration/PLAN-REVIEW.md": "plan-review is not a ship operation"
       },
       "ceiling_bytes": {
-        "claude": 58735,
-        "codex": 58735
+        "claude": 59861,
+        "codex": 59861
       },
-      "note": "ship-issue from ship-handoff.md's prompt, with its sync, review and consolidation files. The lifecycle stdin clause stays per entry (#155 D5). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `ship-issue/REVIEW.md` and `ship-issue/SKILL.md` (#155 D10). Ceiling raised for #198: ship-issue probes reviewer dispatch before any write and returns the gap line (#155 D10). Ceiling re-measured after merging origin/main at 6ab576e, where #195's and #198's raises met (#155 D19). Ceiling raised for #192: ship-issue's Delivery loop, Remainder mode and Phase 6 point to CI-MERGE.md's post-selection sync route (#155 D10). Ceiling raised for #192's review fix: a remainder owner probes reviewer dispatch before a post-selection sync (#155 D10). Ceiling raised for #222: from-issue and ship-issue register writing workers, fence local commits and release before exit (#155 D10). Ceiling raised for #222: final-review fixes to the launch-fence prose (#155 D10). Ceiling raised for #261: from-issue, sdd and ship-issue carry the Interim child results rule (#155 D10)."
+      "note": "ship-issue from ship-handoff.md's prompt, with its sync, review and consolidation files. The lifecycle stdin clause stays per entry (#155 D5). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `ship-issue/REVIEW.md` and `ship-issue/SKILL.md` (#155 D10). Ceiling raised for #198: ship-issue probes reviewer dispatch before any write and returns the gap line (#155 D10). Ceiling re-measured after merging origin/main at 6ab576e, where #195's and #198's raises met (#155 D19). Ceiling raised for #192: ship-issue's Delivery loop, Remainder mode and Phase 6 point to CI-MERGE.md's post-selection sync route (#155 D10). Ceiling raised for #192's review fix: a remainder owner probes reviewer dispatch before a post-selection sync (#155 D10). Ceiling raised for #222: from-issue and ship-issue register writing workers, fence local commits and release before exit (#155 D10). Ceiling raised for #222: final-review fixes to the launch-fence prose (#155 D10). Ceiling raised for #261: from-issue, sdd and ship-issue carry the Interim child results rule (#155 D10). Ceiling raised for #263: ship-issue Phase 2 checks and records the verified tree (#155 D10)."
     },
     {
       "id": "release-owner",
