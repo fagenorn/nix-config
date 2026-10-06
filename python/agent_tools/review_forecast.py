@@ -9,12 +9,12 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import subprocess
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal, telemetry_digest
 from agent_tools.review_actual import (SHA_RE, _run_git, _split_diff, git_diff)
 from agent_tools.review_budget import BudgetAuthority
-from agent_tools.review_git import (HistoryError, original_commit, original_range,
+from agent_tools.review_git import (HistoryError, original_commit, original_commits, original_range,
                                     original_ancestor, original_edge)
 
 
@@ -266,6 +266,13 @@ def history_commit(repo: Path, value: str):
         raise ForecastError("invalid original history") from exc
 
 
+def history_commits(repo: Path, values: Sequence[str]):
+    try:
+        return original_commits(repo, values)
+    except HistoryError as exc:
+        raise ForecastError("invalid original history") from exc
+
+
 def ancestor(repo: Path, base: str, head: str) -> bool:
     try:
         return original_ancestor(repo, base, head)
@@ -305,10 +312,10 @@ def _block(raw: bytes, heading: str) -> dict:
 def edge_facts(repo: Path, parent: str, commit: str, ordinal: int) -> dict:
     """Bind all original parent edges to independently read tree and record facts."""
     try:
-        original_edge(repo, parent, commit, ordinal)
+        parent_commit, child_commit = original_edge(repo, parent, commit, ordinal)
     except HistoryError as exc:
         raise ForecastError("invalid original edge") from exc
-    parent_tree, commit_tree = (history_commit(repo, oid).tree for oid in (parent, commit))
+    parent_tree, commit_tree = parent_commit.tree, child_commit.tree
     status = git_diff(repo, parent_tree, commit_tree, "--name-status", "-z").split(b"\0")
     if status[-1] != b"":
         raise ForecastError("invalid Git status framing")
@@ -415,8 +422,9 @@ def _ownership(repo: Path, base: str, head: str, delivery: dict, tasks: tuple[di
     evidence = closed(delivery["actual_evidence"], "kind head tree process_ranges", "actual evidence")
     if evidence["kind"] != "git-range-ownership/v1":
         raise ForecastError("unknown ownership evidence")
-    checkpoint = full_commit(repo, evidence["head"])
-    if identity(evidence["tree"], "tree") != history_commit(repo, checkpoint).tree:
+    checkpoint = identity(evidence["head"])
+    checkpoint_commit = history_commit(repo, checkpoint)
+    if identity(evidence["tree"], "tree") != checkpoint_commit.tree:
         raise ForecastError("evidence tree mismatch")
     if not ancestor(repo, base, checkpoint):
         raise ForecastError("delivery base is not an evidence ancestor")
@@ -459,9 +467,11 @@ def _ownership(repo: Path, base: str, head: str, delivery: dict, tasks: tuple[di
     if set(owners) != set(complete):
         raise ForecastError("ownership must classify every evidence commit")
     tail = commit_range(repo, checkpoint, head)
+    sequence = (*complete, *tail)
+    held = dict(zip(sequence, history_commits(repo, sequence)))
     previous = checkpoint
     for commit in tail:
-        parents = history_commit(repo, commit).parents
+        parents = held[commit].parents
         if parents != (previous,):
             raise ForecastError("metadata tail is not a first-parent chain")
         owners[commit] = 0
@@ -469,7 +479,7 @@ def _ownership(repo: Path, base: str, head: str, delivery: dict, tasks: tuple[di
         previous = commit
     edges = []
     for commit in (*complete, *tail):
-        parents = history_commit(repo, commit).parents
+        parents = held[commit].parents
         for ordinal, parent in enumerate(parents, 1):
             edge = edge_facts(repo, parent, commit, ordinal)
             if owners[commit] == 0:

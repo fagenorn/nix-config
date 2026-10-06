@@ -214,6 +214,15 @@ def original_commit(repo: Path, oid: str) -> OriginalCommit:
     return _closure(repo, (oid,))[oid]
 
 
+def original_commits(repo: Path, oids: Sequence[str]) -> tuple[OriginalCommit, ...]:
+    """Several authenticated commits, in the order asked, from one closure (#262 D3)."""
+    oids = tuple(oids)
+    if not oids:
+        return ()
+    commits = _closure(repo, oids)
+    return tuple(commits[oid] for oid in oids)
+
+
 def _original_walk(repo: Path, base: str, heads: Sequence[str], *, topological: bool) -> tuple[str, ...]:
     commits = _closure(repo, (base, *heads))
     return _traversal(repo, commits, heads, (base,), topological=topological) if heads else ()
@@ -236,8 +245,9 @@ def original_ancestor(repo: Path, base: str, head: str) -> bool:
     return expected
 
 
-def original_edge(repo: Path, parent: str, commit: str, ordinal: int) -> None:
+def original_edge(repo: Path, parent: str, commit: str, ordinal: int) -> tuple[OriginalCommit, OriginalCommit]:
     commits = _closure(repo, (parent, commit))
     parents = commits[commit].parents
     if type(ordinal) is not int or not 1 <= ordinal <= len(parents) or parents[ordinal - 1] != parent:
         raise HistoryError("original_parent_mismatch")
+    return commits[parent], commits[commit]
