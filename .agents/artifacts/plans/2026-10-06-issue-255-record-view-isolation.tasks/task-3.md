@@ -116,13 +116,13 @@ The class bundle is the clean derivation of the same objects with the same tool 
 
 - [ ] **Step 4: Prove the installed case can fail**
 
-The case is green on arrival, because Tasks 1–2 already isolate the runner and the recipe builds first. Prove that it fails without them: build once, then run the case from a scratch copy whose `python/` is the delivery base's (`31be729`), so its source half is the unisolated package.
+The case is green on arrival, because Tasks 1–2 already isolate the runner and the recipe builds first. Prove that it fails without them: build once, then run the case from a scratch copy whose `python/` is the delivery base's (`31be729`), so its source half is the unisolated package. The scratch copy takes the working tree's `tests/` (the new case is not committed until Step 6), never `HEAD`'s.
 
 ```bash
 timeout 3600 just build >/dev/null 2>&1 || exit 1
 HMF=$(nix-store --query --requisites ./result | grep -- '-home-manager-files$')
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/issue-255-red-XXXXXX"); trap 'rm -rf -- "$tmp"' EXIT
-git archive HEAD tests | tar -x -C "$tmp" && git archive 31be729 python | tar -x -C "$tmp"
+cp -R tests "$tmp/" && git archive 31be729 python | tar -x -C "$tmp"
 (cd "$tmp" && AGENT_SKILLS_INSTALLED_HOME="$HMF" timeout 900 python3 -m unittest \
   tests.test_agent_tools_launchers.AgentToolsLauncherTest.test_review_package_ignores_hostile_git_alike_from_source_and_built 2>&1 | tail -3)
 ```
@@ -133,9 +133,11 @@ Expected: `FAILED (failures=1)`, raised by `assertEqual(outcomes['hostile-source
 
 Run each from the worktree root and check the observation. A skip is never acceptance.
 
-- `timeout 3600 just build 2>&1 | tail -3` → exit 0.
-- `timeout 7200 just agent-workflow-tests 2>&1 | tail -3` → `OK`, no `skipped`.
-- `timeout 3600 just agent-installed-skill-tests 2>&1 | tail -3` → `OK`; `test_review_package_ignores_hostile_git_alike_from_source_and_built` ran and passed (`grep` it in the log as `... ok`).
+Each gate keeps its producer's exit status and log, never a pipe's: `LOG=$(mktemp "${TMPDIR:-/tmp}/issue-255-gate-XXXXXX"); <command> > "$LOG" 2>&1; echo "exit=$?"; tail -3 "$LOG"`.
+
+- `timeout 3600 just build` → `exit=0`.
+- `timeout 7200 just agent-workflow-tests` → `exit=0`, the tail shows `OK`, and `grep -c skipped "$LOG"` prints `0`.
+- `timeout 3600 just agent-installed-skill-tests` → `exit=0`, the tail shows `OK`, and `grep -E 'test_review_package_ignores_hostile_git_alike_from_source_and_built .*\.\.\. ok' "$LOG"` matches.
 - Quiescent retained run (RP11): `timeout 14400 just agent-retained-tests /Users/anis/tmp/nix-config > "$LOG" 2>&1; echo "exit=$?"`, with `LOG` a `mktemp` file outside every worktree → `exit=0`; `grep -E 'test_hostile_record_sources_reproduce_the_clean_bundle|test_real_derivation_and_replay_match_from_source_and_built' "$LOG"` shows both `... ok`.
 - `git diff --stat <plan base>..HEAD -- tests/fixtures/retained-review-evidence tests/retained_evidence_test_support.py` → empty (D2).
 
@@ -144,5 +146,5 @@ Run each from the worktree root and check the observation. A skip is never accep
 ```bash
 git add tests/test_agent_tools_launchers.py tests/test_review_retained_full.py
 launch-commit --repo-root /Users/anis/tmp/nix-config --run-id run-20261006-255-256-259 --worker-id <worker> -- \
-  -m "test(review): prove record isolation built and on real objects (#255)" -m "<session trailer lines>"
+  -m "test(review): prove isolation built and on real objects (#255)" -m "<session trailer lines>"
 ```

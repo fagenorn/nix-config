@@ -47,3 +47,7 @@ Task 3 — Source/built parity, full-shape case and final gates — tests/test_a
 Spec ledger rows D1–D7 bind every task. Planning appended D8 (tier allocation of the hostile proofs and the shared support module), D9 (index-and-`HEAD` `.gitattributes` has no biting control) and D10 (one `commit_subject` error for both callers).
 
 ---
+
+## Standards review provenance
+
+Reviewer: Codex (gpt-6-astra, xhigh), isolated read-only `plan-review`, base `31be729`, no fallback. Findings: 4 accepted (B1 Task 3's red copy takes the working tests; S1 in-range `.gitattributes` test, per D11; S2 gates keep producer exit status and logs; S3 Task 3 subject shortened), 0 rejected, 0 deferred.

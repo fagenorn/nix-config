@@ -328,6 +328,15 @@ class RecordViewTest(unittest.TestCase):
         (repo / ".gitattributes").unlink()
         self.assert_isolated(repo, self.environment(owned), control=False)
 
+    def test_gitattributes_committed_inside_the_range_are_ignored(self):
+        """D3, D11: a `.gitattributes` the reviewed range itself commits is not applied to its records."""
+        # TODO(execute): write this test from the implemented code. From a fresh `self.case("in-range")`,
+        # commit on top of `self.head` one commit that adds `.gitattributes` (`NO_DIFF`) and changes
+        # `src/a.c`; generate CORE's candidates for `self.head..<that commit>` under `self.environment(owned)`,
+        # once with that commit checked out and once after `git checkout -q main`. Assert that both runs are
+        # equal and that every candidate's `src/a.c` record carries a textual `@@` hunk and no
+        # `Binary files` line. No biting control (D9 applies to committed content too).
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -342,7 +351,7 @@ Register it in the `justfile`'s `agent-workflow-tests` list on the line after `t
 - [ ] **Step 3: Run it and watch it fail**
 
 Run: `PYTHONPATH=python timeout 900 python3 -m unittest tests.test_review_record_view 2>&1 | tail -3`
-Expected: `FAILED (failures=21, errors=3)`. The 21 failures are the isolation assertions (`Tuples differ`), never `the hostile source never bit`. The 3 errors are `ImportError` for `record_git` / `commit_subject`.
+Expected: `FAILED (failures=21, errors=3)`, plus whatever the in-range test (D11) observes at base; record the observed counts here, and confirm any added failure is that test's assertion. The 21 failures are the isolation assertions (`Tuples differ`), never `the hostile source never bit`. The 3 errors are `ImportError` for `record_git` / `commit_subject`.
 
 - [ ] **Step 4: Implement `record_git` and `commit_subject`**
 
