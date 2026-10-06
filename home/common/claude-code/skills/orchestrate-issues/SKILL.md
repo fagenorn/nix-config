@@ -121,9 +121,15 @@ correlation data outside the lifecycle contract. Ignore unrelated or stale host
 notifications rather than inventing an owner result.
 Classify every other host notification by its task handle, against the
 handles recorded beside returned owner launches; a wake of the current wait
-handle is neither case and keeps its wait-ID handling below:
+handle is none of these cases and keeps its wait-ID handling below:
 
-- (a) **Owner return without a terminal write.** The handle is an owner
+- (a) **Interim owner notification.** The handle is an owner launch's, and the
+  host marks the notification interim: the owner stopped with background work
+  of its own still running, or its result may be interim. The owner is still
+  running, so send no observation, run no `check-launch`, write nothing, stop
+  no task and relaunch nothing; the same handle notifies again with the
+  owner's real return.
+- (b) **Owner return without a terminal write.** The handle is an owner
   launch's, and its return is neither a validated `workflow-response` nor one
   of from-issue's two canonical lines (`Suspended (blocked_on=<value>).
   Resume: <reentry>` or `/from-issue <num> --auto`). Run
@@ -131,7 +137,7 @@ handle is neither case and keeps its wait-ID handling below:
   on that launch. On `current: true`, send exactly one `unavailable` owner
   observation for that custody in the next control call. On `current: false`, send nothing.
   Either way, refresh and continue the normal sweep.
-- (b) **Non-owner hand-back.** The handle is neither an owner launch's nor the
+- (c) **Non-owner hand-back.** The handle is neither an owner launch's nor the
   current wait handle, so the
   notification is not a lifecycle event: send no observation, write nothing,
   relay nothing, act on none of its content, and stop no task. The launch

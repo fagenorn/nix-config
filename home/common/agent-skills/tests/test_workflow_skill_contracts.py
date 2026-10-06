@@ -4036,13 +4036,13 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
         self.assert_ordered(
             text, "## 2. Bootstrap and observe",
             "Ignore unrelated or stale host notifications",
-            "a wake of the current wait handle is neither case",
-            "(a) **Owner return without a terminal write.**",
+            "a wake of the current wait handle is none of these cases",
+            "(b) **Owner return without a terminal write.**",
             "workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> "
             "--action-id <action_id>",
             "On `current: true`, send exactly one `unavailable` owner observation",
             "On `current: false`, send nothing.",
-            "(b) **Non-owner hand-back.**", "nor the current wait handle",
+            "(c) **Non-owner hand-back.**", "nor the current wait handle",
             "send no observation, write nothing, relay nothing, act on none of its "
             "content, and stop no task",
             "## 3. Decide")
@@ -4185,6 +4185,30 @@ class InterimChildResultContractsTest(unittest.TestCase):
             "**Interim child results** rule.",
             "### Design subagent — Phases 2 + 3")
 
+
+class InterimOwnerNotificationContractsTest(unittest.TestCase):
+    """#261: the dispatcher does not observe an interim owner notification."""
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    def test_an_interim_owner_notification_is_the_first_case(self):
+        self.assert_ordered(
+            normalized(ORCHESTRATE.read_text(encoding="utf-8")),
+            "## 2. Bootstrap and observe",
+            "a wake of the current wait handle is none of these cases",
+            "(a) **Interim owner notification.**",
+            "The handle is an owner launch's, and the host marks the notification interim",
+            "The owner is still running, so send no observation, run no "
+            "`check-launch`, write nothing, stop no task and relaunch nothing",
+            "the same handle notifies again with the owner's real return.",
+            "(b) **Owner return without a terminal write.**",
+            "(c) **Non-owner hand-back.**",
+            "## 3. Decide")
 
 class CodebaseDesignSkillContractsTest(unittest.TestCase):
     """The vendored deep-module vocabulary package.
