@@ -12,11 +12,13 @@ printing {"recorded": true, "tree": "<id>"}; otherwise it writes nothing,
 leaves any previous record byte-identical and exits 3 printing
 {"reason": "tree_changed", "recorded": false, "tree": "<current tree>"}.
 
-The tree is the git tree of the working tree as verification saw it: tracked
-files with uncommitted edits plus untracked files that are not ignored, built
-by `git add -A` and `git write-tree` against a temporary copy of the index, so
-on a clean worktree it equals `HEAD^{tree}`. Neither verb changes the real
-index, HEAD or any working-tree file.
+The tree is what a Git-backed build sees: the index's entries, staged new
+files included, with tracked files' working-tree edits and deletions applied,
+built by `git add -u` and `git write-tree` against a temporary copy of the
+index, so on a clean worktree it equals `HEAD^{tree}`. An untracked file is not
+in it, as such a build excludes it; committing one changes the tree, so the
+next `check` answers `unverified`. Neither verb changes the real index, HEAD or
+any working-tree file.
 
 The record is one latest-pass file per worktree,
 `<git rev-parse --absolute-git-dir>/verified-tree.json`, holding exactly
@@ -87,14 +89,14 @@ def record_path(root: Path) -> Path:
 
 
 def current_tree(root: Path) -> str:
-    """The tree of tracked edits plus untracked non-ignored files, built in a temporary index."""
+    """The index's entries with tracked working-tree edits applied, built in a temporary index."""
     index = root / _git(["rev-parse", "--git-path", "index"], root)
     with tempfile.TemporaryDirectory() as scratch:
         temporary = Path(scratch) / "index"
         if index.is_file():
             shutil.copy2(index, temporary)
         env = {**os.environ, "GIT_INDEX_FILE": str(temporary)}
-        _git(["add", "-A"], root, env=env)
+        _git(["add", "-u"], root, env=env)
         return _git(["write-tree"], root, env=env)
 
 

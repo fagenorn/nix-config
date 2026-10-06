@@ -87,7 +87,8 @@ class VerifiedTreeTest(unittest.TestCase):
         changes = {
             "source edit": lambda: (self.repo / "src.py").write_text("x = 2\n"),
             "test edit": lambda: (self.repo / "tests/test_src.py").write_text("assert 1\n"),
-            "new untracked file": lambda: (self.repo / "new.py").write_text("y = 1\n"),
+            "staged new file": lambda: ((self.repo / "new.py").write_text("y = 1\n"),
+                                        self.git("add", "new.py")),
             "deleted file": lambda: (self.repo / "src.py").unlink(),
         }
         for name, change in changes.items():
@@ -99,6 +100,27 @@ class VerifiedTreeTest(unittest.TestCase):
                 answer = self.check()
                 self.assertEqual(answer["status"], "unverified")
                 self.assertNotEqual(answer["tree"], tree)
+
+    def test_an_untracked_file_is_outside_the_tree_until_it_is_committed(self):
+        # The tree is what a Git-backed build sees, and that build excludes
+        # untracked files: one leaves the pass standing, and committing it
+        # changes the tree, so the next check asks for verification again.
+        tree = self.verify_and_record()
+        (self.repo / "new.py").write_text("y = 1\n")
+        self.assertEqual(self.check(), {"status": "verified", "tree": tree})
+        self.git("add", "new.py")
+        self.git("commit", "-q", "-m", "add new.py")
+        answer = self.check()
+        self.assertEqual(answer["status"], "unverified")
+        self.assertEqual(answer["tree"], self.git("rev-parse", "HEAD^{tree}"))
+        self.assertNotEqual(answer["tree"], tree)
+
+    def test_a_staged_new_file_is_part_of_the_tree(self):
+        (self.repo / "staged.py").write_text("s = 1\n")
+        self.git("add", "staged.py")
+        tree = self.check()["tree"]
+        self.assertEqual(self.git("ls-tree", "--name-only", tree, "staged.py"), "staged.py")
+        self.assertEqual(tree, self.git("write-tree"))
 
     def test_an_ignored_file_leaves_the_tree_verified(self):
         tree = self.verify_and_record()
@@ -131,6 +153,7 @@ class VerifiedTreeTest(unittest.TestCase):
     def test_an_uncommitted_verified_edit_stays_verified_once_committed(self):
         (self.repo / "src.py").write_text("x = 5\n")
         (self.repo / "added.py").write_text("z = 1\n")
+        self.git("add", "added.py")
         tree = self.verify_and_record()
         self.assertNotEqual(tree, self.git("rev-parse", "HEAD^{tree}"))
         self.git("add", "-A")

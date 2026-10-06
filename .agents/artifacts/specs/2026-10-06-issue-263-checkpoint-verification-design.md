@@ -71,15 +71,17 @@ The caller's protocol is fixed: `check`, keep its `tree`, run the declared
 commands, and on a full pass `record --tree <that tree>`. A failing command
 records nothing.
 
-**What the tree is.** It is the git tree object of the working tree as
-verification saw it: tracked files with their uncommitted edits plus
-untracked files that are not ignored. The helper builds it with
-`git add -A` and `git write-tree` against a temporary copy of the index, so
+**What the tree is.** It is the git tree object of what a Git-backed build
+sees: the index's entries, staged new files included, with tracked files'
+uncommitted edits and deletions applied. An untracked file is not in it,
+because such a build excludes untracked files. The helper builds it with
+`git add -u` and `git write-tree` against a temporary copy of the index, so
 it never touches the real index. On a clean worktree it equals
 `HEAD^{tree}`. That makes the record correct for REVIEW.md's step 2, which
-verifies before it commits: once the commit stages everything, the committed
-tree is the verified tree. A partial `git add` yields a different tree, and
-the next `check` honestly answers `unverified` (per D7).
+verifies before it commits: once the commit stages those edits, the
+committed tree is the verified tree. Committing a file the build never saw,
+or leaving an edit out of the commit, yields a different tree, and the next
+`check` honestly answers `unverified` (per D7).
 
 **Where the record lives.** One file, `verified-tree.json`, in the
 worktree's own git directory (`git rev-parse --git-dir`). It sits outside
@@ -224,7 +226,7 @@ Verification is `just build` and `just agent-workflow-tests`.
 | D4 | A failing final verification gets one repair round (existing final fixer + scoped correctness re-review), then becomes a correctness finding → `residuals`, `verification_state: failed` | SDD validator: clean axes with failed verification is unrepresentable, residuals needs a finding axis; one-fix-wave precedent | Unlimited repair loop (unbounded) or no repair (one integration slip strands a whole plan) |
 | D5 | One Phase 2 procedure (check → run unless `verified` → record); REVIEW.md step 2 and CI-MERGE.md's reruns point to it | Single-home precedent; issue names REVIEW step 2 as a rerun site | Separate skip logic per call site: copies drift |
 | D6 | A packaged `verified-tree` command (check/record) rather than skill prose plus git commands | docs/standards/agent-helpers.md rule 1; "a recorded tree hash, not prose, proves it"; deterministic and testable | Prose `git rev-parse HEAD^{tree}` plus a hand-written file: untestable, and agents compose it differently |
-| D7 | The tree is the working tree (temporary index, `git add -A`, `git write-tree`); `record` refuses when it differs from the tree checked before the run | REVIEW.md verifies before committing; the issue asks that a mismatched hash be refused | `HEAD^{tree}`: a pre-commit verification could never be recorded, and an uncommitted edit would pass as verified |
+| D7 | The tree is what a Git-backed build sees (temporary index, `git add -u`, `git write-tree`), so an untracked file is outside it; `record` refuses when it differs from the tree checked before the run | REVIEW.md verifies before committing; the issue asks that a mismatched hash be refused | `HEAD^{tree}`: a pre-commit verification could never be recorded, and an uncommitted edit would pass as verified |
 | D8 | The record is one latest-pass file in the worktree's git dir, unfenced, with no run/attempt binding | sdd deletes its ledger on Clean, and ship is a fresh agent; GROUNDING.md per-worktree precedent; content addressing makes a pass reusable by a retry that shares the worktree | The sdd ledger alone (deleted before ship) or a ship-handoff field (closed schema; standalone ship has none) |
 | D9 | Invalidation is plain tree equality plus the verification id list; test-file edits invalidate too | Strictest reading of the issue; YAGNI on a test-path classifier; bindings resolve from the ledger root, not the tree | Test-path exemptions: needs a classifier and lets an edited test escape the run that proves it |
 | D10 | Grill: `tree_changed` is never a pass; sdd sends it to the repair round with `git status --porcelain` as evidence, ship treats it as a failing verification | A verification command that dirties the tree, or a writer active during the run, means the pass does not describe the current bytes; this repo ignores `result` and caches, so a clean run never trips it | Record the checked tree anyway: certifies bytes that are no longer the worktree's |
