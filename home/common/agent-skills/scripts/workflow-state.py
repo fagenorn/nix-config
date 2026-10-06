@@ -3931,6 +3931,65 @@ def launch_verdict(runtime: Any, state: dict[str, Any] | None,
     return current_action_id, reason
 
 
+def resume_pack_attempt(runtime: Any, state: dict[str, Any] | None,
+                        action_id: str) -> tuple[dict[str, Any], bool]:
+    """``(attempt, current)`` for the launch a resume pack describes (#265 D3, D12).
+
+    The current launch of an active attempt is served as current. The last
+    launch of a suspended or handed-off latest attempt is served as a preview
+    (``current`` false); an earlier launch of that attempt is
+    ``superseded_launch``. Every other verdict refuses with its own reason.
+    """
+    issue, _, launch_ordinal = parse_action_id(action_id)
+    _, reason = launch_verdict(runtime, state, action_id)
+    if reason == "current":
+        assert state is not None
+        return state["issues"][str(issue)]["attempts"][-1], True
+    if reason == "inactive_attempt":
+        assert state is not None
+        latest = state["issues"][str(issue)]["attempts"][-1]
+        if latest["state"] in {"suspended", "handed_off"}:
+            if launch_ordinal == len(latest["launches"]):
+                return latest, False
+            reason = "superseded_launch"
+    raise WorkflowError(f"resume-pack refused: launch {action_id} is {reason}")
+
+
+def resume_next_action(*, phase: int, phase_action: str | None,
+                       handoff_path: str | None, relation: str) -> dict[str, Any]:
+    """The pack's closed ``next_action``, first match wins (#265 D6, D13).
+
+    A handoff path points the owner at its handoff only while the last recorded
+    gate is that handoff: the path is never cleared once spent.
+    """
+    if handoff_path is not None and phase_action == "handoff":
+        return {"kind": "read_handoff", "path": handoff_path}
+    if relation == "diverged":
+        return {"kind": "reorient", "reason": "diverged_marker"}
+    if phase >= 7:
+        return {"kind": "reorient", "reason": "delivery_phases_complete"}
+    return {"kind": "start_phase", "phase": phase + 1}
+
+
+def bound_resume_pack(pack: dict[str, Any]) -> dict[str, Any]:
+    """``pack`` cut until its ``render_json`` bytes are below the bound (#265 D15).
+
+    The bound is on the bytes ``print_json`` writes, because escaping and paths,
+    not character caps, decide them: one non-ASCII character escapes to six
+    bytes and paths are uncapped. The oldest listed commit is shed first, with
+    ``truncated`` marking the cut; a pack still at or over the bound refuses.
+    """
+    bounded = copy.deepcopy(pack)
+    section = bounded["commits_since_marker"]
+    while len(render_json(bounded)) >= RESUME_PACK_BYTES and section["commits"]:
+        section["commits"].pop()
+        section["truncated"] = section["count"] > len(section["commits"])
+    if len(render_json(bounded)) >= RESUME_PACK_BYTES:
+        raise WorkflowError(
+            f"resume-pack refused: the pack exceeds {RESUME_PACK_BYTES} bytes")
+    return bounded
+
+
 def worker_verdict(runtime: Any, state: dict[str, Any] | None,
                    worker_id: str) -> tuple[str | None, str]:
     """``(current_action_id, reason)`` for one registered worker (#222 D2, D12).
@@ -4068,6 +4127,57 @@ def command_mark_progress(args: argparse.Namespace) -> int:
                 "marker": attempt["progress_marker"]}, changed
 
     print_json(transact(args.repo_root, args.run_id, record))
+    return 0
+
+
+def command_resume_pack(args: argparse.Namespace) -> int:
+    """Print one launch's resume pack for its relaunched owner (#265 D2, D3).
+
+    Read-only exactly as ``check-launch`` is: no clock, no lock, and neither
+    ``transact`` nor ``workflow_paths``; git runs read-only in the recorded
+    worktree. The pack is advisory: a refusal never blocks a relaunch.
+    """
+    if not RUN_ID_PATTERN.fullmatch(args.run_id):
+        raise WorkflowError("invalid run_id")
+    issue, attempt_ordinal, _ = parse_action_id(args.action_id)
+    if ":r" in args.action_id:
+        raise WorkflowError("resume-pack refused: a remainder launch has no resume pack")
+    runtime = _delivery()
+    repo_root = resolve_repo_root(args.repo_root)
+    state_path = repo_root / ".superpowers" / "workflows" / args.run_id / "state.json"
+    state = (read_state_unlocked(state_path, args.run_id)
+             if require_regular_path(state_path, "workflow state", allow_missing=True)
+             else None)
+    attempt, current = resume_pack_attempt(runtime, state, args.action_id)
+    # The unlocked reader returns a pre-schema-6 document as stored, so the
+    # schema-6 and optional keys are read with `.get` (#265 D11).
+    marker = attempt.get("progress_marker")
+    try:
+        worktree, commits_since_marker = probe_resume_worktree(attempt["worktree"], marker)
+    except WorktreeBranchUnavailable as unavailable:
+        raise WorkflowError(f"resume-pack refused: {unavailable}") from unavailable
+    pack = {
+        "kind": "resume_pack", "version": 1, "run_id": args.run_id,
+        "issue": issue, "attempt": attempt_ordinal, "action_id": args.action_id,
+        "current": current,
+        "ledger": {
+            "state": attempt["state"], "phase": attempt["phase"],
+            "launch_kind": attempt["launch_kind"],
+            "launches": len(attempt["launches"]),
+            "deadline_at": attempt["deadline_at"],
+            "blocked_on": attempt.get("blocked_on"),
+            "handoff_path": attempt["handoff_path"],
+            "progress_marker": marker,
+        },
+        "worktree": worktree,
+        "commits_since_marker": commits_since_marker,
+        "sdd": None,
+        "next_action": resume_next_action(
+            phase=attempt["phase"], phase_action=attempt.get("phase_action"),
+            handoff_path=attempt["handoff_path"],
+            relation=commits_since_marker["relation"]),
+    }
+    print_json(bound_resume_pack(pack))
     return 0
 
 
@@ -4333,6 +4443,61 @@ def probe_progress_head(worktree: str, marker: str | None) -> tuple[str, bool]:
     return head, ancestry.returncode == 0
 
 
+# The resume pack's construction caps (#265 D7) and its byte bound (#265 D15).
+RESUME_PACK_COMMITS = 20
+RESUME_PACK_SUBJECT_CHARS = 100
+RESUME_PACK_BYTES = 4096
+
+
+def probe_resume_worktree(worktree: str, marker: str | None
+                          ) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(worktree_section, commits_since_marker_section)`` of a resume pack.
+
+    Read-only: ``git`` by name on PATH with the shared 60-second timeout, and
+    ``status`` runs with ``--no-optional-locks`` so it never takes the index
+    lock (#265 D4, D7). The marker's relation comes from the probe
+    ``mark-progress`` uses, so an unknown marker refuses exactly as it does
+    there; commits are listed only when HEAD strictly descends from the
+    marker, newest first and capped. Anything git cannot answer raises
+    ``WorktreeBranchUnavailable`` carrying the reason clause.
+    """
+    branch = live_worktree_branch(worktree)
+    head, marker_is_ancestor = probe_progress_head(worktree, marker)
+    status = _worktree_git(worktree, "--no-optional-locks", "status", "--porcelain")
+    if status.returncode != 0:
+        raise _git_failed(status)
+    dirty = sum(1 for line in status.stdout.decode("utf-8", "replace").splitlines()
+                if line.strip())
+    if marker is None:
+        relation = "none"
+    elif marker == head:
+        relation = "same"
+    elif marker_is_ancestor:
+        relation = "ahead"
+    else:
+        relation = "diverged"
+    count = 0
+    commits: list[dict[str, str]] = []
+    if relation == "ahead":
+        counted = _worktree_git(worktree, "rev-list", "--count", f"{marker}..{head}")
+        if counted.returncode != 0:
+            raise _git_failed(counted)
+        count = int(counted.stdout.decode("utf-8", "replace").strip())
+        listed = _worktree_git(worktree, "log", f"--max-count={RESUME_PACK_COMMITS}",
+                               "--format=%H%x1f%s", f"{marker}..{head}")
+        if listed.returncode != 0:
+            raise _git_failed(listed)
+        for line in listed.stdout.decode("utf-8", "replace").splitlines():
+            if not line:
+                continue
+            sha, _, subject = line.partition("\x1f")
+            commits.append({"sha": sha[:12],
+                            "subject": subject[:RESUME_PACK_SUBJECT_CHARS]})
+    return ({"path": worktree, "branch": branch, "head": head, "dirty_paths": dirty},
+            {"base": marker, "relation": relation, "count": count,
+             "commits": commits, "truncated": count > len(commits)})
+
+
 def command_build_delivery(args: argparse.Namespace) -> int:
     """Print one sealed delivery value; read-only (no lock, clock or write).
 
@@ -4544,6 +4709,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_run_arguments(mark_progress)
     mark_progress.add_argument("--action-id", required=True)
     mark_progress.set_defaults(handler=command_mark_progress)
+
+    resume_pack = subparsers.add_parser("resume-pack")
+    resume_pack.add_argument("--repo-root", required=True)
+    resume_pack.add_argument("--run-id", required=True)
+    resume_pack.add_argument("--action-id", required=True)
+    resume_pack.set_defaults(handler=command_resume_pack)
 
     release_worker = subparsers.add_parser("release-worker")
     add_run_arguments(release_worker)
