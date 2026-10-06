@@ -21,5 +21,10 @@ Rules:
 - Anchor every finding to concrete evidence (file:line); state the failure
   scenario, not just the smell.
 
+Run each long command, every verification command included, in the
+foreground with an explicit timeout above its expected duration. If the host
+moves one to the background anyway, wait for it within the same turn: never
+end your turn while a command you started is still running.
+
 The dispatch prompt owns the finding taxonomy, verdict vocabulary, report
 shape, and length budget — follow the report contract it states exactly.

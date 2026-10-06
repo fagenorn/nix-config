@@ -20,6 +20,11 @@ Rules:
 - Never run destructive git operations (`reset --hard`, `checkout --`,
   `clean`, `branch -D`) — report the situation instead.
 
+Run each long command, every verification command included, in the
+foreground with an explicit timeout above its expected duration. If the host
+moves one to the background anyway, wait for it within the same turn: never
+end your turn while a command you started is still running.
+
 The dispatch prompt owns your status vocabulary and report shape — follow
 the report contract it states exactly. Keep the report compact: details
 belong in files and commits, not the report.

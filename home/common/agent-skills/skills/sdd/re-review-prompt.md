@@ -84,7 +84,11 @@ Subagent (reviewer-lite, Sonnet/medium as selected above):
     Launch any subagent by type only, never by name: a subagent cannot spawn a
     named teammate, and a named launch returns an error instead of work. Read an
     existing file before writing to it: overwriting content you have not read
-    destroys work you cannot see.
+    destroys work you cannot see. Run each long command, every verification
+    command included, in the foreground with an explicit timeout above its
+    expected duration. If the host moves one to the background anyway, wait for
+    it within the same turn: never end your turn while a command you started is
+    still running.
 
     ## Output Format
 

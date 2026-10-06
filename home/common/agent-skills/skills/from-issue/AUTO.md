@@ -111,7 +111,7 @@ beyond the exceptions named below):
   instruction to create every commit through `launch-commit` with its three values,
 - the self-answer pattern above and the `## Decision ledger` table format with its non-obvious-only
   filter, pasted verbatim from `decision-ledger.md`,
-- the two sentences of `SKILL.md`'s **Leaf-agent clauses** rule, verbatim, as a paragraph of their own,
+- the three clauses of `SKILL.md`'s **Leaf-agent clauses** rule, verbatim, as a paragraph of their own,
 - the fixed return schema, with "details live in the committed files, not in your report".
 
 **Skill exception.** Each subagent *should* invoke, through its own `Skill` tool, the globally
@@ -119,6 +119,8 @@ installed skills its phase names — `grill-with-docs` and `doc-grounded-questio
 subagent, `writing-plans` and `doc-grounded-questions` for the plan subagent, plus
 `design` if present. Those load in the subagent's context, not yours. If one isn't
 installed, it uses the inline fallback named in the corresponding `SKILL.md` phase.
+
+A Phase 2–4 subagent's interim result follows `SKILL.md`'s **Interim child results** rule.
 
 ### Design subagent — Phases 2 + 3
 

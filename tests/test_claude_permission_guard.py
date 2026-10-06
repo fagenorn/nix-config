@@ -191,6 +191,15 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     def test_generated_allow_surface_is_exact_and_ordered(self):
         self.assertEqual(EXPECTED_ALLOW, self.settings["permissions"]["allow"])
 
+    def test_bash_timeout_ceiling_is_raised_and_the_default_left_alone(self):
+        # #261 D2: an explicit foreground timeout must be able to cover the
+        # longest verification command; the 120 s default stays the host's.
+        env = self.settings.get("env", {})
+        self.assertEqual(env.get("BASH_MAX_TIMEOUT_MS"), "3600000")
+        self.assertGreaterEqual(int(env["BASH_MAX_TIMEOUT_MS"]), 30 * 60 * 1000)
+        self.assertNotIn("BASH_DEFAULT_TIMEOUT_MS", env)
+        self.assertEqual(env.get("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"), "1")
+
     def test_unrelated_bash_and_exact_branch_delete_pass(self):
         for command in ("git status --short", "git branch -d issue-30-safe"):
             with self.subTest(command=command):

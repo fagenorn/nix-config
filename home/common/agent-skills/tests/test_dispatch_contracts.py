@@ -1,4 +1,4 @@
-"""Dispatch contracts: the two leaf-agent clauses every carrier must hold.
+"""Dispatch contracts: the leaf-agent clauses every carrier must hold.
 
 A carrier is skill-authored text that reaches a subagent's prompt. A clause
 counts only inside the carrier's rendered region, the text the recipient
@@ -36,15 +36,37 @@ CONTRACTS = {
         "Read an existing file before writing to it: overwriting content you "
         "have not read destroys work you cannot see."
     ),
+    "own-commands": (
+        "Run each long command, every verification command included, in the "
+        "foreground with an explicit timeout above its expected duration. If "
+        "the host moves one to the background anyway, wait for it within the "
+        "same turn: never end your turn while a command you started is still "
+        "running."
+    ),
 }
+
+
+AGENT_DEFINITIONS = REPO_ROOT / "home/common/claude-code/agents"
+CARRIER_ROOTS = {**SOURCE_TREES, "agents": AGENT_DEFINITIONS}
 
 
 @dataclass(frozen=True)
 class Carrier:
-    relative: str  # "<skill>/<file>" inside its skill tree
-    tree: str  # a SOURCE_TREES key
+    relative: str  # "<skill>/<file>" in its skill tree, or "<name>.md" for an agent definition
+    tree: str  # a CARRIER_ROOTS key
     kind: str  # a _RENDERERS key
     anchor: str = ""  # the line a non-fence region is located by
+    contracts: tuple = tuple(CONTRACTS)  # the clause ids this carrier must hold
+
+    @property
+    def label(self):
+        """The carrier's label in guarded_documents()."""
+        if self.tree == "agents":
+            return f"agents/{self.relative}"
+        return f"{self.tree}:{self.relative}"
+
+
+AGENT_CLAUSES = ("own-commands",)
 
 
 CARRIERS = (
@@ -63,7 +85,16 @@ CARRIERS = (
         "## Dispatch, phase-budget and attempt-budget rules",
     ),
     Carrier("sdd/SKILL.md", "shared", "section", "## Agent tiers"),
+    Carrier("implementer.md", "agents", "body", contracts=AGENT_CLAUSES),
+    Carrier("mechanic.md", "agents", "body", contracts=AGENT_CLAUSES),
+    Carrier("reviewer.md", "agents", "body", contracts=AGENT_CLAUSES),
+    Carrier("reviewer-lite.md", "agents", "body", contracts=AGENT_CLAUSES),
 )
+
+# The remainder ship-owner prompt in ship-handoff.md forwards the leaf-agent
+# clauses through a placeholder line rather than a copy (per D13).
+REMAINDER_PLACEHOLDER = "<the three leaf-agent clauses of the ship-owner prompt above, verbatim>"
+STALE_REMAINDER_WORDING = "two leaf-agent sentences"
 
 # Documents under these skills whose body holds exactly one unlabeled fence are
 # dispatch templates and must be enrolled as fence carriers, except the
@@ -151,10 +182,24 @@ def _section_region(carrier, text):
     return "\n".join(body)
 
 
+def _body_region(carrier, text):
+    """An agent definition's body: everything after the frontmatter's closing
+    line, the second line that is exactly `---`."""
+    lines = text.splitlines()
+    rules = [index for index, line in enumerate(lines) if line == "---"]
+    if len(rules) < 2:
+        raise RegionError(
+            f"{carrier.relative}: expected a frontmatter block closed by a "
+            f"second `---` line, found {len(rules)} `---` lines"
+        )
+    return "\n".join(lines[rules[1] + 1:])
+
+
 _RENDERERS = {
     "fence": _fence_region,
     "blockquote": _blockquote_region,
     "section": _section_region,
+    "body": _body_region,
 }
 
 
@@ -170,8 +215,8 @@ def missing_contracts(carrier, document_text):
     region = _normalized(_rendered_region(carrier, document_text))
     return frozenset(
         contract_id
-        for contract_id, clause in CONTRACTS.items()
-        if region.count(clause) != 1
+        for contract_id in carrier.contracts
+        if region.count(CONTRACTS[contract_id]) != 1
     )
 
 
@@ -183,14 +228,13 @@ def _clause_pattern(clause):
 
 
 def _source_path(carrier):
-    return SOURCE_TREES[carrier.tree] / carrier.relative
+    return CARRIER_ROOTS[carrier.tree] / carrier.relative
 
 
 def _live(carrier):
     return _source_path(carrier).read_text(encoding="utf-8")
 
 
-AGENT_DEFINITIONS = REPO_ROOT / "home/common/claude-code/agents"
 GLOBAL_GUIDANCE = REPO_ROOT / "home/common/agent-guidance/AGENTS.md"
 
 
@@ -214,7 +258,7 @@ def guarded_documents():
 def stray_copies(documents):
     """`<label>: <contract id>` for each clause that occurs in a document
     outside an enrolled carrier's rendered region, in label then contract order."""
-    carriers = {f"{carrier.tree}:{carrier.relative}": carrier for carrier in CARRIERS}
+    carriers = {carrier.label: carrier for carrier in CARRIERS}
     found = []
     for label in sorted(documents):
         text = documents[label]
@@ -222,7 +266,8 @@ def stray_copies(documents):
         region = _rendered_region(carrier, text) if carrier is not None else ""
         for contract_id, clause in CONTRACTS.items():
             pattern = _clause_pattern(clause)
-            if len(pattern.findall(text)) > len(pattern.findall(region)):
+            held = region if carrier is not None and contract_id in carrier.contracts else ""
+            if len(pattern.findall(text)) > len(pattern.findall(held)):
                 found.append(f"{label}: {contract_id}")
     return found
 
@@ -251,10 +296,18 @@ class StrayCopyGuardTest(unittest.TestCase):
                 documents[label] = mutate(documents[label])
                 self.assertEqual(stray_copies(documents), [f"{label}: launch-by-type"])
 
+    def test_an_undeclared_clause_in_an_agent_definition_is_a_stray_copy(self):
+        label = "agents/reviewer.md"
+        documents = guarded_documents()
+        documents[label] = documents[label] + "\n" + CONTRACTS["launch-by-type"] + "\n"
+        self.assertEqual(stray_copies(documents), [f"{label}: launch-by-type"])
+
 
 class SourceTreeContractsTest(unittest.TestCase):
     def assert_contract_held(self, contract_id):
         for carrier in CARRIERS:
+            if contract_id not in carrier.contracts:
+                continue
             with self.subTest(carrier=carrier.relative):
                 self.assertNotIn(
                     contract_id,
@@ -268,6 +321,9 @@ class SourceTreeContractsTest(unittest.TestCase):
 
     def test_read_before_write(self):
         self.assert_contract_held("read-before-write")
+
+    def test_own_commands(self):
+        self.assert_contract_held("own-commands")
 
 
 class InstalledTreeContractsTest(unittest.TestCase):
@@ -285,7 +341,7 @@ class InstalledTreeContractsTest(unittest.TestCase):
                     self.fail(f"the {view} view is missing: {base}")
                 continue
             for carrier in CARRIERS:
-                if carrier.tree not in trees:
+                if carrier.tree not in trees or contract_id not in carrier.contracts:
                     continue
                 path = base / carrier.relative
                 with self.subTest(view=view, carrier=carrier.relative):
@@ -302,6 +358,15 @@ class InstalledTreeContractsTest(unittest.TestCase):
 
     def test_read_before_write(self):
         self.assert_contract_installed("read-before-write")
+
+    def test_own_commands(self):
+        self.assert_contract_installed("own-commands")
+
+
+def _without_frontmatter_close(carrier, text):
+    lines = text.splitlines()
+    close = [index for index, line in enumerate(lines) if line == "---"][1]
+    return "\n".join(lines[:close] + lines[close + 1:])
 
 
 # Region breakages per carrier kind, each derived from the live text.
@@ -324,6 +389,12 @@ REGION_BREAKERS = {
         ("the heading removed", lambda carrier, text: text.replace(carrier.anchor + "\n", "", 1)),
         ("the heading repeated", lambda carrier, text: text + "\n" + carrier.anchor + "\n"),
     ),
+    "body": (
+        ("the frontmatter's closing line removed", _without_frontmatter_close),
+        ("no frontmatter at all",
+         lambda carrier, text: "\n".join(
+             line for line in text.splitlines() if line != "---")),
+    ),
 }
 
 
@@ -343,7 +414,7 @@ class CheckerMutationTest(unittest.TestCase):
 
     def cases(self):
         for carrier in CARRIERS:
-            for contract_id in CONTRACTS:
+            for contract_id in carrier.contracts:
                 yield carrier, contract_id
 
     def test_unmodified_text_misses_nothing(self):
@@ -370,7 +441,7 @@ class CheckerMutationTest(unittest.TestCase):
                   if carrier.kind == "fence" and "prompt: |" in _live(carrier)]
         self.assertTrue(headed, "no fence carrier declares `prompt: |`")
         for carrier in headed:
-            for contract_id in CONTRACTS:
+            for contract_id in carrier.contracts:
                 with self.subTest(carrier=carrier.relative, contract=contract_id):
                     text = self.removed(carrier, _live(carrier), contract_id)
                     line_start = text.rindex("\n", 0, text.index("prompt: |")) + 1
@@ -392,6 +463,28 @@ class CheckerMutationTest(unittest.TestCase):
                 with self.subTest(carrier=carrier.relative, breakage=label):
                     with self.assertRaises(RegionError):
                         missing_contracts(carrier, breaker(carrier, _live(carrier)))
+
+
+class CarrierDeclarationTest(unittest.TestCase):
+    def test_every_agent_definition_is_an_own_commands_body_carrier(self):
+        enrolled = {c.relative: c for c in CARRIERS if c.tree == "agents"}
+        self.assertEqual(set(enrolled), {p.name for p in AGENT_DEFINITIONS.glob("*.md")})
+        for carrier in enrolled.values():
+            with self.subTest(carrier=carrier.relative):
+                self.assertEqual((carrier.kind, carrier.contracts), ("body", AGENT_CLAUSES))
+
+    def test_every_skill_carrier_holds_all_three_clauses(self):
+        skill_carriers = [c for c in CARRIERS if c.tree != "agents"]
+        self.assertEqual(len(skill_carriers), 9)
+        for carrier in skill_carriers:
+            with self.subTest(carrier=carrier.relative):
+                self.assertEqual(carrier.contracts, tuple(CONTRACTS))
+                self.assertEqual(len(carrier.contracts), 3)
+
+    def test_the_remainder_prompt_placeholder_names_three_clauses(self):
+        text = (SHARED_TREE / "from-issue/ship-handoff.md").read_text(encoding="utf-8")
+        self.assertIn(REMAINDER_PLACEHOLDER, text)
+        self.assertNotIn(STALE_REMAINDER_WORDING, text)
 
 
 class EnrolmentGuardTest(unittest.TestCase):
