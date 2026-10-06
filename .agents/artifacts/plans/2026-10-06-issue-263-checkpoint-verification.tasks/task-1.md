@@ -238,7 +238,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `PYTHONPATH=python python3 -m unittest tests/test_verified_tree.py 2>&1 | tail -4`
+Run: `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_verified_tree.py 2>&1 | tail -4`
 Expected: FAILED — every test errors or fails with `No module named agent_tools.verified_tree`.
 
 - [ ] **Step 3: Implement**
@@ -296,12 +296,13 @@ Then:
 
 Focused tests (failed in Step 2, so a pass is not a no-op):
 
-Run: `PYTHONPATH=python python3 -m unittest tests/test_verified_tree.py 2>&1 | tail -4`
+Run: `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_verified_tree.py 2>&1 | tail -4`
 Expected: `OK`, 13 tests.
 
-Build check (this task changes `python/` and `lib/`), per Global Constraints' long-command rule:
+Build check (this task changes `python/` and `lib/`), per Global Constraints' long-command rule. Stage the new files first: the flake is Git-backed and evaluates only tracked files, so an untracked `verified_tree.py` would trip `lib/agent-tools.nix`'s missing-module assertion:
 
 ```bash
+git add python/agent_tools/verified_tree.py tests/test_verified_tree.py
 log="${TMPDIR:-/tmp}/build-263-t1.log"
 { just build; echo "exit=$?"; } > "$log" 2>&1; tail -3 "$log"
 hm=$(nix-store --query --requisites ./result | grep -- '-home-manager-files$')

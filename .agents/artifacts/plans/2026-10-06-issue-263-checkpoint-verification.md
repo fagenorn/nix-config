@@ -23,8 +23,8 @@ command table (`lib/agent-tools.nix`), Markdown skill documents, `unittest` suit
 
 - Per-task verification follows this issue's own ladder: each task runs the focused test commands its member names, red then green, plus `just build` because every task here changes files the Nix build reads (`python/`, `lib/`, or the copied skill tree under `home/common/agent-skills/skills/`; per D11). No task runs `just agent-workflow-tests`; sdd's final gate runs the full declared verification once.
 - Long commands: run `just build` (up to 15 min) in the foreground with Bash timeout 1800000 when the session runs under the raised `BASH_MAX_TIMEOUT_MS`, otherwise 600000, output redirected to a log ending in an `exit=<status>` line and only its tail read back. If the host moves it to the background, wait for that log's `exit=` line within the same turn; never end the turn while it runs.
-- Focused Python commands run from the worktree root with `PYTHONPATH=python`.
-- Instruction-load ceilings in `home/common/agent-skills/instruction-load.json` sit exactly at measured bytes. Any task that grows a hot member runs `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_instruction_load.py 2>&1 | tail -8`; for each `profile <id> on <host>: hot <N> bytes exceed ceiling <M>` line it sets that profile's `ceiling_bytes.<host>` to `<N>` and appends one sentence to that profile's `note`: `Ceiling raised for #263: <what grew> (#155 D10).` — one sentence per profile per task, never a raise above the measured value.
+- Focused Python commands run from the worktree root with `PYTHONPATH="$PWD/python"` (absolute, because tests that spawn subprocesses change cwd).
+- Instruction-load ceilings in `home/common/agent-skills/instruction-load.json` sit exactly at measured bytes. Any task that grows a hot member runs `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_instruction_load.py 2>&1 | tail -8`; for each `profile <id> on <host>: hot <N> bytes exceed ceiling <M>` line it sets that profile's `ceiling_bytes.<host>` to `<N>` and appends one sentence to that profile's `note`: `Ceiling raised for #263: <what grew> (#155 D10).` — one sentence per profile per task, never a raise above the measured value.
 - Never edit an `<!-- agent-dispatch: … -->` marker or the `Agent(…)` line under it: `home/common/agent-skills/model-matrix.json` pins those lines.
 - Skill text stays project-neutral: shared skills say "the build check" and "files the build evaluates", never `just build` (per D2).
 - Commits go through `launch-commit` with the `Lifecycle worker:` line the dispatch carries, SSH-signed, ending with the session's Co-Authored-By and Claude-Session lines.
@@ -55,3 +55,7 @@ Task 4 — Ship's one verification step — `home/common/agent-skills/skills/shi
 
 The spec's `## Decision ledger` owns every decision. Tasks cite D1–D11 from design and
 D12, appended at planning.
+
+## Standards review provenance
+
+Reviewer: Codex (gpt-6-astra, xhigh), isolated read-only plan-review, base 40fa9c7db3863a49d31960a71f3c5c1c479b9377, no fallback. Findings: 3 accepted (B1 consolidation commits re-verify, per D13; B2 absolute `PYTHONPATH` for subprocess-spawning tests; S1 stage new files before `just build`), 0 rejected, 0 deferred.

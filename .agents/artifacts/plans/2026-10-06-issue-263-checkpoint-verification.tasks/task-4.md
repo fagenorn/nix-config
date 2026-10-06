@@ -16,6 +16,7 @@
 - A `record` refused for `tree_changed` is a failing verification; a `check` exit 2 runs the commands and leaves the pass unrecorded (per D10, D12).
 - The existing blocked-capability, failure and baselining rules stay verbatim and apply only to an actual run.
 - REVIEW.md step 2 and both CI-MERGE.md reruns name Phase 2's step instead of restating commands, so all three sites share one procedure (per D5).
+- A Phase 3 consolidation commit changes the tree after Phase 2 ran, so Phase 3 re-runs Phase 2's step before Phase 4; the merged head is never an unverified tree (per D13).
 - The `gh pr create` body form is unchanged; the reuse note contains no `"`, `$`, backtick or backslash in the rendered body.
 
 - [ ] **Step 1: Write the failing test**
@@ -28,7 +29,7 @@ Add these methods to `CheckpointVerificationContractsTest`:
         phase = phase.split("## Phase 3", 1)[0]
         self.assert_ordered(
             phase, "This is the one verification step.",
-            "REVIEW.md's apply/push step 2 and CI-MERGE.md's post-selection sync run it too.",
+            "Phase 3 after a promotion commit, REVIEW.md's apply/push step 2 and CI-MERGE.md's post-selection sync run it too.",
             "A blocked verification capability stops",
             "1. **Check.** Run `verified-tree check --verification <id>`",
             "in order, and keep the `tree` it prints.",
@@ -49,6 +50,11 @@ Add these methods to `CheckpointVerificationContractsTest`:
             review, "## The five-step apply/push flow", "1. Edit the file(s).",
             "2. Run Phase 2's verification step (SKILL.md's `## Phase 2 — Verify locally`)",
             "3. `git add`")
+        consolidate = self.read(SHIP_ISSUE).split("## Phase 3 — Consolidate learnings", 1)[1]
+        consolidate = consolidate.split("## Phase 4", 1)[0]
+        self.assert_ordered(
+            consolidate, "Promoted candidates commit as",
+            "When Phase 3 commits anything, run Phase 2's verification step again before Phase 4.")
         self.assertNotIn("Re-run every retained `bindings.workflow.verification` command",
                          review)
         ci_merge = self.read(SHIP_ISSUE_CI_MERGE)
@@ -61,7 +67,7 @@ Add these methods to `CheckpointVerificationContractsTest`:
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k CheckpointVerification 2>&1 | tail -4`
+Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k CheckpointVerification 2>&1 | tail -4`
 Expected: FAILED (failures=2) — the two new tests fail; Tasks 2–3's five pass.
 
 - [ ] **Step 3: Implement**
@@ -72,8 +78,8 @@ In `home/common/agent-skills/skills/ship-issue/SKILL.md`:
 2. Replace the body of `## Phase 2 — Verify locally`, from the line after the heading up to (not including) the paragraph that begins `Test failures: separate *environmental*`, with exactly this; keep that `Test failures:` paragraph unchanged after it:
 
 ```markdown
-This is the one verification step. REVIEW.md's apply/push step 2 and
-CI-MERGE.md's post-selection sync run it too.
+This is the one verification step. Phase 3 after a promotion commit,
+REVIEW.md's apply/push step 2 and CI-MERGE.md's post-selection sync run it too.
 
 A blocked verification capability stops and reports its `reason_code` and
 `repair_id`; authored unsupported follows only its documented no-verification
@@ -102,6 +108,8 @@ retained `bindings.commands`.
 
 This removes the old fenced `<each bindings.workflow.verification command, dereferenced through bindings.commands>` block and the old `Run every command id …` paragraph; their content now lives in steps 1 and 3.
 
+3. In `## Phase 3 — Consolidate learnings`, append to the paragraph that ends `following retained \`bindings.vcs.commit.co_authored_by\`.` the sentence: `When Phase 3 commits anything, run Phase 2's verification step again before Phase 4.`
+
 In `home/common/agent-skills/skills/ship-issue/REVIEW.md`, replace step 2 (`2. Re-run every retained \`bindings.workflow.verification\` command through` / `` `bindings.commands` against the modified surface.``) with:
 
 ```markdown
@@ -120,7 +128,7 @@ Then apply the Global Constraints' instruction-load ceiling rule (`ship-issue/SK
 
 - [ ] **Step 4: Verify**
 
-Run: `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_shell_example_contracts.py home/common/agent-skills/tests/test_instruction_load.py 2>&1 | tail -4`
+Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_shell_example_contracts.py home/common/agent-skills/tests/test_instruction_load.py 2>&1 | tail -4`
 Expected: `OK` — the two new tests (red in Step 2) and the updated post-selection-sync route test pass; the shell-example scan and ceilings stay green.
 
 Build check (the skill tree is copied by the Nix build), per Global Constraints' long-command rule:

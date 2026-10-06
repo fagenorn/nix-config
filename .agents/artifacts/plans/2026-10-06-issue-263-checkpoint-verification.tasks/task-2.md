@@ -78,7 +78,7 @@ class CheckpointVerificationContractsTest(unittest.TestCase):
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k CheckpointVerification 2>&1 | tail -4`
+Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k CheckpointVerification 2>&1 | tail -4`
 Expected: FAILED (failures=2) — the first missing anchors are `## Final verification` and `the **Final verification** step`.
 
 - [ ] **Step 3: Implement**
@@ -129,7 +129,7 @@ Then apply the Global Constraints' instruction-load ceiling rule (`final-review.
 
 - [ ] **Step 4: Verify**
 
-Run: `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_dispatch_contracts.py home/common/agent-skills/tests/test_instruction_load.py 2>&1 | tail -4`
+Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_dispatch_contracts.py home/common/agent-skills/tests/test_instruction_load.py 2>&1 | tail -4`
 Expected: `OK` — the two new tests (red in Step 2) pass, and the existing final-review anchors, dispatch markers and ceilings stay green.
 
 Build check (the skill tree is copied by the Nix build), per Global Constraints' long-command rule:
