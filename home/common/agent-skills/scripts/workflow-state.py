@@ -3956,18 +3956,29 @@ def resume_pack_attempt(runtime: Any, state: dict[str, Any] | None,
 
 
 def resume_next_action(*, phase: int, phase_action: str | None,
-                       handoff_path: str | None, relation: str) -> dict[str, Any]:
+                       handoff_path: str | None, relation: str,
+                       sdd: dict[str, Any] | None,
+                       resume_point: dict[str, Any] | None) -> dict[str, Any]:
     """The pack's closed ``next_action``, first match wins (#265 D6, D13).
 
     A handoff path points the owner at its handoff only while the last recorded
-    gate is that handoff: the path is never cleared once spent.
+    gate is that handoff: the path is never cleared once spent. SDD's resume
+    point steers only from phase 5, where Phase 6 executes the plan; it names
+    ``finish_phase`` only when every task of a known count is complete.
     """
     if handoff_path is not None and phase_action == "handoff":
         return {"kind": "read_handoff", "path": handoff_path}
+    if sdd is not None and "ambiguous" in sdd:
+        return {"kind": "reorient", "reason": "ambiguous_sdd_workspace"}
     if relation == "diverged":
         return {"kind": "reorient", "reason": "diverged_marker"}
     if phase >= 7:
         return {"kind": "reorient", "reason": "delivery_phases_complete"}
+    if phase == 5 and resume_point is not None:
+        if resume_point["task"] is None:
+            return {"kind": "finish_phase", "phase": 6}
+        return {"kind": "resume_task", "phase": 6, "task": resume_point["task"],
+                "mid_fix_loop": resume_point["mid_fix_loop"]}
     return {"kind": "start_phase", "phase": phase + 1}
 
 
@@ -3977,13 +3988,22 @@ def bound_resume_pack(pack: dict[str, Any]) -> dict[str, Any]:
     The bound is on the bytes ``print_json`` writes, because escaping and paths,
     not character caps, decide them: one non-ASCII character escapes to six
     bytes and paths are uncapped. The oldest listed commit is shed first, with
-    ``truncated`` marking the cut; a pack still at or over the bound refuses.
+    ``truncated`` marking the cut; then the last character of the SDD
+    ``last_entry`` (``last_entry_truncated``), then the last ambiguous plan
+    name (``ambiguous_count`` keeps the total). ``next_action`` was chosen
+    before any cut and never changes; a pack still at or over the bound refuses.
     """
     bounded = copy.deepcopy(pack)
     section = bounded["commits_since_marker"]
     while len(render_json(bounded)) >= RESUME_PACK_BYTES and section["commits"]:
         section["commits"].pop()
         section["truncated"] = section["count"] > len(section["commits"])
+    sdd = bounded["sdd"] if bounded["sdd"] is not None else {}
+    while len(render_json(bounded)) >= RESUME_PACK_BYTES and sdd.get("last_entry"):
+        sdd["last_entry"] = sdd["last_entry"][:-1]
+        sdd["last_entry_truncated"] = True
+    while len(render_json(bounded)) >= RESUME_PACK_BYTES and sdd.get("ambiguous"):
+        sdd["ambiguous"].pop()
     if len(render_json(bounded)) >= RESUME_PACK_BYTES:
         raise WorkflowError(
             f"resume-pack refused: the pack exceeds {RESUME_PACK_BYTES} bytes")
@@ -4156,6 +4176,8 @@ def command_resume_pack(args: argparse.Namespace) -> int:
         worktree, commits_since_marker = probe_resume_worktree(attempt["worktree"], marker)
     except WorktreeBranchUnavailable as unavailable:
         raise WorkflowError(f"resume-pack refused: {unavailable}") from unavailable
+    sdd, resume_point = read_sdd_position(sdd_workspace_bucket(worktree["path"]),
+                                          worktree["path"])
     pack = {
         "kind": "resume_pack", "version": 1, "run_id": args.run_id,
         "issue": issue, "attempt": attempt_ordinal, "action_id": args.action_id,
@@ -4171,11 +4193,12 @@ def command_resume_pack(args: argparse.Namespace) -> int:
         },
         "worktree": worktree,
         "commits_since_marker": commits_since_marker,
-        "sdd": None,
+        "sdd": sdd,
         "next_action": resume_next_action(
             phase=attempt["phase"], phase_action=attempt.get("phase_action"),
             handoff_path=attempt["handoff_path"],
-            relation=commits_since_marker["relation"]),
+            relation=commits_since_marker["relation"],
+            sdd=sdd, resume_point=resume_point),
     }
     print_json(bound_resume_pack(pack))
     return 0
@@ -4504,6 +4527,126 @@ def probe_resume_worktree(worktree: str, marker: str | None
     return ({"path": worktree, "branch": branch, "head": head, "dirty_paths": dirty},
             {"base": marker, "relation": relation, "count": count,
              "commits": commits, "truncated": count > len(commits)})
+
+
+# SDD's own ledger and task-member shapes, and the pack's SDD caps (#265 D5, D7, D13).
+SDD_LEDGER_HEADER = re.compile(r"# SDD ledger — plan: (.+)")
+SDD_TASK_LINE = re.compile(r"Task ([1-9][0-9]*): ")
+SDD_TASK_MEMBER = re.compile(r"task-([1-9][0-9]*)\.md")
+RESUME_PACK_ENTRY_CHARS = 400
+RESUME_PACK_COMPLETED = 32
+RESUME_PACK_AMBIGUOUS = 8
+SDD_WORKSPACE_UNRESOLVED = "resume-pack refused: the SDD workspace cannot be resolved"
+
+
+def sdd_workspace_bucket(worktree: str) -> Path:
+    """The ``<primary>/.superpowers/sdd/<bucket>`` directory SDD uses for ``worktree``.
+
+    Mirrors ``sdd-workspace``'s checkout-identity rule without creating
+    anything; a test runs ``sdd-workspace`` against the same worktree (#265 D5).
+    A checkout whose git dir is its common dir is the primary, bucket
+    ``primary``; a linked worktree's git dir is ``<common>/worktrees/<name>``
+    under a common dir named ``.git``, bucket ``wt-<name>``. Any other outcome,
+    a git failure included, refuses (#265 D12).
+    """
+    try:
+        identity = _worktree_git(worktree, "rev-parse", "--path-format=absolute",
+                                 "--git-dir", "--git-common-dir", "--show-toplevel")
+        if identity.returncode != 0:
+            raise WorkflowError(SDD_WORKSPACE_UNRESOLVED)
+        lines = os.fsdecode(identity.stdout).removesuffix("\n").split("\n")
+        if len(lines) != 3 or not all(lines):
+            raise WorkflowError(SDD_WORKSPACE_UNRESOLVED)
+        git_dir, common, toplevel = lines
+        if git_dir == common:
+            primary, bucket = toplevel, "primary"
+        else:
+            prefix = f"{common}/worktrees/"
+            name = git_dir[len(prefix):] if git_dir.startswith(prefix) else ""
+            if name in {"", ".", ".."} or "/" in name or os.path.basename(common) != ".git":
+                raise WorkflowError(SDD_WORKSPACE_UNRESOLVED)
+            primary, bucket = os.path.dirname(common), f"wt-{name}"
+            shown = _worktree_git(primary, "rev-parse", "--path-format=absolute",
+                                  "--show-toplevel")
+            if (shown.returncode != 0
+                    or os.fsdecode(shown.stdout).removesuffix("\n") != primary):
+                raise WorkflowError(SDD_WORKSPACE_UNRESOLVED)
+    except WorktreeBranchUnavailable as unavailable:
+        raise WorkflowError(SDD_WORKSPACE_UNRESOLVED) from unavailable
+    if not _non_symlink(Path(primary), stat.S_ISDIR):
+        raise WorkflowError(SDD_WORKSPACE_UNRESOLVED)
+    return Path(primary) / ".superpowers" / "sdd" / bucket
+
+
+def read_sdd_position(bucket: Path, worktree: str
+                      ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """``(sdd_section, resume_point)`` read from the SDD ledgers under ``bucket``.
+
+    Creates nothing (#265 D5): a missing workspace component means no ledger,
+    and one that is a symlink or not a directory refuses (#265 D12). A ledger
+    is a plan directory whose ``progress.md`` opens with SDD's header; several
+    are ambiguous and carry no resume point. ``resume_point`` is SDD's own
+    rule, read from the full ledger before any cap: the first task without a
+    ``complete`` line, ``task`` None only when every one of a known
+    ``task_count`` is complete (#265 D6, D13).
+    """
+    try:
+        for component in (bucket.parent.parent, bucket.parent, bucket):
+            if path_status(component) is None:
+                return None, None
+            if not _non_symlink(component, stat.S_ISDIR):
+                raise WorkflowError(SDD_WORKSPACE_UNRESOLVED)
+        ledgers: list[tuple[Path, list[str], str]] = []
+        for entry in sorted(bucket.iterdir(), key=lambda path: path.name):
+            progress = entry / "progress.md"
+            if not (_non_symlink(entry, stat.S_ISDIR)
+                    and _non_symlink(progress, stat.S_ISREG)):
+                continue
+            lines = progress.read_text(encoding="utf-8", errors="replace").splitlines()
+            header = SDD_LEDGER_HEADER.fullmatch(lines[0]) if lines else None
+            if header is not None:
+                ledgers.append((entry, lines, header.group(1)))
+        if not ledgers:
+            return None, None
+        if len(ledgers) > 1:
+            # Each name takes the same 100-character cut as a subject (#265 D13).
+            return ({"ambiguous": [entry.name[:RESUME_PACK_SUBJECT_CHARS]
+                                   for entry, _, _ in ledgers[:RESUME_PACK_AMBIGUOUS]],
+                     "ambiguous_count": len(ledgers)}, None)
+        workspace, lines, plan = ledgers[0]
+        plan_path = Path(plan) if Path(plan).is_absolute() else Path(worktree) / plan
+        members = plan_path.parent / f"{plan_path.name.removesuffix('.md')}.tasks"
+        task_count = (sum(1 for member in members.iterdir()
+                          if SDD_TASK_MEMBER.fullmatch(member.name)
+                          and _non_symlink(member, stat.S_ISREG))
+                      if _non_symlink(members, stat.S_ISDIR) else None)
+    except (OSError, ValueError) as error:
+        # A plan path carrying a NUL byte makes `lstat` raise ValueError.
+        raise WorkflowError(SDD_WORKSPACE_UNRESOLVED) from error
+    complete: set[int] = set()
+    last_line: dict[int, str] = {}
+    for line in lines:
+        task_line = SDD_TASK_LINE.match(line)
+        if task_line is None:
+            continue
+        number = int(task_line.group(1))
+        last_line[number] = line
+        if line[task_line.end():].startswith("complete"):
+            complete.add(number)
+    entry = next((line.rstrip() for line in reversed(lines) if line.strip()), "")
+    if task_count is None:
+        task: int | None = next(number for number in range(1, len(complete) + 2)
+                                if number not in complete)
+    else:
+        task = next((number for number in range(1, task_count + 1)
+                     if number not in complete), None)
+    mid_fix_loop = task is not None and last_line.get(task, "").startswith(
+        f"Task {task}: fix round")
+    return ({"workspace": str(workspace), "plan": plan, "task_count": task_count,
+             "completed": sorted(complete)[:RESUME_PACK_COMPLETED],
+             "last_entry": entry[:RESUME_PACK_ENTRY_CHARS],
+             "last_entry_truncated": len(entry) > RESUME_PACK_ENTRY_CHARS},
+            {"task": task, "mid_fix_loop": mid_fix_loop})
 
 
 def command_build_delivery(args: argparse.Namespace) -> int:
