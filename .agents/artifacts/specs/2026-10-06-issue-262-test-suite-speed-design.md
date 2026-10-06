@@ -57,10 +57,11 @@ is safe.
 
 **H2 — the review Git authority spends most of its spawns re-authenticating.**
 `review_git._closure` runs `_guard` before and after its object walk. Each
-`_guard` launches six `git` processes: two `rev-parse` calls that could be
-one, `rev-parse --is-shallow-repository`, `for-each-ref` once for each
-replace namespace, `config --list` and `rev-parse --show-object-format`. With
-`cat-file --batch` and `rev-list` added, every closure costs **14 spawns**.
+`_guard` launches five `git` processes in the default environment:
+`rev-parse` for the two locations, `rev-parse --is-shallow-repository`, one
+`for-each-ref` (the two replace namespaces deduplicate by default),
+`config --list` and `rev-parse --show-object-format`. With
+`cat-file --batch` and `rev-list` added, every closure costs **12 spawns**.
 
 In the issue-121 test above, the 268 closures made 536 guard calls, which
 took 43 s of the 60 s spent in `subprocess`. That is about 76% of all spawns.
@@ -123,7 +124,7 @@ authority treats as one API call.
    call, so the policy is still read on every call (per D1).
 2. **H2: a cheaper guard and one closure per operation.** The guard runs the
    same checks, in the same order and with the same error codes, from three
-   `git` processes instead of six (per D2). An operation that asks several
+   `git` processes instead of five (per D2). An operation that asks several
    questions about one set of commits answers them from a single
    authenticated closure, opened at its entry point (per D3).
 3. **H3: an in-process lifecycle runner.** `LifecycleHarness.run_cli` and
@@ -254,6 +255,13 @@ not committed, because it is a point-in-time record.
   where `full_commit` and `history_commit` run on one checkpoint and
   `ancestor` and `commit_range` run on one pair. Should that still fall
   short, the owner reports the gap. No test is weakened to meet it.
+- **`test_review_issue121` and `test_review_issue100` may still exceed 90 s.**
+  Task 6 measured them, after every change and at load 45–61, at 240.7 s and
+  167.0 s. D11's scan excludes `Issue100Test` from H4, because its `live`
+  clone's `remote.origin.url` names the template directory. Their idle-machine
+  timing is measured at ship (per D6). If either is still over 90 s, the PR
+  reports that gap, and the D11 exclusion reason, instead of claiming the
+  criterion. No test is weakened to meet it.
 - **Error-code precedence under D3.** Once the closure behind `original_edge`
   is authenticated, the per-commit lookups that came after it could not fail
   differently on an unchanged repository. Folding them into that closure
@@ -285,7 +293,7 @@ not committed, because it is a point-in-time record.
 | ID | Choice | Grounding | Rejected alternative |
 |----|--------|-----------|----------------------|
 | D1 | Memoize `_delivery()`'s `DeliveryRuntime` per process, keyed by the notes limit read on each call; failures are not cached. | H1: 2,037 loads in 235 calls, 19.2 s of 42 s compiling; the 40-test sample drops from 99.2 s to 51.3 s; `_HOST_ADMISSION` "loaded once (D18)" precedent; the runtime sets state only in `__init__`; the bar's Root causes rule. | Cache the bytecode via `importlib` for `workflow_delivery.py`: it changes the loader and the installed layout for less gain. |
-| D2 | Collapse `_guard` from 6 to 3 `git` spawns, with the same checks in the same order, and keep both guards on every closure. | H2: guards are ~76% of the spawns; prototype cuts 3,794 spawns to 2,722; the `review_git` comment that every boundary observes current metadata; #233 D4. | Drop the post-walk guard, or read refs and config without `git`: that weakens the authentication or reimplements Git. |
+| D2 | Collapse `_guard` from 5 to 3 `git` spawns, with the same checks in the same order, and keep both guards on every closure. | H2: guards are ~76% of the spawns; prototype cuts 3,794 spawns to 2,722; the `review_git` comment that every boundary observes current metadata; #233 D4. | Drop the post-walk guard, or read refs and config without `git`: that weakens the authentication or reimplements Git. |
 | D3 | One authenticated closure per operation: `original_edge` returns both commits, and `original_commits` serves paired lookups. There is no cache across entry-point calls. | H2: `edge_facts` costs 3 closures per edge (120 of 268 in the sample); #233 D4, which authenticates once at the shared boundary and reuses that authority across ranges and edges. | A process-wide verified-object cache: it breaks "observes current ... objects" and saves only the one `cat-file` spawn per closure. |
 | D4 | Run `LifecycleHarness.run_cli` and `run_control_at_root` in process, through a compile-once, fresh-namespace runner; every other workflow-state subprocess site stays a real process. | H3: the sample drops from 51.3 s to 24.0 s on top of D1; the script mutates no process-global state beyond stdio; the issue allows in-process calls where the module is the subject and asks to keep the existing launcher coverage. | A fork server: fork without exec is unsafe on macOS, which is why the stack shard notes that macOS spawns. Converting every workflow-state site: a larger diff, and it would remove the launcher coverage. |
 | D5 | H4 class templates (per-test `copytree` plus `deepcopy`) only for a module still above 90 s after D1–D4, chosen by the plan from that measurement. | H4 is secondary to H2; the issue allows per-class caching only with immutability guards; YAGNI. | Share one mutable fixture per class: tests such as the virtualization attacks mutate the repository. |
