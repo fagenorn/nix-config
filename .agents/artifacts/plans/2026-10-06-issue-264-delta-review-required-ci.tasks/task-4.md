@@ -13,7 +13,7 @@
 - Produces: the PR-body record strings `review range: delta <review_base7>..<head7> since final-review <R7> (<L> lines, <F> files)`, `review range: empty since final-review <R7>` and `review range: full (<reason>)` (per D4), plus REVIEW.md's `## Delta route` brief.
 
 **Invariants:**
-- Every dispatch marker and call line in `ship-issue/SKILL.md` stays byte-identical, including `ship-issue-merge-delta-review` (per D11). `PYTHONPATH=python python3 -m agent_tools.agent_model_matrix validate` stays green.
+- Every dispatch marker and call line in `ship-issue/SKILL.md` stays byte-identical, including `ship-issue-merge-delta-review` (per D11). `PYTHONPATH="$PWD/python" python3 -m agent_tools.agent_model_matrix validate` stays green.
 - The anchor `**Full two-axis review.**` and the text up to `Axis reports are never merged` keep the correctness ladder unchanged, because `ship_correctness_route()` reads that span.
 - The prerequisites keep their order and polarity: clean `review_state`, no manual sync escalation, the size bullet, no `risky` label plus the `capabilities.review.code` state (per D4).
 - REVIEW.md's merge-delta section keeps its `git show --cc` scope and its checklist for CI-MERGE.md's post-selection sync. CI-MERGE.md is not edited in this task (per D11).
@@ -116,7 +116,7 @@ Add these methods to `WorkflowSkillContractsTest`:
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
-Run: `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k gate -k range -k delta 2>&1 | tail -3`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k gate -k range -k delta 2>&1 | tail -3`
 Expected: `FAILED`. `**Pick the range first.**` and `## Delta route` do not exist yet.
 
 - [ ] **Step 3: Write the prose**
@@ -143,10 +143,10 @@ Then run the root's ceiling snippet and raise each breached pair with the note `
 
 - [ ] **Step 4: Verify**
 
-Run: `PYTHONPATH=python timeout 900 python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_instruction_load.py home/common/agent-skills/tests/test_dispatch_contracts.py home/common/agent-skills/tests/test_agent_model_matrix.py home/common/agent-skills/tests/test_shell_example_contracts.py 2>&1 | tail -3`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" timeout 900 python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_instruction_load.py home/common/agent-skills/tests/test_dispatch_contracts.py home/common/agent-skills/tests/test_agent_model_matrix.py home/common/agent-skills/tests/test_shell_example_contracts.py 2>&1 | tail -3`
 Expected: `OK`.
 
-Run: `PYTHONPATH=python python3 -m agent_tools.agent_model_matrix validate 2>&1 | tail -2`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m agent_tools.agent_model_matrix validate 2>&1 | tail -2`
 Expected: exit 0.
 
 Run: `git diff 40fa9c7 -- home/common/agent-skills/skills/ship-issue/SKILL.md | grep '^[-+].*agent-dispatch' || echo MARKERS-UNCHANGED`

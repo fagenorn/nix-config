@@ -21,7 +21,7 @@
 - **Instruction-load ceilings.** `home/common/agent-skills/instruction-load.json`'s `ceiling_bytes` hold each profile's hot bytes with zero slack. A task that grows a hot member raises exactly the breached `(profile, host)` ceilings to the measured value, in its own commit, and appends to that profile's `note` one sentence `Ceiling raised for #264: <what grew> (#155 D10).` Measure with:
 
 ```bash
-PYTHONPATH=python python3 - <<'PY'
+PYTHONPATH="$PWD/python" python3 - <<'PY'
 from pathlib import Path
 from agent_tools import instruction_load as il
 read = il.tree_reader(Path("."))
@@ -41,7 +41,7 @@ PY
 - Seam 1: `python -m agent_tools.review_range` over scratch git repositories in `tests/test_review_range.py` (TemporaryDirectory, no network), asserting the parsed stdout object and exit code. Pure functions may also be imported.
 - Seam 2: `home/common/agent-skills/tests/test_workflow_skill_contracts.py` contract tests over skill prose and `ship-issue/evals/evals.json` eval 1, using its `section`, `normalized` and `assert_ordered` helpers and the `GATE_LINE_BOUNDARY`/`GATE_FILE_BOUNDARY` constants.
 - Seam 3: the installed launcher, through the existing `tests/test_agent_tools_launchers.py` and `just build` (the command-table assertion and import check).
-- Run a module as `PYTHONPATH=python python3 -m unittest <path>` from the worktree root; one test as `PYTHONPATH=python python3 -m unittest <path> -k <name>`.
+- Run a module as `PYTHONPATH="$PWD/python" python3 -m unittest <path>` from the worktree root; one test as `PYTHONPATH="$PWD/python" python3 -m unittest <path> -k <name>`.
 
 ## Delivery estimate and boundaries
 
@@ -61,3 +61,9 @@ Task 5 — Phase 6 waits on required checks only — home/common/agent-skills/sk
 Task 1 rests on D2, D3, D10 and D12. Task 2 rests on D2. Task 3 rests on D1 and D10. Task 4 rests on D4, D5, D10, D11 and D12. Task 5 rests on D6, D7, D8, D9 and D11. The spec's `## Decision ledger` holds every row, including the planning rows D11 and D12.
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, gpt-6-astra/xhigh), isolated read-only fresh thread; no fallback.
+- Base SHA: 40fa9c7db3863a49d31960a71f3c5c1c479b9377; reviewed plan commit a92df9a.
+- Findings: 2 accepted, 0 rejected, 0 deferred. PR264-01 (Blocking): focused-test commands now use an absolute `PYTHONPATH="$PWD/python"`, and Task 1's `git_env()` absolutizes inherited `PYTHONPATH` entries for helper subprocesses run from temporary directories. PR264-02 (Should fix): every verification command piped into `tail` now runs under `set -o pipefail`.

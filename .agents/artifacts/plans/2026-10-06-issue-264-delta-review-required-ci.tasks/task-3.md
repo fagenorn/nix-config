@@ -48,7 +48,7 @@ Add these two methods to `WorkflowSkillContractsTest` in `home/common/agent-skil
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
-Run: `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k head_sha 2>&1 | tail -3`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k head_sha 2>&1 | tail -3`
 Expected: `FAILED (failures=2)`.
 
 - [ ] **Step 3: Write the prose**
@@ -61,7 +61,7 @@ Expected: `FAILED (failures=2)`.
 
 - [ ] **Step 4: Verify**
 
-Run: `PYTHONPATH=python timeout 900 python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_instruction_load.py home/common/agent-skills/tests/test_dispatch_contracts.py home/common/agent-skills/tests/test_artifact_budget.py 2>&1 | tail -3`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" timeout 900 python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_instruction_load.py home/common/agent-skills/tests/test_dispatch_contracts.py home/common/agent-skills/tests/test_artifact_budget.py 2>&1 | tail -3`
 Expected: `OK`. The two new tests pass, and `test_the_live_tree_breaches_no_ceiling` passes.
 
 Run: `git diff --name-only 40fa9c7 -- home/common/agent-skills/skills/sdd home/common/agent-skills/skills/from-issue`

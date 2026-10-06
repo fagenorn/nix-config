@@ -50,6 +50,11 @@ def git_env():
     env = dict(os.environ)
     for name in GIT_LOCATION_VARS:
         env.pop(name, None)
+    # Absolute, so a helper run with its own temporary `cwd` still imports the
+    # package under test (precedent: tests/promotion_test_support.py).
+    if env.get("PYTHONPATH"):
+        env["PYTHONPATH"] = os.pathsep.join(os.path.abspath(entry) for entry
+                                            in env["PYTHONPATH"].split(os.pathsep))
     env.update({
         "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
         "GIT_AUTHOR_NAME": "review-range-test",
@@ -276,7 +281,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
-Run: `PYTHONPATH=python python3 -m unittest tests/test_review_range.py 2>&1 | tail -3`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests/test_review_range.py 2>&1 | tail -3`
 Expected: `FAILED (failures=…)`. Every case fails because `agent_tools.review_range` does not exist (`No module named agent_tools.review_range` in the captured stderr).
 
 - [ ] **Step 3: Write the minimal implementation**
@@ -297,10 +302,10 @@ Create `python/agent_tools/review_range.py`. Its module docstring states the com
 
 - [ ] **Step 4: Verify**
 
-Run: `PYTHONPATH=python python3 -m unittest tests/test_review_range.py 2>&1 | tail -3`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests/test_review_range.py 2>&1 | tail -3`
 Expected: `Ran 18 tests` and `OK`.
 
-Run: `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_diff_scope.py 2>&1 | tail -1`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_diff_scope.py 2>&1 | tail -1`
 Expected: `OK` (`diff_scope` is unchanged).
 
 Run: `git status --porcelain -- python/agent_tools/diff_scope.py`

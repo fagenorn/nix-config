@@ -40,7 +40,7 @@ In the `justfile`'s `agent-workflow-tests` recipe, insert the line `    tests/te
 Run: `rg -c '"review-range"' lib/agent-tools.nix && rg -c 'tests/test_review_range.py' justfile`
 Expected: `1` and `1`.
 
-Run: `timeout 1800 just build 2>&1 | tail -5`
+Run: `set -o pipefail; timeout 1800 just build 2>&1 | tail -5`
 Expected: exit 0. A row whose module is missing fails evaluation with `agent-tools: command review-range has no module`, and a broken import fails the import check.
 
 Run the installed-launcher seam against the built home:
@@ -56,7 +56,7 @@ test -x "$1/.agents/bin/review-range"
 
 Expected: `OK`, then `usage: review-range …`.
 
-Run: `PYTHONPATH=python timeout 600 python3 -m unittest home/common/agent-skills/tests/test_shell_example_contracts.py tests/test_review_range.py 2>&1 | tail -3`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" timeout 600 python3 -m unittest home/common/agent-skills/tests/test_shell_example_contracts.py tests/test_review_range.py 2>&1 | tail -3`
 Expected: `OK`.
 
 - [ ] **Step 5: Commit**

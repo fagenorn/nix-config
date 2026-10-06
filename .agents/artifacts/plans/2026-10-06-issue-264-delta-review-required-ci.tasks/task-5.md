@@ -80,7 +80,7 @@ Add these methods to `WorkflowSkillContractsTest`:
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
-Run: `PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k required 2>&1 | tail -3`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k required 2>&1 | tail -3`
 Expected: `FAILED (failures=3)`. Today the command has no `--required`.
 
 - [ ] **Step 3: Write the prose**
@@ -103,7 +103,7 @@ Then run the root's ceiling snippet and raise each breached pair with the note `
 
 - [ ] **Step 4: Verify**
 
-Run: `PYTHONPATH=python timeout 900 python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_instruction_load.py home/common/agent-skills/tests/test_shell_example_contracts.py home/common/agent-skills/tests/test_ship_release_contracts.py 2>&1 | tail -3`
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" timeout 900 python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_instruction_load.py home/common/agent-skills/tests/test_shell_example_contracts.py home/common/agent-skills/tests/test_ship_release_contracts.py 2>&1 | tail -3`
 Expected: `OK`.
 
 Run: `git diff --name-only 40fa9c7 -- home/common/agent-skills/skills/ship-release home/common/claude-code .github`
@@ -125,5 +125,5 @@ After this commit, run the whole suite once as the plan's acceptance gate (AC3):
 Run: `timeout 3000 just agent-workflow-tests > "${TMPDIR:-/tmp}/issue264-awt.log" 2>&1; echo "exit $?"; tail -3 "${TMPDIR:-/tmp}/issue264-awt.log"`
 Expected: `exit 0` and `OK`.
 
-Run: `timeout 1800 just build 2>&1 | tail -3`
+Run: `set -o pipefail; timeout 1800 just build 2>&1 | tail -3`
 Expected: exit 0.
