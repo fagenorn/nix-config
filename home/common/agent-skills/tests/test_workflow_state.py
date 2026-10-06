@@ -32,6 +32,11 @@ def load_source_module(path, name, *, package=False):
     return module
 
 
+INPROCESS_CLI = load_source_module(
+    Path(__file__).with_name("_inprocess_cli.py"), "workflow_state_test_inprocess_cli"
+)
+
+
 class LifecycleHarness:
     """The lifecycle suites' CLI runner, request builders and ledger helpers."""
 
@@ -143,13 +148,7 @@ class LifecycleHarness:
         return self.workflows_dir / self.run_id / "state.json"
 
     def run_cli(self, *args, ok=True):
-        completed = subprocess.run(
-            [sys.executable, str(SCRIPT), *map(str, args)],
-            capture_output=True,
-            text=True,
-            check=False,
-            env=self.cli_env,
-        )
+        completed = INPROCESS_CLI.run_script(SCRIPT, args, env=self.cli_env)
         if ok and completed.returncode != 0:
             self.fail(
                 f"command failed with {completed.returncode}: {completed.stderr}"
@@ -971,10 +970,11 @@ class LifecycleHarness:
     def run_control_at_root(self, root, request):
         request_path = root / "copied-control.json"
         request_path.write_text(json.dumps(request), encoding="utf-8")
-        completed = subprocess.run(
-            [sys.executable, str(SCRIPT), "control", "--repo-root", str(root),
-             "--run-id", self.run_id, "--request-file", str(request_path)],
-            capture_output=True, text=True, check=False, env=self.cli_env,
+        completed = INPROCESS_CLI.run_script(
+            SCRIPT,
+            ["control", "--repo-root", root, "--run-id", self.run_id,
+             "--request-file", request_path],
+            env=self.cli_env,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         completed.stdout = json.dumps(
