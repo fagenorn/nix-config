@@ -252,7 +252,7 @@ Clean review — or everything parked-with-ruling at the cap — appends `Task <
 
 ## Final review — two axes
 
-Mandatory for **every** risk lane — lanes narrow per-task review, never this gate. When all tasks are complete, read [final-review.md](final-review.md) beside this file and follow it: it owns the two isolated axis dispatches, the single fix wave, the scoped per-axis re-reviews, and the escalation rules.
+Mandatory for **every** risk lane — lanes narrow per-task review, never this gate. When all tasks are complete, read [final-review.md](final-review.md) beside this file and follow it: it owns the two isolated axis dispatches, the single fix wave, the scoped per-axis re-reviews, the escalation rules, and the **Final verification** step.
 
 ## Finish
 
@@ -267,9 +267,11 @@ Build one exact SDD JSON object with only `state`, `review_state`,
 `conformance_verdict`, `correctness_verdict`, `verification_state`, `base_sha`,
 `head_sha`, `detail_state`, `report_path`, and `notes`, then run
 `artifact-budget validate-report --boundary sdd` and transport only canonical
-stdout. A non-empty detail set is `present` with one main-root-relative durable
-path. With genuinely no findings it is `none` with a null path; transient review
-evidence is never inlined.
+stdout. `verification_state` is `passed` only when final-review.md's **Final
+verification** step recorded a pass on the reported `head_sha`, and `failed`
+when that step's repair round did not pass. A non-empty detail set is `present`
+with one main-root-relative durable path. With genuinely no findings it is
+`none` with a null path; transient review evidence is never inlined.
 
 If publication fails, run `artifact-budget validate-detail-input` against the
 no-follow retained file and consume canonical stdout, requiring non-empty findings
@@ -287,7 +289,8 @@ empty-findings input remains failed without an unpublished claim.
 Terminal states:
 
 - **Clean** — both axes clean (or clean after the fix wave), or every remaining
-  finding parked-with-ruling: delete this plan's workspace (`rm -rf <workspace>`;
+  finding parked-with-ruling, and the **Final verification** step recorded a
+  pass on `head_sha`: delete this plan's workspace (`rm -rf <workspace>`;
   sibling directories belong to other plans) and report `review_state: clean` —
   parked findings are already available through the one durable report.
 - **Residuals** — the breaker surfaced a load-bearing residual the caller must

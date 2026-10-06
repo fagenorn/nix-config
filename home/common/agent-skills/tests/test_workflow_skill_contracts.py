@@ -4992,5 +4992,60 @@ class InstalledOrchestrateRoutesTest(unittest.TestCase):
         self.assertEqual(installed(".claude/skills"), ORCHESTRATE.read_text(encoding="utf-8"))
 
 
+class CheckpointVerificationContractsTest(unittest.TestCase):
+    """#263: the full declared verification runs at checkpoints, recorded by tree."""
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def read(path):
+        return normalized(path.read_text(encoding="utf-8"))
+
+    def test_final_verification_follows_the_fix_wave_in_order(self):
+        self.assert_ordered(
+            self.read(SDD_DIR / "final-review.md"),
+            "There is no second fix wave",
+            "## Final verification",
+            "after the fix wave and its scoped re-reviews",
+            "before you choose the terminal state",
+            "`bindings.workflow.verification`",
+            "1. **Check.**", "`verified-tree check --verification <id>`",
+            "keep the `tree` it prints", "Exit 0 with `verified`", "skip step 2.",
+            "2. **Run and record.**",
+            "in the foreground with an explicit timeout above its duration",
+            "only the tail read back",
+            "When every command passes, run `verified-tree record --tree <the checked tree>`",
+            "3. **Ledger.**",
+            "`Final verification: passed (head <full sha>, tree <tree id>)`",
+            "4. **Repair once.**", "`tree_changed`", "exits 2 is not a pass",
+            "Dispatch the final-review fixer above once",
+            "`git status --porcelain`",
+            "one scoped correctness re-review",
+            "then run steps 1–3 once more",
+            "load-bearing correctness finding",
+            "the terminal state is Residuals",
+            "`verification_state: failed`")
+
+    def test_sdd_finish_ties_passed_to_the_recorded_final_verification(self):
+        sdd = self.read(SDD)
+        self.assert_ordered(
+            sdd, "## Final review — two axes", "the **Final verification** step",
+            "## Finish",
+            "`verification_state` is `passed` only when final-review.md's "
+            "**Final verification** step recorded a pass on the reported `head_sha`",
+            "- **Clean** —",
+            "and the **Final verification** step recorded a pass on `head_sha`",
+            "- **Residuals** —")
+        finish = sdd.split("## Finish", 1)[1]
+        for restated in ("verified-tree", "Final verification: passed"):
+            with self.subTest(restated=restated):
+                self.assertNotIn(restated, finish)
+
+
 if __name__ == "__main__":
     unittest.main()

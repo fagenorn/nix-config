@@ -67,3 +67,35 @@ explicit full-review dispatch:
 Agent(subagent_type="reviewer", model="opus", effort="high") adjudicates an ambiguous or branch-wide final-axis re-review escape.
 
 Record the escalation and selected full-review role in the SDD ledger. Adjudicate residuals like the task-loop breaker. There is no second fix wave — residual load-bearing findings surface to the caller.
+
+## Final verification
+
+Run this after the fix wave and its scoped re-reviews, or right after the first
+pass when neither axis had findings, and before you choose the terminal state.
+It is the plan's one run of the full declared verification: every retained
+`bindings.workflow.verification` id, in order, each dereferenced through
+`bindings.commands`.
+
+1. **Check.** In the worktree, run `verified-tree check --verification <id>`,
+   repeating `--verification` for each id, and keep the `tree` it prints.
+   Exit 0 with `verified` means this exact tree already passed these commands
+   (a resumed controller, say): skip step 2.
+2. **Run and record.** Otherwise run every declared verification command once,
+   in the foreground with an explicit timeout above its duration, its output in
+   a log on disk and only the tail read back. When every command passes, run
+   `verified-tree record --tree <the checked tree>` with the same
+   `--verification` ids.
+3. **Ledger.** Append
+   `Final verification: passed (head <full sha>, tree <tree id>)` to the SDD
+   ledger. That line is the readable copy; the record file in the worktree's
+   git directory is the one `verified-tree check` reads.
+4. **Repair once.** A failing command, a `record` that exits 3 with
+   `tree_changed`, or a `check` or `record` that exits 2 is not a pass.
+   Dispatch the final-review fixer above once, carrying the failing command and
+   its log path, the `git status --porcelain` output for `tree_changed`, or the
+   helper's stderr line for an exit 2. Run one scoped correctness re-review of
+   that fix diff, through the final correctness re-review above and the same
+   fix-range package gate, then run steps 1–3 once more. If verification still
+   does not pass, record the failure as a load-bearing correctness finding in
+   the retained detail: the terminal state is Residuals and the report carries
+   `verification_state: failed`.
