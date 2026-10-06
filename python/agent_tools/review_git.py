@@ -214,12 +214,26 @@ def original_commit(repo: Path, oid: str) -> OriginalCommit:
     return _closure(repo, (oid,))[oid]
 
 
+# Tips per closure: bounds the `rev-list` argv a large request expands into (#262).
+_CLOSURE_TIPS = 1024
+
+
 def original_commits(repo: Path, oids: Sequence[str]) -> tuple[OriginalCommit, ...]:
-    """Several authenticated commits, in the order asked, from one closure (#262 D3)."""
+    """Several authenticated commits, in the order asked, from one closure per bounded chunk (#262 D3)."""
     oids = tuple(oids)
     if not oids:
         return ()
-    commits = _closure(repo, oids)
+    tips: list = []
+    seen: set[str] = set()
+    for oid in oids:
+        if not isinstance(oid, str):
+            tips.append(oid)  # left in place for _closure to refuse as an identity mismatch
+        elif oid not in seen:
+            seen.add(oid)
+            tips.append(oid)
+    commits: dict[str, OriginalCommit] = {}
+    for start in range(0, len(tips), _CLOSURE_TIPS):
+        commits.update(_closure(repo, tuple(tips[start:start + _CLOSURE_TIPS])))
     return tuple(commits[oid] for oid in oids)
 
 
