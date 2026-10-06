@@ -3964,7 +3964,10 @@ def resume_next_action(*, phase: int, phase_action: str | None,
     A handoff path points the owner at its handoff only while the last recorded
     gate is that handoff: the path is never cleared once spent. SDD's resume
     point steers only from phase 5, where Phase 6 executes the plan; it names
-    ``finish_phase`` only when every task of a known count is complete.
+    ``finish_phase`` only when every task of a known count is complete. An
+    attempt with no recorded gate (``phase_action`` None, as spawned) has not
+    finished Phase 0, so it starts Phase 0; otherwise the phase after the last
+    recorded gate starts.
     """
     if handoff_path is not None and phase_action == "handoff":
         return {"kind": "read_handoff", "path": handoff_path}
@@ -3979,7 +3982,7 @@ def resume_next_action(*, phase: int, phase_action: str | None,
             return {"kind": "finish_phase", "phase": 6}
         return {"kind": "resume_task", "phase": 6, "task": resume_point["task"],
                 "mid_fix_loop": resume_point["mid_fix_loop"]}
-    return {"kind": "start_phase", "phase": phase + 1}
+    return {"kind": "start_phase", "phase": 0 if phase_action is None else phase + 1}
 
 
 def bound_resume_pack(pack: dict[str, Any]) -> dict[str, Any]:
@@ -4588,7 +4591,8 @@ def read_sdd_position(bucket: Path, worktree: str
     are ambiguous and carry no resume point. ``resume_point`` is SDD's own
     rule, read from the full ledger before any cap: the first task without a
     ``complete`` line, ``task`` None only when every one of a known
-    ``task_count`` is complete (#265 D6, D13).
+    ``task_count`` is complete (#265 D6, D13). A member directory holding no
+    task member is an unknown count, never a count of zero.
     """
     try:
         for component in (bucket.parent.parent, bucket.parent, bucket):
@@ -4619,7 +4623,7 @@ def read_sdd_position(bucket: Path, worktree: str
         task_count = (sum(1 for member in members.iterdir()
                           if SDD_TASK_MEMBER.fullmatch(member.name)
                           and _non_symlink(member, stat.S_ISREG))
-                      if _non_symlink(members, stat.S_ISDIR) else None)
+                      if _non_symlink(members, stat.S_ISDIR) else 0) or None
     except (OSError, ValueError) as error:
         # A plan path carrying a NUL byte makes `lstat` raise ValueError.
         raise WorkflowError(SDD_WORKSPACE_UNRESOLVED) from error

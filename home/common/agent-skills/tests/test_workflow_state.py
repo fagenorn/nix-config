@@ -6911,7 +6911,7 @@ class ResumePackTest(ResumePackHarness, unittest.TestCase):
                             {"sha": first[:12], "subject": "first task"}],
                 "truncated": False},
             "sdd": None,
-            "next_action": {"kind": "start_phase", "phase": 1},
+            "next_action": {"kind": "start_phase", "phase": 0},
         })
         self.assertEqual(self.expected_ledger()["progress_marker"], self.base)
 
@@ -6948,7 +6948,7 @@ class ResumePackTest(ResumePackHarness, unittest.TestCase):
                          ("suspended", "usage_limit"))
         self.assertEqual(pack["commits_since_marker"]["commits"],
                          [{"sha": work[:12], "subject": "task one"}])
-        self.assertEqual(pack["next_action"], {"kind": "start_phase", "phase": 1})
+        self.assertEqual(pack["next_action"], {"kind": "start_phase", "phase": 0})
         self.assert_refused("16:1:2", "launch 16:1:2 is superseded_launch")
         self.resume(issue=16, worktree=str(self.worktree), now=self.tick())
         resumed = self.pack("16:1:2")
@@ -6974,6 +6974,16 @@ class ResumePackTest(ResumePackHarness, unittest.TestCase):
         pack = self.pack("16:1:2")
         self.assertEqual(pack["ledger"]["handoff_path"], stored)
         self.assertEqual(pack["next_action"], {"kind": "start_phase", "phase": 3})
+
+    def test_phase_0_restarts_until_its_gate_is_recorded(self):
+        # Final review C-001: a fresh attempt sits at phase 0 with no gate, so
+        # an interrupted Phase 0 is unfinished, not complete.
+        self.assertIsNone(self.attempt()["phase_action"])
+        self.assertEqual(self.pack("16:1:1")["next_action"],
+                         {"kind": "start_phase", "phase": 0})
+        self.progress(issue=16, phase=0, now=self.tick())
+        self.assertEqual(self.pack("16:1:1")["next_action"],
+                         {"kind": "start_phase", "phase": 1})
 
     def test_a_completed_phase_7_reorients(self):
         self.progress(issue=16, phase=7, now=self.tick())
@@ -7126,6 +7136,15 @@ class ResumePackSddTest(ResumePackHarness, unittest.TestCase):
         self.assertEqual(pack["next_action"], {"kind": "resume_task", "phase": 6,
                                                "task": 3, "mid_fix_loop": False})
 
+    def test_an_empty_task_member_directory_is_an_unknown_count(self):
+        # Final review: zero members must never read as "every task complete".
+        self.at_phase(5)
+        self.sdd_ledger("plans/p.md", [], tasks=0)
+        pack = self.pack("16:1:1")
+        self.assertIsNone(pack["sdd"]["task_count"])
+        self.assertEqual(pack["next_action"], {"kind": "resume_task", "phase": 6,
+                                               "task": 1, "mid_fix_loop": False})
+
     def test_an_absolute_plan_path_is_used_as_is(self):
         self.at_phase(5)
         plan = str(self.worktree / "plans" / "p.md")
@@ -7138,7 +7157,7 @@ class ResumePackSddTest(ResumePackHarness, unittest.TestCase):
         self.sdd_ledger("plans/p.md", [self.FIX.format(1)], tasks=2)
         pack = self.pack("16:1:1")
         self.assertEqual(pack["sdd"]["completed"], [])
-        self.assertEqual(pack["next_action"], {"kind": "start_phase", "phase": 1})
+        self.assertEqual(pack["next_action"], {"kind": "start_phase", "phase": 0})
 
     def test_two_plan_ledgers_are_ambiguous(self):
         self.at_phase(5)
