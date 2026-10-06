@@ -105,6 +105,8 @@ class Bounded121Test(unittest.TestCase):
         self.assertEqual(caught.exception.code, "invalid_payload")
 ```
 
+Also append to `tests/test_review_compact121.py` one below-budget equivalence case (Codex S1, per D9), `test_lineage_keeps_the_pre_256_rule`: a test-local reference copy of the `DELIVERY_BASE` `_lineage` rule (sets unioned per record, then every edge in edge order whose id is in a path's set), applied to small forged payloads built from the committed issue-121 payload with (a) a rename chain `a → b → c` plus a later modification of `a`'s new occupant and (b) two edges whose ids coincide on one path. Each must expand without refusal through `expand_121`, and the `aggregate.actual` `edge_ids` the public path yields (expansion, or `model_121` over a fixture that derives those records) must equal the reference rule's ordered lists exactly, duplicates included. Use only public names (D5); if no public seam reaches lineage for a forged payload, assert it through the derivation suite's existing `test_rehashed_final_record_lineage_is_recomputed` pattern in `tests/test_review_issue121.py` instead and name that in the task report.
+
 `tests/test_review_replay.py`: add `edges_by_rows_121` to the support import, and make `FORGED`
 
 ```python

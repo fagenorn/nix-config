@@ -80,6 +80,7 @@ Both must show `complete/within_budget` with identical metrics; G1 overrides eve
 **G3, final.** In this order, each bounded, with no skip counted as a pass:
 
 ```sh
+set -o pipefail  # each line's status is its first failing stage, never `tail`'s (Codex S2)
 PYTHONPATH=python timeout 1800 python3 -m unittest tests.test_review_expansion tests.test_review_compact100 \
   tests.test_review_compact121 tests.test_review_replay tests.test_review_evidence 2>&1 | tail -3
 timeout 7200 just agent-workflow-tests 2>&1 | tail -3
@@ -88,7 +89,7 @@ timeout 3600 just agent-installed-skill-tests > "$EV/installed.log" 2>&1; echo "
 timeout 14400 just agent-retained-tests /Users/anis/tmp/nix-config > "$EV/retained.log" 2>&1; echo "exit=$?"
 ```
 
-`AGENT_RETAINED_TOOL_COMMIT` is left unset (the final head). The retained run is quiescent (RP11). Then separate authorship-independent conformance and correctness reviews read the complete fixed-base delivery; the correctness review repeats #254's I1 probe (a ≈975 kB issue-100 member) and the M1 probe against the final head with `measured` and records each time and traced peak (spec § *Delivery gates*). Required CI remains the merge gate. Nothing is activated.
+Every line must exit 0 (`exit=0` for the last two). `AGENT_RETAINED_TOOL_COMMIT` is left unset (the final head). The retained run is quiescent (RP11). Then separate authorship-independent conformance and correctness reviews read the complete fixed-base delivery; the correctness review repeats #254's I1 probe (a ≈975 kB issue-100 member) and the M1 probe against the final head with `measured` and records each time and traced peak (spec § *Delivery gates*). Required CI remains the merge gate. Nothing is activated.
 
 ## Acceptance coverage
 
@@ -109,3 +110,8 @@ D1–D4 govern both tasks' product code; D2 also governs Task 1's module move; D
 ```json
 {"actual_evidence":{"head":"84bd99151ed2da073a12de43b8cda52e40ce303d","kind":"git-range-ownership/v1","process_ranges":[{"base":"31be7292b40159c5a3f49cc24f21b3292ba4ce89","boundaries":["bounded"],"head":"84bd99151ed2da073a12de43b8cda52e40ce303d"}],"tree":"e3c138f5855bcc83daa2ed05a847eeae47e6f109"},"boundaries":[{"acceptance":"Complete BOUNDED: both retained expanders charge what they build to one per-call budget of MEMBER_MAX_BYTES, with linear _refs and _lineage, so a maximal forged member is refused invalid_payload within 5 s and 32 MiB; real payloads expand byte-identically; G0, G1 and G3 gates and independent reviews.","depends_on":[],"id":"bounded","parent":null,"prerequisite":{"kind":"delivery-base"},"process_commit_subject_bytes":[64,64,64,64,64,64,64,64,64,64],"process_forecast_ids":["p1","p2","p3","p4"],"process_package":{"plan":".agents/artifacts/plans/2026-10-06-issue-256-bounded-expansion.md","spec":".agents/artifacts/specs/2026-10-06-issue-256-bounded-expansion-design.md","tasks":[".agents/artifacts/plans/2026-10-06-issue-256-bounded-expansion.tasks/task-1.md",".agents/artifacts/plans/2026-10-06-issue-256-bounded-expansion.tasks/task-2.md"]},"tasks":[1,2]}],"delivery_base":"31be7292b40159c5a3f49cc24f21b3292ba4ce89","derived_from":null,"kind":"review-feasibility-delivery","process_records":[{"bounds":[{"added_lines":260,"boundary":"bounded","deleted_lines":0,"record_bytes":26624,"support":{"covers":["p1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"p1","last_task":2,"owner":0,"path":".agents/artifacts/specs/2026-10-06-issue-256-bounded-expansion-design.md"},{"bounds":[{"added_lines":200,"boundary":"bounded","deleted_lines":0,"record_bytes":20480,"support":{"covers":["p2"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"p2","last_task":2,"owner":0,"path":".agents/artifacts/plans/2026-10-06-issue-256-bounded-expansion.md"},{"bounds":[{"added_lines":460,"boundary":"bounded","deleted_lines":0,"record_bytes":32768,"support":{"covers":["p3"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"p3","last_task":2,"owner":0,"path":".agents/artifacts/plans/2026-10-06-issue-256-bounded-expansion.tasks/task-1.md"},{"bounds":[{"added_lines":280,"boundary":"bounded","deleted_lines":0,"record_bytes":22528,"support":{"covers":["p4"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"p4","last_task":2,"owner":0,"path":".agents/artifacts/plans/2026-10-06-issue-256-bounded-expansion.tasks/task-2.md"}],"proposed_boundary":"bounded","schema_version":3}
 ```
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra/xhigh), isolated and read-only, no fallback; base `31be7292b40159c5a3f49cc24f21b3292ba4ce89`; no focus.
+- Findings: 0 Blocking, 2 Should fix, both verified against the live worktree and accepted (S1 into Task 2 Step 1 per D9; S2 into G3); 0 rejected, 0 deferred.
