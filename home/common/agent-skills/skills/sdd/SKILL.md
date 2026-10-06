@@ -267,12 +267,17 @@ Build one exact SDD JSON object with only `state`, `review_state`,
 `conformance_verdict`, `correctness_verdict`, `verification_state`, `base_sha`,
 `head_sha`, `detail_state`, `report_path`, and `notes`, then run
 `artifact-budget validate-report --boundary sdd` and transport only canonical
-stdout. `verification_state` is `passed` only when final-review.md's **Final
-verification** step recorded a pass on the reported `head_sha` or took its
-none-declared route with the per-task focused tests passing, and `failed` when
-that step's repair round did not pass. A non-empty detail set is `present` with
-one main-root-relative durable path. With genuinely no findings it is `none`
-with a null path; transient review evidence is never inlined.
+stdout. `base_sha` and `head_sha` are the `DELIVERY_BASE` and `DELIVERY_HEAD`
+the final review's first pass covered, never the branch tip: when the fix wave
+adds commits, the tip is past `head_sha`, and ship-issue reviews those commits
+again as part of its delta since that final-review head. `verification_state`
+is `passed` only when final-review.md's **Final verification** step recorded a
+pass on the branch tip it ran on (the tip after the fix wave, past `head_sha`
+when that wave added commits) or took its none-declared route with the
+per-task focused tests passing, and `failed` when that step's repair round did
+not pass. A non-empty detail set is `present` with one main-root-relative
+durable path. With genuinely no findings it is `none` with a null path;
+transient review evidence is never inlined.
 
 If publication fails, run `artifact-budget validate-detail-input` against the
 no-follow retained file and consume canonical stdout, requiring non-empty findings
@@ -291,7 +296,7 @@ Terminal states:
 
 - **Clean** — both axes clean (or clean after the fix wave), or every remaining
   finding parked-with-ruling, and the **Final verification** step recorded a
-  pass on `head_sha` or took its none-declared route:
+  pass on the branch tip or took its none-declared route:
   delete this plan's workspace (`rm -rf <workspace>`; sibling directories
   belong to other plans) and report `review_state: clean` — parked findings
   are already available through the one durable report.

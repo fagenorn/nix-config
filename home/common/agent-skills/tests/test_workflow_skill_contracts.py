@@ -62,6 +62,9 @@ CODEX_COLLABORATION_EVALS = (
 # and its eval are both checked against these two strings so they cannot drift.
 GATE_LINE_BOUNDARY = "≤1,000 product lines"
 GATE_FILE_BOUNDARY = "≤20 product files"
+REQUIRED_WATCH = "timeout 300 gh pr checks <pr-num> --required --watch --fail-fast --interval 30"
+ALL_CHECKS_WATCH = "timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30"
+ADVISORY_CALL = "gh pr checks <pr-num> --json name,bucket"
 
 SKILL_ROOTS = (
     REPO_ROOT / "home/common/agent-skills/skills",
@@ -1264,7 +1267,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertIn("## Delivery loop", appendix)
 
     def test_ship_issue_post_selection_sync_route(self):
-        """#192 T11: CI-MERGE.md owns the route; SKILL.md points to it from four places."""
+        """#192 T11: CI-MERGE.md owns the route; SKILL.md points to it from five places.
+
+        The fifth is Phase 5's merge-delta reviewer, which only that route dispatches (#264).
+        """
         route = normalized(self.ship_ci_merge.split("## Post-selection sync", 1)[1])
         self.assert_ordered(route, "**sync selection**", "whoever holds the merge gate",
             "**current selection**", "`--kind current-selection`",
@@ -1288,7 +1294,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "Should-fix", "`terminal_failed` `ship-summary/v2`", "`stopped` row",
             "its own `finish`")
         self.assertNotIn("Agent(", self.ship_ci_merge)
-        self.assertEqual(self.ship_issue.count("`## Post-selection sync`"), 4)
+        self.assertEqual(self.ship_issue.count("`## Post-selection sync`"), 5)
         loop = normalized(self.section(self.ship_issue, "## Delivery loop", "## Remainder mode"))
         self.assert_ordered(loop, "**The pre-merge selection gate.**",
             "`## Post-selection sync`", "**Denials.**", "cannot merge into its base",
@@ -1938,6 +1944,29 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for forbidden in ("parked_findings:", "verdict_details:", "open_items:", "summary:"):
             self.assertNotRegex(self.sdd, rf"(?m)^\s*{re.escape(forbidden)}")
 
+    def test_sdd_head_sha_is_the_final_review_first_pass_head(self):
+        # The report states the range both axes reviewed whole, not the branch
+        # tip, so ship can review the fix wave again as its delta (#264 D1).
+        finish = normalized(self.section(self.sdd, "## Finish", "If publication fails"))
+        self.assertIn(
+            "`base_sha` and `head_sha` are the `DELIVERY_BASE` and `DELIVERY_HEAD`"
+            " the final review's first pass covered, never the branch tip", finish)
+        self.assertIn("the tip is past `head_sha`", finish)
+        final_review = normalized((SDD_DIR / "final-review.md").read_text(encoding="utf-8"))
+        self.assert_ordered(final_review, "review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD",
+                            "Those two pins are the report's `base_sha` and `head_sha`",
+                            "the fix wave below does not move them")
+
+    def test_handoff_head_sha_is_the_sdd_report_head_sha(self):
+        handoff = normalized(self.ship_handoff)
+        self.assertIn("In both handoff shapes, `head_sha` is the validated sdd report's"
+                      " `head_sha`", handoff)
+        self.assertIn("the *final-review head* ship-issue's Phase 5 reviews from", handoff)
+        from_issue = normalized(self.from_issue)
+        self.assertIn("ship-issue's Phase-5 range selection reads them, taking `head_sha` as"
+                      " the final-review head only when `review_state` is `clean`", from_issue)
+        self.assertNotIn("Phase-5 degradation decision reads them", from_issue)
+
     def test_received_reports_cross_the_same_json_wire_seam(self):
         self.assert_ordered(self.from_issue, "received stdout bytes",
                             "validate-report --boundary producer --input -", "decode JSON")
@@ -2028,9 +2057,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("check the spec too when its decision ledger changed", self.standards_review)
         self.assertIn("do not dispatch SDD", self.standards_review)
 
-    def test_ship_expands_validated_plan_only_for_diff_scope_exclusion(self):
+    def test_ship_expands_validated_plan_only_for_review_range_exclusion(self):
         self.assert_ordered(self.ship_issue, "artifact-budget check", "discover the plan members",
-                            "diff-scope", "--artifact-path")
+                            "review-range", "--artifact-path")
         self.assertIn("one argument for the plan root and each discovered member", self.ship_issue)
         self.assertIn("≤1,000 product lines", self.ship_issue)
         self.assertIn("≤20 product files", self.ship_issue)
@@ -3245,33 +3274,28 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("so the reviewer need not re-measure them", plan_packet)
 
     def test_degradation_gate_delegates_counting_and_carries_the_retuned_boundary(self):
-        # The gate states a policy and calls the helper; the accounting itself
-        # lives in `agent_tools.diff_scope` and is not restated here.
-        gate = self.section(
-            self.ship_issue,
-            "**Pick the path first.**",
-            "**Merge-delta check (degraded path).**",
-        )
+        # The gate states a policy and calls the helper; the ancestry and
+        # accounting live in `agent_tools.review_range` / `diff_scope` (#264 D2).
+        gate = self.section(self.ship_issue, "**Pick the range first.**",
+                            "**Route the review.**")
         for fragment in (
             GATE_LINE_BOUNDARY,
             GATE_FILE_BOUNDARY,
-            # the whole invocation, not its pieces: a gate that named only
-            # <spec_path> would satisfy a bare "--artifact-path" check while
-            # under-naming this run's artifacts and inflating the count (D3).
-            "diff-scope $BASE_SHA..$HEAD_SHA --format text"
+            # the whole invocation: the thresholds passed must be the ones stated (D2).
+            "review-range --integration-ref origin/<integration> --head $HEAD_SHA"
+            " --final-review-head <final-review head> --max-lines 1000 --max-files 20"
             " --artifact-path <spec_path> --artifact-path <plan_path>",
+            "distinct from the reviewed `HEAD_SHA`",
             "No measurement",
             "is not a small diff",
+            "`review-range unavailable`",
             "a historical artifact that is itself the requested product still counts",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, gate)
-        for absent in ("--numstat", "400", "--root"):
+        for absent in ("--numstat", "400", "--root", "diff-scope $BASE_SHA"):
             with self.subTest(absent=absent):
                 self.assertNotIn(absent, gate)
-        # Each anchor carries its prerequisite's polarity: bare "manual conflict
-        # escalation" / "`risky` label" would still match a gate that demanded
-        # the opposite condition, so an inverted prerequisite would pass.
         self.assert_ordered(
             gate,
             "`review_state` is `clean`",
@@ -3294,13 +3318,108 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for fragment in (
             GATE_LINE_BOUNDARY,
             GATE_FILE_BOUNDARY,
-            f"the diff is small ({GATE_LINE_BOUNDARY} / {GATE_FILE_BOUNDARY},"
-            " measured with `diff-scope` rather than hand-counted numstat"
-            " arithmetic)",
+            f"the delta is small ({GATE_LINE_BOUNDARY} / {GATE_FILE_BOUNDARY},"
+            " measured with `review-range` rather than hand-counted numstat arithmetic)",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, expected)
+        self.assertNotIn("measured with `diff-scope`", expected)
         self.assertNotIn("≤400", expected)
+
+    def test_phase_five_reviews_the_selected_range_on_two_axes(self):
+        phase_five = normalized(self.section(self.ship_issue, "## Phase 5 — Review the PR",
+                                             "## Phase 6 — Wait for CI"))
+        route = normalized(self.section(self.ship_issue, "**Route the review.**",
+                                        "**Merge-delta reviewer (post-selection sync only).**"))
+        self.assert_ordered(route, "`delta`", "`<review_base>..$HEAD_SHA`",
+                            "delta-route conformance brief", "`empty`", "skip to Phase 6",
+                            "`full`", "`$BASE_SHA..$HEAD_SHA`", "per REVIEW.md")
+        merge_delta = self.section(self.ship_issue,
+                                   "**Merge-delta reviewer (post-selection sync only).**",
+                                   "**Full two-axis review.**")
+        self.assertIn("Phase 5 never dispatches it", normalized(merge_delta))
+        self.assertIn("<!-- agent-dispatch: id=ship-issue-merge-delta-review role=reviewer"
+                      " model=opus effort=high -->", merge_delta)
+        full = normalized(ship_correctness_route(self.ship_issue))
+        self.assertIn("Both the `delta` and `full` routes run it", full)
+        self.assertIn("`<review_base>..$HEAD_SHA` on `delta`, `$BASE_SHA..$HEAD_SHA` otherwise",
+                      full)
+        self.assertNotIn("merge-delta empty, nothing to review", phase_five)
+        self.assertIn("5. Review the PR → review-range picks delta, empty or full;"
+                      " two-axis review over it", normalized(self.ship_issue))
+        self.assertIn("it dispatches zero (empty review range) or two first-pass reviewer"
+                      " subagents", normalized(self.ship_handoff))
+        self.assertNotIn("zero (empty merge-delta), one, or two", normalized(self.ship_handoff))
+
+    def test_review_md_owns_the_delta_brief_and_the_range_record(self):
+        review = normalized(self.ship_review)
+        delta = normalized(self.section(self.ship_review, "## Delta route",
+                                        "## Severity mapping (full path)"))
+        for fragment in (
+            "`<review_base>..$HEAD_SHA`",
+            "already graded delivered-vs-promised for the branch at R",
+            "scope-creep categories", "review hint path",
+            "stale-prose audit limited to files the delta touches",
+            "never grades the whole branch's delivery again",
+            "`review range: delta <review_base7>..<head7> since final-review <R7>"
+            " (<L> lines, <F> files)`",
+            "`review range: empty since final-review <R7>`",
+            "`review range: full (<reason>)`",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, delta)
+        merge_delta = normalized(self.section(self.ship_review,
+                                              "## Merge-delta check (post-selection sync)",
+                                              "## Full two-axis review — templates"))
+        self.assertIn("Phase 5 never does", merge_delta)
+        self.assertIn("`git show --cc <merge-commit>`", merge_delta)
+        self.assertNotIn("after the head sdd reviewed", review)
+        self.assertNotIn("merge-delta empty, nothing to review", review)
+
+    def test_phase_six_waits_on_required_checks_and_lists_advisory_states(self):
+        # #264 D6-D8: block on the forge's required set, fall back to every
+        # check when none is reported, and report the rest in notes.
+        phase_six = self.section(self.ship_issue, "## Phase 6 — Wait for CI",
+                                 "## Phase 7 — Merge")
+        self.assertIn(REQUIRED_WATCH, re.findall(r"```\n(.*?)\n```", phase_six, re.S))
+        collapsed = normalized(phase_six)
+        self.assert_ordered(collapsed, REQUIRED_WATCH, "Exit `124`",
+                            "`no required checks reported`", ALL_CHECKS_WATCH,
+                            "`CI: no required checks reported; waited on all`",
+                            "a gating check failed", ADVISORY_CALL,
+                            "`advisory CI: <name>=<bucket>, …`")
+        self.assertNotIn("Nix Eval", phase_six)
+        flow = normalized(self.section(self.ship_issue, "## The flow", "## Standing authorization"))
+        self.assertIn("6. Wait for CI → gh pr checks --required --watch (one blocking call;"
+                      " all checks when none is required)", flow)
+        self.assertIn("block on `<tracker-cli> pr checks --required --watch`",
+                      normalized(self.ship_handoff))
+
+    def test_ci_merge_explains_the_required_watch_and_its_fallback(self):
+        why = self.section(self.ship_ci_merge, "## Why the blocking watch is shaped that way",
+                           "## Exit codes")
+        self.assertIn(REQUIRED_WATCH, why)
+        self.assertIn("branch protection's own", normalized(why))
+        exits = normalized(self.section(self.ship_ci_merge, "## Exit codes", "## Advisory states"))
+        self.assert_ordered(exits, "**`0`**", "**`124`**", "`no required checks reported`",
+                            ALL_CHECKS_WATCH, "same exit codes and retry budget",
+                            "**any other non-zero**")
+        advisory = normalized(self.section(self.ship_ci_merge, "## Advisory states",
+                                           "## Merge quirks (Phase 7)"))
+        for fragment in (ADVISORY_CALL, "is not `pass`", "`advisory CI: <name>=<bucket>, …`",
+                         "`+<n> more`", "`historical_owner_result`",
+                         "does not block the merge"):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, advisory)
+
+    def test_ship_issue_eval_restates_the_required_ci_wait(self):
+        expected = next(case for case in self.ship_issue_evals["evals"]
+                        if case["id"] == 1)["expected_output"]
+        for fragment in (f"CI is exactly foreground `{REQUIRED_WATCH}`",
+                         f"falling back to `{ALL_CHECKS_WATCH}` when gh reports no required checks",
+                         f"`{ADVISORY_CALL}`"):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, expected)
 
     def test_ship_issue_merge_is_bound_to_the_resolved_repository(self):
         optional_subject = (
@@ -3623,7 +3742,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(skill=name):
                 self.assertIn("~/.agents/bin/agent-evidence", text)
         with self.subTest(skill="ship-issue"):
-            self.assertIn("~/.agents/bin/diff-scope", self.ship_issue)
+            self.assertIn("~/.agents/bin/review-range", self.ship_issue)
         # The packaged detail producer and external workspace command are both
         # published by bare name; review-package has one command-table owner.
         command_table = (REPO_ROOT / "lib/agent-tools.nix").read_text(encoding="utf-8")
@@ -5042,10 +5161,10 @@ class CheckpointVerificationContractsTest(unittest.TestCase):
             sdd, "## Final review — two axes", "the **Final verification** step",
             "## Finish",
             "`verification_state` is `passed` only when final-review.md's "
-            "**Final verification** step recorded a pass on the reported `head_sha`",
+            "**Final verification** step recorded a pass on the branch tip it ran on",
             "or took its none-declared route with the per-task focused tests passing",
             "- **Clean** —",
-            "and the **Final verification** step recorded a pass on `head_sha`",
+            "and the **Final verification** step recorded a pass on the branch tip",
             "or took its none-declared route",
             "- **Residuals** —")
         finish = sdd.split("## Finish", 1)[1]

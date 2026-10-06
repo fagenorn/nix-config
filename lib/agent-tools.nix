@@ -51,6 +51,7 @@ let
     "resolve-project"
     "review-feasibility"
     "review-package"
+    "review-range"
     "verified-tree"
   ];
 
