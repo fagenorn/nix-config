@@ -10,7 +10,8 @@ Per D2. Hotspot H2: `_guard` in `python/agent_tools/review_git.py` runs before a
 - Produces: `_guard(repo: Path) -> str`, with the same signature and return value as at `BASE` (`"sha1"` or `"sha256"`).
 
 **Invariants:**
-- Exactly three `git` spawns per call. They run in this order: one `rev-parse`, one `for-each-ref`, one `config`.
+- Exactly three `git` spawns per call when the combined `rev-parse` succeeds. They run in this order: one `rev-parse`, one `for-each-ref`, one `config`.
+- When the combined `rev-parse` raises `HistoryError` (for example malformed `GIT_SHALLOW_FILE` contents make `--is-shallow-repository` exit 128), `_guard` returns the result of `_guard_stepwise(repo)` — `BASE`'s `_guard` body kept byte-for-byte under that name — so every failure-path code and its precedence equal `BASE`'s (per PR262-B1 in the plan's standards review provenance).
 - Checks run in `BASE`'s order, with `BASE`'s codes:
   1. a routing variable → `original_repository_routing_unavailable`, before any spawn
   2. a graft or shallow file, or a `GIT_GRAFT_FILE`/`GIT_SHALLOW_FILE`, that is a symlink or non-empty → `original_history_virtualized`
@@ -19,7 +20,7 @@ Per D2. Hotspot H2: `_guard` in `python/agent_tools/review_git.py` runs before a
   5. any ref under `refs/replace/` or `GIT_REPLACE_REF_BASE` → `original_history_virtualized`
   6. promisor or partial-clone configuration → `original_history_unavailable`
   7. an object format other than `sha1`/`sha256` → `original_object_format_unavailable`
-- `rev-parse` output that is not exactly four lines raises `HistoryError("original_history_unavailable")`.
+- Combined `rev-parse` output that is not exactly four lines also falls back to `_guard_stepwise(repo)`.
 - `_closure` still calls `_guard` before and after its walk. The comment `# No retained cache: every API boundary observes current metadata and objects.` stays verbatim.
 
 - [ ] **Step 1: Write the failing probe** (scratch only)
@@ -59,10 +60,14 @@ def _guard(repo: Path) -> str:
             "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")):
         raise HistoryError("original_repository_routing_unavailable")
     # One rev-parse answers locations, shallowness and object format (#262 D2).
-    facts = _git(repo, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir",
-                 "--is-shallow-repository", "--show-object-format").decode().splitlines()
+    # Any failure re-runs BASE's stepwise guard so failure codes keep their precedence.
+    try:
+        facts = _git(repo, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir",
+                     "--is-shallow-repository", "--show-object-format").decode().splitlines()
+    except HistoryError:
+        return _guard_stepwise(repo)
     if len(facts) != 4:
-        raise HistoryError("original_history_unavailable")
+        return _guard_stepwise(repo)
     *locations, shallow, algorithm = facts
     paths = [Path(root) / name for root in locations for name in ("info/grafts", "shallow")]
     for key in ("GIT_GRAFT_FILE", "GIT_SHALLOW_FILE"):
@@ -87,7 +92,7 @@ def _guard(repo: Path) -> str:
     return algorithm
 ```
 
-Keep the promisor `config --null --list` block and its comment byte-for-byte where the placeholder comment sits. Do not commit the placeholder line itself.
+Keep the promisor `config --null --list` block and its comment byte-for-byte where the placeholder comment sits. Do not commit the placeholder line itself. Rename `BASE`'s `_guard` to `_guard_stepwise`, unchanged apart from its name, directly above the new `_guard`.
 
 - [ ] **Step 4: Verify**
 
@@ -95,7 +100,8 @@ Keep the promisor `config --null --list` block and its comment byte-for-byte whe
 2. Run: `grep -c "No retained cache: every API boundary observes current metadata and objects." python/agent_tools/review_git.py`. Expect `1`.
 3. Run `tests/test_review_history.py` and `tests/test_review_evidence.py`, each to `OK`.
 4. Run the adversarial entry-point test, with `timeout 900`: `PYTHONPATH=python python3 -m unittest tests.test_review_issue121.AncestryTest.test_virtualized_history_is_invalid_at_both_entry_points`. Expect `OK`.
-5. Run the root's coverage gate. Expect `COVERAGE-GATE-OK 2077 test ids`.
+5. Differential precedence probe (scratch only, not committed): in a fresh scratch repo, for each environment case — a malformed non-empty `GIT_SHALLOW_FILE` (e.g. the text `garbage`), an empty `GIT_SHALLOW_FILE`, a symlinked `GIT_GRAFT_FILE`, a `refs/replace/` ref, `extensions.partialClone` set, and the clean default — call `_guard` and `_guard_stepwise` and assert both raise the same `HistoryError` code or return the same value. Expect every case equal; the malformed-shallow case must report `original_history_virtualized`.
+6. Run the root's coverage gate. Expect `COVERAGE-GATE-OK 2077 test ids`.
 
 - [ ] **Step 5: Commit**
 

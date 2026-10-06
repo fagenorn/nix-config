@@ -72,7 +72,7 @@ PY
 echo "COVERAGE-GATE-OK $(wc -l < "$work/head.ids" | tr -d ' ') test ids"
 ```
 
-**Timing driver.** Tasks 6 and 7 write this verbatim to `${TMPDIR:-/tmp}/issue262-timing.py` and never commit it (per D6). `python3 issue262-timing.py <tree> [module paths...]` runs each of the recipe's modules (or only the listed ones, in recipe order) as its own serial `unittest` process from `<tree>` with `PYTHONPATH=<tree>/python`. For each it prints one TSV row: tests run, wall seconds, `subprocess.Popen` count in the test process, 1-minute load before the module, and exit code.
+**Timing driver.** Tasks 6 and 7 write this verbatim to `${TMPDIR:-/tmp}/issue262-timing.py` and never commit it (per D6). `python3 issue262-timing.py <tree> [module paths...]` runs each of the recipe's modules (or only the listed ones, in recipe order) as its own serial `unittest` process from `<tree>` with `PYTHONPATH=<tree>/python`. For each it prints one TSV row: tests run, wall seconds, `subprocess.Popen` count in the test process, 1-minute load before the module, and exit code. It writes each failing module's full output to `<tree>.logs/` and, after all rows, exits non-zero naming every module that failed or reported no test count.
 
 ```python
 """Serial per-module timing of the agent-workflow-tests recipe: one unittest process per module."""
@@ -87,7 +87,8 @@ hook = ("import atexit, sys, unittest\n"
         "unittest.main(module=None, argv=['unittest', sys.argv[1]])\n")
 env = {**os.environ, "PYTHONPATH": os.path.join(tree, "python")}
 print("module\ttests\twall_s\tspawns\tload1_before\texit", flush=True)
-total = 0.0
+total = 0.0; failed = []
+logs = tree.rstrip("/") + ".logs"; os.makedirs(logs, exist_ok=True)
 for path in paths:
     load = os.getloadavg()[0]
     start = time.monotonic()
@@ -96,7 +97,12 @@ for path in paths:
     ran = re.search(r"^Ran (\d+) tests?", done.stderr, re.M)
     spawns = re.search(r"^SPAWNS (\d+)$", done.stderr, re.M)
     print(f"{path}\t{ran and ran.group(1)}\t{wall:.1f}\t{spawns and spawns.group(1)}\t{load:.1f}\t{done.returncode}", flush=True)
+    if done.returncode or not ran:
+        failed.append(path)
+        with open(os.path.join(logs, path.replace("/", "__") + ".log"), "w", encoding="utf-8") as log:
+            log.write(done.stdout + done.stderr)
 print(f"TOTAL\t-\t{total:.1f}\t-\t-\t-")
+if failed: sys.exit("failed modules (logs under " + logs + "): " + " ".join(failed))
 ```
 
 ## Delivery estimate and boundaries
@@ -119,3 +125,9 @@ Task 7 — Suite-wide acceptance evidence — no repository file (logs under ${T
 Task 1 rests on D1. Task 2 rests on D2. Tasks 3 and 4 rest on D3 and D9. Task 5 rests on D4 and D10. Task 6 rests on D5 and D11. Task 7 rests on D6, D7 and D8. The spec's `## Decision ledger` holds every row.
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (gpt-6-astra, xhigh), fresh isolated read-only thread; no fallback used. Base SHA `31be7292b40159c5a3f49cc24f21b3292ba4ce89`.
+- Findings: 3 accepted (PR262-B1 Blocking: Task 2 failure-path precedence now falls back to `BASE`'s stepwise guard, with a differential probe; PR262-B2 Blocking: Task 7 baseline runs from a disposable detached Git checkout instead of `git archive`; PR262-S1 Should fix: the timing driver keeps failure logs and exits non-zero), 0 rejected, 0 deferred.
+

@@ -20,7 +20,7 @@ Run Steps 1–5 in one shell session from the worktree root, so `A` stays set.
 ```bash
 set -euo pipefail
 A="${TMPDIR:-/tmp}/issue262-accept"; rm -rf "$A"; mkdir -p "$A/base"
-git archive 31be7292b40159c5a3f49cc24f21b3292ba4ce89 | tar -x -C "$A/base"
+rmdir "$A/base"; git worktree add --detach "$A/base" 31be7292b40159c5a3f49cc24f21b3292ba4ce89
 git status --porcelain > "$A/status-before.txt"
 ```
 
@@ -50,7 +50,7 @@ Run back-to-back, each with `timeout 7200`:
 - `python3 "$A/timing.py" "$A/base" > "$A/base.tsv"`
 - `python3 "$A/timing.py" . > "$A/head.tsv"`
 
-Expected: every row's `exit` is `0` in both files, and each module's `tests` count is equal across the two files. Every head row should show `spawns` at or below its base row. A head row above 90 s is reported with its `load1_before` value. It does not fail this task, because the idle-machine 90 s check happens at ship (per D6).
+Each driver run exits non-zero when any module failed or reported no test count; its failure logs are under `<tree>.logs/`. Expected: every row's `exit` is `0` in both files, and each module's `tests` count is equal across the two files. Every head row should show `spawns` at or below its base row. A head row above 90 s is reported with its `load1_before` value. It does not fail this task, because the idle-machine 90 s check happens at ship (per D6).
 
 - [ ] **Step 5: Summary**
 
@@ -60,13 +60,15 @@ import csv, sys
 A = sys.argv[1]
 rows = {name: list(csv.DictReader(open(f"{A}/{name}.tsv"), delimiter="\t")) for name in ("base", "head")}
 base = {r["module"]: r for r in rows["base"]}
-print("module\ttests\tbase_s\thead_s\tbase_spawns\thead_spawns\thead_load1")
+print("module\ttests\tbase_s\thead_s\tbase_spawns\thead_spawns\thead_load1\tbase_exit\thead_exit")
 for r in rows["head"]:
     b = base[r["module"]]
-    print("\t".join([r["module"], r["tests"], b["wall_s"], r["wall_s"], b["spawns"], r["spawns"], r["load1_before"]]))
+    print("\t".join([r["module"], r["tests"], b["wall_s"], r["wall_s"], b["spawns"], r["spawns"], r["load1_before"], b["exit"], r["exit"]]))
 PY
 cat "$A/summary.txt" | tail -5
 test -z "$(diff <(git status --porcelain) "$A/status-before.txt")"
 ```
+
+Remove the disposable baseline checkout with `git worktree remove --force "$A/base"` (it is the scratch checkout Step 1 created, never another worktree).
 
 Report the `summary.txt` path, the `TOTAL` rows, the suite's `real` time from `suite.log`, and any head module over 90 s with its load. Do not paste the whole table.
