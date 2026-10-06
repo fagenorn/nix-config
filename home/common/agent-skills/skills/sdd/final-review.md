@@ -76,6 +76,12 @@ It is the plan's one run of the full declared verification: every retained
 `bindings.workflow.verification` id, in order, each dereferenced through
 `bindings.commands`.
 
+Route on the retained `capabilities.verification` first. A blocked verification
+capability stops and reports its `reason_code` and `repair_id`. When it is
+authored unsupported, skip this step: append `Final verification: none declared`
+to the SDD ledger, and `verification_state` reports the per-task focused tests
+as it did before this step existed.
+
 1. **Check.** In the worktree, run `verified-tree check --verification <id>`,
    repeating `--verification` for each id, and keep the `tree` it prints.
    Exit 0 with `verified` means this exact tree already passed these commands
@@ -98,4 +104,4 @@ It is the plan's one run of the full declared verification: every retained
    fix-range package gate, then run steps 1–3 once more. If verification still
    does not pass, record the failure as a load-bearing correctness finding in
    the retained detail: the terminal state is Residuals and the report carries
-   `verification_state: failed`.
+   `verification_state: failed` and `correctness_verdict: findings`.

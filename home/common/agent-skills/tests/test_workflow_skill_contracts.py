@@ -5014,6 +5014,10 @@ class CheckpointVerificationContractsTest(unittest.TestCase):
             "after the fix wave and its scoped re-reviews",
             "before you choose the terminal state",
             "`bindings.workflow.verification`",
+            "A blocked verification capability stops",
+            "`reason_code` and `repair_id`",
+            "authored unsupported, skip this step",
+            "`Final verification: none declared`",
             "1. **Check.**", "`verified-tree check --verification <id>`",
             "keep the `tree` it prints", "Exit 0 with `verified`", "skip step 2.",
             "2. **Run and record.**",
@@ -5029,7 +5033,8 @@ class CheckpointVerificationContractsTest(unittest.TestCase):
             "then run steps 1–3 once more",
             "load-bearing correctness finding",
             "the terminal state is Residuals",
-            "`verification_state: failed`")
+            "`verification_state: failed`",
+            "`correctness_verdict: findings`")
 
     def test_sdd_finish_ties_passed_to_the_recorded_final_verification(self):
         sdd = self.read(SDD)
