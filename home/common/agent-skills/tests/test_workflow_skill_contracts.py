@@ -5043,8 +5043,10 @@ class CheckpointVerificationContractsTest(unittest.TestCase):
             "## Finish",
             "`verification_state` is `passed` only when final-review.md's "
             "**Final verification** step recorded a pass on the reported `head_sha`",
+            "or took its none-declared route with the per-task focused tests passing",
             "- **Clean** —",
             "and the **Final verification** step recorded a pass on `head_sha`",
+            "or took its none-declared route",
             "- **Residuals** —")
         finish = sdd.split("## Finish", 1)[1]
         for restated in ("verified-tree", "Final verification: passed"):
