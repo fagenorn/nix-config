@@ -13,7 +13,9 @@ axis is dispatched. Generator exit 0 plus validator exit 0, a strict
 `complete` report, and report/checker agreement permits dispatch. Generator
 exit 3 records and returns `decompose_required` with no reviewer dispatched.
 Generator exit 2, validator exit 2, malformed or unknown output, or disagreement
-records and returns `failed` before dispatch.
+records and returns `failed` before dispatch. Those two pins are the report's
+`base_sha` and `head_sha` (SKILL.md's `## Finish`); the fix wave below does not
+move them.
 
 Pass both axes the manifest root path and all four metrics (`root_bytes`,
 `total_bytes`, `file_count`, `largest_member_bytes`), never shard lists or

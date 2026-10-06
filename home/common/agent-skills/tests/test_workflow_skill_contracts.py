@@ -1938,6 +1938,29 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for forbidden in ("parked_findings:", "verdict_details:", "open_items:", "summary:"):
             self.assertNotRegex(self.sdd, rf"(?m)^\s*{re.escape(forbidden)}")
 
+    def test_sdd_head_sha_is_the_final_review_first_pass_head(self):
+        # The report states the range both axes reviewed whole, not the branch
+        # tip, so ship can review the fix wave again as its delta (#264 D1).
+        finish = normalized(self.section(self.sdd, "## Finish", "If publication fails"))
+        self.assertIn(
+            "`base_sha` and `head_sha` are the `DELIVERY_BASE` and `DELIVERY_HEAD`"
+            " the final review's first pass covered, never the branch tip", finish)
+        self.assertIn("the tip is past `head_sha`", finish)
+        final_review = normalized((SDD_DIR / "final-review.md").read_text(encoding="utf-8"))
+        self.assert_ordered(final_review, "review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD",
+                            "Those two pins are the report's `base_sha` and `head_sha`",
+                            "the fix wave below does not move them")
+
+    def test_handoff_head_sha_is_the_sdd_report_head_sha(self):
+        handoff = normalized(self.ship_handoff)
+        self.assertIn("In both handoff shapes, `head_sha` is the validated sdd report's"
+                      " `head_sha`", handoff)
+        self.assertIn("the *final-review head* ship-issue's Phase 5 reviews from", handoff)
+        from_issue = normalized(self.from_issue)
+        self.assertIn("ship-issue's Phase-5 range selection reads them, taking `head_sha` as"
+                      " the final-review head only when `review_state` is `clean`", from_issue)
+        self.assertNotIn("Phase-5 degradation decision reads them", from_issue)
+
     def test_received_reports_cross_the_same_json_wire_seam(self):
         self.assert_ordered(self.from_issue, "received stdout bytes",
                             "validate-report --boundary producer --input -", "decode JSON")

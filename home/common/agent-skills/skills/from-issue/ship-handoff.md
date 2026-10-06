@@ -43,6 +43,10 @@ The handoff records historical custody and grants no current-stage authority:
 the ledger, not the handoff, is current truth. A v2 handoff carries the full
 contract, so its boundary reads it under the `workflow_responses` wire bound.
 
+In both handoff shapes, `head_sha` is the validated sdd report's `head_sha`,
+copied unchanged and never the branch tip: it is the *final-review head*
+ship-issue's Phase 5 reviews from.
+
 Use `state: failed` only according to the ship-handoff validator's before/after
 matrix. `notes` is bounded by `phase_reports.notes_max_characters`; it names a
 non-null `report_path`. Feed the candidate to
