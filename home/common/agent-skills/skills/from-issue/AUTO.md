@@ -284,6 +284,13 @@ artifact blocks only:
 
 The fresh owner resolves once at its own phase entry and applies that retained `ResolvedProject` to these checks; it is never a member of the continuation object.
 
+Beside the continuation, never inside it, pass a resume pack: after
+`progress` persists `delegate`, run
+`workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
+with this controller's own `action_id`, which the fresh owner adopts, and on
+exit 0 put its stdout in the prompt as a `Resume pack` paragraph. A refusal
+sends no pack and does not stop the transfer.
+
 #### Fresh delegated owner
 
 First pipe the continuation's `owner` object through
@@ -303,6 +310,10 @@ Require its full commit ID to equal `reviewed_head_sha`.
 Verify both roots are tracked at that exact reviewed HEAD.
 Next, independently run `artifact-budget check` for each root and compare all four metrics with the
 continuation. Any mismatch stops the attempt as a contract failure.
+
+A resume pack beside the continuation is used as `SKILL.md`'s
+`### Resume pack` says, and only after every check above has passed: it
+replaces none of them.
 
 After those checks pass, adopt the owner envelope as the existing lifecycle
 identity; the fresh owner must not call `direct-owner` or perform any other

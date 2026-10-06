@@ -4231,6 +4231,100 @@ class ProgressMarkerContractsTest(unittest.TestCase):
             "`diverged`")
 
 
+class ResumePackContractsTest(unittest.TestCase):
+    """#265: relaunchers carry a resume pack and owners verify it before use."""
+
+    PACK = ("workflow-state resume-pack --repo-root <ledger_repo_root> "
+            "--run-id <run-id> --action-id <action_id>")
+    DISPATCHER_PACK = ("workflow-state resume-pack --repo-root <ledger_repo_root> "
+                       "--run-id <run-id> --action-id <action-id>")
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def read(path):
+        return normalized(path.read_text(encoding="utf-8"))
+
+    def test_both_skills_exempt_the_pack_from_workflow_response_validation(self):
+        self.assert_ordered(
+            self.read(ORCHESTRATE), "untrusted transport",
+            "and validate before decoding any field.",
+            "The one exception is `resume-pack`", "is not a workflow response",
+            "never pipes or decodes it", "## 1. Resolve issue set and bindings")
+        self.assert_ordered(
+            self.read(FROM_ISSUE), "## Lifecycle identity", "untrusted transport",
+            "and validate before decoding.", "The one exception is `resume-pack`",
+            "is not a workflow response", "the checks in `### Resume pack`",
+            "### Dispatcher-owned acquisition")
+
+    def test_from_issue_defers_the_auto_read_on_a_pack_carrying_relaunch(self):
+        self.assert_ordered(
+            self.read(FROM_ISSUE), "## Files beside this one",
+            "Read it *once*, now, only if the invocation contains the literal token `--auto`.",
+            "When the prompt carries a resume pack, defer that read",
+            "limits it to the sections that subsection names",
+            "restores the whole read", "## Lifecycle identity")
+
+    def test_orchestrate_adds_the_pack_to_resume_prompts_only(self):
+        self.assert_ordered(
+            self.read(ORCHESTRATE), "## 4. Execute control actions",
+            "For a `resume` action", self.DISPATCHER_PACK,
+            "add its stdout verbatim to the owner prompt's `Resume pack` paragraph",
+            "never stops the dispatch", "`spawn` and `retry` carry no pack",
+            "> `<canonical-json>`", "> Resume pack", "> `<resume-pack-json>`",
+            "## 5. Final report")
+
+    def test_from_issue_owner_verifies_the_pack_and_reads_only_the_phase(self):
+        self.assert_ordered(
+            self.read(FROM_ISSUE), "## Lifecycle identity",
+            "### Resume pack A relaunched owner's prompt may carry a resume pack",
+            self.PACK, "an accelerator, never a gate", "not a workflow response",
+            "still resolves the project once", "runs `check-launch`",
+            "`#### Fresh delegated owner` check",
+            "`git -C <worktree> rev-parse HEAD` must equal `worktree.head`",
+            "re-orient in full",
+            "A verified pack replaces only your own ad-hoc re-orientation",
+            "do not dump the ledger", "re-validate the plan",
+            "read only the skill sections its phase needs",
+            "this file's `## Phase <n>` section", "(not the whole file)",
+            "`sdd` for Phase 6", "`ship-issue` for Phase 7",
+            "Everything the pack does not replace still runs unchanged",
+            "sdd's own `progress.md` check", "sdd's ledger wins",
+            "never stops a relaunch", "## The flow")
+
+    def test_from_issue_direct_reentry_and_delegate_carry_the_pack(self):
+        text = self.read(FROM_ISSUE)
+        self.assert_ordered(
+            text, "### Direct autonomous acquisition", "**`kind: owner`**",
+            "When its `launch_kind` is `resume`", self.PACK,
+            "### Interactive direct acquisition")
+        self.assert_ordered(
+            text, "4. **`delegate`** —", "the fresh owner adopts this launch",
+            self.PACK, "as a `Resume pack` paragraph",
+            "Exception — **ledger-only remainder**")
+
+    def test_auto_rollover_passes_the_pack_beside_the_continuation(self):
+        self.assert_ordered(
+            self.read(AUTO), "#### Mandatory transfer gate",
+            "Beside the continuation, never inside it", self.PACK,
+            "does not stop the transfer", "#### Fresh delegated owner",
+            "Any mismatch stops the attempt as a contract failure.",
+            "only after every check above has passed", "replaces none of them",
+            "#### Earlier controller stop")
+
+    def test_claude_md_describes_the_resume_pack(self):
+        self.assert_ordered(
+            self.read(REPO_ROOT / "CLAUDE.md"),
+            "A relaunched owner's prompt carries a resume pack", self.PACK,
+            "`read_handoff`", "`start_phase`", "`current: false` preview",
+            "still runs `check-launch`")
+
+
 class InterimChildResultContractsTest(unittest.TestCase):
     """#261: an owner treats a child's interim return as still running."""
 
