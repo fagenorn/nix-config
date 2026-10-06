@@ -195,6 +195,18 @@ class VerifiedTreeTest(unittest.TestCase):
                 self.assertEqual(done.returncode, 2)
                 self.assertEqual(done.stdout, "")
 
+    def test_an_empty_verification_id_is_refused_by_both_verbs(self):
+        tree = self.git("rev-parse", "HEAD^{tree}")
+        for argv in (("check", "--verification", ""),
+                     ("record", "--tree", tree, "--verification", "nix-build",
+                      "--verification", "")):
+            with self.subTest(argv[0]):
+                done = self.run_tool(*argv)
+                self.assertEqual(done.returncode, 2, done.stdout)
+                self.assertEqual(done.stdout, "")
+                self.assertEqual(len(done.stderr.strip().splitlines()), 1, done.stderr)
+                self.assertFalse(self.record_path().exists())
+
     def test_usage_errors_exit_2(self):
         for argv in ((), ("check",), ("record", *verification_args(IDS)),
                      ("record", "--tree", "0" * 40), ("forget",)):

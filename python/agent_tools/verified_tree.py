@@ -24,9 +24,10 @@ The record is one latest-pass file per worktree,
 `tree` is 40 or 64 lowercase hex characters and `verification` is a non-empty
 list of non-empty strings. It carries no run, attempt or launch identity.
 
-A git failure, or a record that exists but fails strict parsing or that closed
-schema, prints one `verified-tree: <message>` line on stderr and exits 2 with
-empty stdout; argparse's usage errors also exit 2.
+An empty `--verification` id, a git failure, or a record that exists but fails
+strict parsing or that closed schema, prints one `verified-tree: <message>` line
+on stderr and exits 2 with empty stdout, writing nothing; argparse's usage
+errors also exit 2.
 """
 
 from __future__ import annotations
@@ -91,7 +92,7 @@ def current_tree(root: Path) -> str:
     with tempfile.TemporaryDirectory() as scratch:
         temporary = Path(scratch) / "index"
         if index.is_file():
-            shutil.copyfile(index, temporary)
+            shutil.copy2(index, temporary)
         env = {**os.environ, "GIT_INDEX_FILE": str(temporary)}
         _git(["add", "-A"], root, env=env)
         return _git(["write-tree"], root, env=env)
@@ -125,8 +126,15 @@ def read_record(path: Path) -> dict | None:
     return document
 
 
+def _require_ids(verification: list[str]) -> None:
+    """Refuse an empty verification id, which the record's closed schema forbids."""
+    if not verification or not all(verification):
+        raise VerifiedTreeError("every --verification id must be non-empty")
+
+
 def check(verification: list[str]) -> dict:
     """{"status", "tree"}: verified only for the recorded tree under the same ids in order."""
+    _require_ids(verification)
     root = worktree_root()
     tree = current_tree(root)
     stored = read_record(record_path(root))
@@ -137,6 +145,7 @@ def check(verification: list[str]) -> dict:
 
 def record(tree: str, verification: list[str]) -> tuple[int, dict]:
     """Replace the record when the current tree equals `tree`; (3, refusal) otherwise."""
+    _require_ids(verification)
     root = worktree_root()
     current = current_tree(root)
     if current != tree:
@@ -147,18 +156,22 @@ def record(tree: str, verification: list[str]) -> tuple[int, dict]:
         descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".verified-tree-")
     except OSError as error:
         raise VerifiedTreeError(f"cannot write {path}: {error}") from error
+    replaced = False
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(body)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        replaced = True
     except OSError as error:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
         raise VerifiedTreeError(f"cannot write {path}: {error}") from error
+    finally:
+        if not replaced:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
     return 0, {"recorded": True, "tree": tree}
 
 
