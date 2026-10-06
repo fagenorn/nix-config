@@ -1,7 +1,7 @@
 # Task 1: `resume-pack` verb — launch gate, ledger, worktree and commits
 
 Lane: full (lifecycle helper, new public interface). Decisions: per D1, D3,
-D4, D6, D7, D11, D12 and D13 of the spec's ledger. Read the spec's "The verb",
+D4, D6, D7, D11, D12, D13 and D15 of the spec's ledger. Read the spec's "The verb",
 "The pack" and "Next action" sections first; this task does not restate their
 rationale. In this task `sdd` is always `null`; Task 2 fills it.
 
@@ -16,13 +16,14 @@ rationale. In this task `sdd` is always `null`; Task 2 fills it.
   `RUN_ID_PATTERN`, `live_worktree_branch(path) -> str`,
   `probe_progress_head(worktree, marker) -> (head, marker_is_ancestor)`,
   `_worktree_git(path, *args)`, `_git_failed(completed)`,
-  `WorktreeBranchUnavailable`, `print_json`, `_delivery()`.
+  `WorktreeBranchUnavailable`, `render_json`, `print_json`, `_delivery()`.
 - Consumes (test harness, unedited): `LifecycleHarness` with `run_cli`,
   `init_run`, `spawn`, `resume`, `retry`, `suspend`, `progress`,
   `write_handoff`, `fail_owner`, `mark_progress`, `git`, `init_worktree`,
   `commit`, `read_state`, `state_path`.
 - Produces (Task 2 extends these; keep the names exact):
-  - Constants `RESUME_PACK_COMMITS = 20`, `RESUME_PACK_SUBJECT_CHARS = 100`.
+  - Constants `RESUME_PACK_COMMITS = 20`, `RESUME_PACK_SUBJECT_CHARS = 100`,
+    `RESUME_PACK_BYTES = 4096`.
   - `resume_pack_attempt(runtime: Any, state: dict[str, Any] | None, action_id: str) -> tuple[dict[str, Any], bool]`
     — the latest attempt and `current`; raises `WorkflowError` with the D12
     clause.
@@ -30,6 +31,8 @@ rationale. In this task `sdd` is always `null`; Task 2 fills it.
     — `(worktree_section, commits_since_marker_section)`; raises
     `WorktreeBranchUnavailable`.
   - `resume_next_action(*, phase: int, phase_action: str | None, handoff_path: str | None, relation: str) -> dict[str, Any]`.
+  - `bound_resume_pack(pack: dict[str, Any]) -> dict[str, Any]` — enforces
+    the byte bound (per D15); raises `WorkflowError` when it cannot.
   - `command_resume_pack(args: argparse.Namespace) -> int` and the
     `resume-pack` subparser (`--repo-root`, `--run-id`, `--action-id`, all
     required).
@@ -39,8 +42,10 @@ rationale. In this task `sdd` is always `null`; Task 2 fills it.
     `attempt()`, `pack_raw(action_id, *, run_id=None)`, `pack(action_id)`,
     `assert_refused(action_id, clause, *, run_id=None)` and
     `expected_ledger()`; and the test class
-    `ResumePackTest(ResumePackHarness, unittest.TestCase)`. Task 2 adds a
-    sibling `TestCase` on the same mixin.
+    `ResumePackTest(ResumePackHarness, unittest.TestCase)` and
+    `ResumePackBoundTest(ResumePackHarness, unittest.TestCase)` with class
+    attribute `DEPTH` and its `make_worktree` override. Task 2 adds sibling
+    `TestCase`s on the same mixin.
 
 **Invariants:**
 - The pack is exactly the spec's shape with the nested object keyed `ledger`
@@ -65,6 +70,17 @@ rationale. In this task `sdd` is always `null`; Task 2 fills it.
   full `rev-list --count` of `<marker>..<head>`; `truncated` is
   `count > len(commits)`. For `none`, `same` and `diverged`, `count` is 0 and
   `commits` is `[]`; `base` is the stored marker (null for `none`).
+- Byte bound (per D15): the pack `print_json` writes satisfies
+  `len(render_json(pack)) < RESUME_PACK_BYTES` (4096; the ASCII-escaped JSON
+  plus its newline, so every non-ASCII character counts as its `\uXXXX`
+  escapes and every path counts in full). `bound_resume_pack` runs on the
+  fully assembled pack, after `next_action` is chosen, and while the rendering
+  is at or over the bound drops the last (oldest) entry of
+  `commits_since_marker.commits`; `truncated` stays `count > len(commits)`, so
+  it marks the cut. If no commit is left and the rendering is still at or over
+  the bound, it refuses `resume-pack refused: the pack exceeds 4096 bytes`
+  (exit 2, empty stdout). Task 2 inserts its own shedding steps between those
+  two. The 20-commit and 100-character caps still apply first.
 - `dirty_paths` is the number of non-empty lines of
   `git --no-optional-locks status --porcelain`.
 - Next action, first match wins: `read_handoff` `{path}` when `handoff_path`
@@ -275,15 +291,52 @@ class ResumePackTest(ResumePackHarness, unittest.TestCase):
         self.assertTrue(section["commits"][0]["subject"].startswith("24 "))
         self.assertEqual({len(commit["subject"]) for commit in section["commits"]}, {100})
         self.assertEqual({len(commit["sha"]) for commit in section["commits"]}, {12})
+
+
+def rendered_size(pack):
+    """Bytes of `render_json(pack)`: sorted keys, compact, ASCII-escaped, newline."""
+    return len(json.dumps(pack, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+class ResumePackBoundTest(ResumePackHarness, unittest.TestCase):
+    """#265 D15: the rendered pack stays under 4096 bytes whatever its text escapes to."""
+
+    DEPTH = 3
+
+    def make_worktree(self):
+        # Each component is 120 `é` (240 UTF-8 bytes, 720 escaped JSON bytes).
+        self.worktree = self.root.joinpath(*["\u00e9" * 120] * self.DEPTH)
+        self.base = self.init_worktree(self.worktree, branch="issue-16")
+
+    def test_unicode_subjects_on_a_long_path_shed_the_oldest_commits(self):
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        commits = [self.commit(self.worktree, f"{number:02d} " + "\u00e9" * 150)
+                   for number in range(25)]
+        completed = self.pack_raw("16:1:1")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertLess(len(completed.stdout.encode("utf-8")), 4096)
+        pack = json.loads(completed.stdout)
+        section = pack["commits_since_marker"]
+        kept = len(section["commits"])
+        self.assertTrue(0 < kept < 20, kept)
+        self.assertEqual((section["count"], section["truncated"]), (25, True))
+        newest_first = [{"sha": sha[:12], "subject": f"{number:02d} " + "\u00e9" * 97}
+                        for number, sha in reversed(list(enumerate(commits)))]
+        self.assertEqual(section["commits"], newest_first[:kept])
+        section["commits"].append(newest_first[kept])
+        self.assertGreaterEqual(rendered_size(pack), 4096)
 ```
 
-`shutil` and `json` are already imported at the top of the file.
+`shutil` and `json` are already imported at the top of the file. Spell `é`
+as the `\u00e9` escape exactly as shown, so the source stays ASCII and the
+character is precomposed on every filesystem.
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py -k ResumePackTest 2>&1 | tail -3`
 Expected: non-zero exit and `FAILED` over the 10 cases — argparse rejects
-`resume-pack` as an invalid choice.
+`resume-pack` as an invalid choice. The same run with `-k ResumePackBoundTest`
+fails its 1 case the same way.
 
 - [ ] **Step 3: Implement the verb**
 
@@ -318,7 +371,13 @@ In `home/common/agent-skills/scripts/workflow-state.py`:
    `if ... return` (Task 2 adds an `ambiguous_sdd_workspace` branch directly
    before `diverged_marker`, and `resume_task` / `finish_phase` branches
    directly before `start_phase`).
-4. Add `command_resume_pack(args)` directly after `command_mark_progress`:
+4. Add `bound_resume_pack(pack)` after `resume_next_action`, implementing
+   the byte-bound invariant: measure with `render_json` (never a separate
+   `json.dumps`), shed one commit per iteration, and set `truncated` from
+   `count` after each cut. Docstring: the bound is on the bytes `print_json`
+   writes, because escaping and paths, not character caps, decide them
+   (#265 D15).
+5. Add `command_resume_pack(args)` directly after `command_mark_progress`:
    validate `RUN_ID_PATTERN` (`invalid run_id`), `parse_action_id`, refuse
    `":r" in args.action_id` with `resume-pack refused: a remainder launch has
    no resume pack`, read the state exactly as `command_check_launch` does
@@ -326,17 +385,18 @@ In `home/common/agent-skills/scripts/workflow-state.py`:
    `probe_resume_worktree(attempt["worktree"], attempt.get("progress_marker"))`
    mapping `WorktreeBranchUnavailable` to
    `WorkflowError(f"resume-pack refused: {unavailable}")`, assemble the pack
-   (`"sdd": None`), and `print_json` it; return 0. Docstring: read-only
+   (`"sdd": None`), pass it through `bound_resume_pack`, and `print_json`
+   the result; return 0. Docstring: read-only
    exactly as `check-launch` is — no clock, no lock, neither `transact` nor
    `workflow_paths` — and the pack is advisory (#265 D2, D3).
-5. In `build_parser`, directly after the `mark-progress` subparser, add the
+6. In `build_parser`, directly after the `mark-progress` subparser, add the
    `resume-pack` subparser with the three required arguments and
    `set_defaults(handler=command_resume_pack)`.
 
 - [ ] **Step 4: Verify**
 
-Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py -k ResumePackTest 2>&1 | tail -3`
-Expected: `OK`, 10 tests.
+Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py -k ResumePack 2>&1 | tail -3`
+Expected: `OK`, 11 tests.
 
 Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py 2>&1 | tail -3`
 Expected: `OK` (no pre-existing test regresses).

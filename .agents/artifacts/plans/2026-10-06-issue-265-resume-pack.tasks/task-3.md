@@ -1,7 +1,7 @@
 # Task 3: Relauncher and owner guidance, contract test, CLAUDE.md and ceilings
 
 Lane: full (instructions that drive lifecycle owners). Decisions: per D2, D8,
-D9 and D14 of the spec's ledger. Read the spec's "Who puts the pack in the
+D9, D14 and D16 of the spec's ledger. Read the spec's "Who puts the pack in the
 prompt" and "What the relaunched owner does with it" sections first.
 
 **Files:**
@@ -17,7 +17,10 @@ prompt" and "What the relaunched owner does with it" sections first.
   `workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`,
   its exit-0 pack with `action_id`, `current`, `worktree.head`,
   `worktree.dirty_paths` and `next_action` (`read_handoff`, `reorient`,
-  `resume_task`, `finish_phase`, `start_phase`), and its exit-2 refusals.
+  `resume_task`, `finish_phase`, `start_phase`), and its exit-2 refusals. The
+  pack is not a `workflow-response` document: the closed validator in
+  `home/common/agent-skills/scripts/delivery_model/_wire.py` rejects its
+  kind, so no skill pipes it through `validate-report` (per D16).
 - Produces: nothing later tasks consume; this is the last task.
 
 **Invariants:**
@@ -59,6 +62,26 @@ class ResumePackContractsTest(unittest.TestCase):
     def read(path):
         return normalized(path.read_text(encoding="utf-8"))
 
+    def test_both_skills_exempt_the_pack_from_workflow_response_validation(self):
+        self.assert_ordered(
+            self.read(ORCHESTRATE), "untrusted transport",
+            "and validate before decoding any field.",
+            "The one exception is `resume-pack`", "is not a workflow response",
+            "never pipes or decodes it", "## 1. Resolve issue set and bindings")
+        self.assert_ordered(
+            self.read(FROM_ISSUE), "## Lifecycle identity", "untrusted transport",
+            "and validate before decoding.", "The one exception is `resume-pack`",
+            "is not a workflow response", "the checks in `### Resume pack`",
+            "### Dispatcher-owned acquisition")
+
+    def test_from_issue_defers_the_auto_read_on_a_pack_carrying_relaunch(self):
+        self.assert_ordered(
+            self.read(FROM_ISSUE), "## Files beside this one",
+            "Read it *once*, now, only if the invocation contains the literal token `--auto`.",
+            "When the prompt carries a resume pack, defer that read",
+            "limits it to the sections that subsection names",
+            "restores the whole read", "## Lifecycle identity")
+
     def test_orchestrate_adds_the_pack_to_resume_prompts_only(self):
         self.assert_ordered(
             self.read(ORCHESTRATE), "## 4. Execute control actions",
@@ -72,13 +95,19 @@ class ResumePackContractsTest(unittest.TestCase):
         self.assert_ordered(
             self.read(FROM_ISSUE), "## Lifecycle identity",
             "### Resume pack A relaunched owner's prompt may carry a resume pack",
-            self.PACK, "an accelerator, never a gate",
+            self.PACK, "an accelerator, never a gate", "not a workflow response",
             "still resolves the project once", "runs `check-launch`",
+            "`#### Fresh delegated owner` check",
             "`git -C <worktree> rev-parse HEAD` must equal `worktree.head`",
-            "re-orient in full", "do not dump the ledger",
+            "re-orient in full",
+            "A verified pack replaces only your own ad-hoc re-orientation",
+            "do not dump the ledger", "re-validate the plan",
             "read only the skill sections its phase needs",
-            "this file's `## Phase <n>` section", "`sdd` for Phase 6",
-            "`ship-issue` for Phase 7", "never stops a relaunch", "## The flow")
+            "this file's `## Phase <n>` section", "(not the whole file)",
+            "`sdd` for Phase 6", "`ship-issue` for Phase 7",
+            "Everything the pack does not replace still runs unchanged",
+            "sdd's own `progress.md` check", "sdd's ledger wins",
+            "never stops a relaunch", "## The flow")
 
     def test_from_issue_direct_reentry_and_delegate_carry_the_pack(self):
         text = self.read(FROM_ISSUE)
@@ -111,7 +140,7 @@ class ResumePackContractsTest(unittest.TestCase):
 - [ ] **Step 2: Run it and watch it fail**
 
 Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k ResumePackContractsTest 2>&1 | tail -3`
-Expected: non-zero exit and `FAILED` over the 5 cases.
+Expected: non-zero exit and `FAILED` over the 7 cases.
 
 - [ ] **Step 3: Write the skill prose**
 
@@ -126,25 +155,53 @@ Expected: non-zero exit and `FAILED` over the 5 cases.
    `workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`,
    which reads the ledger, the attempt's recorded worktree and that
    worktree's SDD workspace and writes nothing. The pack is an accelerator, never a gate.
+   It is not a workflow response and is never piped through `validate-report`:
+   it stays untrusted until the checks below pass.
    A pack-carrying relaunch still resolves the project once, validates its
    owner object and runs `check-launch`, and obeys a `current: false` answer
-   exactly as it would without a pack. Then it checks the pack against what it
-   can see: the pack's `action_id` must equal the envelope's,
+   exactly as it would without a pack; a delegated owner also passes every
+   `AUTO.md` `#### Fresh delegated owner` check first. Then it checks the pack
+   against what it can see: the pack's `action_id` must equal the envelope's,
    `git -C <worktree> rev-parse HEAD` must equal `worktree.head`, and
    `git -C <worktree> status --porcelain` must list `worktree.dirty_paths`
    entries. On any mismatch the pack is stale: ignore it and re-orient in full.
-   Otherwise trust it: do not dump the ledger, re-read git history, or read
-   the SDD progress log or the plan to find your place. Start from its
+
+   A verified pack replaces only your own ad-hoc re-orientation: do not dump
+   the ledger, re-read git history, re-validate the plan, read the SDD
+   progress log yourself, or read skills end to end. Start from its
    `next_action` and read only the skill sections its phase needs: this file's `## Phase <n>` section, the file
    beside this one that phase names, `AUTO.md`'s section governing that phase
-   under `--auto`, and the phase's sub-skill (`sdd` for Phase 6, `ship-issue`
-   for Phase 7). `read_handoff` reads the handoff document at its `path`;
-   `reorient` re-orients in full, as does a relaunch with no pack.
+   under `--auto` (not the whole file), and the phase's sub-skill (`sdd` for
+   Phase 6, `ship-issue` for Phase 7). Everything the pack does not replace
+   still runs unchanged, sdd's own `progress.md` check on entry included: that
+   check stays sdd's resume mechanism, and where it disagrees with the pack's
+   `resume_task`, sdd's ledger wins. `read_handoff` reads the handoff document
+   at its `path`; `reorient` re-orients in full, as does a relaunch with no
+   pack.
 
    orchestrate-issues adds the pack to `resume` prompts; this skill adds it on
    direct re-entry, on `delegate` and on `AUTO.md`'s Phase-5 rollover. A
    `resume-pack` refusal or failure only means the prompt carries no pack; it
    never stops a relaunch.
+   ```
+
+   Same file, `## Files beside this one`: after the `AUTO.md` bullet's
+   sentence `Read it *once*, now, only if the invocation contains the literal
+   token `--auto`.` append, in the same bullet:
+
+   ```markdown
+   When the prompt carries a resume pack, defer that read until the checks in
+   `### Resume pack`: a pack that passes them limits it to the sections that
+   subsection names, and one that fails them restores the whole read.
+   ```
+
+   Same file, `## Lifecycle identity`: after the sentence ending `and validate
+   before decoding.` append, in the same paragraph:
+
+   ```markdown
+   The one exception is `resume-pack`: its stdout is not a workflow response
+   and `validate-report` has no route for it, so it is never piped there; it
+   stays an untrusted accelerator until the checks in `### Resume pack` pass.
    ```
 
 2. Same file, `### Direct autonomous acquisition`, item 2 (`**`kind:
@@ -196,7 +253,19 @@ Expected: non-zero exit and `FAILED` over the 5 cases.
    replaces none of them.
    ```
 
-5. `home/common/claude-code/skills/orchestrate-issues/SKILL.md` — `## 4.
+5. `home/common/claude-code/skills/orchestrate-issues/SKILL.md` — in the
+   lifecycle-call paragraph before `## 1. Resolve issue set and bindings`,
+   after the sentence ending `and validate before decoding any field.`
+   append:
+
+   ```markdown
+   The one exception is `resume-pack`: its stdout is not a workflow response
+   and `validate-report` has no route for it, so this dispatcher never pipes or
+   decodes it; it goes verbatim into the owner prompt (§4), and the owner
+   checks it before use.
+   ```
+
+   Same file, `## 4.
    Execute control actions`: directly after the paragraph ending `the owner
    validates it again at the same boundary before use.` add:
 
@@ -221,7 +290,7 @@ Expected: non-zero exit and `FAILED` over the 5 cases.
    counts progress, not phase changes`, add one bullet at the same level:
 
    ```markdown
-     - A relaunched owner's prompt carries a resume pack: `workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` is read-only (no lock, clock or write) and prints one `resume-pack/v1` object derived from the ledger, the attempt's recorded worktree (HEAD, uncommitted entries, commits since its `progress_marker`) and that worktree's SDD workspace, ending in a closed `next_action` (`read_handoff`, `reorient`, `resume_task`, `finish_phase` or `start_phase`). It is served for the current launch of an active attempt and as a `current: false` preview for the last launch of a suspended or handed-off one; anything else exits 2. orchestrate-issues §4 adds it to `resume` prompts, and from-issue to direct re-entry, `delegate` and the Phase-5 rollover; the relaunched owner still runs `check-launch`, checks the pack's HEAD and dirtiness, and then reads only the current phase's skill sections (#265).
+     - A relaunched owner's prompt carries a resume pack: `workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` is read-only (no lock, clock or write) and prints one `resume-pack/v1` object derived from the ledger, the attempt's recorded worktree (HEAD, uncommitted entries, commits since its `progress_marker`) and that worktree's SDD workspace, ending in a closed `next_action` (`read_handoff`, `reorient`, `resume_task`, `finish_phase` or `start_phase`). It is served for the current launch of an active attempt and as a `current: false` preview for the last launch of a suspended or handed-off one; anything else exits 2. orchestrate-issues §4 adds it to `resume` prompts, and from-issue to direct re-entry, `delegate` and the Phase-5 rollover; the pack is not a workflow response and is never piped through `validate-report`; the relaunched owner still runs `check-launch`, checks the pack's HEAD and dirtiness, and then reads only the current phase's skill sections, while sdd's own `progress.md` check still decides the task to resume (#265).
    ```
 
 Change nothing else in these files.
@@ -257,7 +326,7 @@ nothing.
 - [ ] **Step 5: Verify**
 
 Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_shell_example_contracts.py home/common/agent-skills/tests/test_dispatch_contracts.py 2>&1 | tail -3`
-Expected: `OK` (the 5 new contracts included).
+Expected: `OK` (the 7 new contracts included).
 
 Run: `set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_instruction_load.py 2>&1 | tail -3`
 Expected: `OK` (`test_the_live_tree_breaches_no_ceiling` included).

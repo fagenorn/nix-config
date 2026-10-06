@@ -34,9 +34,10 @@ ledger. Where the spec says `attempt.<field>` of the pack, read
   `workflow_paths`, nothing created anywhere (no `.superpowers/sdd/`, no
   `state.lock`); git runs only read-only subcommands, and `status` runs with
   `--no-optional-locks`.
-- Exit 0 prints the pack through `print_json`; every refusal exits 2 with empty
+- Exit 0 prints the pack through `print_json`, and `render_json(pack)` is
+  always fewer than 4096 bytes (per D15); every refusal exits 2 with empty
   stdout and one stderr line `workflow-state: resume-pack refused: <clause>`
-  (per D12).
+  (per D12, D15).
 - `check-launch`, `current-launch`, `launch_verdict`, `probe_progress_head`,
   `live_worktree_branch`, the ledger schema, `control` and `direct-owner` are
   not edited (spec Out of scope).
@@ -103,6 +104,15 @@ the pack, which routes), D3 (which launches), D4 (marker as checkpoint), D5
 (SDD bucket rule), D6 (closed next action), D7 (size bounds), D9 (owner
 verification), and the plan-phase rows D11 (the `ledger` key), D12 (refusal
 clauses), D13 (reorient reasons and extra bounds) and D14 (where the guidance
-lands).
+lands), and the plan-review rows D15 (the enforced byte bound) and D16 (the
+pack's validation exception and what a verified pack replaces).
+
+## Standards review provenance
+
+Plan review by Codex (isolated, read-only) at base
+`21cf26cba4e35b8f4742f8c652138f1a48137f68`, no fallback reviewer: 3 findings,
+accepted 3, rejected 0, deferred 0. Applied as the byte bound in Tasks 1–2
+(D15) and the validation exception and re-orientation precedence in Task 3
+(D16).
 
 ---

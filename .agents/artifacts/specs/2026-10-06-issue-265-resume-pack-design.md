@@ -99,11 +99,18 @@ uses: a relaunch into it cannot proceed anyway.
   mid-task can leave uncommitted work, and the relaunched owner must see that
   before it trusts `head`.
 - `sdd` is null or `{"workspace", "plan", "task_count", "completed",
-  "last_entry"}` (below).
-- **Size is bounded by construction** (per D7): at most 20 commits, subjects
-  cut to 100 characters, `last_entry` cut to 400 characters, `completed`
-  capped at 32 numbers. The whole pack stays well under
-  4 KiB; no free text from the ledger beyond these fields is copied.
+  "last_entry", "last_entry_truncated"}` (below).
+- **Size is capped, then enforced in bytes** (per D7, D15): at most 20
+  commits, subjects cut to 100 characters, `last_entry` cut to 400
+  characters, `completed` capped at 32 numbers. On top of those caps, the
+  bytes the verb writes (the ASCII-escaped JSON plus newline, where one
+  non-ASCII character can cost 6 bytes and every path counts in full) are
+  always fewer than 4096. While they are not, the verb sheds the oldest listed
+  commit, then the last character of `last_entry`, then the last ambiguous
+  plan name, each marked (`truncated`, `last_entry_truncated`,
+  `ambiguous_count`); if paths alone still exceed the bound it refuses with
+  `the pack exceeds 4096 bytes`. No free text from the ledger beyond these
+  fields is copied.
 
 ### SDD position
 
@@ -121,7 +128,8 @@ and common dir by the rule `sdd-workspace` documents. It considers each
   one is used as is), or null when that directory is absent; `completed` is the sorted task numbers that have a
   `Task <N>: complete` line; `last_entry` is the file's last non-empty line.
 - Several: the pack cannot say which plan is current, so `sdd` carries only
-  `{"ambiguous": [<plan-basename>, …]}` and `next_action` is `reorient`.
+  `{"ambiguous": [<plan-basename>, …], "ambiguous_count": <n>}` and
+  `next_action` is `reorient`.
 
 ### Next action (closed vocabulary)
 
@@ -152,7 +160,11 @@ is still SDD's own rule.
 `control`'s and `direct-owner`'s envelopes are unchanged; the relauncher calls
 the verb after them (per D2). The pack is optional on every route: a refusal
 or helper failure means the prompt carries no pack, never that the relaunch
-stops.
+stops. The pack is not a workflow response: `artifact-budget validate-report
+--boundary workflow-response` has no route for it, so the orchestrate-issues
+and from-issue rule that every `workflow-state` reply is validated there gains
+one explicit exception for `resume-pack` stdout, which is carried as an
+untrusted accelerator and cross-checked by the owner instead (per D16).
 
 - **orchestrate-issues §4, `resume` actions.** After projecting the owner
   object, the controller runs `resume-pack` with the action's `id` and adds a
@@ -178,13 +190,18 @@ exactly as today. Then it checks two things the pack asserts: the pack's
 equals `worktree.head` with `dirty_paths` as stated. A mismatch makes the pack
 stale: the owner ignores it and re-orients in full.
 
-Otherwise it trusts the pack. It does not dump the ledger, re-read git
-history, or read the SDD progress log or plan to find its place. It reads only
-the skill sections for the pack's phase: SKILL.md's `## Phase <n>` section,
-the file beside SKILL.md that phase names, AUTO.md's section governing that
-phase under `--auto`, and the phase's sub-skill (`sdd` for Phase 6,
-`ship-issue` for Phase 7). `read_handoff` reads the handoff document;
-`reorient` re-orients in full.
+Otherwise it trusts the pack, which replaces exactly the owner's own ad-hoc
+re-orientation (per D16): it does not dump the ledger, re-read git history,
+re-validate the plan, read the SDD progress log itself, or read skills end to
+end. It reads only the skill sections for the pack's phase: SKILL.md's
+`## Phase <n>` section, the file beside SKILL.md that phase names, AUTO.md's
+section governing that phase under `--auto` (in place of reading AUTO.md
+whole), and the phase's sub-skill (`sdd` for Phase 6, `ship-issue` for
+Phase 7). Every mechanism the pack does not replace still runs: resolving the
+project once, owner-object validation, `check-launch`, AUTO.md's fresh-owner
+rollover checks, and sdd's own `progress.md` entry check, which stays sdd's
+resume mechanism and wins over the pack's `resume_task` if they disagree.
+`read_handoff` reads the handoff document; `reorient` re-orients in full.
 
 ## Test seams
 
@@ -199,13 +216,17 @@ phase under `--auto`, and the phase's sub-skill (`sdd` for Phase 6,
   terminal attempt) refused with exit 2 and empty stdout; the read-only
   property (the ledger file's bytes and the run directory listing unchanged);
   each `next_action` kind; the bucket rule agreeing with `sdd-workspace` for
-  the same worktree; and the size bounds.
+  the same worktree; the caps; and the byte bound at its boundary with
+  non-ASCII commit subjects, last entry and plan names on long non-ASCII
+  paths, including a refusal when the paths alone cannot fit.
 - **The skill contract.** `test_workflow_skill_contracts.py` pins that
   orchestrate-issues §4 runs `resume-pack` for `resume` actions and puts its
   stdout in the owner prompt; that from-issue's direct re-entry, Phase-5
-  rollover and `delegate` routes carry the pack; and that from-issue's owner
-  guidance on a pack-carrying relaunch still runs `resolve-project` and
-  `check-launch` and reads only the current phase's skill sections.
+  rollover and `delegate` routes carry the pack; that both skills' validate-every-reply
+  rule names the `resume-pack` exception; and that from-issue's owner
+  guidance on a pack-carrying relaunch still runs `resolve-project`,
+  `check-launch` and sdd's own `progress.md` check, reads only the current
+  phase's skill sections, and that the AUTO.md read-once line yields to it.
 
 ## Out of scope
 
@@ -235,3 +256,5 @@ phase under `--auto`, and the phase's sub-skill (`sdd` for Phase 6,
 | D12 | Refusals print `workflow-state: resume-pack refused: <clause>` and exit 2: `launch <id> is <reason>` with the `launch_verdict` reason, except that an earlier launch of a suspended or handed-off latest attempt reports `superseded_launch`; a remainder id is `a remainder launch has no resume pack`; an unreadable worktree uses `mark-progress`'s clause; a workspace identity git cannot resolve, or a symlinked workspace component, is `the SDD workspace cannot be resolved` | `mark-progress` refusal form; `sdd-workspace` refuses links and unresolvable identities; the-bar Fail loud | `sdd: null` for an unresolvable workspace: the pack would claim no SDD progress over work that exists |
 | D13 | `reorient.reason` is closed: `ambiguous_sdd_workspace`, then `diverged_marker`, then `delivery_phases_complete` (recorded phase 7 or later, where no next phase exists); bounds beyond D7: `sdd.ambiguous` lists at most 8 sorted basenames cut to 100 characters, and `completed` keeps the 32 lowest numbers | D6 closed vocabulary; the flow has phases 0-7; D7 | `start_phase` with phase 8: names a phase that does not exist |
 | D14 | Owner guidance is a `### Resume pack` subsection closing from-issue SKILL.md's `## Lifecycle identity`; orchestrate-issues §4's owner prompt gains an optional `Resume pack` paragraph; AUTO.md's transfer gate and fresh-owner sections carry the pack beside the continuation; CLAUDE.md gains one bullet; hot-path instruction-load ceilings rise to the measured bytes | #250 Task 3 precedent (CLAUDE.md bullet, contract test, ceilings); `test_instruction_load.py` | A new file beside SKILL.md: one more load on the path whose cost the issue cuts |
+| D15 | The 4096-byte bound is enforced on `render_json`'s output (ASCII-escaped JSON plus newline): shed oldest commits, then `last_entry` characters (`last_entry_truncated`), then trailing ambiguous names (`ambiguous_count`), and refuse `the pack exceeds 4096 bytes` when paths alone breach it; amends D7 and D12 | Plan review: character caps do not bound bytes, since `\u00e9`-style escapes cost 6 bytes per character and paths are uncapped | Raising the stated bound or switching to `ensure_ascii=False`: the first leaves it unenforced, the second edits the shared `render_json` wire form |
+| D16 | `resume-pack` stdout is an explicit exception to the validate-every-`workflow-state`-reply rule in orchestrate-issues and from-issue; a verified pack replaces only the owner's ad-hoc re-orientation (ledger dumps, git history, plan re-validation, whole-skill and whole-AUTO.md reads), while `resolve-project`, owner-object validation, `check-launch`, the fresh-owner rollover checks and sdd's own `progress.md` check stay, sdd's ledger winning on disagreement | Plan review: the closed workflow-response validator rejects the pack, and unconditional read instructions (AUTO.md once, sdd's ledger check) left the precedence undefined | A `resume_pack` validator route (excluded by Out of scope); letting the pack override sdd's ledger: two resume authorities for one task list |
