@@ -34,7 +34,7 @@ def _git(repo: Path, *args: str) -> bytes:
         raise HistoryError("original_history_unavailable") from exc
 
 
-def _guard(repo: Path) -> str:
+def _guard_stepwise(repo: Path) -> str:
     # Repository-routing overrides would also redirect disposable reconstruction
     # commands. Refuse them before any source or scratch operation can write.
     if any(key in os.environ for key in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE",
@@ -64,6 +64,50 @@ def _guard(repo: Path) -> str:
            for row in settings):
         raise HistoryError("original_history_unavailable")
     algorithm = _git(repo, "rev-parse", "--show-object-format").strip().decode("ascii")
+    if algorithm not in {"sha1", "sha256"}:
+        raise HistoryError("original_object_format_unavailable")
+    return algorithm
+
+
+def _guard(repo: Path) -> str:
+    # Repository-routing overrides would also redirect disposable reconstruction
+    # commands. Refuse them before any source or scratch operation can write.
+    if any(key in os.environ for key in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE",
+            "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")):
+        raise HistoryError("original_repository_routing_unavailable")
+    # One rev-parse answers locations, shallowness and object format (#262 D2).
+    # Any failure re-runs BASE's stepwise guard so failure codes keep their precedence.
+    try:
+        facts = _git(repo, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir",
+                     "--is-shallow-repository", "--show-object-format").decode().splitlines()
+    except HistoryError:
+        return _guard_stepwise(repo)
+    if len(facts) != 4:
+        return _guard_stepwise(repo)
+    *locations, shallow, algorithm = facts
+    paths = [Path(root) / name for root in locations for name in ("info/grafts", "shallow")]
+    for key in ("GIT_GRAFT_FILE", "GIT_SHALLOW_FILE"):
+        if key in os.environ:
+            path = Path(os.environ[key])
+            paths.append(path if path.is_absolute() else repo / path)
+    try:
+        for path in paths:
+            if path.is_symlink() or (path.exists() and path.stat().st_size):
+                raise HistoryError("original_history_virtualized")
+    except OSError as exc:
+        raise HistoryError("original_history_unavailable") from exc
+    if shallow.strip() != "false":
+        raise HistoryError("original_history_virtualized")
+    namespaces = sorted({"refs/replace/", os.environ.get("GIT_REPLACE_REF_BASE", "refs/replace/")})
+    if _git(repo, "for-each-ref", "--format=%(refname)", *namespaces):
+        raise HistoryError("original_history_virtualized")
+    # A missing promisor object must not trigger a fetch into the source store.
+    settings = _git(repo, "config", "--null", "--list").lower().split(b"\0")
+    if any(row.startswith(b"extensions.partialclone\n") or
+           (row.split(b"\n", 1)[0].endswith(b".promisor") and row.rsplit(b"\n", 1)[-1] != b"false")
+           for row in settings):
+        raise HistoryError("original_history_unavailable")
+    algorithm = algorithm.strip()
     if algorithm not in {"sha1", "sha256"}:
         raise HistoryError("original_object_format_unavailable")
     return algorithm
