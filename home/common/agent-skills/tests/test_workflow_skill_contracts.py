@@ -4112,6 +4112,80 @@ class ProgressMarkerContractsTest(unittest.TestCase):
             "`diverged`")
 
 
+class InterimChildResultContractsTest(unittest.TestCase):
+    """#261: an owner treats a child's interim return as still running."""
+
+    HEAD = "**Interim child results.**"
+    OWNERS = (FROM_ISSUE, SDD, SHIP_ISSUE)
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def read(path):
+        return normalized(path.read_text(encoding="utf-8"))
+
+    @classmethod
+    def paragraph(cls, path):
+        text = path.read_text(encoding="utf-8")
+        start = text.index(cls.HEAD)
+        end = text.find("\n\n", start)
+        return normalized(text[start:] if end < 0 else text[start:end]).strip()
+
+    def test_each_owner_skill_carries_the_paragraph_once(self):
+        for path in self.OWNERS:
+            with self.subTest(path=path.parent.name):
+                self.assertEqual(path.read_text(encoding="utf-8").count(self.HEAD), 1)
+
+    def test_the_paragraph_copies_stay_identical(self):
+        canonical = self.paragraph(FROM_ISSUE)
+        for path in (SDD, SHIP_ISSUE):
+            with self.subTest(path=path.parent.name):
+                self.assertEqual(self.paragraph(path), canonical)
+
+    def test_the_paragraph_states_the_rule_in_order(self):
+        self.assert_ordered(
+            self.paragraph(FROM_ISSUE), self.HEAD,
+            "is not a completion: the child is still running.",
+            "Re-engage that same child by its recorded agent identity",
+            "and wait for that report.",
+            "You may end your own turn while the re-engaged child is live",
+            "Never answer an interim result with a text-only reply",
+            "never suspend for it (it is not an `external` wait)",
+            "never dispatch a replacement or stop the child.",
+            "stays registered under its existing worker id",
+            "so it registers nothing new.",
+            "If the message cannot be delivered",
+            "release `--event stopped`",
+            "the one case that may lead to a fresh dispatch.",
+            "Only the child's final hand-back counts as its result.")
+
+    def test_each_copy_sits_in_its_owner_section(self):
+        for path, start, end in (
+            (FROM_ISSUE, "**Writing workers.**", "## Terminal return procedure"),
+            (SDD, "### 2. Handle the report", "### 3. Review the task"),
+            (SHIP_ISSUE, "## Phase 5 — Review the PR", "## Phase 6 — Wait for CI"),
+        ):
+            with self.subTest(path=path.parent.name):
+                self.assert_ordered(self.read(path), start, self.HEAD, end)
+
+    def test_the_suspension_and_auto_pointers_route_to_the_paragraph(self):
+        self.assert_ordered(
+            self.read(FROM_ISSUE), "## Suspension procedure",
+            "an external wait (never a child's interim result; see "
+            "**Interim child results**)",
+            "A suspension parks the attempt")
+        self.assert_ordered(
+            self.read(AUTO), "## Phases 2–4 run as subagents", "**Skill exception.**",
+            "A Phase 2–4 subagent's interim result follows `SKILL.md`'s "
+            "**Interim child results** rule.",
+            "### Design subagent — Phases 2 + 3")
+
+
 class CodebaseDesignSkillContractsTest(unittest.TestCase):
     """The vendored deep-module vocabulary package.
 

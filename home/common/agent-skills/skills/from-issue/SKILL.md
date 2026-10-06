@@ -298,6 +298,23 @@ task-stop and then released with `--event stopped`. On a host with no stop
 capability, wait for it to return. An owner that can neither wait nor stop
 must return without a terminal write and leave recovery to the dispatcher.
 
+**Interim child results.** A child's return that the host marks interim — it
+stopped with background work of its own still running, or its result may be
+interim — is not a completion: the child is still running. Re-engage that same
+child by its recorded agent identity: message it to wait for its own job inside
+its turn and then return its final report, and wait for that report. You may end
+your own turn while the re-engaged child is live, because the host wakes you
+with its next notification; that is a child's work, not a command you started.
+Never answer an interim result with a text-only reply, never suspend for it (it
+is not an `external` wait), and never dispatch a replacement or stop the child.
+A registered lifecycle worker stays registered under its existing worker id: an
+interim result is not its `returned` event, and re-engagement is not a resume,
+so it registers nothing new. If the message cannot be delivered, the child is
+one you cannot wait for: follow from-issue's **Writing workers** route
+(task-stop, then release `--event stopped`), then this skill's ordinary handling
+of a lost child; that is the one case that may lead to a fresh dispatch. Only
+the child's final hand-back counts as its result.
+
 **Artifact report boundary (D5, D6, D11, D14).** At every producer boundary,
 preserve the received stdout bytes and pipe them unchanged through
 `artifact-budget validate-report --boundary producer --input -`; only after that
@@ -444,7 +461,8 @@ Without lifecycle identity, send the same compact schema directly.
 Suspend — do not finish — when an environmental interruption pauses the work
 rather than resolving it: an imminent quota or session limit, a repeated
 transport failure, a permission prompt only a human can approve, an external
-wait, or a context that cannot launch the agents a phase needs. A suspension
+wait (never a child's interim result; see **Interim child results**), or a
+context that cannot launch the agents a phase needs. A suspension
 parks the attempt without ending it — it consumes no attempt, needs no
 authorization phrase, and re-entry resumes it in place.
 

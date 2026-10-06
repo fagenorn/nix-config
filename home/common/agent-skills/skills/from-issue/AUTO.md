@@ -120,6 +120,8 @@ subagent, `writing-plans` and `doc-grounded-questions` for the plan subagent, pl
 `design` if present. Those load in the subagent's context, not yours. If one isn't
 installed, it uses the inline fallback named in the corresponding `SKILL.md` phase.
 
+A Phase 2–4 subagent's interim result follows `SKILL.md`'s **Interim child results** rule.
+
 ### Design subagent — Phases 2 + 3
 
 <!-- agent-dispatch: id=from-issue-design-grill role=auto-owner model=opus effort=xhigh -->
