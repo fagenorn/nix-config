@@ -126,13 +126,13 @@ before step 3 when the merge already landed.
    With a `Lifecycle worker:` line, make that merge as
    `git merge --no-commit --no-ff origin/<integration>` and commit it through
    `launch-commit` (SKILL.md's ### Local commits).
-2. **Verify.** Run the Phase 2 verification commands.
+2. **Verify.** Run Phase 2's verification step.
 3. **Review.** Run REVIEW.md's merge-delta check over that commit's combined
    diff, `git show --cc <merge-sha>`, through SKILL.md's merge-delta reviewer.
    Apply findings by amending the unpushed merge commit (through
    `launch-commit … -- --amend --no-edit` when this run holds a
    `Lifecycle worker:` line), which keeps both
-   parents, and after every amend re-run the Phase 2 verification commands before the push.
+   parents, and after every amend re-run Phase 2's verification step before the push.
    The link's `review_ref` is `merge-delta-empty` for an empty delta, and
    `merge-delta-clean` once every Blocking and Should-fix finding is applied
    and re-reviewed. Retain Minor and Discussion findings under REVIEW.md's
