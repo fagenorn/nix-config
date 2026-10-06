@@ -23,7 +23,7 @@ Python `unittest` contract suites run by `just`.
 - `settings.env.BASH_MAX_TIMEOUT_MS = "3600000"`; `BASH_DEFAULT_TIMEOUT_MS` stays unset (per D2).
 - No skill document under `from-issue/` or `sdd/` may contain the literal `run_in_background` (existing nested-workflow test).
 - Instruction-load ceilings in `home/common/agent-skills/instruction-load.json` sit exactly at measured bytes. Any task that grows a hot member runs `test_instruction_load.py`; for each `profile <id> on <host>: hot <N> bytes exceed ceiling <M>` line it sets that profile's `ceiling_bytes.<host>` to `<N>` and appends one sentence to that profile's `note`: `Ceiling raised for #261: <what grew> (#155 D10).` — one sentence per profile per task, never a raise above the measured value.
-- Long commands: run `just build` (up to 15 min) and `just agent-workflow-tests` (8–10 min) in the foreground with Bash timeout 600000, output redirected to a log ending in an `exit=<status>` line. If the host moves one to the background, wait for that log's `exit=` line within the same turn; never end the turn while it runs.
+- Long commands: run `just build` (up to 15 min) and `just agent-workflow-tests` (8–10 min) in the foreground with Bash timeout 1800000 (above the expected duration) when the session runs under the raised `BASH_MAX_TIMEOUT_MS` (per D12), otherwise the pre-#261 host maximum 600000, output redirected to a log ending in an `exit=<status>` line. If the host moves one to the background, wait for that log's `exit=` line within the same turn; never end the turn while it runs.
 - Commits go through `launch-commit` with the `Lifecycle worker:` line the dispatch carries, SSH-signed, ending with the session's Co-Authored-By and Claude-Session lines.
 
 ## Test seams
@@ -49,6 +49,8 @@ Task 4 — The dispatcher's interim owner case and final verification — `orche
 ## Decisions
 
 The spec's `## Decision ledger` owns every decision. Tasks cite D1–D8 from design and
-D9–D11 appended at planning.
+D9–D11 appended at planning, D12–D13 at Phase-5 review.
 
----
+## Standards review provenance
+
+Reviewer: Codex (gpt-6-astra, xhigh), isolated read-only fresh thread; no fallback. Base SHA 31be7292b40159c5a3f49cc24f21b3292ba4ce89. Findings: 2 Blocking accepted (timeout prescription per D12; remainder prompt forwarding per D13), 0 rejected, 0 deferred; no Should-fix or Discussion items.

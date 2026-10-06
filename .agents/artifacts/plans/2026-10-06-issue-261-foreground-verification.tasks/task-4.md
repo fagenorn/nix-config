@@ -80,7 +80,7 @@ Stage exactly the files listed above, then
 
 - [ ] **Step 6: Full verification of the branch**
 
-Each command runs in the foreground with Bash timeout 600000, its output in a log that ends with an `exit=` line. If the host moves one to the background, wait for that `exit=` line within the same turn; never end the turn while it runs.
+Each command runs in the foreground with Bash timeout 1800000 (above the expected duration) when the session runs under the raised `BASH_MAX_TIMEOUT_MS` (per D12), otherwise the pre-#261 host maximum 600000, its output in a log that ends with an `exit=` line. If the host moves one to the background, wait for that `exit=` line within the same turn; never end the turn while it runs.
 
 ```bash
 log="${TMPDIR:-/tmp}/awt-261.log"

@@ -56,7 +56,7 @@ In `CLAUDE.md`, append this sentence to the end of the bullet that begins `` - `
 
 - [ ] **Step 4: Verify against the built artifact**
 
-`just show-claude-settings` builds first (up to 15 minutes). Run it in the foreground with Bash timeout 600000; if the host moves it to the background, wait for the log's `exit=` line within the same turn and never end the turn while it runs:
+`just show-claude-settings` builds first (up to 15 minutes). Run it in the foreground with Bash timeout 1800000 (above the expected duration) when the session runs under the raised `BASH_MAX_TIMEOUT_MS` (per D12), otherwise the pre-#261 host maximum 600000; if the host moves it to the background, wait for the log's `exit=` line within the same turn and never end the turn while it runs:
 
 ```bash
 s="${TMPDIR:-/tmp}/settings-261.json"; log="${TMPDIR:-/tmp}/settings-261.log"
