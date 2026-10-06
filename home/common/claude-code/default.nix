@@ -122,6 +122,9 @@ let
 
     env = {
       CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
+      # Ceiling for an explicit Bash timeout (60 min), so a long verification
+      # command can run in the foreground; the 120 s default is unchanged (#261).
+      BASH_MAX_TIMEOUT_MS = "3600000";
     };
 
     hooks.PreToolUse = [
