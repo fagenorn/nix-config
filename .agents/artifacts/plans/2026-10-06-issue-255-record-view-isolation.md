@@ -34,7 +34,7 @@
 
 Estimates only. Product: ten paths in three tasks, two of them new test files (about 12 KB and 2.5 KB); source growth about 60 lines in `review_actual.py` and a net reduction in `review_issue100.py` and `review_projection.py`. Each derivation over the real objects takes minutes, so Task 3's retained gate runs once at the end with a 4-hour bound. One boundary: the guard is not acceptable without the tests that prove it.
 
-Planning prototyped Tasks 1 and 2 in a scratch copy at the spec commit: the CORE suite failed at base on every isolation assertion with every control biting, and passed with the runner; the portable derivation case refused with `domain_mismatch` at base and passed with the runner. The prototype was discarded.
+Planning prototyped Tasks 1 and 2 in a scratch copy at the spec commit: the CORE suite failed at base on every isolation assertion with every control biting, and passed with the runner; the portable derivation case refused with `domain_mismatch` at base and passed with the runner, and every existing review suite with the new one passed (260 tests in about 37 minutes). The prototype was discarded.
 
 ## Task index
 
