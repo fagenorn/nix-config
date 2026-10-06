@@ -9,7 +9,7 @@ import subprocess
 from typing import Callable, Iterable, Iterator, Mapping
 
 from agent_tools.canonical import telemetry_digest
-from agent_tools.review_git import HistoryError, original_commit, original_range
+from agent_tools.review_git import HistoryError, original_commits, original_range
 from agent_tools.review_pack import (ReviewLimits, ReviewRecord, ReviewRecordSize,
     canonical_manifest as _canonical, measure_lengths, pack_whole_records, place_record_sizes)
 
@@ -122,8 +122,8 @@ def git_diff(repo: Path, base_tree: str, head_tree: str, *view: str) -> bytes:
 def actual_inputs(repo: Path, base: str, head: str, package_name: str,
                   limits: ReviewLimits) -> Iterator[CandidateInput]:
     try:
-        base_tree = original_commit(repo, base).tree
-        head_tree = original_commit(repo, head).tree
+        base_commit, head_commit = original_commits(repo, (base, head))
+        base_tree, head_tree = base_commit.tree, head_commit.tree
     except HistoryError as exc:
         raise GenerationError("invalid original history") from exc
     yield from actual_inputs_from_trees(repo, base_tree, head_tree, base=base, head=head,
