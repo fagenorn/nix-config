@@ -9,7 +9,7 @@ from typing import Sequence
 
 from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import (PACKING_POLICY_SHA256, CandidateInput, FutureCommit, _run_git,
-    actual_inputs, actual_inputs_from_trees, git_diff, select_candidate)
+    actual_inputs, actual_inputs_from_trees, commit_subject, git_diff, select_candidate)
 from agent_tools.review_budget import BudgetAuthority, describe
 from agent_tools.review_forecast import (ForecastError, ForecastPlan, ancestor, canonical_bytes,
     closed, commit_range, digest, edge_facts, full_commit, identity, integer, load_plan,
@@ -112,8 +112,7 @@ def reconstruct_owned(repo: Path, prerequisite_commit: str,
                        for path in paths):
                     raise ReconstructionUnavailable("whole_path_postimage_unproved", commit)
             included.add(commit)
-            subject = _run_git(repo, "show", "-s", "--format=%s", commit, binary=True)
-            commits.append({"sha": commit, "subject": subject.removesuffix(b"\n").decode("utf-8")})
+            commits.append({"sha": commit, "subject": commit_subject(repo, commit)})
         result_tree = _run_git(target, "write-tree").strip()
         # Producer manifest order is its reachable-range order, not replay traversal.
         metadata = {row["sha"]: row for row in commits}
