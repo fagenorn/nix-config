@@ -263,16 +263,31 @@ class WorkflowError(Exception):
     pass
 
 
+_DELIVERY_RUNTIMES: dict[int, Any] = {}
+
+
 def _delivery():
+    """The delivery runtime, built once per process for each notes limit (#262 D1).
+
+    The notes limit is read from the artifact-budget policy on every call. A load
+    that fails is not kept, so the next call loads again.
+    """
     src = Path(__file__).parent
     entry = src / "workflow_delivery.py" if src.name == "scripts" else Path.home() / ".agents/lib/python/workflow_delivery.py"
     try:
+        if _DELIVERY_RUNTIMES:
+            runtime = _DELIVERY_RUNTIMES.get(phase_notes_maximum())
+            if runtime is not None:
+                return runtime
         module = runpy.run_path(str(entry))
         if module.get("WORKFLOW_DELIVERY_INTERFACE_VERSION") != 1:
             raise ValueError("interface")
-        return module["DeliveryRuntime"](notes_max_characters=phase_notes_maximum())
+        maximum = phase_notes_maximum()
+        runtime = module["DeliveryRuntime"](notes_max_characters=maximum)
     except Exception as exc:
         raise WorkflowError(f"delivery runtime: {exc}") from exc
+    _DELIVERY_RUNTIMES[maximum] = runtime
+    return runtime
 
 
 _HOST_ADMISSION = None
