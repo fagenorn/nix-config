@@ -52,6 +52,7 @@ let
     "review-feasibility"
     "review-package"
     "review-range"
+    "verified-tree"
   ];
 
   # -I drops every PYTHON* variable, the working directory and the user site.

@@ -1281,8 +1281,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "`mergeable: UNKNOWN`", "proceed to the merge",
             "not an authority denial", "no `authority-observation`")
         self.assert_ordered(route, "**Sync.**", "[`SYNC.md`](./SYNC.md)", "**Verify.**",
-            "Phase 2 verification", "**Review.**", "`git show --cc", "merge-delta reviewer",
-            "re-run the Phase 2 verification commands before the push",
+            "Run Phase 2's verification step.", "**Review.**", "`git show --cc", "merge-delta reviewer",
+            "re-run Phase 2's verification step before the push",
             "`merge-delta-empty`", "`merge-delta-clean`", "**Push.**", "`check-launch`",
             "`git push origin <branch>`", "**Wait for CI.**", "Phase 6's CI wait",
             "**Select.**", "--kind sync-selection", "`git rev-list --parents -n 1",
@@ -5109,6 +5109,152 @@ class InstalledOrchestrateRoutesTest(unittest.TestCase):
         self.assertEqual(installed(".agents/skills"),
                          CODEX_ORCHESTRATE.read_text(encoding="utf-8"))
         self.assertEqual(installed(".claude/skills"), ORCHESTRATE.read_text(encoding="utf-8"))
+
+
+class CheckpointVerificationContractsTest(unittest.TestCase):
+    """#263: the full declared verification runs at checkpoints, recorded by tree."""
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def read(path):
+        return normalized(path.read_text(encoding="utf-8"))
+
+    def test_final_verification_follows_the_fix_wave_in_order(self):
+        self.assert_ordered(
+            self.read(SDD_DIR / "final-review.md"),
+            "There is no second fix wave",
+            "## Final verification",
+            "after the fix wave and its scoped re-reviews",
+            "before you choose the terminal state",
+            "`bindings.workflow.verification`",
+            "A blocked verification capability stops",
+            "`reason_code` and `repair_id`",
+            "authored unsupported, skip this step",
+            "`Final verification: none declared`",
+            "1. **Check.**", "`verified-tree check --verification <id>`",
+            "keep the `tree` it prints", "Exit 0 with `verified`", "skip step 2.",
+            "2. **Run and record.**",
+            "in the foreground with an explicit timeout above its duration",
+            "only the tail read back",
+            "When every command passes, run `verified-tree record --tree <the checked tree>`",
+            "3. **Ledger.**",
+            "`Final verification: passed (head <full sha>, tree <tree id>)`",
+            "4. **Repair once.**", "`tree_changed`", "exits 2 is not a pass",
+            "Dispatch the final-review fixer above once",
+            "`git status --porcelain`",
+            "one scoped correctness re-review",
+            "then run steps 1–3 once more",
+            "load-bearing correctness finding",
+            "the terminal state is Residuals",
+            "`verification_state: failed`",
+            "`correctness_verdict: findings`")
+
+    def test_sdd_finish_ties_passed_to_the_recorded_final_verification(self):
+        sdd = self.read(SDD)
+        self.assert_ordered(
+            sdd, "## Final review — two axes", "the **Final verification** step",
+            "## Finish",
+            "`verification_state` is `passed` only when final-review.md's "
+            "**Final verification** step recorded a pass on the branch tip it ran on",
+            "or took its none-declared route with the per-task focused tests passing",
+            "- **Clean** —",
+            "and the **Final verification** step recorded a pass on the branch tip",
+            "or took its none-declared route",
+            "- **Residuals** —")
+        finish = sdd.split("## Finish", 1)[1]
+        for restated in ("verified-tree", "Final verification: passed"):
+            with self.subTest(restated=restated):
+                self.assertNotIn(restated, finish)
+
+    def test_the_implementer_runs_focused_tests_and_the_build_check_only(self):
+        prompt = self.read(SDD_DIR / "implementer-prompt.md")
+        self.assertNotIn("run the full suite once before committing", prompt)
+        self.assert_ordered(
+            prompt, "## Test Discipline",
+            "run the focused test commands your brief names, red before green",
+            "and the brief's build check when your task changes files the build evaluates",
+            "Do not run the full declared verification: the final gate runs it once, "
+            "on the final head.",
+            "## After Review Findings",
+            "re-run the focused tests covering the amended code",
+            "the brief's build check when the fix changes files the build evaluates")
+
+    def test_fix_rounds_and_the_final_fixer_name_the_same_ladder(self):
+        self.assert_ordered(
+            self.read(SDD_DIR / "fix-loop.md"),
+            "Every round: the implementer fixes, re-runs the covering focused tests",
+            "when the fix changes files the build evaluates, the brief's build check",
+            "(never the full declared verification)",
+            "appends a fix report")
+        self.assert_ordered(
+            self.read(SDD_DIR / "final-review.md"),
+            "id=sdd-final-review-fixer",
+            "The fixer runs the focused tests covering each fix",
+            "the build check when a fix changes files the build evaluates",
+            "never the full declared verification",
+            "the **Final verification** step below runs it after the fix wave",
+            "Where both axes flag the same lines",
+            "## Final verification")
+
+    def test_writing_plans_names_focused_commands_per_task(self):
+        self.assert_ordered(
+            self.read(WRITING_PLANS),
+            "**Every task carries at least one verification line that could fail.**",
+            "**Each task names its focused test commands.**",
+            "adds the project's build check only when the task changes files that "
+            "check evaluates",
+            "a planner unsure whether a task's files reach the build adds it",
+            "No task names the full declared verification as a per-task gate",
+            "sdd's final gate runs it once on the final head",
+            "## Package construction and budget boundary")
+
+    def test_ship_phase_two_skips_only_on_a_verified_tree(self):
+        phase = self.read(SHIP_ISSUE).split("## Phase 2 — Verify locally", 1)[1]
+        phase = phase.split("## Phase 3", 1)[0]
+        self.assert_ordered(
+            phase, "This is the one verification step.",
+            "Phase 3 after a promotion commit, REVIEW.md's apply/push step 2 and CI-MERGE.md's post-selection sync run it too.",
+            "A blocked verification capability stops",
+            "1. **Check.** Run `verified-tree check --verification <id>`",
+            "in order, and keep the `tree` it prints.",
+            "2. **Skip only on `verified`.**", "Exit 0 with `verified`", "skip the run",
+            "`verification reused: tree <id>`",
+            "3. **Otherwise run and record.**", "On any other answer, run every command id",
+            "When every command passes, run `verified-tree record --tree <the checked tree>`",
+            "`tree_changed` is a failing verification",
+            "A `check` that exits 2 leaves no tree to record",
+            "A `record` that exits 2 leaves the pass unrecorded",
+            "the run itself still counts by its commands' results",
+            "These failure rules apply only to an actual run.",
+            "On a failing verification command, pause, ground, and surface",
+            "baselining the same project in a scratch worktree")
+        self.assertEqual(phase.count("verified-tree record"), 1)
+
+    def test_review_and_ci_merge_reruns_use_phase_two(self):
+        review = self.read(SHIP_ISSUE_REVIEW)
+        self.assert_ordered(
+            review, "## The five-step apply/push flow", "1. Edit the file(s).",
+            "2. Run Phase 2's verification step (SKILL.md's `## Phase 2 — Verify locally`)",
+            "3. `git add`")
+        consolidate = self.read(SHIP_ISSUE).split("## Phase 3 — Consolidate learnings", 1)[1]
+        consolidate = consolidate.split("## Phase 4", 1)[0]
+        self.assert_ordered(
+            consolidate, "Promoted candidates commit as",
+            "When Phase 3 commits anything, run Phase 2's verification step again before Phase 4.")
+        self.assertNotIn("Re-run every retained `bindings.workflow.verification` command",
+                         review)
+        ci_merge = self.read(SHIP_ISSUE_CI_MERGE)
+        self.assert_ordered(
+            ci_merge, "## Post-selection sync",
+            "2. **Verify.** Run Phase 2's verification step.",
+            "after every amend re-run Phase 2's verification step before the push.")
+        self.assertNotIn("Phase 2 verification commands", ci_merge)
 
 
 if __name__ == "__main__":

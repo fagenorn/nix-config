@@ -83,8 +83,8 @@ verb. The failure mode is "edited files, ran tests, forgot to commit, advanced t
 Phase 6 polling CI on the stale tip." Follow this order:
 
 1. Edit the file(s).
-2. Re-run every retained `bindings.workflow.verification` command through
-   `bindings.commands` against the modified surface.
+2. Run Phase 2's verification step (SKILL.md's `## Phase 2 — Verify locally`)
+   on the modified worktree, before the commit.
 3. `git add` the changed files; commit `fix(issue-<num>): address PR review —
    <short blocker>` (follow retained `bindings.vcs.commit.co_authored_by`),
    through `launch-commit` when this run holds a `Lifecycle worker:` line

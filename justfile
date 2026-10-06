@@ -107,6 +107,7 @@ agent-workflow-tests:
     tests/test_agent_tools_siblings.py \
     tests/test_launch_commit.py \
     tests/test_review_range.py \
+    tests/test_verified_tree.py \
     tests/test_transaction_core.py \
     tests/test_transaction_custody.py \
     tests/test_transaction_invocation.py \

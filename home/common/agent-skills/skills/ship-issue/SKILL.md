@@ -49,7 +49,7 @@ review prompt.
 ```
 0. Pre-flight              → dispatch probe, worktree clean, branch pattern ok, no PR yet
 1. Sync integration branch → fetch + merge origin/<integration>, hybrid conflict policy
-2. Verify locally          → lint + tests inside the worktree
+2. Verify locally          → verified-tree check; run + record unless verified
 3. Consolidate learnings   → see CONSOLIDATE.md; drop most candidates
 4. Open PR                 → push -u; gh pr create with "Closes #<num>"
 5. Review the PR           → review-range picks delta, empty or full; two-axis review over it
@@ -221,23 +221,40 @@ Otherwise run `git merge --no-commit --no-ff origin/<integration>`; when it repo
 
 ## Phase 2 — Verify locally
 
-```
-<each bindings.workflow.verification command, dereferenced through bindings.commands>
-```
+This is the one verification step. Phase 3 after a promotion commit,
+REVIEW.md's apply/push step 2 and CI-MERGE.md's post-selection sync run it too.
 
-Run every command id in retained `bindings.workflow.verification` through its
-`bindings.commands` argv and cwd. A blocked verification capability stops and
-reports its `reason_code` and `repair_id`; authored unsupported follows only its
-documented no-verification route.
+A blocked verification capability stops and reports its `reason_code` and
+`repair_id`; authored unsupported follows only its documented no-verification
+route.
 
-On a failing verification command, pause, ground, and surface; do not invent a
-fix command outside retained `bindings.commands`.
+1. **Check.** Run `verified-tree check --verification <id>` in the worktree,
+   repeating `--verification` for every id in retained
+   `bindings.workflow.verification`, in order, and keep the `tree` it prints.
+2. **Skip only on `verified`.** Exit 0 with `verified` means this exact tree
+   already passed these commands, at sdd's final gate or an earlier run of
+   this step: skip the run. On Phase 2's own run, note
+   `verification reused: tree <id>` in the PR body's Summary.
+3. **Otherwise run and record.** On any other answer, run every command id in
+   retained `bindings.workflow.verification` through its `bindings.commands`
+   argv and cwd. When every command passes, run
+   `verified-tree record --tree <the checked tree>` with the same
+   `--verification` ids. A `record` that exits 3 with `tree_changed` is a
+   failing verification under the rules below: the passing run no longer
+   describes the worktree. A `check` that exits 2 leaves no tree to record:
+   run the commands anyway, and leave the pass unrecorded. A `record` that
+   exits 2 leaves the pass unrecorded too; the run itself still counts by its
+   commands' results.
+
+These failure rules apply only to an actual run. On a failing verification
+command, pause, ground, and surface; do not invent a fix command outside
+retained `bindings.commands`.
 
 Test failures: separate *environmental* (container connectivity, missing network, sandbox limits) from *real* by baselining the same project in a scratch worktree on `origin/<integration>`. Same failures → pre-existing; continue and note the baseline diff in the PR body. Different failures → real; pause, ground, surface.
 
 ## Phase 3 — Consolidate learnings
 
-**Read [`CONSOLIDATE.md`](./CONSOLIDATE.md) first** — it owns the mining commands, rubric, destination table, and reporting format. Run its step-1 mining commands as actual tool calls *before* concluding anything: empty is a finding, not a default — earn it by mining. Promoted candidates commit as `docs(<scope>): <summary>`, following retained `bindings.vcs.commit.co_authored_by`.
+**Read [`CONSOLIDATE.md`](./CONSOLIDATE.md) first** — it owns the mining commands, rubric, destination table, and reporting format. Run its step-1 mining commands as actual tool calls *before* concluding anything: empty is a finding, not a default — earn it by mining. Promoted candidates commit as `docs(<scope>): <summary>`, following retained `bindings.vcs.commit.co_authored_by`. When Phase 3 commits anything, run Phase 2's verification step again before Phase 4.
 
 ## Phase 4 — Open PR
 
