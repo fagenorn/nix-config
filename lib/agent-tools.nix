@@ -51,6 +51,7 @@ let
     "resolve-project"
     "review-feasibility"
     "review-package"
+    "verified-tree"
   ];
 
   # -I drops every PYTHON* variable, the working directory and the user site.
