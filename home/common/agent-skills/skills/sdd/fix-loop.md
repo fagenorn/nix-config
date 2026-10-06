@@ -24,7 +24,7 @@ Agent(subagent_type="implementer", model="opus", effort="high") owns the fresh-c
 <!-- agent-dispatch: id=sdd-round-five-implementation role=implementer model=opus effort=high -->
 Agent(subagent_type="implementer", model="opus", effort="high") owns the fifth and final fix round.
 
-Every round: the implementer fixes, re-runs the covering tests, appends a fix report (what changed, covering tests, command, output) to the same report file, and returns the short contract. Confirm all three fix-report elements before dispatching the re-review — reviewers do not re-run tests.
+Every round: the implementer fixes, re-runs the covering focused tests and, when the fix changes files the build evaluates, the brief's build check (never the full declared verification), appends a fix report (what changed, covering tests, command, output) to the same report file, and returns the short contract. Confirm all three fix-report elements before dispatching the re-review — reviewers do not re-run tests.
 
 **Lifecycle workers.** Under a lifecycle identity, every fix round's
 implementer — resumed or fresh — is registered as SKILL.md's

@@ -44,6 +44,10 @@ Findings → verify each against the live worktree first (stale or unsupported o
 <!-- agent-dispatch: id=sdd-final-review-fixer role=implementer model=opus effort=high -->
 Agent(subagent_type="implementer", model="opus", effort="high") fixes the verified whole-branch findings in one wave.
 
+The fixer runs the focused tests covering each fix, and the build check when a
+fix changes files the build evaluates, never the full declared verification:
+the **Final verification** step below runs it after the fix wave.
+
 Where both axes flag the same lines, dedupe at dispatch and credit both axes in the ledger (per-finding fixers each rebuild context and re-run suites; a real session's per-finding fix wave cost more than all its tasks combined). Then run exactly one scoped re-review per axis that had findings, using that axis's unchanged rubric with the named findings and bounded fix-range package:
 
 <!-- agent-dispatch: id=sdd-final-conformance-rereview role=reviewer-lite model=sonnet effort=medium -->

@@ -49,8 +49,11 @@ Subagent (the explicitly selected implementer or mechanic above):
       the code under test and pasting its output.
     - Refactoring belongs to review, not this loop. Implement the task;
       resist restructuring around it.
-    - While iterating, run the focused test for what you're changing; run the
-      full suite once before committing, not after every edit.
+    - While iterating, run the focused test for what you're changing. Before
+      committing, run the focused test commands your brief names, red before
+      green, and the brief's build check when your task changes files the build
+      evaluates. Do not run the full declared verification: the final gate
+      runs it once, on the final head.
 
     ## When Something Fails
 
@@ -92,8 +95,10 @@ Subagent (the explicitly selected implementer or mechanic above):
     ## After Review Findings
 
     If the task review finds issues you will be resumed with them. Fix, re-run
-    the tests covering the amended code, and append a fix report to your
-    report file: what changed, the covering tests, the command, the output.
+    the focused tests covering the amended code (and the brief's build check
+    when the fix changes files the build evaluates), and append a fix report
+    to your report file: what changed, the covering tests, the command, the
+    output.
     Reviewers will not re-run tests — your report is the test evidence.
 
     Launch any subagent by type only, never by name: a subagent cannot spawn a

@@ -5051,6 +5051,48 @@ class CheckpointVerificationContractsTest(unittest.TestCase):
             with self.subTest(restated=restated):
                 self.assertNotIn(restated, finish)
 
+    def test_the_implementer_runs_focused_tests_and_the_build_check_only(self):
+        prompt = self.read(SDD_DIR / "implementer-prompt.md")
+        self.assertNotIn("run the full suite once before committing", prompt)
+        self.assert_ordered(
+            prompt, "## Test Discipline",
+            "run the focused test commands your brief names, red before green",
+            "and the brief's build check when your task changes files the build evaluates",
+            "Do not run the full declared verification: the final gate runs it once, "
+            "on the final head.",
+            "## After Review Findings",
+            "re-run the focused tests covering the amended code",
+            "the brief's build check when the fix changes files the build evaluates")
+
+    def test_fix_rounds_and_the_final_fixer_name_the_same_ladder(self):
+        self.assert_ordered(
+            self.read(SDD_DIR / "fix-loop.md"),
+            "Every round: the implementer fixes, re-runs the covering focused tests",
+            "when the fix changes files the build evaluates, the brief's build check",
+            "(never the full declared verification)",
+            "appends a fix report")
+        self.assert_ordered(
+            self.read(SDD_DIR / "final-review.md"),
+            "id=sdd-final-review-fixer",
+            "The fixer runs the focused tests covering each fix",
+            "the build check when a fix changes files the build evaluates",
+            "never the full declared verification",
+            "the **Final verification** step below runs it after the fix wave",
+            "Where both axes flag the same lines",
+            "## Final verification")
+
+    def test_writing_plans_names_focused_commands_per_task(self):
+        self.assert_ordered(
+            self.read(WRITING_PLANS),
+            "**Every task carries at least one verification line that could fail.**",
+            "**Each task names its focused test commands.**",
+            "adds the project's build check only when the task changes files that "
+            "check evaluates",
+            "a planner unsure whether a task's files reach the build adds it",
+            "No task names the full declared verification as a per-task gate",
+            "sdd's final gate runs it once on the final head",
+            "## Package construction and budget boundary")
+
 
 if __name__ == "__main__":
     unittest.main()
