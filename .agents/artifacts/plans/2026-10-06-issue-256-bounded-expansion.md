@@ -64,7 +64,7 @@ core_gate source "$TREE" "$PY" timeout 900 python3 -m agent_tools.review_feasibi
 
 Only exit 0 with `complete/within_budget`, validated and reproduced, clears G0. Exit 2 or 3 stops with no bootstrap. Task 1 starts only after G0 has cleared at 0 (CP12 precedent).
 
-Planning G0 at `--completed-through 0`: run by the planning owner at the committed plan head; its result is recorded here by a process-only commit that changes no forecast.
+Planning G0 at `--completed-through 0`: at head `db027ea`, exit 0 and `complete/within_budget`: root 7,141 of 16,384 B, total 218,085 of 524,288 B, largest member 57,344 B, `file_count` 5 (four of eight payload members), validated and reproduced. The recording commit changes no forecast.
 
 **G1, the complete fixed-base actual gate, after every task and fix and at the final head.**
 
