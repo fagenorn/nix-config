@@ -84,7 +84,10 @@ Your task:
 Launch any subagent by type only, never by name: a subagent cannot spawn a named
 teammate, and a named launch returns an error instead of work. Read an existing
 file before writing to it: overwriting content you have not read destroys work
-you cannot see.
+you cannot see. Run each long command, every verification command included, in
+the foreground with an explicit timeout above its expected duration. If the host
+moves one to the background anyway, wait for it within the same turn: never end
+your turn while a command you started is still running.
 
 Return exactly canonical JSON from `artifact-budget validate-report --boundary ship-summary`.
 One exception comes first, before any change: when ship-issue's Phase-0
@@ -158,9 +161,9 @@ denial the loop checkpointed, which already suspended this custody, return only
 the re-entry line ship-issue prints; after a `delivery_stalled` checkpoint
 reply, return that validated reply.
 
-<the two leaf-agent sentences of the ship-owner prompt above, verbatim>
+<the three leaf-agent clauses of the ship-owner prompt above, verbatim>
 ```
 
-The placeholder line stands for those two sentences copied verbatim as a
+The placeholder line stands for those three clauses copied verbatim as a
 paragraph of their own; they are spelled once in this file, inside the
 ship-owner prompt.

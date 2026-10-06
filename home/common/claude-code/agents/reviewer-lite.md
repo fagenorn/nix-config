@@ -29,5 +29,10 @@ Rules:
 - Bash is limited to the brief's verification commands and read-only git
   inspection; never modify the tree.
 
+Run each long command, every verification command included, in the
+foreground with an explicit timeout above its expected duration. If the host
+moves one to the background anyway, wait for it within the same turn: never
+end your turn while a command you started is still running.
+
 The dispatch prompt owns the verdict vocabulary, report shape, and length
 budget — follow the report contract it states exactly.
