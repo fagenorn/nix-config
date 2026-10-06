@@ -53,7 +53,7 @@ COMMAND_VOCABULARY = frozenset({
     "echo", "env", "eval", "export", "find", "gh", "git", "glab", "go",
     "grep", "head", "jq", "just", "kubectl", "ls", "make", "mkdir", "mktemp",
     "mv", "nix", "nixos-rebuild", "node", "npm", "pnpm", "printf", "pytest",
-    "python3", "railway", "resolve-project", "review-package", "rg", "rm",
+    "python3", "railway", "resolve-project", "review-package", "review-range", "rg", "rm",
     "sdd-workspace", "sed", "sh", "sleep", "sops", "sort", "source", "ssh",
     "tail", "tar", "task-brief", "tee", "terraform", "test", "timeout",
     "touch", "unset", "uv", "wc", "workflow-state", "xargs", "yarn", "zsh",
