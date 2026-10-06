@@ -5110,6 +5110,8 @@ class CheckpointVerificationContractsTest(unittest.TestCase):
             "When every command passes, run `verified-tree record --tree <the checked tree>`",
             "`tree_changed` is a failing verification",
             "A `check` that exits 2 leaves no tree to record",
+            "A `record` that exits 2 leaves the pass unrecorded",
+            "the run itself still counts by its commands' results",
             "These failure rules apply only to an actual run.",
             "On a failing verification command, pause, ground, and surface",
             "baselining the same project in a scratch worktree")

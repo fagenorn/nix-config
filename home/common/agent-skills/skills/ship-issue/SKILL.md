@@ -242,7 +242,9 @@ route.
    `--verification` ids. A `record` that exits 3 with `tree_changed` is a
    failing verification under the rules below: the passing run no longer
    describes the worktree. A `check` that exits 2 leaves no tree to record:
-   run the commands anyway, and leave the pass unrecorded.
+   run the commands anyway, and leave the pass unrecorded. A `record` that
+   exits 2 leaves the pass unrecorded too; the run itself still counts by its
+   commands' results.
 
 These failure rules apply only to an actual run. On a failing verification
 command, pause, ground, and surface; do not invent a fix command outside
