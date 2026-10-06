@@ -14,7 +14,9 @@ Counterpart to `to-issues`. Take one tracker issue from triage to merged code by
 - **`AUTO.md`** — autonomous-mode rules. Read it *once*, now, only if the invocation contains the literal token `--auto`.
   When the prompt carries a resume pack, defer that read until the checks in
   `### Resume pack`: a pack that passes them limits it to the sections that
-  subsection names, and one that fails them restores the whole read.
+  subsection names, and one that fails them restores the whole read. An owner
+  delegated at `AUTO.md`'s Phase-5 rollover still reads its
+  `#### Fresh delegated owner` section now, because those checks come first.
 - **`bindings.md`** — phase binding notes. Included routines receive values from this phase's retained snapshot; use `bindings.tracker`, `bindings.vcs`, and `bindings.paths.artifacts`.
 - **`grounding.md`** (Phases 2–5), **`decision-ledger.md`**, **`investigate.md`** (Phase 0), **`standards-review.md`** (Phase 5), **`ship-handoff.md`** (Phase 7) — loaded at the named phase.
 - **`REVIEW-CONTRACT.md`** — the Phase-5 reviewer contract. Hand it over **by absolute path**, never read it into this conversation.
@@ -255,8 +257,11 @@ It is not a workflow response and is never piped through `validate-report`:
 it stays untrusted until the checks below pass.
 A pack-carrying relaunch still resolves the project once, validates its
 owner object and runs `check-launch`, and obeys a `current: false` answer
-exactly as it would without a pack; a delegated owner also passes every
-`AUTO.md` `#### Fresh delegated owner` check first. Then it checks the pack
+exactly as it would without a pack. An owner delegated at `AUTO.md`'s
+Phase-5 rollover, whose prompt carries that rollover's continuation
+(`reviewed_head_sha` and two measured artifact blocks), also passes every
+`AUTO.md` `#### Fresh delegated owner` check first; a generic `delegate`
+owner carries no continuation and runs none of them. Then it checks the pack
 against what it can see: the pack's `action_id` must equal the envelope's,
 `git -C <worktree> rev-parse HEAD` must equal `worktree.head`, and
 `git -C <worktree> status --porcelain` must list exactly `worktree.dirty_paths`
@@ -265,10 +270,22 @@ entries (the pack carries that count, not the paths). On any mismatch the pack i
 A verified pack replaces only your own ad-hoc re-orientation: do not dump
 the ledger, re-read git history, re-validate the plan, read the SDD
 progress log yourself, or read skills end to end. Start from its
-`next_action` and read only the skill sections its phase needs: this file's `## Phase <n>` section, the file
-beside this one that phase names, `AUTO.md`'s section governing that phase
-under `--auto` (not the whole file), and the phase's sub-skill (`sdd` for
-Phase 6, `ship-issue` for Phase 7). Everything the pack does not replace
+`next_action` and read only the skill sections its phase needs. At every
+phase, always read the sections every owner obeys, headed `Lifecycle identity`,
+`Decision ledger (artifact discipline)`, `Skill-tool invocations`,
+`Dispatch, phase-budget and attempt-budget rules` (leaf-agent clauses,
+writing workers, interim child results, the executable phase gate),
+`Terminal return procedure` and `Suspension procedure`. Then read this
+file's `## Phase <n>` section, the file beside this one that phase names,
+and the phase's sub-skill (`sdd` for Phase 6, `ship-issue` for Phase 7).
+Under `--auto`, read from `AUTO.md` (not the whole file) its opening
+section and those headed `The self-answer pattern` and
+`When *not* to auto-resolve`, plus the one governing your route at that
+phase: `Phases 2–4 run as subagents` for Phases 2–4; from Phase 5 on,
+`Mandatory direct implementation-owner rollover` for a module-owned
+direct autonomous run and `Other Phase 5–7 routes` for every other
+route, each with `Interface_version 2 delivery relay`.
+Everything the pack does not replace
 still runs unchanged, sdd's own `progress.md` check on entry included: that
 check stays sdd's resume mechanism, and where it disagrees with the pack's
 `resume_task`, sdd's ledger wins. `read_handoff` reads the handoff document

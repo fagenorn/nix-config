@@ -4268,7 +4268,10 @@ class ResumePackContractsTest(unittest.TestCase):
             "Read it *once*, now, only if the invocation contains the literal token `--auto`.",
             "When the prompt carries a resume pack, defer that read",
             "limits it to the sections that subsection names",
-            "restores the whole read", "## Lifecycle identity")
+            "restores the whole read",
+            "An owner delegated at `AUTO.md`'s Phase-5 rollover still reads its "
+            "`#### Fresh delegated owner` section now",
+            "## Lifecycle identity")
 
     def test_orchestrate_adds_the_pack_to_resume_prompts_only(self):
         self.assert_ordered(
@@ -4285,14 +4288,24 @@ class ResumePackContractsTest(unittest.TestCase):
             "### Resume pack A relaunched owner's prompt may carry a resume pack",
             self.PACK, "an accelerator, never a gate", "not a workflow response",
             "still resolves the project once", "runs `check-launch`",
-            "`#### Fresh delegated owner` check",
+            "An owner delegated at `AUTO.md`'s Phase-5 rollover",
+            "carries that rollover's continuation",
+            "`#### Fresh delegated owner` check first",
+            "a generic `delegate` owner carries no continuation and runs none of them",
             "`git -C <worktree> rev-parse HEAD` must equal `worktree.head`",
             "re-orient in full",
             "A verified pack replaces only your own ad-hoc re-orientation",
             "do not dump the ledger", "re-validate the plan",
             "read only the skill sections its phase needs",
-            "this file's `## Phase <n>` section", "(not the whole file)",
+            "always read the sections every owner obeys", "`Lifecycle identity`",
+            "`Dispatch, phase-budget and attempt-budget rules`",
+            "`Terminal return procedure`", "`Suspension procedure`",
+            "this file's `## Phase <n>` section",
             "`sdd` for Phase 6", "`ship-issue` for Phase 7",
+            "(not the whole file)", "`The self-answer pattern`",
+            "`When *not* to auto-resolve`",
+            "`Mandatory direct implementation-owner rollover`",
+            "`Other Phase 5–7 routes`",
             "Everything the pack does not replace still runs unchanged",
             "sdd's own `progress.md` check", "sdd's ledger wins",
             "never stops a relaunch", "## The flow")

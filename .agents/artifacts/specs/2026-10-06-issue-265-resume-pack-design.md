@@ -125,7 +125,8 @@ and common dir by the rule `sdd-workspace` documents. It considers each
 - Exactly one: `plan` is the path from that line, verbatim; `task_count` is the
   number of `task-<N>.md` members in the plan's sibling `<stem>.tasks/`
   directory (a relative plan path resolves against the worktree, an absolute
-  one is used as is), or null when that directory is absent; `completed` is the sorted task numbers that have a
+  one is used as is), or null when that directory is absent or holds no
+  member (a count of zero is unknown, per D17); `completed` is the sorted task numbers that have a
   `Task <N>: complete` line; `last_entry` is the file's last non-empty line.
 - Several: the pack cannot say which plan is current, so `sdd` carries only
   `{"ambiguous": [<plan-basename>, …], "ambiguous_count": <n>}` and
@@ -149,7 +150,9 @@ and common dir by the rule `sdd-workspace` documents. It considers each
    says whether that task's last line is a fix round.
 4. `finish_phase` `{phase: 6}` — `attempt.phase` is 5 and every task in
    `1..task_count` is complete: SDD's final gate and the Phase-6 gate remain.
-5. `start_phase` `{phase}` — otherwise, the phase after `attempt.phase`.
+5. `start_phase` `{phase}` — otherwise, the phase after `attempt.phase`;
+   phase 0 itself while no gate is recorded (`phase_action` null, as spawned),
+   since an attempt at phase 0 has not yet finished Phase 0 (per D17).
 
 An unknown `task_count` (null) never yields `finish_phase`: with the plan's
 size unknown the pack answers `resume_task` at the first missing number, which
@@ -258,3 +261,4 @@ resume mechanism and wins over the pack's `resume_task` if they disagree.
 | D14 | Owner guidance is a `### Resume pack` subsection closing from-issue SKILL.md's `## Lifecycle identity`; orchestrate-issues §4's owner prompt gains an optional `Resume pack` paragraph; AUTO.md's transfer gate and fresh-owner sections carry the pack beside the continuation; CLAUDE.md gains one bullet; hot-path instruction-load ceilings rise to the measured bytes | #250 Task 3 precedent (CLAUDE.md bullet, contract test, ceilings); `test_instruction_load.py` | A new file beside SKILL.md: one more load on the path whose cost the issue cuts |
 | D15 | The 4096-byte bound is enforced on `render_json`'s output (ASCII-escaped JSON plus newline): shed oldest commits, then `last_entry` characters (`last_entry_truncated`), then trailing ambiguous names (`ambiguous_count`), and refuse `the pack exceeds 4096 bytes` when paths alone breach it; amends D7 and D12 | Plan review: character caps do not bound bytes, since `\u00e9`-style escapes cost 6 bytes per character and paths are uncapped | Raising the stated bound or switching to `ensure_ascii=False`: the first leaves it unenforced, the second edits the shared `render_json` wire form |
 | D16 | `resume-pack` stdout is an explicit exception to the validate-every-`workflow-state`-reply rule in orchestrate-issues and from-issue; a verified pack replaces only the owner's ad-hoc re-orientation (ledger dumps, git history, plan re-validation, whole-skill and whole-AUTO.md reads), while `resolve-project`, owner-object validation, `check-launch`, the fresh-owner rollover checks and sdd's own `progress.md` check stay, sdd's ledger winning on disagreement | Plan review: the closed workflow-response validator rejects the pack, and unconditional read instructions (AUTO.md once, sdd's ledger check) left the precedence undefined | A `resume_pack` validator route (excluded by Out of scope); letting the pack override sdd's ledger: two resume authorities for one task list |
+| D17 | `start_phase` is phase 0 while the attempt has no recorded gate (`phase_action` null, the spawn state; `progress` always stores a non-null action) and the phase after `attempt.phase` once one is; a pack-carrying owner always reads from-issue's shared owner sections (`## Lifecycle identity`, `## Decision ledger (artifact discipline)`, `## Skill-tool invocations`, `## Dispatch, phase-budget and attempt-budget rules`, `## Terminal return procedure`, `## Suspension procedure`) and, under `--auto`, AUTO.md's opening, `## The self-answer pattern`, `## When *not* to auto-resolve` and its route section; only an owner delegated at AUTO.md's Phase-5 rollover (carrying its continuation) runs the `#### Fresh delegated owner` checks, and it reads that section before the deferred AUTO.md read; an empty `<stem>.tasks/` is an unknown `task_count` (null) | Final-review findings C-001, C-002, the shared-sections conformance finding and the zero-member finding: `phase + 1` skipped an interrupted Phase 0; generic `delegate` has no `reviewed_head_sha` or measured artifacts; dispatch, suspension and terminal rules live outside `## Phase` sections; zero members made `finish_phase` reachable with no task done | Keeping `phase + 1` and storing a synthetic phase −1: a ledger schema change for a fact `phase_action` already carries; applying the rollover checks to every delegated owner: unsatisfiable for a generic `delegate`; a count of zero: finishes Phase 6 on an empty task directory |
