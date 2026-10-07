@@ -1399,6 +1399,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_owner_has_executable_phase_gate_and_action_semantics(self):
         self.assertIn("workflow-state progress", self.from_issue)
         self.assertIn("continue | fresh_start | handoff | delegate", self.from_issue)
+        self.assertIn("--turn-ceiling 120 --context-ceiling 150000 --turn-headroom 2 "
+                      "--context-headroom 10000", self.from_issue)
 
     def test_owner_lifecycle_is_optional_for_direct_use_and_covers_all_stops(self):
         identity = self.section(
@@ -1407,6 +1409,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for field in ("run_id", "attempt", "owner", "action_id", "worktree", "ledger_repo_root"):
             self.assertIn(f"`{field}`", identity)
         self.assertIn("--repo-root <ledger_repo_root>", identity)
+        phase_zero = self.section(self.from_issue, "## Phase 0", "## Phase 1")
+        self.assertIn("workflow-state finish", phase_zero)
 
     def test_from_issue_revalidates_its_launch_before_the_terminal_finish(self):
         handling = normalized(self.section(
@@ -1811,8 +1815,8 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
 
     def test_from_issue_phase_6_hands_sdd_its_lifecycle_identity(self):
         self.assert_ordered(
-            self.read(FROM_ISSUE), "## Phase 6 — Execute", "`deadline_at`",
-            "workflow-state register-worker", "## Phase 7 — Ship")
+            self.read(FROM_ISSUE), "## Phase 6 — Execute", "### Lifecycle workers",
+            "`deadline_at`", "workflow-state register-worker", "## Phase 7 — Ship")
 
     def test_from_issue_registers_writers_and_releases_before_every_exit(self):
         text = self.read(FROM_ISSUE)
