@@ -90,8 +90,8 @@ this route does not perform any other acquisition.
 When the invocation contains literal `--auto` and no dispatcher envelope,
 resolve through the existing bindings and adapters the immutable absolute ledger
 repository root (`ledger_repo_root`), positive issue and configured positive
-attempt budget. Every call sends exactly this interface_version
-2 shape. For each request, populate
+attempt budget. Every call sends exactly this interface_version 2 shape. For each
+request, populate
 every observation kind the helper has requested at least once during this acquisition;
 keep an observation kind `null` until the helper requests it:
 
@@ -115,7 +115,7 @@ keep an observation kind `null` until the helper requests it:
 }
 ```
 
-The concrete `issue`, `now`, and `attempt_budget_minutes` values above stand for
+The concrete `issue` and `attempt_budget_minutes` values above stand for
 the values just resolved; they are not fixed literals. Keep every unrequested
 nullable observation slot (`tracker`, `worktree`, `forge`, `delivery_contract`)
 `null`, keep `authorization_intents` `[]` until a contract is sent, keep
@@ -523,7 +523,7 @@ registered (see **Writing workers**), then run
 `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
 (see **Self-reap**). After the `check-launch` fence of this owner's own
 `action_id`, feed those bytes on stdin as `--summary-file -` to
-`workflow-state finish` using the exact run and current time, in one command
+`workflow-state finish` using the exact run, in one command
 whose reply is validated before decoding:
 
 ```text
