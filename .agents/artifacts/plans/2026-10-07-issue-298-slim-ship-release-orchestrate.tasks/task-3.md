@@ -6,8 +6,8 @@
 - Test: `home/common/agent-skills/tests/test_workflow_skill_contracts.py`
 
 **Interfaces:**
-- Consumes: Task 2's tree. The Codex stub is untouched here (Task 4 owns it).
-- Produces: a `SKILL.md` of ≤ 24,000 B and ≤ 430 reflowed body lines (500 is the hard limit) with the description below. The `L2 home/common/claude-code/skills/orchestrate-issues/SKILL.md` debt key is gone, and `test_workflow_skill_contracts.py` holds no prose pin on this file.
+- Consumes: Task 2's tree, where Task 1 already set this file's description and the Codex stub's (per D15). The Codex stub is untouched here.
+- Produces: a `SKILL.md` of ≤ 24,000 B and ≤ 430 reflowed body lines (500 is the hard limit) with the description Task 1 set. The `L2 home/common/claude-code/skills/orchestrate-issues/SKILL.md` debt key is gone, and `test_workflow_skill_contracts.py` holds no prose pin on this file.
 
 **Invariants:**
 - Byte for byte, from base (the Step 6 script checks each):
@@ -16,7 +16,7 @@
   - the marker line, the `Agent(...)` line and the whole owner-prompt blockquote, base lines 349–387 (per D4; `test_dispatch_contracts` reads the blockquote as the carrier);
   - all six fenced blocks: the `host-route`, `init-run`, §3 control-request JSON (17 keys), `build-delivery`, `control` and owner-dispatch envelope fences;
   - every `ORCHESTRATE_MACHINE_TEXT` token (the focused suite checks them), the sentence holding `~/.agents/bin/workflow-state`, and every inline `workflow-state …` and `launch-scope reap …` argv span.
-- Description is exactly: `Dispatches a set of tracker issues through from-issue --auto as independent background agents, tracking only a ledger. Use for "orchestrate issues X, Y, Z".` (per D8).
+- Description stays exactly what Task 1 set: `Dispatches a set of tracker issues through from-issue --auto as independent background agents, tracking only a ledger. Use for "orchestrate issues X, Y, Z".` (per D8).
 - Cited anchors keep their text (per D4): `## 1. Resolve issue set and bindings`, `## 2. Bootstrap and observe`, `## 3. Decide`, `## 4. Execute control actions`, `## 5. Final report`; `**Per-issue contract rule.**` and its rule; §4's `delivery_contract` rule ("This is the one rule for such an issue"); the owner-object projection sentence with its full member list; the `resume` / `resume-pack` step; `**Stop pass.**` ending in its `launch-scope reap … --sweep`.
 - Closed sets and orders keep their members: the seven action kinds `spawn`, `resume`, `retry`, `delivery_remainder`, `delivery_contract`, `wait`, `finalize`; the notification classes (a), (b), (c); the worktree states `matching_issue_branch | absent | mismatch`; the forge-state normalization; the six `wait` rules in order; the `finalize` order (stop pass, clear `current_wait_id`, cancel, clear `current_wait_handle`); the §5 table columns and the per-summary reporting rules (lifecycle-only, delivered with stale custody, `held`, unable-to-resume, `admission.waiting`, **Stop failures**).
 - Helper-enforced rules become one line each (per D6): `control` reserves slots and owns readiness, precedence, retryability, capacity, deadline and completion, so the adapter applies its envelopes and acts on its refusals; `build-delivery`'s resolution root and refusal shape are the builder's, so a refusal sends null and `[]` and the final report relays its stderr line verbatim.
@@ -58,7 +58,7 @@ Expected: non-zero exit with `L2 home/common/claude-code/skills/orchestrate-issu
 
 - [ ] **Step 3: Cut by content class (spec § Content classes)**
 
-1. Frontmatter: replace only the description.
+1. Frontmatter: unchanged (Task 1 set the description).
 2. Preface: keep the adapter's limits (never read issue content, code, specs, plans, diffs or findings; no second ledger; no reconstructed policy), the `~/.agents/bin/workflow-state` sentence, the resolve paragraph unchanged, one sentence that every lifecycle call reads stdin through a quoted heredoc (`--request-file -` for `control`, `--input -` for `build-delivery`) and writes no request file, the validate-before-decoding rule with its `--boundary workflow-response` command, and the `resume-pack` exception in one sentence.
 3. §1: keep both issue-set bullets with their `human_directed` values, cutting the authorization story; the two budget bullets as one; `ledger_repo_root` and the run-reuse pointer; the host-route fence; the `unsupported` stop; `host_route: "claude-code"`; then the D6 line for slots and `admission`.
 4. §2: keep the run-reuse rule without "(per D13)"; the init-run fence; the bootstrap fields; the recorded-worktree states and rules; the candidate rules; the tracker and forge normalization; the notification correlation and its two `state` values; classes (a)–(c), each trimmed to its actions; the refresh rule; the restart rule in one sentence.
@@ -121,6 +121,13 @@ for gone in ("## Notes", "Claude-only skill: it depends on background agents",
              "The runtime parks the refused owner", "(per D13)"):
     assert gone not in text, gone
 assert text.count("Agent(") == 1, "unmarked Agent( line"
+import sys
+sys.path.insert(0, "home/common/agent-skills/tests")
+import test_shell_example_contracts as sx
+def vetted(t):
+    return {p[0].text for _, kind, p in sx._examples(t) if kind == "call"}
+missing = vetted(base) - vetted(text)
+assert not missing, "vetted inline spans removed: " + repr(sorted(missing))
 reflowed = skill_lint.reflowed_lines(body)
 size = len(text.encode("utf-8"))
 print(f"SKILL.md body {reflowed} reflowed lines, {size} bytes")
@@ -132,7 +139,7 @@ if grep -q '"L2 home/common/claude-code/skills/orchestrate-issues/SKILL.md"' hom
 if grep -q 'BUILD_ROOT_CLAUSE, decide\|at the same phase too many times' home/common/agent-skills/tests/test_workflow_skill_contracts.py; then exit 1; fi
 ```
 
-Expected: exit 0. At Task 2's head it fails first on `description`, and then on `## Notes` and the two test pins.
+Expected: exit 0. At Task 2's head it fails first on `## Notes`, and then on the two test pins.
 
 - [ ] **Step 7: Commit**
 
