@@ -25,9 +25,10 @@ Same machinery and rubrics as sdd's final review, over the range SKILL.md's
 Phase 5 selected. The conformance axis uses sdd's
 `conformance-reviewer-prompt.md`, deployed beside its SKILL.md; the native
 correctness form uses `correctness-reviewer-prompt.md`. At ship there is no
-sdd ledger or diff package: omit the ledger-triage placeholder and let each
-reviewer fetch the range per its template's fallback. Verdicts ≤400 words each,
-Critical/Important/Minor, never merged.
+sdd ledger or diff package: omit the ledger-triage placeholder and
+`[ACCEPTANCE_CRITERIA]` (acceptance criteria are graded only in sdd's final
+review), and let each reviewer fetch the range per its template's fallback.
+Verdicts ≤400 words each, Critical/Important/Minor, never merged.
 
 sdd templates unavailable → still use the two isolated native dispatches in
 SKILL.md, never one combined: one briefed with a pasted one-paragraph conformance

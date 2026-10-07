@@ -5394,6 +5394,37 @@ class AcceptanceGradingContractsTest(unittest.TestCase):
             with self.subTest(document=name):
                 self.assertNotIn("Sonnet", text)
 
+    def test_the_conformance_prompt_grades_every_criterion(self):
+        prompt = self.read(SDD_DIR / "conformance-reviewer-prompt.md")
+        fence = prompt[prompt.index("```"):prompt.rindex("```")]
+        for fragment in (
+            "## Acceptance criteria [ACCEPTANCE_CRITERIA]",
+            "`AC1`…`ACn` in order, as exactly one of `met`, `unmet`, `unverified` or `human_pending`",
+            "part of the Declared verification line",
+            "`<plan stem>.acceptance.md`",
+            "An evidence `met` must cite the observed value and the threshold;",
+            'rounding or "close enough" never counts',
+            "A missing row is `unverified`, a stale row is `unverified`",
+            "`human`: always `human_pending`",
+            "An acceptance finding is never parked with a ruling.",
+            "≤400 words total, not counting the `### Acceptance` table.",
+            "It is `Findings` whenever any Acceptance row is `unmet` or `unverified`.",
+            "| AC | Kind | Verdict | Citation |",
+            "`observed <value> at <sha7> vs threshold <literal>`",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, fence)
+        self.assert_ordered(fence, "### Coverage", "### Acceptance (omit this section",
+                            "### Issues", "### Ledger Triage")
+        placeholders = prompt[prompt.index("**Placeholders:**"):]
+        self.assert_ordered(placeholders, "`[ACCEPTANCE_CRITERIA]`",
+                            "`AC<n>: <the issue's criterion line verbatim, without its checkbox>`",
+                            "`Declared verification: <each declared verification command, in order>`",
+                            "ship-issue's full review",
+                            "`### Acceptance` output section")
+        self.assertIn("omit the ledger-triage placeholder and `[ACCEPTANCE_CRITERIA]`",
+                      self.read(SHIP_ISSUE_REVIEW))
+
 
 if __name__ == "__main__":
     unittest.main()
