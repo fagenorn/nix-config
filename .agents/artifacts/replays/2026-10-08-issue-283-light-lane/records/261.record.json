@@ -1,0 +1,38 @@
+{
+  "signals": {
+    "contract_change": {
+      "value": "doubt",
+      "evidence": "Adds a Bash-timeout member to the generated settings.json env and changes the owner/child hand-back protocol (interim notification no longer a completion); not a schema, but a cross-role interface"
+    },
+    "concurrency_or_persistence": {
+      "value": "doubt",
+      "evidence": "Governs live background jobs versus turn end and orphaned concurrent children; no locking or ledger change, and suspension semantics are declared unchanged"
+    },
+    "open_design_questions": {
+      "value": "no",
+      "evidence": "All three parts are specified (timeout floor 30 min, foreground-with-timeout rule, re-engage same child) and the decisions pin scope"
+    },
+    "criteria_shape": {
+      "value": "no",
+      "evidence": "Four criteria, each verified by a deterministic check: built settings JSON, two skill-contract tests pinning anchors, build plus test suite"
+    }
+  },
+  "paths": [
+    "home/common/claude-code/default.nix",
+    "home/common/claude-code/agents/implementer.md",
+    "home/common/claude-code/agents/reviewer.md",
+    "home/common/claude-code/agents/reviewer-lite.md",
+    "home/common/agent-skills/skills/sdd/SKILL.md",
+    "home/common/agent-skills/skills/sdd/implementer-prompt.md",
+    "home/common/agent-skills/skills/sdd/fix-loop.md",
+    "home/common/agent-skills/skills/sdd/task-reviewer-prompt.md",
+    "home/common/agent-skills/skills/sdd/final-review.md",
+    "home/common/agent-skills/skills/from-issue/AUTO.md",
+    "home/common/agent-skills/skills/from-issue/SKILL.md",
+    "home/common/agent-skills/skills/ship-issue/SKILL.md",
+    "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
+    "home/common/agent-skills/tests/test_workflow_skill_contracts.py",
+    "tests/test_claude_permission_guard.py",
+    "CLAUDE.md"
+  ]
+}

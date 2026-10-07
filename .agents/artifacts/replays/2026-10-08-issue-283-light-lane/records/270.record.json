@@ -1,0 +1,32 @@
+{
+  "signals": {
+    "contract_change": {
+      "value": "hit",
+      "evidence": "Changes the implementer tier in the closed, validated model matrix (EXPECTED_ROLE_TIERS pins implementer to opus/high) and the dispatch markers the contract tests check"
+    },
+    "concurrency_or_persistence": {
+      "value": "no",
+      "evidence": "Static model/effort routing data and skill prose; no concurrency, locking or persisted state"
+    },
+    "open_design_questions": {
+      "value": "doubt",
+      "evidence": "The matrix allows one tier per role, yet implementer must be Sonnet for plan tasks and Opus for escalation sites; new role versus per-site tier, and which 'fixer' sites move, are unstated"
+    },
+    "criteria_shape": {
+      "value": "hit",
+      "evidence": "Four criteria, but recording the re-evaluation rule and baseline in a skill or standards shard is prose, not a deterministic code check"
+    }
+  },
+  "paths": [
+    "home/common/agent-skills/model-matrix.json",
+    "python/agent_tools/agent_model_matrix.py",
+    "home/common/claude-code/agents/implementer.md",
+    "home/common/agent-skills/skills/sdd/SKILL.md",
+    "home/common/agent-skills/skills/sdd/implementer-prompt.md",
+    "home/common/agent-skills/skills/sdd/fix-loop.md",
+    "home/common/agent-skills/skills/sdd/final-review.md",
+    "home/common/agent-skills/tests/test_agent_model_matrix.py",
+    "home/common/agent-skills/tests/test_dispatch_contracts.py",
+    "home/common/agent-skills/tests/test_workflow_skill_contracts.py"
+  ]
+}

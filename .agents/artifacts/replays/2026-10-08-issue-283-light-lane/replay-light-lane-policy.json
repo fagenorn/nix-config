@@ -1,0 +1,16 @@
+{
+  "mode": "shadow",
+  "budget_minutes": 90,
+  "risk_paths": [
+    "home/common/claude-code/lifecycle_guard.py",
+    "home/common/agent-skills/scripts/workflow-state.py",
+    "home/common/agent-skills/scripts/workflow-state",
+    "python/agent_tools/transaction_*.py",
+    "python/agent_tools/resolve_project.py",
+    "home/common/agent-skills/scripts/resolve-project.py",
+    "home/common/agent-skills/scripts/resolve_project.py",
+    "home/common/agent-skills/scripts/delivery_model/*",
+    "home/common/agent-skills/scripts/workflow_delivery*.py",
+    ".agents/project.json"
+  ]
+}

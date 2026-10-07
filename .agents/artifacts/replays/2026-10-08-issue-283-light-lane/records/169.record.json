@@ -1,0 +1,27 @@
+{
+  "signals": {
+    "contract_change": {
+      "value": "hit",
+      "evidence": "Changes the emitted workflow-response wire (wake_on order) and adds a new workflow-response boundary bound to the artifact-budget policy schema"
+    },
+    "concurrency_or_persistence": {
+      "value": "no",
+      "evidence": "Response emission and size bounding only; no change to locking or the ledger write path"
+    },
+    "open_design_questions": {
+      "value": "doubt",
+      "evidence": "The new workflow-response wire bound must be 'sized for a realistic issue set' with no number or sizing rule given"
+    },
+    "criteria_shape": {
+      "value": "no",
+      "evidence": "Three fix items, each verifiable by a deterministic regression test (sorted wake_on, validate-report passes on a real control response)"
+    }
+  },
+  "paths": [
+    "home/common/agent-skills/scripts/workflow-state.py",
+    "home/common/agent-skills/artifact-budget-policy.json",
+    "home/common/agent-skills/scripts/artifact_budget.py",
+    "home/common/agent-skills/tests/test_workflow_state.py",
+    "home/common/agent-skills/tests/test_artifact_budget.py"
+  ]
+}

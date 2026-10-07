@@ -1,0 +1,24 @@
+{
+  "signals": {
+    "contract_change": {
+      "value": "no",
+      "evidence": "Remainder resumes already surface as the existing delivery_remainder action; no response or schema shape changes"
+    },
+    "concurrency_or_persistence": {
+      "value": "doubt",
+      "evidence": "The fix sits in control's resume/recover passes inside the ledger transact, changing slot/capacity accounting over persisted custody"
+    },
+    "open_design_questions": {
+      "value": "no",
+      "evidence": "Expected behavior is stated: only dispatch kinds enter proposal_order and spend capacity"
+    },
+    "criteria_shape": {
+      "value": "no",
+      "evidence": "Two acceptance items, both deterministic regression checks against workflow-state"
+    }
+  },
+  "paths": [
+    "home/common/agent-skills/scripts/workflow-state.py",
+    "home/common/agent-skills/tests/test_workflow_state.py"
+  ]
+}
