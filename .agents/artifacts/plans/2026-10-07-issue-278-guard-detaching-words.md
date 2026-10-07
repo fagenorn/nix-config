@@ -51,3 +51,7 @@ Task 1 — Policy-free detaching-word refusal — `home/common/claude-code/lifec
 
 The spec's `## Decision ledger` owns every decision: D1–D5 from design, D6
 appended at planning (path-spelled evaluators and earliest-offset word naming).
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), isolated and read-only, base `e63f6267205ff9fac06b19829d1f43ce023450c9`, no fallback. Findings: 0 Blocking, 1 Should fix, 0 Discussion. Accepted 1 (R1: Task 1 Step 4 now preserves the build, suite and grep statuses through cleanup and exits non-zero on any failure); rejected 0; deferred 0. Routine fix, no ledger row.

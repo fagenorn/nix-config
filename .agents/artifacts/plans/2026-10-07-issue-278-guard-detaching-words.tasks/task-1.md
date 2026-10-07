@@ -167,15 +167,19 @@ Bash timeout 1800000, and if the host backgrounds it, wait for the log's `exit=`
 same turn:
 
 ```bash
-s="${TMPDIR:-/tmp}/settings-278.json"; log="${TMPDIR:-/tmp}/settings-278.log"
-{ just show-claude-settings > "$s"; echo "exit=$?"; } > "$log" 2>&1; tail -3 "$log"
-CLAUDE_SETTINGS_PATH="$s" python3 -m unittest tests/test_claude_permission_guard.py 2>&1 | tail -4
-if grep -nE '^\s*(from|import)\s+agent_tools' home/common/claude-code/lifecycle_guard.py; then exit 1; fi
-if grep -n '"nohup"' home/common/claude-code/lifecycle_guard.py | grep -q COMMAND_WRAPPERS; then exit 1; fi
-rm -f "$s" "$log"
+s="${TMPDIR:-/tmp}/settings-278.json"; log="${TMPDIR:-/tmp}/settings-278.log"; rc=0
+just show-claude-settings > "$s" 2> "$log"; build=$?; echo "exit=$build"; tail -3 "$log"
+[ "$build" -eq 0 ] || rc=1
+if [ "$rc" -eq 0 ]; then
+  CLAUDE_SETTINGS_PATH="$s" python3 -m unittest tests/test_claude_permission_guard.py > "$log" 2>&1 || rc=1
+  tail -4 "$log"
+fi
+if grep -nE '^\s*(from|import)\s+agent_tools' home/common/claude-code/lifecycle_guard.py; then rc=1; fi
+if grep -n '"nohup"' home/common/claude-code/lifecycle_guard.py | grep -q COMMAND_WRAPPERS; then rc=1; fi
+rm -f "$s" "$log"; echo "verify=$rc"; [ "$rc" -eq 0 ]
 ```
 
-Expected: the log ends `exit=0`; the whole suite reports `OK` including the three new tests
+Expected: `exit=0`, the block ends `verify=0` and exits 0 (any failed build, suite or grep makes it exit non-zero after cleanup); the whole suite reports `OK` including the three new tests
 (two failed in Step 2, so this pass is not a no-op); both prohibition greps find nothing.
 
 - [ ] **Step 5: Commit**
