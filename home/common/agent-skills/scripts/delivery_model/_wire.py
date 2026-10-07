@@ -301,7 +301,7 @@ def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
         _object(value, _members("interface_version kind run_id issue custody blocked_on reentry")); _v2(value); _string(value["run_id"], "suspended run")
         issue = _integer(value["issue"], "suspended issue", minimum=1)
         if validate_custody_ref(value["custody"], issue=issue)["kind"] != "implementation": _reject()
-        if value["blocked_on"] not in {"usage_limit", "transport", "human_gate", "external", "agent_dispatch"}: _reject()
+        if value["blocked_on"] not in {"usage_limit", "transport", "human_gate", "external", "agent_dispatch", "deadline"}: _reject()
         _string(value["reentry"], "reentry")
         return value
     if value.get("kind") == "delivery_remainder": return _remainder(value, notes_max)
