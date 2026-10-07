@@ -50,3 +50,7 @@ Task 3 — `from-issue` Phase 0 triage step, docs and final gate — home/common
 Tasks rest on spec rows D1–D7 and on the plan-level rows D8 (evaluation order, `--input -` only, the `resolve` signature) and D9 (the call is named as an inline span only; no vocabulary or allowlist change). Each member cites the rows it uses.
 
 ---
+
+## Standards review provenance
+
+Reviewer: Claude fallback (one native `reviewer`, Opus), after the configured Codex `plan-review` (`codex-companion task --fresh --reviewer plan-review`) completed with a runtime failure (job timed out after 1680 s, no payload). Base SHA 07f4f954c31a871a5144df2224d6d3152e42937b; isolated, read-only. Findings: 0 Blocking, 4 Should-fix, 1 Discussion. Accepted 5 (SF-1 → task-3 R-SF1, SF-2 → task-3 R-SF2, SF-3 → task-1 R-SF3, SF-4 → task-1 R-SF4, D-1 → task-2/task-3 R-D1), rejected 0, deferred 0. Amendments are appended to each task member (per D10).

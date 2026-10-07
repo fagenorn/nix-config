@@ -178,3 +178,8 @@ git add python/agent_tools/resolve_project.py home/common/agent-skills/tests/tes
 launch-commit --repo-root /Users/anis/tmp/nix-config --run-id <run-id> --worker-id <worker-id> -- -m "feat(resolve-project): optional workflow.light_lane and a public resolve() (#279)" -m "<trailers>"
 ```
 Use the launch-commit identity and commit trailers from your dispatch brief.
+
+## Phase-5 review amendments (apply before committing; per D10)
+
+- **R-SF3:** Update the module docstring of `home/common/agent-skills/tests/test_resolve_project.py` so it no longer says the resolver is imported only by two cases: name the `resolve()` seam cases too. Reuse the file's existing `InProcessTestCase` HOME-patching pattern for the in-process `PublicResolveTest` cases instead of a fresh `mock.patch.dict`, unless it cannot serve them (then say why in a comment).
+- **R-SF4:** `test_resolve_applies_required_capabilities` has no skip branch: call `resolve(str(root), ["deploy"])` directly and compare the raised error's `{code, repair_id, violations}` with the error printed by the subprocess run `self.resolve(root, "--require", "deploy")`, as `test_resolve_raises_the_refusal_the_command_prints` does.

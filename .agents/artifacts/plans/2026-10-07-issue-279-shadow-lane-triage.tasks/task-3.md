@@ -132,3 +132,9 @@ git add home/common/agent-skills/skills/from-issue/SKILL.md home/common/agent-sk
 launch-commit --repo-root /Users/anis/tmp/nix-config --run-id <run-id> --worker-id <worker-id> -- -m "feat(from-issue): shadow lane triage at Phase 0 (#279)" -m "<trailers>"
 ```
 Use the launch-commit identity and commit trailers from your dispatch brief.
+
+## Phase-5 review amendments (per D10)
+
+- **R-SF1:** `SKILL.md` line 8 says `workflow-state build-delivery` is "The only sanctioned exception" to resolving once. Keep that pinned substring intact and add right after it a clause stating that `lane-triage evaluate` likewise performs its own read-only resolution to read `bindings.workflow.light_lane` (reword the sentence so it stays true; e.g. "…; `lane-triage evaluate` likewise performs its own read-only resolution, only to read `bindings.workflow.light_lane`"). Add an anchor for that clause in `LaneTriageContractsTest`.
+- **R-SF2:** The Lane triage paragraph must cover every exit: after the exit-0, `light_lane_unsupported` and other-refusal (exit 2) cases, add that any other non-zero exit (a traceback's exit 1, a missing command's 127) stops the attempt through the terminal return procedure. Anchor it in the contract test.
+- **R-D1:** In the final gate, after `just build`, also run `just agent-installed-skill-tests` (timeout ≥ 2400 s); it exercises the Task-2 `LAUNCHER_FLOOR` row.

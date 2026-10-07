@@ -312,3 +312,7 @@ git add python/agent_tools/lane_triage.py tests/test_lane_triage.py lib/agent-to
 launch-commit --repo-root /Users/anis/tmp/nix-config --run-id <run-id> --worker-id <worker-id> -- -m "feat(lane-triage): read-only light-lane verdict command (#279)" -m "<trailers>"
 ```
 Use the launch-commit identity and commit trailers from your dispatch brief.
+
+## Phase-5 review amendments (per D10)
+
+- **R-D1:** After `just build` succeeds in the final gate (Task 3), `just agent-installed-skill-tests` is also run once so the new `LAUNCHER_FLOOR` row and its `usage: lane-triage ` prefix are actually observed. Task 2 itself still runs only the source checks.
