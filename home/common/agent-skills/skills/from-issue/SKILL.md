@@ -557,9 +557,9 @@ rather than resolving it: an imminent quota or session limit, a repeated
 transport failure, a permission prompt only a human can approve, an external
 wait (never a child's interim result; see **Interim child results**), a
 context that cannot launch the agents a phase needs, or too little attempt
-budget left for the next `sdd` task. A suspension
-parks the attempt without ending it — it consumes no attempt, needs no
-authorization phrase, and re-entry resumes it in place.
+budget left for the next `sdd` task. A suspension parks the attempt without
+ending it — it consumes no attempt, needs no authorization phrase, and
+re-entry resumes it in place.
 
 Before suspending, release every worker this owner registered (see
 **Writing workers**): the helper refuses a suspend, a handoff `progress` or a
@@ -681,10 +681,10 @@ Invoke `sdd`: it reads the plan header, dispatches an implementer per task, and 
 With lifecycle identity, invoke `sdd` with this owner's
 `ledger_repo_root`, `run_id` and `action_id` as its lifecycle identity, so
 sdd's `### Lifecycle workers` registers each writing agent under this
-launch and records a progress marker after each completed task. Also hand `sdd` the
-`deadline_at` this owner currently holds — the one adopted at acquisition, or
-the one from a later `declare-lane` reply — so sdd's deadline headroom rule can
-suspend cleanly at a task boundary. The
+launch and records a progress marker after each completed task. Also hand
+`sdd` the `deadline_at` this owner currently holds — the one adopted at
+acquisition, or the one from a later `declare-lane` reply — so sdd's deadline
+headroom rule can suspend cleanly at a task boundary. The
 mechanical route's mechanic is registered the same way: run
 `workflow-state register-worker` before dispatching it, put the
 `Lifecycle worker:` line in its prompt, and release it when it returns. On

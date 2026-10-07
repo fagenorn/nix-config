@@ -1017,8 +1017,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
 
     def test_sdd_states_the_deadline_suspension_order(self):
         # #281 D5, D9: the one paragraph of `### Lifecycle workers` naming
-        # `blocked_on=deadline` releases workers, records progress, then
-        # suspends with that value, pinned by argv and value, not prose.
+        # `blocked_on=deadline` releases workers, records progress, fences
+        # the launch (final review C-001: `suspend` is not launch-fenced),
+        # then suspends with that value, pinned by argv and value, not prose.
         workers = self.section(self.sdd, "### Lifecycle workers",
                                "### 1. Dispatch the implementer")
         paragraphs = [normalized(p) for p in re.split(r"\n\s*\n", workers)
@@ -1031,6 +1032,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "--run-id <run-id> --worker-id <worker_id>",
             "workflow-state mark-progress --repo-root <ledger_repo_root> "
             "--run-id <run-id> --action-id <action_id>",
+            "workflow-state check-launch --repo-root <ledger_repo_root> "
+            "--run-id <run-id> --action-id <action_id>",
+            "`current: false`",
+            "`/from-issue <num> --auto`",
+            "`current: true`",
             "`blocked_on=deadline`",
         )
 

@@ -25,7 +25,10 @@ is short, the owner stops cleanly, in this order:
 
 1. It releases its workers.
 2. It records progress with `workflow-state mark-progress`.
-3. It suspends with a new owner-writable cause, `blocked_on=deadline`.
+3. It fences its launch with `workflow-state check-launch`, because
+   `suspend` does not check the caller's launch; a launch that is no longer
+   current prints the re-entry line and stops without suspending (D11).
+4. It suspends with a new owner-writable cause, `blocked_on=deadline`.
 
 `deadline` is auto-resumable like `usage_limit` or `transport`: any `control`
 sweep and any direct re-entry resume the suspension in place, on the same
@@ -76,8 +79,15 @@ The rule:
      are none, because each worker is released when it returns. A worker
      still live is stopped and released `--event stopped` by from-issue's
      **Writing workers** route;
-  2. runs `workflow-state mark-progress`;
-  3. follows from-issue's suspension procedure with `blocked_on=deadline`.
+  2. runs `workflow-state mark-progress`; a refusal does not stop these
+     steps;
+  3. runs `workflow-state check-launch`. On `current: false` or any helper
+     failure it writes nothing more, prints `/from-issue <num> --auto` and
+     stops, as from-issue's superseded route says, without suspending: a
+     successor launch may already own the attempt, and `suspend` would park
+     it (D11);
+  4. on `current: true`, follows from-issue's suspension procedure with
+     `blocked_on=deadline`.
 
 The suspension procedure's own release and self-reap steps still run, and
 they are no-ops here. The procedure's `kind: terminal` branch, at the
@@ -131,7 +141,8 @@ These are all existing seams that run under `just agent-workflow-tests`.
   agent-helpers standard rule 6:
   - `sdd`'s `### Lifecycle workers` section carries a `workflow-state
     release-worker` argv, then a `workflow-state mark-progress` argv, then a
-    suspension naming `deadline`, in that order, inside the paragraph that
+    `workflow-state check-launch` argv with its `current: false` and
+    `current: true` keys, then a suspension naming `deadline`, in that order, inside the paragraph that
     states the headroom rule.
   - The from-issue suspension procedure admits `` `deadline` `` (extends
     `test_suspension_procedure_admits_agent_dispatch`).
@@ -165,3 +176,4 @@ These are all existing seams that run under `just agent-workflow-tests`.
 | D8 | The new skill prose is not offset by trimming other text. Each breached instruction-load ceiling (hot, per profile and host, and the corpus ceiling) is raised to its exact measured bytes in the commit that grows it, with a `Ceiling raised for #281: … (#155 D10)` note sentence and an `instruction-budget-raise needed: …` commit-body line. The `instruction-budget-raise` label stays a human authorization that ship requests; no agent applies it | #155 D10; the #309 precedent (ba40a826); headroom at the base is 81 B (from-issue-controller) and 0 B (orchestrated-issue-owner, implementation-owner) | Cutting unrelated skill prose to net zero: scope creep into text this issue does not own |
 | D9 | The `sdd` contract test finds the headroom paragraph by the ledger value `` `blocked_on=deadline` `` (exactly one blank-line-delimited paragraph of `### Lifecycle workers` carries it) and pins, inside it, the `release-worker` argv prefix, then the `mark-progress` argv, then that value. The from-issue Phase-6 test gains the `` `deadline_at` `` key between the identity and `register-worker`. Refines D5 | agent-helpers rule 6 admits `workflow-state` argv and lifecycle JSON keys | A bold label such as `**Deadline headroom.**` as the anchor: an English phrase pin |
 | D10 | from-issue's Phase 6 hands `sdd` the `deadline_at` the owner currently holds (a later `declare-lane` reply's value supersedes the acquired one), and sdd's **Continuous execution** stop list names the deadline headroom rule | Phase-5 plan review (Codex): the acquired value goes stale after `declare-lane` re-bases it, and the opening directive's exclusive stop list would contradict the new rule | Pass the acquisition-time value: can miss the window or suspend early. Leave the stop list alone: two conflicting instructions |
+| D11 | Before the deadline suspension, the owner fences its launch with `workflow-state check-launch`. On `current: false` or any helper failure it writes nothing more, prints `/from-issue <num> --auto` and stops (from-issue's superseded route); only on `current: true` does it suspend with `blocked_on=deadline`. A refused `mark-progress` is tolerated only while the launch stays current. The contract test pins the `check-launch` argv between the `mark-progress` argv and the value. Extends D5 and D9 | Final correctness review C-001: `suspend` selects only the issue and attempt and checks that the attempt is active, not the caller's launch, so a superseded owner whose `mark-progress` was refused (`superseded_launch`) could park its successor's live attempt | Add a launch fence inside `suspend`: new helper behaviour, out of scope under D2 and D4 |

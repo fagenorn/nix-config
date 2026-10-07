@@ -111,7 +111,7 @@
         "from-issue/REVIEW-CONTRACT.md": "handed to the plan reviewer by absolute path, never read into this conversation"
       },
       "ceiling_bytes": {
-        "claude": 191620
+        "claude": 191959
       },
       "conditional_ceiling_bytes": {
         "claude": 153952
@@ -226,8 +226,8 @@
         "codex-collaboration/PLAN-REVIEW.md": "plan-review ran at Phase 5"
       },
       "ceiling_bytes": {
-        "claude": 183210,
-        "codex": 183210
+        "claude": 183549,
+        "codex": 183549
       },
       "conditional_ceiling_bytes": {
         "claude": 135881,
@@ -1043,6 +1043,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 561596,
+  "corpus_ceiling_bytes": 561935,
   "description_ceiling_bytes": 3145
 }

@@ -158,11 +158,17 @@ minus `date -u`. At each boundary, when `remaining` is less than the larger of
    as from-issue's **Writing workers** route says;
 2. run
    `workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`;
-3. follow from-issue's suspension procedure with `blocked_on=deadline`.
+   a refusal does not stop these steps;
+3. run
+   `workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`,
+   because `suspend` does not fence the launch: on `current: false` or any
+   helper failure, write nothing more, print `/from-issue <num> --auto` on
+   its own line and stop, as from-issue's superseded route says;
+4. on `current: true`, follow from-issue's suspension procedure with
+   `blocked_on=deadline`.
 
-A refused `mark-progress` does not stop these steps. If the suspend is
-refused because the attempt is no longer active, the reaper expired it
-first: follow from-issue's expired-deadline route — print
+If the suspend is refused because the attempt is no longer active, the
+reaper expired it first: follow from-issue's expired-deadline route — print
 `/from-issue <num> --auto` on its own line and stop, with no retry. Without
 a `deadline_at`, this rule does not apply.
 
