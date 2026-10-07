@@ -15,6 +15,7 @@ import secrets
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -291,6 +292,9 @@ class ScopeHarness(LifecycleHarness):
         self.write_shim(f"exec {shlex.quote(sys.executable)} {shlex.quote(str(WORKFLOW))} \"$@\"")
         self.env = {**self.cli_env, **HERMETIC_GIT,
                     "PATH": f"{self.shims}{os.pathsep}{os.environ['PATH']}"}
+        # D8: every scratch root a test creates lands in a directory the test owns.
+        self.tmpdir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.env["TMPDIR"] = str(self.tmpdir)
         subprocess.run(["git", "init", "-q", str(self.root)], env=self.env, check=True)
         common = subprocess.run(
             ["git", "-C", str(self.root), "rev-parse", "--path-format=absolute",
@@ -344,6 +348,34 @@ class ScopeHarness(LifecycleHarness):
         self.assertEqual(completed.stdout.count("\n"), 1)
         self.assertEqual(json.loads(completed.stdout),
                          {"action_id": action_id, "started": False, "reason": reason})
+
+    def scratch_args(self, *, action_id="14:1:1", worker_id=None):
+        identity = ["--worker-id", worker_id] if worker_id else ["--action-id", action_id]
+        return ["scratch", "--repo-root", str(self.root), "--run-id", self.run_id, *identity]
+
+    def scratch_(self, **identity):
+        return self.scope(*self.scratch_args(**identity))
+
+    def record_path(self, action_id="14:1:1"):
+        return self.registry / action_id / "scratch.json"
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.root), *args], env=self.env, check=True,
+                              capture_output=True, text=True).stdout
+
+    def add_worktree(self, path):
+        """Add a detached worktree at `path` (making the base commit once); its real path."""
+        if subprocess.run(["git", "-C", str(self.root), "rev-parse", "--verify", "-q", "HEAD"],
+                          env=self.env, capture_output=True).returncode != 0:
+            self.git("-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                     "commit", "-q", "--allow-empty", "-m", "base")
+        self.git("worktree", "add", "-q", "--detach", str(path))
+        return os.path.realpath(path)
+
+    def worktrees(self):
+        listing = self.git("worktree", "list", "--porcelain", "-z")
+        return {os.path.realpath(field[len("worktree "):])
+                for field in listing.split("\0") if field.startswith("worktree ")}
 
 
 # The backgrounded sleeper is a sys.executable process, so its marker is readable on darwin (D15).
@@ -539,6 +571,151 @@ class ExecTest(ScopeHarness, unittest.TestCase):
              *self.argv(*self.exec_args(sys.executable, "-c", probe))],
             cwd=self.root, capture_output=True, text=True, check=False, env=self.env, timeout=120)
         self.assertEqual(done.returncode, 0, done.stderr)
+
+
+class ScratchTest(ScopeHarness, unittest.TestCase):
+    def root_of(self, completed):
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.count("\n"), 1)
+        self.assertTrue(completed.stdout.endswith("\n"))
+        return completed.stdout[:-1]
+
+    def assert_scratch_refused(self, completed, action_id, reason):
+        self.assertEqual(completed.returncode, 3, completed.stderr)
+        self.assertEqual(completed.stdout.count("\n"), 1)
+        self.assertEqual(json.loads(completed.stdout),
+                         {"action_id": action_id, "created": False, "reason": reason})
+
+    def test_repeat_calls_print_one_recorded_root(self):  # AC1
+        first = self.scratch_()
+        root = self.root_of(first)
+        self.assertEqual(self.scratch_().stdout, first.stdout)
+        self.assertEqual(self.record_path().read_bytes(),
+                         (launch_scope.canonical_line({"path": root}) + "\n").encode())
+        # The temp dir sits behind a symlink on darwin (/var -> /private/var): the root is real.
+        self.assertEqual(root, os.path.realpath(root))
+        self.assertEqual(os.path.dirname(root), os.path.realpath(self.tmpdir))
+        self.assertRegex(os.path.basename(root), r"\Alaunch-scope-[a-z0-9_]+\Z")
+        self.assertTrue(os.path.isdir(root))
+        self.assertEqual([p.name for p in self.tmpdir.iterdir()], [os.path.basename(root)])
+
+    def test_a_worker_gets_its_launchs_root_until_released(self):  # D1
+        worker = self.register_worker(action_id="14:1:1",
+                                      now="2026-08-13T20:01:00Z")["worker_id"]
+        root = self.root_of(self.scratch_(worker_id=worker))
+        self.assertEqual(self.root_of(self.scratch_()), root)
+        self.release_worker(worker_id=worker, event="returned", now="2026-08-13T20:02:00Z")
+        self.assert_scratch_refused(self.scratch_(worker_id=worker), "14:1:1", "released")
+
+    def test_a_refused_launch_gets_no_root(self):  # D2
+        self.write_shim("exit 2")
+        self.assert_scratch_refused(self.scratch_(), "14:1:1", "check_launch_failed")
+        self.write_shim(f"exec {shlex.quote(sys.executable)} {shlex.quote(str(WORKFLOW))} \"$@\"")
+        self.assertEqual(self.resume(issue=14, worktree=str(self.root / "wt-14"), now=LATER,
+                                     owner_unavailable=True)["id"], "14:1:2")
+        self.assert_scratch_refused(self.scratch_(), "14:1:1", "superseded_launch")
+        self.assertFalse(self.record_path().exists())
+        self.assertEqual(list(self.tmpdir.iterdir()), [])
+
+    def test_a_missing_root_is_recreated_at_its_recorded_path(self):  # D4
+        root = self.root_of(self.scratch_())
+        os.rmdir(root)
+        self.assertEqual(self.root_of(self.scratch_()), root)
+        self.assertEqual(stat.S_IMODE(os.stat(root).st_mode), 0o700)
+
+    def test_a_malformed_record_or_a_root_that_is_not_a_directory_exits_two(self):  # D4
+        root = self.root_of(self.scratch_())
+        real_tmp = os.path.realpath(self.tmpdir)
+        link = self.tmpdir / "link"
+        link.symlink_to(real_tmp)
+        plain = os.path.join(real_tmp, "launch-scope-plainfile")
+        Path(plain).write_text("x\n")
+        aliased = os.path.join(real_tmp, "launch-scope-aliased")
+        os.symlink(root, aliased)
+
+        def canonical(value):
+            return (launch_scope.canonical_line(value) + "\n").encode()
+        cases = {
+            "not json": b"{\n",
+            "duplicate key": ('{"path":%s,"path":%s}\n' % (json.dumps(root),
+                                                          json.dumps(root))).encode(),
+            "extra key": canonical({"path": root, "x": 1}),
+            "not a string": canonical({"path": 7}),
+            "relative": canonical({"path": os.path.basename(root)}),
+            "not its real path": canonical({"path": os.path.join(str(link),
+                                                                 os.path.basename(root))}),
+            "bad basename": canonical({"path": os.path.join(real_tmp, "other-abc")}),
+            "a regular file": canonical({"path": plain}),
+            "a symlink": canonical({"path": aliased}),
+        }
+        good = self.record_path().read_bytes()
+        for label, data in cases.items():
+            with self.subTest(case=label):
+                self.record_path().write_bytes(data)
+                done = self.scratch_()
+                self.assertEqual((done.returncode, done.stdout), (2, ""), done.stderr)
+                self.assertEqual(self.record_path().read_bytes(), data)
+        self.record_path().write_bytes(good)
+        self.assertEqual(self.root_of(self.scratch_()), root)
+
+    def test_a_caller_that_loses_the_creation_race_uses_the_winners_root(self):  # D3
+        winner = os.path.realpath(tempfile.mkdtemp(prefix="launch-scope-", dir=self.tmpdir))
+        real_mkdtemp = tempfile.mkdtemp
+        mine = []
+
+        def racing_mkdtemp(*args, **kwargs):
+            made = real_mkdtemp(*args, **kwargs)
+            mine.append(made)
+            self.record_path().parent.mkdir(parents=True, exist_ok=True)
+            self.record_path().write_text(launch_scope.canonical_line({"path": winner}) + "\n")
+            return made
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(launch_scope.tempfile, "tempdir", str(self.tmpdir)), \
+                mock.patch.object(launch_scope.tempfile, "mkdtemp", racing_mkdtemp):
+            result = launch_scope.scratch(str(self.root), self.run_id, action_id="14:1:1")
+        self.assertEqual(result, (0, winner))
+        (made,) = mine
+        self.assertFalse(os.path.lexists(made))
+        self.assertEqual([p.name for p in self.record_path().parent.iterdir()],
+                         ["scratch.json"])
+
+    def test_a_failure_before_the_record_is_published_removes_the_root(self):  # D11
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(launch_scope.tempfile, "tempdir", str(self.tmpdir)), \
+                mock.patch.object(launch_scope.os, "link", side_effect=OSError("no link")), \
+                self.assertRaises(launch_scope.LaunchScopeError):
+            launch_scope.scratch(str(self.root), self.run_id, action_id="14:1:1")
+        self.assertFalse(self.record_path().exists())
+        self.assertEqual(list(self.record_path().parent.glob(".scratch.*.tmp")), [])
+        self.assertEqual(list(self.tmpdir.iterdir()), [])
+
+    def test_usage_and_helper_errors_exit_two_and_create_nothing(self):
+        not_git = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        base = ["scratch", "--repo-root", str(self.root), "--run-id", self.run_id]
+        cases = [
+            base,
+            [*base, "--action-id", "14:1:1", "--worker-id", "14:1:1:w1"],
+            [*base, "--action-id", ".."],
+            [*base, "--worker-id", "w1"],
+            [*base, "--action-id", "14:1:1", "--", "true"],
+            ["scratch", "--repo-root", str(self.root), "--run-id", "../x",
+             "--action-id", "14:1:1"],
+            ["scratch", "--repo-root", str(not_git), "--run-id", self.run_id,
+             "--action-id", "14:1:1"],
+        ]
+        for args in cases:
+            with self.subTest(args=args):
+                done = self.scope(*args)
+                self.assertEqual((done.returncode, done.stdout), (2, ""), done.stderr)
+        self.assertFalse(self.record_path().exists())
+        self.assertEqual(list(self.tmpdir.iterdir()), [])
+
+    def test_an_unsupported_platform_creates_nothing(self):  # D9
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(launch_processes.sys, "platform", "win32"), \
+                self.assertRaises(UnsupportedPlatform):
+            launch_scope.scratch(str(self.root), self.run_id, action_id="14:1:1")
+        self.assertFalse(self.record_path().exists())
 
 
 class CheckLaunchReplyTest(unittest.TestCase):
