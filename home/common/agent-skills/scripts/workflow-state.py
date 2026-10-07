@@ -1433,8 +1433,10 @@ def reconciled_result(
     closed, because reconciliation saw a merge, not a report (per D3).
     That is also why every workflow response that relays this record checks it
     with artifact-budget's ledger-result rule (``validate_ledger_result``), not
-    the owner-report rule: a ``merged`` owner report means the owner also closed
-    the issue and cleaned up.
+    the owner-report rule: the record may carry a superseded owner's detail
+    pointer without citing it in its notes, which the owner rule refuses. A
+    bare record also meets the owner rule, since an owner's held ``merged`` row
+    (#273) has the same ``issue_closed`` false.
 
     When ``prior_result`` is the attempt's own result and it already carries a
     delivery-detail pointer — a non-null ``report_path`` or a ``detail_state``
