@@ -156,10 +156,10 @@
       ],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 22845,
-        "codex": 22845
+        "claude": 24308,
+        "codex": 24308
       },
-      "note": "Phase 4 from AUTO.md's prompt: writing-plans and doc-grounded-questions, plus the review contract for a mechanical-only self-grade. The producer-report block stays per skill (#155 D5). Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10). Ceiling raised for #263: the implementer, fixer and writing-plans name the per-task verification ladder (#155 D10)."
+      "note": "Phase 4 from AUTO.md's prompt: writing-plans and doc-grounded-questions, plus the review contract for a mechanical-only self-grade. The producer-report block stays per skill (#155 D5). Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10). Ceiling raised for #263: the implementer, fixer and writing-plans name the per-task verification ladder (#155 D10). Ceiling raised for #274: writing-plans/SKILL.md's plan template carries the Acceptance map section and its self-review check (#155 D10, #274 D12)."
     },
     {
       "id": "implementation-owner",
@@ -381,10 +381,10 @@
       ],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 9308,
-        "codex": 9308
+        "claude": 10621,
+        "codex": 10621
       },
-      "note": "One slicing run. The wide-refactor exception is conditional."
+      "note": "One slicing run. The wide-refactor exception is conditional. Ceiling raised for #274: to-issues/SKILL.md types and locates every acceptance criterion with a `[code|evidence|human]` kind and a `measured:` clause (#155 D10, #274 D12)."
     },
     {
       "id": "ship-release",
@@ -427,10 +427,10 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 10135,
-        "codex": 8839
+        "claude": 10775,
+        "codex": 9479
       },
-      "note": "The Phase-5 plan reviewer: its agent definition on Claude and the review contract it is told to read. Its prompt comes from standards-review.md. Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
+      "note": "The Phase-5 plan reviewer: its agent definition on Claude and the review contract it is told to read. Its prompt comes from standards-review.md. Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10). Ceiling raised for #274: from-issue/REVIEW-CONTRACT.md's Acceptance map check (#155 D10, #274 D12)."
     },
     {
       "id": "from-issue-mechanic",
