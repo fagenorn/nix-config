@@ -1,5 +1,7 @@
+import ast
 import contextlib
 import copy
+from datetime import datetime, timezone
 import importlib.util
 import io
 import json
@@ -89,6 +91,11 @@ class LifecycleHarness:
     def _as_legacy(state, version, *, keep_delivery=False):
         state = copy.deepcopy(state)
         state["schema_version"] = version
+        if version < 7:
+            for issue in state["issues"].values():
+                for attempt in issue["attempts"]:
+                    for field in ("lane", "lane_budget_minutes", "lane_history"):
+                        attempt.pop(field, None)
         if version < 6:
             for issue in state["issues"].values():
                 for attempt in issue["attempts"]:
@@ -829,6 +836,13 @@ class LifecycleHarness:
         completed = self.run_cli(
             "mark-progress", "--repo-root", self.root, "--run-id", self.run_id,
             "--now", now, "--action-id", action_id, ok=ok)
+        return json.loads(completed.stdout) if ok else completed
+
+    def declare_lane(self, *, action_id, now, lane, budget_minutes, reason, ok=True):
+        completed = self.run_cli(
+            "declare-lane", "--repo-root", self.root, "--run-id", self.run_id,
+            "--now", now, "--action-id", action_id, "--lane", lane,
+            "--budget-minutes", str(budget_minutes), "--reason", reason, ok=ok)
         return json.loads(completed.stdout) if ok else completed
 
     @staticmethod
@@ -2445,7 +2459,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         stdout_json = self.finish(1, merged, now="2026-08-13T20:20:00Z")
         state = self.read_state()
         attempt = state["issues"]["14"]["attempts"][0]
-        self.assertEqual(state["schema_version"], 6)
+        self.assertEqual(state["schema_version"], 7)
         self.assertIsNone(attempt["blocked_on"])
         self.assertEqual(attempt["stalled_resumes"], 0)
         self.assertEqual(attempt["state"], "merged")
@@ -2839,9 +2853,10 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                     "phase_inputs": expected_inputs,
                     "blocked_on": None, "suspend_phase": None,
                     "stalled_resumes": 0, "progress_marker": None,
+                    "lane": None, "lane_budget_minutes": None, "lane_history": [],
                 }
                 expected_state = {
-                    "schema_version": 6, "run_id": run_id, "workers": [],
+                    "schema_version": 7, "run_id": run_id, "workers": [],
                     "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
                     "prior_run": None, "admission": self.spawned_admission(14),
                     "issues": {"14": {
@@ -2887,9 +2902,10 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "phase_inputs": expected_inputs,
             "blocked_on": None, "suspend_phase": None, "stalled_resumes": 0,
             "progress_marker": None,
+            "lane": None, "lane_budget_minutes": None, "lane_history": [],
         }
         expected_state = {
-            "schema_version": 6, "run_id": self.run_id, "workers": [],
+            "schema_version": 7, "run_id": self.run_id, "workers": [],
             "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
             "prior_run": None, "admission": self.spawned_admission(14),
             "issues": {"14": {
@@ -3931,9 +3947,11 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
 
     def test_direct_owner_rejects_an_unrepresentable_deadline_without_traceback(self):
         candidate = os.path.abspath(self.root / "worktree-issue-73")
+        # A supplied `now` may lead the clock by at most 60 s (#309 D6), so the
+        # deadline overflow is reached by a budget too long for any date, not a late `now`.
         rejected = self.direct_owner_raw(
-            now="9999-12-31T23:59:59Z",
-            attempt_budget_minutes=1,
+            now="2026-09-30T12:00:00Z",
+            attempt_budget_minutes=10**10,
             tracker=self.tracker_fact(73),
             worktree=self.worktree_fact(
                 73, candidate={"path": candidate, "state": "absent"},
@@ -5368,7 +5386,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             schema_one, run_id=self.run_id, migration_contracts={151: contract}
         )
         self.assertEqual(schema_one, original)
-        self.assertEqual(migrated["schema_version"], 6)
+        self.assertEqual(migrated["schema_version"], 7)
         self.assertEqual(workflow.validate_state(migrated, run_id=self.run_id), migrated)
         issue = migrated["issues"]["151"]
         self.assertEqual(issue["delivery_remainders"], [])
@@ -5389,9 +5407,9 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                     lambda current: (current, False), migration_contracts={},
                 )
             self.assertEqual(state, self._as_legacy(baseline, version))
-            self.assertEqual(value["schema_version"], 6)
+            self.assertEqual(value["schema_version"], 7)
             write.assert_called_once()
-            self.assertEqual(write.call_args.args[2]["schema_version"], 6)
+            self.assertEqual(write.call_args.args[2]["schema_version"], 7)
 
     def test_locked_loader_requires_keyword_migration_context(self):
         self.init_run()
@@ -5416,14 +5434,18 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         workflow = load_source_module(SCRIPT, "workflow_state_legacy_rows")
         migrated = workflow.upgrade_state(legacy, run_id=self.run_id,
                                           migration_contracts={})
-        self.assertEqual(migrated["schema_version"], 6)
+        self.assertEqual(migrated["schema_version"], 7)
         for key, legacy_issue in legacy_rows.items():
             migrated_issue = migrated["issues"][key]
-            # Schema 6 adds one key to every attempt (#250 D4); every legacy
-            # field still migrates byte-exact.
+            # Schemas 6 and 7 add keys to every attempt (#250 D4, #280 D3);
+            # every legacy field still migrates byte-exact.
             attempts = copy.deepcopy(migrated_issue["attempts"])
             for attempt in attempts:
                 self.assertIsNone(attempt.pop("progress_marker"))
+                self.assertEqual(
+                    (attempt.pop("lane"), attempt.pop("lane_budget_minutes"),
+                     attempt.pop("lane_history")),
+                    (None, None, []))
             self.assertEqual(
                 {"issue": migrated_issue["issue"], "attempts": attempts,
                  "outcome": migrated_issue["outcome"]},
@@ -6294,7 +6316,7 @@ class WorkerRegistryTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(self.check_worker("14:1:1:w9")["reason"], "unknown_worker")
         self.assertEqual(self.state_path.read_bytes(), before)
         state = self.read_state()
-        self.assertEqual(state["schema_version"], 6)
+        self.assertEqual(state["schema_version"], 7)
         self.assertEqual(state["workers"][0], {
             "worker_id": "14:1:1:w1", "launch": "14:1:1", "parent": None,
             "registered_at": "2026-08-13T20:01:00Z", "released_at": None,
@@ -6410,7 +6432,7 @@ class WorkerRegistryTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(self.state_path.read_bytes(), before)
         self.register_worker(action_id="14:1:1", now="2026-08-13T20:01:00Z")
         upgraded = self.read_state()
-        self.assertEqual(upgraded["schema_version"], 6)
+        self.assertEqual(upgraded["schema_version"], 7)
         self.assertEqual([w["worker_id"] for w in upgraded["workers"]], ["14:1:1:w1"])
         hybrid = self._as_legacy(upgraded, 4)
         hybrid["workers"] = []
@@ -6487,7 +6509,7 @@ class ProgressMarkerSchemaTest(LifecycleHarness, unittest.TestCase):
 
     def test_a_new_attempt_starts_with_a_null_marker_at_schema_six(self):
         self.spawn_16()
-        self.assertEqual(self.read_state()["schema_version"], 6)
+        self.assertEqual(self.read_state()["schema_version"], 7)
         self.assertIsNone(self.attempt()["progress_marker"])
 
     def test_a_schema_five_ledger_keeps_its_stall_count_and_upgrades_on_first_write(self):
@@ -6512,7 +6534,7 @@ class ProgressMarkerSchemaTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(
             (upgraded["schema_version"], attempt["progress_marker"],
              attempt["stalled_resumes"], attempt["suspend_phase"]),
-            (6, None, 1, 0))
+            (7, None, 1, 0))
 
     def test_a_schema_five_hybrid_is_refused_without_a_write(self):
         self.spawn_16()
@@ -6543,6 +6565,312 @@ class ProgressMarkerSchemaTest(LifecycleHarness, unittest.TestCase):
         missing = copy.deepcopy(valid)
         del missing["issues"]["16"]["attempts"][0]["progress_marker"]
         self.assert_refused_unchanged(missing)
+
+
+class LaneSchemaTest(LifecycleHarness, unittest.TestCase):
+    """#280 D3, D5: schema 7 gives every attempt a lane, a lane budget and a lane history."""
+
+    LATER = "2026-08-13T20:05:00Z"
+    ESCALATIONS = ("important_finding", "second_fix_round", "light_deadline",
+                   "unpredicted_risk")
+
+    def spawn_16(self):
+        self.init_run()
+        self.worktree = str(self.root / "wt-16")
+        self.spawn(issue=16, worktree=self.worktree, budget_minutes=240)
+
+    def attempt(self):
+        return self.read_state()["issues"]["16"]["attempts"][-1]
+
+    def lane_of(self, attempt):
+        return (attempt["lane"], attempt["lane_budget_minutes"], attempt["lane_history"])
+
+    @staticmethod
+    def with_lane(state, lane, budget, history):
+        value = copy.deepcopy(state)
+        value["issues"]["16"]["attempts"][0].update(
+            lane=lane, lane_budget_minutes=budget, lane_history=history)
+        return value
+
+    def assert_refused_unchanged(self, state):
+        self.write_state(state)
+        before = self.state_path.read_bytes()
+        refused = self.check_launch_raw(action_id="16:1:1", ok=False)
+        self.assertEqual((refused.returncode, self.state_path.read_bytes()), (2, before))
+
+    def test_a_new_attempt_starts_without_a_lane_at_schema_seven(self):
+        self.spawn_16()
+        self.assertEqual(self.read_state()["schema_version"], 7)
+        self.assertEqual(self.lane_of(self.attempt()), (None, None, []))
+
+    def test_a_retry_attempt_does_not_inherit_its_predecessors_lane(self):
+        self.spawn_16()
+        # `fail_owner` routes through the legacy `finish` transport, which
+        # downgrades the ledger to schema 2 and so drops lane fields; set the
+        # predecessor's lane only after the failure has landed (Phase-5 PR280-02).
+        self.fail_owner(issue=16, attempt=1, now="2026-08-13T20:01:00Z")
+        self.write_state(self.with_lane(
+            self.read_state(), "light", 90,
+            [{"lane": "light", "reason": "triage", "at": DEFAULT_NOW}]))
+        self.assertEqual(self.lane_of(self.read_state()["issues"]["16"]["attempts"][0])[0],
+                         "light")
+        self.retry(issue=16, worktree=self.root / "wt-16b", now="2026-08-13T20:10:00Z")
+        issue = self.read_state()["issues"]["16"]
+        self.assertEqual(self.lane_of(issue["attempts"][0])[0], "light")
+        self.assertEqual(self.lane_of(issue["attempts"][1]), (None, None, []))
+
+    def test_a_schema_six_ledger_migrates_with_null_lane_fields(self):
+        self.spawn_16()
+        legacy = self._as_legacy(self.read_state(), 6)
+        self.assertEqual(legacy["schema_version"], 6)
+        for field in ("lane", "lane_budget_minutes", "lane_history"):
+            self.assertNotIn(field, legacy["issues"]["16"]["attempts"][0])
+        self.write_state(legacy)
+        before = self.state_path.read_bytes()
+        self.assertEqual(self.check_launch(action_id="16:1:1")["reason"], "current")
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.suspend(issue=16, attempt=1, blocked_on="usage_limit",
+                     now="2026-08-13T20:01:00Z")
+        upgraded = self.read_state()
+        self.assertEqual(
+            (upgraded["schema_version"],
+             self.lane_of(upgraded["issues"]["16"]["attempts"][0])),
+            (7, (None, None, [])))
+
+    def test_a_schema_six_hybrid_is_refused_without_a_write(self):
+        self.spawn_16()
+        valid = self.read_state()
+        for field, value in (("lane", None), ("lane_budget_minutes", None),
+                             ("lane_history", [])):
+            with self.subTest(field=field):
+                hybrid = self._as_legacy(valid, 6)
+                hybrid["issues"]["16"]["attempts"][0][field] = value
+                self.assert_refused_unchanged(hybrid)
+
+    def test_the_validator_closes_the_lane_fields(self):
+        self.spawn_16()
+        valid = self.read_state()
+        light = {"lane": "light", "reason": "triage", "at": DEFAULT_NOW}
+        full = {"lane": "full", "reason": "triage", "at": DEFAULT_NOW}
+        accepted = {"light": ("light", 90, [light]), "full": ("full", 240, [full])}
+        for reason in self.ESCALATIONS:
+            accepted[f"escalated by {reason}"] = ("full", 240, [
+                light, {"lane": "full", "reason": reason, "at": self.LATER}])
+        for label, lane in accepted.items():
+            with self.subTest(accepted=label):
+                self.write_state(self.with_lane(valid, *lane))
+                self.assertEqual(self.check_launch(action_id="16:1:1")["reason"],
+                                 "current")
+        escalated = {"lane": "full", "reason": "important_finding", "at": self.LATER}
+        rejected = {
+            "lane without a budget": ("light", None, [light]),
+            "budget without a lane": (None, 90, []),
+            "lane without a history": ("light", 90, []),
+            "history without a lane": (None, None, [light]),
+            "unknown lane": ("medium", 90, [{**light, "lane": "medium"}]),
+            "last entry disagrees with the lane": ("full", 90, [light]),
+            "zero budget": ("light", 0, [light]),
+            "boolean budget": ("light", True, [light]),
+            "string budget": ("light", "90", [light]),
+            "history that is not a list": ("light", 90, {"0": light}),
+            "entry with an extra key": ("light", 90, [{**light, "note": "x"}]),
+            "entry missing its time": ("light", 90, [{"lane": "light", "reason": "triage"}]),
+            "unknown reason": ("light", 90, [{**light, "reason": "whim"}]),
+            "escalation reason on a first entry": (
+                "light", 90, [{**light, "reason": "important_finding"}]),
+            "triage on an escalation": ("full", 240, [light, {**escalated, "reason": "triage"}]),
+            "full to light": ("light", 90, [full, {**light, "at": self.LATER}]),
+            "light to light": ("light", 90, [light, {**escalated, "lane": "light"}]),
+            "full to full": ("full", 240, [full, escalated]),
+            "time moving backward": ("full", 240, [
+                {**light, "at": self.LATER}, {**escalated, "at": DEFAULT_NOW}]),
+            "entry before the attempt started": (
+                "light", 90, [{**light, "at": "2026-08-13T19:59:59Z"}]),
+            "unparseable time": ("light", 90, [{**light, "at": "yesterday"}]),
+            "list-valued reason": ("light", 90, [{**light, "reason": ["triage"]}]),
+            "null time": ("light", 90, [{**light, "at": None}]),
+            "list-valued lane": ("light", 90, [{**light, "lane": ["light"]}]),
+        }
+        for label, lane in rejected.items():
+            with self.subTest(rejected=label):
+                self.assert_refused_unchanged(self.with_lane(valid, *lane))
+        for field in ("lane", "lane_budget_minutes", "lane_history"):
+            with self.subTest(missing=field):
+                missing = copy.deepcopy(valid)
+                del missing["issues"]["16"]["attempts"][0][field]
+                self.assert_refused_unchanged(missing)
+
+
+class DeclareLaneTest(LifecycleHarness, unittest.TestCase):
+    """#280: `declare-lane` records an attempt's lane and re-bases its deadline."""
+
+    def setUp(self):
+        super().setUp()
+        self.init_run()
+        self.worktree = str(self.root / "wt-16")
+        self.spawn(issue=16, worktree=self.worktree, budget_minutes=240)
+
+    def attempt(self, issue=16):
+        return self.read_state()["issues"][str(issue)]["attempts"][-1]
+
+    def declare(self, lane, *, now, budget=None, reason="triage", action_id="16:1:1",
+                ok=True):
+        if budget is None:
+            budget = 90 if lane == "light" else 240
+        return self.declare_lane(action_id=action_id, now=now, lane=lane,
+                                 budget_minutes=budget, reason=reason, ok=ok)
+
+    def assert_refused(self, clause, lane, **declare):
+        before = self.state_path.read_bytes()
+        refused = self.declare(lane, ok=False, **declare)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, self.state_path.read_bytes()),
+            (2, "", before))
+        self.assertIn(clause, refused.stderr)
+
+    def test_light_rebases_the_deadline_from_the_launch_and_records_history(self):
+        before = self.attempt()
+        self.assertEqual(before["deadline_at"], "2026-08-14T00:00:00Z")
+        reply = self.declare("light", now="2026-08-13T20:05:00Z")
+        self.assertEqual(reply, {"action_id": "16:1:1", "lane": "light",
+                                 "budget_minutes": 90,
+                                 "deadline_at": "2026-08-13T21:30:00Z"})
+        after = self.attempt()
+        self.assertEqual(
+            (after["lane"], after["lane_budget_minutes"], after["deadline_at"],
+             after["lane_history"]),
+            ("light", 90, "2026-08-13T21:30:00Z",
+             [{"lane": "light", "reason": "triage", "at": "2026-08-13T20:05:00Z"}]))
+        self.assertEqual(self.read_state()["updated_at"], "2026-08-13T20:05:00Z")
+        untouched = ("last_progress_at", "phase", "suspend_phase", "stalled_resumes",
+                     "launches", "state", "started_at")
+        self.assertEqual({key: after[key] for key in untouched},
+                         {key: before[key] for key in untouched})
+
+    def test_light_escalates_to_full_from_the_same_launch(self):
+        self.declare("light", now="2026-08-13T20:05:00Z")
+        reply = self.declare("full", now="2026-08-13T20:40:00Z",
+                             reason="second_fix_round")
+        self.assertEqual(reply["deadline_at"], "2026-08-14T00:00:00Z")
+        self.assertEqual(
+            [(entry["lane"], entry["reason"]) for entry in self.attempt()["lane_history"]],
+            [("light", "triage"), ("full", "second_fix_round")])
+
+    def test_full_is_declared_from_triage_with_its_own_budget(self):
+        reply = self.declare("full", now="2026-08-13T20:05:00Z", budget=200)
+        self.assertEqual((reply["lane"], reply["budget_minutes"], reply["deadline_at"]),
+                         ("full", 200, "2026-08-13T23:20:00Z"))
+
+    def test_a_live_worker_does_not_block_a_declaration(self):
+        self.register_worker(action_id="16:1:1", now="2026-08-13T20:01:00Z")
+        self.assertEqual(self.declare("light", now="2026-08-13T20:02:00Z")["lane"],
+                         "light")
+
+    def test_refuses_full_to_light_and_light_to_light(self):
+        self.spawn(issue=17, worktree=str(self.root / "wt-17"), budget_minutes=240)
+        self.declare("full", now="2026-08-13T20:05:00Z")
+        self.assert_refused("declare-lane refused: lane full cannot become light",
+                            "light", now="2026-08-13T20:06:00Z")
+        self.assert_refused("declare-lane refused: lane full cannot become full",
+                            "full", now="2026-08-13T20:06:00Z",
+                            reason="important_finding")
+        self.declare("light", now="2026-08-13T20:07:00Z", action_id="17:1:1")
+        self.assert_refused("declare-lane refused: lane light cannot become light",
+                            "light", now="2026-08-13T20:08:00Z", action_id="17:1:1")
+
+    def test_refuses_a_reason_the_transition_does_not_allow(self):
+        self.assert_refused(
+            "declare-lane refused: reason important_finding does not allow "
+            "lane none to become light",
+            "light", now="2026-08-13T20:05:00Z", reason="important_finding")
+        self.declare("light", now="2026-08-13T20:05:00Z")
+        self.assert_refused(
+            "declare-lane refused: reason triage does not allow lane light to become full",
+            "full", now="2026-08-13T20:06:00Z", reason="triage")
+        self.assert_refused("invalid choice", "light", now="2026-08-13T20:06:00Z",
+                            reason="whim")
+
+    def test_refuses_a_launch_that_is_not_current(self):
+        self.assert_refused("declare-lane refused: launch 99:1:1 is unknown_issue",
+                            "light", now="2026-08-13T20:01:00Z", action_id="99:1:1")
+        self.suspend(issue=16, attempt=1, blocked_on="usage_limit",
+                     now="2026-08-13T20:01:00Z")
+        self.assert_refused("declare-lane refused: launch 16:1:1 is inactive_attempt",
+                            "light", now="2026-08-13T20:02:00Z")
+        self.resume(issue=16, worktree=self.worktree, now="2026-08-13T20:03:00Z")
+        self.assert_refused("declare-lane refused: launch 16:1:1 is superseded_launch",
+                            "light", now="2026-08-13T20:04:00Z")
+        reply = self.declare("light", now="2026-08-13T20:04:00Z", action_id="16:1:2")
+        self.assertEqual(reply["deadline_at"], "2026-08-13T21:33:00Z")
+
+    def test_refuses_a_remainder_launch_a_zero_budget_and_time_moving_backward(self):
+        self.assert_refused("declare-lane refused: a remainder launch carries no lane",
+                            "light", now="2026-08-13T20:01:00Z", action_id="16:r1:1")
+        self.assert_refused("invalid --budget-minutes", "light",
+                            now="2026-08-13T20:01:00Z", budget=0)
+        self.declare("light", now="2026-08-13T20:05:00Z")
+        self.assert_refused("declare-lane refused: time must not move backward",
+                            "full", now="2026-08-13T20:04:00Z",
+                            reason="important_finding")
+
+    def test_an_omitted_now_stamps_the_ledger_clock(self):
+        self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = "2026-08-13T20:10:00Z"
+        completed = self.run_cli(
+            "declare-lane", "--repo-root", self.root, "--run-id", self.run_id,
+            "--action-id", "16:1:1", "--lane", "light", "--budget-minutes", "90",
+            "--reason", "triage")
+        self.assertEqual(json.loads(completed.stdout)["deadline_at"], "2026-08-13T21:30:00Z")
+        self.assertEqual(self.attempt()["lane_history"],
+                         [{"lane": "light", "reason": "triage", "at": "2026-08-13T20:10:00Z"}])
+        self.assertEqual(self.read_state()["updated_at"], "2026-08-13T20:10:00Z")
+
+    def test_refuses_a_rebased_deadline_that_is_not_after_now(self):
+        for now in ("2026-08-13T21:30:00Z", "2026-08-13T21:31:00Z"):
+            with self.subTest(lane="light", now=now):
+                self.assert_refused(
+                    f"declare-lane refused: deadline 2026-08-13T21:30:00Z is not after {now}",
+                    "light", now=now)
+        self.assert_refused(
+            "declare-lane refused: deadline 2026-08-13T21:00:00Z is not after "
+            "2026-08-13T21:31:00Z",
+            "full", now="2026-08-13T21:31:00Z", budget=60)
+        self.assertIsNone(self.attempt()["lane"])
+        self.assert_refused(
+            "declare-lane refused: deadline 2026-08-13T21:31:00Z is not after "
+            "2026-08-13T21:31:00Z",
+            "light", now="2026-08-13T21:31:00Z", budget=91)
+        reply = self.declare("light", now="2026-08-13T21:31:00Z", budget=92)
+        self.assertEqual(reply["deadline_at"], "2026-08-13T21:32:00Z")
+
+    def test_a_suspension_resume_uses_the_lane_budget_or_the_request_budget(self):
+        for issue in (17, 18):
+            self.spawn(issue=issue, worktree=str(self.root / f"wt-{issue}"),
+                       budget_minutes=240)
+        self.declare("light", now="2026-08-13T20:05:00Z")
+        self.declare("full", now="2026-08-13T20:05:00Z", budget=200, action_id="18:1:1")
+        for issue in (16, 17, 18):
+            self.suspend(issue=issue, attempt=1, blocked_on="usage_limit",
+                         now="2026-08-13T20:10:00Z")
+        # `resume` sends the harness's default request budget of 30 minutes.
+        expected = {16: ("2026-08-13T23:00:00Z", "2026-08-14T00:30:00Z", "light"),
+                    17: ("2026-08-13T23:01:00Z", "2026-08-13T23:31:00Z", None),
+                    18: ("2026-08-13T23:02:00Z", "2026-08-14T02:22:00Z", "full")}
+        for issue, (now, deadline, lane) in expected.items():
+            with self.subTest(issue=issue):
+                self.resume(issue=issue, worktree=str(self.root / f"wt-{issue}"), now=now)
+                attempt = self.attempt(issue)
+                self.assertEqual(
+                    (attempt["state"], attempt["deadline_at"], attempt["last_progress_at"],
+                     attempt["lane"], len(attempt["launches"])),
+                    ("active", deadline, now, lane, 2))
+
+    def test_a_takeover_inside_the_window_keeps_the_declared_deadline(self):
+        self.declare("light", now="2026-08-13T20:05:00Z")
+        self.resume(issue=16, worktree=self.worktree, now="2026-08-13T20:20:00Z",
+                    owner_unavailable=True)
+        attempt = self.attempt()
+        self.assertEqual((attempt["deadline_at"], attempt["lane"], len(attempt["launches"])),
+                         ("2026-08-13T21:30:00Z", "light", 2))
 
 
 class ProgressMarkerTest(LifecycleHarness, unittest.TestCase):
@@ -6785,7 +7113,7 @@ class ProgressMarkerTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(
             (state["schema_version"],
              state["issues"]["16"]["attempts"][0]["progress_marker"]),
-            (6, self.base))
+            (7, self.base))
 
     def race(self, module_name, interleave, *, now="2026-08-13T20:09:00Z"):
         """Run `mark-progress` in-process with `interleave()` between its probe and
@@ -7759,6 +8087,82 @@ if DeliveredControlHarness is not None:
             self.deliver_through_remainder(held=False)
             response = self.control(275, recorded={DELIVERED: "absent"}, contracts=True)
             self.assertEqual(self.summaries(response)[DELIVERED]["state"], "queued")
+
+
+class LedgerClockSeamTest(LifecycleHarness, unittest.TestCase):
+    """#309 D1, D2, D11: one clock seam, and an override that can only pin the present or past."""
+
+    CLOCK_CALLS = frozenset({("datetime", "now"), ("datetime", "utcnow"), ("datetime", "today"),
+                             ("date", "today"), ("time", "time"), ("time", "time_ns")})
+
+    def setUp(self):
+        super().setUp()
+        self.cli_env.pop("WORKFLOW_STATE_TEST_CLOCK", None)
+
+    def init_without_time(self):
+        return self.run_cli("init-run", "--repo-root", self.root, "--run-id", self.run_id,
+                            ok=False)
+
+    def test_an_override_later_than_the_clock_is_refused(self):
+        self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = "2999-01-01T00:00:00Z"
+        refused = self.init_without_time()
+        self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+        self.assertRegex(refused.stderr,
+                         r"^workflow-state: invalid WORKFLOW_STATE_TEST_CLOCK: "
+                         r"2999-01-01T00:00:00Z is later than the clock "
+                         r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\n$")
+        self.assertFalse(self.state_path.exists())
+
+    def test_a_malformed_override_is_refused(self):
+        for value in ("yesterday", "2026-08-13T20:00:00"):
+            with self.subTest(value=value):
+                self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = value
+                refused = self.init_without_time()
+                self.assertEqual(
+                    (refused.returncode, refused.stdout, refused.stderr),
+                    (2, "", "workflow-state: invalid WORKFLOW_STATE_TEST_CLOCK: "
+                            "expected an RFC3339 UTC timestamp\n"))
+                self.assertFalse(self.state_path.exists())
+
+    def test_the_override_pins_the_stamp_and_an_empty_one_is_the_clock(self):
+        self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = "2026-09-30T12:00:00Z"
+        self.assertEqual(self.init_without_time().returncode, 0)
+        self.assertEqual(self.read_state()["updated_at"], "2026-09-30T12:00:00Z")
+        self.run_id = "issue-14-empty-override"
+        self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = ""
+        self.assertEqual(self.init_without_time().returncode, 0)
+        stamp = datetime.fromisoformat(self.read_state()["updated_at"].replace("Z", "+00:00"))
+        self.assertLessEqual(abs((datetime.now(timezone.utc) - stamp).total_seconds()), 5)
+
+    def sites(self, path):
+        """(kind, innermost enclosing function name) for each clock call and override literal."""
+        found = []
+
+        def visit(node, owner):
+            for child in ast.iter_child_nodes(node):
+                inner = (child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                         else owner)
+                if isinstance(child, ast.Constant) and child.value == "WORKFLOW_STATE_TEST_CLOCK":
+                    found.append(("override", owner))
+                if (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+                        and isinstance(child.func.value, ast.Name)
+                        and (child.func.value.id, child.func.attr) in self.CLOCK_CALLS):
+                    found.append(("clock", owner))
+                visit(child, inner)
+
+        visit(ast.parse(path.read_text(encoding="utf-8")), None)
+        return found
+
+    def test_only_ledger_clock_reads_the_clock_or_the_override(self):
+        scripts = SCRIPT.parent
+        self.assertEqual(set(self.sites(SCRIPT)),
+                         {("override", "ledger_clock"), ("clock", "ledger_clock")})
+        others = [*sorted(scripts.glob("workflow_delivery*.py")),
+                  *sorted((scripts / "delivery_model").glob("*.py"))]
+        self.assertTrue(others)
+        for path in others:
+            with self.subTest(path=path.name):
+                self.assertEqual(self.sites(path), [])
 
 
 if __name__ == "__main__":

@@ -258,6 +258,16 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
 
+    def test_raise_label_mentions_pass(self):
+        for command in (
+            'echo "gh pr edit 1 --add-label instruction-budget-raise"',
+            "cat > notes.md <<'EOF'\ngh pr edit 1 --add-label instruction-budget-raise\nEOF\n",
+            "git commit -m 'docs: explain the instruction-budget-raise label'",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
     # ------------------------------------------------------------------
     # Adversarial table. Each case is one class of "the guard's parser and
     # the shell disagree". Every command below really runs a guarded verb, so
@@ -330,6 +340,208 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(2, result.returncode, command)
+
+    LABEL_REFUSAL_PREFIX = (
+        "lifecycle guard: unsafe instruction-budget-raise label edit:")
+    DIRECT_ADD_REASON = (
+        "only the user applies this label (Instruction Budget raise control)")
+    EVALUATOR_REASON = "shell source passed to an evaluator cannot be validated"
+    # The existing fail-closed reasons the label rows reuse.
+    UNPARSED_REASON = "the command could not be parsed"
+    UNTOKENISED_REASON = "the segment could not be tokenised"
+    QUOTED_SUBSTITUTION_REASON = (
+        "a command substitution inside a quoted word cannot be validated")
+
+    def test_raise_label_additions_are_refused_in_every_spelling(self):
+        # Every command here adds the instruction-budget-raise label, so exit 0
+        # would mean the guard failed to see it. No cwd: the rule is global.
+        for command in (
+            "gh pr edit 1 --add-label instruction-budget-raise",
+            "gh issue edit 23 --add-label instruction-budget-raise",
+            "gh pr edit 1 --add-label=instruction-budget-raise",
+            "gh pr edit 1 --add-label bug,instruction-budget-raise",
+            'gh pr edit 1 --add-label "bug, instruction-budget-raise"',
+            "gh pr edit 1 --add-label 'instruction-budget-raise'",
+            "gh pr edit 1 --add-label '\"bug\",\"instruction-budget-raise\"'",
+            "gh pr edit 1 --add-label INSTRUCTION-BUDGET-RAISE",
+            "gh pr edit 1 --add-label bug --add-label instruction-budget-raise",
+            "gh pr edit 1 --add-label instruction\\-budget\\-raise",
+            '"gh" pr edit 1 --add-label instruction-budget-raise',
+            "gh  pr edit 1 --add-label instruction-budget-raise",
+            "gh pr\tedit 1 --add-label instruction-budget-raise",
+            "(gh pr edit 1 --add-label instruction-budget-raise)",
+            "{ gh pr edit 1 --add-label instruction-budget-raise; }",
+            "x=$(gh pr edit 1 --add-label instruction-budget-raise)",
+            "`gh pr edit 1 --add-label instruction-budget-raise`",
+            "true && gh pr edit 1 --add-label instruction-budget-raise",
+            "if true; then gh pr edit 1 --add-label instruction-budget-raise; fi",
+            "command gh pr edit 1 --add-label instruction-budget-raise",
+            "env -i gh pr edit 1 --add-label instruction-budget-raise",
+            "env FOO=bar gh pr edit 1 --add-label instruction-budget-raise",
+            "sudo -u anis gh pr edit 1 --add-label instruction-budget-raise",
+            "GH_REPO=fagenorn/nix-config gh pr edit 1 --add-label instruction-budget-raise",
+            "gh pr -R fagenorn/nix-config edit 1 --add-label instruction-budget-raise",
+            "gh issue --repo=a/b edit 1 --add-label instruction-budget-raise",
+            "/opt/homebrew/bin/gh pr edit 1 --add-label instruction-budget-raise",
+            "xargs gh pr edit 1 --add-label instruction-budget-raise",
+            "timeout 5 gh pr edit 1 --add-label instruction-budget-raise",
+            "eval 'gh pr edit 1 --add-label instruction-budget-raise'",
+            "sh -c 'gh pr edit 1 --add-label instruction-budget-raise'",
+            "gh pr edit 1 --add-label 'instruction-budget-raise",  # unterminated
+            # split_segments takes `<<"a\"` as a heredoc delimiter, while the
+            # tokeniser reads `\"` as an escaped quote and never closes it.
+            'gh pr edit 1 --add-label instruction-budget-raise <<"a\\"\nbody\na\\\n',
+            "gh pr edit $(gh pr view --json number --jq .number) "
+            "--add-label instruction-budget-raise",
+            "gh pr edit `echo 1` --add-label instruction-budget-raise",
+            # A separator inside the substitution splits `gh` from its label.
+            "gh pr edit $(gh pr view --json number | jq -r .number) "
+            "--add-label instruction-budget-raise",
+            "gh pr edit `gh pr view --json number | jq -r .number` "
+            "--add-label instruction-budget-raise",
+            "gh pr edit $(true; echo 1) --add-label instruction-budget-raise",
+            # The `gh` word sits in an evaluator segment, its label in the next.
+            "gh pr edit $(sh -c 'printf 1'; true) --add-label instruction-budget-raise",
+            # A quoted substitution still runs.
+            'result="$(gh pr edit 1 --add-label instruction-budget-raise)"',
+            'echo "`gh pr edit 1 --add-label instruction-budget-raise`"',
+        ):
+            # Every row except the fail-closed rows names the direct-add reason.
+            reason = {
+                "eval 'gh pr edit 1 --add-label instruction-budget-raise'": self.EVALUATOR_REASON,
+                "sh -c 'gh pr edit 1 --add-label instruction-budget-raise'": self.EVALUATOR_REASON,
+                "gh pr edit 1 --add-label 'instruction-budget-raise": self.UNPARSED_REASON,
+                'gh pr edit 1 --add-label instruction-budget-raise <<"a\\"\nbody\na\\\n':
+                    self.UNTOKENISED_REASON,
+                'result="$(gh pr edit 1 --add-label instruction-budget-raise)"':
+                    self.QUOTED_SUBSTITUTION_REASON,
+                'echo "`gh pr edit 1 --add-label instruction-budget-raise`"':
+                    self.QUOTED_SUBSTITUTION_REASON,
+            }.get(command, self.DIRECT_ADD_REASON)
+            with self.subTest(command=command):
+                result = self.run_guard(command)
+                self.assertEqual(2, result.returncode, (command, result.stderr))
+                self.assertIn(f"{self.LABEL_REFUSAL_PREFIX} {reason}", result.stderr)
+        elsewhere = self.make_repo("https://github.com/someoneelse/tool.git")
+        result = self.invoke_command_in(
+            "gh pr edit 1 --add-label instruction-budget-raise", elsewhere)
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn(f"{self.LABEL_REFUSAL_PREFIX} {self.DIRECT_ADD_REASON}", result.stderr)
+
+    def test_raise_label_refusal_precedes_every_other_verb(self):
+        # The push alone would be refused as a push; the label wins, so the
+        # label rule is judged before any repository-bound verb.
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        result = self.run_guard(
+            "git push origin main; gh pr edit 1 --add-label instruction-budget-raise",
+            cwd=repo)
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn(f"{self.LABEL_REFUSAL_PREFIX} {self.DIRECT_ADD_REASON}", result.stderr)
+        self.assertNotIn("unsafe push", result.stderr)
+
+    def test_other_label_edits_and_mentions_pass(self):
+        for command in (
+            "gh pr edit 1 --add-label bug",
+            'gh issue edit 23 34 --add-label "bug,help wanted"',
+            "gh pr edit 1 --remove-label instruction-budget-raise",
+            "gh pr edit 1 --body 'the user may add instruction-budget-raise'",
+            "xargs gh pr edit 1 --add-label bug",
+            "sh -c 'gh pr edit 1 --add-label bug'",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def assert_detaching_refusal(self, result, word, command):
+        self.assertEqual(2, result.returncode, (command, result.stderr))
+        self.assertIn(
+            f"lifecycle guard: detaching command `{word}` refused:", result.stderr,
+            command,
+        )
+        self.assertIn("run_in_background", result.stderr, command)
+        self.assertIn("launch-scope exec", result.stderr, command)
+
+    def test_detaching_words_are_refused_globally(self):
+        # Every form below makes the shell run a detaching word (or hands it to
+        # source the guard cannot parse), so exit 0 means the guard missed it.
+        # No cwd: the refusal is global and needs no repository.
+        templates = (
+            "W x", "W x &", "(W x)", "{ W x; }", "`W x`", "y=$(W x)", "$(W)",
+            "case a in a) W x;; esac", "! W x", "time W x",
+            "if true; then W x; fi", "for i in a; do W x; done",
+            "true && W x", "x & W", '"W" x', "/usr/bin/W x",
+            "command W x", "builtin W x", "exec W x", "env W x", "env -i W x",
+            "env FOO=bar W x", "sudo W x", "sudo -E W x",
+            "eval 'W x'", "sh -c 'W x'", 'bash -c "W x"', "zsh -c 'W x'",
+            "dash -c 'W x'", "ksh -c 'W x'", "/bin/sh -c 'W x &'",   # per D6
+            'echo "$(W x &)"', 'echo "`W x`"',                     # per D3
+            'echo "unterminated ; W x',                              # unparseable
+            ">log 2>&1 W x &", "2>&1 W x", "</dev/null W x", "> log W x",
+            ">> log 2>&1 W x", "&>log W x", "FOO=bar >log W x",       # redirections
+            "sudo -u anis W x", "sudo -g wheel W x", "sudo -u anis -E W x",
+            "exec -a foo W x", "env -u FOO W x", "env -C /tmp W x",
+            "env -S -i W x", "sudo -E -u anis env -u FOO W x",         # option args
+            "W>/dev/null sleep 60 &", "W</dev/null x", "W>&2", "W>log x",
+            "W>>log x", "sudo>/dev/null W x", "sudo -u >log anis W x",  # attached
+            "env -u || W x", "sudo -u; W x", "exec -a && W x",          # separators
+            "env -u FOO 2>&1 W x",
+            "env -S 'W x'", "env --split-string='W x'", 'env -S"W x"',
+            "env --split-string 'W x'", "env -iS 'W x'",                # split-string
+            "X='>' W x &", "exec -a 'worker>' W x", "X=1> out W x",
+            "X='>' sh -c 'W x'", "sudo -u 'a>' W x",                    # quoted `>`
+        )
+        for word in ("nohup", "setsid", "disown"):
+            for template in templates:
+                command = template.replace("W", word)
+                with self.subTest(command=command):
+                    self.assert_detaching_refusal(
+                        self.run_guard(command), word, command)
+        # The issue's AC1 forms verbatim, and the deliberate over-refusal of D3.
+        for command, word in (
+            ("nohup x &", "nohup"), ("(setsid x)", "setsid"),
+            ("env nohup x", "nohup"), ("$(disown)", "disown"),
+            ("sh -c 'nohup x'", "nohup"), ("x & disown", "disown"),
+            ("sh -c 'cat nohup.out'", "nohup"),
+            ("sh -c 'setsid a; nohup b'", "setsid"),               # earliest, per D6
+        ):
+            with self.subTest(command=command):
+                self.assert_detaching_refusal(self.run_guard(command), word, command)
+
+    def test_detaching_word_mentions_pass(self):
+        for command in (
+            'echo "nohup"',
+            "grep nohup log",
+            "rg -n 'setsid|disown' docs/",
+            'echo "run nohup x & later"',
+            "cat > notes.md <<'EOF'\nnohup x &\nsetsid y\ndisown\nEOF\n",
+            "true # nohup x & disown",
+            "a & b & wait",
+            "sleep 1 &",
+            "make > nohup.out 2>&1",
+            "tail -f nohup.out",
+            "sudo -u anis ls nohup.out",
+            "sudo -u >log anis ls nohup",
+            "make 2>&1 >nohup.out",
+            "ls >nohup.out",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_detaching_refusal_precedes_the_push_grammar(self):
+        # AC3: still refused, now for detaching rather than as a push.
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        result = self.run_guard("nohup git push origin main", cwd=repo)
+        self.assert_detaching_refusal(result, "nohup", "nohup git push origin main")
+        self.assertNotIn("unsafe push", result.stderr)
+        # D1: the check runs before the policy loads. The registered wrapper
+        # forwards "$@", so a later --policy overrides the store policy.
+        bad_policy = ("--policy", "/nonexistent/lifecycle-guard-policy.json")
+        refused = self.invoke_command("setsid x", *bad_policy)
+        self.assert_detaching_refusal(refused, "setsid", "setsid x")
+        control = self.invoke_command("true", *bad_policy)
+        self.assertEqual(2, control.returncode)
+        self.assertIn("lifecycle guard: invalid policy:", control.stderr)
 
     def test_whitespace_normalisation_still_accepts_a_valid_push(self):
         repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
