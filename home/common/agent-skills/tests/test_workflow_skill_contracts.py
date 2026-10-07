@@ -4069,7 +4069,12 @@ class SonnetTaskImplementerContractsTest(unittest.TestCase):
         self.assert_ordered(
             self.read(SDD_DIR / "fix-loop.md"),
             "**Rounds 1–3 — resume the original implementer**",
-            "it keeps the Sonnet/high tier it was launched with",
+            "it keeps the tier it was launched with",
+            "A task already escalated to Opus/high through a reasoning-problem BLOCKED "
+            "stays on Opus/high: its fresh implementer is another "
+            "`sdd-blocked-reasoning-escalation` dispatch",
+            "never a step back to Sonnet",
+            "A task implementer keeps the Sonnet/high tier it was launched with:",
             "<!-- agent-dispatch: id=sdd-task-fix-redispatch role=task-implementer "
             "model=sonnet effort=high -->",
             "**Round 4 — the stuck-breaker.**",

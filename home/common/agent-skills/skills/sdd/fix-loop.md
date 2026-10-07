@@ -4,7 +4,7 @@ Loaded by `SKILL.md` when a task review fails: spec ❌, any Critical/Important 
 
 A round is one fix dispatch plus one scoped re-review. Five rounds maximum:
 
-- **Rounds 1–3 — resume the original implementer** with the open findings verbatim; its context is intact, and it keeps the Sonnet/high tier it was launched with. Can't resume? Dispatch a fresh one at that same tier, carrying brief path, report path and findings — the report file is the persistent memory:
+- **Rounds 1–3 — resume the original implementer** with the open findings verbatim; its context is intact, and it keeps the tier it was launched with. Can't resume? Dispatch a fresh one at that same tier, carrying brief path, report path and findings — the report file is the persistent memory. A task already escalated to Opus/high through a reasoning-problem BLOCKED stays on Opus/high: its fresh implementer is another `sdd-blocked-reasoning-escalation` dispatch (SKILL.md's BLOCKED route), never a step back to Sonnet. A task implementer keeps the Sonnet/high tier it was launched with:
 
 <!-- agent-dispatch: id=sdd-task-fix-redispatch role=task-implementer model=sonnet effort=high -->
 Agent(subagent_type="implementer", model="sonnet", effort="high") takes over fix rounds 1–3 when the original task implementer cannot be resumed.
