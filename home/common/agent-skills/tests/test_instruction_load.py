@@ -12,7 +12,7 @@ import sys
 import tempfile
 import unittest
 
-from agent_tools import instruction_load
+from agent_tools import instruction_load, skill_lint
 
 
 REPO_ROOT = Path(__file__).parents[4]
@@ -53,18 +53,38 @@ def fixture_model():
              "hot": ["demo/SKILL.md"],
              "conditional": ["demo/EXTRA.md", "demo/NEW.md", "solo/SKILL.md"],
              "unread": {}, "ceiling_bytes": {"claude": 51, "codex": 51},
+             "conditional_ceiling_bytes": {"claude": 38, "codex": 26},
              "note": "fixture entry"},
             {"id": "demo-reviewer", "launch": ["demo-review"], "hosts": ["claude", "codex"],
              "prompt": "demo/SKILL.md", "hot": ["agents/reviewer.md"], "conditional": [],
              "unread": {}, "ceiling_bytes": {"claude": 14, "codex": 0},
+             "conditional_ceiling_bytes": {"claude": 0, "codex": 0},
              "note": "fixture reviewer"},
         ],
         "excluded_sites": {"demo-plugin": "a plugin agent outside both trees"},
+        "corpus_ceiling_bytes": 181, "description_ceiling_bytes": 24,
     }
 
 
 def dict_reader(files):
     return lambda path: files.get(path)
+
+
+# HEAD_FILES plus a Codex skill with a description, and two files the corpus skips.
+CORPUS_FILES = {
+    **HEAD_FILES,
+    "home/common/codex/skills/stub/SKILL.md":
+        b"---\nname: stub\ndescription: Stubs. Use when testing.\n---\nstub body\n",
+    "home/common/agent-skills/skills/demo/evals/evals.md": b"not counted\n",
+    "home/common/claude-code/agents/notes.txt": b"not markdown\n",
+}
+
+
+def dict_snapshot(files):
+    return skill_lint.Snapshot(
+        read=files.get,
+        list_files=lambda prefix: sorted(p for p in files if p.startswith(prefix + "/")),
+    )
 
 
 class ModelCoreTest(unittest.TestCase):
@@ -210,6 +230,80 @@ class ModelCoreTest(unittest.TestCase):
             self.assertIsNone(read("skills/Demo/SKILL.md"))
             self.assertIsNone(read("skills/demo"))
             self.assertIsNone(read("skills/demo/ABSENT.md"))
+
+
+class CeilingTest(unittest.TestCase):
+    def all_ceilings(self, model=None, files=CORPUS_FILES):
+        model = model or fixture_model()
+        snapshot = dict_snapshot(files)
+        return instruction_load.ceilings(model, instruction_load.measure(model, snapshot.read),
+                                         instruction_load.measure_corpus(snapshot))
+
+    def test_the_corpus_counts_skill_markdown_agents_and_the_frame(self):
+        # 51 + 17 + 9 (demo) + 12 (solo) + 67 (stub) + 14 (reviewer.md) + 11 (frame)
+        self.assertEqual(instruction_load.measure_corpus(dict_snapshot(CORPUS_FILES)),
+                         {"corpus": 181, "descriptions": 24})
+
+    def test_every_ceiling_is_enumerated_with_its_location(self):
+        rows = [(c.label, c.location, c.ceiling, c.measured) for c in self.all_ceilings()]
+        self.assertEqual(instruction_load.ceiling_locations(fixture_model()), [r[1] for r in rows])
+        self.assertEqual(instruction_load.ceiling_locations(
+            {"profiles": [3, {"id": 1}, {"id": "x", "hosts": "claude"}]}),
+            [("corpus_ceiling_bytes",), ("description_ceiling_bytes",)])
+        hot, conditional = "ceiling_bytes", "conditional_ceiling_bytes"
+        self.assertEqual(rows, [
+            ("profile demo on claude: hot", ("profiles", "demo", hot, "claude"), 51, 51),
+            ("profile demo on claude: conditional",
+             ("profiles", "demo", conditional, "claude"), 38, 38),
+            ("profile demo on codex: hot", ("profiles", "demo", hot, "codex"), 51, 51),
+            ("profile demo on codex: conditional",
+             ("profiles", "demo", conditional, "codex"), 26, 26),
+            ("profile demo-reviewer on claude: hot",
+             ("profiles", "demo-reviewer", hot, "claude"), 14, 14),
+            ("profile demo-reviewer on claude: conditional",
+             ("profiles", "demo-reviewer", conditional, "claude"), 0, 0),
+            ("profile demo-reviewer on codex: hot",
+             ("profiles", "demo-reviewer", hot, "codex"), 0, 0),
+            ("profile demo-reviewer on codex: conditional",
+             ("profiles", "demo-reviewer", conditional, "codex"), 0, 0),
+            ("corpus", ("corpus_ceiling_bytes",), 181, 181),
+            ("descriptions", ("description_ceiling_bytes",), 24, 24),
+        ])
+
+    def test_a_breach_of_each_new_ceiling_is_found_and_over_ceiling_stays_hot_only(self):
+        files = dict(CORPUS_FILES)
+        files["home/common/agent-skills/skills/demo/EXTRA.md"] += b"x"
+        files["home/common/codex/skills/stub/SKILL.md"] = (
+            b"---\nname: stub\ndescription: Stubs. Use when testing!!\n---\nstub body\n")
+        found = instruction_load.breached(self.all_ceilings(files=files))
+        self.assertEqual([c.label for c in found], [
+            "profile demo on claude: conditional", "profile demo on codex: conditional",
+            "corpus", "descriptions"])
+        model = fixture_model()
+        self.assertEqual(
+            instruction_load.over_ceiling(model, instruction_load.measure(model, files.get)), [])
+
+    def test_the_new_ceilings_are_required_and_typed(self):
+        model = fixture_model()
+        del model["profiles"][0]["conditional_ceiling_bytes"]
+        model["profiles"][1]["conditional_ceiling_bytes"] = {"claude": -1, "codex": True}
+        del model["corpus_ceiling_bytes"]
+        model["description_ceiling_bytes"] = 1.5
+        self.assertEqual(instruction_load.validate(model, dict_reader(HEAD_FILES)), [
+            "model: missing key 'corpus_ceiling_bytes'",
+            "model: description_ceiling_bytes must be a non-negative integer",
+            "profile demo: missing key 'conditional_ceiling_bytes'",
+            "profile demo: conditional_ceiling_bytes must map hosts to byte counts",
+            "profile demo-reviewer: conditional_ceiling_bytes claude must be a non-negative integer",
+            "profile demo-reviewer: conditional_ceiling_bytes codex must be a non-negative integer",
+        ])
+
+    def test_conditional_ceiling_hosts_must_match_the_profile_hosts(self):
+        model = fixture_model()
+        del model["profiles"][0]["conditional_ceiling_bytes"]["codex"]
+        self.assertEqual(instruction_load.validate(model, dict_reader(HEAD_FILES)), [
+            "profile demo: conditional_ceiling_bytes hosts ['claude'] differ from hosts "
+            "['claude', 'codex']"])
 
 
 GIT_LOCATION_VARS = (
@@ -442,6 +536,12 @@ class LiveModelTest(unittest.TestCase):
     def test_the_live_tree_breaches_no_ceiling(self):
         measurement = instruction_load.measure(self.model, self.read)
         self.assertEqual(instruction_load.over_ceiling(self.model, measurement), [])
+
+    def test_the_live_tree_breaches_no_ceiling_of_any_kind(self):
+        snapshot = skill_lint.working_tree(REPO_ROOT)
+        found = instruction_load.ceilings(self.model, instruction_load.measure(self.model, self.read),
+                                          instruction_load.measure_corpus(snapshot))
+        self.assertEqual([c.label for c in instruction_load.breached(found)], [])
 
     def test_growing_a_hot_member_breaches_exactly_the_pairs_that_count_it(self):
         measurement = instruction_load.measure(self.model, self.read)

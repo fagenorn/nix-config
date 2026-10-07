@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import posixpath
@@ -23,7 +24,10 @@ from agent_tools.skill_lint import (
     MD_TOKEN,
     SHARED_TREE,
     Reader,
+    Snapshot,
     names,
+    parse_frontmatter,
+    skill_dirs,
     split_member,
     tree_reader,
 )
@@ -33,7 +37,13 @@ MODEL_PATH = "home/common/agent-skills/instruction-load.json"
 FRAME_MEMBER = "agent-guidance/AGENTS.md"
 FRAME_PATH = "home/common/agent-guidance/AGENTS.md"
 HOSTS = ("claude", "codex")
-TOP_LEVEL_KEYS = ("frame", "profiles", "excluded_sites")
+TOP_LEVEL_KEYS = (
+    "frame",
+    "profiles",
+    "excluded_sites",
+    "corpus_ceiling_bytes",
+    "description_ceiling_bytes",
+)
 PROFILE_KEYS = (
     "id",
     "hosts",
@@ -42,6 +52,7 @@ PROFILE_KEYS = (
     "conditional",
     "unread",
     "ceiling_bytes",
+    "conditional_ceiling_bytes",
     "note",
 )
 PROFILE_CHOICE_KEYS = ("entry", "launch")
@@ -119,6 +130,10 @@ def _is_reason_map(value: object) -> bool:
     return isinstance(value, dict) and all(isinstance(reason, str) for reason in value.values())
 
 
+def _is_byte_count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def _top_level_violations(model: dict, read: Reader) -> list[str]:
     found = [f"model: missing key '{key}'" for key in TOP_LEVEL_KEYS if key not in model]
     found += [f"model: unknown key '{key}'" for key in sorted(set(model) - set(TOP_LEVEL_KEYS))]
@@ -138,6 +153,25 @@ def _top_level_violations(model: dict, read: Reader) -> list[str]:
         ]
     if not isinstance(model.get("profiles", []), list):
         found.append("model: profiles must be a list")
+    for key in ("corpus_ceiling_bytes", "description_ceiling_bytes"):
+        if key in model and not _is_byte_count(model[key]):
+            found.append(f"model: {key} must be a non-negative integer")
+    return found
+
+
+def _ceiling_map_violations(key: str, value: object, hosts: object,
+                            hosts_valid: bool) -> list[str]:
+    """Violations of one per-host ceiling map of a profile."""
+    if not isinstance(value, dict):
+        return [f"{key} must map hosts to byte counts"]
+    found = []
+    if hosts_valid and set(value) != set(hosts):
+        found.append(f"{key} hosts {sorted(value)} differ from hosts {sorted(hosts)}")
+    found += [
+        f"{key} {host} must be a non-negative integer"
+        for host, ceiling in value.items()
+        if not _is_byte_count(ceiling)
+    ]
     return found
 
 
@@ -194,19 +228,8 @@ def _profile_violations(profile: object) -> list[str]:
         for member in dict.fromkeys(listed)
         if listed.count(member) > 1
     ]
-    ceiling = profile.get("ceiling_bytes")
-    if not isinstance(ceiling, dict):
-        found.append("ceiling_bytes must map hosts to byte counts")
-    else:
-        if hosts_valid and set(ceiling) != set(hosts):
-            found.append(
-                f"ceiling_bytes hosts {sorted(ceiling)} differ from hosts {sorted(hosts)}"
-            )
-        found += [
-            f"ceiling_bytes {host} must be a non-negative integer"
-            for host, value in ceiling.items()
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0
-        ]
+    for key in ("ceiling_bytes", "conditional_ceiling_bytes"):
+        found += _ceiling_map_violations(key, profile.get(key), hosts, hosts_valid)
     note = profile.get("note")
     if not isinstance(note, str) or not note.strip():
         found.append("empty note")
@@ -423,6 +446,83 @@ def over_ceiling(model: dict, measurement: dict) -> list[str]:
                     f"exceed ceiling {ceiling} ({listing})"
                 )
     return found
+
+
+CEILING_KINDS = {"ceiling_bytes": "hot", "conditional_ceiling_bytes": "conditional"}
+
+
+def measure_corpus(snapshot: Snapshot) -> dict[str, int]:
+    """Bytes of every instruction document, and of every skill description."""
+    total = 0
+    descriptions = 0
+    for directory in skill_dirs(snapshot):
+        members = [directory.skill_md] if directory.skill_md is not None else []
+        members += [*directory.references, *directory.payloads]
+        total += sum(len(snapshot.read(path) or b"") for path in members)
+        raw = snapshot.read(directory.skill_md) if directory.skill_md is not None else None
+        if raw is not None:
+            try:
+                fields, _ = parse_frontmatter(raw.decode("utf-8"))
+            except ValueError:
+                continue
+            descriptions += len(fields.get("description", "").encode("utf-8"))
+    for path in snapshot.list_files(AGENTS_DIR):
+        if path.endswith(".md") and "/" not in path[len(AGENTS_DIR) + 1:]:
+            total += len(snapshot.read(path) or b"")
+    total += len(snapshot.read(FRAME_PATH) or b"")
+    return {"corpus": total, "descriptions": descriptions}
+
+
+@dataclass(frozen=True)
+class Ceiling:
+    label: str
+    location: tuple[str, ...]
+    ceiling: int
+    measured: int
+
+
+def ceiling_locations(model: dict) -> list[tuple[str, ...]]:
+    """Where each ceiling lives in `model`; the one definition, tolerant of an invalid model."""
+    found: list[tuple[str, ...]] = []
+    profiles = model.get("profiles")
+    for profile in profiles if isinstance(profiles, list) else []:
+        if not (isinstance(profile, dict) and isinstance(profile.get("id"), str)):
+            continue
+        hosts = profile.get("hosts")
+        if not _is_string_list(hosts):
+            continue
+        for host in hosts:
+            found += [("profiles", profile["id"], key, host) for key in CEILING_KINDS]
+    return [*found, ("corpus_ceiling_bytes",), ("description_ceiling_bytes",)]
+
+
+def _ceiling_at(model: dict, location: tuple[str, ...]) -> int:
+    if location[0] != "profiles":
+        return model[location[0]]
+    _, profile_id, key, host = location
+    return next(p for p in model["profiles"]
+                if isinstance(p, dict) and p.get("id") == profile_id)[key][host]
+
+
+def ceilings(model: dict, measurement: dict, corpus: dict[str, int]) -> list[Ceiling]:
+    """Every ceiling of a valid model with its measured size, in `ceiling_locations` order."""
+    found = []
+    for location in ceiling_locations(model):
+        if location[0] == "profiles":
+            _, profile_id, key, host = location
+            kind = CEILING_KINDS[key]
+            label = f"profile {profile_id} on {host}: {kind}"
+            measured = measurement["profiles"][profile_id][host][kind]["bytes"]
+        elif location[0] == "corpus_ceiling_bytes":
+            label, measured = "corpus", corpus["corpus"]
+        else:
+            label, measured = "descriptions", corpus["descriptions"]
+        found.append(Ceiling(label, location, _ceiling_at(model, location), measured))
+    return found
+
+
+def breached(found: list[Ceiling]) -> list[Ceiling]:
+    return [c for c in found if c.measured > c.ceiling]
 
 
 PREFACE = (
