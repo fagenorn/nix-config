@@ -25,6 +25,7 @@
 - An auth refusal exits 2 before any sandbox, `claude -p` run or row exists, and its message contains `claude setup-token` and `CLAUDE_CODE_OAUTH_TOKEN`, per D2.
 - `config/skills/<name>/` is a real directory, and each regular file in the tree's skill directory, except `__pycache__` contents, appears as a symlink to the tree's absolute file. No regular file is copied in, per D11. A name present in both roots dies.
 - `input_tokens = uncached + cache_read + cache_creation`, summed over every `modelUsage` entry (D1). Every token field is `null` when there is no parseable result object or the row is plan-only.
+- `usage_json` prints exactly one JSON object for any `result.json`: empty, truncated, non-JSON, several values, or a well-formed result. So a timed-out or crashed run still writes its row, with null token fields.
 - `tree_dirty` reads `git status --porcelain` over the instruction paths from D13: both skill roots, `home/common/claude-code/agents` and `home/common/agent-guidance/AGENTS.md`, minus `':(exclude)home/common/agent-skills/skills/*/evals/*'` and `':(exclude)home/common/claude-code/skills/*/evals/*'`.
 - The runner still has exactly one `resolve-project resolve --repo-root "$REPO"` and its existing refusal block.
 
@@ -84,6 +85,7 @@ cat >"$FAKE_BIN/claude" <<'FAKE'
 #!/usr/bin/env bash
 # Fake claude. FAKE_AUTH_EXIT / FAKE_RUN_EXIT choose exit codes. FAKE_HOLD=1 makes a
 # -p run touch $FAKE_STATE/started and wait (bounded) for $FAKE_STATE/release.
+# FAKE_EMPTY=1 makes a -p run print nothing on stdout, as a timed-out run does.
 if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
   printf 'auth_config_dir=%s\n' "${CLAUDE_CONFIG_DIR:-}" >>"$FAKE_STATE/record"
   exit "${FAKE_AUTH_EXIT:-0}"
@@ -112,6 +114,7 @@ if [ "${FAKE_HOLD:-}" = 1 ]; then
     sleep 0.1
   done
 fi
+[ "${FAKE_EMPTY:-}" = 1 ] && exit "${FAKE_RUN_EXIT:-0}"
 cat <<'JSON'
 {"type":"result","subtype":"success","is_error":false,"result":"FAKE-RESULT-TEXT","num_turns":7,"total_cost_usd":0.25,"modelUsage":{"claude-sonnet-x":{"inputTokens":10,"cacheReadInputTokens":200,"cacheCreationInputTokens":30,"outputTokens":40},"claude-haiku-y":{"inputTokens":1,"cacheReadInputTokens":2,"cacheCreationInputTokens":3,"outputTokens":4}}}
 JSON
@@ -200,6 +203,13 @@ row_has_tree_and_tokens() {
       and .output_tokens == 44 and .cost_usd == 0.25 and .num_turns == 7
       and .models == ["claude-haiku-y", "claude-sonnet-x"] and .claude_exit == $exit' >/dev/null
 }
+row_has_null_usage() {
+  last_row | jq -e --arg tree "$TREE" --argjson exit "$1" '
+      .tree == $tree and .claude_exit == $exit and .input_tokens == null
+      and .uncached_input_tokens == null and .cache_read_input_tokens == null
+      and .cache_creation_input_tokens == null and .output_tokens == null
+      and .cost_usd == null and .num_turns == null and .models == null' >/dev/null
+}
 transcript_is_result_text() {
   local work
   work=$(last_row | jq -r '.workdir') || return 1
@@ -234,6 +244,14 @@ CFG=$(recorded run_config_dir)
 check "non-zero: the row records claude_exit 1 and the token sums" row_has_tree_and_tokens 1
 check "non-zero: the temp root is gone" root_gone "$CFG"
 check "non-zero: only the sandbox is left in TMPDIR" tmp_holds_only_sandboxes
+
+# --- an empty result: the run printed nothing (a timeout) --------------------------
+scenario empty-result
+run_env FAKE_EMPTY=1 FAKE_RUN_EXIT=124
+CFG=$(recorded run_config_dir)
+check "empty result: exactly one row is still written" test "$(row_count)" -eq 1
+check "empty result: the row has claude_exit 124 and null usage" row_has_null_usage 124
+check "empty result: the temp root is gone" root_gone "$CFG"
 
 # --- exit path 3: the auth probe refuses -------------------------------------------
 scenario auth-refused
@@ -280,7 +298,7 @@ echo "test-run-eval-tree: all checks passed"
 - [ ] **Step 2: Run the test and watch it fail**
 
 Run: `timeout 600 bash home/common/agent-skills/evals/tests/test-run-eval-tree.sh 2>&1 | tail -n 40`
-Expected: exit 1. The runner ignores `EVAL_TREE`, so `the claude run saw a CLAUDE_CONFIG_DIR` and the row checks print `FAIL`. Depending on PATH, the runner may also die with `resolve-project is required`.
+Expected: exit 1. The runner ignores `EVAL_TREE`, so `the claude run saw a CLAUDE_CONFIG_DIR`, the row checks and the `empty result` row checks print `FAIL`. Depending on PATH, the runner may also die with `resolve-project is required`.
 
 - [ ] **Step 3: Implement working-tree mode and the row fields in `run-eval.sh`**
 
@@ -314,11 +332,11 @@ Make these changes in order. Do not touch the resolver block.
    CLAUDE_EXIT=$?
    ```
    Then build `$OUT`. If `jq -er 'if type == "object" and (.result | type) == "string" then .result else error("no result") end' "$WORK/result.json" >"$OUT" 2>/dev/null` fails, run `cat "$WORK/result.json" >"$OUT"`. In both cases follow with `cat "$WORK/stderr.txt" >>"$OUT"` and `cat "$OUT"`. Keep the `claude exited …` and timeout NOTE lines.
-5. **Usage extraction.** Add `usage_json <file>`, which prints one compact object or `{}`:
+5. **Usage extraction.** Add `usage_json <file>`, which prints exactly one compact object, `{}` when there is no usable result. It slurps (`-s`), so an empty file yields `[]` and so `{}`, never empty stdout, and a parse error prints nothing before the `|| echo '{}'` fallback:
    ```bash
    usage_json() {
-     jq -c 'if type == "object" and (.modelUsage | type) == "object" then
-         [.modelUsage[]] as $m
+     jq -cs 'if length == 1 and (.[0] | type) == "object" and (.[0].modelUsage | type) == "object" then
+         .[0] | [.modelUsage[]] as $m
          | {uncached_input_tokens: ($m | map(.inputTokens // 0) | add // 0),
             cache_read_input_tokens: ($m | map(.cacheReadInputTokens // 0) | add // 0),
             cache_creation_input_tokens: ($m | map(.cacheCreationInputTokens // 0) | add // 0),
@@ -337,7 +355,7 @@ Replace `home/common/agent-skills/evals/.gitignore` with two lines, `results/*` 
 
 In `justfile`'s `agent-workflow-tests` recipe, add one line right after the multi-line unittest command: `  bash home/common/agent-skills/evals/tests/test-run-eval-tree.sh`.
 
-**README.** Rewrite "## Evals exercise the DEPLOYED skills" as a "## Two modes: deployed and working tree" section. Update "## Results persistence" too. Write every sentence from the implemented code, covering:
+**README.** Rewrite "## Evals exercise the DEPLOYED skills" as a "## Two modes: deployed and working tree" section. Update "## Results persistence" too. In "## Cheap-first", scope "Pipeline prompts stop the flow after Phase 5 … The implementation never runs." to the `from-issue` pipeline cases, and add that a pipeline case of another skill names its own stop in its prompt. That stays true after Task 3 adds cases that run the implementation (`sdd`) or a release (`ship-release`). Write every sentence from the implemented code, covering:
 - deployed mode, which is the default and is what it was;
 - `EVAL_TREE=. just evals from-issue 1`: the temp `CLAUDE_CONFIG_DIR` and what it holds, the shims ahead on `PATH`, and the cleanup;
 - what tree mode does not cover (spec "Decisions");
@@ -353,6 +371,9 @@ Drop the old claim that only the spend ceiling is recorded.
 
 Run: `timeout 600 bash home/common/agent-skills/evals/tests/test-run-eval-tree.sh 2>&1 | tail -n 40`
 Expected: exit 0, every line `ok`, and `test-run-eval-tree: all checks passed`.
+
+Run: `f=$(mktemp "${TMPDIR:-/tmp}/usage.XXXXXX"); bash -c 'source <(sed -n "/^usage_json()/,/^}/p" "$1"); usage_json "$2"' _ home/common/agent-skills/evals/run-eval.sh "$f"; rm -f "$f"`
+Expected: exactly `{}`.
 
 Run: `PYTHONPATH=python timeout 600 python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_ship_release_contracts.py 2>&1 | tail -n 3`
 Expected: `OK`. The resolver-refusal pin still holds.

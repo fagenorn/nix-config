@@ -11,13 +11,14 @@ This task spends real money and wall time. Fourteen `claude -p` runs execute aga
   - `just evals <skill> <id>`, which runs from the repository root;
   - the env `EVAL_TREE`, `EVAL_MODEL` and `EVAL_TIMEOUT`;
   - the row fields `ts`, `skill`, `id`, `mode`, `model`, `verdict`, `wall_s`, `input_tokens`, `claude_exit`, `tree` and `tree_rev`;
-  - the cases `from-issue 1`, `2` and `3`, `ship-issue 5`, `sdd 4`, `ship-release 5` and `orchestrate-issues 7`.
+  - the cases `from-issue 1`, `2` and `3`, `ship-issue 5`, `sdd 4`, `ship-release 5` and `orchestrate-issues 7`, with Task 3's repair of the from-issue grader (D19) already in place.
 - Produces: the committed baseline rows that S9 compares against, and the acceptance record's evidence for row AC3.
 
 **Invariants:**
 - The baseline measures `main`'s skills. Before any run, the instruction paths (D13) at `HEAD` equal `origin/main`'s (spec "Baseline procedure" step 1).
 - Tree mode is used when its auth probe passes. Otherwise deployed mode is used, and only after the D9 and D13 identity check passes. Neither mode switches the machine: `just switch` is never run.
 - Each (case, model) pair gets one trial (D9). A `FAIL` verdict is recorded as it is, because the baseline is not a gate.
+- Every run, reruns included, sets its mode environment explicitly and inherits none of it: `EVAL_TRIALS=1`, and `EVAL_SETTINGS` and `CLAUDE_CONFIG_DIR` unset. Tree mode sets `EVAL_TREE=.`. Deployed mode unsets `EVAL_TREE`, so its claude reads `~/.claude`, the directory the Step 2 identity check compared.
 - Every appended line parses as JSON. No row is edited or deleted (D10).
 
 - [ ] **Step 1: Check that the tree is main's skills**
@@ -43,8 +44,8 @@ rm -rf -- "$probe"
 echo "probe_status=$probe_status"
 ```
 
-- `probe_status=0`: set `MODE_ENV="EVAL_TREE=."` (tree mode).
-- Otherwise use deployed mode with `MODE_ENV=""`, but first run the D9/D13 identity check below. It must print `deployed-matches-tree`. On any `drift:` line, stop and report `BLOCKED` with those lines. Never run `just switch`.
+- `probe_status=0`: tree mode. Its mode line is `MODE_ARGS=(-u EVAL_SETTINGS -u CLAUDE_CONFIG_DIR EVAL_TREE=. EVAL_TRIALS=1)`.
+- Otherwise use deployed mode, whose mode line is `MODE_ARGS=(-u EVAL_TREE -u EVAL_SETTINGS -u CLAUDE_CONFIG_DIR EVAL_TRIALS=1)`. First run the D9/D13 identity check below. It must print `deployed-matches-tree`. On any `drift:` line, stop and report `BLOCKED` with those lines. Never run `just switch`.
 
 ```bash
 drift=0
@@ -59,19 +60,20 @@ cmp -s home/common/agent-guidance/AGENTS.md "$HOME/.claude/CLAUDE.md" || { echo 
 [ "$drift" -eq 0 ] && echo deployed-matches-tree
 ```
 
-Before any run, record the mode and `git rev-parse --short HEAD` (the measured commit).
+Before any run, record the mode, its mode line and `git rev-parse --short HEAD` (the measured commit). Each Bash call is a fresh shell, so Steps 3 and 4 start with the chosen mode line itself.
 
 - [ ] **Step 3: Launch all 14 runs at once (D17)**
 
-Run this as one foreground Bash call with a tool timeout of 3600000 ms. It returns when the slowest run ends, which is at most 3000 s. Put `$MODE_ENV` in place, or leave it empty in deployed mode:
+Run this as one foreground Bash call with a tool timeout of 3600000 ms. It returns when the slowest run ends, which is at most 3000 s. Replace the first line with the mode line chosen in Step 2:
 
 ```bash
+MODE_ARGS=(<the mode line from Step 2>)
 LOGS="${TMPDIR:-/tmp}/eval-baseline-293"
 mkdir -p "$LOGS"
 for model in sonnet opus; do
   for run in from-issue:1 from-issue:2 from-issue:3 ship-issue:5 sdd:4 ship-release:5 orchestrate-issues:7; do
     skill=${run%%:*}; id=${run#*:}
-    ( env $MODE_ENV EVAL_MODEL="$model" EVAL_TIMEOUT=2700 timeout 3000 \
+    ( env "${MODE_ARGS[@]}" EVAL_MODEL="$model" EVAL_TIMEOUT=2700 timeout 3000 \
         ./home/common/agent-skills/evals/run-eval.sh "$skill" "$id" >"$LOGS/$skill-$id-$model.log" 2>&1
       echo "exit=$?" >>"$LOGS/$skill-$id-$model.log" ) &
   done
@@ -94,7 +96,9 @@ jq -rs '[.[] | select(.ts >= "2026-10-07" and .mode == "pipeline" and (.input_to
 Expected: `all-lines-parse`, followed by the `skill:id:model` triples that are covered. If a (skill, model) pair from the five skills × `sonnet`/`opus` has no covered triple at all, rerun one of its cases once, in the foreground, with a tool timeout of 3600000 ms. Use the case whose earlier run ended `124`, or else the first case listed in Step 3:
 
 ```bash
-env $MODE_ENV EVAL_MODEL=<model> EVAL_TIMEOUT=3300 timeout 3500 ./home/common/agent-skills/evals/run-eval.sh <skill> <id> >"$LOGS/<skill>-<id>-<model>-rerun.log" 2>&1
+MODE_ARGS=(<the mode line from Step 2>)
+LOGS="${TMPDIR:-/tmp}/eval-baseline-293"
+env "${MODE_ARGS[@]}" EVAL_MODEL=<model> EVAL_TIMEOUT=3300 timeout 3500 ./home/common/agent-skills/evals/run-eval.sh <skill> <id> >"$LOGS/<skill>-<id>-<model>-rerun.log" 2>&1
 ```
 
 Reruns can go in parallel the same way as Step 3. If a pair is still uncovered after its rerun, stop. Report `BLOCKED` with the pair and its log tails, and commit nothing.

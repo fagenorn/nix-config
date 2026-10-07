@@ -1,11 +1,13 @@
-# Task 3: Four pipeline cases and the narrowed R8
+# Task 3: Four pipeline cases, the narrowed R8 and the from-issue grader repair
 
 **Files:**
 - Modify: `home/common/agent-skills/skills/ship-issue/evals/evals.json` (append case 5)
 - Modify: `home/common/agent-skills/skills/sdd/evals/evals.json` (append case 4)
-- Modify: `home/common/agent-skills/skills/ship-release/evals/evals.json` (append case 5, extend `notes`)
+- Modify: `home/common/agent-skills/skills/ship-release/evals/evals.json` (append case 5, rescope `notes`)
 - Modify: `home/common/claude-code/skills/orchestrate-issues/evals/evals.json` (append case 7)
-- Modify: `home/common/agent-skills/tests/test_eval_cases.py` (two methods, one constant, one helper)
+- Modify: `home/common/agent-skills/skills/from-issue/evals/evals.json` (cases 1–3: artifact-path asserts only, D19)
+- Modify: `home/common/agent-skills/evals/assert-lib.sh` (`plan_tasks_verifiable` only, D19)
+- Modify: `home/common/agent-skills/tests/test_eval_cases.py` (four methods, two constants, two helpers)
 - Modify: `home/common/agent-skills/tests/test_ship_release_contracts.py` (the R8 test only)
 
 **Interfaces:**
@@ -19,9 +21,10 @@
 - Produces: one `"mode": "pipeline"` case in each of the four files, which Task 4 runs as `ship-issue 5`, `sdd 4`, `ship-release 5` and `orchestrate-issues 7`.
 
 **Invariants:**
-- Existing cases are byte-identical. New cases are appended with the next free `id`.
+- Existing cases are byte-identical, apart from the from-issue assert repairs in Step 4 (D19), which keep every assert name. New cases are appended with the next free `id`.
 - Every new prompt carries `Resolve once into a retained ResolvedProject.`, `A resolver refusal is fatal and values are never defaulted or inferred.` and an explicit bold stop.
-- The ship-issue case never expects a push. It stops before `git push` and asserts that origin has no branch (D12).
+- The ship-issue case never expects a push. It stops before `git push` and asserts that origin has no branch (D12). Its verification assert requires `verified-tree check` to answer `verified` for the fixture's `bindings.workflow.verification` ids, which are `["test"]`. A record file alone does not count.
+- The orchestrate-issues case grades the reachable tracker-free outcome: the contract build is refused and nothing is dispatched (D18).
 - The ship-release case uses `release-ready` and runs through Phase 6. It asserts that no tag was pushed and no state file remains (D8, D15).
 - The Global Constraints' forbidden eval strings and retired orchestrate anchors appear nowhere in the new text.
 - R8 keeps its `notes` fragments (`plan-only`, `kind=none`, `fixture-repo`) and its single-branch `expected_output` fragments. Plan-only cases keep the non-execution guard, and a pipeline case must use `release-ready` (D8).
@@ -32,6 +35,7 @@ Add this constant and helper to `test_eval_cases.py`, below `SETUP_KINDS`:
 
 ```python
 PIPELINE_SKILLS = ("from-issue", "ship-issue", "sdd", "ship-release", "orchestrate-issues")
+ASSERT_LIB = EVALS_DIR / "assert-lib.sh"
 
 
 def skill_cases(skill):
@@ -40,9 +44,15 @@ def skill_cases(skill):
         if path.is_file():
             return json.loads(path.read_text(encoding="utf-8"))["evals"]
     raise AssertionError(f"no evals.json for {skill}")
+
+
+def plan_tasks_verifiable(root):
+    return subprocess.run(
+        ["bash", "-c", 'source "$0"; plan_tasks_verifiable "$1"', str(ASSERT_LIB), str(root)],
+        capture_output=True, text=True, timeout=60)
 ```
 
-Add these two methods to `EvalCasesTest`:
+Add these four methods to `EvalCasesTest`:
 
 ```python
     def test_each_pipeline_skill_has_a_scripted_pipeline_case(self):
@@ -63,6 +73,41 @@ Add these two methods to `EvalCasesTest`:
                 with self.subTest(skill=skill, case=case["id"]):
                     self.assertIn("ResolvedProject", case["prompt"])
                     self.assertRegex(case["prompt"].lower(), r"\bstop\b")
+
+    def test_from_issue_asserts_never_prefix_an_absolute_artifact_dir(self):
+        for case in skill_cases("from-issue"):
+            for check in case.get("asserts") or []:
+                with self.subTest(case=case["id"], name=check["name"]):
+                    self.assertNotRegex(check["shell"], r'\$(WT|REPO|PRE_WT)/\$(SPEC|PLAN)_DIR')
+                    self.assertNotRegex(check["shell"], r'commits_touch "\$WT" "\$(SPEC|PLAN)_DIR"')
+
+    def test_plan_tasks_verifiable_reads_indexed_members(self):
+        index = ("# Plan\n\n## Task index\n\n"
+                 "Task 1 — x — f — full — [task-1.md](p.tasks/task-1.md)\n"
+                 "Task 2 — y — g — full — [task-2.md](p.tasks/task-2.md)\n\n## Acceptance map\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "p.md"
+            root.write_text(index, encoding="utf-8")
+            members = Path(tmp) / "p.tasks"
+            members.mkdir()
+            (members / "task-1.md").write_text("# Task 1: x\n\nRun: `true`\nExpected: exit 0.\n", encoding="utf-8")
+            with self.subTest(case="a linked member is missing"):
+                self.assertNotEqual(plan_tasks_verifiable(root).returncode, 0)
+            (members / "task-2.md").write_text("# Task 2: y\n\n- [ ] Step 1: edit g\n", encoding="utf-8")
+            with self.subTest(case="a member has no verification line"):
+                done = plan_tasks_verifiable(root)
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn("task-2.md", done.stdout)
+            (members / "task-2.md").write_text("# Task 2: y\n\nRun: `true`\nExpected: exit 0.\n", encoding="utf-8")
+            with self.subTest(case="every member is verifiable"):
+                done = plan_tasks_verifiable(root)
+                self.assertEqual(done.returncode, 0, done.stdout)
+            root.write_text("# Plan\n\n## Task index\n\nnone\n", encoding="utf-8")
+            with self.subTest(case="an index that links no member"):
+                self.assertNotEqual(plan_tasks_verifiable(root).returncode, 0)
+            root.write_text("# Plan\n\n### Task 1: x\n\nExpected: ok\n", encoding="utf-8")
+            with self.subTest(case="a legacy single-file plan"):
+                self.assertEqual(plan_tasks_verifiable(root).returncode, 0)
 ```
 
 In `test_ship_release_contracts.py`, rename `test_evals_cover_the_fixture_shape_and_never_execute_a_release` to `test_evals_cover_the_fixture_shape_and_release_only_in_the_sandbox`, and replace its per-case loop with:
@@ -100,7 +145,7 @@ Leave the notes-fragment checks above the loop and the `single_branch` checks be
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run: `PYTHONPATH=python timeout 600 python3 -m unittest home/common/agent-skills/tests/test_eval_cases.py home/common/agent-skills/tests/test_ship_release_contracts.py 2>&1 | grep -E '^(FAIL|ERROR):|has no pipeline case|no ship-release pipeline' | head`
-Expected: `test_each_pipeline_skill_has_a_scripted_pipeline_case` fails for `ship-issue`, `sdd`, `ship-release` and `orchestrate-issues`, and the R8 test fails with `no ship-release pipeline case …`.
+Expected: `test_each_pipeline_skill_has_a_scripted_pipeline_case` fails for `ship-issue`, `sdd`, `ship-release` and `orchestrate-issues`, and the R8 test fails with `no ship-release pipeline case …`. `test_from_issue_asserts_never_prefix_an_absolute_artifact_dir` fails for cases 1–3, and `test_plan_tasks_verifiable_reads_indexed_members` fails on the indexed subtests.
 
 - [ ] **Step 3: Append the four cases**
 
@@ -119,7 +164,7 @@ Resolve once into a retained ResolvedProject. A resolver refusal is fatal and va
 The `expected_output`: "Standalone ship on the tracker-free route. It syncs the worktree branch with origin/main (a no-op here), runs the declared verification and records it with `verified-tree record` in the worktree's git directory, and reaches the push step. There it stops and names `git push -u origin worktree-issue-3-rename-flag` as the next command. Nothing is pushed or merged, and `main` is unchanged locally and on origin."
 
 Asserts:
-- `local verification was recorded for the worktree`: `[ -f "$(git -C "$PRE_WT" rev-parse --absolute-git-dir)/verified-tree.json" ] || fail "no verified-tree.json in the worktree's git directory"`
+- `local verification was recorded for the worktree's tree`: `st=$(cd "$PRE_WT" && verified-tree check --verification test 2>/dev/null | jq -r '.status' 2>/dev/null); [ "$st" = verified ] || fail "verified-tree check --verification test answers '${st:-an error}' in $PRE_WT, not verified"`
 - `the fixture's tests pass in the worktree`: `(cd "$PRE_WT" && python3 -m unittest discover -q 2>/dev/null) || fail "fixture tests fail in $PRE_WT"`
 - `the branch still carries the implementation`: `commits_touch "$PRE_WT" tinytask`
 - `nothing was pushed`: `[ -z "$(git -C "$ORIGIN" for-each-ref refs/heads/worktree-issue-3-rename-flag)" ] || fail "the branch reached origin despite the stop"`
@@ -165,7 +210,7 @@ Asserts (in each one, `new` is computed as shown):
 - `origin carries no new tag`: `[ "$(git -C "$ORIGIN" tag -l)" = v0.1.0 ] || fail "origin tags: $(git -C "$ORIGIN" tag -l | tr '\n' ' ')"`
 - `no durable release state remains`: `[ ! -e "$REPO/.superpowers/workflows/ship-release/state.json" ] || fail "the ship-release state file is still present"`
 
-Extend `notes` by appending this sentence: " Eval 5 is the one pipeline case: it runs a real tracker-free release, but only inside the disposable eval sandbox built by the `release-ready` setup, and pushes no tag."
+In `notes`, replace the opening sentence `plan-only release evals: never tag, release, push, or deploy for real.` with `Evals 1-4 are plan-only release evals: they never tag, release, push, or deploy for real.` (it keeps R8's `plan-only` fragment). Then append this sentence: " Eval 5 is the one pipeline case: it runs a real tracker-free release, but only inside the disposable eval sandbox built by the `release-ready` setup, and pushes no tag."
 
 **orchestrate-issues, id 7, `tracker-free-first-control-response`, no setup.** The prompt:
 
@@ -174,28 +219,78 @@ Extend `notes` by appending this sentence: " Eval 5 is the one pipeline case: it
 
 Resolve once into a retained ResolvedProject. A resolver refusal is fatal and values are never defaulted or inferred. The tracker capability is unsupported, so these facts replace the tracker read: issue 1 is `issues/001-well-specified.md` and issue 3 is `issues/003-mechanical.md`, both open and unblocked. This repository is the ledger repository root.
 
-**Stop after the first `workflow-state control` response is rendered.** Report the actions it returned for each issue, then stop: launch no agent, create no worktree and make no commit.
+**Stop after the first `workflow-state control` response is rendered.** Report each issue's `workflow-state build-delivery` result and the actions control returned, then stop: launch no agent, create no worktree and make no commit.
 ```
 
-The `expected_output`: "The dispatcher asks `workflow-state host-route --route claude-code` first. It then runs `workflow-state init-run` for a fresh run under `.superpowers/workflows/`, followed by one `workflow-state control` call whose validated response holds a dispatch action for issue 1 and one for issue 3. It renders that response and stops. No agent is launched, no worktree is created and `main` carries no new commit."
+The `expected_output`: "The dispatcher asks `workflow-state host-route --route claude-code` first, then runs `workflow-state init-run` for a fresh run under `.superpowers/workflows/`. On that fresh run it builds each issue's delivery contract, and `workflow-state build-delivery` refuses both with exit 2 and `tracker kind 'none' is unsupported`, because the builder seals only a `github` tracker. It reports that refusal verbatim, sends null contracts and `[]` intents, and makes one `workflow-state control` call. No contract governs either issue, so control spawns nothing and writes no attempt: the validated response's summaries carry `delivery_contract_required` and its action is `delivery_contract` for issues 1 and 3. It renders that response and stops. No agent is launched, no worktree is created and `main` carries no new commit."
 
 Asserts:
-- `a run ledger covers issues 1 and 3`: `found=0; for f in "$REPO"/.superpowers/workflows/*/state.json; do [ -f "$f" ] || continue; jq -e '.issues | has("1") and has("3")' "$f" >/dev/null && found=1; done; [ "$found" -eq 1 ] || fail "no run ledger under .superpowers/workflows covers issues 1 and 3"`
+- `a run ledger exists and records no attempt`: `found=0; for f in "$REPO"/.superpowers/workflows/*/state.json; do [ -f "$f" ] || continue; found=$((found + 1)); jq -e '[.issues[]?.attempts[]?] | length == 0' "$f" >/dev/null || { fail "$f records an attempt"; exit 1; }; done; [ "$found" -ge 1 ] || fail "no run ledger under .superpowers/workflows"`
 - `no worktree was created`: `[ "$WT_COUNT" -eq 0 ] || fail "found $WT_COUNT worktrees"`
 - `main carries no new commit`: `[ "$(git -C "$REPO" rev-parse main)" = "$BASE_MAIN" ] || fail "main moved"`
-- `the output names the dispatch for both issues`: `out_matches 'spawn|dispatch' && out_matches '(issue|#) ?1([^0-9]|$)' && out_matches '(issue|#) ?3([^0-9]|$)'`
+- `the run reports the contract builder's refusal`: `out_matches 'build-delivery' && out_matches "tracker kind '?none'? is unsupported"`
+- `the response asks for both issues' contracts`: `out_matches 'delivery_contract' && out_matches '(issue|#) ?1([^0-9]|$)' && out_matches '(issue|#) ?3([^0-9]|$)'`
 
-- [ ] **Step 4: Verify**
+- [ ] **Step 4: Repair the from-issue grader (D19)**
+
+In `assert-lib.sh`, replace `plan_tasks_verifiable` and its comment with the following. The legacy branch is the existing `awk` program, unchanged:
+
+```bash
+# plan_tasks_verifiable <plan-root> — every task carries at least one falsifiable
+# verification line (Expected/Verify/Acceptance/Assert). A root with a `## Task index`
+# is graded through its members: each `[task-N.md](<stem>.tasks/task-N.md)` link must
+# resolve, beside the root, to a member holding such a line, and an index that links no
+# member fails. A root without one is a legacy single-file plan, graded by its
+# `### Task N` sections.
+plan_tasks_verifiable() {
+  local file="$1" dir member members bad=0
+  [ -f "$file" ] || fail "not a file: $file" || return 1
+  members=$(awk '
+    tolower($0) == "## task index" { inside = 1; found = 1; next }
+    inside && /^## / { inside = 0 }
+    inside {
+      while (match($0, /\]\([^)]*\.tasks\/task-[0-9]+\.md\)/)) {
+        print substr($0, RSTART + 2, RLENGTH - 3)
+        $0 = substr($0, RSTART + RLENGTH)
+      }
+    }
+    END { if (found) print "@index" }
+  ' "$file")
+  if [ -n "$members" ]; then
+    [ "$members" != "@index" ] || fail "the task index links no task member" || return 1
+    dir=$(dirname "$file")
+    while IFS= read -r member; do
+      [ "$member" = "@index" ] && continue
+      if [ ! -f "$dir/$member" ]; then
+        echo "task member missing: $member"; bad=1
+      elif ! grep -Eiq 'expected|verif|acceptance|assert' "$dir/$member"; then
+        echo "no verification line in: $member"; bad=1
+      fi
+    done <<<"$members"
+    return "$bad"
+  fi
+  # ... the existing legacy awk program over "$file", unchanged ...
+}
+```
+
+In `from-issue/evals/evals.json`, change only these shells and keep every assert name. `SPEC_DIR` and `PLAN_DIR` are absolute paths under `$REPO`, and the fixture's worktree root is `.worktrees` inside `$REPO`:
+- Case 1: replace each `"$WT/$SPEC_DIR"` with `"$WT/${SPEC_DIR#"$REPO"/}"` and each `"$WT/$PLAN_DIR"` with `"$WT/${PLAN_DIR#"$REPO"/}"`, which is the form the acceptance-map assert already uses. Replace `commits_touch "$WT" "$SPEC_DIR" "$PLAN_DIR"` with `commits_touch "$WT" "${SPEC_DIR#"$REPO"/}" "${PLAN_DIR#"$REPO"/}"`, because git refuses an absolute pathspec outside the linked worktree.
+- Case 2: replace `"$REPO/$SPEC_DIR" "$REPO/$PLAN_DIR"` with `"$SPEC_DIR" "$PLAN_DIR"`.
+- Case 3: replace `"$REPO/$SPEC_DIR" "$REPO/$PLAN_DIR" "$PRE_WT/$SPEC_DIR" "$PRE_WT/$PLAN_DIR"` with `"$SPEC_DIR" "$PLAN_DIR" "$PRE_WT/${SPEC_DIR#"$REPO"/}" "$PRE_WT/${PLAN_DIR#"$REPO"/}"`.
+
+In cases 2 and 3 the doubled path never existed, so those "no spec or plan was written" checks passed whatever happened. They now check the real directories.
+
+- [ ] **Step 5: Verify**
 
 Run: `PYTHONPATH=python timeout 600 python3 -m unittest -v home/common/agent-skills/tests/test_eval_cases.py home/common/agent-skills/tests/test_ship_release_contracts.py home/common/agent-skills/tests/test_workflow_skill_contracts.py 2>&1 | tail -n 4`
-Expected: `OK`.
+Expected: `OK`. This includes `AcceptanceMapEvalGradingTest`, which pins the from-issue acceptance-map assert by name.
 
 Run: `for f in home/common/agent-skills/skills/{ship-issue,sdd,ship-release}/evals/evals.json home/common/claude-code/skills/orchestrate-issues/evals/evals.json; do jq -e '[.evals[] | select(.mode == "pipeline")] | length == 1' "$f" >/dev/null || { echo "bad: $f"; exit 1; }; done; echo ok`
 Expected: `ok`. Each of the four files has exactly one pipeline case.
 
-Run: `for id in 5:ship-issue 4:sdd 5:ship-release; do s=${id#*:}; n=${id%%:*}; jq -r --argjson n "$n" '.evals[] | select(.id == $n) | .asserts[].shell' home/common/agent-skills/skills/$s/evals/evals.json; done | while IFS= read -r shell; do bash -n -c "$shell" || exit 1; done && jq -r '.evals[] | select(.id == 7) | .asserts[].shell' home/common/claude-code/skills/orchestrate-issues/evals/evals.json | while IFS= read -r shell; do bash -n -c "$shell" || exit 1; done && echo syntax-ok`
+Run: `for id in 5:ship-issue 4:sdd 5:ship-release 1:from-issue 2:from-issue 3:from-issue; do s=${id#*:}; n=${id%%:*}; jq -r --argjson n "$n" '.evals[] | select(.id == $n) | .asserts[].shell' home/common/agent-skills/skills/$s/evals/evals.json; done | while IFS= read -r shell; do bash -n -c "$shell" || exit 1; done && jq -r '.evals[] | select(.id == 7) | .asserts[].shell' home/common/claude-code/skills/orchestrate-issues/evals/evals.json | while IFS= read -r shell; do bash -n -c "$shell" || exit 1; done && echo syntax-ok`
 Expected: `syntax-ok`. Every new assert parses as bash.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
-Commit the six files with the message `feat(evals): pipeline cases for ship-issue, sdd, ship-release and orchestrate-issues (#293)`, using sdd's lifecycle commit rule.
+Commit the eight files with the message `feat(evals): pipeline cases for four skills and the from-issue grader repair (#293)`, using sdd's lifecycle commit rule.

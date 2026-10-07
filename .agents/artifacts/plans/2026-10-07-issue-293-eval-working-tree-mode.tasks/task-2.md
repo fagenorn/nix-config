@@ -229,14 +229,14 @@ The inputs describe fixture issue 3 (`fixture-repo/issues/003-mechanical.md`) as
   - In `README.md`: the example line becomes `python3 -m tinytask list --include-done`.
   - In `tests/test_cli.py`: `test_list_all_includes_done_tasks` becomes `test_list_include_done_includes_done_tasks`, and it calls `list --include-done`.
 
-  Generate the patch with `git diff` from the scratch root, using paths `a/…` and `b/…`. Add no `--all` test, because issue criterion 4 bans the old name.
+  Generate the patch with `git diff` from the scratch root, using paths `a/…` and `b/…`. Add no `--all` test: issue criterion 4 bans the old name anywhere in the repo, committed tests included. Criterion 2 (`--all` is a usage error) is checked from outside the repo, by `test_setup_patch_implements_issue_three_on_the_fixture` here and by the sdd case's assert in Task 3.
 - **`2026-10-07-issue-3-rename-flag-design.md`.** A short design spec with `## Problem`, `## Solution`, `## Acceptance criteria` (the issue's four, verbatim) and a `## Decision ledger` table, in the `| ID | Choice | Grounding | Rejected alternative |` shape, with at least one row (for example: no deprecation alias, per the issue's scope).
 - **`2026-10-07-issue-3-rename-flag.md`.** A plan root in the writing-plans header shape: Goal, Architecture, Global Constraints, Test seams, and a `## Task index` with exactly one row ending `[task-1.md](2026-10-07-issue-3-rename-flag.tasks/task-1.md)`. Its `## Acceptance map` has rows AC1–AC4, each of kind `code (classified)` because the issue's criteria are untagged, and each owned by `Task 1`.
 - **`.tasks/task-1.md`.** One task:
   - it names the three files;
-  - it gives the failing test in full: the renamed test, plus a test that `main(["--file", path, "list", "--all"])` raises `SystemExit` with code 2, which lives only in the scratch plan text and not in the patch;
+  - it gives the failing test in full: only the renamed test, `test_list_include_done_includes_done_tasks`, exactly as the patch has it. The task adds no test that names the old flag, and says why: criterion 4;
   - its steps follow red → green → commit;
-  - its verification line is `python3 -m unittest discover` → `OK`.
+  - its verification lines are `python3 -m unittest discover` → `OK`; then, run from outside the committed tree, `python3 -m tinytask --file "$(mktemp -d)/t.json" list --all; echo "exit=$?"` → `exit=2` (criterion 2); and `git grep -n -- '--all' -- tinytask tests README.md` → no output (criterion 4; the `issues/` fixtures quote the old name and are not the tool's code or docs).
 
 - [ ] **Step 4: Implement the setup kinds and `BASE_MAIN` in `run-eval.sh`**
 
