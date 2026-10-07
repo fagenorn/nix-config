@@ -81,10 +81,15 @@ class LaneSchemaTest(LifecycleHarness, unittest.TestCase):
 
     def test_a_retry_attempt_does_not_inherit_its_predecessors_lane(self):
         self.spawn_16()
+        # `fail_owner` routes through the legacy `finish` transport, which
+        # downgrades the ledger to schema 2 and so drops lane fields; set the
+        # predecessor's lane only after the failure has landed (Phase-5 PR280-02).
+        self.fail_owner(issue=16, attempt=1, now="2026-08-13T20:01:00Z")
         self.write_state(self.with_lane(
             self.read_state(), "light", 90,
             [{"lane": "light", "reason": "triage", "at": DEFAULT_NOW}]))
-        self.fail_owner(issue=16, attempt=1, now="2026-08-13T20:01:00Z")
+        self.assertEqual(self.lane_of(self.read_state()["issues"]["16"]["attempts"][0])[0],
+                         "light")
         self.retry(issue=16, worktree=self.root / "wt-16b", now="2026-08-13T20:10:00Z")
         issue = self.read_state()["issues"]["16"]
         self.assertEqual(self.lane_of(issue["attempts"][0])[0], "light")
@@ -171,7 +176,7 @@ class LaneSchemaTest(LifecycleHarness, unittest.TestCase):
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
-Run: `PYTHONPATH=python timeout 900 python3 -m unittest -k LaneSchemaTest home/common/agent-skills/tests/test_workflow_state.py 2>&1 | tail -5`
+Run: `PYTHONPATH=python timeout 900 python3 -m unittest -k LaneSchemaTest home/common/agent-skills/tests/test_workflow_state.py > "$TMPDIR/t280.log" 2>&1; rc=$?; tail -40 "$TMPDIR/t280.log"; echo "exit=$rc"` (the exit status is preserved, never piped away; Phase-5 PR280-04)
 Expected: FAILED. The schema assertions read `6` instead of `7`, and `KeyError: 'lane'` is raised.
 
 - [ ] **Step 3: Implement schema 7**
@@ -184,12 +189,13 @@ In `workflow-state.py`:
    3. `value["lane"] != previous` raises `"attempt lane does not match its history"`. Because `previous` is `None` exactly when the history is empty, this check also covers lane ⇔ history.
    4. `(value["lane"] is None) != (value["lane_budget_minutes"] is None)` raises. A set budget passes `require_plain_int(..., "attempt lane budget", minimum=1)`.
 
-   Every failure raises `WorkflowError`. Check `isinstance(entry["lane"], str)` before testing membership, so that an unhashable value fails closed with `WorkflowError` and not `TypeError`.
+   Every failure raises `WorkflowError`. Check `isinstance(entry["lane"], str)` and `isinstance(entry["reason"], str)` before testing membership, and `isinstance(entry["at"], str)` before `parse_utc`, so that an unhashable or non-string value fails closed with `WorkflowError` and not `TypeError`/`AttributeError` (Phase-5 PR280-03). Add a subTest table to `LaneSchemaTest` covering a list-valued `reason`, a null `at` and a list-valued `lane` in a `lane_history` entry, each asserting exit 2, empty stdout and unchanged ledger bytes (reuse `assert_refused_unchanged`).
 3. In the legacy-reader branch near line 3745, change `{1, 2, 3, 4, 5}` to `{1, 2, 3, 4, 5, 6}`, and change the docstring's "1–5" to "1–6".
 4. In `command_mark_progress`'s docstring, change "a pre-schema-6 ledger is persisted at schema 6" to "a pre-schema-6 ledger is persisted at the current schema".
 
 In `workflow_delivery.py`, `DeliveryRuntime.migrate`:
 - Change the docstring to `1→2→3→4→5→6→7`, the loop condition to `!= 7`, and the accepted set to `{1, 2, 3, 4, 5, 6}`.
+- In `DeliveryRuntime.migrate_1_to_2`, also pop `lane`, `lane_budget_minutes` and `lane_history` from each attempt beside `progress_marker` (a schema-2 attempt has none of them; leaving them makes `migrate` refuse the document as a schema-6 hybrid). Keep `test_delivery_workflow.py`'s existing schema-2 equality and re-migration round-trip assertions green (Phase-5 PR280-01).
 - Insert a `version == 6` branch ahead of the `version == 5` branch. Make `version == 5` an `elif`, and keep the rest of the chain unchanged:
 
 ```python
@@ -222,8 +228,8 @@ Find any others with `grep -n 'schema_version.*6\|progress_marker' <file>` and t
 - [ ] **Step 5: Verify**
 
 Run each command and report only the summary line and any failures:
-- `PYTHONPATH=python timeout 900 python3 -m unittest -k LaneSchemaTest -k ProgressMarkerSchemaTest home/common/agent-skills/tests/test_workflow_state.py 2>&1 | tail -3`. Expected: `OK`.
-- `PYTHONPATH=python timeout 1800 python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py home/common/agent-skills/tests/test_delivery_workflow.py home/common/agent-skills/tests/test_host_admission.py home/common/agent-skills/tests/test_workflow_delivery.py 2>&1 | tail -3`. Expected: `OK`.
+- `PYTHONPATH=python timeout 900 python3 -m unittest -k LaneSchemaTest -k ProgressMarkerSchemaTest home/common/agent-skills/tests/test_workflow_state.py > "$TMPDIR/t280.log" 2>&1; rc=$?; tail -40 "$TMPDIR/t280.log"; echo "exit=$rc"` (the exit status is preserved, never piped away; Phase-5 PR280-04). Expected: `OK` and `exit=0`.
+- `PYTHONPATH=python timeout 1800 python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py home/common/agent-skills/tests/test_delivery_workflow.py home/common/agent-skills/tests/test_host_admission.py home/common/agent-skills/tests/test_workflow_delivery.py > "$TMPDIR/t280.log" 2>&1; rc=$?; tail -40 "$TMPDIR/t280.log"; echo "exit=$rc"` (the exit status is preserved, never piped away; Phase-5 PR280-04). Expected: `OK` and `exit=0`.
 - `cd home/common/agent-skills/scripts && if grep -n 'get("schema_version") != 6' workflow_delivery.py; then exit 1; fi`. Expected: no output, exit 0. At the base commit this prints the loop line, so the check can fail.
 
 - [ ] **Step 6: Commit**

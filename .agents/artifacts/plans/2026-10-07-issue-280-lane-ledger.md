@@ -45,3 +45,7 @@ Task 2 — `declare-lane` verb and lane-aware suspension resume — home/common/
 ## Decisions
 
 Task 1 rests on D3 and D5. Task 2 rests on D1, D2, D4, D5, D6 and D8. Row D8 was appended to the spec's ledger during planning.
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only, base a891b08c, no fallback. Findings: 4 accepted (Blocking PR280-01 migrate_1_to_2 lane strip, PR280-02 retry fixture ordering; Should-fix PR280-03 history type guards, PR280-04 preserved test exit status), 0 rejected, 0 deferred. All applied to task 1/task 2 inline; none changed a decision ledger row.

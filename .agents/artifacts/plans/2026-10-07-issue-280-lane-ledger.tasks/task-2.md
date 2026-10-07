@@ -199,7 +199,7 @@ class DeclareLaneTest(LifecycleHarness, unittest.TestCase):
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
-Run: `PYTHONPATH=python timeout 900 python3 -m unittest -k DeclareLaneTest home/common/agent-skills/tests/test_workflow_state.py 2>&1 | tail -5`
+Run: `PYTHONPATH=python timeout 900 python3 -m unittest -k DeclareLaneTest home/common/agent-skills/tests/test_workflow_state.py > "$TMPDIR/t280.log" 2>&1; rc=$?; tail -40 "$TMPDIR/t280.log"; echo "exit=$rc"` (the exit status is preserved, never piped away; Phase-5 PR280-04)
 Expected: FAILED. Every test errors, because argparse rejects `declare-lane` as an `invalid choice`.
 
 - [ ] **Step 3: Implement `declare-lane`**
@@ -290,8 +290,8 @@ In `resume_attempt`'s docstring, replace "a suspension resume passes the fresh f
 - [ ] **Step 5: Verify**
 
 Run each command and report only the summary line and any failures:
-- `PYTHONPATH=python timeout 900 python3 -m unittest -k DeclareLaneTest -k LaneSchemaTest home/common/agent-skills/tests/test_workflow_state.py 2>&1 | tail -3`. Expected: `OK`.
-- `PYTHONPATH=python timeout 1800 python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py home/common/agent-skills/tests/test_delivery_workflow.py 2>&1 | tail -3`. Expected: `OK`.
+- `PYTHONPATH=python timeout 900 python3 -m unittest -k DeclareLaneTest -k LaneSchemaTest home/common/agent-skills/tests/test_workflow_state.py > "$TMPDIR/t280.log" 2>&1; rc=$?; tail -40 "$TMPDIR/t280.log"; echo "exit=$rc"` (the exit status is preserved, never piped away; Phase-5 PR280-04). Expected: `OK` and `exit=0`.
+- `PYTHONPATH=python timeout 1800 python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py home/common/agent-skills/tests/test_delivery_workflow.py > "$TMPDIR/t280.log" 2>&1; rc=$?; tail -40 "$TMPDIR/t280.log"; echo "exit=$rc"` (the exit status is preserved, never piped away; Phase-5 PR280-04). Expected: `OK` and `exit=0`.
 - `cd home/common/agent-skills/scripts && grep -c 'add_parser("declare-lane")' workflow-state.py`. Expected: `1`. At the base commit the count is `0` and grep exits 1.
 - `if git diff --name-only HEAD -- CLAUDE.md home/common/agent-skills/skills | grep -q .; then exit 1; fi`. Expected: exit 0, because no instruction text changes (D7).
 
