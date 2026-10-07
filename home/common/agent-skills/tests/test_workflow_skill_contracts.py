@@ -14,9 +14,6 @@ REPO_ROOT = Path(__file__).parents[4]
 ORCHESTRATE = (
     REPO_ROOT / "home/common/claude-code/skills/orchestrate-issues/SKILL.md"
 )
-ORCHESTRATE_EVALS = (
-    REPO_ROOT / "home/common/claude-code/skills/orchestrate-issues/evals/evals.json"
-)
 FROM_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/SKILL.md"
 AUTO = REPO_ROOT / "home/common/agent-skills/skills/from-issue/AUTO.md"
 INVESTIGATE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/investigate.md"
@@ -51,12 +48,6 @@ SHIP_ISSUE_EVALS = (
 WRITING_PLANS = REPO_ROOT / "home/common/agent-skills/skills/writing-plans/SKILL.md"
 SDD = SDD_DIR / "SKILL.md"
 PHASE_5_REVIEW_CONTRACT = FROM_ISSUE_DIR / "REVIEW-CONTRACT.md"
-CODEX_PLAN_REVIEW = (
-    REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/PLAN-REVIEW.md"
-)
-CODEX_COLLABORATION_EVALS = (
-    REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/evals/evals.json"
-)
 
 REQUIRED_WATCH = "timeout 300 gh pr checks <pr-num> --required --watch --fail-fast --interval 30"
 ALL_CHECKS_WATCH = "timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30"
@@ -172,6 +163,45 @@ SDD_MACHINE_TEXT = {
     SDD_DIR / "conformance-reviewer-prompt.md": (WHOLE_FILE_POLICY, "[ACCEPTANCE_CRITERIA]"),
     SDD_DIR / "correctness-reviewer-prompt.md": (
         WHOLE_FILE_POLICY, "git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- ':(literal)<path>'",
+    ),
+}
+
+# Machine-consumed text the codex-collaboration documents must carry (#291 D6):
+# the companion argv, the review binding field and the diff-scope invocation and
+# JSON fields DIFF-REVIEW.md reads. No guidance sentence is pinned.
+CODEX_COLLABORATION_MACHINE_TEXT = {
+    COLLABORATION: (
+        "bindings.commands[review_id].argv", "--model gpt-6-astra", "--effort xhigh",
+        "--cwd <absolute-worktree> --json",
+    ),
+    DIFF_REVIEW: (
+        "`~/.agents/bin/diff-scope`",
+        "--artifact-path <specification-directory> --artifact-path <plan-directory>",
+        "--format json", "`product.changed_files`", "`files[].path`",
+        "`files[].changed_lines`", "`git diff <base>..<head> -- ':(literal)<path>'`",
+    ),
+}
+
+# Machine-consumed text each orchestrate-issues tree must carry (#291 D6):
+# lifecycle helper argv, the control request's host route and the observation
+# values the dispatcher sends. No guidance sentence is pinned.
+ORCHESTRATE_MACHINE_TEXT = {
+    ORCHESTRATE: (
+        "workflow-state host-route --route claude-code", '`host_route: "claude-code"`',
+        "--boundary workflow-response", "workflow_bootstrap", "workflow-state init-run",
+        "workflow-state control", "workflow-state build-delivery", "--request-file -",
+        "matching_issue_branch | absent | mismatch", "`worktree_fact`",
+        "`recorded_worktree_absent`", "`recorded_worktree_mismatch`",
+        "workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--action-id <action_id>",
+        "workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--action-id <action-id>",
+        "launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --sweep",
+        "run_in_background=true",
+    ),
+    CODEX_ORCHESTRATE: (
+        "workflow-state host-route --route codex", "--boundary workflow-response",
+        "/from-issue <n> --auto",
     ),
 }
 
@@ -523,27 +553,6 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         self.assertNotIn("bindings.vcs.branch_naming", text)
         self.assertNotIn("Put worktrees in `.worktrees/`", text)
 
-    def test_review_capability_routes_before_command_lookup(self):
-        for path in (COLLABORATION, SHIP_ISSUE, SDD):
-            text = normalized(path.read_text(encoding="utf-8"))
-            with self.subTest(path=path):
-                capability = text.index("capabilities.review.code")
-                lookup = text.index("bindings.commands[review_id].argv")
-                self.assertLess(capability, lookup)
-                self.assertIn("unsupported", text[capability:lookup])
-        # codex-collaboration's own side (issue 195, D6): `unsupported` makes no
-        # Codex call, and says so before the command entry is dereferenced.
-        self.assert_ordered(
-            normalized(COLLABORATION.read_text(encoding="utf-8")),
-            "capabilities.review.code", "`unsupported` makes no Codex call",
-            "dereference `bindings.commands[review_id]`",
-        )
-        self.assertIn(
-            "An unsupported capability never dispatches Codex, because the "
-            "calling controller runs its own native correctness route",
-            normalized(DIFF_REVIEW.read_text(encoding="utf-8")),
-        )
-
     def test_living_source_has_no_legacy_policy_surface(self):
         tracked = subprocess.run(
             ["git", "ls-files", "-z", "--", "AGENTS.md", "CLAUDE.md",
@@ -731,18 +740,6 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
     def test_listed_support_documents_reuse_only_passed_snapshot_fields(self):
         assert_retained_policy_support(self, REPO_ROOT / "home/common/agent-skills/skills", RETAINED_SUPPORT_CONTRACTS)
 
-    def test_codex_plan_review_owner_and_support_are_complete(self):
-        assert_codex_operation_pair(
-            self, CODEX_PLAN_REVIEW, "bindings.workflow.review.plan",
-            ("Blocking", "Should fix", "Discussion"),
-        )
-
-    def test_codex_diff_review_owner_and_support_are_complete(self):
-        assert_codex_operation_pair(
-            self, DIFF_REVIEW, "bindings.workflow.review.code",
-            ("Critical", "Important", "Minor"),
-        )
-
     def test_context_map_selection_uses_only_authored_order(self):
         table = (
             ([], None),
@@ -801,80 +798,6 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         ])
 
 
-# The capacity rule binds only on the `available` route, and a Codex call made
-# under `unsupported` is classified beside it (issue 195, D7, D9).
-CAPACITY_SCOPE_ANCHORS = (
-    "`available` route", "capacity rejection", "no retry", "no native fallback",
-    "routing error, never a capacity rejection",
-)
-
-
-# Issue 236: the one review binding shape, its invocation and validation (D12-D15).
-CODEX_SHAPE_CLASSIFIER_ANCHORS = (
-    "one supported review binding shape",
-    "basename of `argv[0]` is exactly `codex-companion`",
-    "`argv[1]` is `task`",
-    "`--reviewer <op>`",
-    "optional `--fresh`",
-    'bare `["codex"]` included',
-    "binding shape error",
-)
-CODEX_SHAPE_ERROR_ANCHORS = (
-    "binding shape error is a configuration error",
-    "no Codex call", "no retry", "no native fallback",
-    "`review_id`", "authored argv",
-    "`codex-companion task [--fresh] --reviewer <op>`",
-    "an executable other than `codex-companion`",
-    "a companion subcommand other than `task`",
-    "a missing or mismatched `--reviewer`",
-    "an unsupported companion token",
-    "no capability repair ID",
-)
-# In text order: the stdin sentence precedes the tail.
-CODEX_COMPANION_INVOCATION_ANCHORS = (
-    "no positional argument",
-    "--model gpt-6-astra --effort xhigh",
-    "--cwd <absolute-worktree> --json",
-)
-CODEX_COMPANION_VALIDATION_ANCHORS = (
-    "exactly one JSON object",
-    "`status` is `0`",
-    "`touchedFiles` is empty",
-    "`runtime.model` is `gpt-6-astra`",
-    "`runtime.reasoningEffort` is `xhigh`",
-    "`rawOutput` is a non-empty string",
-    "last captured agent message",
-)
-# Retired with the exec route (D12, D17): none may reappear in the skill, the
-# two caller paragraphs or the evals.
-RETIRED_EXEC_REVIEW_TOKENS = (
-    "exec --sandbox", "--output-last-message", "terminal agent-message",
-    "model_reasoning_effort", "JSONL", "Exec shape", "exec shape",
-)
-
-
-def assert_codex_operation_pair(case, support, review_field, headings):
-    owner = normalized(COLLABORATION.read_text(encoding="utf-8"))
-    support_text = normalized(support.read_text(encoding="utf-8"))
-    case.assert_ordered(
-        owner,
-        review_field,
-        *CODEX_SHAPE_CLASSIFIER_ANCHORS, *CODEX_SHAPE_ERROR_ANCHORS,
-        CODEX_COMPANION_INVOCATION_ANCHORS[0],
-        "bindings.commands[review_id].argv",
-        *CODEX_COMPANION_INVOCATION_ANCHORS[1:],
-        *CODEX_COMPANION_VALIDATION_ANCHORS,
-        *CAPACITY_SCOPE_ANCHORS,
-    )
-    for retired in RETIRED_EXEC_REVIEW_TOKENS:
-        case.assertNotIn(retired, owner)
-    case.assertIn("retained `ResolvedProject`", support_text)
-    case.assertIn(review_field, support_text)
-    for heading in headings:
-        case.assertIn(heading, support_text)
-    case.assertNotIn("resolve-project resolve", support_text)
-
-
 def corpus_documents():
     """Every skill document in both skill trees, as (path, text) pairs."""
     for root in SKILL_ROOTS:
@@ -906,7 +829,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.design = DESIGN.read_text(encoding="utf-8")
         cls.grill = GRILL.read_text(encoding="utf-8")
         cls.collaboration = COLLABORATION.read_text(encoding="utf-8")
-        cls.diff_review = DIFF_REVIEW.read_text(encoding="utf-8")
         cls.research = RESEARCH.read_text(encoding="utf-8")
         cls.worktrees = WORKTREES.read_text(encoding="utf-8")
         cls.ship_issue = SHIP_ISSUE.read_text(encoding="utf-8")
@@ -916,10 +838,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.writing_plans = WRITING_PLANS.read_text(encoding="utf-8")
         cls.sdd = SDD.read_text(encoding="utf-8")
         cls.phase_5_review_contract = PHASE_5_REVIEW_CONTRACT.read_text(encoding="utf-8")
-        cls.codex_plan_review = CODEX_PLAN_REVIEW.read_text(encoding="utf-8")
-        cls.codex_collaboration_evals = json.loads(
-            CODEX_COLLABORATION_EVALS.read_text(encoding="utf-8")
-        )
         cls.standards_review = (FROM_ISSUE_DIR / "standards-review.md").read_text(
             encoding="utf-8"
         )
@@ -932,9 +850,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.oversized_budget_fixture = json.loads(
             OVERSIZED_BUDGET_FIXTURE.read_text(encoding="utf-8")
         )
-        cls.orchestrate_evals = json.loads(
-            ORCHESTRATE_EVALS.read_text(encoding="utf-8")
-        )
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -943,27 +858,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertNotEqual(next_position, -1, f"missing anchor: {anchor!r}")
             self.assertGreater(next_position, position, f"out-of-order anchor: {anchor!r}")
             position = next_position
-
-    def test_codex_collaboration_evals_describe_only_the_companion_shape(self):
-        evals = {item["id"]: item for item in self.codex_collaboration_evals["evals"]}
-        companion_tail = "--model gpt-6-astra --effort xhigh --cwd <absolute-worktree> --json"
-        self.assertIn(
-            '["codex-companion","task","--fresh","--reviewer","plan-review"]',
-            evals[1]["prompt"],
-        )
-        for eval_id in (1, 2, 3):
-            expected = evals[eval_id]["expected_output"]
-            for fragment in (
-                companion_tail, "no positional argument", "touchedFiles",
-                "runtime.model gpt-6-astra", "runtime.reasoningEffort xhigh",
-                "rawOutput", "binding shape error",
-                "codex-companion task [--fresh] --reviewer <op>",
-            ):
-                with self.subTest(eval=eval_id, fragment=fragment):
-                    self.assertIn(fragment, expected)
-            for retired in RETIRED_EXEC_REVIEW_TOKENS:
-                with self.subTest(eval=eval_id, retired=retired):
-                    self.assertNotIn(retired, evals[eval_id]["prompt"] + expected)
 
     def test_delivery_interface_two_is_one_atomic_production_caller_contract(self):
         documents = {
@@ -979,7 +873,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, corpus)
         self.assertIn("workflow_bootstrap", normalized(self.orchestrate))
-        self.assertIn("bootstrap requirement", normalized(self.orchestrate))
         self.assertIn("checkpoint-delivery", corpus)
         self.assertNotIn("infer the next stage from tracker", corpus.lower())
         self.assertNotIn("unfinished delivery as failed", corpus.lower())
@@ -1004,11 +897,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         request = json_block(decide)
         self.assertEqual((set(request), request["interface_version"], request["host_route"]),
                          (V3_CONTROL_REQUEST_KEYS, 3, "claude-code"))
-        for anchor in ("workflow-state build-delivery",
-                       "while its latest summary carries `delivery_contract_required`",
-                       "report the refusal", "--request-file -",
-                       "only when this invocation created the run"):
-            self.assertIn(anchor, normalized(decide))
+        for argv in ("workflow-state build-delivery", "--request-file -"):
+            self.assertIn(argv, normalized(decide))
         durable = self.section(self.from_issue, "### Explicit durable interactive acquisition",
                                "## The flow")
         self.assertIn("only when this invocation created the run", normalized(durable))
@@ -1023,22 +913,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(skill=skill):
                 self.assertIn(BUILD_ROOT_CLAUSE, text)
                 self.assertIn(BUILD_REFUSAL_RELAY, text)
-
-    def test_orchestrate_bootstrap_actions_and_projected_owner(self):
-        observe = normalized(self.section(self.orchestrate, "## 2. Bootstrap and observe",
-                                          "## 3. Decide"))
-        for anchor in ("workflow_bootstrap", "`contract_digest`", "`forge_pr`",
-                       "never a candidate for it"):
-            self.assertIn(anchor, observe)
-        execute = normalized(self.section(self.orchestrate, "## 4. Execute control actions",
-                                          "## 5. Final report"))
-        for anchor in ("`spawn`, `resume`, `retry`, `delivery_remainder`, `delivery_contract`, "
-                       "`wait`, or `finalize`",
-                       "rename `id` to `action_id` and `kind` to `launch_kind`",
-                       "`kind: owner`", "`interface_version: 2`", "canonical JSON",
-                       "--boundary workflow-response"):
-            self.assertIn(anchor, execute)
-        self.assertNotIn("Interface_version 2 control adapter", self.orchestrate)
 
     def test_ship_handoff_v2_ship_summary_v2_and_remainder_prompt(self):
         line = next(item for item in self.ship_handoff.splitlines()
@@ -1165,20 +1039,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "relay the canonical bytes unchanged",
         )
 
-    def test_orchestrate_report_names_every_cause_a_label_sweep_leaves_parked(self):
-        # A label or milestone sweep never resumes these causes, so the
-        # per-issue re-entry line is the instruction that works (per D10).
-        final = normalized(self.section(
-            self.orchestrate, "## 5. Final report", "## Notes"))
-        self.assert_ordered(
-            final,
-            "`/from-issue <issue> --auto` for an issue suspended on a cause",
-            "`--label` or `--milestone` sweep does not resume",
-            "`human_gate`", "`external`", "`agent_dispatch`",
-            "the orchestrate re-invocation itself",
-        )
-        self.assertNotIn("for an issue suspended on a human gate", final)
-
     def test_auto_continuation_and_bookkeeper_are_interface_two(self):
         transfer = self.section(self.auto, "#### Mandatory transfer gate",
                                 "#### Fresh delegated owner")
@@ -1200,60 +1060,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for path in (FROM_ISSUE, ORCHESTRATE, SHIP_ISSUE):
             with self.subTest(clause=path.name):
                 self.assertIn(STDIN_CLAUSE, normalized(path.read_text(encoding="utf-8")))
-        expected = " ".join(case["expected_output"] for case in self.orchestrate_evals["evals"])
-        for anchor in ("interface_version 2", "delivery_remainder", "contract_digest",
-                       "build-delivery", "only when this invocation created the run",
-                       "interface_version 3", "host-route", "launch_refused"):
-            self.assertIn(anchor, expected)
-        self.assertNotIn("version-1", expected)
-
-    def test_orchestration_eval_covers_denial_partial_progress_and_remainder(self):
-        text = json.dumps(self.orchestrate_evals, sort_keys=True)
-        for phrase in ("partial effect", "host rejection", "same custody",
-                       "delivery_remainder", "zero external effect",
-                       "implementation_delivered", "pr_merged", "actual scope",
-                       "fresh proposal"):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, text)
-
-    def test_orchestrate_asks_the_host_route_first_and_never_retries_a_refusal(self):
-        resolve = normalized(self.section(self.orchestrate,
-            "## 1. Resolve issue set and bindings", "## 2. Bootstrap and observe"))
-        self.assert_ordered(resolve, "workflow-state host-route --route claude-code",
-                            "--boundary workflow-response",
-                            "`unsupported` answer ends the run", "`alternative`",
-                            '`host_route: "claude-code"`', "never calculates slots")
-        for retired in ("Treat known host capacity as a capability boundary",
-                        "This does not add reservation"):
-            self.assertNotIn(retired, normalized(self.orchestrate))
-        observe = normalized(self.section(self.orchestrate,
-            "## 2. Bootstrap and observe", "## 3. Decide"))
-        self.assertIn("`launch_refused` for an owner launch the host refused", observe)
-        decide = normalized(self.section(self.orchestrate,
-            "## 3. Decide", "## 4. Execute control actions"))
-        self.assertIn("interface_version 3 control response", decide)
-        self.assertIn("`admission`", decide)
-        execute = normalized(self.section(self.orchestrate,
-            "## 4. Execute control actions", "## 5. Final report"))
-        self.assert_ordered(execute, "host refuses an owner launch, never retry it",
-                            "exactly one control call", "`launch_refused`",
-                            "the controller's `finalized` release",
-                            "resumes on the next orchestrate invocation")
-        report = normalized(self.orchestrate.split("## 5. Final report", 1)[1])
-        self.assertIn("`admission.waiting` as queued for agent slots", report)
-        self.assertIn("bounded summaries in the same interface_version 3 control response",
-                      report)
-        self.assertNotIn("interface_version 2 summaries", report)
 
     def test_codex_orchestrate_stub_relays_the_unsupported_route(self):
         raw = CODEX_ORCHESTRATE.read_text(encoding="utf-8")
         self.assertTrue(raw.startswith("---\nname: orchestrate-issues\n"))
         text = normalized(raw)
-        self.assert_ordered(text, "workflow-state host-route --route codex",
-                            "--boundary workflow-response", "verbatim",
-                            "/from-issue <n> --auto", "one at a time")
-        self.assertIn("Never spawn owners, count threads, archive sessions, start an "
-                      "app-server, or retry", text)
         for forbidden in ("workflow-state control", "init-run", "run_in_background",
                           "agent-dispatch"):
             self.assertNotIn(forbidden, text)
@@ -1267,59 +1078,17 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         end = text.index(next_heading, start + len(heading))
         return text[start:end]
 
-    def test_dispatcher_is_a_control_adapter_not_a_policy_owner(self):
-        observe = self.section(
-            self.orchestrate, "## 2. Bootstrap and observe", "## 3. Decide"
-        )
-        decide = self.section(
-            self.orchestrate, "## 3. Decide", "## 4. Execute control actions"
-        )
-        execute = self.section(
-            self.orchestrate, "## 4. Execute control actions", "## 5. Final report"
-        )
-        self.assert_ordered(observe, "workflow-state init-run", "requirements",
-                            "action_id", "recorded_worktree", "normalized")
-        self.assert_ordered(
-            observe, "every requested issue without a bootstrap requirement",
-            "verified absent candidate", "control ignores unused candidates",
-        )
-        self.assertIn("matching_issue_branch | absent | mismatch", observe)
-        self.assertRegex(observe, r"never omit the recorded-path\s+observation")
-        self.assertNotIn("tracker-ready", observe)
-        self.assertNotIn("classify tracker readiness", observe)
-        self.assert_ordered(decide, "--request-file -",
-                            "workflow-state control",
-                            "only source of action order, kind, and lifecycle identity")
+    def test_dispatcher_calls_no_retired_lifecycle_command(self):
         for retired in ("workflow-state launch", "workflow-state reconcile"):
             self.assertNotIn(retired, self.orchestrate)
-        for retired_policy_anchor in (
-            "resume before fresh", "attempts 1 and 2", "permits a retry",
-            "result_source", "earliest armed deadline", "deadline minima",
-            "occupied slots", "count capacity", "run is drained",
-            "fresh owner identity",
-        ):
-            self.assertNotIn(retired_policy_anchor, observe + decide + execute)
 
     def test_dispatcher_passes_immutable_ledger_root_separately_from_worktree(self):
-        durable_section = self.section(
-            self.orchestrate, "## 4. Execute control actions", "## 5. Final report"
-        )
-        self.assert_ordered(
-            durable_section,
-            "--repo-root <ledger_repo_root>",
-            "ledger_repo_root=<ledger_repo_root>",
-            "worktree=<absolute-worktree>",
-            "from-issue <num> --auto",
-        )
-        self.assertIn("exact immutable value", durable_section)
-        self.assertIn("independent of any issue worktree", durable_section)
-
-        declaration = durable_section.index(
+        # The fields of the owner prompt follow its background Agent call.
+        declaration = self.orchestrate.index(
             'Agent(subagent_type="general-purpose", model="opus", effort="high", '
             'run_in_background=true)'
         )
-        fresh_context = durable_section[declaration:]
-        fresh_prompt = fresh_context[:fresh_context.index("\n\nNever inline")]
+        fresh_prompt = self.orchestrate[declaration:]
         for field in (
             "ledger_repo_root=<ledger_repo_root>",
             "run_id=<run-id>",
@@ -1332,121 +1101,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "from-issue <num> --auto",
         ):
             self.assertIn(f"> `{field}`", fresh_prompt)
-        self.assertIn("> Immutable lifecycle envelope:", fresh_prompt)
-        self.assertIn("> Include `handoff_path` only when non-null.", fresh_prompt)
-
-    def test_dispatcher_maps_resolved_limits_into_control_request(self):
-        resolve = self.section(
-            self.orchestrate, "## 1. Resolve issue set and bindings",
-            "## 2. Bootstrap and observe",
-        )
-        self.assertIn(
-            "bindings.workflow.orchestration.attempt_budget_minutes` as\n  request `attempt_budget_minutes`",
-            resolve,
-        )
-        self.assertIn(
-            "bindings.workflow.orchestration.max_parallel` as request `max_parallel`",
-            resolve,
-        )
-        self.assertNotIn("--budget-minutes <budget>", resolve)
 
     def test_dispatcher_executes_the_closed_control_action_set(self):
-        action_section = self.section(
-            self.orchestrate, "## 4. Execute control actions", "## 5. Final report"
-        )
         for kind in ("spawn", "resume", "retry", "delivery_contract", "wait", "finalize"):
-            self.assertIn(f"`{kind}`", action_section)
-        self.assertIn("returned order", action_section)
-        self.assertIn("owner token unchanged", action_section)
-        self.assertIn("handoff_path", action_section)
-        self.assertIn(
-            "Any other kind is a contract error: stop without executing it and surface the unknown kind",
-            action_section,
-        )
-        self.assertNotIn("host task ID as lifecycle identity", action_section)
-
-    def test_dispatcher_uses_one_superseding_wait(self):
-        action_section = self.section(
-            self.orchestrate, "## 4. Execute control actions", "## 5. Final report"
-        )
-        self.assert_ordered(
-            action_section,
-            "save the old `current_wait_id` and `current_wait_handle` pair",
-            "publish the new wait ID", "cancel the old handle",
-            "arm and store the new one-shot observer",
-        )
-        self.assertIn("same wait ID", action_section)
-        self.assertIn("does not arm another observer", action_section)
-        self.assertIn("wake carries its wait ID", action_section)
-        self.assertIn("ignore it unless it equals `current_wait_id`", action_section)
-        self.assert_ordered(action_section, "`finalize`", "clear `current_wait_id`",
-                            "cancel the outstanding handle")
-        self.assertIn("No polling or repeated short sleeps", action_section)
-
-    def test_dispatcher_wait_failures_and_restart_cleanup_are_explicit(self):
-        action_section = self.section(
-            self.orchestrate, "## 4. Execute control actions", "## 5. Final report"
-        )
-        self.assert_ordered(
-            action_section, "missing or already exited", "idempotent",
-            "arm the replacement",
-        )
-        self.assert_ordered(
-            action_section, "unexpected cancellation failure",
-            "restore the old `current_wait_id` and `current_wait_handle` pair",
-            "do not arm the replacement", "fail loudly",
-            "next identical response retries replacement",
-        )
-        self.assertIn(
-            "never leave the new wait ID paired with the old handle",
-            action_section,
-        )
-        self.assert_ordered(
-            action_section, "arming fails", "clear `current_wait_id`",
-            "clear `current_wait_handle`", "no wake is installed", "fail loudly",
-        )
-        self.assert_ordered(
-            self.orchestrate, "full dispatcher restart",
-            "host reaps or cancels inherited detached wait observers",
-            "before", "rearm",
-        )
-        self.assertIn("process-local", self.orchestrate)
-
-    def test_dispatcher_renders_finalize_from_bounded_summaries(self):
-        final_section = self.section(
-            self.orchestrate, "## 5. Final report", "## Notes"
-        )
-        self.assertIn("finalize", final_section)
-        self.assertIn("same control response", final_section)
-        self.assertIn("discussion_items", final_section)
-        for forbidden in ("attempts", "launches", "phase_inputs", "older results"):
-            self.assertIn(forbidden, self.orchestrate)
-
-    def test_final_report_reads_an_expiry_as_an_interruption(self):
-        # The dispatcher renders what happened to a human. An `expired` delta
-        # is an interruption, not a consumed attempt (per D8, D10).
-        final_section = self.section(
-            self.orchestrate, "## 5. Final report", "## Notes"
-        )
-        collapsed = normalized(final_section)
-        self.assert_ordered(
-            collapsed,
-            "`expired` delta",
-            "consumes no attempt",
-            "`resumed` on the same attempt",
-            "a later eligible sweep resumes",
-            "`stopped(stalled)`",
-        )
-        self.assertIn("never `retried` and never `retry_refused`", collapsed)
-
-    def test_final_report_names_an_unresumable_issue(self):
-        # A resume its recorded worktree ended is reported with that reason,
-        # never as progressing (#194 D9, D12).
-        collapsed = normalized(self.section(
-            self.orchestrate, "## 5. Final report", "## Notes"))
-        self.assert_ordered(
-            collapsed, "`worktree_fact`", "`recorded_worktree_absent`",
-            "`recorded_worktree_mismatch`", "cannot resume", "never as progressing")
+            self.assertIn(f"`{kind}`", self.orchestrate)
 
     def test_background_dispatch_flag_appears_only_in_orchestrate_issues(self):
         self.assertIn("run_in_background=true", self.orchestrate)
@@ -1743,20 +1401,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             remeasurement, "after the last write", "implementation-plan",
             "design-spec", "may advance",
         )
-
-    def test_codex_plan_review_validates_before_packet_and_remeasures(self):
-        self.assert_ordered(
-            self.codex_plan_review,
-            "## Caller input gate", "validate-report", "validated stdout bytes",
-            "artifact-budget check", "## Build the review packet",
-            "## Reviewer contract", "## Verify and disposition",
-            "After the last accepted edit", "implementation-plan",
-            "design-spec", "may not advance",
-        )
-        packet = self.section(
-            self.codex_plan_review, "## Build the review packet", "## Reviewer contract"
-        )
-        self.assertIn("Supply no member list or plan content", packet)
 
     def test_preflight_worktree_deletion_requires_proof_of_disposability(self):
         self.assertNotIn("one, clean → remove it", self.from_issue)
@@ -2387,87 +2031,13 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("`reentry`", terminal)
         self.assertIn("verbatim on its own line", terminal)
 
-    def test_orchestrate_reuses_nonfinal_runs(self):
-        bootstrap = self.section(
-            self.orchestrate, "## 2. Bootstrap and observe", "## 3. Decide"
-        )
-        self.assert_ordered(
-            bootstrap,
-            "existing run whose state covers the same issue set",
-            "non-final attempt",
-            "reuse that run id",
-            "workflow-state init-run",
-        )
-        self.assertNotRegex(
-            self.orchestrate, r"(?i)mint (?:a )?(?:fresh |new )?dated run"
-        )
-
-    def test_no_deadline_less_wait_is_armed(self):
-        self.assertIn(
-            "control never returns a deadline-less wait; every wait carries deadline_at, "
-            "and when nothing can proceed without a human, control returns finalize instead, "
-            "or `delivery_contract` when a missing contract is all that stops an issue.",
-            self.orchestrate,
-        )
-        self.assertNotIn("and optional deadline", self.orchestrate)
-
-    def test_dispatcher_answers_a_contract_request_with_one_rule(self):
-        """#221 D5: `delivery_contract` has one rule, in §4, and no override."""
-        decide = normalized(self.section(self.orchestrate, "## 3. Decide",
-                                         "## 4. Execute control actions"))
-        execute = normalized(self.section(self.orchestrate, "## 4. Execute control actions",
-                                          "## 5. Final report"))
-        final = normalized(self.section(self.orchestrate, "## 5. Final report", "## Notes"))
-        self.assertIn("A `delivery_contract` action asks for exactly the contracts of the "
-                      "issues it lists; §4 holds its rule.", decide)
-        self.assert_ordered(execute, "For `delivery_contract`",
-                            "This is the one rule for such an issue.",
-                            "Send each listed issue's contract as §3 describes",
-                            "make the next control call at once",
-                            "Never rebuild an issue whose build this invocation refused",
-                            "refused every listed issue", "ends the run as `finalize` does",
-                            "render §5 from this response")
-        self.assertEqual(normalized(self.orchestrate).count(
-            "This is the one rule for such an issue."), 1)
-        self.assertIn("or a `delivery_contract` action that ends the run", final)
-        # Phase-5 SF-4: the refused-launch and parked-suspension passages name the
-        # new no-deadline sweep too. The parked-suspension paragraph sits in §5.
-        self.assert_ordered(execute, "resumes on the next orchestrate invocation",
-                            "or on the follow-up call a `delivery_contract` action asks for")
-        self.assertIn("the sweep renders `finalize` (or `delivery_contract` when a missing "
-                      "contract is all that stops some issue)", final)
-        # Phase-5 SF-1 (D12): the durable interactive route answers the same action.
+    def test_durable_route_answers_a_contract_request(self):
+        """#221 D12: the durable interactive route answers `delivery_contract`."""
         durable = normalized(self.section(self.from_issue,
             "### Explicit durable interactive acquisition", "## The flow"))
         self.assert_ordered(durable, "A `delivery_contract` reply naming this issue",
                             "build this issue's contract", "call `workflow-state control` once more",
                             "orchestrate-issues §4")
-        for text in (self.orchestrate, json.dumps(self.orchestrate_evals)):
-            self.assertNotIn("override", text.lower())
-        expected = " ".join(case["expected_output"] for case in self.orchestrate_evals["evals"])
-        self.assertIn("spawn, resume, retry, delivery_remainder, delivery_contract, wait, finalize",
-                      expected)
-        self.assertIn("spawn, resume, retry, delivery_remainder, delivery_contract, wait, or "
-                      "finalize", expected)
-
-    def test_orchestrate_evals_grade_control_and_reject_retired_policy(self):
-        expected = " ".join(
-            case["expected_output"] for case in self.orchestrate_evals["evals"]
-        )
-        for anchor in (
-            "ResolvedProject", "bindings.tracker", "bindings.vcs",
-            "attempt_budget_minutes", "max_parallel", "workflow-state init-run",
-            "workflow-state control", "current_wait_id", "finalize",
-        ):
-            self.assertIn(anchor, expected)
-        for retired in ("workflow-state launch", "workflow-state reconcile"):
-            self.assertNotIn(retired, expected)
-        for retired_policy_anchor in (
-            "resume before fresh", "attempts 1 and 2", "permits a retry",
-            "result_source", "earliest armed deadline", "occupied slots",
-            "run is drained",
-        ):
-            self.assertNotIn(retired_policy_anchor, expected)
 
     def test_auto_mode_never_skips_durable_checkpoints_or_terminal_writes(self):
         checkpoint_contract = self.section(
@@ -2519,270 +2089,27 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("mktemp", self.handoff)
         self.assertIn("Do not duplicate lifecycle JSON", self.handoff)
 
-    def test_diff_review_scopes_oversized_ranges_and_discloses_coverage(self):
-        # Whitespace-normalized: these are wrapped prose contracts, so line
-        # breaks must not be part of what is pinned. The blockquote markers go
-        # first — without that, a naive split() leaves a stray ">" inside the
-        # coverage sentence and no fragment spanning its line wrap can match.
-        contract = " ".join(self.diff_review.replace("\n> ", "\n").split())
-        for fragment in (
-            "retained `ResolvedProject` and validated direct-command result",
-            "the size pre-flight below",
-            "`~/.agents/bin/diff-scope`",
-            "--artifact-path <specification-directory> --artifact-path <plan-directory>",
-            "--format json",
-            "paths passed from the caller's retained snapshot, without fallback locations",
-            "`product.changed_files`",
-            "`files[].path`",
-            "`files[].changed_lines`",
-            "`product.changed_lines` and `excluded` are deliberately not read",
-            "`changed_files > 20` scopes the packet, `changed_files == 20` does not",
-            "no filtering, no re-ranking",
-            # Cardinality and selection order — acceptance criteria 3 and 4 rest
-            # on these two, and "no filtering, no re-ranking" pins neither.
-            "taken as the first 20 entries in the emitted order",
-            "ranks churn descending with a raw-path-bytes tie-break",
-            "the same range always yields the same 20 paths",
-            "selected as the highest-churn files",
-            "yields no measurement — never a failure",
-            "adds no fourth failure class",
-            "never spends the one-time native fallback and never triggers a retry",
-            "receives the same packet, item 7 and coverage sentence intact",
-            "`full` | `scoped: <N> of <M> product files` | `unmeasured`",
-            "This is a scoped review:",
-            "do not treat their absence from the list as evidence they are clean",
-            # The bound is on input, not only on grading (D9): item 4 retains
-            # bounded coverage evidence while item 7 owns diff collection.
-            "Under budget — or unmeasured — the packet is exactly the six items above",
-            "Over budget it differs in exactly three places and nowhere else",
-            "Item 4 changes the manifest's use, not its presence",
-            "manifest root path and all four metrics as truthful range-coverage evidence",
-            "do not read its shards",
-            "every unscoped reviewer validate that same manifest and read all shards "
-            "once in manifest order",
-            "Item 7 exists only when scoped",
-            "one bounded read per listed path",
-            "treat that set as the whole of the range under review",
-            # The argv protocol for item 7: `diff-scope` preserves arbitrary Git
-            # path bytes, so paths interpolated into one shell command line split
-            # or are reinterpreted as pathspec magic.
-            "**one invocation per path**",
-            "**single literal argument after `--`**",
-            "never shell-joined with the other listed paths into one command line",
-            "pathspec magic disabled by the `:(literal)` prefix",
-            "one focused check per named risk",
-            # Scoping bounds what is graded, not what may be consulted (D13), so
-            # the coverage sentence and the cross-file allowance need the
-            # boundary that tells them apart.
-            "Every finding you report must be anchored in a listed file",
-            "a defect lying wholly within an unlisted file is outside this pass "
-            "and is not reported",
-            "legal and reportable, as long as it is anchored in a listed file",
-            "it never embeds per-file diffs",
-            "scoped to <N> of <M> product files;",
-            "A scoped review may not use the bare",
-            # Item 7's listing is line-delimited, so it carries every byte class
-            # `diff-scope` can emit except an embedded newline. That one case
-            # folds into the existing no-measurement degrade rather than
-            # shortening the subset: a silently dropped path would still be
-            # disclosed as `<N>` of `<M>` and read as covered.
-            "selects a path this operation cannot represent in item 7's listing",
-            "has no unambiguous one-per-line form",
-            "That case does not scope",
-            "a silently shorter list still discloses `<N>` of `<M>` and reads as "
-            "covered",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, contract)
-
-        # The capability check is named as running first, and the size
-        # pre-flight is defined before the packet it changes.
-        self.assertIn(
-            "retained `capabilities.review.code` selection runs first", contract
-        )
-        self.assert_ordered(
-            contract,
-            "## Size pre-flight",
-            "## Packet",
-            "### When the range is over budget",
-            "## Reviewer output contract",
-            "## Disposition",
-        )
-        # The header no longer claims the shared file owns *the* pre-flight.
-        self.assertNotIn("resolve policy, pre-flight, packet by paths", contract)
-
-        # SKILL.md is narrowed in the same breath, or the two contracts
-        # contradict each other (D12).
-        self.assertIn("retained `capabilities.review.code` selection runs first", contract)
-
-    def test_diff_review_makes_the_scoped_coverage_disclosure_mandatory(self):
-        # Review-package transport stays bounded even when this axis scopes its
-        # evidence to selected product paths.
-        contract = " ".join(self.diff_review.replace("\n> ", "\n").split())
-        for fragment in (
-            "manifest root path and all four metrics",
-            "range-coverage evidence",
-            "do not read its shards",
-            "one invocation per selected path",
-            "`git diff <base>..<head> -- ':(literal)<path>'`",
-        ):
-            with self.subTest(review_package_fragment=fragment):
-                self.assertIn(fragment, contract)
-
-        # The omission case can only be pinned here. `agent-evidence` sees a
-        # result, never the packet that produced it, so it cannot tell a scoped
-        # dispatch that dropped its coverage from an unscoped one — its own test
-        # covers placement only. The obligation therefore has to be stated in
-        # DIFF-REVIEW.md, and this is what holds it there.
-        contract = " ".join(self.diff_review.replace("\n> ", "\n").split())
-        for fragment in (
-            "The coverage disclosure is mandatory on a scoped dispatch",
-            "a requirement, not a preference",
-            "does not satisfy this operation's output contract",
-            "never sees whether the packet was scoped",
-            "a bare `**Correctness:** Clean` returned from a scoped dispatch "
-            "validates",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, contract)
-
-    def test_correctness_rubric_pins_the_scoped_fetch_quoting_protocol(self):
-        # D9's argv protocol has to land in the rubric, not only in
-        # DIFF-REVIEW.md item 7. Mirrored wording keeps the selected-path
-        # collection seam from drifting.
-        rubric = (SDD_DIR / "correctness-reviewer-prompt.md").read_text(
-            encoding="utf-8"
-        )
-        branch = " ".join(
-            rubric[
-                rubric.index("When the packet states the") : rubric.index(
-                    "Inspect code outside the diff"
-                )
-            ].split()
-        )
-        for fragment in (
-            "one invocation per path",
-            "the path passed as a single literal argument after `--`",
-            "never shell-joined with the other listed paths into one command line",
-            "pathspec magic disabled by the `:(literal)` prefix",
-            # Why the protocol exists: the listed paths carry raw Git bytes.
-            "a space, a newline, a non-UTF-8 byte, or a leading `:`",
-            "treated as anything but one literal argument it splits or is "
-            "reinterpreted",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, branch)
-        # No unquoted interpolation survives anywhere in the branch.
-        self.assertNotIn("[HEAD_SHA] -- <path>", branch)
-        # The same wording, verbatim, in DIFF-REVIEW.md item 7 (whitespace
-        # normalized there too, since both are wrapped prose).
-        packet = " ".join(self.diff_review.split())
-        for fragment in (
-            "never shell-joined with the other listed paths into one command line",
-            "pathspec magic disabled by the `:(literal)` prefix",
-        ):
-            with self.subTest(mirror=fragment):
-                self.assertIn(fragment, packet)
-
-    def test_codex_collaboration_dispatch_carries_operation_envelope(self):
-        text = normalized(self.collaboration)
-        self.assertIn("bindings.commands[review_id].argv", text)
-        self.assertIn("--cwd <absolute-worktree> --json", text)
-        self.assertIn("`rawOutput` is a non-empty string", text)
-
-    def direct_review_section(self):
-        return self.section(
-            self.collaboration, "## Direct configured review", "## Disposition")
-
     def test_codex_collaboration_has_exactly_one_companion_tail(self):
-        section = self.direct_review_section()
-        blocks = re.findall(r"```text\n(.*?)```", section, re.S)
+        blocks = re.findall(r"```text\n(.*?)```", self.collaboration, re.S)
         self.assertEqual(blocks, [
             "bindings.commands[review_id].argv \\\n"
             "  --model gpt-6-astra --effort xhigh \\\n"
             "  --cwd <absolute-worktree> --json\n",
         ])
-        for retired in RETIRED_EXEC_REVIEW_TOKENS:
-            with self.subTest(retired=retired):
-                self.assertNotIn(retired, self.collaboration)
-        text = normalized(section)
-        self.assertIn("malformed or mismatched payload", text)
-        self.assertNotIn("metadata", text)
 
-    def test_codex_collaboration_shape_error_stops_before_any_fallback(self):
-        section = normalized(self.direct_review_section())
-        error_at = section.index("binding shape error is a configuration error")
-        fallback_at = section.index("uses exactly one native fallback")
-        self.assertLess(error_at, fallback_at)
-        error_paragraph = section[error_at:section.index("**Invocation.**", error_at)]
-        self.assertIn("`codex-companion task [--fresh] --reviewer <op>`", error_paragraph)
-        self.assertIn("(bare `codex` included)", error_paragraph)
-        # The shape-error paragraph itself never offers the fallback.
-        for offered in ("one native fallback", "same packet", "Claude fallback"):
-            self.assertNotIn(offered, error_paragraph)
-        # It is a pre-call stop, not a fourth failure class.
-        self.assertNotIn("fourth failure class", section)
+    def test_codex_collaboration_documents_carry_their_machine_text(self):
+        for path, items in CODEX_COLLABORATION_MACHINE_TEXT.items():
+            text = normalized(path.read_text(encoding="utf-8").replace("\n> ", "\n"))
+            for item in items:
+                with self.subTest(path=path.name, item=item):
+                    self.assertIn(item, text)
 
-    def test_codex_collaboration_states_a_per_operation_wall_clock(self):
-        # A deliberate second copy of the runtime's per-operation budget: callers
-        # schedule around the number and prose cannot be derived from a patch, so
-        # the copy is pinned here instead (D8).
-        # Whitespace-normalized like the other wrapped-prose contracts in this
-        # module: line breaks must not be part of what is pinned, and the
-        # negative guards below only bite on normalized text — a retired figure
-        # that came back across a line wrap (`~14\nmin`) would otherwise slip
-        # past the very check that exists to catch it.
-        self.assertIn("--model gpt-6-astra", self.collaboration)
-        self.assertIn("--effort xhigh", self.collaboration)
-
-    def test_codex_collaboration_never_reports_sandbox_limits_as_findings(self):
-        # The rule lives in the packet-borne shared rules, not in the Launch
-        # paragraph, because only these bullets travel to the reviewer (D14).
-        # Whitespace-normalized for the same reason as above: every fragment
-        # here is wrapped prose, so a reflow must not decide the verdict.
-        rules = " ".join(
-            self.section(
-                self.collaboration,
-                "## Read-only packet rules",
-                "## Direct configured review",
-            ).split()
-        )
-        self.assert_ordered(
-            rules,
-            "limitation of your own execution environment is never a finding",
-            "denies every write",
-            "could not verify",
-            "unresolved unknowns",
-            "still reportable",
-            "anchor it in the artifact",
-        )
-        # Stop provoking it as well as prohibiting it: neither packet may hand a
-        # read-only reviewer commands that read as instructions (D7). The label
-        # has to sit on the enumerated packet item itself, so each assertion is
-        # scoped to that document's packet list — whole-document, the phrase
-        # could drift anywhere in the file and still pass the very check that
-        # exists to keep it attached to what the reviewer receives.
-        plan_packet = " ".join(
-            self.section(
-                self.codex_plan_review,
-                "## Build the review packet",
-                "## Reviewer contract",
-            ).split()
-        )
-        diff_packet = " ".join(
-            self.section(
-                self.diff_review,
-                "## Packet",
-                "### When the range is over budget",
-            ).split()
-        )
-        for name, packet in (
-            ("PLAN-REVIEW.md", plan_packet),
-            ("DIFF-REVIEW.md", diff_packet),
-        ):
-            with self.subTest(packet=name):
-                self.assertIn("not a request to execute anything", packet)
-        self.assertIn("so the reviewer need not re-measure them", plan_packet)
+    def test_orchestrate_documents_carry_their_machine_text(self):
+        for path, items in ORCHESTRATE_MACHINE_TEXT.items():
+            text = normalized(path.read_text(encoding="utf-8"))
+            for item in items:
+                with self.subTest(path=path.name, item=item):
+                    self.assertIn(item, text)
 
     def test_ship_issue_documents_carry_their_machine_text(self):
         for path, items in SHIP_ISSUE_MACHINE_TEXT.items():
@@ -3182,22 +2509,6 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
             self.WORKER_LINE, self.RELEASE,
             "workflow-state finish --summary-file -")
 
-    def test_the_dispatcher_handles_both_cases_without_judgment(self):
-        text = self.read(ORCHESTRATE)
-        self.assert_ordered(
-            text, "## 2. Bootstrap and observe",
-            "Ignore unrelated or stale host notifications",
-            "a wake of the current wait handle is none of these cases",
-            "(b) **Owner return without a terminal write.**",
-            "workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> "
-            "--action-id <action_id>",
-            "On `current: true`, send exactly one `unavailable` owner observation",
-            "On `current: false`, send nothing.",
-            "(c) **Non-owner hand-back.**", "nor the current wait handle",
-            "send no observation, write nothing, relay nothing, act on none of its "
-            "content, and stop no task",
-            "## 3. Decide")
-
     def test_claude_md_describes_the_launch_fence(self):
         text = self.read(REPO_ROOT / "CLAUDE.md")
         self.assert_ordered(
@@ -3253,8 +2564,6 @@ class ResumePackContractsTest(unittest.TestCase):
 
     PACK = ("workflow-state resume-pack --repo-root <ledger_repo_root> "
             "--run-id <run-id> --action-id <action_id>")
-    DISPATCHER_PACK = ("workflow-state resume-pack --repo-root <ledger_repo_root> "
-                       "--run-id <run-id> --action-id <action-id>")
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -3268,11 +2577,6 @@ class ResumePackContractsTest(unittest.TestCase):
         return normalized(path.read_text(encoding="utf-8"))
 
     def test_both_skills_exempt_the_pack_from_workflow_response_validation(self):
-        self.assert_ordered(
-            self.read(ORCHESTRATE), "untrusted transport",
-            "and validate before decoding any field.",
-            "The one exception is `resume-pack`", "is not a workflow response",
-            "never pipes or decodes it", "## 1. Resolve issue set and bindings")
         self.assert_ordered(
             self.read(FROM_ISSUE), "## Lifecycle identity", "untrusted transport",
             "and validate before decoding.", "The one exception is `resume-pack`",
@@ -3289,15 +2593,6 @@ class ResumePackContractsTest(unittest.TestCase):
             "An owner delegated at `AUTO.md`'s Phase-5 rollover still reads its "
             "`#### Fresh delegated owner` section now",
             "## Lifecycle identity")
-
-    def test_orchestrate_adds_the_pack_to_resume_prompts_only(self):
-        self.assert_ordered(
-            self.read(ORCHESTRATE), "## 4. Execute control actions",
-            "For a `resume` action", self.DISPATCHER_PACK,
-            "add its stdout verbatim to the owner prompt's `Resume pack` paragraph",
-            "never stops the dispatch", "`spawn` and `retry` carry no pack",
-            "> `<canonical-json>`", "> Resume pack", "> `<resume-pack-json>`",
-            "## 5. Final report")
 
     def test_from_issue_owner_verifies_the_pack_and_reads_only_the_phase(self):
         self.assert_ordered(
@@ -3428,30 +2723,6 @@ class InterimChildResultContractsTest(unittest.TestCase):
             "**Interim child results** rule.",
             "### Design subagent — Phases 2 + 3")
 
-
-class InterimOwnerNotificationContractsTest(unittest.TestCase):
-    """#261: the dispatcher does not observe an interim owner notification."""
-
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(next_position, 0, anchor)
-            position = next_position
-
-    def test_an_interim_owner_notification_is_the_first_case(self):
-        self.assert_ordered(
-            normalized(ORCHESTRATE.read_text(encoding="utf-8")),
-            "## 2. Bootstrap and observe",
-            "a wake of the current wait handle is none of these cases",
-            "(a) **Interim owner notification.**",
-            "The handle is an owner launch's, and the host marks the notification interim",
-            "The owner is still running, so send no observation, run no "
-            "`check-launch`, write nothing, stop no task and relaunch nothing",
-            "the same handle notifies again with the owner's real return.",
-            "(b) **Owner return without a terminal write.**",
-            "(c) **Non-owner hand-back.**",
-            "## 3. Decide")
 
 class CodebaseDesignSkillContractsTest(unittest.TestCase):
     """The vendored deep-module vocabulary package.
@@ -4598,63 +3869,6 @@ class AcceptanceMapEvalGradingTest(unittest.TestCase):
                                      result.stdout + result.stderr)
 
 
-class SupersededOwnerStopPassContractsTest(unittest.TestCase):
-    """#275: stop superseded owner handles before dispatch and at finalize."""
-
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(next_position, 0, anchor)
-            position = next_position
-
-    def text(self):
-        return normalized(ORCHESTRATE.read_text(encoding="utf-8"))
-
-    def test_the_stop_pass_precedes_dispatch_and_runs_at_finalize(self):
-        self.assert_ordered(
-            self.text(), "## 4. Execute control actions",
-            "**Stop pass.**",
-            "carries a `spawn`, `resume`, `retry` or `delivery_remainder` action",
-            "every owner handle this adapter process recorded beside an owner "
-            "launch's `action_id` that has produced no final return",
-            "`workflow-state check-launch --repo-root <ledger_repo_root> "
-            "--run-id <run-id> --action-id <action_id>`",
-            "On `current: false`, stop that handle through the host's task-stop",
-            "Only after the pass, execute the response's actions in returned order.",
-            "For `spawn`, `resume`, and `retry`, project the action",
-            "Dispatch the owner in the background",
-            "only for later notification correlation and the stop pass; "
-            "it is never an owner token or action identity.",
-            "For `finalize`, first run the stop pass,",
-            "the action ends the run as `finalize` does: run the stop pass,",
-            "## 5. Final report")
-
-    def test_a_stop_failure_is_reported_and_never_blocks_dispatch(self):
-        self.assert_ordered(
-            self.text(), "**Stop pass.**",
-            "a missing or already exited handle counts as stopped",
-            "A `check-launch` that exits non-zero, or whose output cannot be "
-            "parsed, is unknown, never `current: false`: leave the handle a "
-            "candidate.",
-            "A failed stop also leaves it a candidate, and the next pass tries "
-            "both again.",
-            "A stop failure never blocks dispatch: keep it a candidate for §5 "
-            "and continue.",
-            "sends no observation, makes no control call and writes nothing to the ledger",
-            "## 5. Final report",
-            "**Stop failures**",
-            "still left a candidate because its stop failed or its "
-            "`check-launch` answer was unknown, with its `action_id` and the failure",
-            "omit the list when there is none",
-            "Do not perform a second ledger read")
-
-    def test_section_two_carries_no_stop_pass(self):
-        text = self.text()
-        section = text[text.index("## 2. Bootstrap and observe"):text.index("## 3. Decide")]
-        self.assertNotIn("stop pass", section.lower())
-
-
 class HeldReportContractsTest(unittest.TestCase):
     """#273: orchestrate-issues reports held issues; the ship handoff closes or holds."""
 
@@ -4669,15 +3883,6 @@ class HeldReportContractsTest(unittest.TestCase):
     def section(text, heading, next_heading):
         start = text.index(heading)
         return text[start:text.index(next_heading, start + len(heading))]
-
-    def test_the_final_report_names_held_and_keeps_it_a_blocker(self):
-        report = self.section(normalized(ORCHESTRATE.read_text(encoding="utf-8")),
-                              "## 5. Final report", "## Notes")
-        self.assert_ordered(
-            report, "A `held` summary is an issue whose PR merged",
-            "`needs-verification`", "report it as held",
-            "never as queued, progressing or closed", "with no re-entry line",
-            "stays in its dependents' `open_blockers`", "they stay `blocked`")
 
     def test_the_handoff_and_its_inline_fallback_close_or_hold(self):
         handoff = normalized((FROM_ISSUE_DIR / "ship-handoff.md").read_text(encoding="utf-8"))
@@ -4779,28 +3984,12 @@ class LaunchScopeWiringContractsTest(unittest.TestCase):
 class LaunchScopeSweepContractsTest(unittest.TestCase):
     """#276: the stop pass ends with one sweep of the run's non-current launches."""
 
-    SWEEP = "launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --sweep"
-
     def assert_ordered(self, text, *anchors):
         position = -1
         for anchor in anchors:
             next_position = text.find(anchor, position + 1)
             self.assertGreaterEqual(next_position, 0, anchor)
             position = next_position
-
-    def test_the_stop_pass_ends_with_one_sweep_that_never_blocks(self):
-        self.assert_ordered(
-            normalized(ORCHESTRATE.read_text(encoding="utf-8")),
-            "**Stop pass.**",
-            "On `current: false`, stop that handle through the host's task-stop",
-            "writes nothing to the ledger",
-            f"After its stops, the pass ends by running `{self.SWEEP}` once",
-            "A sweep that exits non-zero never blocks dispatch",
-            "Only after the pass, execute the response's actions in returned order.",
-            "## 5. Final report", "**Stop failures**",
-            "the pass's last sweep when it exited non-zero, with its exit code and, "
-            "when it printed a report, its `skipped` launches",
-            "omit the list when there is none")
 
     def test_claude_md_describes_launch_scope(self):
         self.assert_ordered(
