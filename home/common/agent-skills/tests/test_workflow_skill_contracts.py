@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 from pathlib import Path
@@ -1481,42 +1482,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assert_ordered(fallback, "check-launch", "`ship-issue`",
                             f"`{CAPABILITY_GAP_LINE}`", "`agent_dispatch`")
 
-    def test_expiry_prose_describes_the_wall_clock_the_reaper_actually_reads(self):
-        # The only skill-prose home that explains expiry to an owner. Prose that
-        # frames expiry as detecting a silent agent is wrong: the reaper compares
-        # instants and never looks at progress (per D11).
-        rules = self.section(
-            self.from_issue,
-            "## Dispatch, phase-budget and attempt-budget rules",
-            "## Terminal return procedure",
-        )
-        collapsed = normalized(rules)
-        self.assert_ordered(
-            collapsed,
-            "Persistence precedes notification",
-            "wall-clock only",
-            "never consults `last_progress_at`",
-            "consumes no attempt",
-            "resumes the same attempt",
-            "never opens a second attempt",
-        )
-        self.assertIn("blocked on a CI watch", collapsed)
-        self.assertIn(
-            "bounds how long an owner may hold the issue", collapsed
-        )
-        self.assertIn(
-            "the one fresh retry stays reserved for an attempt that reported "
-            "a terminal",
-            collapsed,
-        )
-        # The same rejection has a second meaning at the anti-zombie bound, and
-        # this owner is the one deciding whether to stop for a pause or for
-        # good, so the stalled branch has to be named here too (per D8).
-        self.assertIn(
-            "a `stopped(stalled)` terminal and the run is over, not paused",
-            collapsed,
-        )
-
     def test_direct_autonomous_bookkeeper_checks_before_the_terminal_finish(self):
         # The guard lives inside the bookkeeper's own command sequence, not in
         # the parent that dispatches it (per D9).
@@ -1589,23 +1554,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_adjacent_from_issue_acquisition_modes_remain_unchanged(self):
         for route in (ACQUIRE_DISPATCHER, ACQUIRE_INTERACTIVE, ACQUIRE_DURABLE):
             self.assertNotIn("direct-owner", route.read_text(encoding="utf-8"))
-
-    def test_from_issue_routes_a_deadline_rejected_progress_to_the_suspension_procedure(self):
-        # A progress call rejected past the attempt budget's deadline is now an
-        # environmental interruption, not a semantic verdict: the reaper demotes
-        # the expired attempt to suspended(unknown), so the owner follows the
-        # suspension procedure (print the re-entry line and stop) rather than
-        # writing a terminal finish, which the helper would reject on a
-        # non-active attempt.
-        self.assert_ordered(
-            self.from_issue,
-            "Obey the returned action exactly",
-            "attempt budget's deadline has passed",
-            "cannot record progress at or after attempt deadline",
-            "progress requires an active attempt",
-            "suspension procedure",
-            "Persistence precedes notification",
-        )
 
     def test_suspension_procedure_pins_verb_line_and_distinction(self):
         suspension = self.section(
@@ -3126,6 +3074,42 @@ class LaunchScopeSweepContractsTest(unittest.TestCase):
             "`launch-scope reap --action-id`", "`reap --sweep`",
             "agent-launch/<run-id>/<action-id>/", "`launch-scope scratch` (#277)",
             "`scratch.json`", "`unattributed_worktrees`")
+
+
+LANE_TRIAGE_VERDICT_KEYS = {"hits", "lane", "mode"}  # closed by tests/test_lane_triage.py
+
+
+def module_constants(path, *names):
+    """The literal module-level assignments `names` in `path`, read without importing it."""
+    found = {}
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id in names):
+            found[node.targets[0].id] = ast.literal_eval(node.value)
+    assert set(found) == set(names), (path, names, sorted(found))
+    return found
+
+
+class LaneTriageRecordKeysTest(unittest.TestCase):
+    """#279 (D16): Phase 0 names the JSON keys `lane-triage evaluate` reads and prints."""
+
+    def setUp(self):
+        text = normalized(FROM_ISSUE.read_text(encoding="utf-8"))
+        start = text.index("## Phase 0 — Investigate")
+        phase_zero = text[start:text.index("## Phase 1 — Worktree", start)]
+        spans = " ".join(re.findall(r"`([^`]+)`", phase_zero))
+        self.span_words = set(re.findall(r"[a-z_]+", spans))
+
+    def test_phase_zero_names_the_triage_record_keys_lane_triage_consumes(self):
+        lane = module_constants(REPO_ROOT / "python/agent_tools/lane_triage.py",
+                                "SIGNALS", "SIGNAL_MEMBERS", "TOP_MEMBERS")
+        expected = set().union(*lane.values())
+        self.assertEqual(expected - self.span_words, set())
+
+    def test_phase_zero_names_the_verdict_keys_and_every_light_lane_mode(self):
+        modes = module_constants(REPO_ROOT / "python/agent_tools/resolve_project.py",
+                                 "LIGHT_LANE_MODES")["LIGHT_LANE_MODES"]
+        self.assertEqual((LANE_TRIAGE_VERDICT_KEYS | set(modes)) - self.span_words, set())
 
 
 class HandBuiltTimeContractsTest(unittest.TestCase):

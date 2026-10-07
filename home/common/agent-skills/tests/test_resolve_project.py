@@ -2,9 +2,10 @@
 
 Runs the resolver as a subprocess against temporary repository roots and parses
 its stdout, the seam established by test_resolve_bindings.py and
-test_workflow_state.py. The resolver is imported only by the two cases whose
-seam no subprocess run can reach — the generic failure wrapper and the
-emit-side non-finite guard — through the shared `load_module` below.
+test_workflow_state.py. The resolver is imported in process only by the cases
+whose seam no subprocess run can reach — the generic failure wrapper, the
+emit-side non-finite guard (both through the shared `load_module` below) and
+the public `resolve()` seam (`PublicResolveTest`, #279).
 
 This file is also the resolver family's fixture module. The platform-era cases
 live beside it — `test_resolve_platform.py` for the manifest gate and the
@@ -821,11 +822,12 @@ def load_module():
 
 
 class InProcessTestCase(unittest.TestCase):
-    """A temporary `HOME` for the two cases that import the resolver in process.
+    """A temporary `HOME` for the cases that import the resolver in process.
 
     `HOME` is patched on this process rather than a child's environment, and
-    restored afterwards, because the manifest load inside `main` reads it
-    directly.
+    restored afterwards, because the manifest load — inside `main` for the
+    wrapper and emit-guard cases, inside `resolve()` for `PublicResolveTest` —
+    reads it directly.
     """
 
     def setUp(self) -> None:
@@ -1622,6 +1624,168 @@ class DriftGateTest(ResolverTestCase):
         self.assertEqual(code, 0, err or out)
         self.assertEqual({entry["action"] for entry in json.loads(out)["projections"]},
                          {"unchanged"})
+
+
+class LightLaneTest(ResolverTestCase):
+    """#279: the optional `bindings.workflow.light_lane` member (parent D13)."""
+
+    VALID = {"mode": "shadow", "budget_minutes": 45,
+             "risk_paths": ["python/agent_tools/resolve_project.py",
+                            "home/common/agent-skills/scripts/workflow*"]}
+
+    def contract_with(self, light_lane):
+        contract = source_contract()
+        contract["bindings"]["workflow"]["light_lane"] = light_lane
+        return contract
+
+    def test_a_valid_light_lane_round_trips_unchanged(self):
+        for light_lane in (self.VALID,
+                           {"mode": "active", "budget_minutes": 1, "risk_paths": []}):
+            with self.subTest(light_lane=light_lane):
+                code, snap, err = self.resolve(self.make_root(self.contract_with(light_lane)))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(snap["bindings"]["workflow"]["light_lane"], light_lane)
+
+    def test_an_absent_member_stays_absent(self):
+        contract = source_contract()
+        self.assertNotIn("light_lane", contract["bindings"]["workflow"])
+        code, snap, err = self.resolve(self.make_root(contract))
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("light_lane", snap["bindings"]["workflow"])
+
+    def test_null_stays_null(self):
+        code, snap, err = self.resolve(self.make_root(self.contract_with(None)))
+        self.assertEqual(code, 0, err)
+        self.assertIn("light_lane", snap["bindings"]["workflow"])
+        self.assertIsNone(snap["bindings"]["workflow"]["light_lane"])
+
+    REFUSALS = (
+        ([], "/bindings/workflow/light_lane", "contract.workflow.not_object"),
+        ({**VALID, "lane": "light"}, "/bindings/workflow/light_lane/lane",
+         "contract.workflow.member_unexpected"),
+        ({"budget_minutes": 45, "risk_paths": []}, "/bindings/workflow/light_lane/mode",
+         "contract.workflow.member_missing"),
+        ({**VALID, "mode": "fast"}, "/bindings/workflow/light_lane/mode",
+         "contract.workflow.light_lane_mode"),
+        ({**VALID, "mode": 1}, "/bindings/workflow/light_lane/mode",
+         "contract.workflow.light_lane_mode"),
+        ({**VALID, "budget_minutes": 0}, "/bindings/workflow/light_lane/budget_minutes",
+         "contract.workflow.not_positive_int"),
+        ({**VALID, "budget_minutes": -5}, "/bindings/workflow/light_lane/budget_minutes",
+         "contract.workflow.not_positive_int"),
+        ({**VALID, "budget_minutes": True}, "/bindings/workflow/light_lane/budget_minutes",
+         "contract.workflow.not_positive_int"),
+        ({**VALID, "risk_paths": "python/*"}, "/bindings/workflow/light_lane/risk_paths",
+         "contract.workflow.not_list"),
+        ({**VALID, "risk_paths": ["../outside/*"]}, "/bindings/workflow/light_lane/risk_paths/0",
+         "contract.workflow.unsafe_path"),
+        ({**VALID, "risk_paths": ["/abs/*"]}, "/bindings/workflow/light_lane/risk_paths/0",
+         "contract.workflow.unsafe_path"),
+        ({**VALID, "risk_paths": [""]}, "/bindings/workflow/light_lane/risk_paths/0",
+         "contract.workflow.unsafe_path"),
+        ({**VALID, "risk_paths": ["ok/*", 3]}, "/bindings/workflow/light_lane/risk_paths/1",
+         "contract.workflow.unsafe_path"),
+        # COR-003: `lane-triage` matches canonical record paths against the glob
+        # unchanged, so a non-canonical glob could never match and is refused.
+        ({**VALID, "risk_paths": ["./a.py"]}, "/bindings/workflow/light_lane/risk_paths/0",
+         "contract.workflow.noncanonical_path"),
+        ({**VALID, "risk_paths": ["ok/*", "a//b.py"]},
+         "/bindings/workflow/light_lane/risk_paths/1", "contract.workflow.noncanonical_path"),
+        ({**VALID, "risk_paths": ["a/"]}, "/bindings/workflow/light_lane/risk_paths/0",
+         "contract.workflow.noncanonical_path"),
+        ({**VALID, "risk_paths": ["a\\b.py"]}, "/bindings/workflow/light_lane/risk_paths/0",
+         "contract.workflow.noncanonical_path"),
+        ({**VALID, "risk_paths": ["a/./b.py"]}, "/bindings/workflow/light_lane/risk_paths/0",
+         "contract.workflow.noncanonical_path"),
+    )
+
+    def test_canonical_glob_patterns_are_accepted(self):
+        light_lane = {**self.VALID, "risk_paths": ["src/**/*.py", "*.nix", "a/[bc]?.py"]}
+        code, snap, err = self.resolve(self.make_root(self.contract_with(light_lane)))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["bindings"]["workflow"]["light_lane"], light_lane)
+
+    def test_each_malformed_light_lane_is_refused_with_its_pointer(self):
+        for light_lane, pointer, repair_id in self.REFUSALS:
+            with self.subTest(pointer=pointer, light_lane=light_lane):
+                code, payload, _ = self.resolve(self.make_root(self.contract_with(light_lane)))
+                self.assertEqual(code, 2)
+                error = payload["error"]
+                self.assertEqual(error["code"], "invalid_contract")
+                self.assertEqual(error["repair_id"], repair_id)
+                self.assertEqual([v["pointer"] for v in error["violations"]], [pointer])
+
+    def test_any_other_workflow_member_is_still_unexpected(self):
+        contract = source_contract()
+        contract["bindings"]["workflow"]["heavy_lane"] = None
+        code, payload, _ = self.resolve(self.make_root(contract))
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error"]["repair_id"], "contract.workflow.member_unexpected")
+        self.assertEqual([v["pointer"] for v in payload["error"]["violations"]],
+                         ["/bindings/workflow/heavy_lane"])
+
+
+class PublicResolveTest(InProcessTestCase):
+    """#279 D1: `resolve()` is `command_resolve`'s composition, importable.
+
+    `InProcessTestCase` patches `HOME` on this process, which the manifest gate
+    inside `resolve()` reads; the subprocess run it is compared with gets the
+    same `HOME` through `run(..., home=self.home)`.
+    """
+
+    def printed(self, root: Path, *extra: str) -> tuple[int, object]:
+        code, out, _ = run("resolve", "--repo-root", str(root), *extra, home=self.home)
+        return code, json.loads(out)
+
+    def test_resolve_returns_the_snapshot_the_command_prints(self):
+        root = make_project_root()
+        code, printed = self.printed(root)
+        self.assertEqual(code, 0)
+        self.assertEqual(resolve_project.resolve(str(root)), printed)
+
+    def raised_refusal(self, root: Path, *required: str) -> dict:
+        with self.assertRaises(resolve_project.ContractError) as raised:
+            resolve_project.resolve(str(root), list(required) or None)
+        return {"code": raised.exception.code, "repair_id": raised.exception.repair_id,
+                "violations": raised.exception.violations}
+
+    def test_resolve_raises_the_refusal_the_command_prints(self):
+        contract = source_contract()
+        contract["bindings"]["workflow"]["light_lane"] = {"mode": "fast",
+                                                          "budget_minutes": 1,
+                                                          "risk_paths": []}
+        root = make_project_root(contract)
+        code, printed = self.printed(root)
+        self.assertEqual(code, 2)
+        self.assertEqual(self.raised_refusal(root), printed["error"])
+
+    def test_resolve_applies_required_capabilities(self):
+        root = make_project_root()
+        code, printed = self.printed(root, "--require", "deploy")
+        self.assertEqual(code, 2)
+        self.assertEqual(printed["error"]["code"], "capability_unavailable")
+        self.assertEqual(self.raised_refusal(root, "deploy"), printed["error"])
+
+    def test_resolve_raises_the_failure_the_command_prints_for_an_overflowing_number(self):
+        """COR-002: `1e400` decodes to `inf` without reaching `parse_constant`.
+
+        The command has always refused it at the emit guard as the fixed
+        `resolver_failure`; `resolve()` raises that same refusal, so no caller
+        of the API evaluates a project the command refuses.
+        """
+        contract = source_contract()
+        contract["bindings"]["deploy"]["config"] = {"threshold": 271828.5}
+        root = make_project_root(contract)
+        path = root / ".agents" / "project.json"
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(text.count("271828.5"), 1)
+        path.write_text(text.replace("271828.5", "1e400"), encoding="utf-8")
+        code, out, _ = run("resolve", "--repo-root", str(root), home=self.home)
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '{"error":{"code":"resolver_failure","repair_id":'
+                              '"resolver.internal","violations":[{"message":'
+                              '"the resolver failed unexpectedly","pointer":""}]}}\n')
+        self.assertEqual(self.raised_refusal(root), json.loads(out)["error"])
 
 
 if __name__ == "__main__":

@@ -41,12 +41,12 @@ TIMEOUT_SECONDS = 60
 # and import `agent_tools.host_admission` from source (#177 D6, D13). #178
 # deletes this entry with them.
 NOT_LAUNCHERS = ("workflow-state",)
-# The commands #175, #179, #177, #249 and #264 accepted as launchers: a floor, not the full
+# The commands #175, #179, #177, #249, #264 and #279 accepted as launchers: a floor, not the full
 # set, which the command table in lib/agent-tools.nix owns (#175 D8).
 LAUNCHER_FLOOR = ("adopt-project", "agent-evidence", "agent-model-matrix", "conformance",
                   "context-map-lint", "derive-review-feasibility-fixtures", "diff-scope",
-                  "replay-retained", "resolve-project", "review-feasibility", "review-package",
-                  "review-range")
+                  "lane-triage", "replay-retained", "resolve-project", "review-feasibility",
+                  "review-package", "review-range")
 # The retained commands (#249) and their modules: refusal parity cases below.
 RETAINED = {"derive-review-feasibility-fixtures": "derive_review_feasibility_fixtures",
             "replay-retained": "replay_retained"}
