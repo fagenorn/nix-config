@@ -1270,14 +1270,15 @@ def _declaration(value, reasons):
     role = value.get("role") if isinstance(value.get("role"), str) else None
     subagent_type = value.get("subagent_type")
     # The matrix is deliberately not read here. These are the source's known
-    # canonical role spellings; shared transport types remain ambiguous.
+    # canonical role spellings; an agent type that serves several roles
+    # (implementer, mechanic, reviewer) stays ambiguous without a declared role.
     canonical = {"auto-owner", "bookkeeper", "codex-transport", "conformance-reviewer", "explorer",
                  "implementer", "issue-owner", "mechanic", "researcher", "reviewer",
-                 "reviewer-lite", "ship-owner"}
+                 "reviewer-lite", "ship-owner", "task-implementer"}
     if role in canonical:
         authority = "structured-dispatch" if dispatch else "runtime-agent-type"
         return {"dispatch_id": dispatch, "role": role, "authority": authority}
-    if subagent_type in canonical - {"reviewer", "mechanic"}:
+    if subagent_type in canonical - {"implementer", "mechanic", "reviewer"}:
         return {"dispatch_id": dispatch, "role": subagent_type,
                 "authority": "runtime-agent-type"}
     reasons["role_ambiguous"] += 1
