@@ -126,6 +126,37 @@ class AcceptanceMapEvalGradingTest(unittest.TestCase):
                 self.assertEqual(len(shells), 1)
                 self.assertIn("acceptance_map_covers", shells[0])
                 self.assertIn('"$REPO/issues/001-well-specified.md"', shells[0])
+
+    def test_both_eval_assert_shells_grade_a_plan_under_harness_paths(self):
+        # run-eval.sh exports PLAN_DIR as the resolver's ABSOLUTE path under
+        # $REPO and runs each shell as `cd $REPO && bash -c "source lib; …"`;
+        # from-issue's plan lands in the worktree at the same relative suffix.
+        full = self.plan(*((f"AC{n}", "code") for n in range(1, 8)))
+        short = self.plan(*((f"AC{n}", "code") for n in range(1, 7)))
+        for path in self.EVALS:
+            case = next(item for item in json.loads(path.read_text(encoding="utf-8"))["evals"]
+                        if item["id"] == 1)
+            shell = next(item["shell"] for item in case["asserts"]
+                         if item["name"] == self.ASSERT_NAME)
+            for label, text, passes in (("complete", full, True), ("missing row", short, False)):
+                with self.subTest(evals=path.parent.parent.name, plan=label), \
+                        tempfile.TemporaryDirectory() as temporary:
+                    repo = Path(temporary) / "repo"
+                    worktree = Path(temporary) / "wt"
+                    plan_dir = repo / ".agents/artifacts/plans"
+                    (repo / "issues").mkdir(parents=True)
+                    (repo / "issues/001-well-specified.md").write_text(
+                        self.FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+                    owner = (worktree if "from-issue" in str(path) else repo)
+                    (owner / ".agents/artifacts/plans").mkdir(parents=True)
+                    (owner / ".agents/artifacts/plans/plan.md").write_text(text, encoding="utf-8")
+                    env = dict(os.environ, REPO=str(repo), WT=str(worktree),
+                               PLAN_DIR=str(plan_dir))
+                    result = subprocess.run(
+                        ["bash", "-c", f"source '{self.ASSERT_LIB}'; {shell}"],
+                        cwd=repo, env=env, check=False, capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, passes,
+                                     result.stdout + result.stderr)
 ```
 
 - [ ] **Step 2: Run the test and watch it fail**
@@ -208,7 +239,7 @@ acceptance_map_covers() {
 ```json
 {
   "name": "the plan's acceptance map has one row per issue criterion",
-  "shell": "acceptance_map_covers \"$(first_file \"$WT/$PLAN_DIR\"/*.md)\" \"$REPO/issues/001-well-specified.md\""
+  "shell": "acceptance_map_covers \"$(first_file \"$WT/${PLAN_DIR#\"$REPO\"/}\"/*.md)\" \"$REPO/issues/001-well-specified.md\""
 }
 ```
 
@@ -219,7 +250,7 @@ and append to that eval's `expected_output` the sentence ` The plan root carries
 ```json
 {
   "name": "the plan's acceptance map has one row per issue criterion",
-  "shell": "acceptance_map_covers \"$(first_file \"$REPO/$PLAN_DIR\"/*.md)\" \"$REPO/issues/001-well-specified.md\""
+  "shell": "acceptance_map_covers \"$(first_file \"$PLAN_DIR\"/*.md)\" \"$REPO/issues/001-well-specified.md\""
 }
 ```
 

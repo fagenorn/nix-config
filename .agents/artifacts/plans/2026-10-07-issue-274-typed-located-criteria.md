@@ -47,6 +47,8 @@ Task 4 — Pin the dispatch-marker total — home/common/agent-skills/tests/test
 
 ## Decisions
 
-Tasks rest on spec ledger rows D1–D10: Task 1 per D1, D9; Task 2 per D2, D3, D4, D5; Task 3 per D6, D7, D10; Task 4 per D8. Plan-level rows D9 and D10 were appended to the spec's ledger during planning.
+Tasks rest on spec ledger rows D1–D11: Task 1 per D1, D9; Task 2 per D2, D3, D4, D5; Task 3 per D6, D7, D10, D11; Task 4 per D8. Plan-level rows D9 and D10 were appended to the spec's ledger during planning, and D11 at standards review.
 
----
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated and read-only, base 81210221ca45091a137190c137c57c0019e6adaa, no fallback. Findings: 1 Blocking (PR-274-01, eval assert paths under an absolute `PLAN_DIR`) accepted and applied to Task 3 per D11; 0 Should fix; 0 Discussion; 0 rejected, 0 deferred.
