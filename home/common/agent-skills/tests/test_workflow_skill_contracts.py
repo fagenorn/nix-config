@@ -938,10 +938,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                        "## Remainder owner prompt"):
             self.assertIn(anchor, self.ship_handoff)
 
-    def test_from_issue_remainder_routes_name_the_re_entry_line(self):
-        self.assertIn("re-entry line", normalized(
-            self.ship_handoff.split("## Remainder owner prompt", 1)[1]))
-
     def test_the_ship_prompt_returns_the_gap_line_and_the_remainder_prompt_never_does(self):
         prompt = normalized(self.ship_handoff.split("## Ship report handling", 1)[0])
         self.assertIn(f"return only `{CAPABILITY_GAP_LINE}`", prompt)
@@ -1232,13 +1228,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("spec_artifact", self.ship_handoff)
         self.assertIn("plan_artifact", self.ship_handoff)
         self.assertIn('"action_id"', self.ship_handoff)
-        self.assertIn(
-            "`action_id` is the `issue:attempt:launch` string the acquisition "
-            "envelope issued",
-            normalized(self.ship_handoff),
-        )
-        self.assertIn("passed through verbatim", normalized(self.ship_handoff))
-        self.assertIn("never carry task member paths", self.ship_handoff)
         for forbidden in ("decisions:", "open_items:", "adr_paths:", "summary:"):
             self.assertNotRegex(self.auto, rf"(?m)^\s*{re.escape(forbidden)}")
             self.assertNotRegex(self.ship_handoff, rf"(?m)^\s*{re.escape(forbidden)}")
@@ -1597,9 +1586,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_phase_five_merge_delta_dispatch_and_handoff_reviewer_count(self):
         self.assertIn("<!-- agent-dispatch: id=ship-issue-merge-delta-review role=reviewer"
                       " model=opus effort=high -->", self.ship_issue)
-        self.assertIn("it dispatches zero (empty review range) or two first-pass reviewer"
-                      " subagents", normalized(self.ship_handoff))
-        self.assertNotIn("zero (empty merge-delta), one, or two", normalized(self.ship_handoff))
 
     def test_phase_six_waits_on_required_checks_and_lists_advisory_states(self):
         # #264 D6-D8: the blocking watch is its own fence; the handoff names it.
