@@ -18,7 +18,7 @@ import tempfile
 from typing import Any, Callable, Iterator
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 CONTROL_INTERFACE_VERSION = 3
 DIRECT_OWNER_INTERFACE_VERSION = 2
 ATTEMPT_STATES = frozenset(
@@ -133,8 +133,25 @@ ATTEMPT_FIELDS = frozenset(
         "suspend_phase",
         "stalled_resumes",
         "progress_marker",
+        "lane",
+        "lane_budget_minutes",
+        "lane_history",
     }
 )
+# #280 D2, D3: an attempt's lane is declared once by triage and may escalate
+# from light to full, never back. The table is closed: a pair it does not name
+# is not a legal transition.
+LANES = frozenset({"light", "full"})
+LANE_HISTORY_FIELDS = frozenset({"lane", "reason", "at"})
+LANE_TRANSITION_REASONS: dict[tuple[str | None, str], frozenset[str]] = {
+    (None, "light"): frozenset({"triage"}),
+    (None, "full"): frozenset({"triage"}),
+    ("light", "full"): frozenset(
+        {"important_finding", "second_fix_round", "light_deadline", "unpredicted_risk"}
+    ),
+}
+LANE_REASONS = frozenset().union(*LANE_TRANSITION_REASONS.values())
+LANE_DEFAULTS = {"lane": None, "lane_budget_minutes": None, "lane_history": []}
 SUSPENSION_DEFAULTS = {
     "blocked_on": None,
     "suspend_phase": None,
@@ -584,6 +601,44 @@ def validate_phase_inputs(value: Any) -> dict[str, Any]:
     return value
 
 
+def validate_attempt_lane(value: dict[str, Any], *, started_at: datetime) -> None:
+    """Close an attempt's lane, lane budget and lane history (#280 D3).
+
+    ``lane`` is ``None`` exactly when the budget is ``None`` and the history is
+    empty; otherwise the history is a chain of legal transitions whose last
+    entry is the current lane.
+    """
+    history = value["lane_history"]
+    if not isinstance(history, list):
+        raise WorkflowError("invalid attempt lane history")
+    previous: str | None = None
+    previous_at = started_at
+    for entry in history:
+        if not isinstance(entry, dict) or set(entry) != LANE_HISTORY_FIELDS:
+            raise WorkflowError("invalid attempt lane history entry")
+        lane, reason = entry["lane"], entry["reason"]
+        if (
+            not isinstance(lane, str)
+            or lane not in LANES
+            or not isinstance(reason, str)
+            or reason
+            not in LANE_TRANSITION_REASONS.get((previous, lane), frozenset())
+        ):
+            raise WorkflowError("invalid attempt lane transition")
+        if not isinstance(entry["at"], str):
+            raise WorkflowError("invalid attempt lane history time")
+        at = parse_utc(entry["at"], "lane history time")
+        if at < previous_at:
+            raise WorkflowError("invalid attempt lane history time order")
+        previous, previous_at = lane, at
+    if value["lane"] != previous:
+        raise WorkflowError("attempt lane does not match its history")
+    if (value["lane"] is None) != (value["lane_budget_minutes"] is None):
+        raise WorkflowError("attempt lane and lane budget must both be set or both be null")
+    if value["lane_budget_minutes"] is not None:
+        require_plain_int(value["lane_budget_minutes"], "attempt lane budget", minimum=1)
+
+
 def validate_attempt(
     value: Any, *, issue: int, expected_number: int, run_id: str
 ) -> None:
@@ -650,6 +705,7 @@ def validate_attempt(
         and PROGRESS_MARKER_PATTERN.fullmatch(progress_marker)
     ):
         raise WorkflowError("invalid attempt progress marker")
+    validate_attempt_lane(value, started_at=started_at)
     result_source = value["result_source"]
     if (result is None) != (value["finished_at"] is None) or (result is None) != (
         result_source is None
@@ -2031,6 +2087,7 @@ def new_control_attempt(
         "phase_inputs": None,
         **SUSPENSION_DEFAULTS,
         "progress_marker": None,
+        **copy.deepcopy(LANE_DEFAULTS),
     }
 
 
@@ -3735,14 +3792,14 @@ def read_state_unlocked(state_path: Path, run_id: str) -> dict[str, Any]:
     lock: `atomic_write_state` publishes by `os.replace`, so an unlocked reader
     sees either the whole prior file or the whole new one, never a torn one — and
     taking the lock would mean creating `state.lock`, which is a write. Schemas
-    1–5 are migrated and validated on a detached copy; the document is returned
+    1–6 are migrated and validated on a detached copy; the document is returned
     as stored.
     """
     try:
         raw_state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise WorkflowError("invalid workflow state") from error
-    if isinstance(raw_state, dict) and raw_state.get("schema_version") in {1, 2, 3, 4, 5}:
+    if isinstance(raw_state, dict) and raw_state.get("schema_version") in {1, 2, 3, 4, 5, 6}:
         candidate = _call("invalid legacy workflow state",
             _delivery().migrate, raw_state, migration_contracts={})
         validate_state(candidate, run_id=run_id)
@@ -4101,7 +4158,7 @@ def command_mark_progress(args: argparse.Namespace) -> int:
 
     The write does not pass ``fence_owner_exit``: this verb ends no launch. And
     because the write goes through ``transact``, a pre-schema-6 ledger is
-    persisted at schema 6 even when the outcome writes nothing (#250 D12).
+    persisted at the current schema even when the outcome writes nothing (#250 D12).
     """
     if not RUN_ID_PATTERN.fullmatch(args.run_id):
         raise WorkflowError("invalid run_id")
