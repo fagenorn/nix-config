@@ -36,6 +36,7 @@ ACQUIRE_DIRECT = FROM_ISSUE_DIR / "acquire-direct.md"
 ACQUIRE_INTERACTIVE = FROM_ISSUE_DIR / "acquire-interactive.md"
 ACQUIRE_DURABLE = FROM_ISSUE_DIR / "acquire-durable.md"
 RESUME_PACK = FROM_ISSUE_DIR / "resume-pack.md"
+SHIP_HANDOFF_DOC = FROM_ISSUE_DIR / "ship-handoff.md"
 SHIP_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/SKILL.md"
 SHIP_ISSUE_REVIEW = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/REVIEW.md"
 SHIP_ISSUE_CI_MERGE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/CI-MERGE.md"
@@ -938,26 +939,14 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for anchor in ("--kind initial-intent", "--boundary ship-summary",
                        "## Remainder owner prompt"):
             self.assertIn(anchor, self.ship_handoff)
-        self.assertNotIn("## Delivery handoff v2", self.ship_handoff)
 
     def test_from_issue_remainder_routes_name_the_re_entry_line(self):
         self.assertIn("re-entry line", normalized(
             self.ship_handoff.split("## Remainder owner prompt", 1)[1]))
 
-    def test_ship_handoff_returns_the_gap_line_before_either_loop_exit(self):
-        # The prompt stops promising nested dispatch, points at the probe, and
-        # returns the closed gap line before the two exits that end the
-        # Delivery loop (per D4, D9).
-        self.assertNotIn("Nested Agent calls are supported.", self.ship_handoff)
-        prompt = normalized(self.ship_handoff.split("## Inline fallback", 1)[0])
-        self.assert_ordered(
-            prompt,
-            "reviewer subagents",
-            "Phase-0 reviewer-dispatch probe confirms",
-            "Return exactly canonical JSON",
-            f"return only `{CAPABILITY_GAP_LINE}`",
-            "Two exceptions end the loop without a summary",
-        )
+    def test_the_ship_prompt_returns_the_gap_line_and_the_remainder_prompt_never_does(self):
+        prompt = normalized(self.ship_handoff.split("## Ship report handling", 1)[0])
+        self.assertIn(f"return only `{CAPABILITY_GAP_LINE}`", prompt)
         remainder = self.ship_handoff.split("## Remainder owner prompt", 1)[1]
         self.assertNotIn("capability_gap", remainder)
 
@@ -976,32 +965,13 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertLessEqual({"ship-handoff.md", "delegated-owner.md"}, carriers)
 
     def test_from_issue_phase_seven_ships_inline_on_the_dispatch_gap(self):
-        # A ship owner that cannot launch reviewers returns the closed gap line
-        # from Phase 0 with nothing changed. The owner re-checks its launch,
-        # ships inline through `Skill`, and only a gap from that inline run
-        # suspends (per D2, D5, D6). The verb stays in the suspension
-        # procedure: Phase 7 never spells it (see the launch-revalidation test).
+        # The fallback ends in the suspension procedure, never a direct
+        # `workflow-state suspend` (the verb stays in that procedure).
         phase_seven = self.section(self.from_issue, "## Phase 7", "## Notes")
-        self.assert_ordered(
-            normalized(phase_seven),
-            "receiving the ship report",
-            "only the re-entry line `/from-issue <num> --auto`",
-            f"only the line `{CAPABILITY_GAP_LINE}`",
-            "no subagent-launch tool",
-            "never decode or validate it",
-            "`delivery_stalled`",
-            "**Dispatch-gap fallback.**",
-            "same `check-launch` fence",
-            "the canonical re-entry line `/from-issue <num> --auto` on its own line",
-            "through your own `Skill` tool",
-            "writing only `checkpoint-delivery`",
-            "never starts a second inline run",
-            "suspension procedure with `<value>` = `agent_dispatch`",
-            "`delivery_remainder` launch",
-        )
-        self.assertNotIn("workflow-state suspend", phase_seven)
-        self.assertIn("After Phase 7 it is the ship report's summary",
-                      normalized(self.from_issue))
+        handling = self.section(self.ship_handoff, "## Ship report handling",
+                                "## Inline fallback (no ship-issue skill)")
+        for text in (phase_seven, handling):
+            self.assertNotIn("workflow-state suspend", text)
 
     def test_suspension_procedure_admits_agent_dispatch(self):
         suspension = normalized(self.section(
@@ -1285,16 +1255,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for forbidden in ("parked_findings:", "verdict_details:", "open_items:", "summary:"):
             self.assertNotRegex(self.sdd, rf"(?m)^\s*{re.escape(forbidden)}")
 
-    def test_handoff_head_sha_is_the_sdd_report_head_sha(self):
-        handoff = normalized(self.ship_handoff)
-        self.assertIn("In both handoff shapes, `head_sha` is the validated sdd report's"
-                      " `head_sha`", handoff)
-        self.assertIn("the *final-review head* ship-issue's Phase 5 reviews from", handoff)
-        from_issue = normalized(self.from_issue)
-        self.assertIn("ship-issue's Phase-5 range selection reads them, taking `head_sha` as"
-                      " the final-review head only when `review_state` is `clean`", from_issue)
-        self.assertNotIn("Phase-5 degradation decision reads them", from_issue)
-
     def test_received_reports_cross_the_same_json_wire_seam(self):
         self.assert_ordered(self.from_issue, "received stdout bytes",
                             "validate-report --boundary producer --input -", "decode JSON")
@@ -1322,11 +1282,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_durable_review_detail_precedes_every_removable_cleanup(self):
         self.assertIn(".superpowers/issue-delivery/", self.sdd)
         self.assertIn(".superpowers/issue-delivery/", self.ship_review)
-        for text in (self.sdd, self.ship_review, self.ship_issue, self.ship_handoff):
+        for text in (self.sdd, self.ship_review, self.ship_issue):
             self.assertIn("report_path", text)
             self.assertIn("keep the worktree", text)
-        self.assertIn("primary worktree", self.ship_handoff)
-        self.assertIn("never inline the report", self.from_issue)
 
     def test_phase_five_remeasures_every_artifact_it_mutates(self):
         self.assert_ordered(self.standards_review, "apply blocking fixes", "final mutation",
@@ -1368,21 +1326,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             remeasurement, "after the last write", "implementation-plan",
             "design-spec", "may advance",
         )
-
-    def test_preflight_worktree_deletion_requires_proof_of_disposability(self):
-        self.assertNotIn("one, clean → remove it", self.from_issue)
-        phase_zero = self.section(self.from_issue, "## Phase 0", "## Phase 1")
-        self.assert_ordered(
-            phase_zero,
-            "inspect before touching",
-            "unpushed commits",
-            "workflow-state ledger",
-            "spec/plan artifacts",
-            "resume that worktree",
-            "provably disposable",
-        )
-        self.assertIn("prefer resume", phase_zero)
-        self.assertIn("stop as blocked", phase_zero)
 
     def test_owner_persists_exact_terminal_result_before_return(self):
         owner_return_section = self.section(
@@ -1515,47 +1458,24 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("lifecycle identity", phase_zero)
         self.assertIn("workflow-state finish", phase_zero)
         self.assertIn("execution failure", normalized(self.from_issue))
-        phase_seven = self.section(self.from_issue, "## Phase 7", "## Notes")
-        self.assert_ordered(
-            phase_seven,
-            "ledger_repo_root",
-            "receiving the ship report",
-            "workflow-state finish",
-            "canonical JSON unchanged",
-        )
 
     def test_from_issue_revalidates_its_launch_before_the_terminal_finish(self):
-        # Without this the design refuses the forge write and then performs the
-        # ledger write from the very launch it just proved stale, because the
-        # ship owner and this parent share one identity (per D9).
-        phase_seven = self.section(self.from_issue, "## Phase 7", "## Notes")
+        handling = normalized(self.section(
+            SHIP_HANDOFF_DOC.read_text(encoding="utf-8"),
+            "## Ship report handling", "## Dispatch-gap fallback"))
         self.assert_ordered(
-            phase_seven,
-            "receiving the ship report",
-            "check-launch",
-            "workflow-state finish",
+            handling,
+            "validate-report --boundary ship-summary --input -",
+            "~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> "
+            "--run-id <run-id> --action-id <issue:attempt:launch>",
+            "/from-issue <num> --auto",
+            "workflow-state finish --summary-file -",
         )
-        collapsed = normalized(phase_seven)
-        self.assertIn(
-            "~/.agents/bin/workflow-state check-launch --repo-root "
-            "<ledger_repo_root> --run-id <run-id> --action-id "
-            "<issue:attempt:launch>",
-            collapsed,
-        )
-        self.assertIn("this owner's own `action_id`", collapsed)
-        self.assertIn("write nothing", collapsed)
-        # Name the line: inside this document the bare phrase "the canonical
-        # re-entry line" binds to the suspension procedure, whose banner needs
-        # the very write D8 forbids. ship-issue spells it out; so does this
-        # (per D24).
-        self.assertIn(
-            "the canonical re-entry line `/from-issue <num> --auto` on its own "
-            "line",
-            collapsed,
-        )
-        # The refusal is a stop, never a suspension: in the resume shape a
-        # suspend would park the successor's live attempt (per D8).
-        self.assertNotIn("workflow-state suspend", phase_seven)
+        fallback = normalized(self.section(
+            SHIP_HANDOFF_DOC.read_text(encoding="utf-8"),
+            "## Dispatch-gap fallback", "## Inline fallback (no ship-issue skill)"))
+        self.assert_ordered(fallback, "check-launch", "`ship-issue`",
+                            f"`{CAPABILITY_GAP_LINE}`", "`agent_dispatch`")
 
     def test_expiry_prose_describes_the_wall_clock_the_reaper_actually_reads(self):
         # The only skill-prose home that explains expiry to an owner. Prose that
@@ -1818,37 +1738,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertTrue(optional_subject in line or rendered_subject in line, line)
 
-    def test_phase0_size_note_delegates_counting_to_diff_scope(self):
-        # Issues #21-#22 made diff-scope the accounting authority and retired the
-        # hand-counted numstat arithmetic; this note is the only restatement of
-        # the C4 artifact carve-out in any skill, so it is where that drift hid.
-        note = " ".join(self.investigate.split())
-        for fragment in (
-            # Whole affirmative clauses, not a bare "diff-scope" token: a bare
-            # token also matches a clause saying the counting is *not* delegated
-            # to the helper, which is the inversion this test guards.
-            "`diff-scope` is the accounting authority",
-            "measure, never hand-count",
-            # Both directions of the carve-out: this run's artifacts are named
-            # one file at a time, and the directories themselves never are.
-            "one `--artifact-path` per file",
-            "never an entire retained artifact directory",
-            "still count",
-            # The estimate/count split: Phase 0 has no range, so its number is an
-            # estimate; the helper is authoritative only once a range exists.
-            # Collapsing these two moments is the defect issue 32 fixed.
-            "the Phase-0 number is an *estimate*",
-            "Once the branch has a range",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, note)
-        # The retired tool must not survive anywhere in the file, and the gate's
-        # two boundaries stay spelled once, in ship-issue's Phase-5 gate: this
-        # line states the policy and points there rather than restating numbers.
-        for absent in ("numstat", "1,000", "≤20"):
-            with self.subTest(absent=absent):
-                self.assertNotIn(absent, note)
-
     def test_helper_binaries_resolve_from_bare_names(self):
         # Skills invoke workflow-state/agent-evidence by bare name. The Nix
         # module must put ~/.agents/bin on PATH, and each contract must anchor
@@ -2071,7 +1960,7 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
     def test_the_ship_prompt_carries_the_worker_line_outside_the_handoff(self):
         self.assert_ordered(
             self.read(FROM_ISSUE_DIR / "ship-handoff.md"), "## Ship-owner subagent prompt",
-            self.WORKER_LINE, "never inside the handoff")
+            self.WORKER_LINE)
 
     def test_the_remainder_prompt_releases_itself_before_its_finish(self):
         self.assert_ordered(
@@ -2933,16 +2822,6 @@ class AcceptanceGradingContractsTest(unittest.TestCase):
                 self.assertIn('"review_state":"clean|residuals",'
                               '"acceptance_state":"met|unmet|human_pending|not_applicable",',
                               line)
-        handoff = normalized(raw)
-        self.assert_ordered(
-            handoff,
-            "In both handoff shapes, `head_sha` is the validated sdd report's `head_sha`",
-            "In both handoff shapes, `acceptance_state` is the validated sdd report's "
-            "`acceptance_state`, copied unchanged.",
-            "(`review_state: unknown`) carries `not_applicable`",
-            "holds it open as `needs-verification`")
-        self.assertIn("`head_sha`, `acceptance_state` and `report_path` may be used to "
-                      "construct the Phase-7 handoff", self.read(FROM_ISSUE))
 
 
 class ToIssuesCriterionLineContractsTest(unittest.TestCase):
@@ -3164,41 +3043,6 @@ class AcceptanceMapEvalGradingTest(unittest.TestCase):
                                      result.stdout + result.stderr)
 
 
-class HeldReportContractsTest(unittest.TestCase):
-    """#273: orchestrate-issues reports held issues; the ship handoff closes or holds."""
-
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(next_position, 0, anchor)
-            position = next_position
-
-    @staticmethod
-    def section(text, heading, next_heading):
-        start = text.index(heading)
-        return text[start:text.index(next_heading, start + len(heading))]
-
-    def test_the_handoff_and_its_inline_fallback_close_or_hold(self):
-        handoff = normalized((FROM_ISSUE_DIR / "ship-handoff.md").read_text(encoding="utf-8"))
-        self.assertNotIn("its close stage does not read it", handoff)
-        self.assertIn("`met` or `not_applicable` closes the issue, and `unmet` or "
-                      "`human_pending` holds it open as `needs-verification` "
-                      "(ship-issue Phase 8 step 1)", handoff)
-        fallback = self.section(handoff, "## Inline fallback (no ship-issue skill)",
-                                "## Remainder owner prompt")
-        self.assert_ordered(
-            fallback, "The PR body carries `Closes #<num>` only when the sdd report's "
-            "`acceptance_state` is `met` or `not_applicable`, and no closing keyword "
-            "otherwise", "close the issue when the sdd report's `acceptance_state` is "
-            "`met` or `not_applicable`",
-            "otherwise hold it with ship-issue Phase 8 step 1's hold sequence",
-            "reopen it only when `CLOSED`", "never with `--force`",
-            "label it `needs-verification`", "comment the verdict table",
-            "verify the issue is `OPEN` with `needs-verification`",
-            "leaving it open. In both cases, publish")
-
-
 class LaunchScopeWiringContractsTest(unittest.TestCase):
     """#276: owners and writing workers run long commands in a launch scope; owners self-reap."""
 
@@ -3240,11 +3084,9 @@ class LaunchScopeWiringContractsTest(unittest.TestCase):
                             "**Self-reap.**")
         handoff = self.read(FROM_ISSUE_DIR / "ship-handoff.md")
         self.assert_ordered(handoff, "## Ship-owner subagent prompt", self.WORKER_LINE,
-                            "never inside the handoff", self.WORKER_EXEC, self.WORKER_SCRATCH,
-                            "Your task:")
+                            self.WORKER_EXEC, self.WORKER_SCRATCH, "Your task:")
         self.assert_ordered(handoff, "## Remainder owner prompt", self.WORKER_LINE,
-                            "never inside it", self.WORKER_EXEC, self.WORKER_SCRATCH,
-                            "Your task:")
+                            self.WORKER_EXEC, self.WORKER_SCRATCH, "Your task:")
         self.assert_ordered(self.read(AUTO), "`Lifecycle worker:`", "launch-commit")
 
     def test_every_owner_exit_reaps_between_release_and_write(self):

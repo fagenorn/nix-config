@@ -366,14 +366,9 @@ Handoff is the deliberate context rollover with a handoff document; suspension i
 
 ## Phase 0 — Investigate
 
-Build a shared mental model *before* the brainstorm. No files yet. Read `investigate.md` for the pre-flight queries and the note structure. (When the retained tracker capability is unsupported, skip the fetch and PR pre-flight.)
+Build a shared mental model *before* the brainstorm. No files yet. Read `investigate.md` for the pre-flight queries, the worktree pre-flight and the note structure. (When the retained tracker capability is unsupported, skip the fetch and PR pre-flight.)
 
-**Pre-flight** — two sessions racing on one issue is the most expensive failure this flow produces. Run the PR pre-flight per `investigate.md`: exact matching open or merged work is reconciled within existing authorization; unknown, competing, or differently scoped work stops for the specific missing decision. Then run `git worktree list` and keep the entries whose bracketed branch field starts with `<bindings.vcs.worktree.prefix>issue-<num>-`:
-
-- none → continue;
-- one → **inspect before touching it**; a "clean" tree can still hold committed work that only ships at Phase 7. Check four signals: unpushed commits (`git log origin/<integration-branch>..<branch> --oneline`); workflow-state ledger attempts naming it that are `active` or `handed_off`; tracker/PR state referencing the branch; spec/plan artifacts under the retained specification and plan directories inside it. If **any** exist → prefer resume: resume that worktree when existing authorization covers the exact continuation; otherwise ask for the missing decision. On conflicting signals stop as blocked through the terminal return procedure. Deletion (`git worktree remove` + `git branch -D`) only when **provably disposable**: zero commits ahead, no active or handed-off ledger attempt, no spec/plan artifacts, no uncommitted work;
-- one with uncommitted work → **stop and ask the user**; their in-progress state isn't yours to discard;
-- several → stop and ask which to resume or discard.
+**Pre-flight** — run the PR pre-flight and then the worktree pre-flight, both per `investigate.md`: exact matching open or merged work is reconciled within existing authorization; unknown, competing, or differently scoped work stops for the specific missing decision.
 
 Investigate per `investigate.md` and post the note. Several issues bundled → stop, suggest `to-issues`. Question or duplicate → report and stop. Every Phase-0 early stop uses the terminal return procedure when lifecycle identity
 exists: write a `terminal_failed` summary carrying the `stopped` or `failed` row through `workflow-state finish` before notifying the caller.
@@ -487,62 +482,9 @@ final-review head only when `review_state` is `clean`.
 <!-- agent-dispatch: id=from-issue-ship-owner role=ship-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") launches `ship-issue` as a fresh ship owner, not inline via `Skill`. By now this conversation carries every artifact of the flow; a fresh ~10k subagent returns one summary instead of ~100 turns over a 200–300k prefix.
 
-Read `ship-handoff.md` for the exact subagent prompt — with lifecycle identity it carries the `ship-handoff/v2` candidate built from the owner object (`ledger_repo_root`, run, owner, `custody`, the installed contract and its builder-regenerated initial intent), branch, worktree, artifact paths, `review_state`, and the fixed `ship-summary/v2` report schema; ledger-free it carries the legacy handoff. When `ship-issue` is absent, the same file's inline fallback applies. The same site launches ship-issue remainder mode for a validated `delivery_remainder` object, with that file's `## Remainder owner prompt`; the remainder owner writes its own `finish`, so its validated reply is relayed unchanged and none of the terminal write below applies to it.
+Read `ship-handoff.md` for the exact subagent prompt — with lifecycle identity it carries the `ship-handoff/v2` candidate built from the owner object (`ledger_repo_root`, run, owner, `custody`, the installed contract and its builder-regenerated initial intent), branch, worktree, artifact paths, `review_state`, and the fixed `ship-summary/v2` report schema; ledger-free it carries the legacy handoff. When `ship-issue` is absent, the same file's inline fallback applies. The same site launches ship-issue remainder mode for a validated `delivery_remainder` object, with that file's `## Remainder owner prompt`; the remainder owner writes its own `finish`, so its validated reply is relayed unchanged and none of the terminal write applies to it.
 
-After receiving the ship report, from-issue owns the terminal durable write.
-A report that is only the re-entry line `/from-issue <num> --auto` means the
-ship-issue run checkpointed a denial, which already suspended this attempt: relay
-that line and write nothing. A report that is only the line
-`capability_gap: agent_dispatch` means ship-issue's Phase-0 reviewer-dispatch
-probe found that the ship owner's context cannot launch its reviewers, before
-anything was launched or written. A `from-issue-ship-owner` launch this context
-cannot make, because it has no subagent-launch tool, counts as that same line.
-Compare it byte for byte, never decode or validate it, and take the
-dispatch-gap fallback below. A report that validates at `--boundary
-workflow-response` as `delivery_stalled` means the checkpoint already ended the
-custody: relay it and write nothing.
-Pipe its received bytes through `artifact-budget validate-report --boundary
-ship-summary --input -`, decode only canonical stdout, consume a durable
-`report_path` before advancing, and never inline either durable or retained
-detail; never inline the report. For `unpublished`, independently re-read the retained candidate through
-`validate-detail-input`, require non-empty findings, keep the worktree, and accept
-only `terminal_failed` with a `stopped`/`failed` historical row. Resolve that `report_path` against the owner worktree,
-not `ledger_repo_root` — only a `present` path is primary-checkout-relative, and
-`workflow-state finish` resolves the two the same way.
-Before that terminal write, run
-`~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <issue:attempt:launch>`
-with this owner's own `action_id`: the ship run and this parent share one
-launch identity, so a ship report from a superseded launch means this launch is
-superseded too. On `current: false` or any helper failure, write nothing, print
-the canonical re-entry line `/from-issue <num> --auto` on its own line, and
-stop. Then call `workflow-state finish --summary-file -` with the validated
-`ship-summary/v2` bytes on stdin, per the terminal return procedure, and
-validate its raw response before sending the canonical JSON unchanged. A fresh
-ship agent writes only `checkpoint-delivery` under this custody, never the owner's final ledger result. Apply the same procedure to any Phase-6 execution
-failure or Phase-7 stopped/failed report. `ship-issue` runs its own Phase 0–8; prefix its phases `ship-Phase-N` when narrating so the two sequences stay distinguishable.
-
-**Dispatch-gap fallback.** This is the one exception to shipping through a
-fresh ship owner, and the one allowed departure from a rollover Phase-6
-`delegate`. With lifecycle identity, first run the same `check-launch` fence
-with this owner's own `action_id`; on `current: false` or any helper failure,
-write nothing, print the canonical re-entry line `/from-issue <num> --auto` on
-its own line, and stop. Ledger-free there is no launch identity, so skip the
-fence. Then invoke `ship-issue` through your own `Skill` tool with the same
-validated handoff bytes — nothing was changed, so they are still accurate, and
-ship-issue re-validates them on entry — and carry out the ship-owner prompt's
-task list yourself: every phase, the auto-mode rules and, with a
-`ship-handoff/v2`, the `## Delivery loop`, writing only `checkpoint-delivery`
-inside it. Its reviewers run as leaves one level below you. Feed its return
-back into the report handling above: the re-entry line, a `delivery_stalled`
-reply and a `ship-summary/v2` are handled exactly as a fresh ship owner's are,
-and a human gate reached inside the run is `ship-issue/HUMAN-GATE.md`'s case of
-an owner running that path itself. A `capability_gap: agent_dispatch` line
-returned by the inline run is the genuine gap and never starts a second inline
-run: with lifecycle identity follow the suspension procedure with `<value>` =
-`agent_dispatch`, making no `finish` call; ledger-free, report the gap to the
-user and stop, keeping the worktree. The fallback covers only the
-review-bearing ship launch: a `delivery_remainder` launch runs remainder mode,
-which probes only before a post-selection sync and never returns the gap line.
+From-issue owns the terminal durable write; handle the ship report as `ship-handoff.md` § Ship report handling says. Apply the same procedure to any Phase-6 execution failure or Phase-7 stopped/failed report.
 
 ## Notes
 

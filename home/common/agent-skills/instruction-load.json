@@ -39,12 +39,12 @@
         "from-issue/acquire-dispatcher.md": "a controller invocation carries no dispatcher envelope"
       },
       "ceiling_bytes": {
-        "claude": 85790,
-        "codex": 85790
+        "claude": 81375,
+        "codex": 81375
       },
       "conditional_ceiling_bytes": {
-        "claude": 53542,
-        "codex": 42203
+        "claude": 56122,
+        "codex": 44783
       },
       "note": "Direct autonomous `--auto` run of Phases 0–5 and the rollover. Design, grill and planning run in their owners. The hot path keeps from-issue's top-level acquisition routes and AUTO.md's rollover, whose route-scoping is deferred (#155 D6). Ceiling raised for #198: from-issue/SKILL.md grew with the Phase-7 dispatch-gap fallback, which this route carries but never runs, and AUTO.md with the earlier controller's relay of the suspension line (#155 D10). Ceiling raised for #191's validated `progress` and `suspend` replies, which grew `from-issue/SKILL.md` (#155 D10). Ceiling raised for #192: AUTO.md's fresh delegated owner checks its worktree against the contract's remove_worktree target (#155 D10). Ceiling raised for #192's review fix: a remainder owner probes reviewer dispatch before a post-selection sync (#155 D10). Ceiling raised for #221: from-issue/SKILL.md's durable interactive route answers control's `delivery_contract` (#221 D10). Ceiling raised for #222: sdd and from-issue Phase 6 register writing workers and fence their commits (#155 D10). Ceiling raised for #222: from-issue and ship-issue register writing workers, fence local commits and release before exit (#155 D10). Ceiling raised for #222: ship review fixes (handoff release step, current wait-handle carve-out) (#155 D10). Ceiling raised for #250: sdd and from-issue Phase 6 record a progress marker after each task, and the stall bound's description names it (#155 D10). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10). Ceiling raised for #261: from-issue, sdd and ship-issue carry the Interim child results rule (#155 D10). Ceiling raised for #264: sdd and from-issue state that head_sha is the final-review head (#155 D10). Ceiling raised for #265: relaunchers carry a resume pack and the owner's resume-pack guidance (#155 D10). Ceiling raised for #265: final-review fixes name the always-read owner sections and scope the rollover checks in the resume-pack guidance (#155 D10). Ceiling raised for #272: both ship-handoff shapes carry acceptance_state from the sdd report (#155 D10). Ceiling raised for #276: owners and writing workers run long commands through launch-scope exec, and owners self-reap before every exit write (#155 D10). Ceiling raised for #276's final-review fixes: Self-reap names a failed reap's `skipped` launches only when it printed a report (#155 D10). Ceiling raised for #277: owners and writing workers create scratch under launch-scope scratch, and self-reap removes the scratch root (#155 D10). Conditional ceiling re-measured after merging origin/main at 2d3ba38, where #276's launch-scope text met this gate (#155 D19). Conditional ceiling re-measured after merging origin/main at e63f626, where #277's scratch-root text met this gate (#155 D19). Conditional ceiling re-measured after merging origin/main at 07f4f95, where #273's tracker-hold text met this gate (#155 D19). Ceiling raised for #309: the leaf-agent clauses gained a fourth, no-wait-loops, in their carriers (#155 D10)."
     },
@@ -121,7 +121,7 @@
         "from-issue/acquire-durable.md": "an orchestrated owner acquires only through its dispatcher envelope"
       },
       "ceiling_bytes": {
-        "claude": 163761
+        "claude": 161926
       },
       "conditional_ceiling_bytes": {
         "claude": 155640
@@ -241,8 +241,8 @@
         "from-issue/acquire-durable.md": "a delegated owner adopts its delegator's identity and performs no acquisition"
       },
       "ceiling_bytes": {
-        "claude": 159168,
-        "codex": 159168
+        "claude": 156528,
+        "codex": 156528
       },
       "conditional_ceiling_bytes": {
         "claude": 139041,
@@ -1058,6 +1058,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 552125,
+  "corpus_ceiling_bytes": 550290,
   "description_ceiling_bytes": 3145
 }
