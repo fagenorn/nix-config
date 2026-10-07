@@ -3,64 +3,59 @@
 Read this file once, when you detect `--auto` in the invocation. It replaces the checkpoint
 behavior in `SKILL.md`; everything else in `SKILL.md` still applies.
 
-This included document receives the phase owner's retained `ResolvedProject`; it uses `bindings.paths.artifacts`, `bindings.tracker`, `bindings.vcs`, and `bindings.workflow` without resolving or inferring policy.
-
-The shift is *what you do at a decision point*, not *what work gets done*. Every phase still
-produces the same artifact at the same quality bar. Brainstorm still happens. Grill still happens.
-Standards review still happens. You don't get to skip thinking — you only stop waiting for the user.
+You don't get to skip thinking — you only stop waiting for the user.
 
 Under direct autonomous acquisition, a resume is not a takeover:
 resuming a `suspended` attempt requires neither `new_run` nor `owner_unavailable` — suspension is not a terminal replay, so re-entry clears it with both flags left `false`.
+
+## Contents
+
+- The self-answer pattern
+- When *not* to auto-resolve
+- Phases 2–4 run as subagents
+- Interface_version 2 delivery relay
+- Other Phase 5–7 routes
 
 ## The self-answer pattern
 
 Wherever a phase or sub-skill would ask the user a clarifying question, present option sets, or pause
 at a `**CHECKPOINT**`:
 
-1. **Ground first.** Use this phase's `GROUNDING.md` cache (see `grounding.md` beside `SKILL.md`). If the
-   decision reaches into an area the cache doesn't cover, load that area and append it.
+1. **Ground first.** Use this phase's `GROUNDING.md` cache. If the decision reaches into an area
+   the cache doesn't cover, load that area and append it.
 2. **Pick the most defensible default** — the choice that aligns with documented invariants and ADRs,
    matches existing precedent in the codebase, honors the issue author's stated intent, and keeps
    scope tight. When two options are both defensible, prefer the smaller, more reversible, more
    idiomatic one.
-3. **Log it** as a row in the spec's `## Decision ledger` (the table format in `decision-ledger.md`),
-   applying the non-obvious-only filter — routine splits, commit boundaries, and obvious verification
-   commands are not rows. Plans and ADRs cite the ID. This is the audit trail: a human reviewing the
-   PR can challenge any choice without re-deriving it.
+3. **Log it** as a row in the spec's `## Decision ledger` (the C1 decision-ledger format; its file is
+   in `SKILL.md`'s index), applying the non-obvious-only filter — routine splits, commit boundaries,
+   and obvious verification commands are not rows. Plans and ADRs cite the ID.
 4. **Continue.** Don't post the question. Don't wait.
 
-Auto-resolving a checkpoint never skips `workflow-state progress`: persist the
-gate decision at every phase checkpoint and obey its returned action before the
-next phase starts. If it returns a durable handoff, invoke `handoff` at the
-per-run destination, finalize it through `workflow-state progress`, and stop.
-For every ordinarily owned terminal result, call `workflow-state finish`
-successfully before any notification to the dispatcher; persistence always
-precedes notification. The only exception is the successful direct Phase-5 relay:
-the delegated fresh owner has already persisted the canonical terminal result, so
-the earlier controller must not call `workflow-state finish` again. A
-delegated-owner dispatch failure remains an ordinarily owned terminal result and
-must be persisted before notification.
+Auto-resolving a checkpoint never skips `workflow-state progress`: persist the gate decision at
+every phase checkpoint and obey its returned action before the next phase starts. If it returns a
+durable handoff, invoke `handoff` at the per-run destination, finalize it through
+`workflow-state progress`, and stop. For every ordinarily owned terminal result, call
+`workflow-state finish` successfully before any notification to the dispatcher; persistence always
+precedes notification. A delegated-owner dispatch failure is such a result and must be persisted
+before notification.
 
-Sub-skills (`design`, `grill-with-docs`, `writing-plans`, `sdd`,
-`ship-issue`) don't know about `--auto`. *You* carry the autonomous-mode
-context — when one tells you to ask or wait, run the self-answer pattern
-instead. Never self-answer a request for new authorization. First apply any
-existing explicit user grant whose scope covers the concrete action and target;
-a phase or session boundary does not erase it. Silence never creates or expands
-a grant. When authority is absent, present the gate's concrete block and follow
-`SKILL.md`'s suspension procedure, suspending `blocked_on: human_gate` and
-printing the canonical re-entry line. An actual permission denial stops that
-action and is never routed around.
+Sub-skills (`design`, `grill-with-docs`, `writing-plans`, `sdd`, `ship-issue`) don't know about
+`--auto`. *You* carry the autonomous-mode context: when one tells you to ask or wait, run the
+self-answer pattern instead. Never self-answer a request for new authorization. First apply any
+existing explicit user grant whose scope covers the concrete action and target; a phase or session
+boundary does not erase it, and silence never creates or expands a grant. When authority is absent,
+present the gate's concrete block and follow `SKILL.md`'s suspension procedure, suspending
+`blocked_on: human_gate` and printing the canonical re-entry line. An actual permission denial
+stops that action and is never routed around.
 
 ## When *not* to auto-resolve
 
-There are no checkpoint gates, but two content-level stops still apply, because they are judgments
-about the work itself rather than user-approval gates:
+There are no checkpoint gates, but two content-level stops still apply:
 
 - **Phase 0 wrong-issue-type stop.** If the issue is several issues bundled, a duplicate, a pure
-  question, or otherwise not implementable, surface that and stop. Auto-mode means "decide without
-  asking", not "implement something incoherent". Phase 0 reconciles an exact
-  open or merged PR per `investigate.md`; it remains a stop only when ownership,
+  question, or otherwise not implementable, surface that and stop. Phase 0 reconciles an exact
+  open or merged PR per Phase 0's PR pre-flight; it remains a stop only when ownership,
   target, scope, acceptance evidence, or authority is unknown. The same stop
   rule applies to dirty or multiple matching worktrees and a matching worktree
   whose disposability cannot be proven — prefer an authorized resume; never delete on ambiguity.
@@ -86,19 +81,11 @@ granularity — you decide and log.
 
 ## Phases 2–4 run as subagents
 
-Interactive mode runs these phases inline and conversationally. **In `--auto` they are dispatched**,
-because brainstorm and grill transcripts are the single largest context sink in the flow and none of
-it is needed downstream — the artifacts are.
+**In `--auto` these phases are dispatched.**
 
 **The orchestrator (this session) holds only three things: the Phase-0 issue summary, the resolved
 config bindings, and each phase's returned report.** Brainstorm and grill conversation must never
-enter this context. Don't ask a subagent to "show its reasoning"; the reasoning belongs in the
-committed artifact.
-
-Both dispatches select the `auto-owner` matrix role on Opus/xhigh;
-design quality is worth paying for here. Purely mechanical dispatches elsewhere
-in the flow use `mechanic` on Sonnet/high; reviewer-shaped first passes use
-`reviewer` on Opus/high.
+enter this context.
 
 Both prompts must carry, inline (the subagent starts with no context and loads no skills of its own
 beyond the exceptions named below):
@@ -111,14 +98,14 @@ beyond the exceptions named below):
   `launch-scope exec` and `scratch` sentences that follow it there, and the instruction to create every
   commit through `launch-commit` with its three values,
 - the self-answer pattern above and the `## Decision ledger` table format with its non-obvious-only
-  filter, pasted verbatim from `decision-ledger.md`,
+  filter, pasted verbatim from the C1 decision-ledger format (its file is in `SKILL.md`'s index),
 - the four clauses of `SKILL.md`'s **Leaf-agent clauses** rule, verbatim, as a paragraph of their own,
 - the fixed return schema, with "details live in the committed files, not in your report".
 
 **Skill exception.** Each subagent *should* invoke, through its own `Skill` tool, the globally
 installed skills its phase names — `grill-with-docs` and `doc-grounded-questions` for the design
 subagent, `writing-plans` and `doc-grounded-questions` for the plan subagent, plus
-`design` if present. Those load in the subagent's context, not yours. If one isn't
+`design` if present. If one isn't
 installed, it uses the inline fallback named in the corresponding `SKILL.md` phase.
 
 A Phase 2–4 subagent's interim result follows `SKILL.md`'s **Interim child results** rule.
@@ -130,8 +117,7 @@ Agent(subagent_type="general-purpose", model="opus", effort="xhigh") launches th
 
 One dispatch covering brainstorm and grill. It produces the design doc under `bindings.paths.artifacts.specs`, applies the
 grill's refinements to it, and writes any context-doc updates and ADRs — all committed in the
-worktree. Splitting these into two dispatches would mean re-establishing the whole design in a second
-prompt for no gain.
+worktree.
 
 After the final mutation, write a candidate producer report, run
 `artifact-budget validate-report --boundary producer`, and return only validated stdout bytes.
@@ -151,8 +137,6 @@ The exact over-budget report includes the checker's ordered, non-empty
 For `failed`, `artifact` is exactly `null` before a root exists or exactly
 `{"kind":"design-spec","path":"<root relative to repo>"}` after one exists;
 metrics, budget status, and violations are forbidden in both failed rows.
-The orchestrator keeps only the artifact root and metrics; ADR paths and ledger
-choices stay in the spec.
 
 ### Plan subagent — Phase 4 (+ mechanical Phase 5)
 
@@ -189,214 +173,23 @@ For `failed`, `artifact` is exactly `null` before a root exists or exactly
 exists; metrics, budget status, and violations are forbidden in both failed
 rows. `complete` plus any status other than `within_budget` is a contract error.
 
-### Mandatory direct implementation-owner rollover
+## Interface_version 2 delivery relay
 
-This section applies to every module-owned direct autonomous run. Phase 5 is
-the last phase owned by the controller that acquired the persisted
-`direct-owner` envelope; implementation and delivery belong to one fresh owner.
+Every relay here carries a validated object unchanged: the interface-2 `owner`
+object in the continuation, the ship report's `ship-summary/v2` into `finish`,
+and each `workflow-state` reply after `artifact-budget validate-report
+--boundary workflow-response`. Delivery effects, scopes and observations belong
+to ship-issue's `## Delivery loop`; a returned `delivery_remainder` launches
+ship-issue remainder mode per `SKILL.md`.
 
-#### Mandatory transfer gate
+## Other Phase 5–7 routes
 
-First, finish Phase 5 and confirm that the controller has
-dispositioned every Blocking and accepted Should-fix finding. Apply accepted
-review edits and any decision-ledger writes, then commit the reviewed plan and
-ledger. After the last mutation, run fresh
-`artifact-budget check --kind design-spec` and
-`artifact-budget check --kind implementation-plan` checks. Retain each
-checker's `root_bytes`, `total_bytes`, `file_count`, and
-`largest_member_bytes`, and require both results to be `within_budget`. If a
-commit hook changes either artifact, repeat the check and commit sequence until
-the committed roots and retained measurements agree. Require a clean worktree,
-then resolve the full lowercase 40-hex current commit as `reviewed_head_sha`;
-that commit is the content identity reviewed at this gate.
-
-Once no conversational dependency remains, call `workflow-state progress` for
-completed Phase 5 with truthful available usage and the exact gate values
-`next_needs_context=false`, `artifacts_sufficient=true`, and
-`remainder_self_contained=true`. Require the persisted action to be `delegate`;
-then dispatch exactly one fresh issue owner at the existing
-`from-issue-phase-delegate` tier. This mandatory transfer includes
-mechanical-only direct autonomous runs.
-
-The continuation is one closed JSON object shaped like this representative
-value. Its `owner` is the validated interface-2 owner object this controller
-acquired, unchanged, with all 19 members; the angle-bracketed strings stand for
-the helper's own values:
-
-```json
-{
-  "owner": {
-    "interface_version": 2,
-    "kind": "owner",
-    "ledger_repo_root": "/absolute/primary-checkout",
-    "run_id": "direct-74-000001",
-    "issue": 74,
-    "attempt": 1,
-    "owner": "74:1",
-    "action_id": "74:1:1",
-    "launch_kind": "spawn",
-    "worktree": "/absolute/.worktrees/worktree-issue-74-cache",
-    "handoff_path": null,
-    "deadline_at": "2026-08-20T12:00:00Z",
-    "custody": {"kind": "implementation", "attempt": 1, "launch": 1, "action_id": "74:1:1"},
-    "contract": "<the installed delivery-contract/v1 object>",
-    "contract_digest": "<sha256 digest of that contract>",
-    "pending_stage_ids": ["select_reviewed_output", "publish_branch", "open_pr", "merge_pr", "close_tracker", "delete_remote_branch", "remove_worktree", "delete_local_branch"],
-    "requirements": [{"kind": "scope_tuple", "subject_id": "select_reviewed_output", "reason_code": "scope_tuple_required", "detail_pointer": null}],
-    "authority_evaluation": null,
-    "requested_scope": null
-  },
-  "reviewed_head_sha": "0123456789abcdef0123456789abcdef01234567",
-  "spec_artifact": {
-    "kind": "design-spec",
-    "path": "<passed-spec-artifact>",
-    "metrics": {
-      "root_bytes": 1000,
-      "total_bytes": 1000,
-      "file_count": 1,
-      "largest_member_bytes": 1000
-    },
-    "budget_status": "within_budget"
-  },
-  "plan_artifact": {
-    "kind": "implementation-plan",
-    "path": "<passed-plan-artifact>",
-    "metrics": {
-      "root_bytes": 2000,
-      "total_bytes": 6000,
-      "file_count": 3,
-      "largest_member_bytes": 2000
-    },
-    "budget_status": "within_budget"
-  }
-}
-```
-
-Pass the unchanged owner object, `reviewed_head_sha`, and the two measured
-artifact blocks only:
-
-- no artifact contents;
-- no task-member paths;
-- no review transcript;
-- no conversation summary;
-- no alternate worktree;
-- no reconstructed lifecycle field; and
-- no authorization flag.
-
-The fresh owner resolves once at its own phase entry and applies that retained `ResolvedProject` to these checks; it is never a member of the continuation object.
-
-Beside the continuation, never inside it, pass a resume pack: after
-`progress` persists `delegate`, run
-`workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
-with this controller's own `action_id`, which the fresh owner adopts, and on
-exit 0 put its stdout in the prompt as a `Resume pack` paragraph. A refusal
-sends no pack and does not stop the transfer.
-
-#### Fresh delegated owner
-
-First pipe the continuation's `owner` object through
-`artifact-budget validate-report --boundary workflow-response --input -`; an
-invalid object stops the attempt before anything else runs. Before reading either artifact, use the caller-passed `bindings.vcs` branch and
-worktree naming values. Quote the pattern's literal bytes,
-substitute decimal `owner.issue` for `<num>` and
-`[a-z0-9][a-z0-9-]*` for `<slug>`, and accept exactly the resulting pattern with
-either the resolved prefix or no prefix. Take `owner.contract`'s reviewed-slot `constraints.branch`
-and require it to match that binding-derived accepted branch regex; that branch
-is the deterministic `expected_branch`. Require normalized `owner.worktree` to
-equal the literal target of `owner.contract`'s `remove_worktree` stage. Require
-`git -C owner.worktree branch --show-current` to equal `expected_branch`. A
-pattern, path, or current-branch mismatch is a contract failure before either
-artifact root is read. Only after that branch check, verify the current clean HEAD.
-Require its full commit ID to equal `reviewed_head_sha`.
-Verify both roots are tracked at that exact reviewed HEAD.
-Next, independently run `artifact-budget check` for each root and compare all four metrics with the
-continuation. Any mismatch stops the attempt as a contract failure.
-
-A resume pack beside the continuation is used as `SKILL.md`'s
-`### Resume pack` says, and only after every check above has passed: it
-replaces none of them.
-
-After those checks pass, adopt the owner envelope as the existing lifecycle
-identity; the fresh owner must not call `direct-owner` or perform any other
-acquisition. It must begin at Phase 6, invoke `sdd` with the reviewed plan, and
-validate the SDD producer report under the existing contract.
-
-After SDD is validated, call `workflow-state progress` for completed Phase 6
-with truthful available usage and `next_needs_context=false`,
-`artifacts_sufficient=true`, and `remainder_self_contained=true`. Require the
-persisted action `delegate`. For this already-delegated implementation owner,
-that Phase-6 delegate is fulfilled by the existing fresh Phase-7 ship owner with
-`auto: true`; it must not dispatch a second issue owner. The one allowed
-departure is `SKILL.md`'s Phase-7 dispatch-gap fallback: when that ship owner
-returns `capability_gap: agent_dispatch`, or this context cannot launch it,
-ship inline exactly as Phase 7 says, including its suspension on a genuine gap.
-
-After validating the ship report's `ship-summary/v2` bytes, call
-`workflow-state progress` for completed Phase 7. Make the finish invocation,
-fed those validated summary bytes on stdin, the ledger-only remainder; use
-truthful available usage and the same three gate values, require persisted
-`delegate`, and use the existing ledger-only bookkeeper route.
-Before dispatching it, the owner releases every worker it registered, then runs
-`launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
-with its own `action_id`. The
-bookkeeper is never registered: a registered bookkeeper would block its own finish.
-Give the bookkeeper an exact two-command sequence and nothing else: first
-`~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <issue:attempt:launch>`
-with this owner's own `action_id`, then the exact `workflow-state finish` command,
-`workflow-state finish --summary-file - --repo-root <ledger_repo_root> --run-id <run-id>`,
-with the validated ship summary inline in its quoted heredoc and its
-reply piped through `artifact-budget validate-report --boundary workflow-response --input -`.
-It executes exactly that sequence and relays the `finish` stdout; it decides
-nothing and edits nothing. It runs `finish` only after a `current: true` answer
-from a well-formed `check-launch` on exit 0. On `current: false`, a non-zero
-exit, or output it cannot parse, it must write nothing, print the canonical
-re-entry line `/from-issue <num> --auto` on its own line as its whole result,
-and stop — a superseded launch's ship report is not this run's terminal result
-to record. The fresh implementation owner
-must return only the exact canonical JSON printed by that durable finish.
-
-For mechanical-only direct autonomous work, the fresh owner invokes the
-existing mechanical Phase-6 mechanic/reviewer route without changing its order
-or ownership, then performs the same Phase-6 progress, fresh shipping, Phase-7
-ledger-only progress, and terminal sequence.
-
-#### Earlier controller stop
-
-The earlier controller's
-post-delegation action set is exactly validate, relay, and stop. Two closed
-line exceptions are matched byte for byte first: a return that is only the
-canonical re-entry line `/from-issue <num> --auto`, and a return that is only a
-canonical `Suspended (blocked_on=<value>). Resume: /from-issue <num> --auto`
-line. Each is relayed unchanged to its caller with no validation, the earlier
-controller writes nothing, and it stops. Neither line is a dispatch failure.
-Otherwise the received bytes are the delegated owner's durable `finish` reply,
-a workflow response, so run `artifact-budget validate-report --boundary workflow-response`
-over them; after successful validation, relay the canonical bytes unchanged to
-its caller and stop.
-
-The earlier controller does not invoke `sdd`.
-It does not edit implementation files.
-It does not reacquire or call `direct-owner`.
-It does not start or create a new attempt.
-It does not dispatch a second owner.
-It does not call `workflow-state finish` after delegation.
-It does not continue after the delegated report. A dispatch failure is the only
-terminal result it persists, and that failure is
-never permission to implement locally.
-
-### Other Phase 5–7 routes
-
-Mechanical-only module-owned direct autonomous runs are excluded from this section
-because they use the mandatory rollover above. The existing
-mechanical-only ordering and ownership for other acquisition routes remains
-unchanged.
+A direct autonomous controller hands Phases 6–7 to a fresh owner at the Phase-5 rollover, mechanical-only runs included; every other route keeps the behavior below, and its mechanical-only ordering and ownership are unchanged.
 
 Dispatcher-owned autonomous, explicitly durable interactive, and ledger-free
 interactive owners retain their existing behavior: Phase 5 dispatches the
 reviewer (or `codex-collaboration`) with `REVIEW-CONTRACT.md`'s path, Phase 6
 runs `sdd`, and Phase 7 dispatches `ship-issue` with the appropriate handoff.
-Reviewer, SDD, and shipping contracts remain unchanged for these routes, and
-the owning controller continues to verify and disposition findings.
 
 At every Phase-6 or Phase-7 push, PR-open, or merge gate, first apply repository
 policy or an explicit user grant covering the concrete action, target, and
@@ -406,12 +199,3 @@ grants the action, follow `SKILL.md`'s suspension procedure with
 `blocked_on: human_gate` and the canonical re-entry line. This never bypasses
 `check-launch`: `current: false`, helper failure, or an actual permission denial
 stops the action and is never routed around.
-
-## Interface_version 2 delivery relay
-
-Every relay here carries a validated object unchanged: the interface-2 `owner`
-object in the continuation, the ship report's `ship-summary/v2` into `finish`,
-and each `workflow-state` reply after `artifact-budget validate-report
---boundary workflow-response`. Delivery effects, scopes and observations belong
-to ship-issue's `## Delivery loop`; a returned `delivery_remainder` launches
-ship-issue remainder mode per `SKILL.md`.

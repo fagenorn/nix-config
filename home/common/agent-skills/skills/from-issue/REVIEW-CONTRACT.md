@@ -1,9 +1,6 @@
 # Phase-5 plan review contract
 
-Operational contract for `from-issue` Phase 5. This included document receives
-the phase owner's retained `ResolvedProject`; it uses passed
-`bindings.workflow.review`, `bindings.commands`, and capability states without
-resolving or inferring policy. The Phase-5 caller executes the caller sections
+Operational contract for `from-issue` Phase 5. Use only the binding values and capability states the caller supplies; never resolve or infer policy. The Phase-5 caller executes the caller sections
 in order. Only after the pre-dispatch boundary passes does it hand this file's
 **path** to the reviewer (or to `codex-collaboration`, which
 passes it by path in the review packet). It supplies concrete values for every
