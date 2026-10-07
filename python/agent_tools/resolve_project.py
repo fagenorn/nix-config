@@ -1396,7 +1396,11 @@ def resolve(repo_root: str | None, required: list[str] | None = None) -> dict:
     """The `ResolvedProject` snapshot for `repo_root`, or `ContractError`.
 
     Exactly the composition `resolve-project resolve` prints (#279 D1);
-    `conformance_checks` keeps its own, collecting composition.
+    `conformance_checks` keeps its own, collecting composition. The snapshot
+    is returned only when it serializes as standards JSON: a number that
+    overflows to a non-finite float (`1e400` never reaches `parse_constant`)
+    raises the same fixed `resolver_failure` the command's emit guard has
+    always printed, so no caller evaluates a project the command refuses.
     """
     # Before root discovery, so a broken platform installation can never be
     # masked by `not_onboarded` or a contract error (R1.3).
@@ -1413,6 +1417,14 @@ def resolve(repo_root: str | None, required: list[str] | None = None) -> dict:
     validate_projections(root, source)
     snapshot = build_snapshot(root, source, manifest)
     raise_for_unavailable(required, snapshot["capabilities"])
+    try:
+        json.dumps(snapshot, allow_nan=False)
+    except ValueError:
+        raise ContractError(
+            "resolver_failure",
+            "resolver.internal",
+            [{"pointer": "", "message": "the resolver failed unexpectedly"}],
+        ) from None
     return snapshot
 
 

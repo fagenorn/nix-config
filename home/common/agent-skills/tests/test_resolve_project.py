@@ -822,11 +822,12 @@ def load_module():
 
 
 class InProcessTestCase(unittest.TestCase):
-    """A temporary `HOME` for the two cases that import the resolver in process.
+    """A temporary `HOME` for the cases that import the resolver in process.
 
     `HOME` is patched on this process rather than a child's environment, and
-    restored afterwards, because the manifest load inside `main` reads it
-    directly.
+    restored afterwards, because the manifest load — inside `main` for the
+    wrapper and emit-guard cases, inside `resolve()` for `PublicResolveTest` —
+    reads it directly.
     """
 
     def setUp(self) -> None:
@@ -1746,6 +1747,27 @@ class PublicResolveTest(InProcessTestCase):
         self.assertEqual(code, 2)
         self.assertEqual(printed["error"]["code"], "capability_unavailable")
         self.assertEqual(self.raised_refusal(root, "deploy"), printed["error"])
+
+    def test_resolve_raises_the_failure_the_command_prints_for_an_overflowing_number(self):
+        """COR-002: `1e400` decodes to `inf` without reaching `parse_constant`.
+
+        The command has always refused it at the emit guard as the fixed
+        `resolver_failure`; `resolve()` raises that same refusal, so no caller
+        of the API evaluates a project the command refuses.
+        """
+        contract = source_contract()
+        contract["bindings"]["deploy"]["config"] = {"threshold": 271828.5}
+        root = make_project_root(contract)
+        path = root / ".agents" / "project.json"
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(text.count("271828.5"), 1)
+        path.write_text(text.replace("271828.5", "1e400"), encoding="utf-8")
+        code, out, _ = run("resolve", "--repo-root", str(root), home=self.home)
+        self.assertEqual(code, 2)
+        self.assertEqual(out, '{"error":{"code":"resolver_failure","repair_id":'
+                              '"resolver.internal","violations":[{"message":'
+                              '"the resolver failed unexpectedly","pointer":""}]}}\n')
+        self.assertEqual(self.raised_refusal(root), json.loads(out)["error"])
 
 
 if __name__ == "__main__":

@@ -72,6 +72,15 @@ def validate_record(value: object) -> None:
         if not resolve_project.is_safe_relative_path(path):
             raise invalid(f"/paths/{index}", "must be a non-empty repository-relative "
                                              "path with no '..' segment")
+        if not is_canonical_path(path):
+            raise invalid(f"/paths/{index}", "must be spelled canonically: '/'-separated, "
+                                             "with no backslash, no empty or '.' segment "
+                                             "and no trailing '/'")
+
+
+def is_canonical_path(path: str) -> bool:
+    """The one spelling `risk_paths` globs are matched against, as recorded (D11)."""
+    return "\\" not in path and all(segment not in ("", ".") for segment in path.split("/"))
 
 
 def load_record(text: str) -> dict:

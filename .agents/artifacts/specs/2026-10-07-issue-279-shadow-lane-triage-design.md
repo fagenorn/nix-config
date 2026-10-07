@@ -37,7 +37,12 @@ acted on: every attempt still runs the full pipeline.
 snapshot or raises `ContractError`, and it is exactly the composition that
 `command_resolve` runs today: manifest gate, root discovery, load, full
 validation, platform range, projection drift, snapshot, and the required
-capabilities check. `command_resolve` becomes `emit_json(resolve(...))`, and its
+capabilities check. It returns the snapshot only when that snapshot serializes as
+standards JSON: a number that overflows to a non-finite float (`1e400` never
+reaches `parse_constant`) raises the fixed `resolver_failure` /
+`resolver.internal` refusal that the command's emit guard already printed, so
+the API never hands a caller a project the command refuses (final-review
+COR-002). `command_resolve` becomes `emit_json(resolve(...))`, and its
 stdout stays byte-identical. `conformance_checks` keeps its own composition,
 because it adds de-duplication and violation collection that `resolve` must not
 take on.
@@ -73,7 +78,10 @@ rule 4). It is a closed object:
 
 - Each `value` is one of `no`, `hit` or `doubt`.
 - Each `evidence` is a non-empty string with no line break.
-- `paths` is a non-empty list of safe relative paths (D4).
+- `paths` is a non-empty list of safe relative paths (D4), each spelled
+  canonically: `/`-separated, with no backslash, no empty or `.` segment and no
+  trailing `/`, so `./a.py`, `a//b.py` and `a/` are refused at `/paths/<index>`
+  (D11).
 - Every object is closed. A missing or extra member is refused.
 
 **`lane-triage` behavior and output.** The command calls
@@ -196,3 +204,4 @@ is invented.
 | D8 | `lane-triage evaluate` reads stdin whole, then resolves (`resolver_refused`), then checks support (`light_lane_unsupported`), and only then validates the record (`invalid_input`), stopping at the first violation in a fixed walk: top-level members, then `signals` in signal order, then `paths`. `--input` accepts only `-`. `resolve(repo_root: str \| None, required: list[str] \| None = None)` keeps `--repo-root`'s optional discovery | The unsupported skip must not depend on record quality, since Phase 0 skips triage there anyway; spec "no input file is written"; The Bar: Fail loud, one error per refusal | Validating the record first: an unsupported project would make the owner fix a record it then discards. Accepting a file path: a second input route nothing uses (YAGNI) |
 | D9 | `from-issue` names the call only as the inline span `lane-triage evaluate --repo-root <project.root> --input -` and describes the heredoc in prose. No shell fence, no `COMMAND_VOCABULARY` entry and no permission allowlist change | `test_shell_example_contracts.py` refuses a heredoc example unless its helper is allowlisted whole in `home/common/claude-code/default.nix`, and the allowlist is out of scope; precedent: `verified-tree` and `launch-scope` are not in the vocabulary either | A heredoc fence: the shell-example contract refuses it. Allowlisting `lane-triage`: it widens the guard's permission surface in a slice that only observes |
 | D10 | Phase-5 review edits: `from-issue` names `lane-triage evaluate` beside `build-delivery` as a helper that resolves on its own; the Phase-0 paragraph sends any non-zero exit outside the closed refusal set (traceback, missing command) to the terminal return procedure; the final gate also runs `just agent-installed-skill-tests` | Plan reviewer (Claude fallback): SKILL.md's "only sanctioned exception" sentence would become false; skill text must cover every exit; `LAUNCHER_FLOOR` is otherwise never exercised | Leave the sentence (stale prose pinned by a test); map every resolver fault to a refusal code inside lane-triage (hides internal faults behind a closed code) |
+| D11 | `validate_record` refuses a non-canonical `paths` entry (a backslash, an empty or `.` segment, a trailing `/`) as `invalid_input` at `/paths/<index>`, inside D8's fixed walk; `evaluate` matches the recorded string unchanged | Final-review correctness finding COR-001: the safe-relative rule admits `./tinytask/store.py` and `tinytask//store.py`, and `fnmatchcase` on the raw string misses the `risk_paths` glob, so an all-`no` record naming a risky file came back `light` | Normalizing paths before matching: it hides the record's error and diverges from the predicted-path list the owner records |

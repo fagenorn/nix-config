@@ -163,6 +163,19 @@ class LaneTriageRefusalTest(LaneTriageCase):
         self.assertEqual([v["pointer"] for v in detail["violations"]],
                          ["/bindings/workflow/light_lane/mode"])
 
+    def test_an_overflowing_number_in_the_contract_is_resolver_refused(self):
+        """COR-002: `1e400` decodes to `inf`; `resolve-project resolve` refuses it."""
+        path = self.root / ".agents" / "project.json"
+        contract = json.loads(path.read_text(encoding="utf-8"))
+        contract["bindings"]["deploy"]["config"] = {"threshold": 271828.5}
+        text = json.dumps(contract, indent=2) + "\n"
+        self.assertEqual(text.count("271828.5"), 1)
+        path.write_text(text.replace("271828.5", "1e400"), encoding="utf-8")
+        self.assertEqual(self.refusal(record(), "resolver_refused"),
+                         {"code": "resolver_failure", "repair_id": "resolver.internal",
+                          "violations": [{"message": "the resolver failed unexpectedly",
+                                          "pointer": ""}]})
+
     def test_a_project_without_a_contract_is_resolver_refused(self):
         (self.root / ".agents" / "project.json").unlink()
         self.assertEqual(self.refusal(record(), "resolver_refused")["code"], "not_onboarded")
@@ -194,6 +207,11 @@ class LaneTriageRefusalTest(LaneTriageCase):
         (record(paths=["../outside.py"]), "/paths/0"),
         (record(paths=["ok.py", "/abs.py"]), "/paths/1"),
         (record(paths=[1]), "/paths/0"),
+        (record(paths=["ok.py", "./tinytask/store.py"]), "/paths/1"),
+        (record(paths=["tinytask//store.py"]), "/paths/0"),
+        (record(paths=["tinytask/"]), "/paths/0"),
+        (record(paths=["."]), "/paths/0"),
+        (record(paths=["tinytask\\store.py"]), "/paths/0"),
     )
 
     def test_an_invalid_record_is_invalid_input_with_its_first_pointer(self):
