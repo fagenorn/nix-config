@@ -5,7 +5,9 @@ reports are the same string held in two files that GitHub will never reconcile f
 us — and once `just protect-main` has been applied, a rename on
 either side raises no error anywhere: it leaves `main` waiting forever on a context
 that never reports, with nothing in the UI pointing at the cause. These tests are
-the only offline place that failure can surface.
+the only offline place that failure can surface. `ci.yaml` and
+`instruction-budget.yaml` share one indentation convention, so every helper reads
+either through a trailing `path` parameter that defaults to `ci.yaml`.
 """
 
 import json
@@ -18,12 +20,15 @@ from pathlib import Path
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yaml"
+WORKFLOWS = REPO_ROOT / ".github" / "workflows"
+WORKFLOW = WORKFLOWS / "ci.yaml"
+BUDGET_WORKFLOW = WORKFLOWS / "instruction-budget.yaml"
 PROTECTION = REPO_ROOT / ".github" / "branch-protection.json"
 
-# ci.yaml's indentation convention: workflow name at column 0, job keys at two
-# spaces, job attributes at four, step attributes at six or more. PyYAML is not a
-# guaranteed dependency on this host, so the convention is the parser.
+# The indentation convention that ci.yaml and instruction-budget.yaml share:
+# workflow name at column 0, job keys at two spaces, job attributes at four, step
+# attributes at six or more. PyYAML is not a guaranteed dependency on this host, so
+# the convention is the parser.
 JOB_KEY_RE = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
 JOB_NAME_RE = re.compile(
     r"^    name:\s*(?:\"([^\"]*)\"|'([^']*)'|(\S.*?))\s*$"
@@ -61,10 +66,13 @@ REQUIRED_PAYLOAD_KEYS = {
 }
 
 EXPECTED_WORKFLOW_PERMISSIONS = {"contents": "read"}
+BUDGET_COMMAND_RE = re.compile(r"PYTHONPATH=python python3 -m agent_tools\.instruction_load check\b")
+BUDGET_INVOCATION = 'PYTHONPATH=python python3 -m agent_tools.instruction_load check "${args[@]}"'
 EXPECTED_PROTECTION_PAYLOAD = {
     "required_status_checks": {
-        "strict": False,
-        "checks": [{"context": "Nix Eval", "app_id": 15368}],
+        "strict": True,
+        "checks": [{"context": "Nix Eval", "app_id": 15368},
+                   {"context": "Instruction Budget", "app_id": 15368}],
     },
     "enforce_admins": True,
     "required_pull_request_reviews": None,
@@ -72,16 +80,16 @@ EXPECTED_PROTECTION_PAYLOAD = {
 }
 
 
-def workflow_lines():
-    return WORKFLOW.read_text(encoding="utf-8").splitlines()
+def workflow_lines(path=WORKFLOW):
+    return path.read_text(encoding="utf-8").splitlines()
 
 
-def _top_level_block(key):
+def _top_level_block(key, path=WORKFLOW):
     """Lines under a column-0 `key:`, up to the next column-0 key."""
-    lines = workflow_lines()
+    lines = workflow_lines(path)
     header = f"{key}:"
     if header not in lines:
-        raise AssertionError(f"{WORKFLOW} has no top-level `{header}`")
+        raise AssertionError(f"{path} has no top-level `{header}`")
     out = []
     for line in lines[lines.index(header) + 1:]:
         if TOP_LEVEL_KEY_RE.match(line):
@@ -90,11 +98,11 @@ def _top_level_block(key):
     return out
 
 
-def job_blocks():
+def job_blocks(path=WORKFLOW):
     """Map each job key in `jobs:` to the lines of its block."""
     blocks = {}
     current = None
-    for line in _top_level_block("jobs"):
+    for line in _top_level_block("jobs", path):
         match = JOB_KEY_RE.match(line)
         if match:
             current = match.group(1)
@@ -137,10 +145,10 @@ def _mapping_entry(line, indentation, scope):
     return key, match.group("value")
 
 
-def workflow_permissions():
+def workflow_permissions(path=WORKFLOW):
     """Return the two-space token permissions declared at workflow scope."""
     permissions = {}
-    for line in _top_level_block("permissions"):
+    for line in _top_level_block("permissions", path):
         entry = _mapping_entry(line, 2, "workflow permission")
         if entry is not None:
             key, value = entry
@@ -164,7 +172,7 @@ def job_permission_lines(block):
     return permissions
 
 
-def job_body(key):
+def job_body(key, path=WORKFLOW):
     """The job's block with comment lines dropped.
 
     A `#`-leading line is a YAML comment at job level and a shell comment inside a
@@ -173,20 +181,42 @@ def job_body(key):
     runs it.
     """
     return "\n".join(
-        line for line in job_blocks()[key] if not line.lstrip().startswith("#")
+        line for line in job_blocks(path)[key] if not line.lstrip().startswith("#")
     )
 
 
-def job_names():
+def job_names(path=WORKFLOW):
     """Map each job's reported check-run name to its job key."""
     names = {}
-    for key, block in job_blocks().items():
+    for key, block in job_blocks(path).items():
         for line in block:
             name = job_name(line)
             if name is not None:
+                if name in names:
+                    raise AssertionError(f"job name {name!r} is defined twice in {path.name}")
                 names[name] = key
                 break
     return names
+
+
+def all_workflows():
+    return sorted(WORKFLOWS.glob("*.yaml")) + sorted(WORKFLOWS.glob("*.yml"))
+
+
+def required_jobs():
+    """Map each job name in any workflow to its `(workflow path, job key)`.
+
+    A name defined in two workflows is refused: GitHub would report both under the
+    one required context, and a passing duplicate could stand in for a failing gate.
+    """
+    found = {}
+    for path in all_workflows():
+        for name, key in job_names(path).items():
+            if name in found:
+                raise AssertionError(f"job name {name!r} is defined in {found[name][0].name} "
+                                     f"and {path.name}")
+            found[name] = (path, key)
+    return found
 
 
 def job_name(line):
@@ -197,9 +227,9 @@ def job_name(line):
     return next(value for value in match.groups() if value is not None)
 
 
-def trigger_block(name):
+def trigger_block(name, path=WORKFLOW):
     """Lines under `  <name>:` inside the `on:` block, or None if absent."""
-    block = _top_level_block("on")
+    block = _top_level_block("on", path)
     header = f"  {name}:"
     if header not in block:
         return None
@@ -211,13 +241,13 @@ def trigger_block(name):
     return out
 
 
-def trigger_branches(name):
+def trigger_branches(name, path=WORKFLOW):
     """The `branches:` list of a trigger, or None if the trigger or the key is absent.
 
     Scoped to the `branches:` subtree on purpose: a bare `- main` anywhere under the
     trigger would also satisfy a `paths:` or `paths-ignore:` list, which gates nothing.
     """
-    block = trigger_block(name)
+    block = trigger_block(name, path)
     if block is None or "    branches:" not in block:
         return None
     out = []
@@ -228,20 +258,20 @@ def trigger_branches(name):
     return out
 
 
-def job_if_expression(key):
+def job_if_expression(key, path=WORKFLOW):
     """The job's four-space `if:` expression, or None when it has none."""
-    for line in job_blocks()[key]:
+    for line in job_blocks(path)[key]:
         match = JOB_IF_RE.match(line)
         if match:
             return match.group(1)
     return None
 
 
-def step_blocks(key):
+def step_blocks(key, path=WORKFLOW):
     """Return the named steps in a job, including each step's owned lines."""
     steps = {}
     current = None
-    for line in job_blocks()[key]:
+    for line in job_blocks(path)[key]:
         match = re.match(r"^      - name: (.+)$", line)
         if match:
             current = match.group(1)
@@ -289,6 +319,16 @@ def execute_summary(event="pull_request"):
             env={**os.environ, "GITHUB_STEP_SUMMARY": str(summary)},
         )
         return result.stdout, summary.read_text(encoding="utf-8")
+
+
+def forwards_budget_args(body):
+    """Whether the one budget call is the invocation that forwards `args`.
+
+    Without the forwarding, `--base HEAD^1` and `--raise-label` are still built and
+    still in the body, yet the check runs with neither.
+    """
+    calls = [line.strip() for line in body.splitlines() if BUDGET_COMMAND_RE.search(line)]
+    return calls == [BUDGET_INVOCATION]
 
 
 def has_measurement_contract(steps, name, step_id):
@@ -485,6 +525,7 @@ class WorkflowShape(unittest.TestCase):
         )
         self.assertIn("Nix Eval", names)
         self.assertIn("Flake Checker", names)
+        self.assertIn("Instruction Budget", job_names(BUDGET_WORKFLOW))
 
     def test_pull_request_on_main_is_a_trigger(self):
         """Without this trigger a PR head carries zero check runs and the required
@@ -534,14 +575,15 @@ class WorkflowShape(unittest.TestCase):
         change to it has to be made deliberately here as well as in the workflow."""
         contexts = required_contexts()
         self.assertTrue(contexts, "branch protection requires at least one context")
-        names = job_names()
+        jobs = required_jobs()
         for context in contexts:
-            self.assertIn(context, names)
-            expression = job_if_expression(names[context])
+            self.assertIn(context, jobs)
+            path, key = jobs[context]
+            expression = job_if_expression(key, path)
             self.assertIn(
                 expression,
                 (None, "github.event_name != 'schedule'"),
-                f"job {names[context]!r} backs required context {context!r} and "
+                f"job {key!r} in {path.name} backs required context {context!r} and "
                 f"carries an unreviewed `if:` ({expression!r}); if it can skip a "
                 f"pull request, that PR blocks forever on a context that never "
                 f"reports",
@@ -557,70 +599,110 @@ class WorkflowShape(unittest.TestCase):
         assertion in this file green."""
         contexts = required_contexts()
         self.assertTrue(contexts, "branch protection requires at least one context")
-        names = job_names()
-        blocks = job_blocks()
+        jobs = required_jobs()
         for context in contexts:
-            self.assertIn(context, names)
-            key = names[context]
+            self.assertIn(context, jobs)
+            path, key = jobs[context]
             offenders = [
                 line.strip()
-                for line in blocks[key]
+                for line in job_blocks(path)[key]
                 if GREEN_WITHOUT_WORK_RE.match(line)
             ]
             self.assertEqual(
                 [],
                 offenders,
-                f"job {key!r} backs required context {context!r} and carries "
+                f"job {key!r} in {path.name} backs required context {context!r} and carries "
                 f"{offenders}; each of these lets the job conclude success without "
                 f"running its evaluation, so the gate would report green on a tree "
                 f"nothing checked",
             )
 
-    def test_required_job_still_runs_the_evaluation_it_exists_for(self):
-        """The pin above catches a job that concludes success without running its
-        steps. This catches the inverse of *that*: steps that run fine and evaluate
-        nothing. Replacing the step's `run:` body with `true` — or pointing it at a
-        different flake attribute — leaves every other assertion in this file green
-        while `Nix Eval` keeps certifying a tree it never looked at."""
-        contexts = required_contexts()
-        # Ties this assertion to the required context rather than to a job that
-        # merely happens to be named this. D2 pins one provider-bound check and
-        # this list derives from it; if that ever widens, this test must be
-        # rewritten rather than extended, because a second required context would
-        # not be a Nix evaluation.
-        self.assertEqual(["Nix Eval"], contexts)
-        names = job_names()
-        self.assertIn("Nix Eval", names)
-        body = job_body(names["Nix Eval"])
-        self.assertRegex(
-            body,
-            NIX_EVAL_COMMAND_RE,
-            f"job {names['Nix Eval']!r} backs the required context 'Nix Eval' but "
-            f"runs no `nix eval`; the gate would report green without evaluating "
-            f"anything",
-        )
-        self.assertIn(
-            EVALUATED_ATTRIBUTE,
-            body,
-            f"job {names['Nix Eval']!r} no longer evaluates "
-            f"{EVALUATED_ATTRIBUTE!r}; whatever it evaluates instead, a PR that "
-            f"breaks the NixOS host config would still merge green",
-        )
+    def test_each_required_job_still_runs_the_evaluation_it_exists_for(self):
+        """Steps that run fine and evaluate nothing are the inverse of green-without-work:
+        a `run:` body of `true`, another flake attribute, or a budget call that drops
+        its base each leave every other assertion here green."""
+        self.assertEqual(["Nix Eval", "Instruction Budget"], required_contexts())
+        jobs = required_jobs()
+        nix_path, nix_key = jobs["Nix Eval"]
+        nix_body = job_body(nix_key, nix_path)
+        self.assertRegex(nix_body, NIX_EVAL_COMMAND_RE)
+        self.assertIn(EVALUATED_ATTRIBUTE, nix_body)
+        budget_path, budget_key = jobs["Instruction Budget"]
+        self.assertEqual(BUDGET_WORKFLOW, budget_path)
+        budget_body = job_body(budget_key, budget_path)
+        self.assertRegex(budget_body, BUDGET_COMMAND_RE)
+        self.assertTrue(forwards_budget_args(budget_body), budget_body)
+        self.assertIn("--base HEAD^1", budget_body)
+        self.assertIn("--raise-label", budget_body)
+
+    def test_the_budget_forwarding_rejects_mutations(self):
+        body = job_body("instruction-budget", BUDGET_WORKFLOW)
+        self.assertTrue(forwards_budget_args(body))
+        self.assertFalse(forwards_budget_args(body + "\n" + BUDGET_INVOCATION))
+        for mutated in ("check", "check --base HEAD^1 --raise-label", 'check "${args[*]}"'):
+            with self.subTest(invocation=mutated):
+                self.assertFalse(forwards_budget_args(body.replace('check "${args[@]}"', mutated)))
+
+
+class BudgetWorkflowShape(unittest.TestCase):
+    LABEL_EXPRESSION = ("contains(github.event.pull_request.labels.*.name, "
+                        "'instruction-budget-raise')")
+
+    def test_label_events_and_push_are_the_triggers(self):
+        block = trigger_block("pull_request", BUDGET_WORKFLOW)
+        self.assertIsNotNone(block)
+        self.assertEqual(["main"], trigger_branches("pull_request", BUDGET_WORKFLOW))
+        self.assertIn("    types: [opened, synchronize, reopened, labeled, unlabeled]", block)
+        self.assertEqual(["main"], trigger_branches("push", BUDGET_WORKFLOW))
+        for absent in ("schedule", "workflow_dispatch", "pull_request_target"):
+            self.assertIsNone(trigger_block(absent, BUDGET_WORKFLOW), absent)
+        for trigger in ("pull_request", "push"):
+            self.assertFalse([line for line in trigger_block(trigger, BUDGET_WORKFLOW)
+                              if line.startswith("    paths")])
+
+    def test_minimum_permissions_and_no_job_override(self):
+        self.assertEqual(EXPECTED_WORKFLOW_PERMISSIONS, workflow_permissions(BUDGET_WORKFLOW))
+        for key, block in job_blocks(BUDGET_WORKFLOW).items():
+            self.assertEqual([], job_permission_lines(block), key)
+
+    def test_full_history_and_a_payload_derived_label(self):
+        names = job_names(BUDGET_WORKFLOW)
+        self.assertEqual({"Instruction Budget": "instruction-budget"}, names)
+        body = job_body("instruction-budget", BUDGET_WORKFLOW)
+        self.assertIn("          fetch-depth: 0", body.splitlines())
+        self.assertIn(self.LABEL_EXPRESSION, body)
+        for forbidden in ("secrets.", "GITHUB_TOKEN", "GH_TOKEN", "gh api", "gh pr"):
+            self.assertNotIn(forbidden, body)
 
 
 class RequiredContexts(unittest.TestCase):
     def test_every_required_context_is_a_job_name(self):
         contexts = required_contexts()
         self.assertTrue(contexts, "branch protection requires at least one context")
-        names = job_names()
+        jobs = required_jobs()
         for context in contexts:
             self.assertIn(
                 context,
-                names,
+                jobs,
                 f"required context {context!r} in {PROTECTION.name} matches no job "
-                f"`name:` in {WORKFLOW.name} (found {sorted(names)}); merges to main "
-                f"would block forever waiting for it",
+                f"`name:` in any workflow under {WORKFLOWS.name} (found {sorted(jobs)}); "
+                f"merges to main would block forever waiting for it",
             )
+
+    def test_job_names_refuses_a_name_twice_in_one_workflow(self):
+        path = Path("twice.yaml")
+        lines = ["jobs:", "  a:", "    name: Twin", "  b:", "    name: Twin"]
+        with mock.patch(f"{__name__}.workflow_lines", lambda p=WORKFLOW: lines):
+            with self.assertRaisesRegex(AssertionError, "defined twice in"):
+                job_names(path)
+
+    def test_required_jobs_refuses_a_name_in_two_workflows(self):
+        paths = [Path("a.yaml"), Path("b.yaml")]
+        by_path = {p: ["jobs:", f"  job-{p.stem}:", "    name: Twin"] for p in paths}
+        with mock.patch(f"{__name__}.all_workflows", lambda: paths), \
+                mock.patch(f"{__name__}.workflow_lines", lambda p=WORKFLOW: by_path[p]):
+            with self.assertRaisesRegex(AssertionError, "defined in a.yaml and b.yaml"):
+                required_jobs()
 
     def test_required_jobs_are_plain_jobs(self):
         """A matrix job reports as `name (value)` and a reusable workflow as
@@ -628,23 +710,24 @@ class RequiredContexts(unittest.TestCase):
         required context while a pure string comparison still passes."""
         contexts = required_contexts()
         self.assertTrue(contexts, "branch protection requires at least one context")
-        names = job_names()
-        blocks = job_blocks()
+        jobs = required_jobs()
         for context in contexts:
             self.assertIn(
                 context,
-                names,
-                f"required context {context!r} matches no job `name:` in "
-                f"{WORKFLOW.name} (found {sorted(names)})",
+                jobs,
+                f"required context {context!r} matches no job `name:` in any "
+                f"workflow under {WORKFLOWS.name} (found {sorted(jobs)})",
             )
-            key = names[context]
+            path, key = jobs[context]
             offenders = [
-                line.strip() for line in blocks[key] if RENAMING_KEY_RE.match(line)
+                line.strip()
+                for line in job_blocks(path)[key]
+                if RENAMING_KEY_RE.match(line)
             ]
             self.assertEqual(
                 [],
                 offenders,
-                f"job {key!r} backs required context {context!r} and must stay a "
+                f"job {key!r} in {path.name} backs required context {context!r} and must stay a "
                 f"plain job; found {offenders}",
             )
 
@@ -659,7 +742,8 @@ class ProtectionPayload(unittest.TestCase):
         data = payload()
         self.assertEqual(REQUIRED_PAYLOAD_KEYS, set(data))
         self.assertIs(True, data["enforce_admins"])
-        self.assertIs(False, data["required_status_checks"]["strict"])
+        # strict: two PRs that each pass on their own base cannot merge into a breach (program D5).
+        self.assertIs(True, data["required_status_checks"]["strict"])
         # D10: present and explicitly null. A non-null value here would block every
         # solo and unattended merge, which is the opposite of the issue's ask.
         self.assertIsNone(data["required_pull_request_reviews"])
