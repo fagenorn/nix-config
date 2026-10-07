@@ -49,9 +49,11 @@ def declaration_for(observation: dict, matrix: dict) -> tuple[dict | None, list[
     findings = []
     if dispatch_id is not None:
         site = dispatches.get(dispatch_id)
-        if site is None or role != site["role"]:
+        if site is None or (role is not None and role != site["role"]):
             # A carried dispatch is authoritative request evidence.  An unknown
-            # ID or disagreement with its carried role proves declaration drift.
+            # ID or disagreement with its carried role proves declaration drift;
+            # an absent role (an agent type serving several roles) is resolved
+            # from the known site rather than read as a disagreement.
             findings.append("REQUEST_DECLARATION_MISMATCH")
             return None, findings
         host = hosts.get(dispatch_id)
