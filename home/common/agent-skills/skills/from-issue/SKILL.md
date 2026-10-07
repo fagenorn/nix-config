@@ -555,8 +555,9 @@ Without lifecycle identity, send the same compact schema directly.
 Suspend — do not finish — when an environmental interruption pauses the work
 rather than resolving it: an imminent quota or session limit, a repeated
 transport failure, a permission prompt only a human can approve, an external
-wait (never a child's interim result; see **Interim child results**), or a
-context that cannot launch the agents a phase needs. A suspension
+wait (never a child's interim result; see **Interim child results**), a
+context that cannot launch the agents a phase needs, or too little attempt
+budget left for the next `sdd` task. A suspension
 parks the attempt without ending it — it consumes no attempt, needs no
 authorization phrase, and re-entry resumes it in place.
 
@@ -571,8 +572,9 @@ with `live workers: <ids>` and writing nothing. Then run
 workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --issue <n> --attempt <k> --blocked-on <value> | artifact-budget validate-report --boundary workflow-response --input -
 ```
 
-with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`, or
-`agent_dispatch` (the reaper alone owns `unknown`). A validated `kind: terminal`
+with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`,
+`agent_dispatch`, or `deadline` (the reaper alone owns `unknown`). Only sdd's
+deadline headroom rule writes `deadline`. A validated `kind: terminal`
 reply means the anti-zombie bound ended the attempt instead: handle it as the
 terminal replay in the terminal return procedure — print its `reentry`, relay
 it, and write no `finish` — and stop. Otherwise the reply is `kind: suspended`;
@@ -679,7 +681,10 @@ Invoke `sdd`: it reads the plan header, dispatches an implementer per task, and 
 With lifecycle identity, invoke `sdd` with this owner's
 `ledger_repo_root`, `run_id` and `action_id` as its lifecycle identity, so
 sdd's `### Lifecycle workers` registers each writing agent under this
-launch and records a progress marker after each completed task. The
+launch and records a progress marker after each completed task. Also hand `sdd` the
+`deadline_at` this owner currently holds — the one adopted at acquisition, or
+the one from a later `declare-lane` reply — so sdd's deadline headroom rule can
+suspend cleanly at a task boundary. The
 mechanical route's mechanic is registered the same way: run
 `workflow-state register-worker` before dispatching it, put the
 `Lifecycle worker:` line in its prompt, and release it when it returns. On

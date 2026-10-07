@@ -13,7 +13,7 @@ retained `capabilities.review.code` first: `blocked` stops and authored
 
 Execute a plan by dispatching a fresh implementer per task, a lane-scoped task review after each, and one two-axis whole-branch review (conformance ∥ correctness) at the end. Subagents never inherit your session's history — you construct exactly what each needs, which also keeps your own context flat for coordination.
 
-**Continuous execution:** don't pause between tasks. Stop only for BLOCKED you cannot resolve, ambiguity that genuinely prevents progress, or all-tasks-complete. Narrate at most one short line between tool calls — the ledger and tool results carry the record.
+**Continuous execution:** don't pause between tasks. Stop only for BLOCKED you cannot resolve, ambiguity that genuinely prevents progress, all-tasks-complete, or the deadline headroom rule in `### Lifecycle workers`. Narrate at most one short line between tool calls — the ledger and tool results carry the record.
 
 ## Setup
 
@@ -142,6 +142,29 @@ suspends between tasks is not stopped as stalled. The reply's `outcome` is
 informational. A refusal changes nothing, is not a suspension cause and
 never stops the task loop: the next `workflow-state progress` or
 `check-launch` remains the authority on the attempt's state.
+
+When the caller also hands over the attempt's `deadline_at`, stop cleanly at
+a task boundary instead of letting the reaper expire the attempt mid-task. A
+task boundary is the moment before you dispatch a plan task, and the moment
+after the last task's `complete` line, before the final review. Note each
+task's dispatch instant with `date -u`; at its `complete` line, its wall time
+is the elapsed difference. `longest` is the largest wall time of a task
+completed this session (0 before the first), and `remaining` is `deadline_at`
+minus `date -u`. At each boundary, when `remaining` is less than the larger of
+15 minutes and `longest`:
+1. release every worker this launch still has registered — normally none,
+   because each is released when it returns; stop a still-live one and run
+   `workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> --event stopped`,
+   as from-issue's **Writing workers** route says;
+2. run
+   `workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`;
+3. follow from-issue's suspension procedure with `blocked_on=deadline`.
+
+A refused `mark-progress` does not stop these steps. If the suspend is
+refused because the attempt is no longer active, the reaper expired it
+first: follow from-issue's expired-deadline route — print
+`/from-issue <num> --auto` on its own line and stop, with no retry. Without
+a `deadline_at`, this rule does not apply.
 
 ### 1. Dispatch the implementer
 
