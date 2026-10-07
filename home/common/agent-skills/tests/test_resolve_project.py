@@ -1685,7 +1685,25 @@ class LightLaneTest(ResolverTestCase):
          "contract.workflow.unsafe_path"),
         ({**VALID, "risk_paths": ["ok/*", 3]}, "/bindings/workflow/light_lane/risk_paths/1",
          "contract.workflow.unsafe_path"),
+        # COR-003: `lane-triage` matches canonical record paths against the glob
+        # unchanged, so a non-canonical glob could never match and is refused.
+        ({**VALID, "risk_paths": ["./a.py"]}, "/bindings/workflow/light_lane/risk_paths/0",
+         "contract.workflow.noncanonical_path"),
+        ({**VALID, "risk_paths": ["ok/*", "a//b.py"]},
+         "/bindings/workflow/light_lane/risk_paths/1", "contract.workflow.noncanonical_path"),
+        ({**VALID, "risk_paths": ["a/"]}, "/bindings/workflow/light_lane/risk_paths/0",
+         "contract.workflow.noncanonical_path"),
+        ({**VALID, "risk_paths": ["a\\b.py"]}, "/bindings/workflow/light_lane/risk_paths/0",
+         "contract.workflow.noncanonical_path"),
+        ({**VALID, "risk_paths": ["a/./b.py"]}, "/bindings/workflow/light_lane/risk_paths/0",
+         "contract.workflow.noncanonical_path"),
     )
+
+    def test_canonical_glob_patterns_are_accepted(self):
+        light_lane = {**self.VALID, "risk_paths": ["src/**/*.py", "*.nix", "a/[bc]?.py"]}
+        code, snap, err = self.resolve(self.make_root(self.contract_with(light_lane)))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["bindings"]["workflow"]["light_lane"], light_lane)
 
     def test_each_malformed_light_lane_is_refused_with_its_pointer(self):
         for light_lane, pointer, repair_id in self.REFUSALS:

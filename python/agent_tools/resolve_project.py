@@ -245,6 +245,20 @@ def is_safe_relative_path(value: object) -> bool:
     return ".." not in Path(value).parts
 
 
+CANONICAL_PATH_MESSAGE = ("must be spelled canonically: '/'-separated, with no "
+                          "backslash, no empty or '.' segment and no trailing '/'")
+
+
+def is_canonical_path(path: str) -> bool:
+    """The one spelling `lane-triage` matches: '/'-separated, with no backslash,
+    no empty or `.` segment and no trailing `/` (#279 D11).
+
+    `risk_paths` globs and triage record paths both meet it, because
+    `fnmatchcase` compares the strings unchanged.
+    """
+    return "\\" not in path and all(segment not in ("", ".") for segment in path.split("/"))
+
+
 def check_string(value: object, pointer: str, section: str,
                  violations: list[dict]) -> bool:
     if isinstance(value, str) and value:
@@ -742,8 +756,12 @@ def validate_workflow(workflow: dict, commands: dict | None,
                 light_lane["risk_paths"], f"{pointer}/risk_paths", "workflow",
                 violations):
             for index, entry in enumerate(light_lane["risk_paths"]):
-                check_safe_path(
-                    entry, f"{pointer}/risk_paths/{index}", "workflow", violations)
+                entry_pointer = f"{pointer}/risk_paths/{index}"
+                if check_safe_path(entry, entry_pointer, "workflow", violations) \
+                        and not is_canonical_path(entry):
+                    violations.append(violation(
+                        entry_pointer, CANONICAL_PATH_MESSAGE,
+                        "contract.workflow.noncanonical_path"))
 
 
 def validate_deploy(deploy: dict, commands: dict | None,

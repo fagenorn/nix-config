@@ -61,10 +61,14 @@ exactly these members:
   boolean, zero or negative.
 - `risk_paths` is a list, possibly empty. Each entry is a glob that satisfies the
   resolver's safe-relative-path rule: non-empty, not absolute, and with no `..`
-  segment.
+  segment. It must also be spelled canonically, by the same
+  `resolve_project.is_canonical_path` rule `lane-triage` applies to record
+  paths: no backslash, no empty or `.` segment, and no trailing `/` (D18).
 
 Violations use the existing `contract.workflow.*` repair-id kinds. A bad `mode`
-gets the new kind `contract.workflow.light_lane_mode`. `normalize_bindings`
+gets the new kind `contract.workflow.light_lane_mode`, and a safe but
+non-canonical `risk_paths` entry gets the new kind
+`contract.workflow.noncanonical_path`. `normalize_bindings`
 passes the member through as authored: an absent member stays absent, and
 `null` stays `null`. The snapshot never adds a member the author did not write.
 The platform manifest and `project_schema_versions` are unchanged (D2).
@@ -127,8 +131,8 @@ declaration. The step runs in this order:
 1. The owner judges each parent D2 signal, using parent D7 for
    `criteria_shape`, and writes one line of evidence for each. It lists the
    paths it predicts the change will touch.
-2. It feeds that record to `lane-triage evaluate --repo-root <project.root>`
-   on stdin through a quoted heredoc. No input file is written.
+2. It feeds that record to `lane-triage evaluate --repo-root <project.root>
+   --input -` on stdin through a quoted heredoc. No input file is written.
 3. It handles the exit code:
    - With exit 0, it records the record, the verdict and
      `ran: full (shadow)` in the investigation note, under a new **Lane
@@ -202,7 +206,9 @@ is invented.
   - A valid `light_lane` round-trips unchanged.
   - An absent member stays absent and `null` stays `null`.
   - An unknown key, a bad `mode`, a `budget_minutes` that is zero, negative or
-    boolean, and an unsafe glob are each refused with their pointer.
+    boolean, an unsafe glob, and a non-canonical glob (`./a.py`, `a//b.py`,
+    `a/`, a backslash) are each refused with their pointer, while canonical
+    glob patterns such as `src/**/*.py` and `*.nix` are accepted.
 - **New `tests/test_lane_triage.py`**, driving `python -m agent_tools.lane_triage`
   against a fixture project under a temporary `HOME` holding the committed
   platform manifest (agent-helpers rule 5). The fixture is built locally from
@@ -217,8 +223,9 @@ is invented.
   - The run leaves the tree unchanged.
 - **`tests/test_agent_tools_launchers.py`**: the command list gains
   `lane-triage`.
-- **`test_workflow_skill_contracts.py`** gains no lane-triage test. The
-  branch's `LaneTriageContractsTest` is deleted, because all five of its
+- **`test_workflow_skill_contracts.py`** gains one lane-triage test,
+  `LaneTriageRecordKeysTest`, a key-set test that keeps AC4 measured (D16).
+  The branch's `LaneTriageContractsTest` is deleted, because all five of its
   tests, the `CLAUDE.md` one included, pin English phrases. The two
   existing expiry phrase-pin tests,
   `test_expiry_prose_describes_the_wall_clock_the_reaper_actually_reads` and
@@ -262,3 +269,4 @@ is invented.
 | D15 | No ceiling is lowered: `instruction-load.json` ends byte-identical to `origin/main`'s (ec089c67 is reverted) | The roughly 38 bytes of slack sit far inside the check's 5% tightness band; lowering adds a gate-file edit that conflicts with concurrent PRs' ceiling notes, for no enforcement gain | Running `tighten` to the new measures: allowed, but it is churn on a contended file and leaves zero slack for the final merge with main |
 | D16 | Reverses D14's "no replacement pin": AC4 stays measured in `test_workflow_skill_contracts.py` by one key-set test. Phase 0's backticked spans must name every record key `lane-triage evaluate` reads (`SIGNALS`, `SIGNAL_MEMBERS` and `TOP_MEMBERS`, read from `lane_triage.py` with `ast.literal_eval`), the closed verdict keys `hits`, `lane` and `mode`, and every `LIGHT_LANE_MODES` value from `resolve_project.py`. The modes are the narrowest consumed anchor for "shadow". The Phase-0 text names the verdict as `{hits, lane, mode}`. The two expiry pins are still deleted | Issue AC4 names this file as its measure; rule 6 allows lifecycle-contract JSON key sets; `agent-installed-skill-tests` runs this file without `PYTHONPATH`, so importing `agent_tools` would break that tier, while parsing the source does not; the verdict set mirrors `tests/test_lane_triage.py`'s closed-key assertion | Deleting every pin, which leaves AC4 unmeasured. Phrase pins such as "every attempt runs full", which rule 6 forbids. Importing `agent_tools.lane_triage`, which breaks the installed tier. Adding an output-key constant to `lane_triage.py`, which changes code for a test |
 | D17 | Amends D15's mechanism: after the merge, `instruction-load.json` is restored whole from `origin/main` (`git checkout origin/main -- <file>`), because reverting ec089c67 removes only the corpus raise while ffbc16e0 also raised three profile ceilings and appended their notes | Phase-5 Codex B-001, verified at `home/common/agent-skills/instruction-load.json:36,113,228` against `origin/main`; the gate refuses any model change except lowering | Reverting the hunks of ffbc16e0 value by value: same end state, more chances to leave a note or ceiling behind |
+| D18 | `resolve-project` refuses a safe but non-canonical `risk_paths` glob (a backslash, an empty or `.` segment, a trailing `/`) as `contract.workflow.noncanonical_path` at `/bindings/workflow/light_lane/risk_paths/<index>`. The canonical rule and its message live once in `resolve_project` (`is_canonical_path`, `CANONICAL_PATH_MESSAGE`), and `lane_triage` reuses both for D11's record-path check | Final-review correctness finding COR-003: D11 makes record paths canonical and `evaluate` matches globs unchanged, so an accepted `./tinytask/store.py` glob could never match and an all-`no` record came back a false `light` | Normalizing globs before matching: it hides the authoring error and makes the matched policy differ from the authored one. A second copy of the predicate in `resolve_project`: two homes for one rule would drift |
