@@ -139,6 +139,11 @@ PATHS_LIST_MEMBERS = (
 PATHS_MEMBERS = ("artifacts",) + PATHS_LIST_MEMBERS
 COMMAND_MEMBERS = ("argv", "cwd", "env")
 WORKFLOW_MEMBERS = ("verification", "orchestration", "review", "release")
+# #279: the one workflow member an author may leave out. `null` and absent both
+# mean no light lane; the resolver never inserts the member itself.
+WORKFLOW_OPTIONAL_MEMBERS = ("light_lane",)
+LIGHT_LANE_MEMBERS = ("mode", "budget_minutes", "risk_paths")
+LIGHT_LANE_MODES = ("shadow", "active")
 DEPLOY_MEMBERS = ("adapter", "command", "config")
 PROJECTION_MEMBERS = ("id", "agent", "kind", "target", "source")
 
@@ -301,15 +306,20 @@ def check_list(value: object, pointer: str, section: str,
 
 
 def check_exact_members(value: dict, pointer: str, expected: tuple[str, ...],
-                        section: str, violations: list[dict]) -> None:
-    """Report every absent required member and every unexpected one."""
+                        section: str, violations: list[dict], *,
+                        optional: tuple[str, ...] = ()) -> None:
+    """Report every absent required member and every unexpected one.
+
+    A name in `optional` may be present or absent: it is never reported as
+    missing and never as unexpected.
+    """
     for name in expected:
         if name not in value:
             violations.append(violation(
                 f"{pointer}/{name}", "required member is absent",
                 f"contract.{section}.member_missing"))
     for name in sorted(value):
-        if name not in expected:
+        if name not in expected and name not in optional:
             violations.append(violation(
                 f"{pointer}/{name}", "member is not part of this schema",
                 f"contract.{section}.member_unexpected"))
@@ -682,7 +692,8 @@ def check_command_id(value: object, pointer: str, commands: dict | None,
 def validate_workflow(workflow: dict, commands: dict | None,
                       violations: list[dict]) -> None:
     check_exact_members(
-        workflow, "/bindings/workflow", WORKFLOW_MEMBERS, "workflow", violations)
+        workflow, "/bindings/workflow", WORKFLOW_MEMBERS, "workflow", violations,
+        optional=WORKFLOW_OPTIONAL_MEMBERS)
     pointer = "/bindings/workflow/verification"
     if "verification" in workflow and check_list(
             workflow["verification"], pointer, "workflow", violations):
@@ -711,6 +722,28 @@ def validate_workflow(workflow: dict, commands: dict | None,
     if "release" in workflow and workflow["release"] is not None:
         check_command_id(
             workflow["release"], "/bindings/workflow/release", commands, violations)
+    pointer = "/bindings/workflow/light_lane"
+    if "light_lane" in workflow and workflow["light_lane"] is not None and check_object(
+            workflow["light_lane"], pointer, "workflow", violations):
+        light_lane = workflow["light_lane"]
+        check_exact_members(
+            light_lane, pointer, LIGHT_LANE_MEMBERS, "workflow", violations)
+        if "mode" in light_lane and (
+                not isinstance(light_lane["mode"], str)
+                or light_lane["mode"] not in LIGHT_LANE_MODES):
+            violations.append(violation(
+                f"{pointer}/mode", "must be one of shadow, active",
+                "contract.workflow.light_lane_mode"))
+        if "budget_minutes" in light_lane:
+            check_positive_int(
+                light_lane["budget_minutes"], f"{pointer}/budget_minutes",
+                "workflow", violations)
+        if "risk_paths" in light_lane and check_list(
+                light_lane["risk_paths"], f"{pointer}/risk_paths", "workflow",
+                violations):
+            for index, entry in enumerate(light_lane["risk_paths"]):
+                check_safe_path(
+                    entry, f"{pointer}/risk_paths/{index}", "workflow", violations)
 
 
 def validate_deploy(deploy: dict, commands: dict | None,
@@ -1359,11 +1392,16 @@ def require_registry() -> list[dict]:
 # --------------------------------------------------------------------------
 
 
-def command_resolve(args: argparse.Namespace) -> int:
+def resolve(repo_root: str | None, required: list[str] | None = None) -> dict:
+    """The `ResolvedProject` snapshot for `repo_root`, or `ContractError`.
+
+    Exactly the composition `resolve-project resolve` prints (#279 D1);
+    `conformance_checks` keeps its own, collecting composition.
+    """
     # Before root discovery, so a broken platform installation can never be
     # masked by `not_onboarded` or a contract error (R1.3).
     manifest, _ = require_platform_manifest()
-    root = discover_root(args.repo_root)
+    root = discover_root(repo_root)
     source = load_contract(root)
     raise_for_violations(validate_contract(source, manifest))
     # The range check is the inner half of the manifest gate, and it runs only
@@ -1374,8 +1412,12 @@ def command_resolve(args: argparse.Namespace) -> int:
     # before a single snapshot member exists (D10).
     validate_projections(root, source)
     snapshot = build_snapshot(root, source, manifest)
-    raise_for_unavailable(args.require, snapshot["capabilities"])
-    return emit_json(snapshot)
+    raise_for_unavailable(required, snapshot["capabilities"])
+    return snapshot
+
+
+def command_resolve(args: argparse.Namespace) -> int:
+    return emit_json(resolve(args.repo_root, args.require))
 
 
 def command_write_projections(args: argparse.Namespace) -> int:
