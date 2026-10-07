@@ -6,8 +6,10 @@
 `exec` writes a registry row under `<git common dir of R>/agent-launch/I/A/`,
 asks `workflow-state check-launch` (or `check-worker` for a worker, whose action
 is its ID without the `:w<n>` suffix) and, only on a strict positive reply,
-runs `<argv>` in a new session with `AGENT_LAUNCH_SCOPE=I/A/<nonce>` added to its
-environment. SIGINT, SIGTERM and SIGHUP are forwarded to the command's group.
+runs `<argv>` in a new session with `AGENT_LAUNCH_SCOPE=S/I/A/<nonce>` added to its
+environment, where `S` is the repository scope: 16 hex characters of the
+SHA-256 of the registry's real path, so a launch of another repository that
+shares the run and action ids never carries this repository's marker (D17). SIGINT, SIGTERM and SIGHUP are forwarded to the command's group.
 When the command exits, every process carrying that exact marker and every
 member of the command's group is terminated, and the row is deleted.
 
@@ -22,7 +24,8 @@ stderr and still exits with the command's status.
 
 `reap --action-id A` reaps that one launch without asking the ledger. `reap
 --sweep` asks `check-launch` about every launch under the run, each launch
-directory and each launch a live process's marker names (an earlier reap can
+directory and each launch a live process's marker names under this repository's
+scope (an earlier reap can
 have deleted the directory of an exec paused before its spawn), and reaps each
 one that is not current; a failed or malformed check skips it. A
 reap terminates every live process whose marker names the launch, plus every
@@ -51,6 +54,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -125,8 +129,13 @@ def launch_directory(registry: Path, run_id: str, action_id: str) -> Path:
     return registry / safe_segment(run_id, "run id") / safe_segment(action_id, "action id")
 
 
-def launch_marker(run_id: str, action_id: str, nonce: str) -> str:
-    return f"{run_id}/{action_id}/{nonce}"
+def repository_scope(registry: Path) -> str:
+    """The marker's first segment: 16 hex of the SHA-256 of the registry's real path (D17)."""
+    return hashlib.sha256(os.fsencode(os.path.realpath(registry))).hexdigest()[:16]
+
+
+def launch_marker(scope: str, run_id: str, action_id: str, nonce: str) -> str:
+    return f"{scope}/{run_id}/{action_id}/{nonce}"
 
 
 def check_launch_reply(stdout: bytes, action_id: str) -> str:
@@ -251,13 +260,14 @@ def exec_scoped(repo_root: str, run_id: str, argv: Sequence[str], *,
     action = action_id if worker_id is None else worker_action(worker_id)
     safe_segment(run_id, "run id")
     safe_segment(action, "action id")
-    directory = launch_directory(registry_root(repo_root), run_id, action)
+    registry = registry_root(repo_root)
+    directory = launch_directory(registry, run_id, action)
     if not argv:
         raise LaunchScopeError(f"no command after {SEPARATOR}")
 
     nonce = secrets.token_hex(16)
     row = directory / f"{nonce}.json"
-    marker = launch_marker(run_id, action, nonce)
+    marker = launch_marker(repository_scope(registry), run_id, action, nonce)
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     _write_row(row, nonce, None, started_at, argv[0])
     forwarder = _Forwarder()
@@ -418,7 +428,8 @@ def reap_launch(registry: Path, run_id: str, action_id: str) -> tuple[int, bool]
     directory is kept and the launch counts as survived (D16).
     """
     directory = launch_directory(registry, run_id, action_id)
-    launch = re.compile(re.escape(f"{run_id}/{action_id}/") + NONCE.pattern)
+    scope = repository_scope(registry)
+    launch = re.compile(re.escape(f"{scope}/{run_id}/{action_id}/") + NONCE.pattern)
 
     def is_marked(pid: int) -> bool:
         marker = read_marker(pid)
@@ -431,7 +442,7 @@ def reap_launch(registry: Path, run_id: str, action_id: str) -> tuple[int, bool]
         table = process_table()          # fresh, right before terminate: the pid-reuse window
         marked = _launch_marked(launch, table)
         proved = {pgid for nonce, pgid in rows if pgid is not None
-                  and any(marker == launch_marker(run_id, action_id, nonce)
+                  and any(marker == launch_marker(scope, run_id, action_id, nonce)
                           and table[pid].pgid == pgid for pid, marker in marked.items())}
         reached, survivors = terminate(list(marked), proved, is_marked=is_marked)
         signalled += reached
@@ -461,9 +472,9 @@ def _launch_names(run_directory: Path) -> list[str]:
     return sorted(names)
 
 
-def _marked_launch_names(run_id: str) -> set[str]:
-    """The safe action ids that a live, non-zombie process's marker names under `run_id`."""
-    launch = re.compile(re.escape(f"{run_id}/") + r"([^/]+)/" + NONCE.pattern)
+def _marked_launch_names(scope: str, run_id: str) -> set[str]:
+    """The safe action ids a live, non-zombie process's marker names under `scope` and `run_id`."""
+    launch = re.compile(re.escape(f"{scope}/{run_id}/") + r"([^/]+)/" + NONCE.pattern)
     names = set()
     for pid, proc in process_table().items():
         if proc.zombie:
@@ -490,7 +501,8 @@ def reap(repo_root: str, run_id: str, *, action_id: str | None = None,
         launches = [action_id]
     else:
         launches = []
-        names = set(_launch_names(registry / run_id)) | _marked_launch_names(run_id)
+        names = (set(_launch_names(registry / run_id))
+                 | _marked_launch_names(repository_scope(registry), run_id))
         for name in sorted(names):
             reason = ask_launch(repo_root, run_id, name)
             if reason in (CHECK_LAUNCH_FAILED, MALFORMED_REPLY):

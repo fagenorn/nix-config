@@ -6061,7 +6061,7 @@ class LaunchScopeSweepContractsTest(unittest.TestCase):
         self.assert_ordered(
             normalized((REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")),
             "**Agent helper package.**", "`launch-scope` (#276)",
-            "AGENT_LAUNCH_SCOPE=<run-id>/<action-id>/<nonce>",
+            "AGENT_LAUNCH_SCOPE=<repo-scope>/<run-id>/<action-id>/<nonce>",
             "`launch-scope reap --action-id`", "`reap --sweep`",
             "agent-launch/<run-id>/<action-id>/")
 

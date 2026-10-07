@@ -296,6 +296,7 @@ class ScopeHarness(LifecycleHarness):
             ["git", "-C", str(self.root), "rev-parse", "--path-format=absolute",
              "--git-common-dir"], env=self.env, check=True, capture_output=True, text=True)
         self.registry = Path(common.stdout.strip()) / "agent-launch" / self.run_id
+        self.repo_scope = launch_scope.repository_scope(self.registry.parent)
         self.init_run()
         self.assertEqual(self.spawn(issue=14, worktree=str(self.root / "wt-14"))["id"], "14:1:1")
 
@@ -385,8 +386,9 @@ class ExecTest(ScopeHarness, unittest.TestCase):
         done = self.exec_("sh", "-c", 'printf %s "$AGENT_LAUNCH_SCOPE" > "$1"; exit 7',
                           "sh", str(seen))
         self.assertEqual(done.returncode, 7, done.stderr)
-        self.assertRegex(seen.read_text(),
-                         rf"\A{re.escape(self.run_id)}/14:1:1/[0-9a-f]{{32}}\Z")
+        self.assertRegex(self.repo_scope, r"\A[0-9a-f]{16}\Z")
+        self.assertRegex(seen.read_text(), rf"\A{self.repo_scope}/{re.escape(self.run_id)}"
+                                           rf"/14:1:1/[0-9a-f]{{32}}\Z")
         self.assertEqual(self.exec_("sh", "-c", "kill -TERM $$").returncode,
                          128 + signal.SIGTERM)
 
@@ -629,7 +631,7 @@ class ReapTest(ScopeHarness, unittest.TestCase):
 
     def test_a_sweep_reaps_a_marked_launch_whose_directory_is_gone(self):
         # An exec paused before its spawn can have had its directory reaped.
-        marker = f"{self.run_id}/14:1:1/" + "c" * 32
+        marker = f"{self.repo_scope}/{self.run_id}/14:1:1/" + "c" * 32
         orphan = subprocess.Popen(SLEEPER, env={**UNMARKED_ENV, MARKER_ENV: marker},
                                   start_new_session=True)
         self.addCleanup(orphan.wait)
@@ -641,6 +643,25 @@ class ReapTest(ScopeHarness, unittest.TestCase):
         self.assert_report(self.scope(*self.reap_args("--sweep")), 0,
                            [{"action_id": "14:1:1", "signalled": 1}], [])
         self.assertTrue(wait_until(lambda: is_dead(orphan.pid), 2.0))
+
+    def test_another_repositorys_launch_with_the_same_ids_is_never_signalled(self):  # D17
+        # Direct run ids are per repository, so another repository can run 14:1:1 under
+        # the same run id; its process carries that repository's scope, not this one's.
+        other = launch_scope.repository_scope(self.root / "other" / ".git" / "agent-launch")
+        self.assertNotEqual(other, self.repo_scope)
+        marker = f"{other}/{self.run_id}/14:1:1/" + "d" * 32
+        foreign = subprocess.Popen(SLEEPER, env={**UNMARKED_ENV, MARKER_ENV: marker},
+                                   start_new_session=True)
+        self.addCleanup(foreign.wait)
+        self.addCleanup(kill_quietly, foreign.pid)
+        self.assertTrue(wait_until(lambda: read_marker(foreign.pid) == marker))
+        self.assertFalse((self.registry / "14:1:1").exists())
+        self.assert_report(self.scope(*self.reap_args("--action-id", "14:1:1")), 0,
+                           [{"action_id": "14:1:1", "signalled": 0}], [])
+        self.assertEqual(self.resume(issue=14, worktree=str(self.root / "wt-14"), now=LATER,
+                                     owner_unavailable=True)["id"], "14:1:2")
+        self.assert_report(self.scope(*self.reap_args("--sweep")), 0, [], [])
+        self.assertFalse(is_dead(foreign.pid))
 
     def test_a_stale_row_does_not_prove_a_live_unmarked_group(self):  # D14
         stranger = subprocess.Popen(SLEEPER, env=UNMARKED_ENV, start_new_session=True)
@@ -697,7 +718,8 @@ class ReapTest(ScopeHarness, unittest.TestCase):
             result = real(pids, groups, **options)
             if len(raced) < rounds:
                 nonce = secrets.token_hex(16)
-                env = {**UNMARKED_ENV, MARKER_ENV: f"{self.run_id}/14:1:1/{nonce}"}
+                env = {**UNMARKED_ENV,
+                       MARKER_ENV: f"{self.repo_scope}/{self.run_id}/14:1:1/{nonce}"}
                 late = subprocess.Popen(SLEEPER, env=env, start_new_session=True)
                 self.addCleanup(late.wait)
                 self.addCleanup(kill_quietly, late.pid)

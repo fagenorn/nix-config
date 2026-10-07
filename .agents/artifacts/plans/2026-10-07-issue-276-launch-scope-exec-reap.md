@@ -5,7 +5,7 @@
 
 **Goal:** a lifecycle launch's long commands run under `launch-scope exec`, and `launch-scope reap` kills whatever they leave behind: an owner reaps itself before every exit write, and the orchestrate-issues stop pass sweeps every non-current launch (#276, slice S2 of the launch process reaping design).
 
-**Architecture:** Two new `agent_tools` modules. `launch_processes` is the platform seam: the `ps` process table, reading one pid's `AGENT_LAUNCH_SCOPE` marker (`/proc` on Linux, `KERN_PROCARGS2` on darwin), the never-self/ancestor guard, and TERM→KILL termination. `launch_scope` is the `launch-scope` command, with `exec` and `reap`, the registry under the ledger repository's git common dir, and strict `check-launch`/`check-worker` reply parsing. Skill prose in from-issue, sdd, ship-issue and orchestrate-issues adopts it. Spec: `.agents/artifacts/specs/2026-10-07-issue-276-launch-scope-exec-reap-design.md` (ledger D1–D13). Parent: `.agents/artifacts/specs/2026-10-06-launch-process-reaping-design.md` (read-only).
+**Architecture:** Two new `agent_tools` modules. `launch_processes` is the platform seam: the `ps` process table, reading one pid's `AGENT_LAUNCH_SCOPE` marker (`/proc` on Linux, `KERN_PROCARGS2` on darwin), the never-self/ancestor guard, and TERM→KILL termination. `launch_scope` is the `launch-scope` command, with `exec` and `reap`, the registry under the ledger repository's git common dir, and strict `check-launch`/`check-worker` reply parsing. Skill prose in from-issue, sdd, ship-issue and orchestrate-issues adopts it. Spec: `.agents/artifacts/specs/2026-10-07-issue-276-launch-scope-exec-reap-design.md` (ledger D1–D17). Parent: `.agents/artifacts/specs/2026-10-06-launch-process-reaping-design.md` (read-only).
 
 **Tech stack:** Python 3 standard library (`subprocess`, `signal`, `os.waitid`, `ctypes`), Nix command table, Markdown skill text, `unittest`.
 
@@ -53,6 +53,8 @@ Task 5 — Adapter sweep in the stop pass, and CLAUDE.md — home/common/claude-
 ## Decisions
 
 Tasks rest on spec rows D1–D10 and on the plan-level rows D11 (zombie-held cleanup and the `stat` column), D12 (injectable `terminate`) and D13 (the AUTO.md worker sentence and "writes nothing to the ledger"). Each member cites the rows it uses.
+
+Amendment (after execution): spec rows D14–D17 supersede the task members where they differ, and the members are not rewritten. D14 adds exception-safe cleanup after the spawn. D15 tolerates a blank `stat`. D16 makes `terminate` take `is_marked`, makes the sweep also visit launches named by live markers, and makes reap remove only the files it proved instead of the whole directory. D17 adds the repository scope as the marker's first segment, so the marker is `<repo-scope>/<run-id>/<action-id>/<nonce>`.
 
 ---
 
