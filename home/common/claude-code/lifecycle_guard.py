@@ -44,11 +44,18 @@ GUARDED_TOKEN_LITERALS = (
     (["git", "branch", "-d"], "branch"),
     (["git", "push"], "push"),
 )
+# The raise label is the user's Instruction Budget raise decision. The refusal
+# is a mistake-catcher for agents, not enforcement (#294).
+RAISE_LABEL = "instruction-budget-raise"
+RAISE_LABEL_REFUSAL = (
+    "only the user applies this label (Instruction Budget raise control)"
+)
 OPERATION_LABELS = {
     "merge": "merge",
     "pr-create": "PR creation",
     "branch": "branch deletion",
     "push": "push",
+    "label": "instruction-budget-raise label edit",
 }
 # Words that keep the command position open: shell keywords that introduce a
 # command, and wrappers that hand the rest of the words to another command.
@@ -351,13 +358,55 @@ def command_position_flags(tokens):
     return flags
 
 
-def unvalidatable(segment, reason):
-    """Every guarded verb mentioned in `segment`, all refused for `reason`."""
-    return [
+def mentions_raise_label(texts):
+    """True when any of `texts` contains the raise label, ignoring case."""
+    return any(RAISE_LABEL in text.lower() for text in texts)
+
+
+def adds_raise_label(tokens):
+    """True when a `gh` invocation in `tokens` adds the raise label.
+
+    Looks at every `gh` word, in any position: its words run to the next
+    operator, and a label value is the word after `--add-label` or the rest of
+    a `--add-label=` word. No subcommand parsing and no comma splitting: a
+    value that contains the label anywhere counts.
+    """
+    for index, (value, is_operator) in enumerate(tokens):
+        if is_operator or os.path.basename(value) != "gh":
+            continue
+        words = []
+        for word, word_is_operator in tokens[index + 1:]:
+            if word_is_operator:
+                break
+            words.append(word)
+        labels = [
+            words[position + 1]
+            for position, word in enumerate(words[:-1])
+            if word == "--add-label"
+        ]
+        labels.extend(
+            word[len("--add-label="):]
+            for word in words
+            if word.startswith("--add-label=")
+        )
+        if any(RAISE_LABEL in label.lower() for label in labels):
+            return True
+    return False
+
+
+def unvalidatable(segment, reason, mentions_label=False):
+    """Every guarded verb mentioned in `segment`, all refused for `reason`.
+
+    When `mentions_label` is set, the raise-label edit is refused too.
+    """
+    found = [
         (operation, segment, reason)
         for literal, operation in GUARDED_LITERALS
         if literal in segment
     ]
+    if mentions_label:
+        found.append(("label", segment, reason))
+    return found
 
 
 def guarded_operations(command):
@@ -369,24 +418,36 @@ def guarded_operations(command):
     that is not a command position (an argument to some other program). Those
     are refused rather than waved through — the parser and the shell have to
     agree, and where they cannot the guard fails closed.
+
+    The `label` operation is mention-gated: it is considered only in a segment
+    that mentions the raise label, always carries a problem, and is refused for
+    any `gh` invocation, in any position, whose `--add-label` value contains it.
     """
     segments = split_segments(command)
     if segments is None:
-        return unvalidatable(command, "the command could not be parsed")
+        return unvalidatable(
+            command, "the command could not be parsed",
+            mentions_raise_label([command]),
+        )
     found = []
     for segment in segments:
         tokens = tokenize_segment(segment)
         if tokens is None:
-            found.extend(unvalidatable(segment, "the segment could not be tokenised"))
+            found.extend(unvalidatable(
+                segment, "the segment could not be tokenised",
+                mentions_raise_label([segment]),
+            ))
             continue
         flags = command_position_flags(tokens)
         values = [value for value, _ in tokens]
+        mentions = mentions_raise_label(values)
         if any(
             flag and value in SHELL_EVALUATORS
             for flag, value in zip(flags, values)
         ):
             found.extend(unvalidatable(
-                segment, "shell source passed to an evaluator cannot be validated"
+                segment, "shell source passed to an evaluator cannot be validated",
+                mentions,
             ))
             continue
         for index in range(len(values)):
@@ -403,6 +464,8 @@ def guarded_operations(command):
                         "validate; quote it if you only mean to mention it",
                     ))
                 break
+        if mentions and adds_raise_label(tokens):
+            found.append(("label", segment, RAISE_LABEL_REFUSAL))
     return found
 
 
@@ -957,8 +1020,13 @@ def main():
     if args.jq_bin is None:
         args.jq_bin = policy.jq_bin
 
+    operations = guarded_operations(command)
+    for operation, _segment, problem in operations:
+        if operation == "label":
+            return block(f"unsafe {OPERATION_LABELS[operation]}: {problem}")
+
     context = None
-    for operation, segment, problem in guarded_operations(command):
+    for operation, segment, problem in operations:
         if problem is not None:
             return block(f"unsafe {OPERATION_LABELS[operation]}: {problem}")
         if operation == "branch":

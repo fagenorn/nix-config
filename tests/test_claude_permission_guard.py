@@ -331,6 +331,96 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(2, result.returncode, command)
 
+    LABEL_REFUSAL_PREFIX = (
+        "lifecycle guard: unsafe instruction-budget-raise label edit:")
+    DIRECT_ADD_REASON = (
+        "only the user applies this label (Instruction Budget raise control)")
+    EVALUATOR_REASON = "shell source passed to an evaluator cannot be validated"
+    # The unterminated-quote row's existing fail-closed reason: pin the exact string the
+    # live guard yields for it — "the command could not be parsed" when split_segments
+    # returns None, else "the segment could not be tokenised" (check once, then pin).
+    UNPARSED_REASON = "the command could not be parsed"
+
+    def test_raise_label_additions_are_refused_in_every_spelling(self):
+        # Every command here adds the instruction-budget-raise label, so exit 0
+        # would mean the guard failed to see it. No cwd: the rule is global.
+        for command in (
+            "gh pr edit 1 --add-label instruction-budget-raise",
+            "gh issue edit 23 --add-label instruction-budget-raise",
+            "gh pr edit 1 --add-label=instruction-budget-raise",
+            "gh pr edit 1 --add-label bug,instruction-budget-raise",
+            'gh pr edit 1 --add-label "bug, instruction-budget-raise"',
+            "gh pr edit 1 --add-label 'instruction-budget-raise'",
+            "gh pr edit 1 --add-label '\"bug\",\"instruction-budget-raise\"'",
+            "gh pr edit 1 --add-label INSTRUCTION-BUDGET-RAISE",
+            "gh pr edit 1 --add-label bug --add-label instruction-budget-raise",
+            "gh pr edit 1 --add-label instruction\\-budget\\-raise",
+            '"gh" pr edit 1 --add-label instruction-budget-raise',
+            "gh  pr edit 1 --add-label instruction-budget-raise",
+            "gh pr\tedit 1 --add-label instruction-budget-raise",
+            "(gh pr edit 1 --add-label instruction-budget-raise)",
+            "{ gh pr edit 1 --add-label instruction-budget-raise; }",
+            "x=$(gh pr edit 1 --add-label instruction-budget-raise)",
+            "`gh pr edit 1 --add-label instruction-budget-raise`",
+            "true && gh pr edit 1 --add-label instruction-budget-raise",
+            "if true; then gh pr edit 1 --add-label instruction-budget-raise; fi",
+            "command gh pr edit 1 --add-label instruction-budget-raise",
+            "env -i gh pr edit 1 --add-label instruction-budget-raise",
+            "env FOO=bar gh pr edit 1 --add-label instruction-budget-raise",
+            "sudo -u anis gh pr edit 1 --add-label instruction-budget-raise",
+            "GH_REPO=fagenorn/nix-config gh pr edit 1 --add-label instruction-budget-raise",
+            "gh pr -R fagenorn/nix-config edit 1 --add-label instruction-budget-raise",
+            "gh issue --repo=a/b edit 1 --add-label instruction-budget-raise",
+            "/opt/homebrew/bin/gh pr edit 1 --add-label instruction-budget-raise",
+            "xargs gh pr edit 1 --add-label instruction-budget-raise",
+            "timeout 5 gh pr edit 1 --add-label instruction-budget-raise",
+            "eval 'gh pr edit 1 --add-label instruction-budget-raise'",
+            "sh -c 'gh pr edit 1 --add-label instruction-budget-raise'",
+            "gh pr edit 1 --add-label 'instruction-budget-raise",  # unterminated
+        ):
+            # Every row except the three fail-closed rows names the direct-add reason.
+            reason = {
+                "eval 'gh pr edit 1 --add-label instruction-budget-raise'": self.EVALUATOR_REASON,
+                "sh -c 'gh pr edit 1 --add-label instruction-budget-raise'": self.EVALUATOR_REASON,
+                "gh pr edit 1 --add-label 'instruction-budget-raise": self.UNPARSED_REASON,
+            }.get(command, self.DIRECT_ADD_REASON)
+            with self.subTest(command=command):
+                result = self.run_guard(command)
+                self.assertEqual(2, result.returncode, (command, result.stderr))
+                self.assertIn(f"{self.LABEL_REFUSAL_PREFIX} {reason}", result.stderr)
+        elsewhere = self.make_repo("https://github.com/someoneelse/tool.git")
+        result = self.invoke_command_in(
+            "gh pr edit 1 --add-label instruction-budget-raise", elsewhere)
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn(f"{self.LABEL_REFUSAL_PREFIX} {self.DIRECT_ADD_REASON}", result.stderr)
+
+    def test_raise_label_refusal_precedes_every_other_verb(self):
+        # The push alone would be refused as a push; the label wins, so the
+        # label rule is judged before any repository-bound verb.
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        result = self.run_guard(
+            "git push origin main; gh pr edit 1 --add-label instruction-budget-raise",
+            cwd=repo)
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn(f"{self.LABEL_REFUSAL_PREFIX} {self.DIRECT_ADD_REASON}", result.stderr)
+        self.assertNotIn("unsafe push", result.stderr)
+
+    def test_other_label_edits_and_mentions_pass(self):
+        for command in (
+            "gh pr edit 1 --add-label bug",
+            'gh issue edit 23 34 --add-label "bug,help wanted"',
+            "gh pr edit 1 --remove-label instruction-budget-raise",
+            "gh pr edit 1 --body 'the user may add instruction-budget-raise'",
+            "xargs gh pr edit 1 --add-label bug",
+            "sh -c 'gh pr edit 1 --add-label bug'",
+            'echo "gh pr edit 1 --add-label instruction-budget-raise"',
+            "cat > notes.md <<'EOF'\ngh pr edit 1 --add-label instruction-budget-raise\nEOF\n",
+            "git commit -m 'docs: explain the instruction-budget-raise label'",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
     def test_whitespace_normalisation_still_accepts_a_valid_push(self):
         repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
         for command in ("git  push -u origin topic", "git\tpush origin topic"):
