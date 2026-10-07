@@ -22,7 +22,8 @@ no owner. The user chose to keep that worktree, so a fix must not delete it.
    owner and its workers share the root.
 2. **`reap` removes the root.** After a launch's processes are gone, reap
    force-removes every worktree of the repository that is registered inside the
-   root, deletes the root, and runs `git worktree prune`.
+   root and deletes the root. It never runs a repository-wide
+   `git worktree prune`, which would also drop registrations outside every root (D10).
 3. **`reap` reports leftovers.** Every reap lists the registered worktrees that
    sit outside the main checkout and outside every recorded scratch root as
    `unattributed_worktrees`, and deletes none of them.
@@ -86,18 +87,22 @@ snapshot's record:
    A worktree is inside the root when its real path is the root or lies below
    it. Each such worktree, except the main worktree, is removed with
    `git -C R worktree remove --force --force <path>`. A registration whose
-   directory is already gone is left for the prune. Git records real paths, so
+   directory is already gone is removed the same way: `remove --force --force`
+   drops the registration of a missing worktree, locked or not (D10). Git records real paths, so
    a worktree reached through a symlink that leads out of the root counts as
    outside and is kept; `rmtree` removes only the link.
 3. Delete the root with `shutil.rmtree` if it exists. A root that is already
-   gone is not an error.
-4. Run `git -C R worktree prune`, then list again. Any worktree still
-   registered inside the root, or any failed remove, rmtree or prune, skips the
+   gone is not an error; a root that step 2 took away, because a worktree
+   occupied the root itself, counts as deleted by this reap.
+4. List again. Any worktree still
+   registered inside the root, or any failed remove or rmtree, skips the
    launch with `scratch_not_removed` and keeps the record and directory for the
-   next reap.
+   next reap. Each failure names on stderr the operation, the path, and git's
+   exit status and stderr or the filesystem error (D11).
 5. `worktrees_removed` is the sorted real paths that were registered inside the
    root before step 2 and are gone after step 4. `scratch_removed` is true when
-   this reap deleted the root directory (D5).
+   this reap deleted the root directory, by `rmtree` or by removing a worktree
+   that occupied the root (D5).
 
 Only then does #276's proved-file removal delete `scratch.json` with the rows.
 Repeating a reap is still a no-op. The record is gone, so the report shows
@@ -158,7 +163,11 @@ and the existing test that they never name `launch-scope` stays (D7).
   - a missing root is recreated, and a malformed record exits 2;
   - a worktree added inside the root is gone from `git worktree list` and from
     disk after `reap --action-id`, and also after `--sweep` (AC2);
-  - a worktree whose directory was already deleted is pruned;
+  - a worktree whose directory was already deleted is unregistered, while a
+    missing registration outside every root stays registered (D10);
+  - a worktree occupying the root itself reports `scratch_removed: true`;
+  - a failed removal names the operation, path and cause on stderr (D11);
+  - a failed record publication leaves neither a root nor a temporary record (D11);
   - a worktree in an unrelated temp directory appears in
     `unattributed_worktrees` and still exists, while a worktree below the main
     checkout and one inside a live launch's root are not listed (AC3);
@@ -200,3 +209,5 @@ and the existing test that they never name `launch-scope` stays (D7).
 | D7 | Adoption is one scratch sentence placed right after each #276 `exec` sentence. The leaf-agent clauses stay byte-identical. Issue AC4 ("the leaf clause routes scratch") is met by these lifecycle-identity sentences, as #276 D8 met its "leaf clause names `exec`" criterion | #276 D8; parent D7; `test_dispatch_contracts.py` verbatim-once contract | Editing the leaf clauses spends tokens in every reviewer prompt and agent definition, none of which ever holds a lifecycle identity |
 | D8 | Tests drive real `git worktree` operations with `TMPDIR` pinned to a test-owned directory. Only the removal-failure branch is patched in process | #276 D10 and D12 precedent; the-bar tests that can fail | Mocking git cannot catch the `/var` and `/private/var` mismatch that the issue names |
 | D9 | Plan-level edge rules. `scratch` calls `require_supported_platform` first and exits 2 on an unsupported platform, as `exec` and `reap` do. A registration inside the root whose directory is gone and that `prune` keeps (a locked one) fails the step as `scratch_not_removed`, and nothing unlocks it | No reap can run where `scratch` would hand out a root, and parent D8 forbids removing anything reap cannot account for; the-bar fail loud | Handing out roots on a platform reap refuses leaks every one. Running `git worktree unlock` overrides a lock someone set on purpose |
+| D10 | Reverses D5's prune and D9's locked-registration rule. Reap never runs a repository-wide `git worktree prune`; it runs `git worktree remove --force --force` on every registration inside the root, present or missing, locked or not, and re-lists to verify | Codex plan review PR277-01: prune drops every prunable registration, including missing ones outside every root, which parent D8 says reap only reports. Git 2.51 removes a missing, locked registration under double force (checked locally) | Keeping the prune deletes registrations reap cannot account for. Leaving locked missing registrations as a permanent skip strands the launch when the lock sits inside the launch's own root |
+| D11 | Failure paths keep evidence and leak nothing: `scratch` removes its freshly made root and temporary record on every failure before the record is published; reap's scratch step names each failed operation, its path and its cause on stderr while keeping the D5 report and exit code | Codex plan review PR277-02 and PR277-04; the-bar diagnostics rule | Cleaning up only on `FileExistsError` leaks an unrecorded root no reap can find; a bare `scratch_not_removed` hides which path failed and why |

@@ -47,6 +47,10 @@ Task 3 — Scratch sentences, Self-reap and CLAUDE.md — home/common/agent-skil
 
 ## Decisions
 
-Tasks rest on spec rows D1–D8 and on the plan-level row D9 (`scratch` requires a supported platform; a locked, missing registration fails the scratch step). Each member cites the rows it uses.
+Tasks rest on spec rows D1–D8 on the plan-level row D9 (`scratch` requires a supported platform), and on the Phase-5 rows D10 (no repository-wide prune; reverses D9's locked-registration clause) and D11 (no leaked root on failed publication; failure diagnostics on stderr). Each member cites the rows it uses.
 
 ---
+
+## Standards review provenance
+
+Reviewer: Codex (gpt-6-astra, xhigh), isolated read-only `plan-review`, no fallback. Base SHA 2d3ba38d. Findings: 4 accepted (PR277-01 and PR277-02 blocking, PR277-03 and PR277-04 should-fix), 0 rejected, 0 deferred; recorded as spec rows D10 and D11.

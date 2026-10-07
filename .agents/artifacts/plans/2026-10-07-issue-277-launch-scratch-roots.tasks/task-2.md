@@ -18,8 +18,9 @@ Spec sections **Reap** and **Unattributed worktrees** are normative; this task c
 
 **Invariants:**
 - The scratch step runs only in a clean round (no survivor, snapshot unchanged, no live marked process), after those checks and before `_remove_proved` (D5).
-- `git worktree remove --force --force` is run only on a listed, non-main worktree whose real path is the root or below it, and whose path still exists (`os.path.lexists`); `shutil.rmtree` only on the validated root (D4, D5).
-- Any failed remove, rmtree or prune, or any registration still inside the root after the prune, returns `SCRATCH_NOT_REMOVED` and skips `_remove_proved`, so `scratch.json` and the rows stay (D5, D9).
+- `git worktree remove --force --force` is run only on a listed, non-main worktree whose real path is the root or below it, present or missing (D10); `shutil.rmtree` only on the validated root (D4, D5).
+- Any failed remove or rmtree, or any registration still inside the root on the re-list, returns `SCRATCH_NOT_REMOVED` and skips `_remove_proved`, so `scratch.json` and the rows stay; each failure is named on stderr with operation, path and cause (D5, D11).
+- No repository-wide `git worktree prune` ever runs, so a registration outside every root survives the reap even when its directory is missing (D10).
 - `unattributed_worktrees` never contains the main worktree, anything below it, or anything inside a root of a valid `scratch.json` in any run; it never changes the exit code (D6).
 - Across reap rounds, `scratch_removed` is true if any round deleted the root, and `worktrees_removed` is the sorted union of every round's removals.
 
@@ -75,15 +76,28 @@ Add these tests to `ReapTest`:
         self.assertFalse(os.path.lexists(root))
         self.assertNotIn(inside, self.worktrees())
 
-    def test_a_worktree_whose_directory_is_gone_is_pruned(self):
+    def test_a_missing_registration_is_dropped_only_inside_the_root(self):  # D10
         root = self.scratch_root()
         inside = self.add_worktree(Path(root) / "tree")
+        elsewhere = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        outside = self.add_worktree(elsewhere / "gone")
         shutil.rmtree(inside)
-        self.assertIn(inside, self.worktrees())
+        shutil.rmtree(outside)
+        self.assertTrue({inside, outside} <= self.worktrees())
         self.assert_report(self.scope(*self.reap_args("--action-id", "14:1:1")), 0, [
             {"action_id": "14:1:1", "signalled": 0, "scratch_removed": True,
-             "worktrees_removed": [inside]}], [])
+             "worktrees_removed": [inside]}], [], [outside])
         self.assertNotIn(inside, self.worktrees())
+        self.assertIn(outside, self.worktrees())
+
+    def test_a_worktree_occupying_the_root_counts_as_removing_it(self):  # D5
+        root = self.scratch_root()
+        os.rmdir(root)
+        occupying = self.add_worktree(Path(root))
+        self.assert_report(self.scope(*self.reap_args("--action-id", "14:1:1")), 0, [
+            {"action_id": "14:1:1", "signalled": 0, "scratch_removed": True,
+             "worktrees_removed": [occupying]}], [])
+        self.assertFalse(os.path.lexists(root))
 
     def test_worktrees_outside_every_root_are_reported_and_kept(self):  # AC3
         live_root = self.scratch_root()
@@ -105,11 +119,15 @@ Add these tests to `ReapTest`:
         self.add_worktree(Path(root) / "tree")
         with mock.patch.dict(os.environ, self.env, clear=True), \
                 mock.patch.object(launch_scope.shutil, "rmtree",
-                                  side_effect=OSError("injected")):
+                                  side_effect=OSError("injected")), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
             status, report = launch_scope.reap(str(self.root), self.run_id, action_id="14:1:1")
         self.assertEqual((status, report), (1, {"reaped": [], "skipped": [
             {"action_id": "14:1:1", "reason": "scratch_not_removed"}],
             "unattributed_worktrees": []}))
+        self.assertIn("rmtree", stderr.getvalue())
+        self.assertIn(root, stderr.getvalue())
+        self.assertIn("injected", stderr.getvalue())
         self.assertTrue(self.record_path().is_file())
         self.assertTrue(os.path.isdir(root))
         self.assert_report(self.scope(*self.reap_args("--action-id", "14:1:1")), 0, [
@@ -138,26 +156,26 @@ In `python/agent_tools/launch_scope.py` (`from typing import NamedTuple`):
 
 1. `worktree_paths(repo_root)`: run `["git", "-C", repo_root, "worktree", "list", "--porcelain", "-z"]` with `capture_output=True`; split stdout on `b"\0"`; each field starting with `b"worktree "` yields `os.path.realpath(os.fsdecode(field[len(b"worktree "):]))`.
 2. `_inside(path: str, root: str) -> bool`: `path == root or path.startswith(root + os.sep)`. Both arguments are real paths.
-3. `_git_step(repo_root, *args) -> bool`: run `git -C repo_root <args>` with `capture_output=True`; `OSError` raises `LaunchScopeError`; returns `returncode == 0`.
+3. `_git_step(repo_root, *args) -> bool`: run `git -C repo_root <args>` with `capture_output=True`; `OSError` raises `LaunchScopeError`; on a non-zero exit, print `launch-scope: git <args> failed (exit <n>): <stderr>` to stderr; returns `returncode == 0` (D11).
 4. `_remove_scratch(repo_root: str, snapshot: dict[str, bytes]) -> tuple[bool, tuple[str, ...]] | None` — `None` means skip with `SCRATCH_NOT_REMOVED`:
    1. `data = snapshot.get(SCRATCH_RECORD)`; `None` → `return False, ()`.
    2. `root = scratch_path(data)`; `None` → `return None` (D4).
    3. `listed = worktree_paths(repo_root)`; `before = sorted(p for p in listed[1:] if _inside(p, root))`.
-   4. `failed = False`. For each `p` in `before` with `os.path.lexists(p)`: `failed |= not _git_step(repo_root, "worktree", "remove", "--force", "--force", p)`. A path that no longer exists is left for the prune.
-   5. `removed_root = False`; if `os.path.lexists(root)`: `shutil.rmtree(root)` (through the module attribute, so the failure test can patch it); `removed_root = True`; an `OSError` sets `failed = True`.
-   6. `failed |= not _git_step(repo_root, "worktree", "prune")`.
-   7. `relisted = worktree_paths(repo_root)`; if `failed` or any `p` in `relisted[1:]` is `_inside(p, root)` → `return None` (a locked, missing registration lands here: D9).
+   4. `failed = False`. `root_existed = os.path.lexists(root)`. For each `p` in `before`, present or missing: `failed |= not _git_step(repo_root, "worktree", "remove", "--force", "--force", p)` (D10).
+   5. If `os.path.lexists(root)`: `shutil.rmtree(root)` (through the module attribute, so the failure test can patch it); an `OSError` prints `launch-scope: rmtree <root> failed: <error>` to stderr and sets `failed = True` (D11). `removed_root = root_existed and not os.path.lexists(root)`, so a root a worktree removal took away counts (D5).
+   6. No `git worktree prune` (D10).
+   7. `relisted = worktree_paths(repo_root)`; if `failed` or any `p` in `relisted[1:]` is `_inside(p, root)` → `return None` (D10).
    8. `return removed_root, tuple(p for p in before if p not in set(relisted))`.
 5. `reap_launch(repo_root, registry, run_id, action_id) -> ReapOutcome`: keep the round loop. Hold `removed_root = False` and `removed: set[str]` across rounds. In the clean round, after the live-marked check and before `_remove_proved`: `scratch = _remove_scratch(repo_root, snapshot)`; `None` → `return ReapOutcome(signalled, SCRATCH_NOT_REMOVED, False, ())`; otherwise fold it into `removed_root`/`removed`. `_remove_proved(...)` true → `return ReapOutcome(signalled, None, removed_root, tuple(sorted(removed)))`. Survivors, or rounds exhausted → `ReapOutcome(signalled, PROCESSES_SURVIVED, False, ())`. Update its docstring with the scratch step.
 6. `recorded_roots(registry)`: for each `run` in `_launch_names(registry)` and each `action` in `_launch_names(registry / run)`, read `registry / run / action / SCRATCH_RECORD` when it is a regular file (`is_file()` and not `is_symlink()`); `FileNotFoundError` → skip, other `OSError` → `LaunchScopeError`; add `scratch_path(data)` when not `None`.
 7. `unattributed_worktrees(repo_root, registry)`: `listed = worktree_paths(repo_root)`; `main = listed[0]`; `roots = recorded_roots(registry)`; return `sorted(p for p in listed[1:] if not _inside(p, main) and not any(_inside(p, r) for r in roots))`.
 8. `reap(...)`: call `reap_launch(repo_root, registry, run_id, name)`; a `skip_reason` appends `{"action_id", "reason"}` to `skipped`; otherwise append `{"action_id", "signalled", "scratch_removed", "worktrees_removed": list(...)}` to `reaped`. After the loop, add `"unattributed_worktrees": unattributed_worktrees(repo_root, registry)` to the report. The exit status stays `0 if not skipped else 1`.
-9. Module docstring: replace the reap report line with the new shape; add the scratch step (clean round only, force-remove inside worktrees, rmtree, prune, re-list), the `unattributed_worktrees` rule (D6), `scratch_not_removed` under exit 1, and a git listing failure under exit 2. Write it from the code as implemented in this step.
+9. Module docstring: replace the reap report line with the new shape; add the scratch step (clean round only, force-remove every registration inside the root, rmtree, re-list, never a repository-wide prune), the `unattributed_worktrees` rule (D6), `scratch_not_removed` under exit 1, and a git listing failure under exit 2. Write it from the code as implemented in this step.
 
 - [ ] **Step 4: Verify**
 
 Run: `PYTHONPATH="$PWD/python" timeout 600 python3 -m unittest tests.test_launch_scope 2>&1 | tail -4`
-Expected: `OK` — the six new `ReapTest` cases pass, and every existing case passes with the updated `assert_report`.
+Expected: `OK` — the seven new `ReapTest` cases pass, and every existing case passes with the updated `assert_report`.
 
 Run: `PYTHONPATH="$PWD/python" timeout 600 python3 -m unittest tests.test_agent_tools_canonical tests.test_launch_commit 2>&1 | tail -2`
 Expected: `OK`.
