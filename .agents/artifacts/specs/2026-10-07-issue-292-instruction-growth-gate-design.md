@@ -122,7 +122,10 @@ gate to compare against.
   newline, which the live file already round-trips). It never raises a ceiling,
   so it cannot clear a breach (D7).
 - The parser keeps `prog="agent-instruction-load"`. The remedy text for a loose
-  or breached ceiling names `just agent-instruction-load tighten`.
+  ceiling names `just agent-instruction-load tighten`. The remedy text for a
+  breached ceiling says to cut the text, or to raise the ceiling in a PR that
+  carries the `instruction-budget-raise` label, because `tighten` cannot clear
+  a breach (D7).
 
 ### The workflow and protection
 
