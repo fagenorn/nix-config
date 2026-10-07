@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
+import json
 import math
 import os
 from pathlib import Path
 import re
+import sys
 from typing import Callable, Optional
 
 from agent_tools.agent_model_matrix import AGENTS_PATH, MATRIX_PATH, parse_matrix
+from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 
 
 SHARED_TREE = "home/common/agent-skills/skills"
@@ -19,6 +23,9 @@ TREE_ROOTS = (SHARED_TREE, CLAUDE_TREE, CODEX_TREE)
 AGENTS_DIR = AGENTS_PATH.as_posix()
 EXCLUDED_DIRS = ("evals", "scripts")
 REFLOW_WIDTH = 100
+DEBT_PATH = "home/common/agent-skills/skill-lint-debt.json"
+TRIGGERS = ("Use when", "Use for", "Use to", "Use before", "Use after", "Invoke before")
+XML = re.compile(r"<[A-Za-z/]")
 
 Reader = Callable[[str], Optional[bytes]]
 Lister = Callable[[str], list[str]]
@@ -30,6 +37,7 @@ MD_TOKEN = re.compile(BASENAME_BEFORE + r"([A-Za-z0-9_-]+\.md)" + BOUNDARY_AFTER
 
 _FRONTMATTER_LINE = re.compile(r"([A-Za-z][A-Za-z0-9_-]*):(?: (.*))?")
 _BLOCK_SCALARS = (">", "|", ">-", "|-", ">+", "|+")
+_NAME = re.compile(r"[a-z0-9-]+")
 
 
 @dataclass(frozen=True)
@@ -203,3 +211,174 @@ def skill_dirs(snapshot: Snapshot) -> list[SkillDir]:
                 payloads=payloads,
             ))
     return found
+
+
+@dataclass(frozen=True, order=True)
+class Violation:
+    key: str
+    text: str
+
+
+def has_contents(text: str) -> bool:
+    """Whether the first `## ` heading outside code fences is `## Contents`, followed by a list."""
+    lines = text.splitlines()
+    fenced = False
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if fenced or not line.startswith("## "):
+            continue
+        if line != "## Contents":
+            return False
+        following = next((rest for rest in lines[index + 1:] if rest.strip()), "")
+        return following.startswith(("- ", "1. "))
+    return False
+
+
+def _basename(path: str) -> str:
+    return path.rsplit("/", 1)[-1]
+
+
+def _frontmatter_violations(directory: SkillDir, path: str, fields: dict[str, str]) -> list[Violation]:
+    found: list[Violation] = []
+
+    def add(rule: str, text: str) -> None:
+        found.append(Violation(f"{rule} {path}", text))
+
+    name = fields.get("name")
+    if name is None:
+        add("L1", "missing name")
+    else:
+        if name != directory.name:
+            add("L1", f"name {name!r} differs from its directory {directory.name!r}")
+        if len(name) > 64:
+            add("L1", "name is longer than 64 characters")
+        if not _NAME.fullmatch(name):
+            add("L1", "name must match [a-z0-9-]+")
+        if "anthropic" in name or "claude" in name:
+            add("L1", "name contains 'anthropic' or 'claude'")
+        if XML.search(name):
+            add("L1", "name contains XML")
+    description = fields.get("description")
+    if description is None:
+        add("L1", "missing description")
+    elif not description:
+        add("L1", "description is empty")
+    else:
+        if len(description) > 1024:
+            add("L1", "description is longer than 1024 characters")
+        if XML.search(description):
+            add("L1", "description contains XML")
+        if description.startswith(("I ", "You ")):
+            add("L5", "description opens with 'I ' or 'You '")
+        if not any(trigger in description for trigger in TRIGGERS):
+            add("L5", "description has no trigger clause "
+                      "(Use when, Use for, Use to, Use before, Use after, Invoke before)")
+    return found
+
+
+def _directory_violations(snapshot: Snapshot, directory: SkillDir) -> list[Violation]:
+    if directory.skill_md is None:
+        return [Violation(f"L1 {directory.path}/SKILL.md", "missing SKILL.md")]
+    path = directory.skill_md
+    try:
+        text = (snapshot.read(path) or b"").decode("utf-8")
+    except UnicodeDecodeError:
+        return [Violation(f"L1 {path}", "SKILL.md is not UTF-8")]
+    found: list[Violation] = []
+    try:
+        fields, body = parse_frontmatter(text)
+    except ValueError as error:
+        found.append(Violation(f"L1 {path}", str(error)))
+        body = text
+    else:
+        found.extend(_frontmatter_violations(directory, path, fields))
+    lines = reflowed_lines(body)
+    if lines > 500:
+        found.append(Violation(f"L2 {path}", f"body is {lines} reflowed lines, over 500"))
+    for reference in directory.references:
+        reference_text = (snapshot.read(reference) or b"").decode("utf-8", errors="replace")
+        lines = reflowed_lines(reference_text)
+        if lines > 100 and not has_contents(reference_text):
+            found.append(Violation(
+                f"L3 {reference}",
+                f"{lines} reflowed lines and no ## Contents list before its first other ## heading"))
+        if not names(f"{directory.name}/SKILL.md", text,
+                     f"{directory.name}/{_basename(reference)}"):
+            found.append(Violation(f"L4a {reference}", "not named in its SKILL.md"))
+        for other in directory.references:
+            if other != reference and names(f"{directory.name}/{_basename(reference)}",
+                                            reference_text,
+                                            f"{directory.name}/{_basename(other)}"):
+                found.append(Violation(
+                    f"L4b {reference} names {_basename(other)}",
+                    f"names the sibling reference file {_basename(other)}"))
+    return found
+
+
+def violations(snapshot: Snapshot) -> list[Violation]:
+    """Every L1-L5 violation of the three skill trees, sorted, without duplicates."""
+    found: list[Violation] = []
+    for directory in skill_dirs(snapshot):
+        found.extend(_directory_violations(snapshot, directory))
+    return sorted(set(found))
+
+
+def load_debt(raw: bytes) -> list[str]:
+    """The debt keys of the committed debt file, which must be sorted and unique."""
+    try:
+        document = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_nonfinite_literal,
+        )
+    except ValueError as error:
+        raise ValueError(f"cannot load {DEBT_PATH}: {error}") from error
+    debt = document.get("debt") if isinstance(document, dict) else None
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"debt"}
+        or not isinstance(debt, list)
+        or not all(isinstance(key, str) for key in debt)
+        or debt != sorted(set(debt))
+    ):
+        raise ValueError(f'{DEBT_PATH}: must be {{"debt": [sorted unique keys]}}')
+    return debt
+
+
+def lint(snapshot: Snapshot) -> list[str]:
+    """One failure line per unlisted violation, then one per stale debt key."""
+    raw = snapshot.read(DEBT_PATH)
+    if raw is None:
+        raise ValueError(f"{DEBT_PATH} is absent")
+    debt = load_debt(raw)
+    found = violations(snapshot)
+    listed = set(debt)
+    produced = {violation.key for violation in found}
+    lines = [f"{v.key}: {v.text}" for v in found if v.key not in listed]
+    lines.extend(
+        f"{key}: stale debt entry; delete it from {DEBT_PATH}"
+        for key in debt if key not in produced
+    )
+    return lines
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(prog="skill-lint")
+    commands = parser.add_subparsers(dest="command", required=True)
+    check = commands.add_parser("check", help="lint the skill trees against the debt file")
+    check.add_argument("--root", type=Path, default=Path("."))
+    args = parser.parse_args(argv)
+    try:
+        lines = lint(working_tree(args.root))
+    except (ValueError, OSError) as error:
+        print(f"skill-lint: {' '.join(str(error).split())}", file=sys.stderr)
+        return 2
+    for line in lines:
+        print(line)
+    return 1 if lines else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

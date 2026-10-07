@@ -144,5 +144,188 @@ class FoundationTest(unittest.TestCase):
         self.assertIsNone(skill_lint.split_member("demo/sub/EXTRA.md"))
 
 
+DEBT = "home/common/agent-skills/skill-lint-debt.json"
+ALPHA_BODY = "Read GUIDE.md first.\nHand alpha-prompt.md and CONTRACT.md to the reviewer.\n"
+
+
+class RuleTest(unittest.TestCase):
+    def setUp(self):
+        self.files = clean_files()
+
+    def keys(self, files=None):
+        return {v.key for v in skill_lint.violations(dict_snapshot(files or self.files))}
+
+    def test_the_clean_tree_has_no_violation(self):
+        self.assertEqual(skill_lint.violations(dict_snapshot(self.files)), [])
+        self.assertEqual(skill_lint.lint(dict_snapshot(self.files)), [])
+
+    def test_l1_reports_every_frontmatter_form(self):
+        path = f"{ALPHA}/SKILL.md"
+        body = ALPHA_BODY.encode()
+        cases = {
+            "name differs": skill("alphax", body=ALPHA_BODY),
+            "missing name": b"---\ndescription: Alphas. Use when testing.\n---\n" + body,
+            "missing description": b"---\nname: alpha\n---\n" + body,
+            "empty description": b"---\nname: alpha\ndescription:\n---\n" + body,
+            "long description": skill("alpha", "Use when testing. " + "x" * 1010, ALPHA_BODY),
+            "xml description": skill("alpha", "Alphas <b>things</b>. Use when testing.",
+                                     ALPHA_BODY),
+            "no fence": body,
+            "unclosed fence": b"---\nname: alpha\n" + body,
+            "block scalar": b"---\nname: alpha\ndescription: >\n---\n" + body,
+            "duplicate key": b"---\nname: alpha\nname: alpha\n"
+                             b"description: Alphas. Use when x.\n---\n" + body,
+        }
+        for label, data in cases.items():
+            with self.subTest(case=label):
+                files = clean_files()
+                files[path] = data
+                self.assertEqual(self.keys(files), {f"L1 {path}"})
+
+    def test_l1_judges_the_name_itself(self):
+        for name in ("a" * 65, "Upper", "claude-helper", "anthropic-x"):
+            with self.subTest(name=name):
+                files = clean_files()
+                path = f"{SHARED}/{name}/SKILL.md"
+                files[path] = skill(name)
+                self.assertEqual(self.keys(files), {f"L1 {path}"})
+
+    def test_l1_reports_a_skill_directory_without_skill_md(self):
+        self.files[f"{SHARED}/orphan/NOTES.md"] = b"notes\n"
+        self.assertEqual(self.keys(), {f"L1 {SHARED}/orphan/SKILL.md"})
+
+    def test_l2_counts_reflowed_body_lines(self):
+        path = f"{ALPHA}/SKILL.md"
+        for body, expected in ((ALPHA_BODY + "x\n" * 498, set()),
+                               (ALPHA_BODY + "x\n" * 499, {f"L2 {path}"}),
+                               (ALPHA_BODY + "x\n" * 496 + "y" * 201 + "\n", {f"L2 {path}"})):
+            with self.subTest(lines=body.count("\n")):
+                files = clean_files()
+                files[path] = skill("alpha", "Alphas things. Use when testing.", body)
+                self.assertEqual(self.keys(files), expected)
+
+    def test_l3_demands_a_contents_list_past_100_reflowed_lines(self):
+        guide = f"{ALPHA}/GUIDE.md"
+        filler = "line\n"
+        cases = (
+            ("100 lines, no contents", "# Guide\n" + filler * 99, set()),
+            ("101 lines, no contents", "# Guide\n" + filler * 100, {f"L3 {guide}"}),
+            ("101 lines with contents",
+             "# Guide\n## Contents\n- [A](#a)\n## A\n" + filler * 97, set()),
+            ("contents after another heading",
+             "# Guide\n## A\n## Contents\n- [A](#a)\n" + filler * 97, {f"L3 {guide}"}),
+            ("contents heading without a list",
+             "# Guide\n## Contents\nprose\n## A\n" + filler * 97, {f"L3 {guide}"}),
+            ("a fenced heading comes first",
+             "# Guide\n```\n## Not a heading\n```\n## Contents\n- a\n" + filler * 95, set()),
+        )
+        for label, text, expected in cases:
+            with self.subTest(case=label):
+                files = clean_files()
+                files[guide] = text.encode()
+                self.assertEqual(self.keys(files), expected)
+
+    def test_l4a_reports_a_reference_its_skill_md_does_not_name(self):
+        self.files[f"{ALPHA}/ORPHAN.md"] = b"orphan\n"
+        self.assertEqual(self.keys(), {f"L4a {ALPHA}/ORPHAN.md"})
+
+    def test_l4b_reports_a_reference_naming_a_sibling_reference(self):
+        self.files[f"{ALPHA}/OTHER.md"] = b"other\n"
+        self.files[f"{ALPHA}/SKILL.md"] = skill("alpha", "Alphas things. Use when testing.",
+                                                ALPHA_BODY + "See OTHER.md.\n")
+        self.files[f"{ALPHA}/GUIDE.md"] = b"# Guide\nsee OTHER.md\n"
+        self.assertEqual(self.keys(), {f"L4b {ALPHA}/GUIDE.md names OTHER.md"})
+
+    def test_l4_exempts_payloads_and_naming_skill_md_or_a_payload(self):
+        # GUIDE.md names SKILL.md and the payload CONTRACT.md; the payload
+        # alpha-prompt.md names the reference GUIDE.md. None of it is a violation.
+        self.files[f"{ALPHA}/CONTRACT.md"] = b"contract naming GUIDE.md\n"
+        self.assertEqual(self.keys(), set())
+
+    def test_l5_demands_third_person_and_a_trigger_clause(self):
+        path = f"{ALPHA}/SKILL.md"
+        for description, expected in (("You alpha things. Use when testing.", {f"L5 {path}"}),
+                                      ("I alpha things. Use when testing.", {f"L5 {path}"}),
+                                      ("Alphas things.", {f"L5 {path}"}),
+                                      ("Alphas things. Invoke before planning.", set())):
+            with self.subTest(description=description):
+                files = clean_files()
+                files[path] = skill("alpha", description, ALPHA_BODY)
+                self.assertEqual(self.keys(files), expected)
+
+
+class DebtTest(unittest.TestCase):
+    def setUp(self):
+        self.files = clean_files()
+
+    def debt(self, keys):
+        self.files[DEBT] = json.dumps({"debt": keys}).encode()
+
+    def test_a_listed_violation_is_suppressed(self):
+        self.files[f"{ALPHA}/ORPHAN.md"] = b"orphan\n"
+        self.debt([f"L4a {ALPHA}/ORPHAN.md"])
+        self.assertEqual(skill_lint.lint(dict_snapshot(self.files)), [])
+
+    def test_an_unlisted_violation_is_one_failure_line(self):
+        self.files[f"{ALPHA}/ORPHAN.md"] = b"orphan\n"
+        self.assertEqual(skill_lint.lint(dict_snapshot(self.files)),
+                         [f"L4a {ALPHA}/ORPHAN.md: not named in its SKILL.md"])
+
+    def test_a_stale_entry_fails(self):
+        self.debt(["L4a gone.md"])
+        self.assertEqual(skill_lint.lint(dict_snapshot(self.files)), [
+            "L4a gone.md: stale debt entry; delete it from "
+            "home/common/agent-skills/skill-lint-debt.json"])
+
+    def test_a_malformed_debt_file_cannot_run(self):
+        for raw in (b'{"debt": ["b", "a"]}', b'{"debt": ["a", "a"]}', b'{"debt": "a"}',
+                    b'{"debt": [], "extra": 1}', b'{"debt": [1]}', b"[]",
+                    b'{"debt": [], "debt": []}', b"\xff", None):
+            with self.subTest(raw=raw):
+                files = clean_files()
+                if raw is None:
+                    del files[DEBT]
+                else:
+                    files[DEBT] = raw
+                with self.assertRaises(ValueError):
+                    skill_lint.lint(dict_snapshot(files))
+
+
+class CommandTest(unittest.TestCase):
+    def run_lint(self, files):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative, data in files.items():
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                (root / relative).write_bytes(data)
+            return subprocess.run(
+                [sys.executable, "-m", "agent_tools.skill_lint", "check", "--root", str(root)],
+                capture_output=True, text=True, check=False)
+
+    def test_exit_codes(self):
+        clean = self.run_lint(clean_files())
+        self.assertEqual((clean.returncode, clean.stdout, clean.stderr), (0, "", ""))
+        orphaned = self.run_lint({**clean_files(), f"{ALPHA}/ORPHAN.md": b"orphan\n"})
+        self.assertEqual((orphaned.returncode, orphaned.stdout),
+                         (1, f"L4a {ALPHA}/ORPHAN.md: not named in its SKILL.md\n"))
+        no_codex = {p: d for p, d in clean_files().items() if not p.startswith(CODEX)}
+        for files in ({**clean_files(), DEBT: b"{"}, no_codex):
+            broken = self.run_lint(files)
+            self.assertEqual((broken.returncode, broken.stdout), (2, ""))
+            self.assertEqual(len(broken.stderr.splitlines()), 1, broken.stderr)
+            self.assertTrue(broken.stderr.startswith("skill-lint: "))
+
+
+class LiveTreeTest(unittest.TestCase):
+    def test_the_live_tree_lints_clean_against_its_debt_file(self):
+        self.assertEqual(skill_lint.lint(skill_lint.working_tree(REPO_ROOT)), [])
+
+    def test_every_live_debt_key_names_a_known_rule(self):
+        raw = (REPO_ROOT / DEBT).read_bytes()
+        for key in skill_lint.load_debt(raw):
+            with self.subTest(key=key):
+                self.assertIn(key.split(" ", 1)[0], {"L1", "L2", "L3", "L4a", "L4b", "L5"})
+
+
 if __name__ == "__main__":
     unittest.main()
