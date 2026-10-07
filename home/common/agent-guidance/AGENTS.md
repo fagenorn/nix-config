@@ -11,3 +11,5 @@ See https://devenv.sh/ad-hoc-developer-environments/
 Before starting a task, check the available-skills listing for a match; if a
 skill plausibly applies, invoke it via the Skill tool before acting. Skills
 evolve — read the current version instead of working from memory.
+
+Only the user applies the `instruction-budget-raise` label.
