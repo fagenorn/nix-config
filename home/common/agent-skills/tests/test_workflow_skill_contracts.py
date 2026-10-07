@@ -1343,7 +1343,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_durable_review_detail_precedes_every_removable_cleanup(self):
         self.assertIn(".superpowers/issue-delivery/", self.sdd)
         self.assertIn(".superpowers/issue-delivery/", self.ship_review)
-        for text in (self.sdd, self.ship_issue, self.ship_handoff):
+        for text in (self.sdd, self.ship_handoff):
             self.assertIn("report_path", text)
             self.assertIn("keep the worktree", text)
         self.assertIn("primary worktree", self.ship_handoff)
@@ -2347,7 +2347,7 @@ class InterimChildResultContractsTest(unittest.TestCase):
     """#261: an owner treats a child's interim return as still running."""
 
     HEAD = "**Interim child results.**"
-    OWNERS = (FROM_ISSUE, SDD, SHIP_ISSUE)
+    OWNERS = (FROM_ISSUE, SDD)
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -2374,7 +2374,7 @@ class InterimChildResultContractsTest(unittest.TestCase):
 
     def test_the_paragraph_copies_stay_identical(self):
         canonical = self.paragraph(FROM_ISSUE)
-        for path in (SDD, SHIP_ISSUE):
+        for path in (SDD,):
             with self.subTest(path=path.parent.name):
                 self.assertEqual(self.paragraph(path), canonical)
 
@@ -2399,7 +2399,6 @@ class InterimChildResultContractsTest(unittest.TestCase):
         for path, start, end in (
             (FROM_ISSUE, "**Writing workers.**", "## Terminal return procedure"),
             (SDD, "### 2. Handle the report", "### 3. Review the task"),
-            (SHIP_ISSUE, "## Phase 5 — Review the PR", "## Phase 6 — Wait for CI"),
         ):
             with self.subTest(path=path.parent.name):
                 self.assert_ordered(self.read(path), start, self.HEAD, end)

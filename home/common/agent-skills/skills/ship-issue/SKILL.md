@@ -1,24 +1,17 @@
 ---
 name: ship-issue
-description: Deliver a finished feature-branch worktree — sync integration branch, PR, review, CI, merge, close or hold issue, clean up. Phase 7 of from-issue. Use for "ship #X", "land it".
+description: 'Delivers a finished feature-branch worktree: integration-branch sync, PR, review, CI, merge, issue close or hold, cleanup. Phase 7 of from-issue. Use for "ship #X", "land it".'
 ---
 
 # Ship Issue
 
-Counterpart to `to-issues` and `from-issue`. Take a worktree branch with the implementation committed and deliver it: merged on the integration branch, issue closed or held as `needs-verification`, workspace gone.
+Delivers a worktree branch with its implementation committed: merged on the integration branch, issue closed or held as `needs-verification`, workspace gone.
 
 ## Project bindings (resolve first)
 
 Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. The only sanctioned exception is `workflow-state build-delivery`, which performs its own sealed, read-only resolution when it builds a delivery object; this skill still never resolves again itself. Use `bindings.tracker`, `bindings.vcs`, `bindings.commands`, `bindings.workflow.review.code`, and `bindings.workflow.verification`; dereference verification IDs through `bindings.commands`.
 
-For code review, select `bindings.workflow.review.code` and route retained
-`capabilities.review.code` first. `blocked` stops; authored `unsupported` takes
-only its documented route. Only `available` dereferences
-`bindings.commands[review_id].argv` before execution.
-
-A blocked required capability stops. An authored unsupported tracker takes the existing tracker-free route; the sync/verify/consolidate/merge machinery still applies.
-
-Retained `capabilities.review.code` governs the full review route.
+For code review, select `bindings.workflow.review.code` and route retained `capabilities.review.code` first: `blocked` stops, authored `unsupported` takes only its documented route, and only `available` dereferences `bindings.commands[review_id].argv` before execution. A blocked required capability stops. An authored unsupported tracker takes the tracker-free route, where the sync/verify/consolidate/merge machinery still applies.
 
 **Invocation paths.** From `from-issue`, treat the handoff as received stdin
 bytes: pass them through `artifact-budget validate-report --boundary
@@ -75,17 +68,16 @@ review prompt.
 ## Standing authorization
 
 Standing authorization exists where repository policy or an explicit user grant
-covers the concrete action, target, and external effect. Carry that grant across
-phase and session boundaries; do not demand that Codex receive the same literal
-command text again. A harmless quoting or spelling change and a transient command
-failure do not erase scoped authorization. The launch guard, required CI,
-reviewed-tip check, protected-branch rules, and the host's actual automatic
-approval decision still bind.
+covers the concrete action, target, and external effect. It carries across phase
+and session boundaries; Codex need not receive the same literal command again, and
+a harmless quoting or spelling change or a transient command failure does not erase
+it. The launch guard, required CI, reviewed-tip check, protected-branch rules, and
+the host's actual automatic approval decision still bind.
 
 In a qualifying repository, the lifecycle guard covers pushing a non-default
 branch, opening a PR to the default branch, the guarded merge, branch deletion,
-and worktree removal. Execute that authorized chain without a phase-boundary
-re-prompt while every check above passes.
+and worktree removal. Execute that chain without a phase-boundary re-prompt while
+every check above passes.
 
 On a host whose permission layer adjudicates intent by review, use an existing
 user grant when it covers the same chain. When authority is absent, take the
@@ -94,10 +86,7 @@ denial stops the denied action; never route around it.
 
 ## Launch guard
 
-The lifecycle ledger reserves one worktree per issue and hands a retry the
-predecessor's worktree and branch on purpose, so a superseded attempt can still
-push, open a PR and merge. Before **every write to the forge or to `origin` this
-skill makes up to and including the merge**, re-validate that the handoff's
+Before **every write to the forge or to `origin` this skill makes up to and including the merge**, re-validate that the handoff's
 launch identity is still the launch the ledger entitles. The rule binds
 regardless of tracker capability, so an unsupported-tracker invocation — which skips
 Phase 4's PR but still pushes the branch — guards that bare `origin` push too:
@@ -107,17 +96,9 @@ Phase 4's PR but still pushes the branch — guards that bare `origin` push too:
 ```
 
 `<issue:attempt:launch>` is the `action_id` the handoff carried, passed through
-verbatim — never recomputed, never derived from `attempt`; the launch ordinal is
-exactly the part this owner cannot know. The verb is read-only: it takes no
-clock, holds no lock and creates nothing.
+verbatim — never recomputed, never derived from `attempt`.
 
-Proceed only on `current: true`. Refuse the write on `current: false`, a
-non-zero exit, a missing helper, or output that does not parse into the exact
-four keys `action_id`, `current`, `current_action_id` and `reason`. **This one
-call does not follow this skill's degrade-gracefully rule for absent optional
-helpers** — that rule is written for optional bindings, not for a safety check,
-and following it here would turn the guard into a no-op precisely when the
-environment is broken.
+Proceed only on `current: true`. Anything else — `current: false`, a non-zero exit, a missing helper, or output that does not parse into the exact four keys `action_id`, `current`, `current_action_id` and `reason` — refuses the write; this check never degrades gracefully.
 
 Guarded: the Phase-4 push, the Phase-4 PR create, every push in REVIEW.md's
 five-step apply/push flow, and the Phase-7 merge. There is no post-merge
@@ -142,14 +123,11 @@ retained readable Minor/Discussion findings, naming that retained source and its
 root in notes and keeping the worktree. An `unpublished` `report_path` is
 worktree-relative, not main-root-relative (REVIEW.md §"Durable
 Minor/Discussion detail"). Phase 8 does not run and no delivery detail is
-published: the successor owns that worktree and will produce its own.
+published.
 
 Without lifecycle identity — a standalone `/ship-issue <num>`, or a handoff
-whose lifecycle group is all-null — skip the guard silently: a ledger-free
-invocation has no attempts and no supersession mechanism, and the handoff
-validator's all-or-nothing group means it is never partially present. That is
-the only skip, and it is a statement about the invocation, not about the
-environment.
+whose lifecycle group is all-null — skip the guard silently. That is the only
+skip, and it is a statement about the invocation, not about the environment.
 
 ### Local commits
 
@@ -171,7 +149,7 @@ still in the foreground." and "Create every scratch directory or scratch worktre
 
 ## Doc-grounded escalations
 
-Before forming *any* user-facing question this skill raises mid-flow, invoke the `doc-grounded-questions` skill and read only the retained declared paths. Lead with what the relevant document says; ask only the genuinely open part.
+Before forming *any* user-facing question this skill raises mid-flow, invoke the `doc-grounded-questions` skill, read only the retained declared paths, lead with what the relevant document says, and ask only the genuinely open part.
 
 ## gh hygiene
 
@@ -189,9 +167,7 @@ the subagents this skill's reviewer dispatch sites name: the subagent-launch
 tool is in your tool surface, or, on a host that defers tool schemas, its tool
 search returns that tool's schema (Claude Code: `ToolSearch` `select:Agent`).
 Test the capability, never a host by name. The probe launches nothing, writes
-nothing and makes no trial dispatch. It proves the tool is present, not that a
-later launch will succeed: a Phase-5 launch that fails after a passing probe
-keeps its existing failure handling. It runs in every review-bearing
+nothing and makes no trial dispatch. It runs in every review-bearing
 invocation — a `ship-handoff/v2` or legacy handoff, or a standalone
 `/ship-issue <num>` — even when the review range may turn out empty, because the
 delta is unknown until the sync this probe precedes. Remainder mode skips
@@ -241,13 +217,7 @@ git fetch origin
 git log origin/<integration>..<integration> --oneline
 ```
 
-The load-bearing rules, in brief:
-
-- Merging `origin/<integration>` into the feature branch is safe even when the local integration branch has diverged (expected under parallel `--auto` runs). **Anything that rewrites the local integration branch — reset, rebase, push — stops and surfaces; `--auto` never auto-resolves history rewrites.**
-- Foreign commits on the branch (another issue's work) → surface, never clean up silently.
-- Conflicts: the allowlist auto-resolves lockfiles, migrations and generated files, and always keeps `.claude/settings.json` out of the merge. **Everything else escalates one conflict at a time**; skipped conflicts pause the phase.
-
-Otherwise run `git merge --no-commit --no-ff origin/<integration>`; when it reports `Already up to date` there is nothing to commit, otherwise commit the merge with the configured merge-commit message through `launch-commit` when this run holds a `Lifecycle worker:` line (### Local commits), or plain `git commit` without one. Don't squash.
+Then run `git merge --no-commit --no-ff origin/<integration>`; when it reports `Already up to date` there is nothing to commit, otherwise commit the merge with the configured merge-commit message through `launch-commit` when this run holds a `Lifecycle worker:` line (### Local commits), or plain `git commit` without one. Don't squash.
 
 ## Phase 2 — Verify locally
 
@@ -270,11 +240,9 @@ route.
    argv and cwd. When every command passes, run
    `verified-tree record --tree <the checked tree>` with the same
    `--verification` ids. A `record` that exits 3 with `tree_changed` is a
-   failing verification under the rules below: the passing run no longer
-   describes the worktree. A `check` that exits 2 leaves no tree to record:
-   run the commands anyway, and leave the pass unrecorded. A `record` that
-   exits 2 leaves the pass unrecorded too; the run itself still counts by its
-   commands' results.
+   failing verification under the rules below. A `check` that exits 2 means run
+   the commands anyway and leave the pass unrecorded; so does a `record` that
+   exits 2.
 
 These failure rules apply only to an actual run. On a failing verification
 command, pause, ground, and surface; do not invent a fix command outside
@@ -323,22 +291,15 @@ Acceptance record: <record-path or none>
 Closes #<num>"
 ```
 
-This is the one form the lifecycle guard accepts: one command, those five flags in that order, `<resolved-repository>` the retained `bindings.tracker.repo_slug`, and the body a single double-quoted argument that may span lines but contains no `"`, `$`, backtick or backslash. A body written to a file, a heredoc or a command substitution is refused, so render the body in place.
+The lifecycle guard accepts only this form, with `<resolved-repository>` the retained `bindings.tracker.repo_slug`; render the body in place, with no `"`, `$`, backtick or backslash, never through a file, heredoc or substitution.
 
-The `## Acceptance` section always appears. `Acceptance state:` carries Phase 0's
-effective value, and `Acceptance record:` carries the record's repository-relative
-path or `none`. With a record, `<acceptance table>` is a Markdown table with the
-three columns `AC`, `Kind` and `Verdict`, one row per record row, copying its
-closed tokens; without one, drop that line. On a **hold** drop the
-`Closes #<num>` line too: a hold body carries no closing keyword (close, closes,
-closed, fix, fixes, fixed, resolve, resolves or resolved before an issue
-reference), so the merge cannot close the issue.
+The `## Acceptance` section always appears: `Acceptance state:` carries Phase 0's effective value and `Acceptance record:` the record's repository-relative path or `none`. With a record, `<acceptance table>` is a Markdown table with the three columns `AC`, `Kind` and `Verdict`, one row per record row, copying its closed tokens; without one, drop that line. On a **hold** drop the `Closes #<num>` line too: a hold body carries no closing keyword (close, closes, closed, fix, fixes, fixed, resolve, resolves or resolved before an issue reference), so the merge cannot close the issue.
 
-Title: the issue title verbatim unless the implementation deviated meaningfully. Under 70 chars; details go in the body.
+Title: the issue title verbatim unless the implementation deviated meaningfully; under 70 chars, details in the body.
 
 GitHub auto-close on merge fires only when the PR base equals the **default branch**; when retained integration and default branches differ, the real close mechanism is Phase 8's explicit `gh issue close <num>` — on the close branch keep the `Closes #<num>` trailer for traceability, don't rely on it.
 
-**Use full URLs, not bare `#N`**, in PR bodies, comments, and commit-message references (`https://github.com/<resolved-repository>/issues/<n>`) — GitHub resolves bare `#N` against the source repo context, which under cross-references lands on unrelated refs. The `Closes #<num>` trailer is the one exception.
+**Use full URLs, not bare `#N`**, in PR bodies, comments, and commit-message references (`https://github.com/<resolved-repository>/issues/<n>`), because GitHub resolves a bare `#N` against the source repo context and lands on unrelated refs. The `Closes #<num>` trailer is the one exception.
 
 ## Phase 5 — Review the PR
 
@@ -386,7 +347,7 @@ Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") re-reviews
 
 If the fix changes unrelated behavior or the finding cannot be checked in that bounded diff, stop the cheap re-review and return to the appropriate full Opus/high axis above.
 
-**Interim child results.** A child's return that the host marks interim — it stopped with background work of its own still running, or its result may be interim — is not a completion: the child is still running. Re-engage that same child by its recorded agent identity: message it to wait for its own job inside its turn and then return its final report, and wait for that report. You may end your own turn while the re-engaged child is live, because the host wakes you with its next notification; that is a child's work, not a command you started. Never answer an interim result with a text-only reply, never suspend for it (it is not an `external` wait), and never dispatch a replacement or stop the child. A registered lifecycle worker stays registered under its existing worker id: an interim result is not its `returned` event, and re-engagement is not a resume, so it registers nothing new. If the message cannot be delivered, the child is one you cannot wait for: follow from-issue's **Writing workers** route (task-stop, then release `--event stopped`), then this skill's ordinary handling of a lost child; that is the one case that may lead to a fresh dispatch. Only the child's final hand-back counts as its result.
+**Interim child results.** A child's return that the host marks interim — background work of its own still running, or a result that may be interim — is not a completion: the child is still running. Re-engage that same child by its recorded agent identity: message it to wait for its own job inside its turn and then return its final report, and wait for that report. You may end your own turn while it is live (a child's work, not a command you started); the host wakes you with its next notification. Never answer an interim result with a text-only reply, never suspend for it (it is not an `external` wait), and never dispatch a replacement or stop the child. A registered lifecycle worker stays registered under its existing worker id: an interim result is not its `returned` event, so it registers nothing new. If the message cannot be delivered, the child is one you cannot wait for: follow from-issue's **Writing workers** route (task-stop, then release `--event stopped`), then this skill's ordinary handling of a lost child; that is the one case that may lead to a fresh dispatch. Only the child's final hand-back counts as its result.
 
 ## Phase 6 — Wait for CI
 
@@ -405,9 +366,7 @@ is the genuinely-blocked stop: stop before the CI wait and before the merge,
 make no further forge write, run no cleanup, keep the worktree and the branch,
 and return a truthful `stopped` ship summary naming both SHAs — the reviewed
 `HEAD_SHA` and the observed `headRefOid`. In interactive mode, surface and wait
-at the same point. Divergence here is also evidence of a superseded launch,
-which is why `## Launch guard` runs before the merge regardless of how this
-check came out.
+at the same point.
 
 Then block on the required checks with `gh`'s built-in watch — one Bash call, **300s timeout**:
 
@@ -431,7 +390,7 @@ Run `check-launch` (see `## Launch guard`) immediately before the merge, and
 run it regardless of how Phase 6's tip check came out. On anything but
 `current: true`, refuse the merge and take the no-write stop. Under lifecycle identity this effect is a `## Delivery loop` cycle.
 
-Use retained `bindings.tracker.repo_slug` and `bindings.vcs` values to build the subject. Emit the subject form only when the rendered result is nonempty and representable by D18's quoted-subject grammar: it contains none of double quote, dollar, backtick, backslash, NUL, LF, or CR; otherwise omit `--subject` and its value and let the forge choose its normal subject. Never pass `--no-ff` (rejected by recent `gh`; `--merge` already produces a true merge commit).
+Use retained `bindings.tracker.repo_slug` and `bindings.vcs` values to build the subject. Pass `--subject` only when the rendered subject is non-empty and contains none of `"`, `$`, backtick, backslash, NUL, LF or CR; otherwise omit it. Never pass `--no-ff` (rejected by recent `gh`; `--merge` already produces a true merge commit).
 
 ```
 gh pr merge <pr-num> --repo <resolved-repository> --merge --subject "<rendered subject>" --delete-branch
@@ -472,17 +431,10 @@ Under lifecycle identity this effect is a `## Delivery loop` cycle.
    git branch -d <branch>
    ```
 
-   After the worktree is gone, remove the `$BUCKET` directory recorded above —
-   the shape `<primary-checkout>/.superpowers/sdd/wt-<worktree-name>/`,
-   captured from the worktree's own git directory before removal rather than
-   guessed from its path, because a stale registration under the same
-   basename makes `git worktree add` register `<name>1` instead of `<name>`,
-   and guessing would delete another worktree's bucket. Nothing else prunes
-   it: the bucket lives in the primary checkout and outlives the worktree
-   that named it, so a later worktree recreated under the same name would
-   resolve to this attempt's ledger and read its `Task <N>: complete` lines
-   as its own. Remove only that one worktree's bucket — never `primary/`,
-   and never another worktree's.
+   After the worktree is gone, remove only the `$BUCKET` directory recorded above —
+   the shape `<primary-checkout>/.superpowers/sdd/wt-<worktree-name>/`, captured
+   from the worktree's own git directory before removal — never `primary/` and
+   never another worktree's.
 
 3. If `git worktree remove` refuses on the rebased-branch case: confirm the PR landed via `gh pr view`, then retry with `ExitWorktree action: "remove", discard_changes: true` — the "discarded N commits" wording is misleading; the content is on the integration branch.
 
@@ -501,17 +453,14 @@ The final validated ship-summary contains only `issue`, `state`, `pr_url`, full
 `report_path`, and notes. `report_path` is relative, and which root it is
 relative to follows `detail_state`: a `present` path resolves against the
 primary checkout, an `unpublished` one against the feature worktree. Notes say
-which, because the path alone does not. That 9-key row has two roles: it is the
-ledger-free return, and under lifecycle identity it is the
-`historical_owner_result` of the `ship-summary/v2` that `## Delivery loop`
-returns. Under implementation custody a ship owner writes only
-`checkpoint-delivery`, never `finish`; a remainder owner writes its own
+which, because the path alone does not. Under implementation custody a ship owner
+writes only `checkpoint-delivery`, never `finish`; a remainder owner writes its own
 `finish --summary-file -`.
 
 ## Notes
 
-- Merge commits, learning-doc updates, and blocker fixes fall under standing local-commit authorization. Don't re-confirm each. The `Co-Authored-By` trailer follows retained `bindings.vcs.commit.co_authored_by`.
-- If a phase reveals an earlier one was wrong (review surfaces a misaligned spec, say), back up to the appropriate `from-issue` phase. Don't paper over.
+- Merge commits, learning-doc updates, and blocker fixes fall under standing local-commit authorization; don't re-confirm each. The `Co-Authored-By` trailer follows retained `bindings.vcs.commit.co_authored_by`.
+- If a phase reveals an earlier one was wrong (review surfaces a misaligned spec, say), back up to the appropriate `from-issue` phase; don't paper over.
 - Absent sibling skills (`from-issue`, `sdd`, `worktrees`) degrade to no-ops; this skill still runs.
 
 ## Delivery loop
