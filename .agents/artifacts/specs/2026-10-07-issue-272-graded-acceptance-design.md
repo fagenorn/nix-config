@@ -100,9 +100,10 @@ when `[ACCEPTANCE_CRITERIA]` is omitted.
 1. **Citation check, on the first pass and on every re-review.** An `evidence`
    `met` that lacks the observed value or the threshold is recorded as
    `unverified`. A `code` `met` whose check is outside the declared verification
-   and has no cited run is recorded as `unverified`. A first pass whose table is
-   missing, or is missing a row, is an unreadable conformance verdict, handled
-   as the axis already handles unreadable review evidence.
+   and has no cited run is recorded as `unverified`. When the table is missing,
+   or a row is missing, every missing row is recorded as `unverified`, so a
+   verdict that omits a criterion can only fail toward an acceptance finding
+   (D3).
 2. **Fix wave.** Each `unmet` or `unverified` row joins the fixer's list as an
    Important finding labelled `conformance` and `ACn`. For an `evidence`
    criterion, the fix is to re-measure and write the row's evidence columns.
@@ -247,6 +248,8 @@ agent-workflow-tests`:
 
 - S2 (#273): `tracker_held`, the hold instead of close, `needs-verification`,
   and the verdict table in the PR body. Ship still closes as it does today.
+  Until S2 lands, a `clean` run that reports `human_pending` still closes its
+  issue. That is a known gap in the interim, and S2 closes it.
 - S3 (#274): `to-issues`' criterion shape, `writing-plans`' acceptance map and
   its review check. This also covers the implementer-prompt wording that gives
   a task ownership of an evidence row.
@@ -260,7 +263,7 @@ agent-workflow-tests`:
 |----|--------|-----------|----------------------|
 | D1 | The controller passes the issue's criterion lines verbatim as `AC1..n` in one `[ACCEPTANCE_CRITERIA]` placeholder. Kinds come from the plan's acceptance map when present, else from the inline tags, else the grader classifies. No source gives `not_applicable`. | Parent D2 and D9 (grading must work without a map). the-bar Token economy (short stable handles). | Let the reviewer fetch the issue itself: the numbering could drift from the record, and every run pays a tracker read. |
 | D2 | A `code` check that is not in the declared verification is `met` only with a cited grader run at the graded head. Otherwise it is `unverified`. | Parent: "a check that any reviewer reproduces at the head". Truthful terminal states. | Treat a CI-only check as met because ship's CI wait gates the merge: sdd would be grading something it never observed. |
-| D3 | The `### Acceptance` table sits at the prompt's existing heading level, is outside the ≤400-word budget, and forces a first-line `Findings` when any row is unmet or unverified. | It is consistent with the sibling `### Coverage` and `### Issues` sections, and the parent's `## Acceptance` names the section. A word cap must not crowd out criteria. | Count the table inside the 400 words: a long criterion list would silently truncate findings. |
+| D3 | The `### Acceptance` table sits at the prompt's existing heading level, is outside the ≤400-word budget, and forces a first-line `Findings` when any row is unmet or unverified. A missing table or row records `unverified`, with no re-dispatch. | It is consistent with the sibling `### Coverage` and `### Issues` sections, and the parent's `## Acceptance` names the section. A word cap must not crowd out criteria. | Count the table inside the 400 words: a long criterion list would silently truncate findings. |
 | D4 | Acceptance findings re-verdict through the existing reviewer-lite conformance re-review, with the same citation rule enforced by the controller. No dispatch is added. | Parent D3 (no new agent, marker count unchanged). Reviewer-lite eligibility covers "named prior findings". | An Opus re-grade dispatch: it adds an agent, and the citation check already removes the risk of a judgment shortcut. |
 | D5 | The record is written and committed before Final verification. A failed repair round flips the affected `code` rows to `unmet` in a second commit. | #263: ship skips its rerun only for the identical verified tree. Parent D4 (the record must be committed). | Commit after verification: every issue with criteria would force ship to rerun the full verification. |
 | D6 | The controller's record commit goes through `launch-commit` under a self-registered worker id, and through plain `git` without a lifecycle identity. | #222: every writer on a shared checkout is launch-fenced. | An unfenced controller commit: a superseded predecessor could still write to the successor's branch. |
