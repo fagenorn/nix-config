@@ -2182,8 +2182,8 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
                 ".claude/specs/2026-09-23-issue-171-delivery-contract-source-design.md", 47301),
             "plan_artifact": artifact("implementation-plan",
                 ".claude/plans/2026-09-24-issue-171-delivery-contract-source.md", 8375),
-            "head_sha": "a" * 40, "review_state": "clean", "auto": True,
-            "report_path": None, "notes": "", "delivery_contract": self.contract,
+            "head_sha": "a" * 40, "review_state": "clean", "acceptance_state": "met",
+            "auto": True, "report_path": None, "notes": "", "delivery_contract": self.contract,
             "delivery_contract_digest": self.digest, "authorization_intents": [intent],
             "authorization_chain_digest": self.model.canonical_digest(
                 {"intent_ids": [intent["id"]]}),

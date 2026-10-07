@@ -362,11 +362,11 @@ def _artifact(value: Any, label: str) -> dict[str, Any]:
 
 
 def _ship_handoff(value: Any, notes_max: int) -> dict[str, Any]:
-    keys = {"interface_version", "state", "ledger_repo_root", "run_id", "owner", "owner_worktree", "custody", "issue_number", "branch", "worktree_path", "spec_artifact", "plan_artifact", "head_sha", "review_state", "auto", "report_path", "notes", "delivery_contract", "delivery_contract_digest", "authorization_intents", "authorization_chain_digest", "authority_observation_ids", "reevaluation_evidence_ids", "authority_evaluation_consumption_ids", "pending_stage_ids", "selected_outputs", "requested_scope"}
+    keys = {"interface_version", "state", "ledger_repo_root", "run_id", "owner", "owner_worktree", "custody", "issue_number", "branch", "worktree_path", "spec_artifact", "plan_artifact", "head_sha", "review_state", "acceptance_state", "auto", "report_path", "notes", "delivery_contract", "delivery_contract_digest", "authorization_intents", "authorization_chain_digest", "authority_observation_ids", "reevaluation_evidence_ids", "authority_evaluation_consumption_ids", "pending_stage_ids", "selected_outputs", "requested_scope"}
     value = _object(value, keys, "ship handoff")
     if type(value["interface_version"]) is not int or value["interface_version"] != 2: _reject()
     issue = _integer(value["issue_number"], "handoff issue", minimum=1); validate_custody_ref(value["custody"], issue=issue)
-    for name in ("state", "ledger_repo_root", "run_id", "owner", "owner_worktree", "branch", "worktree_path", "head_sha", "review_state"): _string(value[name], f"handoff {name}")
+    for name in ("state", "ledger_repo_root", "run_id", "owner", "owner_worktree", "branch", "worktree_path", "head_sha", "review_state", "acceptance_state"): _string(value[name], f"handoff {name}")
     _bounded_notes(value["notes"], notes_max); _boolean(value["auto"], "handoff auto")
     if value["report_path"] is not None: _string(value["report_path"], "handoff report path")
     _artifact(value["spec_artifact"], "spec artifact"); _artifact(value["plan_artifact"], "plan artifact")

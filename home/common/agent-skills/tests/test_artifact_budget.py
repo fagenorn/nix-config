@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from ._delivery_model_fixtures import contract_and_delivery, custody, workflow_responses
+from ._delivery_model_fixtures import contract_and_delivery, custody, ship_handoff, workflow_responses
 
 
 ROOT = Path(__file__).parents[4]
@@ -90,6 +90,39 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                  "--input", str(candidate), "--policy", str(POLICY)],
                 capture_output=True, check=False,
             )
+
+    def test_ship_handoff_v2_acceptance_state_is_required_closed_and_paired(self):
+        """#272 D8, D9, D11: the v2 handoff gets the same pairing as the legacy one."""
+        model = artifact_budget._delivery_model()
+        contract, delivery = contract_and_delivery(model)
+        handoff = ship_handoff(model, contract, delivery)
+        detail = ".superpowers/issue-delivery/151/run-1/sdd-a.json"
+        residual = {**handoff, "review_state": "residuals", "report_path": detail,
+                    "notes": f"details: {detail}"}
+        accepted = [
+            *({**handoff, "acceptance_state": v} for v in ("met", "human_pending", "not_applicable")),
+            *({**residual, "acceptance_state": v}
+              for v in ("met", "unmet", "human_pending", "not_applicable")),
+            {**handoff, "review_state": "unknown", "acceptance_state": "not_applicable"},
+        ]
+        for index, payload in enumerate(accepted):
+            with self.subTest(accepted=index):
+                result = self.run_validate("ship-handoff", payload, use_stdin=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        rejected = [
+            {key: value for key, value in handoff.items() if key != "acceptance_state"},
+            {**handoff, "acceptance_state": "unmet"},
+            {**handoff, "acceptance_state": "partially_met"},
+            {**handoff, "review_state": "unknown", "acceptance_state": "met"},
+            {**handoff, "review_state": "partial", "acceptance_state": "met"},
+            {**residual, "acceptance_state": "unmet", "report_path": None,
+             "notes": "no durable detail"},
+        ]
+        for index, payload in enumerate(rejected):
+            with self.subTest(rejected=index):
+                result = self.run_validate("ship-handoff", payload, use_stdin=True)
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (2, b"", b"artifact-budget: invalid report\n"))
 
     def test_workflow_response_boundary_red_accepts_valid_v2_bootstrap_shape(self):
         """Task 2 must add this closed raw boundary, not repair this fixture."""

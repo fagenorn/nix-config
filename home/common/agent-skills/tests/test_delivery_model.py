@@ -1214,6 +1214,21 @@ class DeliveryModelTest(unittest.TestCase):
         bad = copy.deepcopy(handoff); bad["branch"] = "other"
         self.assert_invalid(bad, "ship-handoff")
 
+    def test_ship_handoff_admits_acceptance_state_as_a_string(self):
+        """#272 D9: the model admits the key; artifact-budget owns its values."""
+        contract, delivery = contract_and_delivery(self.model)
+        handoff = ship_handoff(self.model, contract, delivery)
+        self.assertEqual(handoff["acceptance_state"], "met")
+        self.assertEqual(self.validate(handoff, "ship-handoff"), handoff)
+        missing = copy.deepcopy(handoff)
+        missing.pop("acceptance_state")
+        self.assert_invalid(missing, "ship-handoff")
+        for value in (None, 1, True, ["met"], ""):
+            bad = copy.deepcopy(handoff)
+            bad["acceptance_state"] = value
+            with self.subTest(value=value):
+                self.assert_invalid(bad, "ship-handoff")
+
     SYNC_H1, SYNC_H2 = "e" * 40, "9" * 40
     INTEGRATION_1, INTEGRATION_2 = "d" * 40, "f" * 40
 

@@ -931,6 +931,12 @@ def validate_delivery_model_report(
         model.validate_delivery_object(
             value, expected_kind=boundary, notes_max_characters=notes_max_characters
         )
+        if boundary == "ship-handoff" and isinstance(value, dict) and (
+                not acceptance_pairs_with_review(value["review_state"], value["acceptance_state"])
+                or (value["acceptance_state"] == "unmet" and value["report_path"] is None)):
+            # The model only admits the key; the closed pairing is ours (#272 D9),
+            # and an unmet criterion travels only with its durable detail (#272 D16).
+            raise ArtifactBudgetError("acceptance_state does not pair with review_state")
         if boundary == "ship-summary" and isinstance(value, dict):
             _validate_legacy_result_slot(
                 value["historical_owner_result"], value["issue"], notes_max_characters,
