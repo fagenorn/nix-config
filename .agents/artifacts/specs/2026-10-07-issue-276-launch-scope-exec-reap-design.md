@@ -47,6 +47,11 @@ launch-scope reap --repo-root R --run-id I (--action-id A | --sweep)
 the launch's action ID is the worker ID without its `:w<n>` suffix, the same
 derivation `launch-commit` already checks. `--action-id` asks `check-launch`.
 
+Before any path is built, the run ID and the action ID must each be one safe
+path segment: `[A-Za-z0-9._:-]+`, and neither `.` nor `..`. Anything else
+exits 2 (D10). The identity grammar stays with `workflow-state`, which refuses a
+malformed ID when it is checked.
+
 ### Registry
 
 The registry root is `<git common dir of R>/agent-launch/<run-id>/<action-id>/`.
@@ -77,10 +82,12 @@ writer. `exec` deletes only its own row. The action directory is removed only by
    with the child's pgid. Standard streams and the working directory are
    inherited. An argv that cannot be executed deletes the row and exits 127
    when the program is not found, or 126 when it cannot be run, as a shell does.
-5. Forward SIGINT, SIGTERM and SIGHUP to the child's group and wait for the
+5. Forward SIGINT, SIGTERM and SIGHUP to the child's group, so that a host
+   timeout's SIGTERM reaches the command in its new session, and wait for the
    child.
 6. Clean up (see **Signalling**) every process that carries this exact marker,
-   plus the child's group, then delete the row and exit with the child's status.
+   plus the child's group. Another `exec` of the same launch has a different
+   nonce, so it is untouched. Then delete the row and exit with the child's status.
    A child killed by a signal exits 128 plus the signal number. If a process
    survives SIGKILL, the row stays for `reap`, `exec` names the survivors on
    stderr, and it still exits with the child's status (D5).
@@ -209,3 +216,4 @@ unreadable environment, a zombie or a vanished pid is not a proof.
 | D7 | The environment is read from `/proc/<pid>/environ` on Linux and from `KERN_PROCARGS2` through `ctypes` on darwin. Any other platform fails loud with exit 2. An unreadable environment is no proof | Parent D4; probed on this darwin host (2026-10-07): a same-user setsid child's marker is readable, and pid 1 returns EINVAL; the-bar fail loud | `ps eww` output is truncated and quoting-ambiguous. psutil is a dependency the standard-library package does not take |
 | D8 | The worker rule is a separate sentence placed right after every composed `Lifecycle worker:` line. The owner rule is one sentence in from-issue's lifecycle identity. The three leaf-agent clauses, their 13 carriers and the remainder placeholder stay unchanged. Issue AC4's "leaf clause names `launch-scope exec`" is met by these lifecycle-identity sentences | Parent D7 ("beside #222's `Lifecycle worker:` line"; nothing changes without identity); `test_dispatch_contracts.py` verbatim-once contract | Appending to the `own-commands` clause would spend tokens in every reviewer prompt and agent definition, none of which ever holds a lifecycle identity |
 | D9 | Profiles in `instruction-load.json` whose files grow get their ceilings raised in the same change | #275 D7 / #155 D10 precedent | Leaving the ceilings alone turns `agent-workflow-tests` red |
+| D10 | `launch-scope` checks only that the run and action IDs are safe single path segments before it builds the registry path. The identity grammar is still enforced by `check-launch` and `check-worker` | Grill: `reap --action-id ../..` would otherwise delete outside the registry. The grammar has one home in `workflow-state` (its `parse_action_id`), which agent-helpers rule 3 bars importing | Copying `ACTION_ID_PATTERN` into the package makes a second grammar home. Asking `check-launch` only to validate a reap costs a helper call on every self-reap |
