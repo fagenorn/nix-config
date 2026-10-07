@@ -106,6 +106,7 @@ SEPARATOR = "--"
 SCRATCH_RECORD = "scratch.json"
 SCRATCH_PREFIX = "launch-scope-"
 SCRATCH_NAME = re.compile(r"launch-scope-[a-z0-9_]+")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 _REPLY_KEYS = frozenset({"action_id", "current", "current_action_id", "reason"})
 _FORWARDED = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
@@ -367,12 +368,13 @@ def scratch_path(data: bytes) -> str | None:
     try:
         value = json.loads(data, object_pairs_hook=reject_duplicate_keys,
                            parse_constant=reject_nonfinite_literal)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(value, dict) or set(value) != {"path"}:
         return None
     path = value["path"]
-    if (not isinstance(path, str) or not os.path.isabs(path)
+    if (not isinstance(path, str) or _CONTROL.search(path) is not None
+            or not os.path.isabs(path)
             or os.path.realpath(path) != path
             or SCRATCH_NAME.fullmatch(os.path.basename(path)) is None):
         return None

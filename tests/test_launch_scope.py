@@ -645,6 +645,9 @@ class ScratchTest(ScopeHarness, unittest.TestCase):
             "not its real path": canonical({"path": os.path.join(str(link),
                                                                  os.path.basename(root))}),
             "bad basename": canonical({"path": os.path.join(real_tmp, "other-abc")}),
+            "a NUL in the path": canonical({"path": root + "\0"}),
+            "a newline in the path": canonical({"path": root + "\n"}),
+            "deep nesting": b"[" * 100000,
             "a regular file": canonical({"path": plain}),
             "a symlink": canonical({"path": aliased}),
         }
