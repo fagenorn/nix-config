@@ -693,8 +693,32 @@ class ScratchTest(ScopeHarness, unittest.TestCase):
         self.assertEqual(list(self.record_path().parent.glob(".scratch.*.tmp")), [])
         self.assertEqual(list(self.tmpdir.iterdir()), [])
 
+    def test_a_failed_pre_publication_cleanup_is_named_on_stderr(self):  # D11
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(launch_scope.tempfile, "tempdir", str(self.tmpdir)), \
+                mock.patch.object(launch_scope.os, "link", side_effect=OSError("no link")), \
+                mock.patch.object(launch_scope.shutil, "rmtree",
+                                  side_effect=OSError("injected")), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr, \
+                self.assertRaises(launch_scope.LaunchScopeError):
+            launch_scope.scratch(str(self.root), self.run_id, action_id="14:1:1")
+        self.assertIn("rmtree", stderr.getvalue())
+        self.assertIn("injected", stderr.getvalue())
+        self.assertFalse(self.record_path().exists())
+
+    def test_a_temp_directory_whose_root_would_be_unreadable_publishes_nothing(self):  # C277-02
+        for label, name in (("a newline", "bad\ndir"), ("a tab", "bad\tdir")):
+            with self.subTest(case=label):
+                bad = self.tmpdir / name
+                bad.mkdir()
+                done = self.scope(*self.scratch_args(), env={**self.env, "TMPDIR": str(bad)})
+                self.assertEqual((done.returncode, done.stdout), (2, ""), done.stderr)
+                self.assertFalse(self.record_path().exists())
+                self.assertEqual(list(self.record_path().parent.glob(".scratch.*.tmp")), [])
+                self.assertEqual(list(bad.iterdir()), [])
+
     def test_usage_and_helper_errors_exit_two_and_create_nothing(self):
-        not_git = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        not_git =Path(self.enterContext(tempfile.TemporaryDirectory()))
         base = ["scratch", "--repo-root", str(self.root), "--run-id", self.run_id]
         cases = [
             base,
@@ -1088,6 +1112,23 @@ class ReapTest(ScopeHarness, unittest.TestCase):
         self.assertTrue(self.record_path().is_file())
         self.assertTrue(os.path.isdir(root))
         self.assertTrue(os.path.isdir(parent))
+
+    def test_a_deeply_nested_record_skips_the_launch_without_crashing(self):  # C277-01, D4
+        root = self.scratch_root()
+        deep = b"[" * 100000
+        self.record_path().write_bytes(deep)
+        self.assert_report(self.scope(*self.reap_args("--action-id", "14:1:1")), 1, [],
+                           [{"action_id": "14:1:1", "reason": "scratch_not_removed"}])
+        self.assertEqual(self.record_path().read_bytes(), deep)
+        self.assertTrue(os.path.isdir(root))
+
+    def test_a_deeply_nested_row_is_not_a_row_and_does_not_crash_the_reap(self):  # C277-01
+        root = self.scratch_root()
+        (self.registry / "14:1:1" / "deep.json").write_bytes(b"[" * 100000)
+        self.assert_report(self.scope(*self.reap_args("--action-id", "14:1:1")), 0, [
+            {"action_id": "14:1:1", "signalled": 0, "scratch_removed": True}], [])
+        self.assertFalse(os.path.lexists(root))
+        self.assertFalse((self.registry / "14:1:1").exists())
 
     def test_unsafe_ids_and_usage_errors_exit_two_and_delete_nothing(self):
         keep = self.registry.parent / "keep"

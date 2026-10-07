@@ -417,6 +417,14 @@ def _read_record(record: Path) -> str | None:
     return path
 
 
+def _discard_root(made: str) -> None:
+    """Remove a root made before its record was published; a failure is named on stderr (D11)."""
+    try:
+        shutil.rmtree(made)
+    except OSError as error:
+        print(f"launch-scope: rmtree {made!r} failed: {error}", file=sys.stderr)
+
+
 def _create_record(directory: Path) -> str:
     """Make the launch's root and publish its record once, by an exclusive link (D3, D11)."""
     record = directory / SCRATCH_RECORD
@@ -425,13 +433,17 @@ def _create_record(directory: Path) -> str:
         made = os.path.realpath(tempfile.mkdtemp(prefix=SCRATCH_PREFIX))
     except OSError as error:
         raise LaunchScopeError(f"cannot make the scratch root: {error}") from error
+    data = (canonical_line({"path": made}) + "\n").encode("utf-8")
+    if scratch_path(data) != made:       # e.g. a TMPDIR holding a control character
+        _discard_root(made)
+        raise LaunchScopeError(f"scratch root {made!r} cannot be recorded (D4)")
     temp = None
     try:
         try:
             with tempfile.NamedTemporaryFile(dir=directory, prefix=".scratch.", suffix=".tmp",
                                              delete=False) as handle:
                 temp = Path(handle.name)
-                handle.write((canonical_line({"path": made}) + "\n").encode("utf-8"))
+                handle.write(data)
             os.link(temp, record)
         except FileExistsError:
             os.rmdir(made)               # the loser of the race: the winner's root stands
@@ -440,7 +452,7 @@ def _create_record(directory: Path) -> str:
                 raise LaunchScopeError(f"scratch record {record} vanished") from None
             return winner
         except BaseException as error:
-            shutil.rmtree(made, ignore_errors=True)
+            _discard_root(made)
             if isinstance(error, OSError):
                 raise LaunchScopeError(f"cannot write {record}: {error}") from error
             raise
@@ -481,7 +493,7 @@ def _parse_row(name: str, data: bytes) -> tuple[str, int | None] | None:
     try:
         row = json.loads(data, object_pairs_hook=reject_duplicate_keys,
                          parse_constant=reject_nonfinite_literal)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(row, dict) or set(row) != ROW_KEYS:
         return None
@@ -661,7 +673,8 @@ def reap_launch(repo_root: str, registry: Path, run_id: str, action_id: str) -> 
     for _ in range(REAP_ROUNDS):
         snapshot = _directory_files(directory)
         rows = [row for row in (_parse_row(name, data) for name, data in sorted(snapshot.items())
-                                if name.endswith(".json")) if row is not None]
+                                if name.endswith(".json") and name != SCRATCH_RECORD)
+                if row is not None]
         table = process_table()          # fresh, right before terminate: the pid-reuse window
         marked = _launch_marked(launch, table)
         proved = {pgid for nonce, pgid in rows if pgid is not None
