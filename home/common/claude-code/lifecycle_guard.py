@@ -44,11 +44,18 @@ GUARDED_TOKEN_LITERALS = (
     (["git", "branch", "-d"], "branch"),
     (["git", "push"], "push"),
 )
+# The raise label is the user's Instruction Budget raise decision. The refusal
+# is a mistake-catcher for agents, not enforcement (#294).
+RAISE_LABEL = "instruction-budget-raise"
+RAISE_LABEL_REFUSAL = (
+    "only the user applies this label (Instruction Budget raise control)"
+)
 OPERATION_LABELS = {
     "merge": "merge",
     "pr-create": "PR creation",
     "branch": "branch deletion",
     "push": "push",
+    "label": "instruction-budget-raise label edit",
 }
 # Words that keep the command position open: shell keywords that introduce a
 # command, and wrappers that hand the rest of the words to another command.
@@ -56,10 +63,20 @@ COMMAND_KEYWORDS = frozenset({
     "!", "time", "if", "then", "elif", "else", "while", "until", "do", "done",
     "in", "coproc",
 })
-COMMAND_WRAPPERS = frozenset({"command", "builtin", "exec", "env", "nohup", "sudo"})
+COMMAND_WRAPPERS = frozenset({"command", "builtin", "exec", "env", "sudo"})
 # Programs whose argument is shell source. Arbitrary shell cannot be parsed
-# here, so a guarded verb anywhere in such a segment is refused outright.
+# here, so a guarded verb anywhere in such a segment is refused outright, and
+# so is a detaching word (matched there as raw text, including when the
+# evaluator is named by path, as in `/bin/sh -c`).
 SHELL_EVALUATORS = frozenset({"eval", "sh", "bash", "zsh", "dash", "ksh"})
+# Words that detach a process from the task that started it (#278). Refused
+# in every repository, before the policy loads.
+DETACHING_WORDS = ("nohup", "setsid", "disown")
+DETACHING_ROUTES = (
+    "a detached process outlives the task stop; run it with the Bash tool's "
+    "background mode (run_in_background: true), or wrap a lifecycle launch in "
+    "launch-scope exec"
+)
 # Characters that end a word and re-open the command position: subshells,
 # groups, `case` arms and command substitution all start a command after one.
 OPERATOR_CHARS = "(){}`"
@@ -351,13 +368,57 @@ def command_position_flags(tokens):
     return flags
 
 
-def unvalidatable(segment, reason):
-    """Every guarded verb mentioned in `segment`, all refused for `reason`."""
-    return [
+def mentions_raise_label(texts):
+    """True when any of `texts` contains the raise label, ignoring case."""
+    return any(RAISE_LABEL in text.lower() for text in texts)
+
+
+def adds_raise_label(tokens):
+    """True when a `gh` invocation in `tokens` adds the raise label.
+
+    Looks at every `gh` word, in any position: its words run to the end of
+    `tokens` (the whole command's tokenised segments), skipping operator
+    tokens, so a substitution, group or pipeline before the label
+    (`gh pr edit $(… | …) --add-label …`) cannot hide it. A label value is
+    the word after `--add-label` or the rest of a `--add-label=` word. No
+    subcommand parsing and no comma splitting: a value that contains the label
+    anywhere counts.
+    """
+    for index, (value, is_operator) in enumerate(tokens):
+        if is_operator or os.path.basename(value) != "gh":
+            continue
+        words = [
+            word for word, word_is_operator in tokens[index + 1:]
+            if not word_is_operator
+        ]
+        labels = [
+            words[position + 1]
+            for position, word in enumerate(words[:-1])
+            if word == "--add-label"
+        ]
+        labels.extend(
+            word[len("--add-label="):]
+            for word in words
+            if word.startswith("--add-label=")
+        )
+        if any(RAISE_LABEL in label.lower() for label in labels):
+            return True
+    return False
+
+
+def unvalidatable(segment, reason, mentions_label=False):
+    """Every guarded verb mentioned in `segment`, all refused for `reason`.
+
+    When `mentions_label` is set, the raise-label edit is refused too.
+    """
+    found = [
         (operation, segment, reason)
         for literal, operation in GUARDED_LITERALS
         if literal in segment
     ]
+    if mentions_label:
+        found.append(("label", segment, reason))
+    return found
 
 
 def guarded_operations(command):
@@ -369,24 +430,46 @@ def guarded_operations(command):
     that is not a command position (an argument to some other program). Those
     are refused rather than waved through — the parser and the shell have to
     agree, and where they cannot the guard fails closed.
+
+    The `label` operation is mention-gated: it is considered only when the
+    command's tokens mention the raise label, always carries a problem, and is
+    refused for any `gh` invocation, in any position, whose `--add-label` value
+    contains it. That check runs over every tokenised segment at once, because
+    a separator inside a substitution splits a `gh` word from its label. A
+    word that mentions the label inside a `$(…)` or backtick substitution is
+    refused too, because a quoted substitution still runs.
     """
     segments = split_segments(command)
     if segments is None:
-        return unvalidatable(command, "the command could not be parsed")
+        return unvalidatable(
+            command, "the command could not be parsed",
+            mentions_raise_label([command]),
+        )
     found = []
+    stream = []
     for segment in segments:
         tokens = tokenize_segment(segment)
         if tokens is None:
-            found.extend(unvalidatable(segment, "the segment could not be tokenised"))
+            found.extend(unvalidatable(
+                segment, "the segment could not be tokenised",
+                mentions_raise_label([segment]),
+            ))
             continue
+        # Every tokenised segment joins the label stream, evaluator segments
+        # included: `gh pr edit $(sh -c '…'; true) --add-label …` puts the
+        # `gh` word in an evaluator segment and its label in the next one.
+        stream.extend(tokens)
+        stream.append((";", True))
         flags = command_position_flags(tokens)
         values = [value for value, _ in tokens]
+        mentions = mentions_raise_label(values)
         if any(
             flag and value in SHELL_EVALUATORS
             for flag, value in zip(flags, values)
         ):
             found.extend(unvalidatable(
-                segment, "shell source passed to an evaluator cannot be validated"
+                segment, "shell source passed to an evaluator cannot be validated",
+                mentions,
             ))
             continue
         for index in range(len(values)):
@@ -403,7 +486,229 @@ def guarded_operations(command):
                         "validate; quote it if you only mean to mention it",
                     ))
                 break
+    # Judged over every tokenised segment at once: a separator inside a
+    # substitution (`gh pr edit $(gh pr view | jq …) --add-label …`) splits
+    # the `gh` word from its label, so a per-segment check would miss it.
+    if mentions_raise_label([value for value, _ in stream]) and adds_raise_label(stream):
+        found.append(("label", command, RAISE_LABEL_REFUSAL))
+    # A substitution inside a double-quoted word (`x="$(gh pr edit … )"`) runs,
+    # but the tokeniser keeps it as one word, so the guard cannot see its `gh`.
+    # A word that mentions the label and carries a substitution fails closed.
+    if any(
+        not is_operator and mentions_raise_label([value])
+        and ("$(" in value or "`" in value)
+        for value, is_operator in stream
+    ):
+        found.append((
+            "label", command,
+            "a command substitution inside a quoted word cannot be validated",
+        ))
     return found
+
+
+# Wrapper options that consume an argument, so the word holding it is not the
+# wrapped command. Used only by the detaching pass. Short options may be
+# clustered (`env -iu FOO`), and an argument may be attached (`-uanis`,
+# `--user=anis`). An option not listed here is treated as a flag, so the word
+# after it is taken as the command word.
+WRAPPER_SHORT_OPTIONS_WITH_ARGUMENT = {
+    "sudo": frozenset("ugCDhprtTU"),
+    "exec": frozenset("a"),
+    "env": frozenset("uCS"),
+}
+WRAPPER_OPTIONS_WITH_ARGUMENT = {
+    "sudo": frozenset({
+        "--user", "--group", "--close-from", "--chdir", "--host", "--prompt",
+        "--role", "--type", "--command-timeout", "--other-user",
+    }),
+    "exec": frozenset(),
+    "env": frozenset({"--unset", "--chdir", "--split-string"}),
+}
+# `env -S`/`--split-string` hands its argument to env, which splits it into a
+# command line and runs it. That argument is command text, not a name.
+ENV_SPLIT_STRING = "--split-string"
+# A redirection operator standing alone takes the next word as its target.
+BARE_REDIRECTION = re.compile(r"^(\d*|&)(>>?|<<?<?|<>|>&|<&)$")
+ATTACHED_REDIRECTION = re.compile(r"^(\d+|&)?(>>?|<<?<?|<>|>&|<&)")
+# A segment cut at the `&` of `2>&1` ends in an unescaped `>` or `<`. Only then
+# does the next segment continue the same simple command.
+DANGLING_REDIRECTION = re.compile(r"(?:^|[^\\])(?:\\\\)*[<>]$")
+
+
+def split_redirection(value):
+    """(word, redirection): `nohup>/dev/null` -> ("nohup", ">/dev/null").
+
+    The shell ends a word at an unquoted `<` or `>`. Token values are already
+    unquoted, so a quoted `"a>b"` splits too; that only ever over-refuses.
+    """
+    for index, character in enumerate(value):
+        if character in "<>":
+            return value[:index], value[index:]
+    return value, ""
+
+
+def wrapper_option(wrapper, option):
+    """(kind, attached) for a wrapper option word.
+
+    `kind` is None for a flag, "argument" for an option that consumes an
+    argument and "payload" for env's split-string, whose argument is command
+    text. `attached` is the argument carried in the same word, or None when the
+    option takes the next word.
+    """
+    payload_letters = "S" if wrapper == "env" else ""
+    if option.startswith("--"):
+        name, equals, attached = option.partition("=")
+        if wrapper == "env" and len(name) >= 3 and ENV_SPLIT_STRING.startswith(name):
+            # getopt_long accepts any unambiguous prefix (`--split`); reading
+            # more as command text only ever refuses more.
+            return "payload", attached if equals else None
+        if name in WRAPPER_OPTIONS_WITH_ARGUMENT.get(wrapper, ()):
+            return "argument", attached if equals else None
+        return None, None
+    letters = WRAPPER_SHORT_OPTIONS_WITH_ARGUMENT.get(wrapper, frozenset())
+    for index in range(1, len(option)):
+        letter = option[index]
+        if letter in letters:
+            kind = "payload" if letter in payload_letters else "argument"
+            return kind, option[index + 1:] or None
+    return None, None
+
+
+def detaching_command_flags(tokens, state=(True, None, (), False),
+                            embedded_targets=True):
+    """Per token: is it a word at which the shell may start a simple command?
+
+    Returns (flags, payloads, state). `payloads` is the command text handed to
+    `env -S`. `state` is (open_position, wrapper, pending_arguments,
+    redirection_target) and carries a dangling redirection: `split_segments`
+    cuts at the `&` of `2>&1`, so the next segment opens with its target.
+
+    A word ending in a bare operator inside it (`X=>`, `worker>`) is ambiguous,
+    because token values are unquoted: an unquoted `>` takes the next word as
+    its target, a quoted one (`X='>'`) does not. `embedded_targets` picks one
+    reading; `detaching_word` scans both and refuses on either.
+
+    Like `command_position_flags`, but it also steps over redirections, attached
+    (`nohup>log`) or not, and over the arguments of wrapper options, so
+    `>log nohup x` and `sudo -u anis nohup x` are seen. An operator token ends
+    any pending option argument. The verb pass keeps `command_position_flags`;
+    this pass has no such fail-closed backstop, hence the extra stepping.
+    """
+    flags = [False] * len(tokens)
+    payloads = []
+    open_position, wrapper, pending, target = state
+    pending = list(pending)
+    for index, (value, operator) in enumerate(tokens):
+        if operator:
+            open_position, wrapper, pending, target = True, None, [], False
+            continue
+        if target:
+            target = False
+            continue
+        if not open_position:
+            continue
+        if BARE_REDIRECTION.match(value) is not None:
+            target = True
+            continue
+        if ATTACHED_REDIRECTION.match(value) is not None:
+            continue
+        word, redirection = split_redirection(value)
+        target = (embedded_targets
+                  and BARE_REDIRECTION.match(redirection) is not None)
+        if pending:
+            if pending.pop(0) == "payload":
+                payloads.append(value)
+            continue
+        if ASSIGNMENT_PREFIX.match(word) is not None:
+            continue
+        if word in COMMAND_KEYWORDS or word in COMMAND_WRAPPERS:
+            wrapper = word
+            continue
+        if wrapper is not None and word.startswith("-"):
+            kind, attached = wrapper_option(wrapper, word)
+            if kind == "payload" and attached is not None:
+                payloads.append(value)
+            elif kind == "payload" or (kind == "argument" and attached is None
+                                       and not redirection):
+                # An option word that also carries a redirection may be a quoted
+                # attached argument; taking the next word as the command then
+                # only ever refuses more.
+                pending.append(kind)
+            continue
+        flags[index] = True
+        open_position = False
+    return flags, payloads, (open_position, wrapper, tuple(pending), target)
+
+
+def detaching_word(command):
+    """The detaching word (`nohup`, `setsid`, `disown`) the shell would run, or None.
+
+    Policy-free and global. A word at a command position matches by value or by
+    basename, after any attached redirection is cut off (`nohup>log`). Where the
+    guard cannot see command positions it matches raw text instead and fails
+    closed: an unparseable command, an untokenisable segment, a segment whose
+    command-position word (or its basename) is an evaluator, a token carrying
+    `$(` or a backtick, and the command text handed to `env -S`. A raw-text match
+    names the word that occurs earliest in that text. A word in argument
+    position otherwise passes.
+    """
+
+    def earliest(text):
+        hits = [(text.find(word), word) for word in DETACHING_WORDS if word in text]
+        return min(hits)[1] if hits else None
+
+    def name(value):
+        return split_redirection(value)[0].rsplit("/", 1)[-1]
+
+    fresh = (True, None, (), False)
+    segments = split_segments(command)
+    if segments is None:
+        return earliest(command)
+    # One scan per reading of a bare operator inside a word: as a redirection
+    # whose target is the next word, and as a quoted character.
+    readings = (True, False)
+    states = dict.fromkeys(readings, fresh)
+    for segment in segments:
+        tokens = tokenize_segment(segment)
+        if tokens is None:
+            states = dict.fromkeys(readings, fresh)
+            found = earliest(segment)
+            if found is not None:
+                return found
+            continue
+        flags = [False] * len(tokens)
+        payloads = []
+        for reading in readings:
+            read_flags, read_payloads, after = detaching_command_flags(
+                tokens, states[reading], embedded_targets=reading)
+            # Only a redirection cut at its `&` (`2>&1`) continues into the next
+            # segment; any real separator ends the simple command and its options.
+            dangling = after[3] and DANGLING_REDIRECTION.search(segment) is not None
+            states[reading] = after if dangling else fresh
+            flags = [a or b for a, b in zip(flags, read_flags)]
+            payloads.extend(read_payloads)
+        for payload in payloads:
+            found = earliest(payload)
+            if found is not None:
+                return found
+        if any(
+            flag and not operator and name(value) in SHELL_EVALUATORS
+            for flag, (value, operator) in zip(flags, tokens)
+        ):
+            found = earliest(segment)
+            if found is not None:
+                return found
+            continue
+        for flag, (value, operator) in zip(flags, tokens):
+            if operator:
+                continue
+            if flag and name(value) in DETACHING_WORDS:
+                return name(value)
+            if "$(" in value or "`" in value:
+                found = earliest(value)
+                if found is not None:
+                    return found
+    return None
 
 
 def detect_repository(git_bin, cwd, timeout):
@@ -947,6 +1252,10 @@ def main():
     if not isinstance(command, str):
         return block("invalid hook input: expected tool_input.command to be a string")
 
+    word = detaching_word(command)
+    if word is not None:
+        return block(f"detaching command `{word}` refused: {DETACHING_ROUTES}")
+
     policy, reason = load_policy(args.policy)
     if policy is None:
         return block(f"invalid policy: {reason}")
@@ -957,8 +1266,13 @@ def main():
     if args.jq_bin is None:
         args.jq_bin = policy.jq_bin
 
+    operations = guarded_operations(command)
+    for operation, _segment, problem in operations:
+        if operation == "label":
+            return block(f"unsafe {OPERATION_LABELS[operation]}: {problem}")
+
     context = None
-    for operation, segment, problem in guarded_operations(command):
+    for operation, segment, problem in operations:
         if problem is not None:
             return block(f"unsafe {OPERATION_LABELS[operation]}: {problem}")
         if operation == "branch":

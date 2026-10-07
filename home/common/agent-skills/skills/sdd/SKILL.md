@@ -88,9 +88,9 @@ Turn count beats token price: a too-cheap agent takes 2–3× the turns on multi
 - *When:* after about 10 delivered issues under this routing, and only once the sample holds at least 30 full-lane first-pass reviews; below that floor, keep going.
 - *Decision:* below 74% (ten points under the baseline) is clearly worse — revert by pointing the `sdd-nonmechanical-implementation` and `sdd-task-fix-redispatch` sites back at the `implementer` role and retiring the `task-implementer` role. At or above 74%, keep Sonnet; a rate between 74% and 84% is reported but is not a revert trigger.
 
-**Leaf-agent clauses.** Every prompt this skill composes for an `Agent` dispatch — here, in [fix-loop.md](fix-loop.md) or in [final-review.md](final-review.md) — carries these three clauses verbatim, as a paragraph of their own; a prompt built from one of the `*-prompt.md` templates already carries them:
+**Leaf-agent clauses.** Every prompt this skill composes for an `Agent` dispatch — here, in [fix-loop.md](fix-loop.md) or in [final-review.md](final-review.md) — carries these four clauses verbatim, as a paragraph of their own; a prompt built from one of the `*-prompt.md` templates already carries them:
 
-> Launch any subagent by type only, never by name: a subagent cannot spawn a named teammate, and a named launch returns an error instead of work. Read an existing file before writing to it: overwriting content you have not read destroys work you cannot see. Run each long command, every verification command included, in the foreground with an explicit timeout above its expected duration. If the host moves one to the background anyway, wait for it within the same turn: never end your turn while a command you started is still running.
+> Launch any subagent by type only, never by name: a subagent cannot spawn a named teammate, and a named launch returns an error instead of work. Read an existing file before writing to it: overwriting content you have not read destroys work you cannot see. Run each long command, every verification command included, in the foreground with an explicit timeout above its expected duration. If the host moves one to the background anyway, wait for it within the same turn: never end your turn while a command you started is still running. Never write an `until` or `while` loop around `sleep` to wait for something: if a wait is truly needed, run one bounded foreground `sleep N`, then check once.
 
 ## The task loop
 
@@ -108,7 +108,7 @@ When the caller runs this skill under a lifecycle identity — its
 dispatches or resumes that can write (the implementer, the mechanic and each
 fix-round implementer) is a registered worker of that launch. Immediately
 before the dispatch or resume, run
-`workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`
+`workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
 and put its printed `worker_id` into the prompt as the single line
 `Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>`,
 followed by the sentences "Run each long command, every verification command included, as
@@ -116,7 +116,7 @@ followed by the sentences "Run each long command, every verification command inc
 still in the foreground." and "Create every scratch directory or scratch worktree under the path that
 `launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>` prints."
 When that agent returns, run
-`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --worker-id <worker_id> --event returned`.
+`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> --event returned`.
 A resumed agent is registered again and gets a fresh `worker_id`.
 Read-only reviewers are not registered.
 
@@ -133,7 +133,7 @@ refusal was no supersession: follow from-issue's suspension procedure with
 workers commit with plain `git`.
 
 Under a lifecycle identity, also record this launch's progress marker. Run
-`workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`
+`workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
 once before dispatching the first task this session will execute, and again
 after each task completes (step 5). The helper reads the commit checked out
 in the attempt's worktree itself; a commit that strictly descends from the
@@ -264,7 +264,7 @@ Never fix findings yourself in the controller session — controller fixes skip 
 
 ### 5. Complete the task
 
-Clean review — or everything parked-with-ruling at the cap — appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)`; mark the todo, run the cumulative delivery gate, then move on only when it passes. Never advance past open Critical/Important findings that are neither fixed nor parked. Under a lifecycle identity, run `workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>` immediately after appending that `complete` line, as `### Lifecycle workers` describes.
+Clean review — or everything parked-with-ruling at the cap — appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)`; mark the todo, run the cumulative delivery gate, then move on only when it passes. Never advance past open Critical/Important findings that are neither fixed nor parked. Under a lifecycle identity, run `workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` immediately after appending that `complete` line, as `### Lifecycle workers` describes.
 
 ## Final review — two axes
 
