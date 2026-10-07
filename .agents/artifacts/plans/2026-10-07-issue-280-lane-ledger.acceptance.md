@@ -1,0 +1,8 @@
+# Acceptance record — issue #280
+
+| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |
+|----|-----------|------|------------------|----------|--------|------------|---------|
+| AC1 | [code] declare-lane --lane light --budget-minutes 90 sets deadline_at to the launch at plus 90 minutes and appends a lane_history entry — measured: test_workflow_state.py | code | `DeclareLaneTest.test_light_rebases_the_deadline_from_the_launch_and_records_history` | in final verification | 12d7e90 | `just agent-workflow-tests` | met |
+| AC2 | [code] declare-lane refuses full to light, light to light, a non-current launch and a light declaration whose re-based deadline already passed — measured: test_workflow_state.py | code | `DeclareLaneTest.test_refuses_full_to_light_and_light_to_light`, `test_refuses_a_launch_that_is_not_current`, `test_refuses_a_rebased_deadline_that_is_not_after_now` | in final verification | 12d7e90 | `just agent-workflow-tests` | met |
+| AC3 | [code] A suspended light attempt resumes with a 90-minute window and an attempt with no lane resumes with the request budget — measured: test_workflow_state.py | code | `DeclareLaneTest.test_a_suspension_resume_uses_the_lane_budget_or_the_request_budget` | in final verification | 12d7e90 | `just agent-workflow-tests` | met |
+| AC4 | [code] A schema-6 ledger migrates with the three new attempt fields set to null, null and [] — measured: test_workflow_state.py | code | `LaneSchemaTest.test_a_schema_six_ledger_migrates_with_null_lane_fields` | in final verification | 12d7e90 | `just agent-workflow-tests` | met |
