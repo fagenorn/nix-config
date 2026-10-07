@@ -113,13 +113,13 @@ print("delta", d); raise SystemExit(d > 0)
 EOF`
 Expected: `delta` at most 0. The probe estimates about −19. The command exits 1 at this task's base.
 
-Run: `PYTHONPATH="$PWD/python" python3 -m agent_tools.instruction_load check --base origin/main 2>&1 | tail -3; echo "exit=${PIPESTATUS[0]}"`
+Run: `PYTHONPATH="$PWD/python" python3 -m agent_tools.instruction_load check --base origin/main > "${TMPDIR:-/tmp}/il-279.txt" 2>&1; echo "exit=$?"; tail -3 "${TMPDIR:-/tmp}/il-279.txt"`
 Expected: `exit=0`. It is non-zero at this task's base, as Task 4 recorded.
 
 Run: `if grep -q 'class LaneTriageContractsTest\|test_expiry_prose_describes\|routes_a_deadline_rejected_progress' home/common/agent-skills/tests/test_workflow_skill_contracts.py; then exit 1; fi`
 
-Run, with a timeout of at least 900 s: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_shell_example_contracts.py home/common/agent-skills/tests/test_dispatch_contracts.py home/common/agent-skills/tests/test_instruction_load.py 2>&1 | tail -3`
-Expected: `OK`. Any other failing pin over the rewritten text is a phrase pin. Delete it under rule 6, and report its name. Never re-word it.
+Run, with a timeout of at least 900 s: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_shell_example_contracts.py home/common/agent-skills/tests/test_dispatch_contracts.py home/common/agent-skills/tests/test_instruction_load.py > "${TMPDIR:-/tmp}/ut5-279.log" 2>&1; echo "exit=$?"; tail -3 "${TMPDIR:-/tmp}/ut5-279.log"`
+Expected: `exit=0` and `OK`. Any other failing pin over the rewritten text is a phrase pin. Delete it under rule 6, and report its name. Never re-word it.
 
 - [ ] **Step 6: Commit**
 

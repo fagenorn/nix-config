@@ -21,7 +21,7 @@ Run `git fetch origin`. If `git merge-base --is-ancestor origin/main HEAD` exits
 
 - [ ] **Step 2: Check the budget against that main**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m agent_tools.instruction_load check --base origin/main 2>&1 | tail -3; echo "exit=${PIPESTATUS[0]}"`
+Run: `PYTHONPATH="$PWD/python" python3 -m agent_tools.instruction_load check --base origin/main > "${TMPDIR:-/tmp}/il-279.txt" 2>&1; echo "exit=$?"; tail -3 "${TMPDIR:-/tmp}/il-279.txt"`
 Expected: `exit=0`. If it fails because main's own growth ate the slack, re-run Task 5 Step 5's delta command. If the delta is still ≤ 0 against the new main, the breach is main's to fix: stop and report the failing profile. Never raise a ceiling (issue AC5).
 
 Run: `git diff --quiet origin/main -- home/common/agent-skills/instruction-load.json && echo same`
@@ -29,16 +29,16 @@ Expected: `same`.
 
 - [ ] **Step 3: Final gate**
 
-Run each command in the foreground, with a timeout of at least 2400 s (3600 s recommended), and read only the tails:
-- `just build 2>&1 | tail -5`. Expected: exit 0.
+Run each command in the foreground, with a timeout of at least 2400 s (3600 s recommended). Capture each command's own exit status before reading its log tail (no status through a pipe; the shell may be zsh, so never rely on `PIPESTATUS`), and record verification only when that status is 0 (Phase-5 SF-001):
+- `L="${TMPDIR:-/tmp}/build-279.log"; just build > "$L" 2>&1; echo "exit=$?"; tail -5 "$L"`. Expected: `exit=0`.
 - `L="${TMPDIR:-/tmp}/awt-279.log"; just agent-workflow-tests > "$L" 2>&1; echo "exit=$?"; tail -3 "$L"; grep -c LaneTriageRecordKeysTest "$L"`. Expected: `exit=0`, `OK`, and a count of 2.
-- `just agent-installed-skill-tests 2>&1 | tail -5` (D10). Expected: `OK`, which shows that the `ast`-based pin also runs without `PYTHONPATH` (D16).
+- `L="${TMPDIR:-/tmp}/ais-279.log"; just agent-installed-skill-tests > "$L" 2>&1; echo "exit=$?"; tail -5 "$L"` (D10). Expected: `exit=0` and `OK`, which shows that the `ast`-based pin also runs without `PYTHONPATH` (D16).
 
 - [ ] **Step 4: Update the acceptance record**
 
 In the acceptance record:
 - AC4: set the check to `home/common/agent-skills/tests/test_workflow_skill_contracts.py::LaneTriageRecordKeysTest` under `just agent-workflow-tests`.
-- Append an AC5 row. Criterion: the issue's fifth criterion, copied. Kind: `code`. Check: the required `Instruction Budget` CI check on the PR, without the `instruction-budget-raise` label. Its local proxy is `instruction_load check --base origin/main`, which must exit 0 with no `--raise-label`. Observed: Step 2's exit and the `origin/main` SHA it ran against. Verdict: `met locally; CI pending` until the PR's check is green.
+- Append an AC5 row. Criterion: the issue's fifth criterion, copied. Kind: `code`. Check: the required `Instruction Budget` CI check on the PR, without the `instruction-budget-raise` label. Its local proxy is `instruction_load check --base origin/main`, which must exit 0 with no `--raise-label`. Observed: Step 2's exit and the `origin/main` SHA it ran against. Put the local result in Observed. Verdict: `unverified` (the closed vocabulary is `met`, `unmet`, `unverified`, `human_pending`), because only the PR's green `Instruction Budget` check establishes AC5; ship-issue's CI wait observes that check, and the record is updated to `met` only once it is green (Phase-5 SF-002).
 - Fill Observed and Commit on every row from Step 3, using the final head SHA.
 
 - [ ] **Step 5: Commit**

@@ -12,7 +12,7 @@ Spec section **Instruction budget**; rows D12 and D15.
 
 **Invariants:**
 - After this task, `git diff --quiet origin/main -- home/common/agent-skills/instruction-load.json` exits 0 (D15).
-- No ceiling is edited by hand. The file only reaches `origin/main`'s bytes through the revert and the merge.
+- No ceiling is edited by hand. The revert removes only the corpus raise; Task 1's commit `ffbc16e0` also raised three profile ceilings and appended their notes, so after the merge the whole file is restored from `origin/main` (`git checkout origin/main -- home/common/agent-skills/instruction-load.json`), never edited value by value (Phase-5 B-001).
 - The revert and the merge are separate commits, both signed. Never pass `--no-gpg-sign`, and never rewrite history: no rebase, no reset of pushed commits.
 - `instruction_load check` is expected to **fail** at this task's end, because the from-issue text is still the uncompressed version. That failure is Task 5's red. Do not fix it here.
 
@@ -29,13 +29,17 @@ Run `git revert --no-commit ec089c67`. Then commit it with the launch's commit w
 
 Run `git merge --no-ff --no-commit origin/main`. If any path conflicts, stop and report the conflicting paths: the probe predicts none, so a conflict means main moved in a way this plan did not anticipate. Otherwise commit with the message `Merge remote-tracking branch 'origin/main' into worktree-issue-279-orchestrated`, the same way as Step 2.
 
+- [ ] **Step 3b: Restore the gate file from main**
+
+Run `git checkout origin/main -- home/common/agent-skills/instruction-load.json`, then commit it, signed and with the session trailers, as `chore(instruction-load): restore main's ceilings and notes for #279` with the body `Drops the profile-ceiling raises ffbc16e0 made; no ceiling is raised (issue AC5, spec D15).` If the file is already identical, skip the commit.
+
 - [ ] **Step 4: Verify**
 
 Run: `git diff --quiet origin/main -- home/common/agent-skills/instruction-load.json && git merge-base --is-ancestor origin/main HEAD && echo ok`
 Expected: `ok`.
 
-Run: `PYTHONPATH="$PWD/python" python3 -m agent_tools.instruction_load check --base origin/main > /tmp/il-279.txt 2>&1; echo "exit=$?"; tail -5 /tmp/il-279.txt`
+Run: `PYTHONPATH="$PWD/python" python3 -m agent_tools.instruction_load check --base origin/main > "${TMPDIR:-/tmp}/il-279.txt" 2>&1; echo "exit=$?"; tail -5 "${TMPDIR:-/tmp}/il-279.txt"`
 Expected: a non-zero exit naming breached from-issue profiles. This records Task 5's red, and nothing changes in this task.
 
-Run, with a timeout of at least 600 s: `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_lane_triage.py home/common/agent-skills/tests/test_resolve_project.py 2>&1 | tail -3`
-Expected: `OK`. The merge did not disturb Tasks 1–2.
+Run, with a timeout of at least 600 s: `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_lane_triage.py home/common/agent-skills/tests/test_resolve_project.py > "${TMPDIR:-/tmp}/ut-279.log" 2>&1; echo "exit=$?"; tail -3 "${TMPDIR:-/tmp}/ut-279.log"`
+Expected: `exit=0` and `OK`. The merge did not disturb Tasks 1–2.
