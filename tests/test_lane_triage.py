@@ -176,6 +176,19 @@ class LaneTriageRefusalTest(LaneTriageCase):
                           "violations": [{"message": "the resolver failed unexpectedly",
                                           "pointer": ""}]})
 
+    def test_an_integer_past_the_digit_limit_is_resolver_refused(self):
+        """COR-004: the loader leaves this `ValueError` untranslated; `resolve()` must not."""
+        path = self.root / ".agents" / "project.json"
+        contract = json.loads(path.read_text(encoding="utf-8"))
+        contract["bindings"]["deploy"]["config"] = {"threshold": 271828}
+        text = json.dumps(contract, indent=2) + "\n"
+        self.assertEqual(text.count("271828"), 1)
+        path.write_text(text.replace("271828", "9" * 5000), encoding="utf-8")
+        self.assertEqual(self.refusal(record(), "resolver_refused"),
+                         {"code": "resolver_failure", "repair_id": "resolver.internal",
+                          "violations": [{"message": "the resolver failed unexpectedly",
+                                          "pointer": ""}]})
+
     def test_a_project_without_a_contract_is_resolver_refused(self):
         (self.root / ".agents" / "project.json").unlink()
         self.assertEqual(self.refusal(record(), "resolver_refused")["code"], "not_onboarded")
