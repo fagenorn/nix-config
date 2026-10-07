@@ -366,6 +366,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "env -u FOO 2>&1 W x",
             "env -S 'W x'", "env --split-string='W x'", 'env -S"W x"',
             "env --split-string 'W x'", "env -iS 'W x'",                # split-string
+            "X='>' W x &", "exec -a 'worker>' W x", "X=1> out W x",
+            "X='>' sh -c 'W x'", "sudo -u 'a>' W x",                    # quoted `>`
         )
         for word in ("nohup", "setsid", "disown"):
             for template in templates:

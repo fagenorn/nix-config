@@ -484,13 +484,19 @@ def wrapper_option(wrapper, option):
     return None, None
 
 
-def detaching_command_flags(tokens, state=(True, None, (), False)):
+def detaching_command_flags(tokens, state=(True, None, (), False),
+                            embedded_targets=True):
     """Per token: is it a word at which the shell may start a simple command?
 
     Returns (flags, payloads, state). `payloads` is the command text handed to
     `env -S`. `state` is (open_position, wrapper, pending_arguments,
     redirection_target) and carries a dangling redirection: `split_segments`
     cuts at the `&` of `2>&1`, so the next segment opens with its target.
+
+    A word ending in a bare operator inside it (`X=>`, `worker>`) is ambiguous,
+    because token values are unquoted: an unquoted `>` takes the next word as
+    its target, a quoted one (`X='>'`) does not. `embedded_targets` picks one
+    reading; `detaching_word` scans both and refuses on either.
 
     Like `command_position_flags`, but it also steps over redirections, attached
     (`nohup>log`) or not, and over the arguments of wrapper options, so
@@ -517,7 +523,8 @@ def detaching_command_flags(tokens, state=(True, None, (), False)):
         if ATTACHED_REDIRECTION.match(value) is not None:
             continue
         word, redirection = split_redirection(value)
-        target = BARE_REDIRECTION.match(redirection) is not None
+        target = (embedded_targets
+                  and BARE_REDIRECTION.match(redirection) is not None)
         if pending:
             if pending.pop(0) == "payload":
                 payloads.append(value)
@@ -567,20 +574,29 @@ def detaching_word(command):
     segments = split_segments(command)
     if segments is None:
         return earliest(command)
-    state = fresh
+    # One scan per reading of a bare operator inside a word: as a redirection
+    # whose target is the next word, and as a quoted character.
+    readings = (True, False)
+    states = dict.fromkeys(readings, fresh)
     for segment in segments:
         tokens = tokenize_segment(segment)
         if tokens is None:
-            state = fresh
+            states = dict.fromkeys(readings, fresh)
             found = earliest(segment)
             if found is not None:
                 return found
             continue
-        flags, payloads, after = detaching_command_flags(tokens, state)
-        # Only a redirection cut at its `&` (`2>&1`) continues into the next
-        # segment; any real separator ends the simple command and its options.
-        dangling = after[3] and DANGLING_REDIRECTION.search(segment) is not None
-        state = after if dangling else fresh
+        flags = [False] * len(tokens)
+        payloads = []
+        for reading in readings:
+            read_flags, read_payloads, after = detaching_command_flags(
+                tokens, states[reading], embedded_targets=reading)
+            # Only a redirection cut at its `&` (`2>&1`) continues into the next
+            # segment; any real separator ends the simple command and its options.
+            dangling = after[3] and DANGLING_REDIRECTION.search(segment) is not None
+            states[reading] = after if dangling else fresh
+            flags = [a or b for a, b in zip(flags, read_flags)]
+            payloads.extend(read_payloads)
         for payload in payloads:
             found = earliest(payload)
             if found is not None:
