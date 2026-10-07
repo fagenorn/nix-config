@@ -87,8 +87,7 @@ Substitute your project's real terms and decisions for the placeholders:
 > `<the existing abstraction>` or add a sibling abstraction for the new
 > `<edge case>` — what's your call?"
 
-This does two things at once: shows the homework, and frames the question
-precisely around what's actually unknown. When the docs fully answer it:
+When the docs fully answer it:
 "Per `<ADR-NNN>`, `<the decision>`, so this goes there. Continuing."
 
 ## Cost note
