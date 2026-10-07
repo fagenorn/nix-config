@@ -538,5 +538,21 @@ class MarkerInventoryTest(unittest.TestCase):
         self.assertIn(CONFORMANCE_CALL, text)
 
 
+# Every `<!-- agent-dispatch:` marker across the source skill trees, pinned at
+# #274's base. A change that adds or removes a dispatch site updates this literal
+# in the same commit, which is the point of the pin (#274 D8).
+DISPATCH_MARKER_TOTAL = 39
+
+
+class DispatchMarkerInventoryTest(unittest.TestCase):
+    def test_the_source_trees_hold_the_pinned_number_of_dispatch_markers(self):
+        total = sum(
+            path.read_text(encoding="utf-8").count("<!-- agent-dispatch:")
+            for root in SOURCE_TREES.values()
+            for path in sorted(root.rglob("*.md"))
+        )
+        self.assertEqual(total, DISPATCH_MARKER_TOTAL)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -125,3 +125,54 @@ path_unchanged_since() {
   git -C "$dir" diff --quiet "$ref" -- "$@" ||
     fail "$* changed since $ref: $(git -C "$dir" diff --name-only "$ref" -- "$@" | tr '\n' ' ')"
 }
+
+# acceptance_map_covers <plan-root> <issue-file> — the plan root's `## Acceptance map`
+# holds rows AC1..AC<n>, each once and in issue order, for the n column-0 criterion
+# items (`- [ ]`/`- [x]` or `<n>.`) under the issue's `## Acceptance criteria`. A row's
+# kind equals the issue's `[code|evidence|human]` tag, or is `<kind> (classified)` for
+# an untagged item. With no criteria the map must be the single line
+# `None — no acceptance criteria.` Headings match case-insensitively.
+acceptance_map_covers() {
+  local plan="$1" issue="$2" kinds
+  [ -f "$plan" ] || fail "not a file: $plan" || return 1
+  [ -f "$issue" ] || fail "not a file: $issue" || return 1
+  kinds=$(awk '
+    tolower($0) == "## acceptance criteria" { inside = 1; next }
+    inside && /^## / { inside = 0 }
+    inside && /^- \[[ xX]\] / {
+      kind = "untagged"
+      if (match($0, /^- \[[ xX]\] \[(code|evidence|human)\] /)) kind = substr($0, 8, RLENGTH - 9)
+      out = out (out == "" ? "" : ",") kind
+      next
+    }
+    inside && /^[0-9]+\. / { out = out (out == "" ? "" : ",") "untagged" }
+    END { print out }
+  ' "$issue")
+  awk -v kinds="$kinds" '
+    BEGIN { n = (kinds == "" ? 0 : split(kinds, want, ",")) }
+    tolower($0) == "## acceptance map" { inside = 1; found = 1; next }
+    inside && /^## / { inside = 0 }
+    inside && $0 == "None — no acceptance criteria." { none = 1; next }
+    inside && /^\|/ {
+      split($0, cells, "|")
+      id = cells[2]; kind = cells[3]
+      gsub(/^[ \t]+|[ \t]+$/, "", id); gsub(/^[ \t]+|[ \t]+$/, "", kind)
+      if (tolower(id) == "ac" || id ~ /^[-: ]*$/) next
+      rows++
+      if (id != "AC" rows) { print "row " rows " is " id ", expected AC" rows; bad++; next }
+      if (rows > n) { print id ": no issue criterion for this row"; bad++; next }
+      if (want[rows] == "untagged") {
+        if (kind !~ /^(code|evidence|human) \(classified\)$/) { print id ": untagged criterion needs <kind> (classified), got " kind; bad++ }
+      } else if (kind != want[rows]) { print id ": kind " kind " contradicts the issue tag " want[rows]; bad++ }
+    }
+    END {
+      if (!found) { print "heading not found: ## Acceptance map"; exit 1 }
+      if (n == 0) {
+        if (!none || rows > 0) { print "issue has no criteria; the map must be the single line: None — no acceptance criteria."; exit 1 }
+        exit 0
+      }
+      if (rows < n) { print "map has " rows " rows for " n " criteria"; bad++ }
+      exit (bad > 0)
+    }
+  ' "$plan"
+}

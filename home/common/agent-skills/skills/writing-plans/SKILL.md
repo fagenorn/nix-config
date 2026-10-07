@@ -52,7 +52,7 @@ Steps inside a task are one action each (2–5 minutes): write the failing test 
 Every plan root starts with the following header and contains no numbered task
 bodies or copied decision-ledger rationale. It holds the goal, architecture,
 technology, Global Constraints, Test seams, Delivery estimate and boundaries,
-Task index, and decision-ID
+Task index, Acceptance map, and decision-ID
 citations. Numbered tasks live only in members (D3).
 
 ```markdown
@@ -98,6 +98,30 @@ members contiguously from 1, with one row per member. Every row ends exactly in
 - `full` — everything else.
 
 Example: `Task 3 — Wire settings loader — src/config.py, tests/test_config.py — low-risk — [task-3.md](2026-08-19-feature.tasks/task-3.md)`>
+
+## Acceptance map
+
+<One row per acceptance criterion of the issue this plan serves, in issue order —
+or, with no issue, of the requirements document. With no criteria, this section
+holds the single line `None — no acceptance criteria.` Otherwise it is this table:
+
+| AC | Kind | Task | Check |
+|----|------|------|-------|
+| AC1 | code | Task 3 | `tests/test_config.py::test_loader_rejects_unknown_key` |
+
+- `AC` — `AC1` to `AC<n>`, numbering the criteria in issue order, each exactly once.
+- `Kind` — the issue's `[code|evidence|human]` tag, copied: a tagged criterion is
+  never reclassified. An untagged criterion gets the kind you judge and is written
+  `<kind> (classified)`.
+- `Task` — exactly one owning `Task N` from the index: when several tasks
+  contribute, the task that adds or runs the check.
+- `Check` — for `code`, the test, check or CI job; for `evidence`, the command,
+  the conditions, the literal threshold and the acceptance-record row `AC<n>` the
+  owning task's implementer fills in; for `human`, the judgment that attests it
+  and who makes it.
+
+The map is the plan's only acceptance surface; task verification lines stay as
+they are.>
 
 ## Decisions
 
@@ -242,7 +266,11 @@ Read the finished plan against the spec with fresh eyes. This is your own checkl
 7. **Member completeness** — each member has exact files, consumed/produced
    interfaces, task-specific invariants, complete failing tests, implementation
    actions, a falsifiable scoped gate, decision-ID citations, and commit scope.
-8. **Final remeasurement** — after every self-review edit, check the whole plan
+8. **Acceptance map** — one row per issue criterion in issue order, each kind
+   copied from the issue's tag or written `<kind> (classified)`, each owner a
+   `Task N` in the index, and every `evidence` row naming its command, its
+   conditions and its literal threshold.
+9. **Final remeasurement** — after every self-review edit, check the whole plan
    package again; if a ledger row was appended, check the amended spec again too.
 
 Fix inline and move on; no re-review pass.
