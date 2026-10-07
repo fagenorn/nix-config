@@ -116,6 +116,9 @@ Subagent (the explicitly selected implementer or mechanic above):
     commit as
     `launch-commit --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <git commit arguments>`
     with the three values from that line, and never run `git commit` directly.
+    Run each long command, every verification command included, as
+    `launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <argv>`,
+    still in the foreground.
     If you have been given more than one `Lifecycle worker:` line (a resume
     brings a fresh one), only the most recent one governs: the earlier ones
     are released. If `launch-commit` exits 3, it printed one JSON line whose
