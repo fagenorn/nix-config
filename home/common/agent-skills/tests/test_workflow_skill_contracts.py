@@ -5938,7 +5938,7 @@ class SupersededOwnerStopPassContractsTest(unittest.TestCase):
             "both again.",
             "A stop failure never blocks dispatch: keep it a candidate for §5 "
             "and continue.",
-            "sends no observation, makes no control call and writes nothing",
+            "sends no observation, makes no control call and writes nothing to the ledger",
             "## 5. Final report",
             "**Stop failures**",
             "still left a candidate because its stop failed or its "
@@ -6029,6 +6029,41 @@ class LaunchScopeWiringContractsTest(unittest.TestCase):
         text = self.read(FROM_ISSUE)
         start = text.index("**Leaf-agent clauses.**")
         self.assertNotIn("launch-scope", text[start:text.index("**Writing workers.**", start)])
+
+
+class LaunchScopeSweepContractsTest(unittest.TestCase):
+    """#276: the stop pass ends with one sweep of the run's non-current launches."""
+
+    SWEEP = "launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --sweep"
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    def test_the_stop_pass_ends_with_one_sweep_that_never_blocks(self):
+        self.assert_ordered(
+            normalized(ORCHESTRATE.read_text(encoding="utf-8")),
+            "**Stop pass.**",
+            "On `current: false`, stop that handle through the host's task-stop",
+            "writes nothing to the ledger",
+            f"After its stops, the pass ends by running `{self.SWEEP}` once",
+            "A sweep that exits non-zero never blocks dispatch",
+            "Only after the pass, execute the response's actions in returned order.",
+            "## 5. Final report", "**Stop failures**",
+            "the pass's last sweep when it exited non-zero, with its exit code and its "
+            "`skipped` launches",
+            "omit the list when there is none")
+
+    def test_claude_md_describes_launch_scope(self):
+        self.assert_ordered(
+            normalized((REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")),
+            "**Agent helper package.**", "`launch-scope` (#276)",
+            "AGENT_LAUNCH_SCOPE=<run-id>/<action-id>/<nonce>",
+            "`launch-scope reap --action-id`", "`reap --sweep`",
+            "agent-launch/<run-id>/<action-id>/")
 
 
 if __name__ == "__main__":
