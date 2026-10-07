@@ -13,6 +13,7 @@ either through a trailing `path` parameter that defaults to `ci.yaml`.
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -331,6 +332,82 @@ def forwards_budget_args(body):
     return calls == [BUDGET_INVOCATION]
 
 
+BUDGET_STEP = "Check the instruction budget"
+# The budget step's whole `env:` mapping: the event name and the payload-derived label.
+BUDGET_ENV = [
+    "EVENT_NAME: ${{ github.event_name }}",
+    "RAISE_LABEL: ${{ github.event_name == 'pull_request' && "
+    "contains(github.event.pull_request.labels.*.name, 'instruction-budget-raise') }}",
+]
+# The arguments `check` must receive for each event and label value (D14: the head
+# runs its own workflow, so losing raise control here would be permanent).
+BUDGET_CASES = (
+    ("pull_request", "true", ["--base", "HEAD^1", "--raise-label"]),
+    ("pull_request", "false", ["--base", "HEAD^1"]),
+    ("push", "false", []),
+)
+
+
+def budget_step(path=BUDGET_WORKFLOW):
+    """The lines of the budget job's checking step."""
+    return step_blocks("instruction-budget", path)[BUDGET_STEP]
+
+
+def step_env(step):
+    """The stripped `key: value` lines of a step's `env:` mapping, or None without one."""
+    if "        env:" not in step:
+        return None
+    out = []
+    for line in step[step.index("        env:") + 1:]:
+        if not line.startswith("          "):
+            break
+        out.append(line.strip())
+    return out
+
+
+def step_script(step):
+    """The shell body of a step's `run: |` block, dedented."""
+    body = []
+    for line in step[step.index("        run: |") + 1:]:
+        if line.strip() and not line.startswith("          "):
+            break
+        body.append(line[10:])
+    return "\n".join(body) + "\n"
+
+
+def execute_budget_script(script, event, label):
+    """Run `script` with `python3` stubbed to print its argv; exit code, argv, stderr.
+
+    The stub is a shell function, not an executable on PATH: a function shadows every
+    PATH entry, so a host that refuses to exec a freshly written file cannot make bash
+    fall through to the real interpreter.
+    """
+    stub = "python3() { printf '%s\\n' \"$@\"; }\n"
+    with tempfile.TemporaryDirectory() as directory:
+        result = subprocess.run(
+            [shutil.which("bash"), "-c", stub + script], cwd=directory, capture_output=True,
+            text=True, check=False,
+            env={"PATH": os.environ["PATH"], "EVENT_NAME": event, "RAISE_LABEL": label},
+        )
+    return result.returncode, result.stdout.splitlines(), result.stderr
+
+
+def budget_step_problems(step):
+    """Each way the step fails to pass `check` the base and the label it should."""
+    problems = []
+    env = step_env(step)
+    if env != BUDGET_ENV:
+        problems.append(f"env is {env!r}, not {BUDGET_ENV!r}")
+    script = step_script(step)
+    for event, label, extra in BUDGET_CASES:
+        expected = (0, ["-m", "agent_tools.instruction_load", "check", *extra])
+        code, argv, stderr = execute_budget_script(script, event, label)
+        if (code, argv) != expected:
+            problems.append(f"{event} with label {label}: ran {(code, argv)!r}, not "
+                            f"{expected!r}; stderr {stderr!r}")
+    return problems
+
+
 def has_measurement_contract(steps, name, step_id):
     """A measurement's continuation belongs to that named step alone."""
     owned = steps.get(name, [])
@@ -619,8 +696,10 @@ class WorkflowShape(unittest.TestCase):
 
     def test_each_required_job_still_runs_the_evaluation_it_exists_for(self):
         """Steps that run fine and evaluate nothing are the inverse of green-without-work:
-        a `run:` body of `true`, another flake attribute, or a budget call that drops
-        its base each leave every other assertion here green."""
+        a `run:` body of `true`, another flake attribute, or a budget call that no
+        longer forwards the arguments the step builds each leave every other assertion
+        here green. Whether the step builds `--base` and `--raise-label` under the right
+        event and label is BudgetWorkflowShape's behavioural test, not this one."""
         self.assertEqual(["Nix Eval", "Instruction Budget"], required_contexts())
         jobs = required_jobs()
         nix_path, nix_key = jobs["Nix Eval"]
@@ -673,6 +752,38 @@ class BudgetWorkflowShape(unittest.TestCase):
         self.assertIn(self.LABEL_EXPRESSION, body)
         for forbidden in ("secrets.", "GITHUB_TOKEN", "GH_TOKEN", "gh api", "gh pr"):
             self.assertNotIn(forbidden, body)
+
+
+    def test_the_budget_step_passes_the_base_and_label_per_event(self):
+        self.assertEqual([], budget_step_problems(budget_step()))
+
+    def test_the_budget_step_rejects_raise_control_mutations(self):
+        text = "\n".join(budget_step())
+        guard = 'if [ "$EVENT_NAME" = pull_request ]; then'
+        condition = ('            if [ "$RAISE_LABEL" = true ]; then\n'
+                     "              args+=(--raise-label)\n"
+                     "            fi")
+        label_expression = BUDGET_ENV[1].split(": ", 1)[1]
+        mutations = {
+            "event name pinned": ("EVENT_NAME: ${{ github.event_name }}", "EVENT_NAME: push"),
+            "label not payload-derived": (label_expression, "true"),
+            "label not limited to pull requests": (
+                "github.event_name == 'pull_request' && ", ""),
+            "guard never matches": (guard, 'if [ "$EVENT_NAME" = pull-request ]; then'),
+            "guard always matches": (guard, "if true; then"),
+            "condition removed": (condition, "            args+=(--raise-label)"),
+            "condition inverted": ('[ "$RAISE_LABEL" = true ]', '[ "$RAISE_LABEL" != true ]'),
+            "env dropped": ("        env:\n", ""),
+        }
+        for label, (old, new) in mutations.items():
+            with self.subTest(mutation=label):
+                self.assertIn(old, text)
+                mutated = text.replace(old, new, 1)
+                if label == "env dropped":
+                    mutated = "\n".join(line for line in mutated.splitlines()
+                                        if not line.startswith(("          EVENT_NAME:",
+                                                                "          RAISE_LABEL:")))
+                self.assertNotEqual([], budget_step_problems(mutated.splitlines()))
 
 
 class RequiredContexts(unittest.TestCase):
