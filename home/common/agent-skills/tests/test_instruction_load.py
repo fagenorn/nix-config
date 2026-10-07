@@ -12,7 +12,7 @@ import sys
 import tempfile
 import unittest
 
-from agent_tools import instruction_load
+from agent_tools import instruction_load, skill_lint
 
 
 REPO_ROOT = Path(__file__).parents[4]
@@ -53,18 +53,38 @@ def fixture_model():
              "hot": ["demo/SKILL.md"],
              "conditional": ["demo/EXTRA.md", "demo/NEW.md", "solo/SKILL.md"],
              "unread": {}, "ceiling_bytes": {"claude": 51, "codex": 51},
+             "conditional_ceiling_bytes": {"claude": 38, "codex": 26},
              "note": "fixture entry"},
             {"id": "demo-reviewer", "launch": ["demo-review"], "hosts": ["claude", "codex"],
              "prompt": "demo/SKILL.md", "hot": ["agents/reviewer.md"], "conditional": [],
              "unread": {}, "ceiling_bytes": {"claude": 14, "codex": 0},
+             "conditional_ceiling_bytes": {"claude": 0, "codex": 0},
              "note": "fixture reviewer"},
         ],
         "excluded_sites": {"demo-plugin": "a plugin agent outside both trees"},
+        "corpus_ceiling_bytes": 181, "description_ceiling_bytes": 24,
     }
 
 
 def dict_reader(files):
     return lambda path: files.get(path)
+
+
+# HEAD_FILES plus a Codex skill with a description, and two files the corpus skips.
+CORPUS_FILES = {
+    **HEAD_FILES,
+    "home/common/codex/skills/stub/SKILL.md":
+        b"---\nname: stub\ndescription: Stubs. Use when testing.\n---\nstub body\n",
+    "home/common/agent-skills/skills/demo/evals/evals.md": b"not counted\n",
+    "home/common/claude-code/agents/notes.txt": b"not markdown\n",
+}
+
+
+def dict_snapshot(files):
+    return skill_lint.Snapshot(
+        read=files.get,
+        list_files=lambda prefix: sorted(p for p in files if p.startswith(prefix + "/")),
+    )
 
 
 class ModelCoreTest(unittest.TestCase):
@@ -212,6 +232,101 @@ class ModelCoreTest(unittest.TestCase):
             self.assertIsNone(read("skills/demo/ABSENT.md"))
 
 
+class CeilingTest(unittest.TestCase):
+    def all_ceilings(self, model=None, files=CORPUS_FILES):
+        model = model or fixture_model()
+        snapshot = dict_snapshot(files)
+        return instruction_load.ceilings(model, instruction_load.measure(model, snapshot.read),
+                                         instruction_load.measure_corpus(snapshot))
+
+    def test_the_corpus_counts_skill_markdown_agents_and_the_frame(self):
+        # 51 + 17 + 9 (demo) + 12 (solo) + 67 (stub) + 14 (reviewer.md) + 11 (frame)
+        self.assertEqual(instruction_load.measure_corpus(dict_snapshot(CORPUS_FILES)),
+                         {"corpus": 181, "descriptions": 24})
+
+    def test_a_listed_file_that_cannot_be_read_cannot_be_measured(self):
+        prompt = "home/common/agent-skills/skills/demo/demo-prompt.md"
+        files = {**CORPUS_FILES, prompt: b"payload\n"}
+        for path in ("home/common/agent-skills/skills/demo/SKILL.md",
+                     "home/common/agent-skills/skills/demo/EXTRA.md", prompt,
+                     "home/common/claude-code/agents/reviewer.md"):
+            with self.subTest(path=path):
+                snapshot = skill_lint.Snapshot(
+                    read=lambda p, path=path: None if p == path else files.get(p),
+                    list_files=dict_snapshot(files).list_files,
+                )
+                with self.assertRaisesRegex(ValueError, re.escape(f"cannot read {path}")):
+                    instruction_load.measure_corpus(snapshot)
+
+    def test_an_absent_frame_counts_zero_bytes(self):
+        # 181 less the frame's 11 bytes: the frame is read by path, not listed.
+        files = {p: d for p, d in CORPUS_FILES.items()
+                 if p != "home/common/agent-guidance/AGENTS.md"}
+        self.assertEqual(instruction_load.measure_corpus(dict_snapshot(files)),
+                         {"corpus": 170, "descriptions": 24})
+
+    def test_every_ceiling_is_enumerated_with_its_location(self):
+        rows = [(c.label, c.location, c.ceiling, c.measured) for c in self.all_ceilings()]
+        self.assertEqual(instruction_load.ceiling_locations(fixture_model()), [r[1] for r in rows])
+        self.assertEqual(instruction_load.ceiling_locations(
+            {"profiles": [3, {"id": 1}, {"id": "x", "hosts": "claude"}]}),
+            [("corpus_ceiling_bytes",), ("description_ceiling_bytes",)])
+        hot, conditional = "ceiling_bytes", "conditional_ceiling_bytes"
+        self.assertEqual(rows, [
+            ("profile demo on claude: hot", ("profiles", "demo", hot, "claude"), 51, 51),
+            ("profile demo on claude: conditional",
+             ("profiles", "demo", conditional, "claude"), 38, 38),
+            ("profile demo on codex: hot", ("profiles", "demo", hot, "codex"), 51, 51),
+            ("profile demo on codex: conditional",
+             ("profiles", "demo", conditional, "codex"), 26, 26),
+            ("profile demo-reviewer on claude: hot",
+             ("profiles", "demo-reviewer", hot, "claude"), 14, 14),
+            ("profile demo-reviewer on claude: conditional",
+             ("profiles", "demo-reviewer", conditional, "claude"), 0, 0),
+            ("profile demo-reviewer on codex: hot",
+             ("profiles", "demo-reviewer", hot, "codex"), 0, 0),
+            ("profile demo-reviewer on codex: conditional",
+             ("profiles", "demo-reviewer", conditional, "codex"), 0, 0),
+            ("corpus", ("corpus_ceiling_bytes",), 181, 181),
+            ("descriptions", ("description_ceiling_bytes",), 24, 24),
+        ])
+
+    def test_a_breach_of_each_new_ceiling_is_found_and_over_ceiling_stays_hot_only(self):
+        files = dict(CORPUS_FILES)
+        files["home/common/agent-skills/skills/demo/EXTRA.md"] += b"x"
+        files["home/common/codex/skills/stub/SKILL.md"] = (
+            b"---\nname: stub\ndescription: Stubs. Use when testing!!\n---\nstub body\n")
+        found = instruction_load.breached(self.all_ceilings(files=files))
+        self.assertEqual([c.label for c in found], [
+            "profile demo on claude: conditional", "profile demo on codex: conditional",
+            "corpus", "descriptions"])
+        model = fixture_model()
+        self.assertEqual(
+            instruction_load.over_ceiling(model, instruction_load.measure(model, files.get)), [])
+
+    def test_the_new_ceilings_are_required_and_typed(self):
+        model = fixture_model()
+        del model["profiles"][0]["conditional_ceiling_bytes"]
+        model["profiles"][1]["conditional_ceiling_bytes"] = {"claude": -1, "codex": True}
+        del model["corpus_ceiling_bytes"]
+        model["description_ceiling_bytes"] = 1.5
+        self.assertEqual(instruction_load.validate(model, dict_reader(HEAD_FILES)), [
+            "model: missing key 'corpus_ceiling_bytes'",
+            "model: description_ceiling_bytes must be a non-negative integer",
+            "profile demo: missing key 'conditional_ceiling_bytes'",
+            "profile demo: conditional_ceiling_bytes must map hosts to byte counts",
+            "profile demo-reviewer: conditional_ceiling_bytes claude must be a non-negative integer",
+            "profile demo-reviewer: conditional_ceiling_bytes codex must be a non-negative integer",
+        ])
+
+    def test_conditional_ceiling_hosts_must_match_the_profile_hosts(self):
+        model = fixture_model()
+        del model["profiles"][0]["conditional_ceiling_bytes"]["codex"]
+        self.assertEqual(instruction_load.validate(model, dict_reader(HEAD_FILES)), [
+            "profile demo: conditional_ceiling_bytes hosts ['claude'] differ from hosts "
+            "['claude', 'codex']"])
+
+
 GIT_LOCATION_VARS = (
     "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
@@ -331,6 +446,19 @@ class ReportCommandTest(unittest.TestCase):
         self.assertTrue(completed.stderr.startswith("agent-instruction-load: "))
         self.assertFalse(output.exists())
 
+    def test_a_model_from_before_the_gate_still_reports(self):
+        model = fixture_model()
+        for key in instruction_load.GATE_TOP_LEVEL_KEYS:
+            del model[key]
+        for profile in model["profiles"]:
+            for key in instruction_load.GATE_PROFILE_KEYS:
+                del profile[key]
+        legacy = self.commit({instruction_load.MODEL_PATH: json.dumps(model).encode()}, "legacy")
+        completed = self.report("--base", self.base, "--head", legacy, "--format", "json")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["head"], legacy)
+        self.assertNotEqual(instruction_load.validate(model, dict_reader(HEAD_FILES)), [])
+
     def test_an_invalid_model_at_head_exits_2(self):
         model = fixture_model()
         del model["excluded_sites"]["demo-plugin"]
@@ -443,6 +571,12 @@ class LiveModelTest(unittest.TestCase):
         measurement = instruction_load.measure(self.model, self.read)
         self.assertEqual(instruction_load.over_ceiling(self.model, measurement), [])
 
+    def test_the_live_tree_breaches_no_ceiling_of_any_kind(self):
+        snapshot = skill_lint.working_tree(REPO_ROOT)
+        found = instruction_load.ceilings(self.model, instruction_load.measure(self.model, self.read),
+                                          instruction_load.measure_corpus(snapshot))
+        self.assertEqual([c.label for c in instruction_load.breached(found)], [])
+
     def test_growing_a_hot_member_breaches_exactly_the_pairs_that_count_it(self):
         measurement = instruction_load.measure(self.model, self.read)
         for member in ("from-issue/AUTO.md", "agents/reviewer.md"):
@@ -463,6 +597,257 @@ class LiveModelTest(unittest.TestCase):
                 breaches = instruction_load.over_ceiling(
                     self.model, instruction_load.measure(self.model, grown))
                 self.assertEqual({BREACH.match(b).groups() for b in breaches}, counting)
+
+
+DEBT = "home/common/agent-skills/skill-lint-debt.json"
+WORKFLOW = ".github/workflows/instruction-budget.yaml"
+DEMO = "home/common/agent-skills/skills/demo/SKILL.md"
+LOOSE = "home/common/agent-skills/skills/demo/LOOSE.md"
+GATE_SITE = {"id": "demo-plugin", "path": DEMO,
+             "call": 'Agent(subagent_type="codex:rescue", model="sonnet", effort="medium") '
+                     'transports.'}
+# A lint-clean three-tree repository carrying the gate workflow; GATE_MODEL's
+# ceilings are hand-counted: demo 75, solo 74, stub 74, frame 11; descriptions 31 each.
+GATE_TREE = {
+    "home/common/agent-skills/model-matrix.json": json.dumps(
+        {"roles": {}, "dispatch_sites": [GATE_SITE], "scenarios": {}}).encode(),
+    DEMO: b"---\nname: demo\ndescription: Demos things. Use when testing.\n---\nsee `solo`\n",
+    "home/common/claude-code/skills/solo/SKILL.md":
+        b"---\nname: solo\ndescription: Solos things. Use when testing.\n---\nsolo body\n",
+    "home/common/codex/skills/stub/SKILL.md":
+        b"---\nname: stub\ndescription: Stubs things. Use when testing.\n---\nstub body\n",
+    "home/common/agent-guidance/AGENTS.md": b"frame text\n",
+    DEBT: b'{"debt": []}\n',
+    WORKFLOW: b"name: Instruction Budget\n",
+}
+TIGHTEN = "run `just agent-instruction-load tighten`"
+WAIVER = "revert it, or have a human apply the instruction-budget-raise label"
+
+
+def gate_model():
+    return {
+        "frame": "agent-guidance/AGENTS.md",
+        "profiles": [{"id": "demo", "entry": "demo", "hosts": ["claude", "codex"],
+                      "prompt": None, "hot": ["demo/SKILL.md"], "conditional": ["solo/SKILL.md"],
+                      "unread": {}, "ceiling_bytes": {"claude": 75, "codex": 75},
+                      "conditional_ceiling_bytes": {"claude": 74, "codex": 0},
+                      "note": "gate fixture"}],
+        "excluded_sites": {"demo-plugin": "a plugin agent outside both trees"},
+        "corpus_ceiling_bytes": 234,
+        "description_ceiling_bytes": 93,
+    }
+
+
+def gate_files(model=None, extra=None, drop=()):
+    files = {**GATE_TREE,
+             instruction_load.MODEL_PATH: json.dumps(model or gate_model(), indent=2).encode()}
+    files.update(extra or {})
+    for path in drop:
+        files.pop(path)
+    return files
+
+
+def debt_line(key):
+    return (f"debt: {key} is not in the base's {DEBT}; the debt file may only shrink, "
+            f"so fix the violation instead")
+
+
+class CheckTest(unittest.TestCase):
+    def check(self, head, base=None, label=False):
+        return instruction_load.run_check(
+            dict_snapshot(head), None if base is None else dict_snapshot(base), label)
+
+    def found(self, files, model):
+        snapshot = dict_snapshot(files)
+        return instruction_load.ceilings(model, instruction_load.measure(model, snapshot.read),
+                                         instruction_load.measure_corpus(snapshot))
+
+    def test_the_tight_unchanged_tree_passes(self):
+        self.assertEqual(self.check(gate_files(), gate_files()), [])
+        self.assertEqual(self.check(gate_files()), [])
+
+    def test_each_raise_fails_unlabelled_and_passes_labelled(self):
+        def mutated(change):
+            model = gate_model()
+            change(model)
+            return gate_files(model)
+
+        def move_to_conditional(m):
+            profile = m["profiles"][0]
+            profile["hot"], profile["conditional"] = [], ["demo/SKILL.md", "solo/SKILL.md"]
+            profile["ceiling_bytes"] = {"claude": 0, "codex": 0}
+            profile["conditional_ceiling_bytes"] = {"claude": 149, "codex": 75}
+
+        def new_profile(m):
+            m["profiles"].append({
+                "id": "solo", "entry": "solo", "hosts": ["claude"], "prompt": None,
+                "hot": ["solo/SKILL.md"], "conditional": [], "unread": {},
+                "ceiling_bytes": {"claude": 74}, "conditional_ceiling_bytes": {"claude": 0},
+                "note": "a second profile"})
+
+        model_line = (f"raise: {instruction_load.MODEL_PATH} changes more than lowering a "
+                      f"ceiling; {WAIVER}")
+        cases = (
+            ("raised hot ceiling",
+             mutated(lambda m: m["profiles"][0]["ceiling_bytes"].update(claude=76)), model_line),
+            ("raised conditional ceiling",
+             mutated(lambda m: m["profiles"][0]["conditional_ceiling_bytes"].update(claude=75)),
+             model_line),
+            ("raised corpus ceiling",
+             mutated(lambda m: m.update(corpus_ceiling_bytes=235)), model_line),
+            ("raised description ceiling",
+             mutated(lambda m: m.update(description_ceiling_bytes=94)), model_line),
+            ("hot member moved to conditional", mutated(move_to_conditional), model_line),
+            ("new profile", mutated(new_profile), model_line),
+            ("excluded_sites edit",
+             mutated(lambda m: m["excluded_sites"].update({"demo-plugin": "reworded"})),
+             model_line),
+            ("gate file edited",
+             gate_files(extra={WORKFLOW: b"name: Instruction Budget\n# edited\n"}),
+             f"raise: gate file {WORKFLOW} differs from the base; {WAIVER}"),
+            ("gate file added",
+             gate_files(extra={"python/agent_tools/skill_lint.py": b"# new\n"}),
+             f"raise: gate file python/agent_tools/skill_lint.py differs from the base; {WAIVER}"),
+        )
+        for label, head, expected in cases:
+            with self.subTest(case=label):
+                self.assertEqual(self.check(head, gate_files()), [expected])
+                self.assertEqual(self.check(head, gate_files(), label=True), [])
+
+    def test_a_grown_debt_file_fails_with_and_without_the_label(self):
+        key = f"L4a {LOOSE}"
+        head = gate_files(extra={LOOSE: b"", DEBT: json.dumps({"debt": [key]}).encode()})
+        self.assertEqual(self.check(head, gate_files()), [debt_line(key)])
+        self.assertEqual(self.check(head, gate_files(), label=True), [debt_line(key)])
+
+    def test_paying_debt_passes_unlabelled(self):
+        key = f"L4a {LOOSE}"
+        base = gate_files(extra={LOOSE: b"", DEBT: json.dumps({"debt": [key]}).encode()})
+        self.assertEqual(self.check(gate_files(), base), [])
+
+    def test_a_lowering_only_change_passes_unlabelled(self):
+        base_model = gate_model()
+        base_model["profiles"][0]["ceiling_bytes"]["claude"] = 78
+        base_model["corpus_ceiling_bytes"] = 240
+        self.assertEqual(self.check(gate_files(), gate_files(base_model)), [])
+
+    def test_a_base_without_the_gate_workflow_skips_raise_control(self):
+        raised = gate_model()
+        raised["profiles"][0]["ceiling_bytes"]["claude"] = 76
+        head = gate_files(raised, extra={LOOSE: b"",
+                                         DEBT: json.dumps({"debt": [f"L4a {LOOSE}"]}).encode()})
+        self.assertEqual(self.check(head, gate_files(drop=(WORKFLOW,))), [])
+
+    def test_a_loose_ceiling_fails_and_tighten_fixes_it_without_raising(self):
+        within = gate_model()
+        within["profiles"][0]["ceiling_bytes"]["claude"] = 78        # 7800 <= 105 * 75
+        self.assertEqual(self.check(gate_files(within)), [])
+        model = gate_model()
+        model["profiles"][0]["ceiling_bytes"]["claude"] = 79         # 7900 > 105 * 75
+        model["corpus_ceiling_bytes"] = 250
+        self.assertEqual(self.check(gate_files(model)), [
+            "tightness: profile demo on claude: hot ceiling 79 is more than 5% above its "
+            f"measured 75 bytes; {TIGHTEN}",
+            f"tightness: corpus ceiling 250 is more than 5% above its measured 234 bytes; {TIGHTEN}",
+        ])
+        tight, lowered = instruction_load.tightened(model, self.found(gate_files(model), model))
+        self.assertEqual(tight, gate_model())
+        self.assertEqual(lowered, ["lowered profile demo on claude: hot: 79 -> 75",
+                                   "lowered corpus: 250 -> 234"])
+        self.assertEqual(self.check(gate_files(tight)), [])
+
+    def test_a_breach_survives_tighten(self):
+        head = gate_files(extra={DEMO: GATE_TREE[DEMO] + b" "})
+        expected = [
+            "ceiling: profile demo on claude: hot measures 76 bytes, above its ceiling 75",
+            "ceiling: profile demo on codex: hot measures 76 bytes, above its ceiling 75",
+            "ceiling: corpus measures 235 bytes, above its ceiling 234",
+        ]
+        self.assertEqual([line.split(";")[0] for line in self.check(head)], expected)
+        self.assertEqual(instruction_load.tightened(gate_model(), self.found(head, gate_model())),
+                         (gate_model(), []))
+
+    def test_lint_and_invalid_model_lines_carry_their_steps(self):
+        self.assertEqual(self.check(gate_files(extra={LOOSE: b""})),
+                         [f"lint: L4a {LOOSE}: not named in its SKILL.md"])
+        broken = gate_model()
+        del broken["excluded_sites"]["demo-plugin"]
+        self.assertEqual(self.check(gate_files(broken)),
+                         ["ceiling: invalid model: matrix site demo-plugin is in no profile"])
+
+    def test_what_cannot_be_checked_raises(self):
+        for head, base in ((gate_files(drop=(instruction_load.MODEL_PATH,)), None),
+                           (gate_files(extra={instruction_load.MODEL_PATH: b"{"}), None),
+                           (gate_files(), gate_files(drop=(instruction_load.MODEL_PATH,))),
+                           (gate_files(), gate_files(extra={instruction_load.MODEL_PATH: b"{"})),
+                           (gate_files(extra={DEBT: b"{"}), None)):
+            with self.subTest(head=sorted(head)[:1], base=base is not None):
+                with self.assertRaises(ValueError):
+                    self.check(head, base)
+
+
+class CheckCommandTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.repo = Path(self.temporary.name) / "repo"
+        self.repo.mkdir()
+        self.env = git_env()
+        for args in (("init", "-q", "-b", "main"), ("config", "commit.gpgsign", "false")):
+            subprocess.run(["git", "-C", str(self.repo), *args], env=self.env, check=True)
+        self.write(gate_files())
+        for args in (("add", "-A"), ("commit", "-q", "-m", "base")):
+            subprocess.run(["git", "-C", str(self.repo), *args], env=self.env, check=True)
+
+    def write(self, files):
+        for relative, data in files.items():
+            path = self.repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+
+    def run_tool(self, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "agent_tools.instruction_load", *args, "--root", str(self.repo)],
+            env=self.env, capture_output=True, text=True, check=False)
+
+    def test_check_exit_codes_and_the_label_flag(self):
+        clean = self.run_tool("check", "--base", "HEAD")
+        self.assertEqual((clean.returncode, clean.stdout), (0, "check: pass\n"), clean.stderr)
+        raised = gate_model()
+        raised["profiles"][0]["ceiling_bytes"]["claude"] = 76
+        self.write({instruction_load.MODEL_PATH: json.dumps(raised, indent=2).encode()})
+        unlabelled = self.run_tool("check", "--base", "HEAD")
+        self.assertEqual(unlabelled.returncode, 1)
+        self.assertTrue(unlabelled.stdout.startswith("raise: "), unlabelled.stdout)
+        self.assertEqual(self.run_tool("check", "--base", "HEAD", "--raise-label").returncode, 0)
+        for args in (("check", "--base", "no-such-revision"), ("check", "--raise-label")):
+            with self.subTest(args=args):
+                refused = self.run_tool(*args)
+                self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+                self.assertEqual(len(refused.stderr.splitlines()), 1, refused.stderr)
+                self.assertTrue(refused.stderr.startswith("agent-instruction-load: "))
+
+    def test_tighten_lowers_in_canonical_form_and_fails_on_a_breach(self):
+        model = gate_model()
+        model["profiles"][0]["ceiling_bytes"]["claude"] = 79
+        self.write({instruction_load.MODEL_PATH: json.dumps(model, indent=2).encode()})
+        tightened = self.run_tool("tighten")
+        self.assertEqual((tightened.returncode, tightened.stdout),
+                         (0, "lowered profile demo on claude: hot: 79 -> 75\n"), tightened.stderr)
+        self.assertEqual((self.repo / instruction_load.MODEL_PATH).read_text(encoding="utf-8"),
+                         json.dumps(gate_model(), indent=2, ensure_ascii=False) + "\n")
+        self.assertEqual(self.run_tool("check", "--base", "HEAD").returncode, 0)
+        self.write({DEMO: GATE_TREE[DEMO] + b" "})
+        breached = self.run_tool("tighten")
+        self.assertEqual(breached.returncode, 1)
+        self.assertIn("breach profile demo on claude: hot: measures 76 bytes, above its "
+                      "ceiling 75", breached.stdout)
+
+
+class LiveBudgetTest(unittest.TestCase):
+    def test_the_live_tree_passes_steps_one_to_three(self):
+        self.assertEqual(
+            instruction_load.run_check(skill_lint.working_tree(REPO_ROOT), None, False), [])
 
 
 if __name__ == "__main__":
