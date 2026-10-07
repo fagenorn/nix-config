@@ -246,7 +246,7 @@ def _darwin_environ(pid: int) -> list[bytes] | None:
 3. Deliver SIGTERM. Call `send_group(g, SIGTERM)` once for each `g` in `safe_groups` that holds a target. Call `send(pid, SIGTERM)` for each target whose pgid is not in `safe_groups`. Ignore `ProcessLookupError` and `PermissionError` from either call, because darwin returns `EPERM` for a group whose only member is a zombie (D11).
 4. Await. Poll `read_table()` every `POLL_SECONDS` until `term_seconds` have passed. A target is gone when it is absent, a zombie, or its pgid differs from the recorded one, which means the pid was reused (D11). Stop early once every target is gone.
 5. When targets remain, deliver SIGKILL in the same way, but only to the remaining targets: a group call for each safe group that still holds one, and a pid call for the rest. Await again for `kill_seconds`.
-6. Return `(len(targets), frozenset(remaining))`.
+6. Return `(delivered, frozenset(remaining))`, where `delivered` counts the distinct target pids that SIGTERM actually reached: a pid sent individually counts when `send` did not raise, and a group call that did not raise counts every target in that group. A target that vanished before SIGTERM (the call raised `ProcessLookupError`) is not counted (per D14). A test through the injectable `send`/`send_group` seam makes one send raise `ProcessLookupError` and asserts the count excludes it.
 
 - [ ] **Step 4: Verify**
 

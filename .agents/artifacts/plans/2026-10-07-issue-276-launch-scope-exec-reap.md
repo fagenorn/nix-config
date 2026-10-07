@@ -55,3 +55,9 @@ Task 5 — Adapter sweep in the stop pass, and CLAUDE.md — home/common/claude-
 Tasks rest on spec rows D1–D10 and on the plan-level rows D11 (zombie-held cleanup and the `stat` column), D12 (injectable `terminate`) and D13 (the AUTO.md worker sentence and "writes nothing to the ledger"). Each member cites the rows it uses.
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (gpt-6-astra, xhigh), isolated read-only `plan-review`, no fallback.
+- Base SHA: 8a2e2631b173b30351480a86cd4018f8b5bccc8c; reviewed plan commit 124143b9.
+- Findings: 1 Blocking, 2 Should fix, 0 Discussion — 3 accepted (B1, S1, S2 → spec D14; edits in tasks 1–3), 0 rejected, 0 deferred.

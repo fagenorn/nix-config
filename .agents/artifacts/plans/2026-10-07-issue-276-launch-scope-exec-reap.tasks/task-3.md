@@ -19,6 +19,8 @@
 - When there are no survivors, the action directory is removed with `shutil.rmtree`, and a directory that is already gone is fine. When there are survivors, the directory stays and the launch is listed in `skipped` with `processes_survived` (D5, D6). A repeated reap reports `signalled: 0` and exits 0.
 - Both identities pass `safe_segment` before any path is built (D10).
 
+- Group-proof discrimination tests (per D14), beside the sweep test below: (a) a stale row whose `pgid` names a live group with no marked member (an unmarked `sleep 300` started with `start_new_session=True`) — that group must survive the reap; (b) a proved group, recorded in a row and holding one marked member, that also holds an unmarked member (a child started with the marker stripped from its environment but inside the same group) — the unmarked member must die with its group. Together they fail both "ignore recorded groups" and "signal every recorded group without proof".
+
 - [ ] **Step 1: Write the failing test**
 
 Add `from agent_tools import launch_scope` to the imports, and add this class above the `if __name__` line:
