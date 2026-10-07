@@ -43,6 +43,11 @@ CONTRACTS = {
         "same turn: never end your turn while a command you started is still "
         "running."
     ),
+    "no-wait-loops": (
+        "Never write an `until` or `while` loop around `sleep` to wait for "
+        "something: if a wait is truly needed, run one bounded foreground "
+        "`sleep N`, then check once."
+    ),
 }
 
 
@@ -93,7 +98,7 @@ CARRIERS = (
 
 # The remainder ship-owner prompt in ship-handoff.md forwards the leaf-agent
 # clauses through a placeholder line rather than a copy (per D13).
-REMAINDER_PLACEHOLDER = "<the three leaf-agent clauses of the ship-owner prompt above, verbatim>"
+REMAINDER_PLACEHOLDER = "<the four leaf-agent clauses of the ship-owner prompt above, verbatim>"
 STALE_REMAINDER_WORDING = "two leaf-agent sentences"
 
 # Documents under these skills whose body holds exactly one unlabeled fence are
@@ -325,6 +330,9 @@ class SourceTreeContractsTest(unittest.TestCase):
     def test_own_commands(self):
         self.assert_contract_held("own-commands")
 
+    def test_no_wait_loops(self):
+        self.assert_contract_held("no-wait-loops")
+
 
 class InstalledTreeContractsTest(unittest.TestCase):
     @classmethod
@@ -361,6 +369,9 @@ class InstalledTreeContractsTest(unittest.TestCase):
 
     def test_own_commands(self):
         self.assert_contract_installed("own-commands")
+
+    def test_no_wait_loops(self):
+        self.assert_contract_installed("no-wait-loops")
 
 
 def _without_frontmatter_close(carrier, text):
@@ -473,15 +484,15 @@ class CarrierDeclarationTest(unittest.TestCase):
             with self.subTest(carrier=carrier.relative):
                 self.assertEqual((carrier.kind, carrier.contracts), ("body", AGENT_CLAUSES))
 
-    def test_every_skill_carrier_holds_all_three_clauses(self):
+    def test_every_skill_carrier_holds_all_four_clauses(self):
         skill_carriers = [c for c in CARRIERS if c.tree != "agents"]
         self.assertEqual(len(skill_carriers), 9)
         for carrier in skill_carriers:
             with self.subTest(carrier=carrier.relative):
                 self.assertEqual(carrier.contracts, tuple(CONTRACTS))
-                self.assertEqual(len(carrier.contracts), 3)
+                self.assertEqual(len(carrier.contracts), 4)
 
-    def test_the_remainder_prompt_placeholder_names_three_clauses(self):
+    def test_the_remainder_prompt_placeholder_names_four_clauses(self):
         text = (SHARED_TREE / "from-issue/ship-handoff.md").read_text(encoding="utf-8")
         self.assertIn(REMAINDER_PLACEHOLDER, text)
         self.assertNotIn(STALE_REMAINDER_WORDING, text)
