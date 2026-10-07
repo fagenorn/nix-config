@@ -12,6 +12,7 @@
       "hot": [
         "from-issue/SKILL.md",
         "from-issue/AUTO.md",
+        "from-issue/rollover.md",
         "from-issue/investigate.md",
         "from-issue/decision-ledger.md",
         "from-issue/standards-review.md",
@@ -29,11 +30,12 @@
       ],
       "unread": {
         "from-issue/REVIEW-CONTRACT.md": "handed to the plan reviewer by absolute path, never read into this conversation",
-        "codex-collaboration/DIFF-REVIEW.md": "diff-review is not a Phase 0–5 operation"
+        "codex-collaboration/DIFF-REVIEW.md": "diff-review is not a Phase 0–5 operation",
+        "from-issue/delegated-owner.md": "the controller delegates Phases 6–7 at the rollover and never runs them as the fresh owner"
       },
       "ceiling_bytes": {
-        "claude": 100418,
-        "codex": 100418
+        "claude": 94843,
+        "codex": 94843
       },
       "conditional_ceiling_bytes": {
         "claude": 48918,
@@ -104,10 +106,12 @@
         "ship-issue/HUMAN-GATE.md"
       ],
       "unread": {
-        "from-issue/REVIEW-CONTRACT.md": "handed to the plan reviewer by absolute path, never read into this conversation"
+        "from-issue/REVIEW-CONTRACT.md": "handed to the plan reviewer by absolute path, never read into this conversation",
+        "from-issue/rollover.md": "a dispatcher-owned owner never takes the direct Phase-5 rollover",
+        "from-issue/delegated-owner.md": "only the owner delegated at the direct Phase-5 rollover reads it"
       },
       "ceiling_bytes": {
-        "claude": 186214
+        "claude": 175965
       },
       "conditional_ceiling_bytes": {
         "claude": 153646
@@ -188,6 +192,7 @@
       "hot": [
         "from-issue/SKILL.md",
         "from-issue/AUTO.md",
+        "from-issue/delegated-owner.md",
         "from-issue/ship-handoff.md",
         "sdd/SKILL.md",
         "sdd/implementer-prompt.md",
@@ -217,11 +222,12 @@
         "from-issue/investigate.md": "Phase 0 ran in the earlier controller",
         "from-issue/standards-review.md": "Phase 5 ran in the earlier controller",
         "from-issue/REVIEW-CONTRACT.md": "the Phase-5 reviewer contract, handed over by path",
-        "codex-collaboration/PLAN-REVIEW.md": "plan-review ran at Phase 5"
+        "codex-collaboration/PLAN-REVIEW.md": "plan-review ran at Phase 5",
+        "from-issue/rollover.md": "the transfer gate and the earlier controller's stop run in the controller; this owner receives the continuation"
       },
       "ceiling_bytes": {
-        "claude": 179014,
-        "codex": 179014
+        "claude": 172690,
+        "codex": 172690
       },
       "conditional_ceiling_bytes": {
         "claude": 135746,
@@ -1037,6 +1043,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 546834,
+  "corpus_ceiling_bytes": 545184,
   "description_ceiling_bytes": 3034
 }
