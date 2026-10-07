@@ -47,6 +47,8 @@ class SupersededOwnerStopPassContractsTest(unittest.TestCase):
             "Only after the pass, execute the response's actions in returned order.",
             "For `spawn`, `resume`, and `retry`, project the action",
             "Dispatch the owner in the background",
+            "only for later notification correlation and the stop pass; "
+            "it is never an owner token or action identity.",
             "For `finalize`, first run the stop pass,",
             "the action ends the run as `finalize` does: run the stop pass,",
             "## 5. Final report")
@@ -60,6 +62,9 @@ class SupersededOwnerStopPassContractsTest(unittest.TestCase):
             "sends no observation, makes no control call and writes nothing",
             "## 5. Final report",
             "**Stop failures**",
+            "still left a candidate because its stop failed or its "
+            "`check-launch` answer was unknown, with its `action_id` and the failure",
+            "omit the list when there is none",
             "Do not perform a second ledger read")
 
     def test_section_two_carries_no_stop_pass(self):
@@ -86,6 +91,8 @@ Put the `workflow-state check-launch …` command on its own line, as §2 rule (
 Change the `finalize` clause's opening from `For \`finalize\`, first clear \`current_wait_id\`,` to `For \`finalize\`, first run the stop pass, then clear \`current_wait_id\`,`; the rest of that clause is unchanged.
 
 In the `delivery_contract` clause, change `the action ends the run as \`finalize\` does: clear the wait state as for \`finalize\` and render §5 from this response.` to `the action ends the run as \`finalize\` does: run the stop pass, clear the wait state as for \`finalize\` and render §5 from this response.`
+
+In the same §4, change the sentence `Record the host task handle beside the returned action ID only for later notification correlation; it is never an owner token or action identity.` to `Record the host task handle beside the returned action ID only for later notification correlation and the stop pass; it is never an owner token or action identity.` (the stop pass consumes recorded handles; Codex plan-review SF-1).
 
 In §5, insert immediately before `Do not perform a second ledger read`, per D6:
 

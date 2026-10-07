@@ -42,4 +42,8 @@ Task 1 — Stop pass in orchestrate-issues §4 and its stop-failure report — h
 
 Task 1 rests on spec ledger rows D1–D5 and on plan-level rows D6 (which stop failures §5 lists) and D7 (the dispatcher ceiling raise), appended to the spec's ledger during planning.
 
+## Standards review provenance
+
+Reviewer: Codex (gpt-6-astra, xhigh), isolated read-only `plan-review`, no fallback. Base SHA 6d8c8451c7ea01882342bc0389020b0a2ec43c9b. Findings: 0 Blocking, 2 Should fix, 0 Discussion; accepted 2 (SF-1 handle-recording sentence names the stop pass; SF-2 test asserts the §5 list contents), rejected 0, deferred 0.
+
 ---
