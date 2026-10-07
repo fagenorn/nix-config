@@ -60,6 +60,21 @@ the test-fixture conventions in the project's standards shards (or legacy coding
 If the caller passes applicable `bindings.paths.hints` paths, read them for
 project-specific review hints and fold those into this pass.
 
+## Acceptance map check
+
+Read the issue's acceptance criteria (or, with no issue, the requirements
+document's) and the plan root's `## Acceptance map`. Each of these is **Blocking**:
+
+- the `## Acceptance map` section is missing;
+- a criterion has no row, or more than one;
+- rows are out of issue order (`AC1` to `AC<n>`);
+- a kind is outside `code`, `evidence`, `human`, or contradicts the issue's tag;
+- an owning task is not a `Task N` in the Task index;
+- an `evidence` row lacks its command, its conditions or its literal threshold.
+
+A `(classified)` kind you disagree with is **Should-fix**: give the kind you would
+assign and why.
+
 ## Common-miss checklist
 
 Scan against these categories — they have repeatedly slipped past plan review and surfaced only at PR

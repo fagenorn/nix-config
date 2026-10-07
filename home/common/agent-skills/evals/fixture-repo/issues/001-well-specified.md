@@ -17,15 +17,13 @@ Add a `--state` option to `tinytask list` that filters the backlog to a single s
 
 ## Acceptance criteria
 
-1. `list --state done` prints only tasks whose state is `done`, in id order, in the
-   existing `id<TAB>state<TAB>title` shape.
-2. `list --state open` prints exactly what bare `list` prints for the same task file.
-3. `list --state wibble` exits non-zero and writes a message naming the valid states to
-   stderr. Nothing is printed to stdout.
-4. `list --all --state done` exits non-zero with a usage error.
-5. Bare `list` and `list --all` behave exactly as they do today — no change.
-6. `--state` appears in `tinytask list --help`.
-7. Tests cover each of 1-5 with exact expected output lines.
+- [ ] [code] `list --state done` prints only tasks whose state is `done`, in id order, in the existing `id<TAB>state<TAB>title` shape — measured: tests/test_cli.py
+- [ ] [code] `list --state open` prints exactly what bare `list` prints for the same task file — measured: tests/test_cli.py
+- [ ] [code] `list --state wibble` exits non-zero and writes a message naming the valid states to stderr, and nothing is printed to stdout — measured: tests/test_cli.py
+- [ ] [code] `list --all --state done` exits non-zero with a usage error — measured: tests/test_cli.py
+- [ ] [code] Bare `list` and `list --all` behave exactly as they do today, with no change — measured: tests/test_cli.py
+- [ ] [code] `--state` appears in `tinytask list --help` — measured: a `--help` output test added to tests/test_cli.py
+- [ ] [code] Tests cover each of criteria 1-5 with exact expected output lines — measured: tests/test_cli.py
 
 ## Notes
 

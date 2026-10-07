@@ -113,9 +113,9 @@ these instead of re-deriving (or re-asking) them. Omit the section when nothing 
 
 ## Acceptance criteria
 
-- [ ] Criterion 1
-- [ ] Criterion 2
-- [ ] Criterion 3
+- [ ] [code] <observable outcome> — measured: <the test, check or CI job that observes it>
+- [ ] [evidence] <observable outcome> — measured: <command>, <conditions it runs under>, <literal threshold>
+- [ ] [human] <observable outcome> — measured: <who judges, in what environment>
 
 ## Blocked by
 
@@ -125,11 +125,26 @@ Or "None - can start immediately" if no blockers.
 
 </issue-template>
 
-**The body is the contract; the discussion is context.** Issue bodies are read weeks later in fresh
-contexts: state behavior and outcomes, not procedures; no file paths, no line numbers, no "as
-discussed above". Anything an implementer must know goes in the body or a linked durable artifact,
-never only in a comment thread.
+**Every acceptance criterion is typed and located.** Write each one as
+`- [ ] [code|evidence|human] <observable outcome> — measured: <where>`, with exactly one kind from
+that closed set:
 
-**Every acceptance criterion must be falsifiable.** For each one, name the observation that would show it false, and confirm that observation actually fails at the commit the implementer starts from. A criterion already true at the base commit grades nothing — it is how an implementer "completes" an issue as a no-op. Vertical slicing prevents most of this by construction (a slice delivering behaviour that did not exist before is red at base), but check by hand. Reject two other recurring shapes: a criterion that can only be satisfied by work another slice owns, and one that restates the request instead of deriving from the artifact.
+- `code` — a check any reviewer reproduces at the head: a test, the build or a CI job. `measured:`
+  names that test, check or CI job.
+- `evidence` — a measurement taken outside the gating suite. `measured:` names the command, the
+  conditions it runs under and a literal threshold, such as `≤ 90 s per module, serial, idle mbp`.
+- `human` — needs a person's judgment or an environment the agent cannot control. `measured:` names
+  who judges and in what environment.
+
+Prefer `code`, then `evidence`; use `human` only when no agent can produce the observation. The
+`measured:` clause is the one place the body names a test, file or command, because that name is
+what a grader reruns.
+
+**The body is the contract; the discussion is context.** Issue bodies are read weeks later in fresh
+contexts: state behavior and outcomes, not procedures; no file paths outside a `measured:` clause, no line
+numbers, no "as discussed above". Anything an implementer must know goes in the body or a linked
+durable artifact, never only in a comment thread.
+
+**Every acceptance criterion must be falsifiable.** For each one, name the observation that would show it false, and confirm that observation actually fails at the commit the implementer starts from. A criterion already true at the base commit grades nothing — it is how an implementer "completes" an issue as a no-op. Vertical slicing prevents most of this by construction (a slice delivering behaviour that did not exist before is red at base), but check by hand. Reject two other recurring shapes: a criterion that can only be satisfied by work another slice owns, and one that restates the request instead of deriving from the artifact. The `measured:` clause must name an observation that fails at the base commit, and an evidence threshold is a literal number or string, never "faster" or "reasonable".
 
 Do NOT close or modify any parent issue.

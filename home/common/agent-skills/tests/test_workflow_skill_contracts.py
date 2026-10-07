@@ -5440,5 +5440,260 @@ class CheckpointVerificationContractsTest(unittest.TestCase):
         self.assertNotIn("Phase 2 verification commands", ci_merge)
 
 
+class ToIssuesCriterionLineContractsTest(unittest.TestCase):
+    """#274 AC1: every to-issues criterion line is typed and located (D1, D9)."""
+
+    TO_ISSUES = REPO_ROOT / "home/common/agent-skills/skills/to-issues/SKILL.md"
+    LINE_RE = re.compile(
+        r"^- \[ \] \[(code|evidence|human)\] \S.* — measured: \S.*$")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = cls.TO_ISSUES.read_text(encoding="utf-8")
+        template = cls.text[cls.text.index("<issue-template>"):
+                            cls.text.index("</issue-template>")]
+        section = template[template.index("## Acceptance criteria\n"):]
+        section = section[:section.index("\n## ", 1)]
+        cls.criterion_lines = [
+            line for line in section.splitlines() if line.startswith("- ")]
+
+    def test_every_template_criterion_line_carries_a_kind_and_a_measured_clause(self):
+        self.assertGreaterEqual(len(self.criterion_lines), 3)
+        for line in self.criterion_lines:
+            with self.subTest(line=line):
+                self.assertRegex(line, self.LINE_RE)
+        kinds = {match.group(1) for match in map(self.LINE_RE.match, self.criterion_lines)
+                 if match}
+        self.assertEqual(kinds, {"code", "evidence", "human"})
+
+    def test_the_shape_kinds_and_preference_rule_are_stated(self):
+        text = normalized(self.text)
+        for phrase in (
+            "`- [ ] [code|evidence|human] <observable outcome> — measured: <where>`",
+            "`code` — a check any reviewer reproduces at the head",
+            "`evidence` — a measurement taken outside the gating suite",
+            "`human` — needs a person's judgment or an environment the agent cannot control",
+            "Prefer `code`, then `evidence`; use `human` only when no agent can "
+            "produce the observation.",
+            "no file paths outside a `measured:` clause",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def test_the_falsifiability_rule_extends_to_the_measured_clause(self):
+        paragraph = next(
+            line for line in self.text.splitlines()
+            if line.startswith("**Every acceptance criterion must be falsifiable.**"))
+        self.assertIn(
+            "The `measured:` clause must name an observation that fails at the base "
+            "commit, and an evidence threshold is a literal number or string, never "
+            "\"faster\" or \"reasonable\".",
+            paragraph,
+        )
+
+
+class AcceptanceMapContractsTest(unittest.TestCase):
+    """#274 AC2: plans carry an Acceptance map and plan review blocks a gap (D2-D5)."""
+
+    WRITING_PLANS = REPO_ROOT / "home/common/agent-skills/skills/writing-plans/SKILL.md"
+    REVIEW_CONTRACT = (
+        REPO_ROOT / "home/common/agent-skills/skills/from-issue/REVIEW-CONTRACT.md")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.plans = cls.WRITING_PLANS.read_text(encoding="utf-8")
+        cls.review = cls.REVIEW_CONTRACT.read_text(encoding="utf-8")
+
+    @staticmethod
+    def section(text, heading):
+        start = text.index("\n" + heading + "\n") + 1
+        end = text.find("\n## ", start + len(heading))
+        return text[start:] if end < 0 else text[start:end]
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(position, 0, anchor)
+
+    def test_the_plan_template_places_the_map_directly_after_the_task_index(self):
+        headings = [line for line in self.plans.splitlines() if line.startswith("## ")]
+        self.assertEqual(headings.count("## Task index"), 1)
+        self.assertEqual(headings.count("## Acceptance map"), 1)
+        self.assertEqual(headings[headings.index("## Task index") + 1], "## Acceptance map")
+        self.assertIn("Task index, Acceptance map, and decision-ID", normalized(self.plans))
+
+    def test_the_map_section_fixes_its_columns_kinds_owner_and_checks(self):
+        mapping = normalized(self.section(self.plans, "## Acceptance map"))
+        for phrase in (
+            "| AC | Kind | Task | Check |",
+            "`None — no acceptance criteria.`",
+            "a tagged criterion is never reclassified",
+            "`<kind> (classified)`",
+            "exactly one owning `Task N` from the index",
+            "the task that adds or runs the check",
+            "the acceptance-record row `AC<n>` the owning task's implementer fills in",
+            "The map is the plan's only acceptance surface",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, mapping)
+
+    def test_self_review_checks_the_map_before_final_remeasurement(self):
+        self.assert_ordered(
+            normalized(self.plans), "## Self-review",
+            "8. **Acceptance map** — one row per issue criterion",
+            "9. **Final remeasurement**")
+
+    def test_review_contract_blocks_a_missing_or_duplicated_row(self):
+        self.assert_ordered(
+            self.review, "## Reviewer instructions\n", "## Acceptance map check\n",
+            "## Common-miss checklist\n")
+        check = normalized(self.section(self.review, "## Acceptance map check"))
+        for phrase in (
+            "Each of these is **Blocking**:",
+            "the `## Acceptance map` section is missing;",
+            "a criterion has no row, or more than one;",
+            "rows are out of issue order (`AC1` to `AC<n>`);",
+            "a kind is outside `code`, `evidence`, `human`, or contradicts the issue's tag;",
+            "an owning task is not a `Task N` in the Task index;",
+            "an `evidence` row lacks its command, its conditions or its literal threshold.",
+            "A `(classified)` kind you disagree with is **Should-fix**",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, check)
+
+
+class AcceptanceMapEvalGradingTest(unittest.TestCase):
+    """#274 AC3: fixture 001 is tagged and both evals grade its map (D6, D7, D10)."""
+
+    ASSERT_LIB = REPO_ROOT / "home/common/agent-skills/evals/assert-lib.sh"
+    FIXTURE = (REPO_ROOT
+               / "home/common/agent-skills/evals/fixture-repo/issues/001-well-specified.md")
+    EVALS = (
+        REPO_ROOT / "home/common/agent-skills/skills/from-issue/evals/evals.json",
+        REPO_ROOT / "home/common/agent-skills/skills/writing-plans/evals/evals.json",
+    )
+    ASSERT_NAME = "the plan's acceptance map has one row per issue criterion"
+    TAGGED = ("# Issue\n\n## Acceptance criteria\n\n"
+              "- [ ] [code] a — measured: t\n"
+              "- [ ] [evidence] b — measured: cmd, idle, ≤ 5 s\n"
+              "- [x] [human] c — measured: the user, on mbp\n\n"
+              "## Blocked by\n\nNone\n")
+    LEGACY = "# Issue\n\n## Acceptance criteria\n\n1. a\n   more of a\n2. b\n\n## Notes\n"
+    EMPTY = "# Issue\n\n## Acceptance criteria\n\n## Notes\n"
+
+    @staticmethod
+    def plan(*rows):
+        return ("# Plan\n\n## Task index\n\nTask 1 — x — f — full — [task-1.md](p.tasks/task-1.md)\n\n"
+                "## Acceptance map\n\n| AC | Kind | Task | Check |\n|----|------|------|-------|\n"
+                + "".join(f"| {ac} | {kind} | Task 1 | check |\n" for ac, kind in rows)
+                + "\n## Decisions\n")
+
+    def covers(self, plan_text, issue_text=None, issue_path=None):
+        with tempfile.TemporaryDirectory() as temporary:
+            plan_path = Path(temporary) / "plan.md"
+            plan_path.write_text(plan_text, encoding="utf-8")
+            if issue_path is None:
+                issue_path = Path(temporary) / "issue.md"
+                issue_path.write_text(issue_text, encoding="utf-8")
+            return subprocess.run(
+                ["bash", "-c", 'source "$0"; acceptance_map_covers "$1" "$2"',
+                 str(self.ASSERT_LIB), str(plan_path), str(issue_path)],
+                check=False, capture_output=True, text=True)
+
+    def test_a_conforming_tagged_map_passes(self):
+        result = self.covers(self.plan(("AC1", "code"), ("AC2", "evidence"), ("AC3", "human")),
+                             self.TAGGED)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_each_structural_gap_fails_with_a_reason(self):
+        cases = {
+            "missing row": (("AC1", "code"), ("AC2", "evidence")),
+            "duplicate row": (("AC1", "code"), ("AC1", "code"), ("AC2", "evidence"),
+                              ("AC3", "human")),
+            "out of order": (("AC2", "evidence"), ("AC1", "code"), ("AC3", "human")),
+            "kind contradicts tag": (("AC1", "evidence"), ("AC2", "evidence"),
+                                     ("AC3", "human")),
+            "tagged kind reclassified": (("AC1", "code (classified)"), ("AC2", "evidence"),
+                                         ("AC3", "human")),
+        }
+        for name, rows in cases.items():
+            with self.subTest(case=name):
+                result = self.covers(self.plan(*rows), self.TAGGED)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(result.stdout.strip(), "a failing helper names its reason")
+
+    def test_legacy_numbered_criteria_need_a_classified_kind(self):
+        good = self.covers(self.plan(("AC1", "code (classified)"), ("AC2", "human (classified)")),
+                           self.LEGACY)
+        self.assertEqual(good.returncode, 0, good.stdout)
+        bare = self.covers(self.plan(("AC1", "code"), ("AC2", "human (classified)")),
+                           self.LEGACY)
+        self.assertNotEqual(bare.returncode, 0)
+
+    def test_no_criteria_pass_only_on_the_none_line(self):
+        none = "# Plan\n\n## Acceptance map\n\nNone — no acceptance criteria.\n"
+        self.assertEqual(self.covers(none, self.EMPTY).returncode, 0)
+        self.assertNotEqual(self.covers("# Plan\n\n## Acceptance map\n", self.EMPTY).returncode, 0)
+        self.assertNotEqual(self.covers("# Plan\n\n## Task index\n", self.TAGGED).returncode, 0)
+
+    def test_fixture_001_has_seven_tagged_code_criteria_graded_by_the_helper(self):
+        text = self.FIXTURE.read_text(encoding="utf-8")
+        section = text[text.index("## Acceptance criteria\n"):]
+        section = section[:section.index("\n## ", 1)]
+        items = [line for line in section.splitlines()
+                 if re.match(r"^(- \[[ xX]\] |[0-9]+\. )", line)]
+        self.assertEqual(len(items), 7)
+        for line in items:
+            with self.subTest(line=line):
+                self.assertRegex(
+                    line, r"^- \[ \] \[code\] \S.* — measured: .*tests/test_cli\.py$")
+        result = self.covers(self.plan(*((f"AC{n}", "code") for n in range(1, 8))),
+                             issue_path=self.FIXTURE)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_both_fixture_001_evals_call_the_helper(self):
+        for path in self.EVALS:
+            with self.subTest(evals=path.parent.parent.name):
+                case = next(item for item in json.loads(path.read_text(encoding="utf-8"))["evals"]
+                            if item["id"] == 1)
+                shells = [item["shell"] for item in case["asserts"]
+                          if item["name"] == self.ASSERT_NAME]
+                self.assertEqual(len(shells), 1)
+                self.assertIn("acceptance_map_covers", shells[0])
+                self.assertIn('"$REPO/issues/001-well-specified.md"', shells[0])
+
+    def test_both_eval_assert_shells_grade_a_plan_under_harness_paths(self):
+        # run-eval.sh exports PLAN_DIR as the resolver's ABSOLUTE path under
+        # $REPO and runs each shell as `cd $REPO && bash -c "source lib; …"`;
+        # from-issue's plan lands in the worktree at the same relative suffix.
+        full = self.plan(*((f"AC{n}", "code") for n in range(1, 8)))
+        short = self.plan(*((f"AC{n}", "code") for n in range(1, 7)))
+        for path in self.EVALS:
+            case = next(item for item in json.loads(path.read_text(encoding="utf-8"))["evals"]
+                        if item["id"] == 1)
+            shell = next(item["shell"] for item in case["asserts"]
+                         if item["name"] == self.ASSERT_NAME)
+            for label, text, passes in (("complete", full, True), ("missing row", short, False)):
+                with self.subTest(evals=path.parent.parent.name, plan=label), \
+                        tempfile.TemporaryDirectory() as temporary:
+                    repo = Path(temporary) / "repo"
+                    worktree = Path(temporary) / "wt"
+                    plan_dir = repo / ".agents/artifacts/plans"
+                    (repo / "issues").mkdir(parents=True)
+                    (repo / "issues/001-well-specified.md").write_text(
+                        self.FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+                    owner = (worktree if "from-issue" in str(path) else repo)
+                    (owner / ".agents/artifacts/plans").mkdir(parents=True)
+                    (owner / ".agents/artifacts/plans/plan.md").write_text(text, encoding="utf-8")
+                    env = dict(os.environ, REPO=str(repo), WT=str(worktree),
+                               PLAN_DIR=str(plan_dir))
+                    result = subprocess.run(
+                        ["bash", "-c", f"source '{self.ASSERT_LIB}'; {shell}"],
+                        cwd=repo, env=env, check=False, capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, passes,
+                                     result.stdout + result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

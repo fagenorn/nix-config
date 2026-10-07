@@ -7,7 +7,7 @@
       "name": "plan-from-well-specified-requirements",
       "mode": "pipeline",
       "prompt": "Use the `writing-plans` skill to turn `issues/001-well-specified.md` into an implementation plan.\n\nResolve once into a retained ResolvedProject. The tracker capability is unsupported, so this file is the requirements; refusal is fatal and no value is defaulted or inferred. Work on the current branch without a worktree. Autonomous mode: record each non-obvious decision as `| ID | Choice | Grounding | Rejected alternative |`. Produce and commit plan artifacts only; do not edit `tinytask/` or `tests/`.\n\nReport the resolved plan path(s) and each self-answered decision.",
-      "expected_output": "Plan artifacts under the retained plans directory, committed on the current branch: either one plan file with Task N sections, or (target contract) a thin index plus per-task briefs. Every task carries at least one falsifiable verification line naming a command and the observation that would show the task incomplete. Planning decisions are logged in a decision section — target contract: compact ledger rows `ID | choice | grounding | rejected alternative`. No placeholders (TBD/TODO/'implement later'), and no source file touched.",
+      "expected_output": "Plan artifacts under the retained plans directory, committed on the current branch: either one plan file with Task N sections, or (target contract) a thin index plus per-task briefs. Every task carries at least one falsifiable verification line naming a command and the observation that would show the task incomplete. Planning decisions are logged in a decision section — target contract: compact ledger rows `ID | choice | grounding | rejected alternative`. No placeholders (TBD/TODO/'implement later'), and no source file touched. The plan root carries an Acceptance map with rows AC1 to AC7, each of kind code, each owned by one task.",
       "asserts": [
         {
           "name": "a plan artifact exists under the retained plans directory",
@@ -17,6 +17,10 @@
           "name": "every task section (inline or per-task brief) has a falsifiable verification line",
           "contract": "accepts both today's single-file plan and the target thin-index + per-task-brief layout",
           "shell": "files=$(grep -rlE '^##+[[:space:]]+[Tt]ask[[:space:]]+[0-9]' \"$REPO/$PLAN_DIR\" 2>/dev/null); [ -n \"$files\" ] || fail \"no task sections under $PLAN_DIR\"; for f in $files; do plan_tasks_verifiable \"$f\" || exit 1; done"
+        },
+        {
+          "name": "the plan's acceptance map has one row per issue criterion",
+          "shell": "acceptance_map_covers \"$(first_file \"$PLAN_DIR\"/*.md)\" \"$REPO/issues/001-well-specified.md\""
         },
         {
           "name": "self-answered decisions are logged as ledger rows (spec- or plan-hosted; legacy ### accepted)",
