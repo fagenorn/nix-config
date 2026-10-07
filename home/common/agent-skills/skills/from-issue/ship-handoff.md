@@ -47,7 +47,7 @@ In both handoff shapes, `head_sha` is the validated sdd report's `head_sha`,
 copied unchanged and never the branch tip: it is the *final-review head*
 ship-issue's Phase 5 reviews from.
 
-In both handoff shapes, `acceptance_state` is the validated sdd report's `acceptance_state`, copied unchanged. A `state: failed` handoff built without an sdd report (`review_state: unknown`) carries `not_applicable`. ship-issue validates the field and carries it; its close stage does not read it.
+In both handoff shapes, `acceptance_state` is the validated sdd report's `acceptance_state`, copied unchanged. A `state: failed` handoff built without an sdd report (`review_state: unknown`) carries `not_applicable`. ship-issue validates the field and fixes its effective acceptance state from it: `met` or `not_applicable` closes the issue, and `unmet` or `human_pending` holds it open as `needs-verification` (ship-issue Phase 8 step 1).
 
 Use `state: failed` only according to the ship-handoff validator's before/after
 matrix. `notes` is bounded by `phase_reports.notes_max_characters`; it names a
@@ -129,8 +129,10 @@ Deliver inline: push the branch, open a PR against `<integration-branch>`, then 
 <!-- agent-dispatch: id=from-issue-inline-ship-review role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") launches a fresh first-pass reviewer over the shipping diff.
 
-Then wait for CI (`<tracker-cli> pr checks --watch`), merge `--no-ff`, close the
-issue, and publish every non-empty review detail beneath the primary worktree's
+Then wait for CI (`<tracker-cli> pr checks --watch`), merge `--no-ff`, then close
+the issue when the sdd report's `acceptance_state` is `met` or `not_applicable`;
+otherwise hold it: label it `needs-verification` (creating the label when
+missing), comment the verdict table, leaving it open, and publish every non-empty review detail beneath the primary worktree's
 `.superpowers/issue-delivery/` home before cleanup. Publication failure must keep
 the worktree and report `unpublished`. With an unsupported tracker capability, merge
 locally and clean up under the same detail rule.

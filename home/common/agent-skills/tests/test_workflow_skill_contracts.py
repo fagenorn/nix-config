@@ -5633,7 +5633,7 @@ class AcceptanceGradingContractsTest(unittest.TestCase):
             "In both handoff shapes, `acceptance_state` is the validated sdd report's "
             "`acceptance_state`, copied unchanged.",
             "(`review_state: unknown`) carries `not_applicable`",
-            "its close stage does not read it")
+            "holds it open as `needs-verification`")
         self.assertIn("`head_sha`, `acceptance_state` and `report_path` may be used to "
                       "construct the Phase-7 handoff", self.read(FROM_ISSUE))
         self.assertIn("`head_sha`, `review_state`, `acceptance_state`, `auto`",
@@ -6027,6 +6027,44 @@ class TrackerHoldContractsTest(unittest.TestCase):
             "present on the close branch and absent on a hold", "gh issue close <num>",
             "gh issue reopen <num>", "gh issue edit <num> --add-label needs-verification",
             "git push origin --delete <branch>")
+
+
+class HeldReportContractsTest(unittest.TestCase):
+    """#273: orchestrate-issues reports held issues; the ship handoff closes or holds."""
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def section(text, heading, next_heading):
+        start = text.index(heading)
+        return text[start:text.index(next_heading, start + len(heading))]
+
+    def test_the_final_report_names_held_and_keeps_it_a_blocker(self):
+        report = self.section(normalized(ORCHESTRATE.read_text(encoding="utf-8")),
+                              "## 5. Final report", "## Notes")
+        self.assert_ordered(
+            report, "A `held` summary is an issue whose PR merged",
+            "`needs-verification`", "report it as held",
+            "never as queued, progressing or closed", "with no re-entry line",
+            "stays in its dependents' `open_blockers`", "they stay `blocked`")
+
+    def test_the_handoff_and_its_inline_fallback_close_or_hold(self):
+        handoff = normalized((FROM_ISSUE_DIR / "ship-handoff.md").read_text(encoding="utf-8"))
+        self.assertNotIn("its close stage does not read it", handoff)
+        self.assertIn("`met` or `not_applicable` closes the issue, and `unmet` or "
+                      "`human_pending` holds it open as `needs-verification` "
+                      "(ship-issue Phase 8 step 1)", handoff)
+        fallback = self.section(handoff, "## Inline fallback (no ship-issue skill)",
+                                "## Remainder owner prompt")
+        self.assert_ordered(
+            fallback, "close the issue when the sdd report's `acceptance_state` is "
+            "`met` or `not_applicable`", "label it `needs-verification`",
+            "comment the verdict table", "leaving it open")
 
 
 if __name__ == "__main__":
