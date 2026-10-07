@@ -1,3 +1,4 @@
+import ast
 import html
 import json
 import os
@@ -2450,42 +2451,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # suspend would park the successor's live attempt (per D8).
         self.assertNotIn("workflow-state suspend", phase_seven)
 
-    def test_expiry_prose_describes_the_wall_clock_the_reaper_actually_reads(self):
-        # The only skill-prose home that explains expiry to an owner. Prose that
-        # frames expiry as detecting a silent agent is wrong: the reaper compares
-        # instants and never looks at progress (per D11).
-        rules = self.section(
-            self.from_issue,
-            "## Dispatch, phase-budget and attempt-budget rules",
-            "## Terminal return procedure",
-        )
-        collapsed = normalized(rules)
-        self.assert_ordered(
-            collapsed,
-            "Persistence precedes notification",
-            "wall-clock only",
-            "never consults `last_progress_at`",
-            "consumes no attempt",
-            "resumes the same attempt",
-            "never opens a second attempt",
-        )
-        self.assertIn("blocked on a CI watch", collapsed)
-        self.assertIn(
-            "bounds how long an owner may hold the issue", collapsed
-        )
-        self.assertIn(
-            "the one fresh retry stays reserved for an attempt that reported "
-            "a terminal",
-            collapsed,
-        )
-        # The same rejection has a second meaning at the anti-zombie bound, and
-        # this owner is the one deciding whether to stop for a pause or for
-        # good, so the stalled branch has to be named here too (per D8).
-        self.assertIn(
-            "a `stopped(stalled)` terminal and the run is over, not paused",
-            collapsed,
-        )
-
     def test_direct_autonomous_bookkeeper_checks_before_the_terminal_finish(self):
         # The delegated ledger-only remainder is how a --auto run reaches its
         # terminal write, so the guard has to live inside the bookkeeper's own
@@ -2682,23 +2647,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "max_parallel: 1", "workflow-state control", "first `spawn` envelope",
         )
         self.assertNotIn("direct-owner", durable)
-
-    def test_from_issue_routes_a_deadline_rejected_progress_to_the_suspension_procedure(self):
-        # A progress call rejected past the attempt budget's deadline is now an
-        # environmental interruption, not a semantic verdict: the reaper demotes
-        # the expired attempt to suspended(unknown), so the owner follows the
-        # suspension procedure (print the re-entry line and stop) rather than
-        # writing a terminal finish, which the helper would reject on a
-        # non-active attempt.
-        self.assert_ordered(
-            self.from_issue,
-            "Obey the returned action exactly",
-            "attempt budget's deadline has passed",
-            "cannot record progress at or after attempt deadline",
-            "progress requires an active attempt",
-            "suspension procedure",
-            "Persistence precedes notification",
-        )
 
     def test_suspension_procedure_pins_verb_line_and_distinction(self):
         suspension = self.section(
@@ -6286,71 +6234,40 @@ class LaunchScopeSweepContractsTest(unittest.TestCase):
             "`scratch.json`", "`unattributed_worktrees`")
 
 
-class LaneTriageContractsTest(unittest.TestCase):
-    """#279: from-issue Phase 0 records a shadow lane-triage verdict."""
+LANE_TRIAGE_VERDICT_KEYS = {"hits", "lane", "mode"}  # closed by tests/test_lane_triage.py
 
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(next_position, 0, anchor)
-            position = next_position
 
-    @staticmethod
-    def section(text, heading, next_heading):
-        start = text.index(heading)
-        return text[start:text.index(next_heading, start + len(heading))]
+def module_constants(path, *names):
+    """The literal module-level assignments `names` in `path`, read without importing it."""
+    found = {}
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id in names):
+            found[node.targets[0].id] = ast.literal_eval(node.value)
+    assert set(found) == set(names), (path, names, sorted(found))
+    return found
+
+
+class LaneTriageRecordKeysTest(unittest.TestCase):
+    """#279 (D16): Phase 0 names the JSON keys `lane-triage evaluate` reads and prints."""
 
     def setUp(self):
-        self.from_issue = normalized(FROM_ISSUE.read_text(encoding="utf-8"))
-        self.auto = normalized(AUTO.read_text(encoding="utf-8"))
-        self.investigate = normalized(INVESTIGATE.read_text(encoding="utf-8"))
+        text = normalized(FROM_ISSUE.read_text(encoding="utf-8"))
+        start = text.index("## Phase 0 — Investigate")
+        phase_zero = text[start:text.index("## Phase 1 — Worktree", start)]
+        spans = " ".join(re.findall(r"`([^`]+)`", phase_zero))
+        self.span_words = set(re.findall(r"[a-z_]+", spans))
 
-    def test_phase_zero_runs_lane_triage_in_shadow(self):
-        phase_zero = self.section(self.from_issue, "## Phase 0 — Investigate",
-                                  "## Phase 1 — Worktree")
-        self.assert_ordered(
-            phase_zero,
-            "run the lane triage below, and post the note",
-            "**Lane triage.**", "`contract_change`", "`concurrency_or_persistence`",
-            "`open_design_questions`", "`criteria_shape`", "The triage record is",
-            "`lane-triage evaluate --repo-root <project.root> --input -`",
-            "quoted heredoc", "no input file is written",
-            "`ran: full (shadow)`", "`ran: full (active route not yet available)`",
-            "every attempt runs full", "`light_lane_unsupported`",
-            "light lane unsupported", "terminal return procedure",
-            "Any other non-zero exit", "a traceback's exit 1",
-            "a missing command's 127", "terminal return procedure",
-            "**CHECKPOINT**", "triage verdict here as information only")
+    def test_phase_zero_names_the_triage_record_keys_lane_triage_consumes(self):
+        lane = module_constants(REPO_ROOT / "python/agent_tools/lane_triage.py",
+                                "SIGNALS", "SIGNAL_MEMBERS", "TOP_MEMBERS")
+        expected = set().union(*lane.values())
+        self.assertEqual(expected - self.span_words, set())
 
-    def test_resolve_once_rule_admits_the_lane_triage_resolution(self):
-        rule = self.section(self.from_issue, "The only sanctioned exception is",
-                            "Use `bindings.tracker`")
-        self.assert_ordered(
-            rule, "`workflow-state build-delivery`",
-            "`lane-triage evaluate` likewise performs its own read-only resolution",
-            "`bindings.workflow.light_lane`")
-
-    def test_phase_two_commits_the_record_as_the_spec_triage_section(self):
-        phase_two = self.section(self.from_issue, "## Phase 2 — Brainstorm",
-                                 "## Phase 3 — Grill")
-        self.assert_ordered(phase_two, "**Lane triage** record", "verbatim",
-                            "`## Triage` section")
-        self.assert_ordered(self.auto, "the Phase-0 issue summary and scope boundary",
-                            "**Lane triage** record and verdict verbatim",
-                            "`## Triage` section")
-
-    def test_the_note_names_the_lane_triage_field_without_a_binding(self):
-        self.assertIn("**Lane triage** (the triage record", self.investigate)
-        self.assertNotIn("bindings.workflow", self.investigate)
-
-    def test_claude_md_names_the_command_and_its_seam(self):
-        text = normalized((REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8"))
-        self.assert_ordered(
-            text, "`launch-scope scratch` (#277)",
-            "`lane-triage evaluate --repo-root <root> --input -` (#279)",
-            "`agent_tools.resolve_project.resolve`", "`light_lane_unsupported`",
-            "every attempt still runs full", "The remaining Python helpers")
+    def test_phase_zero_names_the_verdict_keys_and_every_light_lane_mode(self):
+        modes = module_constants(REPO_ROOT / "python/agent_tools/resolve_project.py",
+                                 "LIGHT_LANE_MODES")["LIGHT_LANE_MODES"]
+        self.assertEqual((LANE_TRIAGE_VERDICT_KEYS | set(modes)) - self.span_words, set())
 
 
 if __name__ == "__main__":

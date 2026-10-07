@@ -5,7 +5,7 @@ description: Drive one tracker issue through investigate → spec → plan → r
 
 # From Issue
 
-Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. The only sanctioned exception is `workflow-state build-delivery`, which performs its own sealed, read-only resolution when it builds a delivery contract; `lane-triage evaluate` likewise performs its own read-only resolution, only to read `bindings.workflow.light_lane`; this skill still never resolves again itself. Use `bindings.tracker`, `bindings.vcs`, `bindings.paths.artifacts`, and `bindings.workflow`; required blocked capabilities stop and authored unsupported capabilities take only documented no-capability routes.
+Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. The only sanctioned exception is `workflow-state build-delivery`, which performs its own sealed, read-only resolution when it builds a delivery contract (and `lane-triage evaluate`, read-only, for `bindings.workflow.light_lane`); this skill still never resolves again itself. Use `bindings.tracker`, `bindings.vcs`, `bindings.paths.artifacts`, and `bindings.workflow`; required blocked capabilities stop and authored unsupported capabilities take only documented no-capability routes.
 
 Counterpart to `to-issues`. Take one tracker issue from triage to merged code by chaining the canonical skills, carrying the caller's scoped authorization across phase boundaries.
 
@@ -470,36 +470,16 @@ and Phase-7 `delegate` launches only the ledger-only finish bookkeeper. The
 behavior for all other acquisition modes retains the existing generic action
 semantics unchanged.
 
-If `workflow-state progress` is rejected because the
-attempt budget's deadline has passed — either
+If `workflow-state progress` is rejected because the attempt deadline has passed —
 `cannot record progress at or after attempt deadline`, or
-`progress requires an active attempt` when the lazy reaper demoted the attempt
-to `suspended(unknown)` first — that is an environmental interruption, not a
-semantic verdict, not a harness fault, and not a reason to retry it or to doubt
-your identity: the expired attempt is usually now a resumable suspension, so
-follow the suspension procedure — print the canonical re-entry line and stop,
-and never write a terminal `workflow-state finish` for it (the helper rejects a
-finish on a non-active attempt). That rejection carries one outcome more than
-the suspension it usually means. At the anti-zombie bound — an attempt parked
-too many times in a row without a phase advance or a newly recorded progress
-marker — the reaper ends the work
-instead of parking it: the attempt becomes a `stopped(stalled)` terminal and
-the run is over, not paused. The rejection reads the same either way, so print
-the re-entry line and stop without asserting which one you got; the reaper has
-already recorded it, and the re-entry either resumes the attempt or replays
-that terminal. Persistence precedes notification: the reaper's
-suspension is already durable before you print. Expiry is wall-clock only:
-the reaper compares the current instant against the attempt's `deadline_at`
-and never consults `last_progress_at`, so an attempt that is actively
-working — blocked on a CI watch, say — expires exactly like one whose owner
-is gone. A deadline bounds how long an owner may hold the issue; it says
-nothing about whether that owner is still running. The reaper's suspension
-consumes no attempt: re-entry resumes the same attempt in place, on the same
-worktree, with a fresh full `attempt_budget_minutes` window and one more
-launch recorded against it. A deadline therefore never opens a second
-attempt, and the one fresh retry stays reserved for an attempt that reported
-a terminal — an owner-reported `failed`, or a legacy expiry-sourced `stopped`
-from before the suspension model.
+`progress requires an active attempt` once the lazy reaper demoted the attempt to
+`suspended(unknown)` — that is an environmental interruption, not a verdict or a
+fault: never retry it and never write a `workflow-state finish` (the helper rejects
+one on a non-active attempt). Print the re-entry line and stop. The reaper has
+already durably recorded either a resumable suspension or, at the anti-zombie bound
+(parked too often in a row without a phase advance or a newly recorded progress marker), a
+`stopped(stalled)` terminal; do not assert which, since re-entry resumes the one
+or replays the other.
 
 Without lifecycle identity, apply the same action order locally with the
 120-turn/150000-token ceilings and default interactive handoff behavior.
@@ -606,33 +586,12 @@ exists: write a `terminal_failed` summary carrying the `stopped` or `failed` row
 
 **Mechanical-only shortcut.** Declare `mechanical-only` only when the **entire** change fits the mechanical lane (§Risk lanes). Then Phase 5 self-grades against `REVIEW-CONTRACT.md` and Phase 6 dispatches one mechanic+reviewer pair for the whole change. Every phase still runs; skip manufactured TDD framing.
 
-**Lane triage.** After investigating and before the checkpoint, judge each
-light-lane signal as `no`, `hit` or `doubt`, with one line of evidence each:
-`contract_change` (a contract, schema or public interface changes),
-`concurrency_or_persistence` (concurrency, locking or persisted state is
-touched), `open_design_questions` (a design question is still open), and
-`criteria_shape` (`hit` for more than four acceptance criteria or for any
-criterion that no deterministic code check verifies, `doubt` for one you cannot
-classify). List the repository-relative paths the change is predicted to touch.
-The triage record is the JSON object
-`{"signals": {<name>: {"value": ..., "evidence": ...}, ...}, "paths": [...]}`.
-Feed it to `lane-triage evaluate --repo-root <project.root> --input -` on stdin
-through a quoted heredoc; no input file is written. Exit 0 prints the verdict
-`{"hits": [...], "lane": ..., "mode": ...}`: record the triage record, the
-verdict and `ran: full (shadow)` under the note's **Lane triage** field, or
-`ran: full (active route not yet available)` when `mode` is `active`. The
-verdict is observed, never acted on: every attempt runs full, whatever `lane`
-says. The `light_lane_unsupported` refusal means the project has no light lane:
-skip triage and record "light lane unsupported". Any other refusal
-(`invalid_input` or `resolver_refused`, exit 2 with one stderr line) is an input
-or resolver error: fix the record and rerun, or stop through the terminal return
-procedure. Any other non-zero exit (a traceback's exit 1, a missing command's
-127) stops the attempt through the terminal return procedure.
+**Lane triage.** Before the checkpoint, judge each light-lane signal `no`, `hit` or `doubt`, with one line of evidence: `contract_change` (a contract, schema or public interface changes), `concurrency_or_persistence` (concurrency, locking or persisted state), `open_design_questions` (a design question is open) and `criteria_shape` (`hit`: over four acceptance criteria, or one no deterministic code check verifies). Feed `{"signals": {<name>: {"value": ..., "evidence": ...}}, "paths": [<predicted repo-relative paths>]}` through a quoted heredoc to `lane-triage evaluate --repo-root <project.root> --input -`. Exit 0: record the input, its `{hits, lane, mode}` verdict and `ran: full (shadow)` (`ran: full (active route not yet available)` for `mode: active`) under the note's **Lane triage**; every attempt runs full. `light_lane_unsupported`: record "light lane unsupported". `invalid_input` or `resolver_refused`: fix the record and rerun, or stop; any other exit stops; every stop uses the terminal return procedure.
 
 **CHECKPOINT** — Record the restatement and scope. Every open question needs a
 disposition: an answer, "defer to brainstorm", or "agent-choose". Apply the
 shared checkpoint rule; ask only for a disposition that existing authorization
-does not cover. Interactive mode shows the triage verdict here as information only; there is no lane to choose.
+does not cover.
 
 ## Phase 1 — Worktree
 
@@ -669,7 +628,7 @@ A ledger-free interactive direct invocation keeps the standard `worktrees` flow:
 
 ## Phase 2 — Brainstorm
 
-Invoke `design` for a design doc under the retained specifications directory, committed in the worktree. Ground first per `grounding.md`. Resolve every Phase-0 carryover before opening a new question. When the investigation note carries a **Lane triage** record, the design copies the record and the verdict verbatim into the spec as a `## Triage` section; that commit is what makes them durable.
+Invoke `design` for a design doc under the retained specifications directory, committed in the worktree. Ground first per `grounding.md`. Resolve every Phase-0 carryover before opening a new question. A note's **Lane triage** record and verdict go verbatim into the spec's `## Triage` section.
 
 **CHECKPOINT** — Record the spec path and approval source. Apply the shared checkpoint rule; existing authorization for autonomous design decisions suffices within its scope.
 
