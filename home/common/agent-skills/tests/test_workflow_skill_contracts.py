@@ -5952,5 +5952,82 @@ class SupersededOwnerStopPassContractsTest(unittest.TestCase):
         self.assertNotIn("stop pass", section.lower())
 
 
+class TrackerHoldContractsTest(unittest.TestCase):
+    """#273 AC4: ship-issue holds as needs-verification in the delivery loop and Phase 8."""
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def section(text, heading, next_heading=None):
+        start = text.index(heading)
+        if next_heading is None:
+            return text[start:]
+        return text[start:text.index(next_heading, start + len(heading))]
+
+    def setUp(self):
+        self.ship = normalized(SHIP_ISSUE.read_text(encoding="utf-8"))
+        self.gate = normalized(SHIP_ISSUE_HUMAN_GATE.read_text(encoding="utf-8"))
+
+    def test_phase_0_fixes_the_effective_acceptance_state(self):
+        phase0 = self.section(self.ship, "## Phase 0 — Pre-flight", "## Phase 1")
+        self.assert_ordered(
+            phase0, "**Effective acceptance state.**",
+            "`<plan stem>.acceptance.md` beside the plan root", "`met (attested)`",
+            "`--auto` never asks and never self-attests",
+            "`met` or `not_applicable` **closes** the issue",
+            "`unmet` or `human_pending` **holds** it open as `needs-verification`")
+
+    def test_the_pr_body_carries_the_verdict_table_and_a_conditional_trailer(self):
+        phase4 = self.section(self.ship, "## Phase 4 — Open PR", "## Phase 5")
+        self.assert_ordered(
+            phase4, "## Acceptance", "Acceptance state: <effective acceptance state>",
+            "Acceptance record: <record-path or none>", "<acceptance table>",
+            "Closes #<num>")
+        self.assertIn("a Markdown table with the three columns `AC`, `Kind` and "
+                      "`Verdict`, one row per record row", phase4)
+        self.assertIn("On a **hold** drop the `Closes #<num>` line too: a hold body "
+                      "carries no closing keyword", phase4)
+
+    def test_phase_8_names_the_hold_branch_and_creates_the_label_on_demand(self):
+        phase8 = self.section(self.ship, "## Phase 8 — Cleanup", "## Notes")
+        self.assert_ordered(
+            phase8, "**Close** (`met` or `not_applicable`)", "gh issue close <num>",
+            "**Hold** (`unmet` or `human_pending`)", "gh issue reopen <num>",
+            "gh label list --repo <resolved-repository> --search needs-verification --json name",
+            "gh label create needs-verification", "never `--force`",
+            "gh issue edit <num> --add-label needs-verification",
+            "Held for verification: <PR URL>", "gh issue comment <num>",
+            "git worktree remove")
+        self.assertIn("`issue_closed: false` on hold", phase8)
+
+    def test_the_delivery_loop_records_a_hold_as_tracker_held(self):
+        loop = self.section(self.ship, "## Delivery loop", "## Remainder mode")
+        self.assert_ordered(
+            loop, "`close_tracker` → `tracker_closed`, or `tracker_held` on a hold",
+            "On a hold the `close_tracker` cycle runs Phase 8 step 1's hold branch",
+            "`needs-verification`", "`tracker_held` with the facts `comment_url`",
+            "`observation_identity` `github:issue:<num>:held`",
+            "on the close branch only, closure by a merge that closes the issue")
+
+    def test_a_remainder_reads_its_acceptance_state_from_the_pr_body(self):
+        remainder = self.section(self.ship, "## Remainder mode")
+        self.assert_ordered(
+            remainder, "--json body", "one `Acceptance state:` line",
+            "one `Acceptance record:` line", "stops before the `close_tracker` effect "
+            "with `terminal_failed`", "never default")
+
+    def test_the_human_gate_mirrors_close_or_hold(self):
+        self.assert_ordered(
+            self.gate, "## Acceptance", "Closes #<num>",
+            "present on the close branch and absent on a hold", "gh issue close <num>",
+            "gh issue reopen <num>", "gh issue edit <num> --add-label needs-verification",
+            "git push origin --delete <branch>")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -48,11 +48,20 @@ gh pr create --repo <resolved-repository> --base <integration-branch> --head <br
 ## Plan
 <plan-path>
 
+## Acceptance
+Acceptance state: <effective acceptance state>
+
+Acceptance record: <record-path or none>
+
+<acceptance table>
+
 Closes #<num>"
 ```
 
 Present the body fully rendered — the resolved bindings
-substituted, the `Closes #<num>` trailer present. Both commands are fully
+substituted, the `## Acceptance` section filled from Phase 0's effective
+acceptance state, and the `Closes #<num>` trailer present on the close branch
+and absent on a hold. Both commands are fully
 determined at this moment, so neither needs a later correction.
 
 Gate 1 also names that a second and final gate follows after CI and what it will
@@ -66,6 +75,10 @@ only now, which is why this cannot be folded into Gate 1.
 The same grant covers the rest of the chain, in this order:
 
 - `gh issue close <num>`, when the issue is still open;
+- on a hold instead, Phase 8 step 1's hold branch: `gh issue reopen <num>` when
+  the merge closed it, `gh label create needs-verification` when the label is
+  missing, `gh issue edit <num> --add-label needs-verification` and
+  `gh issue comment <num>`;
 - `git push origin --delete <branch>`, taken only when
   `git ls-remote --heads origin <branch>` is non-empty;
 - `git worktree remove <worktree-path>`, run from the main repo root;
