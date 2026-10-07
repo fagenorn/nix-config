@@ -131,8 +131,8 @@ Record the escalation and selected full-review role in the SDD ledger.
 The conformance re-review re-verdicts acceptance findings like any other named
 finding, and only those: every `ACn` it was not given keeps its first-pass
 verdict, and a named one it returns no verdict for stays `unverified`. An
-ADDRESSED `evidence` criterion without the `observed <value> at <sha7> vs
-threshold <literal>` citation is recorded `unverified`.
+ADDRESSED `evidence` criterion without the citation
+`observed <value> at <sha7> vs threshold <literal>` is recorded `unverified`.
 
 Adjudicate residuals like the task-loop breaker. There is no second fix wave — residual load-bearing findings surface to the caller.
 
