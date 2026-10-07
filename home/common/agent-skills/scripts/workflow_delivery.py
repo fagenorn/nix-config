@@ -353,8 +353,11 @@ class DeliveryRuntime:
                 issue.pop("delivery_remainders", None)
                 # A schema-2 attempt has no progress marker (#250 D4); leaving
                 # one makes `migrate` refuse this document as a hybrid.
+                # Nor does it have a lane (#280 D3), for the same reason.
                 for attempt in issue.get("attempts", []):
                     attempt.pop("progress_marker", None)
+                    for field in ("lane", "lane_budget_minutes", "lane_history"):
+                        attempt.pop(field, None)
         return candidate
 
     def validate(self, value: object, kind: str) -> dict[str, Any]:
@@ -1286,7 +1289,7 @@ class DeliveryRuntime:
         }
 
     def migrate(self, value: object, *, migration_contracts: dict[int, object]) -> object:
-        """Compose schema 1→2→3→4→5→6 on a detached copy without persisting."""
+        """Compose schema 1→2→3→4→5→6→7 on a detached copy without persisting."""
         if not isinstance(migration_contracts, dict):
             raise ValueError("invalid migration contracts")
         for issue, contract in migration_contracts.items():
@@ -1297,9 +1300,9 @@ class DeliveryRuntime:
                     raise ValueError("migration contract issue mismatch")
         candidate = copy.deepcopy(value)
         seen: set[int] = set()
-        while isinstance(candidate, dict) and candidate.get("schema_version") != 6:
+        while isinstance(candidate, dict) and candidate.get("schema_version") != 7:
             version = candidate.get("schema_version")
-            if type(version) is not int or version in seen or version not in {1, 2, 3, 4, 5}:
+            if type(version) is not int or version in seen or version not in {1, 2, 3, 4, 5, 6}:
                 raise ValueError("unsupported workflow state schema version")
             seen.add(version)
             issues = candidate.get("issues")
@@ -1310,7 +1313,19 @@ class DeliveryRuntime:
                     or set(issue) != {"issue", "attempts", "outcome"}
                     for issue in issues.values()):
                 raise ValueError("invalid legacy issue schema")
-            if version == 5:
+            if version == 6:
+                # Schema 7 adds the attempt's lane (#280 D3); a schema-6 attempt
+                # that already carries any lane field is a hybrid.
+                for issue in issues.values():
+                    if isinstance(issue, dict) and isinstance(issue.get("attempts"), list):
+                        for attempt in issue["attempts"]:
+                            if isinstance(attempt, dict):
+                                if {"lane", "lane_budget_minutes", "lane_history"} & set(attempt):
+                                    raise ValueError("invalid schema-six lane")
+                                attempt.update(lane=None, lane_budget_minutes=None,
+                                               lane_history=[])
+                candidate["schema_version"] = 7
+            elif version == 5:
                 # Schema 6 adds the attempt's progress marker (#250 D4); a
                 # schema-5 document that already carries one is a hybrid.
                 for issue in issues.values():
