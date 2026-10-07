@@ -1,5 +1,7 @@
+import ast
 import contextlib
 import copy
+from datetime import datetime, timezone
 import importlib.util
 import io
 import json
@@ -7759,6 +7761,82 @@ if DeliveredControlHarness is not None:
             self.deliver_through_remainder(held=False)
             response = self.control(275, recorded={DELIVERED: "absent"}, contracts=True)
             self.assertEqual(self.summaries(response)[DELIVERED]["state"], "queued")
+
+
+class LedgerClockSeamTest(LifecycleHarness, unittest.TestCase):
+    """#309 D1, D2, D11: one clock seam, and an override that can only pin the present or past."""
+
+    CLOCK_CALLS = frozenset({("datetime", "now"), ("datetime", "utcnow"), ("datetime", "today"),
+                             ("date", "today"), ("time", "time"), ("time", "time_ns")})
+
+    def setUp(self):
+        super().setUp()
+        self.cli_env.pop("WORKFLOW_STATE_TEST_CLOCK", None)
+
+    def init_without_time(self):
+        return self.run_cli("init-run", "--repo-root", self.root, "--run-id", self.run_id,
+                            ok=False)
+
+    def test_an_override_later_than_the_clock_is_refused(self):
+        self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = "2999-01-01T00:00:00Z"
+        refused = self.init_without_time()
+        self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+        self.assertRegex(refused.stderr,
+                         r"^workflow-state: invalid WORKFLOW_STATE_TEST_CLOCK: "
+                         r"2999-01-01T00:00:00Z is later than the clock "
+                         r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\n$")
+        self.assertFalse(self.state_path.exists())
+
+    def test_a_malformed_override_is_refused(self):
+        for value in ("yesterday", "2026-08-13T20:00:00"):
+            with self.subTest(value=value):
+                self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = value
+                refused = self.init_without_time()
+                self.assertEqual(
+                    (refused.returncode, refused.stdout, refused.stderr),
+                    (2, "", "workflow-state: invalid WORKFLOW_STATE_TEST_CLOCK: "
+                            "expected an RFC3339 UTC timestamp\n"))
+                self.assertFalse(self.state_path.exists())
+
+    def test_the_override_pins_the_stamp_and_an_empty_one_is_the_clock(self):
+        self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = "2026-09-30T12:00:00Z"
+        self.assertEqual(self.init_without_time().returncode, 0)
+        self.assertEqual(self.read_state()["updated_at"], "2026-09-30T12:00:00Z")
+        self.run_id = "issue-14-empty-override"
+        self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = ""
+        self.assertEqual(self.init_without_time().returncode, 0)
+        stamp = datetime.fromisoformat(self.read_state()["updated_at"].replace("Z", "+00:00"))
+        self.assertLessEqual(abs((datetime.now(timezone.utc) - stamp).total_seconds()), 5)
+
+    def sites(self, path):
+        """(kind, innermost enclosing function name) for each clock call and override literal."""
+        found = []
+
+        def visit(node, owner):
+            for child in ast.iter_child_nodes(node):
+                inner = (child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                         else owner)
+                if isinstance(child, ast.Constant) and child.value == "WORKFLOW_STATE_TEST_CLOCK":
+                    found.append(("override", owner))
+                if (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+                        and isinstance(child.func.value, ast.Name)
+                        and (child.func.value.id, child.func.attr) in self.CLOCK_CALLS):
+                    found.append(("clock", owner))
+                visit(child, inner)
+
+        visit(ast.parse(path.read_text(encoding="utf-8")), None)
+        return found
+
+    def test_only_ledger_clock_reads_the_clock_or_the_override(self):
+        scripts = SCRIPT.parent
+        self.assertEqual(set(self.sites(SCRIPT)),
+                         {("override", "ledger_clock"), ("clock", "ledger_clock")})
+        others = [*sorted(scripts.glob("workflow_delivery*.py")),
+                  *sorted((scripts / "delivery_model").glob("*.py"))]
+        self.assertTrue(others)
+        for path in others:
+            with self.subTest(path=path.name):
+                self.assertEqual(self.sites(path), [])
 
 
 if __name__ == "__main__":

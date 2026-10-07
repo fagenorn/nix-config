@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timedelta, timezone
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -31,6 +33,15 @@ NOW = "2026-09-21T00:00:00Z"
 WORKTREE_NAME = "worktree-issue-171-delivery-contract-source"
 LATER = "2026-09-21T00:10:00Z"
 SLUGLESS = "worktree-issue-171"
+CLOCK_ENV = "WORKFLOW_STATE_TEST_CLOCK"
+PINNED = "2026-09-30T12:00:00Z"
+SKEW = ("workflow-state: {label} {supplied} is {lead} seconds ahead of the clock {clock}; "
+        "a supplied time may lead it by at most 60 seconds — omit it to use the clock\n")
+PROGRESS_ARGS = ("--issue", 14, "--attempt", 1, "--phase", 1, "--turn-count", 10,
+                 "--context-tokens", 20000, "--turn-ceiling", 120, "--context-ceiling", 150000,
+                 "--turn-headroom", 2, "--context-headroom", 10000,
+                 "--next-needs-context", "true", "--artifacts-sufficient", "false",
+                 "--remainder-self-contained", "false")
 
 
 def authored_policy():
@@ -61,6 +72,10 @@ def load(path, name, *, package=False):
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+LifecycleHarness = load(Path(__file__).with_name("test_workflow_state.py"),
+                        "delivery_workflow_lifecycle_harness").LifecycleHarness
 
 
 class DeliveryAdmissionTest(unittest.TestCase):
@@ -3371,6 +3386,174 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
             self.failed_summary(action["custody"], digest, [selected])).encode()).stdout)
         self.assertEqual((minted["kind"], minted["custody"]["action_id"]),
                          ("delivery_remainder", "171:r1:1"))
+
+
+class LedgerClockTest(LifecycleHarness, unittest.TestCase):
+    """#309: ledger time comes from the clock; a future supplied time is refused (D3–D8)."""
+
+    def setUp(self):
+        super().setUp()
+        self.cli_env.pop(CLOCK_ENV, None)
+
+    @property
+    def run_args(self):
+        return ("--repo-root", self.root, "--run-id", self.run_id)
+
+    def pin(self, value=PINNED):
+        self.cli_env[CLOCK_ENV] = value
+
+    @staticmethod
+    def at(base, seconds):
+        moved = datetime.fromisoformat(base.replace("Z", "+00:00")) + timedelta(seconds=seconds)
+        return moved.isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def clock_text():
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    def assert_clock_stamp(self, stamp):
+        self.assertRegex(stamp, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        recorded = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        self.assertLessEqual(abs((datetime.now(timezone.utc) - recorded).total_seconds()), 5,
+                             stamp)
+
+    def worktree(self, issue):
+        return str(self.root / f"wt-{issue}")
+
+    def spawn_two(self, now):
+        """One control sweep at `now` spawning issues 14 and 15; their spawn actions by issue."""
+        response = self.control_validated(
+            now=now, issues=[14, 15],
+            tracker=[self.tracker_fact(14), self.tracker_fact(15)],
+            worktrees=[self.worktree_fact(issue, candidate={
+                "path": self.worktree(issue), "state": "absent"}) for issue in (14, 15)],
+            max_parallel=100)
+        return {action["issue"]: action for action in response["actions"]
+                if action["kind"] == "spawn"}
+
+    def test_a_supplied_time_over_the_bound_is_refused_and_writes_nothing(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.spawn_two(PINNED)
+        worker = json.loads(self.run_cli("register-worker", *self.run_args,
+                                         "--action-id", "14:1:1").stdout)["worker_id"]
+        ahead = self.at(PINNED, 900)
+        never_read = self.root / "never-read.json"
+        before = self.state_path.read_bytes()
+        for name, args in (
+                ("checkpoint-delivery", ("checkpoint-delivery", *self.run_args, "--now", ahead,
+                                         "--checkpoint-file", never_read)),
+                ("release-worker", ("release-worker", *self.run_args, "--now", ahead,
+                                    "--worker-id", worker, "--event", "returned")),
+                ("finish", ("finish", *self.run_args, "--now", ahead,
+                            "--summary-file", never_read))):
+            with self.subTest(command=name):
+                refused = self.run_cli(*args, ok=False)
+                self.assertEqual(
+                    (refused.returncode, refused.stdout, refused.stderr),
+                    (2, "", SKEW.format(label="--now", supplied=ahead, lead=900, clock=PINNED)))
+                self.assertEqual(self.state_path.read_bytes(), before)
+        at_bound = self.at(PINNED, 60)
+        released = json.loads(self.run_cli("release-worker", *self.run_args, "--now", at_bound,
+                                           "--worker-id", worker, "--event", "returned").stdout)
+        self.assertEqual(released["released"], [worker])
+        self.assertEqual(self.read_state()["updated_at"], at_bound)
+
+    def test_an_omitted_time_is_read_after_the_ledger_lock(self):
+        # D7: another writer may advance the ledger while this command waits for the
+        # lock. The in-process runner patches os.environ with cli_env, so a flock
+        # wrapper can move the pinned clock at the moment the lock is taken.
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.spawn_two(PINNED)
+        worker = json.loads(self.run_cli("register-worker", *self.run_args,
+                                         "--action-id", "14:1:1").stdout)["worker_id"]
+        self.assertEqual(self.read_state()["updated_at"], PINNED)
+        self.pin(self.at(PINNED, -600))
+        later = self.at(PINNED, 30)
+        real_flock = fcntl.flock
+
+        def flock_then_advance(descriptor, operation):
+            real_flock(descriptor, operation)
+            if operation & fcntl.LOCK_EX:
+                os.environ[CLOCK_ENV] = later
+
+        with mock.patch("fcntl.flock", side_effect=flock_then_advance):
+            completed = self.run_cli("release-worker", *self.run_args, "--worker-id", worker,
+                                     "--event", "returned")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self.read_state()["updated_at"], later)
+        # A clock read before the lock would have seen PINNED-600s and been refused
+        # as moving backward.
+
+    def test_every_flag_command_without_a_time_stamps_the_clock(self):
+        self.run_cli("init-run", *self.run_args)
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        spawned = self.spawn_two(self.clock_text())
+        custody, digest = spawned[14]["custody"], spawned[14]["contract_digest"]
+        worker = json.loads(self.run_cli("register-worker", *self.run_args,
+                                         "--action-id", "14:1:1").stdout)["worker_id"]
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        self.run_cli("release-worker", *self.run_args, "--worker-id", worker,
+                     "--event", "returned")
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        self.init_worktree(self.worktree(14), branch="issue-14-ledger-clock")
+        marked = json.loads(self.run_cli("mark-progress", *self.run_args,
+                                         "--action-id", "14:1:1").stdout)
+        self.assertEqual(marked["outcome"], "baseline")
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        self.run_cli("progress", *self.run_args, *PROGRESS_ARGS)
+        self.assert_clock_stamp(
+            self.read_state()["issues"]["14"]["attempts"][0]["last_progress_at"])
+        report = {"interface_version": 2, "issue": 14, "custody": custody,
+                  "contract_digest": digest, "delivery_observations": [],
+                  "authority_observations": [], "reevaluation_evidence": [],
+                  "requested_scope": None, "detail_state": "none", "report_path": None,
+                  "notes": ""}
+        checkpoint = self.root / "checkpoint.json"
+        checkpoint.write_text(json.dumps(report), encoding="utf-8")
+        self.run_cli("checkpoint-delivery", *self.run_args, "--checkpoint-file", checkpoint)
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        historical = {"issue": 14, "state": "failed", "pr_url": None, "merge_sha": None,
+                      "issue_closed": False, "discussion_items": [], "detail_state": "none",
+                      "report_path": None, "notes": "failed"}
+        summary = {"interface_version": 2, "issue": 14, "state": "terminal_failed",
+                   "custody": custody, "historical_owner_result": historical,
+                   "delivery_contract_digest": digest, "delivery_observations": [],
+                   "authority_observations": [], "reevaluation_evidence": [],
+                   "detail_state": "none", "report_path": None, "notes": "failed"}
+        summary_path = self.root / "summary.json"
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+        self.run_cli("finish", *self.run_args, "--summary-file", summary_path)
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        self.run_cli("suspend", *self.run_args, "--issue", 15, "--attempt", 1,
+                     "--blocked-on", "usage_limit")
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+
+    def test_a_backward_refusal_names_the_wait(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.spawn_two(PINNED)
+        worker = json.loads(self.run_cli("register-worker", *self.run_args,
+                                         "--action-id", "14:1:1").stdout)["worker_id"]
+        earlier = self.at(PINNED, -37)
+        before = self.state_path.read_bytes()
+        for name, args, expected in (
+                ("release-worker",
+                 ("release-worker", *self.run_args, "--now", earlier, "--worker-id", worker,
+                  "--event", "returned"),
+                 f"workflow-state: release-worker time must not move backward: {earlier} is "
+                 f"before the run updated_at {PINNED}; it would succeed in 37 seconds\n"),
+                ("progress",
+                 ("progress", *self.run_args, "--now", earlier, *PROGRESS_ARGS),
+                 f"workflow-state: progress time must not move backward: {earlier} is "
+                 f"before the attempt last_progress_at {PINNED}; it would succeed in "
+                 f"37 seconds\n")):
+            with self.subTest(command=name):
+                refused = self.run_cli(*args, ok=False)
+                self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                 (2, "", expected))
+                self.assertEqual(self.state_path.read_bytes(), before)
 
 if __name__ == "__main__":
     unittest.main()
