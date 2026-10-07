@@ -119,7 +119,7 @@ V2_OWNER_KEYS = {"interface_version", "kind", "ledger_repo_root", "run_id", "iss
     "requirements", "authority_evaluation", "requested_scope"}
 SHIP_HANDOFF_V2_KEYS = {"interface_version", "state", "ledger_repo_root", "run_id",
     "owner", "owner_worktree", "custody", "issue_number", "branch", "worktree_path",
-    "spec_artifact", "plan_artifact", "head_sha", "review_state", "auto", "report_path",
+    "spec_artifact", "plan_artifact", "head_sha", "review_state", "acceptance_state", "auto", "report_path",
     "notes", "delivery_contract", "delivery_contract_digest", "authorization_intents",
     "authorization_chain_digest", "authority_observation_ids", "reevaluation_evidence_ids",
     "authority_evaluation_consumption_ids", "pending_stage_ids", "selected_outputs",
@@ -981,7 +981,8 @@ def sdd_correctness_route(text=None):
     if text is None:
         text = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
     start = text.index("- **Correctness axis**")
-    return text[start:text.index("Point the conformance dispatch", start)]
+    # The acceptance-criteria paragraph follows the axes (#272 D13).
+    return text[start:text.index("**Acceptance criteria.**", start)]
 
 
 def ship_correctness_route(text=None):
@@ -1938,7 +1939,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_sdd_report_is_exact_and_mechanically_validated(self):
         for field in ("state", "review_state", "conformance_verdict",
                       "correctness_verdict", "verification_state", "base_sha",
-                      "head_sha", "detail_state", "report_path", "notes"):
+                      "head_sha", "acceptance_state", "detail_state", "report_path",
+                      "notes"):
             self.assertIn(field, self.sdd)
         self.assertIn("validate-report --boundary sdd", self.sdd)
         for forbidden in ("parked_findings:", "verdict_details:", "open_items:", "summary:"):
@@ -5332,7 +5334,7 @@ class CheckpointVerificationContractsTest(unittest.TestCase):
             "Dispatch the final-review fixer above once",
             "`git status --porcelain`",
             "one scoped correctness re-review",
-            "then run steps 1–3 once more",
+            "run steps 1–3 once more",
             "load-bearing correctness finding",
             "the terminal state is Residuals",
             "`verification_state: failed`",
@@ -5438,6 +5440,204 @@ class CheckpointVerificationContractsTest(unittest.TestCase):
             "2. **Verify.** Run Phase 2's verification step.",
             "after every amend re-run Phase 2's verification step before the push.")
         self.assertNotIn("Phase 2 verification commands", ci_merge)
+
+
+class AcceptanceGradingContractsTest(unittest.TestCase):
+    """#272: the conformance axis grades every acceptance criterion on Opus/high."""
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def read(path):
+        return normalized(path.read_text(encoding="utf-8"))
+
+    def test_the_conformance_axis_runs_on_opus_high(self):
+        final_review = self.read(SDD_DIR / "final-review.md")
+        sdd = self.read(SDD)
+        prompt = self.read(SDD_DIR / "conformance-reviewer-prompt.md")
+        self.assertIn("Native `reviewer` on the Opus/high tier selected in "
+                      "[conformance-reviewer-prompt.md](conformance-reviewer-prompt.md)",
+                      final_review)
+        self.assertIn("(parent D3)", final_review)
+        self.assertNotIn("checklist-shaped work", final_review)
+        self.assertIn("the conformance axis as `reviewer` on Opus/high;", sdd)
+        self.assertIn("Subagent (reviewer, Opus/high as selected above):", prompt)
+        # #270 names Sonnet task implementers elsewhere in sdd, so only the
+        # final-review bullet of its Agent tiers is checked there (#272 D10).
+        sdd_axes = sdd[sdd.index("The **final review's two axes**"):]
+        sdd_axes = sdd_axes[:sdd_axes.index(" - ")]
+        for name, text in (("final review", final_review), ("sdd", sdd_axes),
+                           ("prompt", prompt)):
+            with self.subTest(document=name):
+                self.assertNotIn("Sonnet", text)
+
+    def test_the_conformance_prompt_grades_every_criterion(self):
+        prompt = self.read(SDD_DIR / "conformance-reviewer-prompt.md")
+        fence = prompt[prompt.index("```"):prompt.rindex("```")]
+        for fragment in (
+            "## Acceptance criteria [ACCEPTANCE_CRITERIA]",
+            "`AC1`…`ACn` in order, as exactly one of `met`, `unmet`, `unverified` or `human_pending`",
+            "part of the Declared verification line",
+            "`<plan stem>.acceptance.md`",
+            "An evidence `met` must cite the observed value and the threshold;",
+            'rounding or "close enough" never counts',
+            "A missing row is `unverified`, a stale row is `unverified`",
+            "`human`: always `human_pending`",
+            "An acceptance finding is never parked with a ruling.",
+            "≤400 words total, not counting the `### Acceptance` table.",
+            "It is `Findings` whenever any Acceptance row is `unmet` or `unverified`.",
+            "| AC | Kind | Verdict | Citation |",
+            "`observed <value> at <sha7> vs threshold <literal>`",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, fence)
+        self.assert_ordered(fence, "### Coverage", "### Acceptance (omit this section",
+                            "### Issues", "### Ledger Triage")
+        placeholders = prompt[prompt.index("**Placeholders:**"):]
+        self.assert_ordered(placeholders, "`[ACCEPTANCE_CRITERIA]`",
+                            "`AC<n>: <the issue's criterion line verbatim, without its checkbox>`",
+                            "`Declared verification: <each declared verification command, in order>`",
+                            "ship-issue's full review",
+                            "`### Acceptance` output section")
+        self.assertIn("omit the ledger-triage placeholder and `[ACCEPTANCE_CRITERIA]`",
+                      self.read(SHIP_ISSUE_REVIEW))
+
+    def test_final_review_never_parks_acceptance_findings(self):
+        text = self.read(SDD_DIR / "final-review.md")
+        self.assert_ordered(
+            text, "**Acceptance criteria.**",
+            "`<tracker-cli> issue view <num> --repo <repo_slug> --json body`",
+            "`## Acceptance criteria` heading", "`AC1`…`ACn`",
+            "`Declared verification:`", "`acceptance_state: not_applicable`",
+            "stops the final review before either axis is dispatched",
+            "Point the conformance dispatch")
+        self.assert_ordered(
+            text, "**Acceptance verdicts.**",
+            "An `evidence` `met` without the observed value or the threshold is "
+            "recorded as `unverified`.",
+            "On the first pass, a missing table, or a missing row, records every "
+            "missing `ACn` as `unverified`.",
+            "Every `unmet` or `unverified` row is an acceptance finding.",
+            "An acceptance finding is never parked with a ruling",
+            "forces the Residuals terminal state",
+            "id=sdd-final-review-fixer")
+        self.assert_ordered(
+            text, "Verdicts come back ≤400 words each, not counting the conformance "
+            "axis's `### Acceptance` table,", "id=sdd-final-conformance-rereview",
+            "every `ACn` it was not given keeps its first-pass verdict",
+            "a named acceptance finding it returns no verdict for stays `unverified`",
+            "`observed <value> at <sha7> vs threshold <literal>`; without it, "
+            "record `unverified`.",
+            "There is no second fix wave", "## Acceptance record",
+            "`<plans dir>/<plan stem>.acceptance.md`",
+            "| AC | Criterion | Kind | Check or command | Observed | Commit | "
+            "Conditions | Verdict |",
+            "Before writing, check freshness against each `evidence` row's own "
+            "`Commit`, not the head the conformance first pass graded.",
+            "touches that row's measured surface, that row becomes `unverified`.",
+            "Commit the acceptance record, then run the **Final verification** step.",
+            "`launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
+            "--worker-id <worker_id> -- <git commit arguments>`",
+            "--event returned", "## Final verification",
+            "after the acceptance record's commit",
+            "every `met` `evidence` row whose measured surface the repair's commits "
+            "touch becomes `unverified`, in a record commit made the same way",
+            "`correctness_verdict: findings`")
+        raw = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
+        self.assertIn("```markdown\n# Acceptance record — issue #<n>", raw)
+
+    def test_final_review_fix_wave_closes_freshness_and_record_gaps(self):
+        # #272 D17: freshness is measured from each evidence row's own Commit,
+        # and the repair round commits record updates before re-verifying.
+        text = self.read(SDD_DIR / "final-review.md")
+        record = text[text.index("## Acceptance record"):text.index("## Final verification")]
+        self.assertNotIn("When a commit after the head the conformance first pass "
+                         "graded touches", record)
+        self.assert_ordered(
+            record, "Before writing, check freshness against each `evidence` row's "
+            "own `Commit`, not the head the conformance first pass graded.",
+            "When a commit after the `Commit` of an `evidence` row recorded `met` "
+            "touches that row's measured surface, that row becomes `unverified`.",
+            "A fixer that changed the surface and then re-measured wrote a fresh "
+            "`Commit`, so only commits after that re-measurement count.")
+        repair = text[text.index("4. **Repair once.**"):]
+        self.assert_ordered(
+            repair, "through the final correctness re-review above and the same "
+            "fix-range package gate.",
+            "every `met` `evidence` row whose measured surface the repair's commits "
+            "touch becomes `unverified`, in a record commit made the same way",
+            "before steps 1–3 run again, so the tree they verify and record holds "
+            "the final record",
+            "Then run steps 1–3 once more.",
+            "If verification still does not pass",
+            "On that route, when there is an acceptance record, every `code` row "
+            "whose check still fails becomes `unmet` in one more record commit made "
+            "the same way.",
+            "No verified tree is recorded on that route, so this commit cannot "
+            "leave a recorded tree behind the final record.")
+        self.assertNotIn("in a second record commit", repair)
+        # #272 D14: ship's full review omits the criteria, so the bullet skips.
+        prompt = (SDD_DIR / "conformance-reviewer-prompt.md").read_text(encoding="utf-8")
+        self.assertIn("    - **Acceptance criteria:** skip this bullet when the dispatch "
+                      "has no Acceptance\n      criteria section. Otherwise grade every "
+                      "criterion", prompt)
+        self.assertIn("Standalone (`/ship-issue <num>`): `review_state` is `unknown` "
+                      "unless the user supplies validated evidence of a completed sdd "
+                      "two-axis review, and with `review_state: unknown` "
+                      "`acceptance_state` is `not_applicable`;", self.read(SHIP_ISSUE))
+
+    def test_pr_review_fixes_pin_numbering_and_code_run_freshness(self):
+        # #272 PR review: ACn numbering matches the Acceptance map's reader, a
+        # cited standalone code run goes stale like an evidence row, and the
+        # scoped re-review is asked for the evidence citation.
+        text = self.read(SDD_DIR / "final-review.md")
+        self.assertIn("A criterion line is a checkbox line (`- [ ]` or `- [x]`) or a "
+                      "numbered line (`<n>. `), the same lines writing-plans' "
+                      "`## Acceptance map` counts", text)
+        self.assertIn("`code` row recorded `met` on a cited run outside the Declared "
+                      "verification line follows the same rule from that run's commit",
+                      text)
+        self.assertIn("(an ADDRESSED `evidence` acceptance finding cites `observed "
+                      "<value> at <sha7> vs threshold <literal>`)", text)
+
+    def test_sdd_finish_reports_acceptance_state(self):
+        finish = self.read(SDD).split("## Finish", 1)[1]
+        self.assertIn("`head_sha`, `acceptance_state`, `detail_state`, `report_path`, "
+                      "and `notes`", finish)
+        self.assert_ordered(
+            finish, "`acceptance_state` derives from the final verdicts",
+            "`not_applicable` when", "`unmet` when any verdict is `unmet` or `unverified`",
+            "`human_pending` when any verdict is `human_pending`", "otherwise `met`",
+            "- **Clean** —", "(an acceptance finding never is)")
+
+    def test_both_handoff_templates_carry_acceptance_state(self):
+        raw = (FROM_ISSUE_DIR / "ship-handoff.md").read_text(encoding="utf-8")
+        templates = [line for line in raw.splitlines()
+                     if line.startswith('{"interface_version":2')
+                     or line.startswith('{"state":"complete"')]
+        self.assertEqual(len(templates), 2)
+        for line in templates:
+            with self.subTest(template=line[:30]):
+                self.assertIn('"review_state":"clean|residuals",'
+                              '"acceptance_state":"met|unmet|human_pending|not_applicable",',
+                              line)
+        handoff = normalized(raw)
+        self.assert_ordered(
+            handoff,
+            "In both handoff shapes, `head_sha` is the validated sdd report's `head_sha`",
+            "In both handoff shapes, `acceptance_state` is the validated sdd report's "
+            "`acceptance_state`, copied unchanged.",
+            "(`review_state: unknown`) carries `not_applicable`",
+            "its close stage does not read it")
+        self.assertIn("`head_sha`, `acceptance_state` and `report_path` may be used to "
+                      "construct the Phase-7 handoff", self.read(FROM_ISSUE))
+        self.assertIn("`head_sha`, `review_state`, `acceptance_state`, `auto`",
+                      self.read(SHIP_ISSUE))
 
 
 class ToIssuesCriterionLineContractsTest(unittest.TestCase):

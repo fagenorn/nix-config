@@ -26,7 +26,7 @@ ship-handoff --input -` before decoding any field. With lifecycle identity it is
 `ship-handoff/v2` carrying `custody`, the installed delivery contract, its initial
 intent and the ledger's pending stages; ledger-free it is the legacy handoff with
 a null lifecycle group. Either carries the fixed lifecycle
-scalars, `spec_artifact`, `plan_artifact`, `head_sha`, `review_state`, `auto`, one
+scalars, `spec_artifact`, `plan_artifact`, `head_sha`, `review_state`, `acceptance_state`, `auto`, one
 optional durable `report_path`, and notes. On entry, independently run
 `artifact-budget check` for the design-spec and implementation-plan roots,
 compare all four metrics, and recheck a non-null SDD detail root as a
@@ -34,7 +34,8 @@ review-package. Exit 2/3, stale metrics, a mismatch, or over-budget input stops
 before Phase 0. After any later writer changes either artifact, repeat the same
 checks before continuing. Standalone (`/ship-issue <num>`): `review_state` is
 `unknown` unless the user supplies validated evidence of a completed sdd
-two-axis review; derive the issue number and artifacts, then establish the same
+two-axis review, and with `review_state: unknown` `acceptance_state` is
+`not_applicable`; derive the issue number and artifacts, then establish the same
 checker-valid root/metric objects. The worktree state — not the handoff — is
 ground truth.
 

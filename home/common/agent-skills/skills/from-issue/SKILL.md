@@ -676,7 +676,7 @@ field. Revalidate a `present` delivery-detail package with `artifact-budget chec
 with `artifact-budget validate-detail-input`, consume canonical stdout, keep the
 workspace and worktree, and fail without Phase 7. Never inline the report.
 After these gates, sdd's `review_state` (`clean | residuals | unknown`),
-`head_sha` and `report_path` may be used to construct the Phase-7 handoff —
+`head_sha`, `acceptance_state` and `report_path` may be used to construct the Phase-7 handoff —
 ship-issue's Phase-5 range selection reads them, taking `head_sha` as the
 final-review head only when `review_state` is `clean`.
 
