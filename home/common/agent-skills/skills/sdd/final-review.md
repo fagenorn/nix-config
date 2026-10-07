@@ -47,8 +47,11 @@ read the issue once with
 `<tracker-cli> issue view <num> --repo <repo_slug> --json body` (from
 `bindings.tracker`, prefixed as
 `bindings.tracker.credential_env.unset_before_invocation` requires). Copy the
-checkbox lines under its `## Acceptance criteria` heading, up to the next
-heading, verbatim and in issue order, and number them `AC1`…`ACn`. Then add the
+criterion lines under its `## Acceptance criteria` heading, up to the next
+heading, verbatim and in issue order, and number them `AC1`…`ACn`. A criterion
+line is a checkbox line (`- [ ]` or `- [x]`) or a numbered line (`<n>. `), the
+same lines writing-plans' `## Acceptance map` counts, so `ACn` names the same
+criterion in the plan and here. Then add the
 line `Declared verification:` followed by the command of each retained
 `bindings.workflow.verification` id, in order, or `none` when the verification
 capability is authored unsupported. No issue, an intent statement, an
@@ -103,7 +106,8 @@ above before dispatch. Supply (1) the axis's findings list verbatim, (2) the
 manifest root path and all four metrics, never shard lists or diff contents, and
 (3) the instruction to validate the manifest and coverage, read each shard once
 in manifest order, explicitly report an unreadable or mismatched shard, verdict
-each finding ADDRESSED / NOT ADDRESSED, and flag new breakage in the fix diff
+each finding ADDRESSED / NOT ADDRESSED (an ADDRESSED `evidence` acceptance
+finding cites `observed <value> at <sha7> vs threshold <literal>`), and flag new breakage in the fix diff
 only — out-of-scope observations go to the ledger as deferred minors; ≤400
 words. Ambiguous or branch-wide judgment escapes reviewer-lite through this
 explicit full-review dispatch:
@@ -155,7 +159,11 @@ Before writing, check freshness against each `evidence` row's own `Commit`, not
 the head the conformance first pass graded. When a commit after the `Commit` of
 an `evidence` row recorded `met` touches that row's measured surface, that row
 becomes `unverified`. A fixer that changed the surface and then re-measured
-wrote a fresh `Commit`, so only commits after that re-measurement count. A row
+wrote a fresh `Commit`, so only commits after that re-measurement count. A
+`code` row recorded `met` on a cited run outside the Declared verification line
+follows the same rule from that run's commit: a later commit that touches the
+check's surface makes it `unverified` unless the check was run again and the
+fresh run cited. A row
 made `unverified` here is an acceptance finding that survives the fix wave,
 because there is no second fix wave.
 

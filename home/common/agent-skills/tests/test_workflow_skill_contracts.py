@@ -5591,6 +5591,20 @@ class AcceptanceGradingContractsTest(unittest.TestCase):
                       "two-axis review, and with `review_state: unknown` "
                       "`acceptance_state` is `not_applicable`;", self.read(SHIP_ISSUE))
 
+    def test_pr_review_fixes_pin_numbering_and_code_run_freshness(self):
+        # #272 PR review: ACn numbering matches the Acceptance map's reader, a
+        # cited standalone code run goes stale like an evidence row, and the
+        # scoped re-review is asked for the evidence citation.
+        text = self.read(SDD_DIR / "final-review.md")
+        self.assertIn("A criterion line is a checkbox line (`- [ ]` or `- [x]`) or a "
+                      "numbered line (`<n>. `), the same lines writing-plans' "
+                      "`## Acceptance map` counts", text)
+        self.assertIn("`code` row recorded `met` on a cited run outside the Declared "
+                      "verification line follows the same rule from that run's commit",
+                      text)
+        self.assertIn("(an ADDRESSED `evidence` acceptance finding cites `observed "
+                      "<value> at <sha7> vs threshold <literal>`)", text)
+
     def test_sdd_finish_reports_acceptance_state(self):
         finish = self.read(SDD).split("## Finish", 1)[1]
         self.assertIn("`head_sha`, `acceptance_state`, `detail_state`, `report_path`, "

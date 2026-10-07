@@ -506,10 +506,9 @@ class EnrolmentGuardTest(unittest.TestCase):
         )
 
 
-# The dispatch-marker inventory across both skill source trees (#272 D12): a
-# change that adds or retires a dispatch updates this count deliberately. #270
-# added two (the Sonnet task-fix re-dispatch and the BLOCKED reasoning escalation).
-MARKER_INVENTORY = 39
+# The dispatch-marker inventory across both skill source trees (#272 D12) has
+# one pin, #274's DISPATCH_MARKER_TOTAL below: these tests add the uniqueness
+# check over the same count.
 MARKER_LINE = re.compile(r"^<!-- agent-dispatch: id=([a-z0-9-]+) ", re.M)
 CONFORMANCE_MARKER = ("<!-- agent-dispatch: id=sdd-final-conformance-review "
                       "role=conformance-reviewer model=opus effort=high -->")
@@ -527,8 +526,8 @@ class MarkerInventoryTest(unittest.TestCase):
 
     def test_the_marker_inventory_count_is_unchanged(self):
         markers = self.markers()
-        self.assertEqual(len(markers), MARKER_INVENTORY)
-        self.assertEqual(len(set(markers)), MARKER_INVENTORY)
+        self.assertEqual(len(markers), DISPATCH_MARKER_TOTAL)
+        self.assertEqual(len(set(markers)), DISPATCH_MARKER_TOTAL)
 
     def test_the_final_conformance_marker_selects_opus_high(self):
         text = (SHARED_TREE / "sdd/conformance-reviewer-prompt.md").read_text(encoding="utf-8")
