@@ -4095,6 +4095,32 @@ class SonnetTaskImplementerContractsTest(unittest.TestCase):
         self.assertIn("round 4 is the Codex-assisted stuck-breaker and round 5 the "
                       "final fresh dispatch, both on Opus/high", sdd)
 
+    def test_sdd_agent_tiers_carry_the_re_evaluation_rule(self):
+        tiers = self.read(SDD).split("## Agent tiers", 1)[1].split("## The task loop", 1)[0]
+        self.assert_ordered(
+            tiers,
+            "with the model and effort its dispatch site declares",
+            "an `implementer` dispatch that omitted its model would run on its "
+            "definition's Opus/high",
+            "A planned task and its fix rounds 1–3 run on Sonnet/high (the "
+            "`task-implementer` role)",
+            "fix rounds 4–5 and a reasoning-problem BLOCKED — and the final-review "
+            "fixer run on Opus/high (the `implementer` role)",
+            "**Stuck tasks escalate across models, not just tiers** — Sonnet → Opus",
+            "**Re-evaluating Sonnet task implementers.**",
+            "*Metric:* the first-pass approval rate of full-lane task reviews",
+            "spec ✅ and no Critical or Important finding",
+            "*Baseline:* Opus/high implementers, about 84% first-pass approval "
+            "across 153 full-lane first-pass reviews",
+            "*When:* after about 10 delivered issues",
+            "at least 30 full-lane first-pass reviews",
+            "*Decision:* below 74%",
+            "`sdd-nonmechanical-implementation` and `sdd-task-fix-redispatch`",
+            "retiring the `task-implementer` role",
+            "between 74% and 84% is reported but is not a revert trigger",
+            "**Leaf-agent clauses.**")
+        self.assertNotIn("the definitions carry the model and effort tier", tiers)
+
 
 class LaunchFencedWorkerContractsTest(unittest.TestCase):
     """#222: writing dispatches register, commit through launch-commit, release."""

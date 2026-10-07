@@ -70,16 +70,23 @@ caller instead of dispatching more work.
 
 ## Agent tiers
 
-Dispatch by agent type — the definitions carry the model and effort tier; never leave the tier to inheritance:
+Dispatch by agent type, with the model and effort its dispatch site declares; never leave the tier to inheritance — an `implementer` dispatch that omitted its model would run on its definition's Opus/high:
 
 - **`mechanic`** — transcription plus testing: the plan text contains the complete code, or the change is single-file mechanical. Also inventories and bulk sweeps.
-- **`implementer`** — every other implementation task: prose-specified work, multi-file integration, judgment inside a fixed scope.
+- **`implementer`** — every other implementation task: prose-specified work, multi-file integration, judgment inside a fixed scope. A planned task and its fix rounds 1–3 run on Sonnet/high (the `task-implementer` role); a stuck task's escalations — fix rounds 4–5 and a reasoning-problem BLOCKED — and the final-review fixer run on Opus/high (the `implementer` role).
 - **`reviewer`** — full-lane first-pass task review and every first-pass whole-branch review.
 - **`reviewer-lite`** — only a scoped re-review (named prior findings + bounded fix diff) or a mechanical/low-risk lane verification (declared lane + bounded task diff). Ambiguous adjudication or branch-wide review escalates to `reviewer` on Opus/high, recorded in the SDD ledger.
 - The **final review's two axes** dispatch per [final-review.md](final-review.md) — the conformance axis as `reviewer` on Sonnet/high; the correctness axis via `codex-collaboration`'s `diff-review` when `capabilities.review.code` is `available` and that skill is installed, and as `reviewer` on Opus/high when the capability is `unsupported` or the skill is not installed (`blocked` stops).
-- **Stuck tasks escalate across models, not just tiers** — see the fix loop's round 4.
+- **Stuck tasks escalate across models, not just tiers** — Sonnet → Opus: see the fix loop's rounds 4–5 and the BLOCKED handling under the task loop.
 
 Turn count beats token price: a too-cheap agent takes 2–3× the turns on multi-step work and costs more overall. Unsure between mechanic and implementer → pick implementer.
+
+**Re-evaluating Sonnet task implementers.** Sonnet/high task implementers replaced Opus/high on 2026-10-07. Judge that choice by this rule alone:
+
+- *Metric:* the first-pass approval rate of full-lane task reviews of tasks a `task-implementer` implemented — the share whose first-pass review needed no fix round (spec ✅ and no Critical or Important finding).
+- *Baseline:* Opus/high implementers, about 84% first-pass approval across 153 full-lane first-pass reviews, measured before 2026-10-07.
+- *When:* after about 10 delivered issues under this routing, and only once the sample holds at least 30 full-lane first-pass reviews; below that floor, keep going.
+- *Decision:* below 74% (ten points under the baseline) is clearly worse — revert by pointing the `sdd-nonmechanical-implementation` and `sdd-task-fix-redispatch` sites back at the `implementer` role and retiring the `task-implementer` role. At or above 74%, keep Sonnet; a rate between 74% and 84% is reported but is not a revert trigger.
 
 **Leaf-agent clauses.** Every prompt this skill composes for an `Agent` dispatch — here, in [fix-loop.md](fix-loop.md) or in [final-review.md](final-review.md) — carries these three clauses verbatim, as a paragraph of their own; a prompt built from one of the `*-prompt.md` templates already carries them:
 
