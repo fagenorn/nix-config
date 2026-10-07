@@ -1,0 +1,29 @@
+{
+  "signals": {
+    "contract_change": {
+      "value": "doubt",
+      "evidence": "Removes the user-facing ui-ux-pro-max skill and adds a new ~/.agents/bin/impeccable launcher and skill surface; not a schema, but a public interface swap"
+    },
+    "concurrency_or_persistence": {
+      "value": "hit",
+      "evidence": "Requires a one-generation activation migration that deletes stale skill directories from the persisted home tree while refusing user-authored content"
+    },
+    "open_design_questions": {
+      "value": "hit",
+      "evidence": "Detector packaging is explicitly undecided by the owner (Nix-packaged vs on-demand download), and trimming of SKILL.md depends on an unmeasured size"
+    },
+    "criteria_shape": {
+      "value": "hit",
+      "evidence": "Six acceptance criteria (over four); 'PR records the measured SKILL.md size' and the doc statement are not deterministic code checks"
+    }
+  },
+  "paths": [
+    "flake.nix",
+    "flake.lock",
+    "home/common/agent-skills/default.nix",
+    "home/common/claude-code/default.nix",
+    "home/common/codex/default.nix",
+    "lib/impeccable.nix",
+    "CLAUDE.md"
+  ]
+}
