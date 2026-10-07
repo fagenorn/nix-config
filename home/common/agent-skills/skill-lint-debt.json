@@ -1,6 +1,5 @@
 {
   "debt": [
-    "L2 home/common/agent-skills/skills/from-issue/SKILL.md",
     "L2 home/common/agent-skills/skills/ship-issue/SKILL.md",
     "L2 home/common/agent-skills/skills/ship-release/SKILL.md",
     "L2 home/common/claude-code/skills/orchestrate-issues/SKILL.md",

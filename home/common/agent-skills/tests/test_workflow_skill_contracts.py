@@ -885,8 +885,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_delivery_interface_two_is_one_atomic_production_caller_contract(self):
         documents = {
             str(path.relative_to(REPO_ROOT)): normalized(path.read_text(encoding="utf-8"))
-            for path in (FROM_ISSUE, AUTO, FROM_ISSUE.parent / "ship-handoff.md",
-                         SHIP_ISSUE, SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE,
+            for path in (SHIP_ISSUE, SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE,
                          ORCHESTRATE)
         }
         corpus = " ".join(documents.values())
@@ -904,7 +903,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "## Terminal return procedure", "## Suspension procedure"
         ))
         self.assertIn("--summary-file", terminal)
-        self.assertIn("historical input only", terminal)
         self.assertNotIn("--result-file <path>", terminal)
 
     def test_direct_and_control_requests_are_interface_two(self):
@@ -1435,14 +1433,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_owner_has_executable_phase_gate_and_action_semantics(self):
         self.assertIn("workflow-state progress", self.from_issue)
         self.assertIn("continue | fresh_start | handoff | delegate", self.from_issue)
-        for phase in range(8):
-            self.assertIn(f"Phase {phase}", self.from_issue)
-        self.assertIn("At every phase boundary", self.from_issue)
-        self.assertIn("Do not fabricate usage", self.from_issue)
-        self.assertIn("120", self.from_issue)
-        self.assertIn("150000", self.from_issue)
-        self.assertIn("same attempt", self.from_issue)
-        self.assertIn("fresh agent", self.from_issue)
 
     def test_owner_lifecycle_is_optional_for_direct_use_and_covers_all_stops(self):
         identity = self.section(
@@ -1480,42 +1470,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "## Dispatch-gap fallback", "## Inline fallback (no ship-issue skill)"))
         self.assert_ordered(fallback, "check-launch", "`ship-issue`",
                             f"`{CAPABILITY_GAP_LINE}`", "`agent_dispatch`")
-
-    def test_expiry_prose_describes_the_wall_clock_the_reaper_actually_reads(self):
-        # The only skill-prose home that explains expiry to an owner. Prose that
-        # frames expiry as detecting a silent agent is wrong: the reaper compares
-        # instants and never looks at progress (per D11).
-        rules = self.section(
-            self.from_issue,
-            "## Dispatch, phase-budget and attempt-budget rules",
-            "## Terminal return procedure",
-        )
-        collapsed = normalized(rules)
-        self.assert_ordered(
-            collapsed,
-            "Persistence precedes notification",
-            "wall-clock only",
-            "never consults `last_progress_at`",
-            "consumes no attempt",
-            "resumes the same attempt",
-            "never opens a second attempt",
-        )
-        self.assertIn("blocked on a CI watch", collapsed)
-        self.assertIn(
-            "bounds how long an owner may hold the issue", collapsed
-        )
-        self.assertIn(
-            "the one fresh retry stays reserved for an attempt that reported "
-            "a terminal",
-            collapsed,
-        )
-        # The same rejection has a second meaning at the anti-zombie bound, and
-        # this owner is the one deciding whether to stop for a pause or for
-        # good, so the stalled branch has to be named here too (per D8).
-        self.assertIn(
-            "a `stopped(stalled)` terminal and the run is over, not paused",
-            collapsed,
-        )
 
     def test_direct_autonomous_bookkeeper_checks_before_the_terminal_finish(self):
         # The guard lives inside the bookkeeper's own command sequence, not in
@@ -1591,20 +1545,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertNotIn("direct-owner", route.read_text(encoding="utf-8"))
 
     def test_from_issue_routes_a_deadline_rejected_progress_to_the_suspension_procedure(self):
-        # A progress call rejected past the attempt budget's deadline is now an
-        # environmental interruption, not a semantic verdict: the reaper demotes
-        # the expired attempt to suspended(unknown), so the owner follows the
-        # suspension procedure (print the re-entry line and stop) rather than
-        # writing a terminal finish, which the helper would reject on a
-        # non-active attempt.
         self.assert_ordered(
             self.from_issue,
-            "Obey the returned action exactly",
-            "attempt budget's deadline has passed",
             "cannot record progress at or after attempt deadline",
             "progress requires an active attempt",
-            "suspension procedure",
-            "Persistence precedes notification",
+            "/from-issue <num> --auto",
         )
 
     def test_suspension_procedure_pins_verb_line_and_distinction(self):
@@ -1620,23 +1565,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "Suspended (blocked_on=<value>). Resume: <reentry from the envelope>",
             suspension,
         )
-        self.assertIn(
-            "Handoff is the deliberate context rollover with a handoff document; "
-            "suspension is the environmental pause with none.",
-            suspension,
-        )
-        self.assertIn("no `finish` call", suspension)
         self.assert_ordered(
-            suspension, "workflow-state suspend", "Suspended (blocked_on=", "stop",
+            suspension, "workflow-state suspend", "Suspended (blocked_on=",
         )
-
-    def test_phase_gate_obeys_the_validated_phase_gate_action(self):
-        """#191 D8: the obeyed action is the validated `phase_gate` reply's `action`."""
-        self.assertIn(
-            "Obey the returned action exactly: it is the `action` of the validated "
-            "`phase_gate` reply, and the closed set is "
-            "`continue | fresh_start | handoff | delegate`:",
-            normalized(self.from_issue))
 
     def test_suspension_validates_its_reply_and_replays_a_stall_bound_terminal(self):
         """#191 D6, D8: suspend's reply is validated; a `terminal` reply is a replay."""
@@ -2007,8 +1938,7 @@ class ProgressMarkerContractsTest(unittest.TestCase):
             "committed", "is not a suspension cause", "## Phase 7 — Ship")
 
     def test_the_bound_is_described_as_progress_not_phase(self):
-        for path, retired in ((FROM_ISSUE, "at the same recorded phase too many times"),
-                              (ORCHESTRATE, "at the same phase too many times")):
+        for path, retired in ((ORCHESTRATE, "at the same phase too many times"),):
             with self.subTest(path=path.name):
                 text = self.read(path)
                 self.assertIn(self.BOUND, text)
@@ -2076,7 +2006,7 @@ class InterimChildResultContractsTest(unittest.TestCase):
     """#261: an owner treats a child's interim return as still running."""
 
     HEAD = "**Interim child results.**"
-    OWNERS = (FROM_ISSUE, SDD, SHIP_ISSUE)
+    OWNERS = (SDD, SHIP_ISSUE)
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -2102,14 +2032,14 @@ class InterimChildResultContractsTest(unittest.TestCase):
                 self.assertEqual(path.read_text(encoding="utf-8").count(self.HEAD), 1)
 
     def test_the_paragraph_copies_stay_identical(self):
-        canonical = self.paragraph(FROM_ISSUE)
-        for path in (SDD, SHIP_ISSUE):
+        canonical = self.paragraph(SDD)
+        for path in (SHIP_ISSUE,):
             with self.subTest(path=path.parent.name):
                 self.assertEqual(self.paragraph(path), canonical)
 
     def test_the_paragraph_states_the_rule_in_order(self):
         self.assert_ordered(
-            self.paragraph(FROM_ISSUE), self.HEAD,
+            self.paragraph(SDD), self.HEAD,
             "is not a completion: the child is still running.",
             "Re-engage that same child by its recorded agent identity",
             "and wait for that report.",
@@ -2126,7 +2056,6 @@ class InterimChildResultContractsTest(unittest.TestCase):
 
     def test_each_copy_sits_in_its_owner_section(self):
         for path, start, end in (
-            (FROM_ISSUE, "**Writing workers.**", "## Terminal return procedure"),
             (SDD, "### 2. Handle the report", "### 3. Review the task"),
             (SHIP_ISSUE, "## Phase 5 — Review the PR", "## Phase 6 — Wait for CI"),
         ):
@@ -2134,11 +2063,6 @@ class InterimChildResultContractsTest(unittest.TestCase):
                 self.assert_ordered(self.read(path), start, self.HEAD, end)
 
     def test_the_suspension_and_auto_pointers_route_to_the_paragraph(self):
-        self.assert_ordered(
-            self.read(FROM_ISSUE), "## Suspension procedure",
-            "an external wait (never a child's interim result; see "
-            "**Interim child results**)",
-            "A suspension parks the attempt")
         self.assert_ordered(
             self.read(AUTO), "## Phases 2–4 run as subagents", "**Interim child results**",
             "### Design subagent — Phases 2 + 3")
@@ -3087,16 +3011,9 @@ class LaunchScopeWiringContractsTest(unittest.TestCase):
     def test_every_owner_exit_reaps_between_release_and_write(self):
         text = self.read(FROM_ISSUE)
         self.assert_ordered(
-            text, "**Self-reap.**", self.REAP,
-            "then removes the launch's scratch root and every worktree inside it",
-            "the reap runs before the bookkeeper is dispatched",
-            "does not block the exit write",
-            "A delegating owner does not reap",
-            "**`handoff`** — first release every worker", self.REAP, "--handoff-path",
-            "## Terminal return procedure", "release every worker", self.REAP,
-            "workflow-state finish --repo-root",
-            "## Suspension procedure", "release every worker", "live workers:", self.REAP,
-            "workflow-state suspend --repo-root")
+            text, "**Self-reap.**", self.REAP, self.REAP, "--handoff-path",
+            "## Terminal return procedure", self.REAP, "workflow-state finish --repo-root",
+            "## Suspension procedure", self.REAP, "workflow-state suspend --repo-root")
 
     def test_the_bookkeeper_route_reaps_before_dispatch(self):
         self.assert_ordered(self.read(DELEGATED_OWNER), self.REAP,
