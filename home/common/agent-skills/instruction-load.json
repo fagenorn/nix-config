@@ -39,8 +39,8 @@
         "from-issue/acquire-dispatcher.md": "a controller invocation carries no dispatcher envelope"
       },
       "ceiling_bytes": {
-        "claude": 72978,
-        "codex": 72978
+        "claude": 74378,
+        "codex": 74378
       },
       "conditional_ceiling_bytes": {
         "claude": 56114,
@@ -121,7 +121,7 @@
         "from-issue/acquire-durable.md": "an orchestrated owner acquires only through its dispatcher envelope"
       },
       "ceiling_bytes": {
-        "claude": 153176
+        "claude": 154576
       },
       "conditional_ceiling_bytes": {
         "claude": 155640
@@ -241,8 +241,8 @@
         "from-issue/acquire-durable.md": "a delegated owner adopts its delegator's identity and performs no acquisition"
       },
       "ceiling_bytes": {
-        "claude": 148134,
-        "codex": 148134
+        "claude": 149444,
+        "codex": 149444
       },
       "conditional_ceiling_bytes": {
         "claude": 139018,
@@ -1058,6 +1058,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 538663,
+  "corpus_ceiling_bytes": 540063,
   "description_ceiling_bytes": 3145
 }
