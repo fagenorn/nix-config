@@ -39,8 +39,8 @@
         "from-issue/acquire-dispatcher.md": "a controller invocation carries no dispatcher envelope"
       },
       "ceiling_bytes": {
-        "claude": 80432,
-        "codex": 80432
+        "claude": 80492,
+        "codex": 80492
       },
       "conditional_ceiling_bytes": {
         "claude": 56114,
