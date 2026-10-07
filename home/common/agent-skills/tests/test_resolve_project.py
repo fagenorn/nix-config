@@ -1648,7 +1648,7 @@ class LightLaneTest(ResolverTestCase):
 
     def test_an_absent_member_stays_absent(self):
         contract = source_contract()
-        self.assertNotIn("light_lane", contract["bindings"]["workflow"])
+        contract["bindings"]["workflow"].pop("light_lane", None)
         code, snap, err = self.resolve(self.make_root(contract))
         self.assertEqual(code, 0, err)
         self.assertNotIn("light_lane", snap["bindings"]["workflow"])
