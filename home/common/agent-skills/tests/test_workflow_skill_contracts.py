@@ -1265,6 +1265,12 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for text in (self.from_issue, self.standards_review):
             self.assertIn("validate-report --boundary producer --input -", text)
 
+    def test_standards_review_gate_validates_before_it_checks_the_plan(self):
+        gate = self.standards_review.split("## Caller input gate", 1)[1]
+        gate = normalized(gate.split("## Dispositioning findings", 1)[0])
+        self.assert_ordered(gate, "validate-report --boundary producer --input -",
+                            "artifact-budget check --kind implementation-plan --root")
+
     def test_standards_review_stops_a_blocked_plan_review_capability(self):
         self.assert_ordered(self.standards_review, "capabilities.review.plan", "reason_code",
                             "repair_id")
