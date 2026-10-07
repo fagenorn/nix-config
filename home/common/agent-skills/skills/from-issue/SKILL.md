@@ -380,8 +380,8 @@ with this owner's own `action_id`, and only then makes the exit write. The
 reap kills every process that a `launch-scope exec` of this launch left
 behind. When the ledger-only bookkeeper makes the exit write, the reap runs
 before the bookkeeper is dispatched. A reap that exits non-zero does not block
-the exit write: name its exit code and its `skipped` launches in this owner's
-result. A delegating owner does not reap, because the fresh delegated owner
+the exit write: name its exit code and, when it printed a report, its
+`skipped` launches in this owner's result. A delegating owner does not reap, because the fresh delegated owner
 adopts its launch and reaps it at its own exit.
 
 **Interim child results.** A child's return that the host marks interim — it

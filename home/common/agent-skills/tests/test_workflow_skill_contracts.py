@@ -6053,8 +6053,8 @@ class LaunchScopeSweepContractsTest(unittest.TestCase):
             "A sweep that exits non-zero never blocks dispatch",
             "Only after the pass, execute the response's actions in returned order.",
             "## 5. Final report", "**Stop failures**",
-            "the pass's last sweep when it exited non-zero, with its exit code and its "
-            "`skipped` launches",
+            "the pass's last sweep when it exited non-zero, with its exit code and, "
+            "when it printed a report, its `skipped` launches",
             "omit the list when there is none")
 
     def test_claude_md_describes_launch_scope(self):
