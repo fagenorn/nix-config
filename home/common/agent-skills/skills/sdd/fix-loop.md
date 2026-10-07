@@ -4,11 +4,11 @@ Loaded by `SKILL.md` when a task review fails: spec ❌, any Critical/Important 
 
 A round is one fix dispatch plus one scoped re-review. Five rounds maximum:
 
-- **Rounds 1–3 — resume the original implementer** with the open findings verbatim; its context is intact, and it keeps the tier it was launched with. Can't resume? Dispatch a fresh one at that same tier, carrying brief path, report path and findings — the report file is the persistent memory. A task already escalated to Opus/high through a reasoning-problem BLOCKED stays on Opus/high: its fresh implementer is another `sdd-blocked-reasoning-escalation` dispatch (SKILL.md's BLOCKED route), never a step back to Sonnet. A task implementer keeps the Sonnet/high tier it was launched with:
+- **Rounds 1–3 — resume the original implementer** with the open findings verbatim, at the tier it was launched with. Can't resume? Dispatch a fresh one at that same tier, carrying brief path, report path and findings. A task already escalated to Opus/high through a reasoning-problem BLOCKED stays on Opus/high: its fresh implementer is another `sdd-blocked-reasoning-escalation` dispatch (SKILL.md's BLOCKED route), never a step back to Sonnet:
 
 <!-- agent-dispatch: id=sdd-task-fix-redispatch role=task-implementer model=sonnet effort=high -->
 Agent(subagent_type="implementer", model="sonnet", effort="high") takes over fix rounds 1–3 when the original task implementer cannot be resumed.
-- **Round 4 — the stuck-breaker.** Three same-context rounds failing usually means the implementer cannot see its own problem, and another same-model retry re-runs the blindness. The original implementer ran on Sonnet/high, so from here every fix dispatch escalates to Opus/high — a model change, not only a fresh context. Use the bounded Codex transport with the failing command or test, the diff so far (`BASE..HEAD`), the brief and report paths, and the open findings:
+- **Round 4 — the stuck-breaker.** Three failures on the same context escalate the model, not only the context: from here every fix dispatch is Opus/high. Use the bounded Codex transport with the failing command or test, the diff so far (`BASE..HEAD`), the brief and report paths, and the open findings:
 
 <!-- agent-dispatch: id=sdd-codex-rescue-transport role=codex-transport model=sonnet effort=medium -->
 Agent(subagent_type="codex:rescue", model="sonnet", effort="medium") transports the bounded stuck-breaker diagnosis to the external Codex runtime without selecting that runtime's model.
@@ -27,36 +27,11 @@ Agent(subagent_type="implementer", model="opus", effort="high") owns the fresh-c
 <!-- agent-dispatch: id=sdd-round-five-implementation role=implementer model=opus effort=high -->
 Agent(subagent_type="implementer", model="opus", effort="high") owns the fifth and final fix round.
 
-Every round: the implementer fixes, re-runs the covering focused tests and, when the fix changes files the build evaluates, the brief's build check (never the full declared verification), appends a fix report (what changed, covering tests, command, output) to the same report file, and returns the short contract. Confirm all three fix-report elements before dispatching the re-review — reviewers do not re-run tests.
+Every round: the implementer fixes, re-runs the covering focused tests (plus the brief's build check when the fix changes files the build evaluates; never the full declared verification), appends a fix report (what changed, covering tests, command, output) to the same report file, and returns the short contract. Confirm the fix report before dispatching the re-review.
 
-**Lifecycle workers.** Under a lifecycle identity, every fix round's
-implementer — resumed or fresh — is registered as SKILL.md's
-`### Lifecycle workers` says before the round and gets a fresh `worker_id`.
-Its `Lifecycle worker:` line goes in the prompt of a fresh implementer, and in
-the resume message of a resumed one. Run the release when it returns. A `launch fence refused`
-report ends the loop.
+**Lifecycle workers.** Under a lifecycle identity, register every fix round's implementer, resumed or fresh, as SKILL.md's `### Lifecycle workers` says, with a fresh `worker_id` per round. Its `Lifecycle worker:` line goes in the prompt of a fresh implementer, or the resume message of a resumed one. Release it on return. A `launch fence refused` report ends the loop.
 
-The re-review is scoped: run `review-package PLAN_FILE FIX_BASE HEAD`
-(FIX_BASE = the head the previous review saw), capture stdout unchanged, and
-validate it through
-`artifact-budget validate-report --boundary producer --input -`. Generator
-exit 0 plus validator exit 0, a strict `complete` report, and report/checker
-agreement permits dispatch. Generator exit 3 records and returns
-`decompose_required` with no reviewer dispatched. Generator exit 2, validator
-exit 2, malformed or unknown output, or disagreement records and returns
-`failed` before dispatch.
-
-Supply [re-review-prompt.md](re-review-prompt.md) with the findings list, brief
-and report paths, and the manifest root path and all four metrics
-(`root_bytes`, `total_bytes`, `file_count`,
-`largest_member_bytes`), never shard lists or diff contents. The reviewer
-validates the strict manifest and coverage, reads every shard once in manifest
-order, and explicitly reports an unreadable or mismatched shard. Its explicit
-`reviewer-lite` selection verdicts each finding ADDRESSED / NOT ADDRESSED and
-flags new breakage in the fix diff only; out-of-scope observations go to the
-ledger as deferred minors. A result that requires ambiguous adjudication or
-branch-wide review escapes reviewer-lite through this explicit full-review
-dispatch:
+**Re-review.** Run `review-package PLAN_FILE FIX_BASE HEAD` (FIX_BASE = the head the previous review saw) and apply `SKILL.md`'s `### Review-package gate` before dispatching. Supply [re-review-prompt.md](re-review-prompt.md) with the findings list, brief and report paths, and the manifest root path and all four metrics (`root_bytes`, `total_bytes`, `file_count`, `largest_member_bytes`), never shard lists or diff contents. The explicit `reviewer-lite` selection verdicts each finding ADDRESSED / NOT ADDRESSED and flags new breakage in the fix diff only; out-of-scope observations go to the ledger as deferred minors. A result that requires ambiguous adjudication or branch-wide review escapes reviewer-lite through this explicit full-review dispatch:
 
 <!-- agent-dispatch: id=sdd-task-rereview-escalation role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") adjudicates an ambiguous or branch-wide task re-review escape.
@@ -69,15 +44,4 @@ Record the escalation and selected full-review role in this plan's SDD ledger. A
 - Real but nothing downstream builds on it → park it, ruling says real-and-deferred.
 - Real and load-bearing (a later task builds on it, or it reveals a plan defect) → STOP: `Task <N>: BLOCKED — <reason>`, report to the human with the finding, the colliding plan text, and the fix history.
 
-Adjudicate only at the cap — earlier is pre-judging with a different name. Every adjudication is a ledger entry; silent discards are forbidden.
-
-## Common rationalizations
-
-| Excuse | Reality |
-|--------|---------|
-| "Close enough on spec compliance" | Spec gaps = not done. Fix, or hit the cap and adjudicate. |
-| "I'll fix it myself" | Controller fixes pollute context and skip review. Resume the implementer. |
-| "One more round will converge" | Past the cap the failure is structural. Adjudicate and route. |
-| "This finding is obviously wrong, I'll drop it" | Adjudicate only at the cap; every ruling is a ledger entry. |
-| "The fix was small, skip the re-review" | Unreviewed fixes are how regressions land. |
-| "Ledger bookkeeping is overhead" | The ledger survives compaction; without it, controllers have re-executed whole plans. |
+Adjudicate only at the cap; every adjudication is a ledger entry.

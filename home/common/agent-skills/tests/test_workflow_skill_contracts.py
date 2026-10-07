@@ -155,7 +155,6 @@ SDD_MACHINE_TEXT = {
         "--action-id <action_id>",
         WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV, "launch fence refused:",
     ),
-    SDD_DIR / "fix-loop.md": (PRODUCER_VALIDATION,),
     SDD_DIR / "final-review.md": (
         PRODUCER_VALIDATION, WHOLE_FILE_POLICY,
         "review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD",
