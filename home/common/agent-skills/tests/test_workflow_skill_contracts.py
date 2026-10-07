@@ -248,6 +248,9 @@ SHIP_ISSUE_MACHINE_TEXT = {
         "launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
         "--worker-id <worker_id> -- ",
         "--parent <worker_id>", "git merge --no-commit --no-ff origin/<integration>",
+        "git push -u origin <branch>",
+        'gh pr create --repo <resolved-repository> --base <integration> '
+        '--head <branch> --title "<title>" --body',
         "Lifecycle worker:",
         WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV,
         "verified-tree check --verification <id>",

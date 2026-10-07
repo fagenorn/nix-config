@@ -4,8 +4,7 @@
 
 Enter only when SKILL.md's `## Standing authorization` finds no repository policy or explicit
 user grant covering the concrete action and target. Enter the gate *instead of* attempting the
-verb — never attempt a shipping verb and then react to the denial. There are up to two planned
-gate locations on the successful path — one before the first push, one before the merge — and
+verb. There are up to two planned gate locations on the successful path — one before the first push, one before the merge — and
 only those whose actions lack existing authorization are entered. The gate makes the remaining
 external effects reviewable; it does not grant them itself, and the host's actual automatic
 approval decision still governs execution.
@@ -36,7 +35,7 @@ filled from Phase 0's effective acceptance state, and the `Closes #<num>` traile
 close branch and absent on a hold.
 
 Gate 1 also names that a second and final gate follows after CI and what it will
-cover, so the operator sees the whole remaining chain once.
+cover.
 
 ## Gate 2 — after CI, before the merge (Phase 7)
 
@@ -57,8 +56,7 @@ The same grant covers the rest of the chain, in this order:
 After this grant nothing further is asked on the successful path: the same
 session resumes in place and runs the chain to issue close or hold and cleanup. A
 transient execution failure does not erase the grant; retry only after
-diagnosing the failure and re-validating the same required checks. An actual
-permission denial stops the action and is never retried through another spelling.
+diagnosing the failure and re-validating the same required checks.
 
 ## Grant semantics
 
