@@ -12,6 +12,11 @@ Counterpart to `to-issues`. Take one tracker issue from triage to merged code by
 ## Files beside this one
 
 - **`AUTO.md`** — autonomous-mode rules. Read it *once*, now, only if the invocation contains the literal token `--auto`.
+  When the prompt carries a resume pack, defer that read until the checks in
+  `### Resume pack`: a pack that passes them limits it to the sections that
+  subsection names, and one that fails them restores the whole read. An owner
+  delegated at `AUTO.md`'s Phase-5 rollover still reads its
+  `#### Fresh delegated owner` section now, because those checks come first.
 - **`bindings.md`** — phase binding notes. Included routines receive values from this phase's retained snapshot; use `bindings.tracker`, `bindings.vcs`, and `bindings.paths.artifacts`.
 - **`grounding.md`** (Phases 2–5), **`decision-ledger.md`**, **`investigate.md`** (Phase 0), **`standards-review.md`** (Phase 5), **`ship-handoff.md`** (Phase 7) — loaded at the named phase.
 - **`REVIEW-CONTRACT.md`** — the Phase-5 reviewer contract. Hand it over **by absolute path**, never read it into this conversation.
@@ -41,7 +46,11 @@ quoted heredoc (`<<'EOF'`): `--request-file -`, `--checkpoint-file -`,
 `artifact-budget validate-report --input -`. No request or summary file is
 written. Treat every `workflow-state` reply as untrusted transport: pipe its
 raw bytes through `artifact-budget validate-report --boundary workflow-response
---input -` and validate before decoding. The ledger, not tracker or intent
+--input -` and validate before decoding.
+The one exception is `resume-pack`: its stdout is not a workflow response
+and `validate-report` has no route for it, so it is never piped there; it
+stays an untrusted accelerator until the checks in `### Resume pack` pass.
+The ledger, not tracker or intent
 data, selects the next delivery stage: follow the returned `owner`,
 `delivery_remainder`, requirement, or terminal variant without manufacturing
 authority, a retry, or another permission ritual. Every delivery effect runs
@@ -173,6 +182,11 @@ follows:
    `requirements`, `authority_evaluation` and `requested_scope` for the Phase-7
    handoff. Continue the existing Phase 0–7 owner flow. Do not spawn or reserve
    another owner or worktree.
+   When its `launch_kind` is `resume`, this re-entered session is its own
+   relauncher: run
+   `workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
+   with that `action_id` and, on exit 0, use its stdout as this relaunch's
+   resume pack (`### Resume pack`).
 3. **`kind: delivery_remainder`** — the validated object names a delivery
    remainder, not an implementation owner. Skip Phases 0–6: launch ship-issue
    remainder mode through the existing `from-issue-ship-owner` site with
@@ -232,6 +246,56 @@ identity; do not spawn another owner. Missing,
 wrong-kind, wrong-issue, or multiple dispatch actions fail loudly before Phase
 1. The helper may also return its one trailing `wait` action; this
 already-running owner does not install the dispatcher's observer.
+
+### Resume pack
+
+A relaunched owner's prompt may carry a resume pack: the stdout of
+`workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`,
+which reads the ledger, the attempt's recorded worktree and that
+worktree's SDD workspace and writes nothing. The pack is an accelerator, never a gate.
+It is not a workflow response and is never piped through `validate-report`:
+it stays untrusted until the checks below pass.
+A pack-carrying relaunch still resolves the project once, validates its
+owner object and runs `check-launch`, and obeys a `current: false` answer
+exactly as it would without a pack. An owner delegated at `AUTO.md`'s
+Phase-5 rollover, whose prompt carries that rollover's continuation
+(`reviewed_head_sha` and two measured artifact blocks), also passes every
+`AUTO.md` `#### Fresh delegated owner` check first; a generic `delegate`
+owner carries no continuation and runs none of them. Then it checks the pack
+against what it can see: the pack's `action_id` must equal the envelope's,
+`git -C <worktree> rev-parse HEAD` must equal `worktree.head`, and
+`git -C <worktree> status --porcelain` must list exactly `worktree.dirty_paths`
+entries (the pack carries that count, not the paths). On any mismatch the pack is stale: ignore it and re-orient in full.
+
+A verified pack replaces only your own ad-hoc re-orientation: do not dump
+the ledger, re-read git history, re-validate the plan, read the SDD
+progress log yourself, or read skills end to end. Start from its
+`next_action` and read only the skill sections its phase needs. At every
+phase, always read the sections every owner obeys, headed `Lifecycle identity`,
+`Decision ledger (artifact discipline)`, `Skill-tool invocations`,
+`Dispatch, phase-budget and attempt-budget rules` (leaf-agent clauses,
+writing workers, interim child results, the executable phase gate),
+`Terminal return procedure` and `Suspension procedure`. Then read this
+file's `## Phase <n>` section, the file beside this one that phase names,
+and the phase's sub-skill (`sdd` for Phase 6, `ship-issue` for Phase 7).
+Under `--auto`, read from `AUTO.md` (not the whole file) its opening
+section and those headed `The self-answer pattern` and
+`When *not* to auto-resolve`, plus the one governing your route at that
+phase: `Phases 2–4 run as subagents` for Phases 2–4; from Phase 5 on,
+`Mandatory direct implementation-owner rollover` for a module-owned
+direct autonomous run and `Other Phase 5–7 routes` for every other
+route, each with `Interface_version 2 delivery relay`.
+Everything the pack does not replace
+still runs unchanged, sdd's own `progress.md` check on entry included: that
+check stays sdd's resume mechanism, and where it disagrees with the pack's
+`resume_task`, sdd's ledger wins. `read_handoff` reads the handoff document
+at its `path`; `reorient` re-orients in full, as does a relaunch with no
+pack.
+
+orchestrate-issues adds the pack to `resume` prompts; this skill adds it on
+direct re-entry, on `delegate` and on `AUTO.md`'s Phase-5 rollover. A
+`resume-pack` refusal or failure only means the prompt carries no pack; it
+never stops a relaunch.
 
 ## The flow
 
@@ -362,6 +426,10 @@ defaults `--turn-ceiling 120 --context-ceiling 150000 --turn-headroom 2
 <!-- agent-dispatch: id=from-issue-phase-delegate role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") delegates the entire remainder to a fresh issue owner with the lifecycle envelope and artifact paths.
    This is a fresh agent; it reconstructs context from those artifacts rather than inheriting conversation history.
+   Before dispatching it, and because the fresh owner adopts this launch, run
+   `workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
+   with this owner's own `action_id` and, on exit 0, put its stdout in the
+   prompt as a `Resume pack` paragraph.
    Exception — **ledger-only remainder**: when every content artifact is final and only `workflow-state` transitions plus verbatim result relay remain, delegate to the cheap bookkeeper instead:
 <!-- agent-dispatch: id=from-issue-ledger-remainder role=bookkeeper model=haiku effort=low -->
 Agent(subagent_type="mechanic", model="haiku", effort="low") executes the ledger-only remainder: the exact workflow-state commands and verbatim JSON relay, with no content judgment.

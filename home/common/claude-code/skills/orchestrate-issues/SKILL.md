@@ -34,6 +34,10 @@ quoted heredoc (`<<'EOF'`): `--request-file -` for `control`, `--input -` for
 --input -`. No request file is written. Treat every `workflow-state` reply as
 untrusted transport: pipe its raw bytes through `artifact-budget validate-report
 --boundary workflow-response --input -` and validate before decoding any field.
+The one exception is `resume-pack`: its stdout is not a workflow response
+and `validate-report` has no route for it, so this dispatcher never pipes or
+decodes it; it goes verbatim into the owner prompt (§4), and the owner
+checks it before use.
 
 ## 1. Resolve issue set and bindings
 
@@ -277,6 +281,12 @@ object through `artifact-budget validate-report --boundary workflow-response
 --input -` and put only its stdout — the canonical JSON — in the owner prompt
 below; the owner validates it again at the same boundary before use.
 
+For a `resume` action, after projecting the owner object, run
+`workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action-id>`
+with the action's `id`; on exit 0, add its stdout verbatim to the owner prompt's `Resume pack` paragraph
+below. A refusal or helper failure omits that paragraph and never stops the
+dispatch. `spawn` and `retry` carry no pack.
+
 Dispatch the owner in the background using the action's identity and paths
 verbatim. Pass the helper-issued action ID and owner token unchanged; never
 substitute a host task ID. Both object kinds use this one dispatch; a
@@ -331,6 +341,9 @@ Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_backg
 > `artifact-budget validate-report --boundary workflow-response --input -`
 > before use and require its identity to equal the lines above):
 > `<canonical-json>`
+> Resume pack (only for a `resume` action whose `resume-pack` call exited 0;
+> use it as from-issue's `### Resume pack` says):
+> `<resume-pack-json>`
 > Invoke the `from-issue` skill via the Skill tool with the literal arguments
 > `from-issue <num> --auto`. Preserve the lifecycle identity and exact worktree.
 >

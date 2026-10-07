@@ -14,6 +14,7 @@ from unittest import mock
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "workflow-state.py"
+SDD_WORKSPACE = Path(__file__).parents[1] / "skills" / "sdd" / "scripts" / "sdd-workspace"
 MODEL = Path(__file__).parents[1] / "scripts" / "delivery_model" / "__init__.py"
 MODEL_FIXTURES = Path(__file__).with_name("_delivery_model_fixtures.py")
 ARTIFACT_BUDGET = Path(__file__).parents[1] / "scripts" / "artifact_budget.py"
@@ -6820,6 +6821,457 @@ class ProgressMarkerTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(
             (attempt["state"], attempt["progress_marker"], attempt["suspend_phase"]),
             ("suspended", self.base, 0))
+
+
+class ResumePackHarness(LifecycleHarness):
+    """Issue 16's attempt on a real git worktree, and the `resume-pack` runners."""
+
+    def setUp(self):
+        super().setUp()
+        self.seconds = 0
+        self.init_run()
+        self.make_worktree()
+        self.spawn(issue=16, worktree=str(self.worktree), budget_minutes=10)
+
+    def make_worktree(self):
+        """Set `self.worktree` and its first commit `self.base`; Task 2 overrides it."""
+        self.worktree = self.root / "wt-16"
+        self.base = self.init_worktree(self.worktree, branch="issue-16")
+
+    def tick(self):
+        self.seconds += 1
+        return f"2026-08-13T20:{self.seconds // 60:02d}:{self.seconds % 60:02d}Z"
+
+    def attempt(self):
+        return self.read_state()["issues"]["16"]["attempts"][-1]
+
+    def pack_raw(self, action_id, *, run_id=None):
+        return self.run_cli(
+            "resume-pack", "--repo-root", self.root,
+            "--run-id", self.run_id if run_id is None else run_id,
+            "--action-id", action_id, ok=False)
+
+    def pack(self, action_id):
+        completed = self.pack_raw(action_id)
+        self.assertEqual((completed.returncode, completed.stderr), (0, ""))
+        return json.loads(completed.stdout)
+
+    def assert_refused(self, action_id, clause, *, run_id=None):
+        before = self.state_path.read_bytes()
+        refused = self.pack_raw(action_id, run_id=run_id)
+        self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+        self.assertIn("workflow-state: resume-pack refused: " + clause, refused.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def expected_ledger(self):
+        attempt = self.attempt()
+        return {"state": attempt["state"], "phase": attempt["phase"],
+                "launch_kind": attempt["launch_kind"],
+                "launches": len(attempt["launches"]),
+                "deadline_at": attempt["deadline_at"],
+                "blocked_on": attempt["blocked_on"],
+                "handoff_path": attempt["handoff_path"],
+                "progress_marker": attempt["progress_marker"]}
+
+    def sdd_ledger(self, plan, entries, *, tasks=None):
+        """Write a plan and its SDD ledger where `sdd-workspace` puts it (#265 D5)."""
+        plan_path = Path(plan) if Path(plan).is_absolute() else self.worktree / plan
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        if tasks is not None:
+            members = plan_path.parent / f"{plan_path.stem}.tasks"
+            members.mkdir()
+            for number in range(1, tasks + 1):
+                (members / f"task-{number}.md").write_text("task\n", encoding="utf-8")
+        workspace = subprocess.run(
+            [str(SDD_WORKSPACE), plan], cwd=self.worktree, check=True,
+            capture_output=True, text=True).stdout.strip()
+        Path(workspace, "progress.md").write_text(
+            "\n".join([f"# SDD ledger — plan: {plan}", *entries]) + "\n",
+            encoding="utf-8")
+        return workspace
+
+
+class ResumePackTest(ResumePackHarness, unittest.TestCase):
+    """#265: `resume-pack` summarises one launch for its relaunched owner."""
+
+    def test_an_active_current_launch_packs_ledger_worktree_and_commits_ahead(self):
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        first = self.commit(self.worktree, "first task")
+        second = self.commit(self.worktree, "second task")
+        self.assertEqual(self.pack("16:1:1"), {
+            "kind": "resume_pack", "version": 1, "run_id": self.run_id,
+            "issue": 16, "attempt": 1, "action_id": "16:1:1", "current": True,
+            "ledger": self.expected_ledger(),
+            "worktree": {"path": self.attempt()["worktree"], "branch": "issue-16",
+                         "head": second, "dirty_paths": 0},
+            "commits_since_marker": {
+                "base": self.base, "relation": "ahead", "count": 2,
+                "commits": [{"sha": second[:12], "subject": "second task"},
+                            {"sha": first[:12], "subject": "first task"}],
+                "truncated": False},
+            "sdd": None,
+            "next_action": {"kind": "start_phase", "phase": 0},
+        })
+        self.assertEqual(self.expected_ledger()["progress_marker"], self.base)
+
+    def test_relations_none_same_and_diverged(self):
+        empty = {"count": 0, "commits": [], "truncated": False}
+        pack = self.pack("16:1:1")
+        self.assertEqual(pack["commits_since_marker"],
+                         {"base": None, "relation": "none", **empty})
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        self.assertEqual(self.pack("16:1:1")["commits_since_marker"],
+                         {"base": self.base, "relation": "same", **empty})
+        moved = self.commit(self.worktree)
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        self.git(self.worktree, "reset", "--quiet", "--hard", self.base)
+        pack = self.pack("16:1:1")
+        self.assertEqual(pack["commits_since_marker"],
+                         {"base": moved, "relation": "diverged", **empty})
+        self.assertEqual(pack["next_action"],
+                         {"kind": "reorient", "reason": "diverged_marker"})
+
+    def test_dirty_paths_count_uncommitted_entries(self):
+        (self.worktree / "a.txt").write_text("a\n", encoding="utf-8")
+        (self.worktree / "b.txt").write_text("b\n", encoding="utf-8")
+        self.assertEqual(self.pack("16:1:1")["worktree"]["dirty_paths"], 2)
+
+    def test_a_suspended_attempt_previews_its_last_launch(self):
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        work = self.commit(self.worktree, "task one")
+        self.suspend(issue=16, attempt=1, blocked_on="usage_limit", now=self.tick())
+        pack = self.pack("16:1:1")
+        self.assertEqual((pack["current"], pack["ledger"]),
+                         (False, self.expected_ledger()))
+        self.assertEqual((pack["ledger"]["state"], pack["ledger"]["blocked_on"]),
+                         ("suspended", "usage_limit"))
+        self.assertEqual(pack["commits_since_marker"]["commits"],
+                         [{"sha": work[:12], "subject": "task one"}])
+        self.assertEqual(pack["next_action"], {"kind": "start_phase", "phase": 0})
+        self.assert_refused("16:1:2", "launch 16:1:2 is superseded_launch")
+        self.resume(issue=16, worktree=str(self.worktree), now=self.tick())
+        resumed = self.pack("16:1:2")
+        self.assertEqual((resumed["current"], resumed["action_id"],
+                          resumed["ledger"]["launch_kind"], resumed["ledger"]["launches"]),
+                         (True, "16:1:2", "resume", 2))
+        self.assertEqual(resumed["commits_since_marker"], pack["commits_since_marker"])
+        self.assert_refused("16:1:1", "launch 16:1:1 is superseded_launch")
+
+    def test_a_handoff_gate_points_at_its_handoff_until_the_next_gate(self):
+        handoff = self.write_handoff(16)
+        self.progress(issue=16, phase=1, now=self.tick(), turn_count=118,
+                      handoff_path=handoff)
+        stored = self.attempt()["handoff_path"]
+        preview = self.pack("16:1:1")
+        self.assertEqual((preview["current"], preview["ledger"]["state"]),
+                         (False, "handed_off"))
+        self.assertEqual(preview["next_action"], {"kind": "read_handoff", "path": stored})
+        self.resume(issue=16, worktree=str(self.worktree), now=self.tick())
+        self.assertEqual(self.pack("16:1:2")["next_action"],
+                         {"kind": "read_handoff", "path": stored})
+        self.progress(issue=16, phase=2, now=self.tick())
+        pack = self.pack("16:1:2")
+        self.assertEqual(pack["ledger"]["handoff_path"], stored)
+        self.assertEqual(pack["next_action"], {"kind": "start_phase", "phase": 3})
+
+    def test_phase_0_restarts_until_its_gate_is_recorded(self):
+        # Final review C-001: a fresh attempt sits at phase 0 with no gate, so
+        # an interrupted Phase 0 is unfinished, not complete.
+        self.assertIsNone(self.attempt()["phase_action"])
+        self.assertEqual(self.pack("16:1:1")["next_action"],
+                         {"kind": "start_phase", "phase": 0})
+        self.progress(issue=16, phase=0, now=self.tick())
+        self.assertEqual(self.pack("16:1:1")["next_action"],
+                         {"kind": "start_phase", "phase": 1})
+
+    def test_a_completed_phase_7_reorients(self):
+        self.progress(issue=16, phase=7, now=self.tick())
+        self.assertEqual(self.pack("16:1:1")["next_action"],
+                         {"kind": "reorient", "reason": "delivery_phases_complete"})
+
+    def test_non_current_launches_are_refused_with_empty_stdout(self):
+        self.assert_refused("16:1:2", "launch 16:1:2 is superseded_launch")
+        self.assert_refused("16:2:1", "launch 16:2:1 is unknown_attempt")
+        self.assert_refused("17:1:1", "launch 17:1:1 is unknown_issue")
+        self.assert_refused("16:r1:1", "a remainder launch has no resume pack")
+        self.assert_refused("16:1:1", "launch 16:1:1 is unknown_run",
+                            run_id="issue-99-absent")
+        malformed = self.pack_raw("16:1")
+        self.assertEqual((malformed.returncode, malformed.stdout), (2, ""))
+        self.assertIn("invalid action_id", malformed.stderr)
+        self.fail_owner(issue=16, attempt=1, now=self.tick())
+        self.assert_refused("16:1:1", "launch 16:1:1 is inactive_attempt")
+        self.retry(issue=16, worktree=str(self.worktree), now=self.tick())
+        self.assert_refused("16:1:1", "launch 16:1:1 is superseded_attempt")
+        retried = self.pack("16:2:1")
+        self.assertEqual((retried["attempt"], retried["current"]), (2, True))
+
+    def test_an_unreadable_worktree_is_refused(self):
+        self.git(self.worktree, "checkout", "--quiet", "--detach")
+        self.assert_refused("16:1:1", "its HEAD is detached")
+        shutil.rmtree(self.worktree)
+        self.assert_refused("16:1:1", "the worktree is absent")
+
+    def test_resume_pack_writes_nothing(self):
+        tracked = self.worktree / "tracked.txt"
+        tracked.write_text("one\n", encoding="utf-8")
+        self.git(self.worktree, "add", "tracked.txt")
+        self.commit(self.worktree, "tracked")
+        tracked.write_text("two\n", encoding="utf-8")
+        index = self.worktree / ".git" / "index"
+        before = (self.state_path.read_bytes(), index.read_bytes(),
+                  sorted(path.relative_to(self.root) for path in self.root.rglob("*")))
+        self.assertEqual(self.pack("16:1:1")["worktree"]["dirty_paths"], 1)
+        self.assert_refused("16:1:2", "launch 16:1:2 is superseded_launch")
+        after = (self.state_path.read_bytes(), index.read_bytes(),
+                 sorted(path.relative_to(self.root) for path in self.root.rglob("*")))
+        self.assertEqual(after, before)
+        self.assertFalse((self.worktree / ".superpowers").exists())
+
+    def signed_commit(self, subject):
+        """A commit carrying an SSH signature header, written without any key.
+
+        `log.showSignature` prints its verification result (no allowed-signers
+        file is configured, so "No signature") on stdout, even under `--format`.
+        """
+        tree = self.git(self.worktree, "rev-parse", "HEAD^{tree}")
+        parent = self.git(self.worktree, "rev-parse", "HEAD")
+        body = (f"tree {tree}\nparent {parent}\n"
+                "author Fixture <fixture@example.test> 1700000000 +0000\n"
+                "committer Fixture <fixture@example.test> 1700000000 +0000\n"
+                "gpgsig -----BEGIN SSH SIGNATURE-----\n U1NIU0lH\n"
+                " -----END SSH SIGNATURE-----\n\n" + subject + "\n")
+        sha = subprocess.run(
+            ["git", "-C", str(self.worktree), "hash-object", "-t", "commit", "-w",
+             "--stdin"], input=body, check=True, capture_output=True,
+            text=True).stdout.strip()
+        self.git(self.worktree, "reset", "--quiet", "--hard", sha)
+        return sha
+
+    def test_the_commit_list_ignores_log_show_signature(self):
+        # #265 D4: no signature line `log.showSignature` adds may become a commit.
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        first = self.signed_commit("first task")
+        second = self.signed_commit("second task")
+        self.git(self.worktree, "config", "log.showSignature", "true")
+        self.assertIn("No signature", self.git(
+            self.worktree, "log", "--max-count=1", "--format=%H%x1f%s"))
+        self.assertEqual(self.pack("16:1:1")["commits_since_marker"], {
+            "base": self.base, "relation": "ahead", "count": 2,
+            "commits": [{"sha": second[:12], "subject": "second task"},
+                        {"sha": first[:12], "subject": "first task"}],
+            "truncated": False})
+
+    def test_the_commit_list_is_bounded(self):
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        for number in range(25):
+            self.commit(self.worktree, f"{number:02d} " + "x" * 150)
+        completed = self.pack_raw("16:1:1")
+        self.assertLess(len(completed.stdout.encode("utf-8")), 4096)
+        section = json.loads(completed.stdout)["commits_since_marker"]
+        self.assertEqual((section["count"], len(section["commits"]), section["truncated"]),
+                         (25, 20, True))
+        self.assertTrue(section["commits"][0]["subject"].startswith("24 "))
+        self.assertEqual({len(commit["subject"]) for commit in section["commits"]}, {100})
+        self.assertEqual({len(commit["sha"]) for commit in section["commits"]}, {12})
+
+    def test_a_primary_checkout_reads_the_primary_bucket(self):
+        workspace = self.sdd_ledger("plans/p.md", ["Task 1: complete (review clean)"])
+        self.assertEqual(Path(workspace).parent.name, "primary")
+        self.assertEqual(self.pack("16:1:1")["sdd"]["workspace"], workspace)
+
+
+class ResumePackSddTest(ResumePackHarness, unittest.TestCase):
+    """#265: the pack reads the attempt worktree's SDD bucket by sdd-workspace's rule."""
+
+    COMPLETE = "Task {}: complete (commits aaaaaaa..bbbbbbb, review clean)"
+    FIX = "Task {}: fix round 1/5 (1 addressed, 0 open — x; commits ccccccc..ddddddd)"
+
+    def make_worktree(self):
+        self.primary = self.root / "primary"
+        self.init_worktree(self.primary, branch="main")
+        self.worktree = self.primary / ".worktrees" / "wt-16"
+        self.git(self.primary, "worktree", "add", "--quiet", "-b", "issue-16",
+                 str(self.worktree))
+        self.base = self.git(self.worktree, "rev-parse", "HEAD")
+
+    def at_phase(self, phase):
+        self.progress(issue=16, phase=phase, now=self.tick())
+
+    def test_phase_5_with_a_task_mid_fix_loop_resumes_it(self):
+        self.at_phase(5)
+        entries = [self.COMPLETE.format(1), self.FIX.format(2)]
+        workspace = self.sdd_ledger("plans/p.md", entries, tasks=3)
+        self.assertEqual(Path(workspace).parent.name, "wt-wt-16")
+        pack = self.pack("16:1:1")
+        self.assertEqual(pack["sdd"], {"workspace": workspace, "plan": "plans/p.md",
+                                       "task_count": 3, "completed": [1],
+                                       "last_entry": self.FIX.format(2),
+                                       "last_entry_truncated": False})
+        self.assertEqual(pack["next_action"], {"kind": "resume_task", "phase": 6,
+                                               "task": 2, "mid_fix_loop": True})
+
+    def test_a_task_with_no_lines_starts_fresh(self):
+        self.at_phase(5)
+        self.sdd_ledger("plans/p.md", [self.FIX.format(1), self.COMPLETE.format(1)],
+                        tasks=2)
+        self.assertEqual(self.pack("16:1:1")["next_action"],
+                         {"kind": "resume_task", "phase": 6, "task": 2,
+                          "mid_fix_loop": False})
+
+    def test_every_task_complete_finishes_phase_6(self):
+        self.at_phase(5)
+        self.sdd_ledger("plans/p.md", [self.COMPLETE.format(2), self.COMPLETE.format(1)],
+                        tasks=2)
+        pack = self.pack("16:1:1")
+        self.assertEqual(pack["sdd"]["completed"], [1, 2])
+        self.assertEqual(pack["next_action"], {"kind": "finish_phase", "phase": 6})
+
+    def test_an_unknown_task_count_never_finishes(self):
+        self.at_phase(5)
+        self.sdd_ledger("plans/p.md", [self.COMPLETE.format(1), self.COMPLETE.format(2)])
+        pack = self.pack("16:1:1")
+        self.assertIsNone(pack["sdd"]["task_count"])
+        self.assertEqual(pack["next_action"], {"kind": "resume_task", "phase": 6,
+                                               "task": 3, "mid_fix_loop": False})
+
+    def test_an_empty_task_member_directory_is_an_unknown_count(self):
+        # Final review: zero members must never read as "every task complete".
+        self.at_phase(5)
+        self.sdd_ledger("plans/p.md", [], tasks=0)
+        pack = self.pack("16:1:1")
+        self.assertIsNone(pack["sdd"]["task_count"])
+        self.assertEqual(pack["next_action"], {"kind": "resume_task", "phase": 6,
+                                               "task": 1, "mid_fix_loop": False})
+
+    def test_an_absolute_plan_path_is_used_as_is(self):
+        self.at_phase(5)
+        plan = str(self.worktree / "plans" / "p.md")
+        self.sdd_ledger(plan, [self.COMPLETE.format(1)], tasks=1)
+        pack = self.pack("16:1:1")
+        self.assertEqual((pack["sdd"]["plan"], pack["sdd"]["task_count"]), (plan, 1))
+        self.assertEqual(pack["next_action"], {"kind": "finish_phase", "phase": 6})
+
+    def test_sdd_position_outside_phase_5_does_not_steer(self):
+        self.sdd_ledger("plans/p.md", [self.FIX.format(1)], tasks=2)
+        pack = self.pack("16:1:1")
+        self.assertEqual(pack["sdd"]["completed"], [])
+        self.assertEqual(pack["next_action"], {"kind": "start_phase", "phase": 0})
+
+    def test_two_plan_ledgers_are_ambiguous(self):
+        self.at_phase(5)
+        self.sdd_ledger("plans/b.md", [self.COMPLETE.format(1)])
+        self.sdd_ledger("plans/a.md", [self.COMPLETE.format(1)])
+        pack = self.pack("16:1:1")
+        self.assertEqual(pack["sdd"], {"ambiguous": ["a", "b"], "ambiguous_count": 2})
+        self.assertEqual(pack["next_action"],
+                         {"kind": "reorient", "reason": "ambiguous_sdd_workspace"})
+
+    def test_a_ledger_naming_no_plan_is_not_a_ledger(self):
+        workspace = self.sdd_ledger("plans/p.md", [self.COMPLETE.format(1)])
+        Path(workspace, "progress.md").write_text("# notes\n", encoding="utf-8")
+        self.assertIsNone(self.pack("16:1:1")["sdd"])
+
+    def test_a_symlinked_bucket_is_refused(self):
+        bucket = Path(self.sdd_ledger("plans/p.md", [])).parent
+        shutil.rmtree(bucket)
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        bucket.symlink_to(elsewhere, target_is_directory=True)
+        self.assert_refused("16:1:1", "the SDD workspace cannot be resolved")
+
+    def test_the_last_entry_is_bounded(self):
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        for number in range(25):
+            self.commit(self.worktree, f"{number:02d} " + "x" * 150)
+        self.sdd_ledger("plans/p.md", [self.COMPLETE.format(1), "y" * 600], tasks=1)
+        completed = self.pack_raw("16:1:1")
+        self.assertLess(len(completed.stdout.encode("utf-8")), 4096)
+        sdd = json.loads(completed.stdout)["sdd"]
+        self.assertEqual((sdd["last_entry"], sdd["last_entry_truncated"]),
+                         ("y" * 400, True))
+
+    def test_unicode_ambiguous_names_shed_from_the_end(self):
+        names = [f"{number}" + "\u00e9" * 99 for number in range(9)]
+        for name in names:
+            self.sdd_ledger(f"plans/{name}.md", [self.COMPLETE.format(1)])
+        completed = self.pack_raw("16:1:1")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertLess(len(completed.stdout.encode("utf-8")), 4096)
+        pack = json.loads(completed.stdout)
+        kept = len(pack["sdd"]["ambiguous"])
+        self.assertTrue(0 < kept < 8, kept)
+        self.assertEqual(pack["sdd"], {"ambiguous": names[:kept], "ambiguous_count": 9})
+        self.assertEqual(pack["next_action"],
+                         {"kind": "reorient", "reason": "ambiguous_sdd_workspace"})
+        pack["sdd"]["ambiguous"].append(names[kept])
+        self.assertGreaterEqual(rendered_size(pack), 4096)
+
+    def test_no_ledger_reads_create_nothing(self):
+        self.assertIsNone(self.pack("16:1:1")["sdd"])
+        self.assertFalse((self.primary / ".superpowers").exists())
+
+
+def rendered_size(pack):
+    """Bytes of `render_json(pack)`: sorted keys, compact, ASCII-escaped, newline."""
+    return len(json.dumps(pack, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+class ResumePackBoundTest(ResumePackHarness, unittest.TestCase):
+    """#265 D15: the rendered pack stays under 4096 bytes whatever its text escapes to."""
+
+    DEPTH = 3
+
+    def make_worktree(self):
+        # Each component is 120 `é` (240 UTF-8 bytes, 720 escaped JSON bytes).
+        self.worktree = self.root.joinpath(*["\u00e9" * 120] * self.DEPTH)
+        self.base = self.init_worktree(self.worktree, branch="issue-16")
+
+    def test_unicode_subjects_on_a_long_path_shed_the_oldest_commits(self):
+        self.mark_progress(action_id="16:1:1", now=self.tick())
+        commits = [self.commit(self.worktree, f"{number:02d} " + "\u00e9" * 150)
+                   for number in range(25)]
+        completed = self.pack_raw("16:1:1")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertLess(len(completed.stdout.encode("utf-8")), 4096)
+        pack = json.loads(completed.stdout)
+        section = pack["commits_since_marker"]
+        kept = len(section["commits"])
+        self.assertTrue(0 < kept < 20, kept)
+        self.assertEqual((section["count"], section["truncated"]), (25, True))
+        newest_first = [{"sha": sha[:12], "subject": f"{number:02d} " + "\u00e9" * 97}
+                        for number, sha in reversed(list(enumerate(commits)))]
+        self.assertEqual(section["commits"], newest_first[:kept])
+        section["commits"].append(newest_first[kept])
+        self.assertGreaterEqual(rendered_size(pack), 4096)
+
+    def test_paths_that_cannot_fit_are_refused(self):
+        self.sdd_ledger("plans/p.md", ["Task 1: complete (review clean)"], tasks=1)
+        self.assert_refused("16:1:1", "the pack exceeds 4096 bytes")
+
+
+class ResumePackEntryBoundTest(ResumePackHarness, unittest.TestCase):
+    """#265 D15: a Unicode last entry on a long path is cut until the pack fits."""
+
+    DEPTH = 1
+    make_worktree = ResumePackBoundTest.make_worktree
+
+    def test_a_unicode_last_entry_is_cut_to_the_byte_bound(self):
+        self.progress(issue=16, phase=5, now=self.tick())
+        entry = "\u00e9" * 400
+        self.sdd_ledger("plans/p.md", ["Task 1: complete (review clean)", entry], tasks=2)
+        completed = self.pack_raw("16:1:1")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertLess(len(completed.stdout.encode("utf-8")), 4096)
+        pack = json.loads(completed.stdout)
+        kept = pack["sdd"]["last_entry"]
+        self.assertTrue(0 < len(kept) < 400 and entry.startswith(kept), len(kept))
+        self.assertTrue(pack["sdd"]["last_entry_truncated"])
+        self.assertEqual(pack["next_action"], {"kind": "resume_task", "phase": 6,
+                                               "task": 2, "mid_fix_loop": False})
+        pack["sdd"]["last_entry"] = entry[:len(kept) + 1]
+        self.assertGreaterEqual(rendered_size(pack), 4096)
 
 
 class OwnerExitFenceTest(LifecycleHarness, unittest.TestCase):
