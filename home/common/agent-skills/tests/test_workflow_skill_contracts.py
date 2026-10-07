@@ -5440,5 +5440,57 @@ class CheckpointVerificationContractsTest(unittest.TestCase):
         self.assertNotIn("Phase 2 verification commands", ci_merge)
 
 
+class ToIssuesCriterionLineContractsTest(unittest.TestCase):
+    """#274 AC1: every to-issues criterion line is typed and located (D1, D9)."""
+
+    TO_ISSUES = REPO_ROOT / "home/common/agent-skills/skills/to-issues/SKILL.md"
+    LINE_RE = re.compile(
+        r"^- \[ \] \[(code|evidence|human)\] \S.* — measured: \S.*$")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = cls.TO_ISSUES.read_text(encoding="utf-8")
+        template = cls.text[cls.text.index("<issue-template>"):
+                            cls.text.index("</issue-template>")]
+        section = template[template.index("## Acceptance criteria\n"):]
+        section = section[:section.index("\n## ", 1)]
+        cls.criterion_lines = [
+            line for line in section.splitlines() if line.startswith("- ")]
+
+    def test_every_template_criterion_line_carries_a_kind_and_a_measured_clause(self):
+        self.assertGreaterEqual(len(self.criterion_lines), 3)
+        for line in self.criterion_lines:
+            with self.subTest(line=line):
+                self.assertRegex(line, self.LINE_RE)
+        kinds = {match.group(1) for match in map(self.LINE_RE.match, self.criterion_lines)
+                 if match}
+        self.assertEqual(kinds, {"code", "evidence", "human"})
+
+    def test_the_shape_kinds_and_preference_rule_are_stated(self):
+        text = normalized(self.text)
+        for phrase in (
+            "`- [ ] [code|evidence|human] <observable outcome> — measured: <where>`",
+            "`code` — a check any reviewer reproduces at the head",
+            "`evidence` — a measurement taken outside the gating suite",
+            "`human` — needs a person's judgment or an environment the agent cannot control",
+            "Prefer `code`, then `evidence`; use `human` only when no agent can "
+            "produce the observation.",
+            "no file paths outside a `measured:` clause",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def test_the_falsifiability_rule_extends_to_the_measured_clause(self):
+        paragraph = next(
+            line for line in self.text.splitlines()
+            if line.startswith("**Every acceptance criterion must be falsifiable.**"))
+        self.assertIn(
+            "The `measured:` clause must name an observation that fails at the base "
+            "commit, and an evidence threshold is a literal number or string, never "
+            "\"faster\" or \"reasonable\".",
+            paragraph,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
