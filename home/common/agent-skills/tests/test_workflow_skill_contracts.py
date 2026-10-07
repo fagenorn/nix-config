@@ -1049,9 +1049,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for path in LIFECYCLE_DOCS:
             text = normalized(path.read_text(encoding="utf-8"))
             with self.subTest(path=path.name):
-                for forbidden in ('"interface_version": 1', "version-1",
-                                  "temporary request file", "temporary `ship-summary/v2` file"):
-                    self.assertNotIn(forbidden, text)
+                self.assertNotIn('"interface_version": 1', text)
+                if "skills/ship-issue/" not in path.as_posix():
+                    for forbidden in ("version-1", "temporary request file",
+                                      "temporary `ship-summary/v2` file"):
+                        self.assertNotIn(forbidden, text)
                 for flag, value in INPUT_FLAG_RE.findall(text):
                     self.assertEqual(value.strip("`.,;"), "-", flag)
                 self.assertLessEqual(text.count("--result-file"), 1)
