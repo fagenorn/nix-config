@@ -343,7 +343,7 @@ bookkeeper is never registered: a registered bookkeeper would block its own fini
 Give the bookkeeper an exact two-command sequence and nothing else: first
 `~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <issue:attempt:launch>`
 with this owner's own `action_id`, then the exact `workflow-state finish` command,
-`workflow-state finish --summary-file - --repo-root <ledger_repo_root> --run-id <run-id> --now <utc>`,
+`workflow-state finish --summary-file - --repo-root <ledger_repo_root> --run-id <run-id>`,
 with the validated ship summary inline in its quoted heredoc and its
 reply piped through `artifact-budget validate-report --boundary workflow-response --input -`.
 It executes exactly that sequence and relays the `finish` stdout; it decides

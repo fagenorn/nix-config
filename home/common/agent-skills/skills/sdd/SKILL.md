@@ -108,7 +108,7 @@ When the caller runs this skill under a lifecycle identity — its
 dispatches or resumes that can write (the implementer, the mechanic and each
 fix-round implementer) is a registered worker of that launch. Immediately
 before the dispatch or resume, run
-`workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`
+`workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
 and put its printed `worker_id` into the prompt as the single line
 `Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>`,
 followed by the sentences "Run each long command, every verification command included, as
@@ -116,7 +116,7 @@ followed by the sentences "Run each long command, every verification command inc
 still in the foreground." and "Create every scratch directory or scratch worktree under the path that
 `launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>` prints."
 When that agent returns, run
-`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --worker-id <worker_id> --event returned`.
+`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> --event returned`.
 A resumed agent is registered again and gets a fresh `worker_id`.
 Read-only reviewers are not registered.
 
@@ -133,7 +133,7 @@ refusal was no supersession: follow from-issue's suspension procedure with
 workers commit with plain `git`.
 
 Under a lifecycle identity, also record this launch's progress marker. Run
-`workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`
+`workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
 once before dispatching the first task this session will execute, and again
 after each task completes (step 5). The helper reads the commit checked out
 in the attempt's worktree itself; a commit that strictly descends from the
@@ -264,7 +264,7 @@ Never fix findings yourself in the controller session — controller fixes skip 
 
 ### 5. Complete the task
 
-Clean review — or everything parked-with-ruling at the cap — appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)`; mark the todo, run the cumulative delivery gate, then move on only when it passes. Never advance past open Critical/Important findings that are neither fixed nor parked. Under a lifecycle identity, run `workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>` immediately after appending that `complete` line, as `### Lifecycle workers` describes.
+Clean review — or everything parked-with-ruling at the cap — appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)`; mark the todo, run the cumulative delivery gate, then move on only when it passes. Never advance past open Critical/Important findings that are neither fixed nor parked. Under a lifecycle identity, run `workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` immediately after appending that `complete` line, as `### Lifecycle workers` describes.
 
 ## Final review — two axes
 

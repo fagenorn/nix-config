@@ -791,11 +791,11 @@ class RefusedFormFixtureTest(unittest.TestCase):
 
 # ship-issue/SKILL.md "Delivery loop" checkpoint call, verbatim at a311fda:
 # three helper segments, a quoted heredoc feeding the first (per D23).
-CHECKPOINT_CALL = """artifact-budget validate-report --boundary ship-checkpoint --input - <<'EOF' | workflow-state checkpoint-delivery --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --checkpoint-file - | artifact-budget validate-report --boundary workflow-response --input -
+CHECKPOINT_CALL = """artifact-budget validate-report --boundary ship-checkpoint --input - <<'EOF' | workflow-state checkpoint-delivery --repo-root <ledger_repo_root> --run-id <run-id> --checkpoint-file - | artifact-budget validate-report --boundary workflow-response --input -
 <ship-checkpoint/v2 JSON>
 EOF"""
 PATH_NAMED_CALL = ("~/.agents/bin/workflow-state init-run --repo-root <ledger_repo_root> --run-id <run-id> "
-                   "--now <utc> | ~/.agents/bin/artifact-budget validate-report --boundary workflow-response --input -")
+                   "| ~/.agents/bin/artifact-budget validate-report --boundary workflow-response --input -")
 # Each variant misses one D23/D26 condition, so the call is classified in full.
 LIFECYCLE_VARIANTS = (
     ("non-helper segment",
@@ -809,12 +809,12 @@ LIFECYCLE_VARIANTS = (
     ("redirect", "--boundary workflow-response --input -",
      "--boundary workflow-response --input - > reply.json", ("pipe", "redirect", "heredoc")),
     ("unquoted delimiter", "<<'EOF'", "<<EOF", ("pipe", "heredoc")),
-    ("substitution argument", "--now <utc>", '--now "$(date -u +%FT%TZ)"', ("pipe", "heredoc")),
+    ("substitution argument", "--run-id <run-id>", '--run-id "$(cat run-id)"', ("pipe", "heredoc")),
     ("escaped delimiter", "<<'EOF'", "<<\\EOF", ("pipe", "heredoc")),
     ("stderr pipe", "<<'EOF' | workflow-state", "<<'EOF' |& workflow-state", ("pipe", "heredoc")),
     ("dash heredoc", "<<'EOF'", "<<-'EOF'", ("pipe", "heredoc")),
     ("here-string", "<<'EOF'", "<<< text", ("pipe", "heredoc")),
-    ("backtick argument", "--now <utc>", "--now `date -u`", ("pipe", "heredoc")),
+    ("backtick argument", "--run-id <run-id>", "--run-id `cat run-id`", ("pipe", "heredoc")),
 )
 # The same call with its delimiter double-quoted: still sanctioned (per D23, D27).
 DQUOTED_CHECKPOINT_CALL = CHECKPOINT_CALL.replace("<<'EOF'", '<<"EOF"')

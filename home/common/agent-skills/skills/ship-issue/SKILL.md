@@ -526,7 +526,7 @@ optionally piped into or out of `artifact-budget validate-report --input -`. A
 checkpoint is one such command:
 
 ```text
-artifact-budget validate-report --boundary ship-checkpoint --input - <<'EOF' | workflow-state checkpoint-delivery --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --checkpoint-file - | artifact-budget validate-report --boundary workflow-response --input -
+artifact-budget validate-report --boundary ship-checkpoint --input - <<'EOF' | workflow-state checkpoint-delivery --repo-root <ledger_repo_root> --run-id <run-id> --checkpoint-file - | artifact-budget validate-report --boundary workflow-response --input -
 <ship-checkpoint/v2 JSON>
 EOF
 ```
@@ -666,14 +666,14 @@ reply, and it writes no `finish`. Otherwise a remainder owner holds its custody,
 so it writes its own `finish --summary-file -`. A remainder owner whose prompt
 carries a `Lifecycle worker:` line releases every worker it registered and
 then itself with
-`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --worker-id <worker_id> --event returned`
+`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> --event returned`
 after its last commit and immediately before its own `finish`; after that
 release it creates no commit. After the last cycle, validate the `ship-summary/v2` (its `historical_owner_result` is
 the legacy row) and write it in one command, then return exactly the validated
 reply and nothing else:
 
 ```text
-workflow-state finish --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --summary-file - <<'EOF' | artifact-budget validate-report --boundary workflow-response --input -
+workflow-state finish --repo-root <ledger_repo_root> --run-id <run-id> --summary-file - <<'EOF' | artifact-budget validate-report --boundary workflow-response --input -
 <canonical ship-summary/v2>
 EOF
 ```

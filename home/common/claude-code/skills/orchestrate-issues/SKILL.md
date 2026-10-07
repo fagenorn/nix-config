@@ -81,7 +81,7 @@ Only when none matches do you mint a new one (per D13) — a re-invocation over 
 At the start of a run or after adapter restart, call:
 
 ```text
-workflow-state init-run --repo-root <ledger_repo_root> --run-id <run-id> --now <RFC3339-now> | artifact-budget validate-report --boundary workflow-response --input -
+workflow-state init-run --repo-root <ledger_repo_root> --run-id <run-id> | artifact-budget validate-report --boundary workflow-response --input -
 ```
 
 Consume only the validated interface_version 2 `workflow_bootstrap` response's
@@ -166,7 +166,6 @@ values are representative; angle-bracketed strings stand for the objects named:
 {
   "interface_version": 3,
   "host_route": "claude-code",
-  "now": "2026-09-24T10:00:00Z",
   "max_parallel": 2,
   "attempt_budget_minutes": 180,
   "human_directed": true,
@@ -211,7 +210,7 @@ sweep. Build each contract with one command:
 
 ```text
 workflow-state build-delivery --repo-root <ledger_repo_root> --kind contract --input - <<'EOF'
-{"issue": <num>, "worktree": "<absolute-worktree>", "source_kind": "<source-kind>", "source_reference": "<source-reference>", "now": "<RFC3339-now>"}
+{"issue": <num>, "worktree": "<absolute-worktree>", "source_kind": "<source-kind>", "source_reference": "<source-reference>"}
 EOF
 ```
 

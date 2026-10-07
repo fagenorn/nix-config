@@ -172,7 +172,7 @@ Your task: invoke the `ship-issue` skill via the Skill tool and follow its
 custody, so you write its `checkpoint-delivery` cycles; after your last commit
 and immediately before your own finish (after every cycle), release your
 children and then yourself with
-`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --worker-id <worker_id> --event returned`,
+`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> --event returned`,
 then write your own `workflow-state finish --summary-file -` and return exactly that finish's
 validated JSON stdout and nothing else. Two exceptions write no finish: after a
 denial the loop checkpointed, which already suspended this custody, return only
