@@ -31,6 +31,7 @@ from agent_tools.skill_lint import (
     load_debt,
     names,
     parse_frontmatter,
+    read_listed,
     skill_dirs,
     split_member,
     tree_reader,
@@ -479,9 +480,9 @@ def measure_corpus(snapshot: Snapshot) -> dict[str, int]:
     for directory in skill_dirs(snapshot):
         members = [directory.skill_md] if directory.skill_md is not None else []
         members += [*directory.references, *directory.payloads]
-        total += sum(len(snapshot.read(path) or b"") for path in members)
-        raw = snapshot.read(directory.skill_md) if directory.skill_md is not None else None
-        if raw is not None:
+        total += sum(len(read_listed(snapshot, path)) for path in members)
+        if directory.skill_md is not None:
+            raw = read_listed(snapshot, directory.skill_md)
             try:
                 fields, _ = parse_frontmatter(raw.decode("utf-8"))
             except ValueError:
@@ -489,8 +490,8 @@ def measure_corpus(snapshot: Snapshot) -> dict[str, int]:
             descriptions += len(fields.get("description", "").encode("utf-8"))
     for path in snapshot.list_files(AGENTS_DIR):
         if path.endswith(".md") and "/" not in path[len(AGENTS_DIR) + 1:]:
-            total += len(snapshot.read(path) or b"")
-    total += len(snapshot.read(FRAME_PATH) or b"")
+            total += len(read_listed(snapshot, path))
+    total += len(snapshot.read(FRAME_PATH) or b"")   # the frame is read by path: absent counts 0
     return {"corpus": total, "descriptions": descriptions}
 
 
@@ -551,10 +552,6 @@ def loose(found: list[Ceiling]) -> list[Ceiling]:
     return [c for c in found if 100 * c.ceiling > 105 * c.measured]
 
 
-def _is_count(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
-
-
 def _slot(model: dict, location: tuple[str, ...]) -> Optional[dict]:
     """The dict holding `location`'s last key, or None when it does not resolve.
 
@@ -579,8 +576,8 @@ def lowered_to(model: dict, base: dict) -> dict:
     result = copy.deepcopy(model)
     for location in ceiling_locations(result):
         target, source, key = _slot(result, location), _slot(base, location), location[-1]
-        if target is not None and source is not None and _is_count(target.get(key)) \
-                and _is_count(source.get(key)) and target[key] <= source[key]:
+        if target is not None and source is not None and _is_byte_count(target.get(key)) \
+                and _is_byte_count(source.get(key)) and target[key] <= source[key]:
             target[key] = source[key]
     return result
 

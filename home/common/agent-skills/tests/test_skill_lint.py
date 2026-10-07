@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -87,6 +88,24 @@ class FoundationTest(unittest.TestCase):
             with self.subTest(text=text):
                 with self.assertRaises(ValueError):
                     skill_lint.parse_frontmatter(text)
+        for value in ('"Use when testing.', "'Use when testing.", 'Use when testing."',
+                      "Use when testing.'", '"Use when testing.\'', "'Use when testing.\"",
+                      '"', "'"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError,
+                                            "frontmatter: description has an unterminated quote"):
+                    skill_lint.parse_frontmatter(f"---\ndescription: {value}\n---\n")
+
+    def test_a_listed_file_that_cannot_be_read_cannot_be_linted(self):
+        files = clean_files()
+        for path in (f"{ALPHA}/SKILL.md", f"{ALPHA}/GUIDE.md"):
+            with self.subTest(path=path):
+                snapshot = skill_lint.Snapshot(
+                    read=lambda p, path=path: None if p == path else files.get(p),
+                    list_files=dict_snapshot(files).list_files,
+                )
+                with self.assertRaisesRegex(ValueError, re.escape(f"cannot read {path}")):
+                    skill_lint.violations(snapshot)
 
     def test_skill_dirs_classify_references_and_payloads(self):
         dirs = skill_lint.skill_dirs(dict_snapshot(clean_files()))
@@ -175,6 +194,8 @@ class RuleTest(unittest.TestCase):
             "block scalar": b"---\nname: alpha\ndescription: >\n---\n" + body,
             "duplicate key": b"---\nname: alpha\nname: alpha\n"
                              b"description: Alphas. Use when x.\n---\n" + body,
+            "unterminated quote": b'---\nname: alpha\ndescription: "Alphas. Use when x.\n---\n'
+                                  + body,
         }
         for label, data in cases.items():
             with self.subTest(case=label):

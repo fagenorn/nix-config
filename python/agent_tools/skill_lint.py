@@ -65,6 +65,14 @@ def tree_reader(root: Path) -> Reader:
     return read
 
 
+def read_listed(snapshot: Snapshot, path: str) -> bytes:
+    """The bytes of a file `snapshot` listed: one that then reads as None is an error, not empty."""
+    raw = snapshot.read(path)
+    if raw is None:
+        raise ValueError(f"cannot read {path}")
+    return raw
+
+
 def tree_lister(root: Path) -> Lister:
     """List the sorted repository-relative POSIX paths of regular files under a prefix."""
 
@@ -133,7 +141,9 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
         key, value = match.group(1), (match.group(2) or "").strip()
         if value in _BLOCK_SCALARS:
             raise ValueError(f"frontmatter: {key} is a block scalar")
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        if value[:1] in ("\"", "'") or value[-1:] in ("\"", "'"):
+            if len(value) < 2 or value[0] != value[-1]:
+                raise ValueError(f"frontmatter: {key} has an unterminated quote")
             value = value[1:-1]
         if key in fields:
             raise ValueError(f"frontmatter: duplicate key {key}")
@@ -283,7 +293,7 @@ def _directory_violations(snapshot: Snapshot, directory: SkillDir) -> list[Viola
         return [Violation(f"L1 {directory.path}/SKILL.md", "missing SKILL.md")]
     path = directory.skill_md
     try:
-        text = (snapshot.read(path) or b"").decode("utf-8")
+        text = read_listed(snapshot, path).decode("utf-8")
     except UnicodeDecodeError:
         return [Violation(f"L1 {path}", "SKILL.md is not UTF-8")]
     found: list[Violation] = []
@@ -298,7 +308,7 @@ def _directory_violations(snapshot: Snapshot, directory: SkillDir) -> list[Viola
     if lines > 500:
         found.append(Violation(f"L2 {path}", f"body is {lines} reflowed lines, over 500"))
     for reference in directory.references:
-        reference_text = (snapshot.read(reference) or b"").decode("utf-8", errors="replace")
+        reference_text = read_listed(snapshot, reference).decode("utf-8", "replace")
         lines = reflowed_lines(reference_text)
         if lines > 100 and not has_contents(reference_text):
             found.append(Violation(

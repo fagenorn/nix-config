@@ -244,6 +244,27 @@ class CeilingTest(unittest.TestCase):
         self.assertEqual(instruction_load.measure_corpus(dict_snapshot(CORPUS_FILES)),
                          {"corpus": 181, "descriptions": 24})
 
+    def test_a_listed_file_that_cannot_be_read_cannot_be_measured(self):
+        prompt = "home/common/agent-skills/skills/demo/demo-prompt.md"
+        files = {**CORPUS_FILES, prompt: b"payload\n"}
+        for path in ("home/common/agent-skills/skills/demo/SKILL.md",
+                     "home/common/agent-skills/skills/demo/EXTRA.md", prompt,
+                     "home/common/claude-code/agents/reviewer.md"):
+            with self.subTest(path=path):
+                snapshot = skill_lint.Snapshot(
+                    read=lambda p, path=path: None if p == path else files.get(p),
+                    list_files=dict_snapshot(files).list_files,
+                )
+                with self.assertRaisesRegex(ValueError, re.escape(f"cannot read {path}")):
+                    instruction_load.measure_corpus(snapshot)
+
+    def test_an_absent_frame_counts_zero_bytes(self):
+        # 181 less the frame's 11 bytes: the frame is read by path, not listed.
+        files = {p: d for p, d in CORPUS_FILES.items()
+                 if p != "home/common/agent-guidance/AGENTS.md"}
+        self.assertEqual(instruction_load.measure_corpus(dict_snapshot(files)),
+                         {"corpus": 170, "descriptions": 24})
+
     def test_every_ceiling_is_enumerated_with_its_location(self):
         rows = [(c.label, c.location, c.ceiling, c.measured) for c in self.all_ceilings()]
         self.assertEqual(instruction_load.ceiling_locations(fixture_model()), [r[1] for r in rows])
