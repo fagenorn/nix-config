@@ -5695,5 +5695,57 @@ class AcceptanceMapEvalGradingTest(unittest.TestCase):
                                      result.stdout + result.stderr)
 
 
+class SupersededOwnerStopPassContractsTest(unittest.TestCase):
+    """#275: stop superseded owner handles before dispatch and at finalize."""
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    def text(self):
+        return normalized(ORCHESTRATE.read_text(encoding="utf-8"))
+
+    def test_the_stop_pass_precedes_dispatch_and_runs_at_finalize(self):
+        self.assert_ordered(
+            self.text(), "## 4. Execute control actions",
+            "**Stop pass.**",
+            "carries a `spawn`, `resume`, `retry` or `delivery_remainder` action",
+            "every owner handle this adapter process recorded beside an owner "
+            "launch's `action_id` that has produced no final return",
+            "`workflow-state check-launch --repo-root <ledger_repo_root> "
+            "--run-id <run-id> --action-id <action_id>`",
+            "On `current: false`, stop that handle through the host's task-stop",
+            "Only after the pass, execute the response's actions in returned order.",
+            "For `spawn`, `resume`, and `retry`, project the action",
+            "Dispatch the owner in the background",
+            "only for later notification correlation and the stop pass; "
+            "it is never an owner token or action identity.",
+            "For `finalize`, first run the stop pass,",
+            "the action ends the run as `finalize` does: run the stop pass,",
+            "## 5. Final report")
+
+    def test_a_stop_failure_is_reported_and_never_blocks_dispatch(self):
+        self.assert_ordered(
+            self.text(), "**Stop pass.**",
+            "a missing or already exited handle counts as stopped",
+            "is unknown, never `current: false`",
+            "A stop failure never blocks dispatch",
+            "sends no observation, makes no control call and writes nothing",
+            "## 5. Final report",
+            "**Stop failures**",
+            "still left a candidate because its stop failed or its "
+            "`check-launch` answer was unknown, with its `action_id` and the failure",
+            "omit the list when there is none",
+            "Do not perform a second ledger read")
+
+    def test_section_two_carries_no_stop_pass(self):
+        text = self.text()
+        section = text[text.index("## 2. Bootstrap and observe"):text.index("## 3. Decide")]
+        self.assertNotIn("stop pass", section.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

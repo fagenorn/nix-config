@@ -270,6 +270,25 @@ Validate each action as one of the closed kinds `spawn`, `resume`, `retry`,
 `delivery_remainder`, `delivery_contract`, `wait`, or `finalize`, and execute
 actions in returned order. Any other kind is a contract error: stop without executing it and surface the unknown kind; fail loudly.
 
+**Stop pass.** Before executing the first action of a response that carries a
+`spawn`, `resume`, `retry` or `delivery_remainder` action, stop the superseded
+owners. The candidates are every owner handle this adapter process recorded
+beside an owner launch's `action_id` that has produced no final return. An
+interim notification under §2 rule (a) is not a final return. The current wait
+handle and non-owner handles are never candidates, and a handle this response
+dispatches becomes one only once it is dispatched. For each candidate, run
+`workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
+with the `action_id` recorded beside that handle. On `current: false`, stop
+that handle through the host's task-stop and mark it stopped; a missing or
+already exited handle counts as stopped. On `current: true`, leave it running.
+A `check-launch` that exits non-zero, or whose output cannot be parsed, is
+unknown, never `current: false`: leave the handle a candidate. A failed stop
+also leaves it a candidate, and the next pass tries both again. A stop failure
+never blocks dispatch: keep it for §5 and continue. The pass sends no
+observation, makes no control call and writes nothing, so a later notification
+from a stopped handle still falls under §2 rule (b). Only after the pass,
+execute the response's actions in returned order.
+
 For `spawn`, `resume`, and `retry`, project the action into the interface-2
 owner object: rename `id` to `action_id` and `kind` to `launch_kind`, add
 `kind: owner`, `interface_version: 2`, `ledger_repo_root` and `run_id`, and keep
@@ -311,7 +330,7 @@ run and is independent of any issue worktree. The worktree is the exact returned
 path. For `resume`, include the returned `handoff_path` when present. For a
 `delivery_remainder`, `attempt` is its `source_attempt`, `action_id` is its
 custody's `action_id`, and there is no `handoff_path`. Record the host task
-handle beside the returned action ID only for later notification correlation; it
+handle beside the returned action ID only for later notification correlation and the stop pass; it
 is never an owner token or action identity.
 
 If the host refuses an owner launch, never retry it: make exactly one control
@@ -383,7 +402,7 @@ Arm the one-shot observer for the returned wake conditions and its `deadline_at`
 control never returns a deadline-less wait; every wait carries deadline_at, and when nothing can proceed without a human, control returns finalize instead, or `delivery_contract` when a missing contract is all that stops an issue.
 No polling or repeated short sleeps are allowed.
 
-For `finalize`, first clear `current_wait_id`, then cancel the outstanding handle
+For `finalize`, first run the stop pass, then clear `current_wait_id`, then cancel the outstanding handle
 (a missing/already-exited handle is harmless), and clear
 `current_wait_handle`. Do not issue another control call merely to prepare the
 report.
@@ -395,8 +414,8 @@ contract as §3 describes (the pair built for it earlier in this invocation,
 else build it now) and make the next control call at once; that response
 takes over from this one. Never rebuild an issue whose build this invocation
 refused: send null and `[]` for it. When the builder has refused every listed
-issue in this invocation, the action ends the run as `finalize` does: clear
-the wait state as for `finalize` and render §5 from this response.
+issue in this invocation, the action ends the run as `finalize` does: run the
+stop pass, clear the wait state as for `finalize` and render §5 from this response.
 
 ## 5. Final report
 
@@ -424,7 +443,11 @@ cannot resume, because its recorded worktree is gone or is not on the issue
 branch: report it as unable to resume for that reason, never as progressing.
 Then group every `discussion_items` entry by issue and call out anything needing
 a human. List every issue in that same control response's `admission.waiting` as
-queued for agent slots, with its summary state. Do not perform a second ledger
+queued for agent slots, with its summary state. Below the table, under **Stop failures**, list each owner handle the final stop
+pass still left a candidate because its stop failed or its `check-launch` answer
+was unknown, with its `action_id` and the failure; omit the list when there is
+none. These are facts local to this adapter, not fields of the finalize summary.
+Do not perform a second ledger
 read or reconstruct omitted history.
 
 An `expired` delta is an interruption, not a verdict on the work: it consumes
