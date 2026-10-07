@@ -142,6 +142,10 @@ agent-model-matrix:
 agent-instruction-load *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.instruction_load {{args}}
 
+# Run the Instruction Budget gate against origin/main; pass --raise-label for a labelled raise (#292 D9).
+agent-instruction-budget *args:
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.instruction_load check --base origin/main {{args}}
+
 # Check the skill contracts and agent-tool launchers against what the Nix build installs.
 agent-installed-skill-tests: build
   @set -- $(nix-store --query --requisites ./result \

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -18,13 +19,16 @@ from agent_tools.agent_model_matrix import (
     parse_matrix,
 )
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools import skill_lint
 from agent_tools.skill_lint import (
     AGENTS_DIR,
     CLAUDE_TREE,
+    DEBT_PATH,
     MD_TOKEN,
     SHARED_TREE,
     Reader,
     Snapshot,
+    load_debt,
     names,
     parse_frontmatter,
     skill_dirs,
@@ -57,6 +61,14 @@ PROFILE_KEYS = (
 )
 PROFILE_CHOICE_KEYS = ("entry", "launch")
 SKILL_NAME = re.compile(r"[A-Za-z0-9_-]+")
+WORKFLOW_PATH = ".github/workflows/instruction-budget.yaml"
+RAISE_LABEL = "instruction-budget-raise"
+GATE_FILES = (
+    WORKFLOW_PATH,
+    "python/agent_tools/skill_lint.py",
+    "python/agent_tools/instruction_load.py",
+    ".github/branch-protection.json",
+)
 REGENERATE = "just agent-instruction-load report --base {base} --head {head} --output <path>"
 
 
@@ -68,8 +80,8 @@ def _git(root: Path, *args: str) -> bytes:
     return completed.stdout
 
 
-def revision_reader(root: Path, revision: str) -> tuple[str, Reader]:
-    """The full commit SHA of `revision`, and a reader over that commit's tree."""
+def revision_snapshot(root: Path, revision: str) -> tuple[str, Snapshot]:
+    """The full commit SHA of `revision`, and a snapshot of that commit's tree."""
     try:
         sha = _git(root, "rev-parse", "--verify", "--quiet", "--end-of-options",
                    f"{revision}^{{commit}}").decode("ascii").strip()
@@ -86,7 +98,16 @@ def revision_reader(root: Path, revision: str) -> tuple[str, Reader]:
             cache[path] = _git(root, "show", f"{sha}:{path}")
         return cache[path]
 
-    return sha, read
+    return sha, Snapshot(
+        read=read,
+        list_files=lambda prefix: sorted(p for p in present if p.startswith(prefix + "/")),
+    )
+
+
+def revision_reader(root: Path, revision: str) -> tuple[str, Reader]:
+    """The full commit SHA of `revision`, and a reader over that commit's tree."""
+    sha, snapshot = revision_snapshot(root, revision)
+    return sha, snapshot.read
 
 
 def load_model(data: bytes) -> dict:
@@ -525,6 +546,103 @@ def breached(found: list[Ceiling]) -> list[Ceiling]:
     return [c for c in found if c.measured > c.ceiling]
 
 
+def loose(found: list[Ceiling]) -> list[Ceiling]:
+    """The ceilings more than 5% above what they measure."""
+    return [c for c in found if 100 * c.ceiling > 105 * c.measured]
+
+
+def _is_count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _slot(model: dict, location: tuple[str, ...]) -> Optional[dict]:
+    """The dict holding `location`'s last key, or None when it does not resolve.
+
+    A profile is matched by id, and only when `model` holds exactly one profile with it.
+    """
+    if len(location) == 1:
+        return model
+    _, profile_id, kind, _ = location
+    profiles = model.get("profiles") if isinstance(model.get("profiles"), list) else []
+    matches = [p for p in profiles if isinstance(p, dict) and p.get("id") == profile_id]
+    if len(matches) != 1 or not isinstance(matches[0].get(kind), dict):
+        return None
+    return matches[0][kind]
+
+
+def lowered_to(model: dict, base: dict) -> dict:
+    """`model` with each ceiling that is at or below its base value set to that value.
+
+    Raise control compares the result with `base`: anything still unequal is a change
+    other than lowering a ceiling. Non-dict and non-list values are skipped, never lowered.
+    """
+    result = copy.deepcopy(model)
+    for location in ceiling_locations(result):
+        target, source, key = _slot(result, location), _slot(base, location), location[-1]
+        if target is not None and source is not None and _is_count(target.get(key)) \
+                and _is_count(source.get(key)) and target[key] <= source[key]:
+            target[key] = source[key]
+    return result
+
+
+def tightened(model: dict, found: list[Ceiling]) -> tuple[dict, list[str]]:
+    """`model` with every ceiling above its measure lowered to it, and the lines saying so."""
+    result = copy.deepcopy(model)
+    lines = []
+    for c in found:
+        if c.ceiling > c.measured:
+            _slot(result, c.location)[c.location[-1]] = c.measured
+            lines.append(f"lowered {c.label}: {c.ceiling} -> {c.measured}")
+    return result, lines
+
+
+def run_check(head: Snapshot, base: Optional[Snapshot], raise_label: bool) -> list[str]:
+    """Every failing line of the gate, in step order; raises ValueError when it cannot run."""
+    lines = [f"lint: {line}" for line in skill_lint.lint(head)]
+    raw = head.read(MODEL_PATH)
+    if raw is None:
+        raise ValueError(f"no {MODEL_PATH} in the working tree")
+    model = load_model(raw)
+    violations = validate(model, head.read)
+    if violations:
+        lines += [f"ceiling: invalid model: {violation}" for violation in violations]
+    else:
+        found = ceilings(model, measure(model, head.read), measure_corpus(head))
+        lines += [
+            f"ceiling: {c.label} measures {c.measured} bytes, above its ceiling {c.ceiling}; "
+            f"cut the text, or raise the ceiling in a PR carrying the {RAISE_LABEL} label"
+            for c in breached(found)
+        ]
+        lines += [
+            f"tightness: {c.label} ceiling {c.ceiling} is more than 5% above its measured "
+            f"{c.measured} bytes; run `just agent-instruction-load tighten`"
+            for c in loose(found)
+        ]
+    if base is not None and base.read(WORKFLOW_PATH) is not None:
+        base_raw = base.read(MODEL_PATH)
+        if base_raw is None:
+            raise ValueError(f"no {MODEL_PATH} at the base")
+        base_model = load_model(base_raw)
+        if not raise_label:
+            if lowered_to(model, base_model) != base_model:
+                lines.append(f"raise: {MODEL_PATH} changes more than lowering a ceiling; "
+                             f"revert it, or have a human apply the {RAISE_LABEL} label")
+            lines += [
+                f"raise: gate file {path} differs from the base; "
+                f"revert it, or have a human apply the {RAISE_LABEL} label"
+                for path in GATE_FILES if head.read(path) != base.read(path)
+            ]
+        head_keys = set(load_debt(head.read(DEBT_PATH)))
+        base_debt = base.read(DEBT_PATH)
+        base_keys = set() if base_debt is None else set(load_debt(base_debt))
+        lines += [
+            f"debt: {key} is not in the base's {DEBT_PATH}; "
+            f"the debt file may only shrink, so fix the violation instead"
+            for key in sorted(head_keys - base_keys)
+        ]
+    return lines
+
+
 PREFACE = (
     "Bytes are UTF-8 lengths and words are whitespace-separated tokens; neither is a token "
     "count. A hot member loads on every run of its profile's standard route and a conditional "
@@ -697,34 +815,80 @@ def _parser() -> argparse.ArgumentParser:
     report.add_argument("--output", type=Path, help="write the report here instead of stdout")
     report.add_argument("--format", choices=("markdown", "json"), default="markdown")
     report.add_argument("--root", type=Path, default=Path("."), help="the repository")
+    check = commands.add_parser("check", help="run the growth gate on the working tree")
+    check.add_argument("--base", help="the base revision for raise control and debt shrink")
+    check.add_argument("--raise-label", action="store_true",
+                       help="the pull request carries the raise label")
+    check.add_argument("--root", type=Path, default=Path("."), help="the repository")
+    tighten = commands.add_parser("tighten", help="lower every loose ceiling to its measure")
+    tighten.add_argument("--root", type=Path, default=Path("."), help="the repository")
     return parser
+
+
+def _report(args: argparse.Namespace) -> int:
+    base, read_base = revision_reader(args.root, args.base)
+    head, read_head = revision_reader(args.root, args.head)
+    raw = read_head(MODEL_PATH)
+    if raw is None:
+        raise ValueError(f"no {MODEL_PATH} at {head}")
+    try:
+        model = load_model(raw)
+    except ValueError as error:
+        raise ValueError(f"invalid model at {head}: {error}") from None
+    violations = validate(model, read_head)
+    if violations:
+        raise ValueError(f"invalid model at {head}: " + "; ".join(violations))
+    report = compare(model, measure(model, read_base), measure(model, read_head), base, head)
+    text = render_json(report) if args.format == "json" else render_markdown(report)
+    if args.output is None:
+        sys.stdout.buffer.write(text.encode("utf-8"))
+    else:
+        args.output.write_text(text, encoding="utf-8")
+    return 0
+
+
+def _check(args: argparse.Namespace) -> int:
+    if args.raise_label and args.base is None:
+        raise ValueError("--raise-label needs --base")
+    head = skill_lint.working_tree(args.root)
+    base = None if args.base is None else revision_snapshot(args.root, args.base)[1]
+    if base is not None and base.read(WORKFLOW_PATH) is None:
+        print(f"agent-instruction-load: the base has no {WORKFLOW_PATH}; "
+              f"raise control and debt shrink skipped", file=sys.stderr)
+    lines = run_check(head, base, args.raise_label)
+    print("\n".join(lines) if lines else "check: pass")
+    return 1 if lines else 0
+
+
+def _tighten(args: argparse.Namespace) -> int:
+    snapshot = skill_lint.working_tree(args.root)
+    raw = snapshot.read(MODEL_PATH)
+    if raw is None:
+        raise ValueError(f"no {MODEL_PATH} in the working tree")
+    model = load_model(raw)
+    violations = validate(model, snapshot.read)
+    if violations:
+        raise ValueError("invalid model: " + "; ".join(violations))
+    found = ceilings(model, measure(model, snapshot.read), measure_corpus(snapshot))
+    result, lowered = tightened(model, found)
+    if lowered:
+        (args.root / MODEL_PATH).write_text(
+            json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print("\n".join(lowered))
+    over = breached(found)
+    for c in over:
+        print(f"breach {c.label}: measures {c.measured} bytes, above its ceiling {c.ceiling}")
+    return 1 if over else 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = _parser().parse_args(argv)
+    handler = {"report": _report, "check": _check, "tighten": _tighten}[args.command]
     try:
-        base, read_base = revision_reader(args.root, args.base)
-        head, read_head = revision_reader(args.root, args.head)
-        raw = read_head(MODEL_PATH)
-        if raw is None:
-            raise ValueError(f"no {MODEL_PATH} at {head}")
-        try:
-            model = load_model(raw)
-        except ValueError as error:
-            raise ValueError(f"invalid model at {head}: {error}") from None
-        violations = validate(model, read_head)
-        if violations:
-            raise ValueError(f"invalid model at {head}: " + "; ".join(violations))
-        report = compare(model, measure(model, read_base), measure(model, read_head), base, head)
-        text = render_json(report) if args.format == "json" else render_markdown(report)
-        if args.output is None:
-            sys.stdout.buffer.write(text.encode("utf-8"))
-        else:
-            args.output.write_text(text, encoding="utf-8")
+        return handler(args)
     except (ValueError, OSError) as error:
         print(f"agent-instruction-load: {' '.join(str(error).split())}", file=sys.stderr)
         return 2
-    return 0
 
 
 if __name__ == "__main__":
