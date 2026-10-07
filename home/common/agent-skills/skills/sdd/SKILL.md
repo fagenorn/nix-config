@@ -30,7 +30,7 @@ Track progress in a ledger file:
 - `scripts/sdd-workspace PLAN_FILE` prints the plan's git-ignored workspace — `<primary-checkout>/.superpowers/sdd/<checkout-bucket>/<plan-basename>/`, where `<checkout-bucket>` is `primary` or `wt-<worktree-name>` for a linked worktree. Ledger, briefs, reports and review packages for THIS plan live there; another plan's directory or checkout's bucket is never yours.
 - Check `<workspace>/progress.md`. If its first line names your plan file, tasks with a `Task <N>: complete` line are DONE — resume at the first task without one; a task whose last line is a fix round resumes mid-loop. A ledger naming a different plan is not yours: leave it, start fresh.
 - Create the ledger with its identity as the first line: `# SDD ledger — plan: <plan file path>`.
-- After compaction, trust the ledger and `git log` over recollection.
+- After compaction, or if the workspace is gone, trust the ledger and `git log` over recollection.
 
 **Initial validation is the only whole-package read.** After the checker passes,
 read the root and every indexed member once, in discovery order, and scan for
@@ -187,7 +187,7 @@ Template: [implementer-prompt.md](implementer-prompt.md)
 
 ### 2. Handle the report
 
-- **DONE** → run `review-package PLAN_FILE BASE HEAD` (BASE from step 1 — never `HEAD~1`, which silently drops all but the last commit) and apply the review-package gate before step 3.
+- **DONE** → run `review-package PLAN_FILE BASE HEAD` (BASE from step 1 — never `HEAD~1`) and apply the review-package gate before step 3.
 - **DONE_WITH_CONCERNS** → correctness/scope concerns get addressed before review; observations get noted, review proceeds.
 - **NEEDS_CONTEXT** → provide it, re-dispatch.
 - **BLOCKED** → a `launch fence refused` report follows `### Lifecycle workers` and is never re-dispatched. Otherwise: context problem: add context, re-dispatch at the same tier. Reasoning problem: escalate to a fresh Opus/high implementer carrying the brief path, the report path and the blocker:
