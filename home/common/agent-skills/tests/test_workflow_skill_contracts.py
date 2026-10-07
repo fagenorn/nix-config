@@ -119,7 +119,7 @@ V2_OWNER_KEYS = {"interface_version", "kind", "ledger_repo_root", "run_id", "iss
     "requirements", "authority_evaluation", "requested_scope"}
 SHIP_HANDOFF_V2_KEYS = {"interface_version", "state", "ledger_repo_root", "run_id",
     "owner", "owner_worktree", "custody", "issue_number", "branch", "worktree_path",
-    "spec_artifact", "plan_artifact", "head_sha", "review_state", "auto", "report_path",
+    "spec_artifact", "plan_artifact", "head_sha", "review_state", "acceptance_state", "auto", "report_path",
     "notes", "delivery_contract", "delivery_contract_digest", "authorization_intents",
     "authorization_chain_digest", "authority_observation_ids", "reevaluation_evidence_ids",
     "authority_evaluation_consumption_ids", "pending_stage_ids", "selected_outputs",
@@ -5480,6 +5480,30 @@ class AcceptanceGradingContractsTest(unittest.TestCase):
             "`not_applicable` when", "`unmet` when any verdict is `unmet` or `unverified`",
             "`human_pending` when any verdict is `human_pending`", "otherwise `met`",
             "- **Clean** —", "(an acceptance finding never is)")
+
+    def test_both_handoff_templates_carry_acceptance_state(self):
+        raw = (FROM_ISSUE_DIR / "ship-handoff.md").read_text(encoding="utf-8")
+        templates = [line for line in raw.splitlines()
+                     if line.startswith('{"interface_version":2')
+                     or line.startswith('{"state":"complete"')]
+        self.assertEqual(len(templates), 2)
+        for line in templates:
+            with self.subTest(template=line[:30]):
+                self.assertIn('"review_state":"clean|residuals",'
+                              '"acceptance_state":"met|unmet|human_pending|not_applicable",',
+                              line)
+        handoff = normalized(raw)
+        self.assert_ordered(
+            handoff,
+            "In both handoff shapes, `head_sha` is the validated sdd report's `head_sha`",
+            "In both handoff shapes, `acceptance_state` is the validated sdd report's "
+            "`acceptance_state`, copied unchanged.",
+            "(`review_state: unknown`) carries `not_applicable`",
+            "its close stage does not read it")
+        self.assertIn("`head_sha`, `acceptance_state` and `report_path` may be used to "
+                      "construct the Phase-7 handoff", self.read(FROM_ISSUE))
+        self.assertIn("`head_sha`, `review_state`, `acceptance_state`, `auto`",
+                      self.read(SHIP_ISSUE))
 
 
 if __name__ == "__main__":
