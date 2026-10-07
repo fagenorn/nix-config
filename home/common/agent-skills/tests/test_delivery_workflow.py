@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timedelta, timezone
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -31,6 +33,15 @@ NOW = "2026-09-21T00:00:00Z"
 WORKTREE_NAME = "worktree-issue-171-delivery-contract-source"
 LATER = "2026-09-21T00:10:00Z"
 SLUGLESS = "worktree-issue-171"
+CLOCK_ENV = "WORKFLOW_STATE_TEST_CLOCK"
+PINNED = "2026-09-30T12:00:00Z"
+SKEW = ("workflow-state: {label} {supplied} is {lead} seconds ahead of the clock {clock}; "
+        "a supplied time may lead it by at most 60 seconds — omit it to use the clock\n")
+PROGRESS_ARGS = ("--issue", 14, "--attempt", 1, "--phase", 1, "--turn-count", 10,
+                 "--context-tokens", 20000, "--turn-ceiling", 120, "--context-ceiling", 150000,
+                 "--turn-headroom", 2, "--context-headroom", 10000,
+                 "--next-needs-context", "true", "--artifacts-sufficient", "false",
+                 "--remainder-self-contained", "false")
 
 
 def authored_policy():
@@ -61,6 +72,10 @@ def load(path, name, *, package=False):
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+LifecycleHarness = load(Path(__file__).with_name("test_workflow_state.py"),
+                        "delivery_workflow_lifecycle_harness").LifecycleHarness
 
 
 class DeliveryAdmissionTest(unittest.TestCase):
@@ -1722,7 +1737,7 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
                 self.assertEqual((refused.returncode, refused.stdout), (2, b""))
                 self.assertIn(reason, refused.stderr)
         self.project()
-        missing = self.contract_input(); missing.pop("now")
+        missing = self.contract_input(); missing.pop("issue")
         for kind, value, reason in (("contract", missing, b"builder input keys"),
                                     ("nonsense", self.contract_input(), b"invalid choice")):
             with self.subTest(kind=kind):
@@ -1863,6 +1878,38 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
         self.assertIn(b"builder input keys", refused.stderr)
 
 
+    def test_a_contract_input_without_now_is_stamped_from_the_clock(self):
+        """#309 D5: the command fills `now`; the builder stays pure."""
+        self.project()
+        value = self.contract_input(); value.pop("now")
+        with mock.patch.dict(os.environ, {CLOCK_ENV: PINNED}):
+            pinned = self.build("contract", value)
+        self.assertEqual(pinned["contract"]["provenance"]["created_at"], PINNED)
+        with mock.patch.dict(os.environ):
+            os.environ.pop(CLOCK_ENV, None)
+            stamped = self.build("contract", value)["contract"]["provenance"]["created_at"]
+        recorded = datetime.fromisoformat(stamped.replace("Z", "+00:00"))
+        self.assertLessEqual(abs((datetime.now(timezone.utc) - recorded).total_seconds()), 5)
+
+    def test_a_contract_now_over_the_bound_is_refused(self):
+        """#309 D5, D12: a parsing future `now` is refused; a malformed one is the builder's."""
+        self.project()
+        ahead = "2026-09-30T12:15:00Z"
+        with mock.patch.dict(os.environ, {CLOCK_ENV: PINNED}):
+            refused = self.build("contract", self.contract_input(now=ahead), ok=False)
+            at_bound = self.build("contract", self.contract_input(now="2026-09-30T12:01:00Z"))
+            malformed = self.build("contract", self.contract_input(now="soon"), ok=False)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, refused.stderr),
+            (2, b"", SKEW.format(label="contract now", supplied=ahead, lead=900,
+                                 clock=PINNED).encode()))
+        self.assertEqual(at_bound["contract"]["provenance"]["created_at"], "2026-09-30T12:01:00Z")
+        self.assertEqual((malformed.returncode, malformed.stdout), (2, b""))
+        self.assertTrue(malformed.stderr.startswith(b"workflow-state: build-delivery refused: "),
+                        malformed.stderr)
+        self.assertNotIn(b"ahead of the clock", malformed.stderr)
+
+
 class WorktreePolicyTest(BuilderHarness, unittest.TestCase):
     """D3, D4, D7: an existing contract worktree can veto a build, never supply policy."""
 
@@ -1919,7 +1966,9 @@ class WorktreePolicyTest(BuilderHarness, unittest.TestCase):
                 "and refuses if any sealed policy member differs.",
                 "when resolve-project refuses, that line ends with the resolver's error "
                 "document",
-                "It takes no lock, reads no clock and writes nothing.",
+                "It takes no lock and writes nothing, and it reads the clock only for a "
+                "--kind contract input's now: to stamp an omitted one and to skew-check a "
+                "supplied one.",
                 "A contract the builder cannot re-derive is served only when a ledger under "
                 "--repo-root has installed it, and then against that ledger's stored initial "
                 "intent.",
@@ -3379,6 +3428,335 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
             self.failed_summary(action["custody"], digest, [selected])).encode()).stdout)
         self.assertEqual((minted["kind"], minted["custody"]["action_id"]),
                          ("delivery_remainder", "171:r1:1"))
+
+
+class LedgerClockTest(LifecycleHarness, unittest.TestCase):
+    """#309: ledger time comes from the clock; a future supplied time is refused (D3–D8)."""
+
+    def setUp(self):
+        super().setUp()
+        self.cli_env.pop(CLOCK_ENV, None)
+
+    @property
+    def run_args(self):
+        return ("--repo-root", self.root, "--run-id", self.run_id)
+
+    def pin(self, value=PINNED):
+        self.cli_env[CLOCK_ENV] = value
+
+    @staticmethod
+    def at(base, seconds):
+        moved = datetime.fromisoformat(base.replace("Z", "+00:00")) + timedelta(seconds=seconds)
+        return moved.isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def clock_text():
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+    def assert_clock_stamp(self, stamp):
+        self.assertRegex(stamp, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        recorded = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        self.assertLessEqual(abs((datetime.now(timezone.utc) - recorded).total_seconds()), 5,
+                             stamp)
+
+    def worktree(self, issue):
+        return str(self.root / f"wt-{issue}")
+
+    def spawn_two(self, now):
+        """One control sweep at `now` spawning issues 14 and 15; their spawn actions by issue."""
+        response = self.control_validated(
+            now=now, issues=[14, 15],
+            tracker=[self.tracker_fact(14), self.tracker_fact(15)],
+            worktrees=[self.worktree_fact(issue, candidate={
+                "path": self.worktree(issue), "state": "absent"}) for issue in (14, 15)],
+            max_parallel=100)
+        return {action["issue"]: action for action in response["actions"]
+                if action["kind"] == "spawn"}
+
+    def test_a_supplied_time_over_the_bound_is_refused_and_writes_nothing(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.spawn_two(PINNED)
+        worker = json.loads(self.run_cli("register-worker", *self.run_args,
+                                         "--action-id", "14:1:1").stdout)["worker_id"]
+        ahead = self.at(PINNED, 900)
+        never_read = self.root / "never-read.json"
+        before = self.state_path.read_bytes()
+        for name, args in (
+                ("checkpoint-delivery", ("checkpoint-delivery", *self.run_args, "--now", ahead,
+                                         "--checkpoint-file", never_read)),
+                ("release-worker", ("release-worker", *self.run_args, "--now", ahead,
+                                    "--worker-id", worker, "--event", "returned")),
+                ("finish", ("finish", *self.run_args, "--now", ahead,
+                            "--summary-file", never_read))):
+            with self.subTest(command=name):
+                refused = self.run_cli(*args, ok=False)
+                self.assertEqual(
+                    (refused.returncode, refused.stdout, refused.stderr),
+                    (2, "", SKEW.format(label="--now", supplied=ahead, lead=900, clock=PINNED)))
+                self.assertEqual(self.state_path.read_bytes(), before)
+        at_bound = self.at(PINNED, 60)
+        released = json.loads(self.run_cli("release-worker", *self.run_args, "--now", at_bound,
+                                           "--worker-id", worker, "--event", "returned").stdout)
+        self.assertEqual(released["released"], [worker])
+        self.assertEqual(self.read_state()["updated_at"], at_bound)
+
+    def test_an_omitted_time_is_read_after_the_ledger_lock(self):
+        # D7: another writer may advance the ledger while this command waits for the
+        # lock. The in-process runner patches os.environ with cli_env, so a flock
+        # wrapper can move the pinned clock at the moment the lock is taken.
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.spawn_two(PINNED)
+        worker = json.loads(self.run_cli("register-worker", *self.run_args,
+                                         "--action-id", "14:1:1").stdout)["worker_id"]
+        self.assertEqual(self.read_state()["updated_at"], PINNED)
+        self.pin(self.at(PINNED, -600))
+        later = self.at(PINNED, 30)
+        real_flock = fcntl.flock
+
+        def flock_then_advance(descriptor, operation):
+            real_flock(descriptor, operation)
+            if operation & fcntl.LOCK_EX:
+                os.environ[CLOCK_ENV] = later
+
+        with mock.patch("fcntl.flock", side_effect=flock_then_advance):
+            completed = self.run_cli("release-worker", *self.run_args, "--worker-id", worker,
+                                     "--event", "returned")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self.read_state()["updated_at"], later)
+        # A clock read before the lock would have seen PINNED-600s and been refused
+        # as moving backward.
+
+    def test_every_flag_command_without_a_time_stamps_the_clock(self):
+        self.run_cli("init-run", *self.run_args)
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        spawned = self.spawn_two(self.clock_text())
+        custody, digest = spawned[14]["custody"], spawned[14]["contract_digest"]
+        worker = json.loads(self.run_cli("register-worker", *self.run_args,
+                                         "--action-id", "14:1:1").stdout)["worker_id"]
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        self.run_cli("release-worker", *self.run_args, "--worker-id", worker,
+                     "--event", "returned")
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        self.init_worktree(self.worktree(14), branch="issue-14-ledger-clock")
+        marked = json.loads(self.run_cli("mark-progress", *self.run_args,
+                                         "--action-id", "14:1:1").stdout)
+        self.assertEqual(marked["outcome"], "baseline")
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        self.run_cli("progress", *self.run_args, *PROGRESS_ARGS)
+        self.assert_clock_stamp(
+            self.read_state()["issues"]["14"]["attempts"][0]["last_progress_at"])
+        report = {"interface_version": 2, "issue": 14, "custody": custody,
+                  "contract_digest": digest, "delivery_observations": [],
+                  "authority_observations": [], "reevaluation_evidence": [],
+                  "requested_scope": None, "detail_state": "none", "report_path": None,
+                  "notes": ""}
+        checkpoint = self.root / "checkpoint.json"
+        checkpoint.write_text(json.dumps(report), encoding="utf-8")
+        self.run_cli("checkpoint-delivery", *self.run_args, "--checkpoint-file", checkpoint)
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        historical = {"issue": 14, "state": "failed", "pr_url": None, "merge_sha": None,
+                      "issue_closed": False, "discussion_items": [], "detail_state": "none",
+                      "report_path": None, "notes": "failed"}
+        summary = {"interface_version": 2, "issue": 14, "state": "terminal_failed",
+                   "custody": custody, "historical_owner_result": historical,
+                   "delivery_contract_digest": digest, "delivery_observations": [],
+                   "authority_observations": [], "reevaluation_evidence": [],
+                   "detail_state": "none", "report_path": None, "notes": "failed"}
+        summary_path = self.root / "summary.json"
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+        self.run_cli("finish", *self.run_args, "--summary-file", summary_path)
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+        self.run_cli("suspend", *self.run_args, "--issue", 15, "--attempt", 1,
+                     "--blocked-on", "usage_limit")
+        self.assert_clock_stamp(self.read_state()["updated_at"])
+
+    def test_a_backward_refusal_names_the_wait(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.spawn_two(PINNED)
+        worker = json.loads(self.run_cli("register-worker", *self.run_args,
+                                         "--action-id", "14:1:1").stdout)["worker_id"]
+        earlier = self.at(PINNED, -37)
+        before = self.state_path.read_bytes()
+        for name, args, expected in (
+                ("release-worker",
+                 ("release-worker", *self.run_args, "--now", earlier, "--worker-id", worker,
+                  "--event", "returned"),
+                 f"workflow-state: release-worker time must not move backward: {earlier} is "
+                 f"before the run updated_at {PINNED}; it would succeed in 37 seconds\n"),
+                ("progress",
+                 ("progress", *self.run_args, "--now", earlier, *PROGRESS_ARGS),
+                 f"workflow-state: progress time must not move backward: {earlier} is "
+                 f"before the attempt last_progress_at {PINNED}; it would succeed in "
+                 f"37 seconds\n")):
+            with self.subTest(command=name):
+                refused = self.run_cli(*args, ok=False)
+                self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                 (2, "", expected))
+                self.assertEqual(self.state_path.read_bytes(), before)
+
+    def omitted(self, request):
+        request = copy.deepcopy(request)
+        del request["now"]
+        return request
+
+    def control_without_now(self, issues, *, ok=True, **facts):
+        request = self.omitted(self.control_request(now=PINNED, issues=issues, **facts))
+        completed = self.control_raw(request=request, legacy=False, ok=ok)
+        return json.loads(completed.stdout) if ok else completed
+
+    def recorded_facts(self, issues):
+        return {"tracker": [self.tracker_fact(issue) for issue in issues],
+                "worktrees": [self.worktree_fact(issue, recorded={
+                    "path": self.worktree(issue), "state": "matching_issue_branch"})
+                    for issue in issues],
+                "max_parallel": 100}
+
+    def test_a_control_time_over_the_bound_is_refused_and_writes_nothing(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.spawn_two(PINNED)
+        before = self.state_path.read_bytes()
+        ahead = self.at(PINNED, 900)
+        request = self.control_request(now=ahead, issues=[14, 15],
+                                       **self.recorded_facts([14, 15]))
+        refused = self.control_raw(request=request, legacy=False, ok=False)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, refused.stderr),
+            (2, "", SKEW.format(label="control now", supplied=ahead, lead=900, clock=PINNED)))
+        self.assertEqual(self.state_path.read_bytes(), before)
+        direct = self.direct_request(issue=73, now=ahead)
+        refused = self.direct_owner_at_root(self.root, direct, ok=False)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, refused.stderr),
+            (2, "", SKEW.format(label="direct owner now", supplied=ahead, lead=900,
+                                clock=PINNED)))
+        self.assertFalse(self.direct_state_path("direct-73-000001").exists())
+
+    def test_a_present_null_now_is_still_refused(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        request = self.control_request(now=None, issues=[14], **self.recorded_facts([14]))
+        refused = self.control_raw(request=request, legacy=False, ok=False)
+        self.assertEqual((refused.returncode, refused.stderr),
+                         (2, "workflow-state: invalid control now: expected an RFC3339 UTC "
+                             "timestamp\n"))
+
+    def test_control_and_direct_owner_without_now_stamp_the_clock(self):
+        self.run_cli("init-run", *self.run_args)
+        response = self.control_without_now(
+            [14], tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, candidate={
+                "path": self.worktree(14), "state": "absent"})],
+            max_parallel=100)
+        self.assertEqual([action["kind"] for action in response["actions"]][:1], ["spawn"])
+        self.assert_clock_stamp(response["now"])
+        self.assertEqual(self.read_state()["updated_at"], response["now"])
+        candidate = os.path.abspath(self.root / "worktree-issue-73")
+        common = {"issue": 73, "now": PINNED, "attempt_budget_minutes": 180}
+        for extra in ({}, {"tracker": self.tracker_fact(73)},
+                      {"tracker": self.tracker_fact(73), "worktree": self.worktree_fact(
+                          73, candidate={"path": candidate, "state": "absent"})}):
+            completed = self.direct_owner_at_root(
+                self.root, self.omitted(self.direct_request(**common, **extra)))
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["kind"], "owner")
+        self.assert_clock_stamp(json.loads(
+            self.direct_state_path("direct-73-000001").read_text(encoding="utf-8"))["updated_at"])
+
+    def test_control_reads_an_omitted_now_after_the_ledger_lock(self):
+        # D7, as in the flag-command lock-order test: seed the run at PINNED, re-pin
+        # the override to PINNED-600s, and patch fcntl.flock so a LOCK_EX acquisition
+        # moves the clock to PINNED+30s. A clock read before the lock would see
+        # PINNED-600s and be refused as moving backward.
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.assertEqual(self.read_state()["updated_at"], PINNED)
+        later = self.at(PINNED, 30)
+        real_flock = fcntl.flock
+
+        def flock_then_advance(descriptor, operation):
+            real_flock(descriptor, operation)
+            if operation & fcntl.LOCK_EX:
+                os.environ[CLOCK_ENV] = later
+
+        self.pin(self.at(PINNED, -600))
+        with mock.patch("fcntl.flock", side_effect=flock_then_advance):
+            response = self.control_without_now(
+                [14], tracker=[self.tracker_fact(14)],
+                worktrees=[self.worktree_fact(14, candidate={
+                    "path": self.worktree(14), "state": "absent"})],
+                max_parallel=100)
+        self.assertEqual([action["kind"] for action in response["actions"]][:1], ["spawn"])
+        self.assertEqual((response["now"], self.read_state()["updated_at"]), (later, later))
+
+        candidate = os.path.abspath(self.root / "worktree-issue-73")
+        common = {"issue": 73, "attempt_budget_minutes": 180}
+        self.pin()
+        for extra in ({}, {"tracker": self.tracker_fact(73)},
+                      {"tracker": self.tracker_fact(73), "worktree": self.worktree_fact(
+                          73, candidate={"path": candidate, "state": "absent"})}):
+            completed = self.direct_owner_at_root(
+                self.root, self.omitted(self.direct_request(**common, now=PINNED, **extra)))
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+        direct_state = self.direct_state_path("direct-73-000001")
+        self.assertEqual(json.loads(direct_state.read_text(encoding="utf-8"))["updated_at"],
+                         PINNED)
+        self.pin(self.at(PINNED, -600))
+        with mock.patch("fcntl.flock", side_effect=flock_then_advance):
+            refused = self.direct_owner_at_root(self.root, self.omitted(self.direct_request(
+                **common, now=PINNED, owner_unavailable=True, tracker=self.tracker_fact(73),
+                worktree=self.worktree_fact(73, recorded={
+                    "path": candidate, "state": "matching_issue_branch"}))))
+        self.assertEqual(refused.returncode, 0, refused.stderr)
+        self.assertEqual(json.loads(direct_state.read_text(encoding="utf-8"))["updated_at"],
+                         later)
+
+    def test_a_pinned_clock_stamps_control_exactly(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        response = self.control_without_now(
+            [14], tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, candidate={
+                "path": self.worktree(14), "state": "absent"})],
+            max_parallel=100)
+        self.assertEqual((response["now"], self.read_state()["updated_at"]), (PINNED, PINNED))
+
+    def test_control_and_direct_owner_backward_refusals_name_the_wait(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.spawn_two(PINNED)
+        earlier = self.at(PINNED, -37)
+        before = self.state_path.read_bytes()
+        request = self.control_request(now=earlier, issues=[14, 15],
+                                       **self.recorded_facts([14, 15]))
+        refused = self.control_raw(request=request, legacy=False, ok=False)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, refused.stderr),
+            (2, "", f"workflow-state: control time must not move backward: {earlier} is "
+                    f"before the run updated_at {PINNED}; it would succeed in 37 seconds\n"))
+        self.assertEqual(self.state_path.read_bytes(), before)
+        candidate = os.path.abspath(self.root / "worktree-issue-73")
+        common = {"issue": 73, "attempt_budget_minutes": 180}
+        for extra in ({}, {"tracker": self.tracker_fact(73)},
+                      {"tracker": self.tracker_fact(73), "worktree": self.worktree_fact(
+                          73, candidate={"path": candidate, "state": "absent"})}):
+            self.direct_owner_at_root(self.root, self.omitted(
+                self.direct_request(**common, now=PINNED, **extra)))
+        direct_state = self.direct_state_path("direct-73-000001")
+        direct_before = direct_state.read_bytes()
+        refused = self.direct_owner_at_root(self.root, self.direct_request(
+            **common, now=earlier, owner_unavailable=True, tracker=self.tracker_fact(73),
+            worktree=self.worktree_fact(73, recorded={
+                "path": candidate, "state": "matching_issue_branch"})), ok=False)
+        self.assertEqual(
+            (refused.returncode, refused.stderr),
+            (2, f"workflow-state: direct owner time must not move backward: {earlier} is "
+                f"before the run updated_at {PINNED}; it would succeed in 37 seconds\n"))
+        self.assertEqual(direct_state.read_bytes(), direct_before)
+
 
 if __name__ == "__main__":
     unittest.main()

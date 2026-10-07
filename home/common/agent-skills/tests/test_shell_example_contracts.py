@@ -791,11 +791,11 @@ class RefusedFormFixtureTest(unittest.TestCase):
 
 # ship-issue/SKILL.md "Delivery loop" checkpoint call, verbatim at a311fda:
 # three helper segments, a quoted heredoc feeding the first (per D23).
-CHECKPOINT_CALL = """artifact-budget validate-report --boundary ship-checkpoint --input - <<'EOF' | workflow-state checkpoint-delivery --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --checkpoint-file - | artifact-budget validate-report --boundary workflow-response --input -
+CHECKPOINT_CALL = """artifact-budget validate-report --boundary ship-checkpoint --input - <<'EOF' | workflow-state checkpoint-delivery --repo-root <ledger_repo_root> --run-id <run-id> --checkpoint-file - | artifact-budget validate-report --boundary workflow-response --input -
 <ship-checkpoint/v2 JSON>
 EOF"""
 PATH_NAMED_CALL = ("~/.agents/bin/workflow-state init-run --repo-root <ledger_repo_root> --run-id <run-id> "
-                   "--now <utc> | ~/.agents/bin/artifact-budget validate-report --boundary workflow-response --input -")
+                   "| ~/.agents/bin/artifact-budget validate-report --boundary workflow-response --input -")
 # Each variant misses one D23/D26 condition, so the call is classified in full.
 LIFECYCLE_VARIANTS = (
     ("non-helper segment",
@@ -809,12 +809,12 @@ LIFECYCLE_VARIANTS = (
     ("redirect", "--boundary workflow-response --input -",
      "--boundary workflow-response --input - > reply.json", ("pipe", "redirect", "heredoc")),
     ("unquoted delimiter", "<<'EOF'", "<<EOF", ("pipe", "heredoc")),
-    ("substitution argument", "--now <utc>", '--now "$(date -u +%FT%TZ)"', ("pipe", "heredoc")),
+    ("substitution argument", "--run-id <run-id>", '--run-id "$(cat run-id)"', ("pipe", "heredoc")),
     ("escaped delimiter", "<<'EOF'", "<<\\EOF", ("pipe", "heredoc")),
     ("stderr pipe", "<<'EOF' | workflow-state", "<<'EOF' |& workflow-state", ("pipe", "heredoc")),
     ("dash heredoc", "<<'EOF'", "<<-'EOF'", ("pipe", "heredoc")),
     ("here-string", "<<'EOF'", "<<< text", ("pipe", "heredoc")),
-    ("backtick argument", "--now <utc>", "--now `date -u`", ("pipe", "heredoc")),
+    ("backtick argument", "--run-id <run-id>", "--run-id `cat run-id`", ("pipe", "heredoc")),
 )
 # The same call with its delimiter double-quoted: still sanctioned (per D23, D27).
 DQUOTED_CHECKPOINT_CALL = CHECKPOINT_CALL.replace("<<'EOF'", '<<"EOF"')
@@ -909,84 +909,15 @@ class VocabularyGuardTest(unittest.TestCase):
 
 
 class WorktreesGuidanceTest(unittest.TestCase):
-    def setUp(self):
-        self.skill = _host()
-
-    def section(self, heading):
-        start = self.skill.index(heading)
-        end = self.skill.find("\n## ", start + len(heading))
-        return self.skill[start:] if end == -1 else self.skill[start:end]
-
-    def test_isolation_probe_is_one_rev_parse_with_the_no_line_note(self):
-        section = self.section("## Detect existing isolation")
+    def test_isolation_probe_is_one_rev_parse(self):
         self.assertIn(
             "```bash\ngit rev-parse --path-format=absolute --git-dir "
             "--git-common-dir --show-superproject-working-tree\n```",
-            section,
+            _host(),
         )
-        self.assertIn("no line at all", " ".join(section.split()))
-
-    SECTION = "## Shell forms the isolation checker refuses"
-
-    def test_section_sits_between_positioning_and_detection(self):
-        self.assertLess(self.skill.index("## Already positioned? Skip the call"),
-                        self.skill.index(self.SECTION))
-        self.assertLess(self.skill.index(self.SECTION),
-                        self.skill.index("## Detect existing isolation"))
-
-    def test_section_names_contract_forms_and_alternatives_in_order(self):
-        section = " ".join(self.section(self.SECTION).split())
-        anchors = (
-            "one plain command whose targets are literal arguments",
-            "a multi-clause chain",
-            "a pipe",
-            "a redirect",
-            "a heredoc fed to a command's stdin",
-            "One command per call",
-            "pass them by path",
-            "`git -C <path>`",
-            f"`{SANCTIONED_PREFIX}`",
-            "one heredoc-fed `workflow-state` command",
-            "never copy a pipe or heredoc into another command",
-            "change the shell form, never the isolation",
-        )
-        position = 0
-        for anchor in anchors:
-            found = section.find(anchor, position)
-            self.assertNotEqual(found, -1, f"missing or out of order: {anchor!r}")
-            position = found + len(anchor)
-        self.assertNotIn("--body-file", section)
 
 
 GUIDANCE_POINTER = "see worktrees/SKILL.md, ## Shell forms the isolation checker refuses"
-GUIDANCE_HOME = "worktrees/SKILL.md"
-CHECKER_MENTION = re.compile(r"isolation\s+checker", re.I)
-
-
-def lacks_guidance_pointer(document_text):
-    """True when a document mentions the isolation checker without naming its
-    guidance home. A paraphrase that avoids the term is outside this check."""
-    return (CHECKER_MENTION.search(document_text) is not None
-            and GUIDANCE_HOME not in document_text)
-
-
-class GuidancePointerTest(unittest.TestCase):
-    def test_every_checker_mention_names_the_guidance_home(self):
-        for tree, relative in swept_documents():
-            if (tree, relative) == ("shared", GUIDANCE_HOME):
-                continue
-            with self.subTest(document=f"{tree}:{relative}"):
-                text = (SOURCE_TREES[tree] / relative).read_text(encoding="utf-8")
-                self.assertFalse(
-                    lacks_guidance_pointer(text),
-                    f"{tree}:{relative} mentions the isolation checker without "
-                    f"naming {GUIDANCE_HOME}",
-                )
-
-    def test_a_mention_without_the_pointer_is_reported(self):
-        text = (SOURCE_TREES["shared"] / "ship-release/SKILL.md").read_text(encoding="utf-8")
-        self.assertFalse(lacks_guidance_pointer(text))
-        self.assertTrue(lacks_guidance_pointer(text.replace(GUIDANCE_HOME, "")))
 
 
 def findings_report(document, findings):

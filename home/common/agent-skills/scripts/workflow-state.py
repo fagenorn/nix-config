@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import fcntl
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -357,6 +358,91 @@ def parse_utc(value: str, label: str = "time") -> datetime:
 
 def format_utc(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+SUPPLIED_TIME_MAX_LEAD_SECONDS = 60
+
+
+def ledger_clock() -> datetime:
+    """The one place workflow-state reads the time (#309 D1, D2, D11).
+
+    The system clock in UTC, truncated to whole seconds. A non-empty
+    WORKFLOW_STATE_TEST_CLOCK pins the value for tests. It must parse and must
+    not be later than the system clock, so it can pin only the present or past.
+    """
+    clock = datetime.now(timezone.utc).replace(microsecond=0)
+    pinned = os.environ.get("WORKFLOW_STATE_TEST_CLOCK", "")
+    if not pinned:
+        return clock
+    value = parse_utc(pinned, "WORKFLOW_STATE_TEST_CLOCK").replace(microsecond=0)
+    if value > clock:
+        raise WorkflowError(
+            f"invalid WORKFLOW_STATE_TEST_CLOCK: {format_utc(value)} is later than "
+            f"the clock {format_utc(clock)}")
+    return value
+
+
+def supplied_time(value: str | None, label: str) -> datetime | None:
+    """A caller-supplied time, refused when it leads the clock by more than 60 s (#309 D6).
+
+    ``None`` when the caller omitted it. The command then reads the clock
+    under its ledger lock (D7). A past time of any age is accepted.
+    """
+    if value is None:
+        return None
+    parsed = parse_utc(value, label)
+    clock = ledger_clock()
+    lead = math.ceil((parsed - clock).total_seconds())
+    if lead > SUPPLIED_TIME_MAX_LEAD_SECONDS:
+        raise WorkflowError(
+            f"{label} {format_utc(parsed)} is {lead} seconds ahead of the clock "
+            f"{format_utc(clock)}; a supplied time may lead it by at most "
+            f"{SUPPLIED_TIME_MAX_LEAD_SECONDS} seconds — omit it to use the clock")
+    return parsed
+
+
+def ledger_time(supplied: datetime | None) -> datetime:
+    """The time a write records: the supplied one, else the clock read now (#309 D7).
+
+    Call it under the ledger lock, as the mutation's first statement.
+    """
+    return ledger_clock() if supplied is None else supplied
+
+
+def stamp_request(request: dict[str, Any]) -> datetime:
+    """Fill a request's omitted ``now`` from the clock and return the request's time (#309 D7, D11).
+
+    Call it under the ledger lock. A supplied ``now`` was already skew-checked
+    by request validation and is kept.
+    """
+    if request["now"] is None:
+        request["now"] = format_utc(ledger_clock())
+    return parse_utc(request["now"], "request now")
+
+
+def backward_refusal(prefix: str, now: datetime, field: str, stored: str) -> WorkflowError:
+    """``prefix``, the stored time, and the whole seconds until the write would succeed (#309 D8)."""
+    wait = math.ceil((parse_utc(stored, field) - now).total_seconds())
+    return WorkflowError(f"{prefix}: {format_utc(now)} is before the {field} {stored}; "
+                         f"it would succeed in {wait} seconds")
+
+
+def stamp_contract_input(value: dict[str, Any]) -> None:
+    """Fill an omitted contract ``now`` from the clock, and skew-check a supplied one (#309 D5, D12).
+
+    A non-string or malformed ``now`` is left for the builder to refuse in its own words.
+    """
+    if "now" not in value:
+        value["now"] = format_utc(ledger_clock())
+        return
+    supplied = value["now"]
+    if not isinstance(supplied, str):
+        return
+    try:
+        parse_utc(supplied, "contract now")
+    except WorkflowError:
+        return
+    supplied_time(supplied, "contract now")
 
 
 def positive_int(value: str) -> int:
@@ -1860,16 +1946,20 @@ def validate_forge_observation(value: Any) -> dict[str, Any]:
 
 
 def validate_control_request(value):
-    request = require_exact_fields(
-        copy.deepcopy(value), CONTROL_REQUEST_FIELDS, "control request")
+    request = copy.deepcopy(value)
+    omitted = isinstance(request, dict) and "now" not in request
+    if omitted:
+        request["now"] = None
+    request = require_exact_fields(request, CONTROL_REQUEST_FIELDS, "control request")
     if (
         type(request["interface_version"]) is not int
         or request["interface_version"] != CONTROL_INTERFACE_VERSION
     ):
         raise WorkflowError("unsupported control interface version")
-    if not isinstance(request["now"], str):
-        raise WorkflowError("invalid control now: expected an RFC3339 UTC timestamp")
-    request["now"] = format_utc(parse_utc(request["now"], "control now"))
+    if not omitted:
+        if not isinstance(request["now"], str):
+            raise WorkflowError("invalid control now: expected an RFC3339 UTC timestamp")
+        request["now"] = format_utc(supplied_time(request["now"], "control now"))
     require_plain_int(request["max_parallel"], "max_parallel", minimum=1)
     require_plain_int(
         request["attempt_budget_minutes"], "attempt_budget_minutes", minimum=1
@@ -1952,8 +2042,12 @@ def load_control_request(path_value):
 
 
 def validate_direct_owner_request(value):
+    request = copy.deepcopy(value)
+    omitted = isinstance(request, dict) and "now" not in request
+    if omitted:
+        request["now"] = None
     request = require_exact_fields(
-        copy.deepcopy(value), DIRECT_OWNER_REQUEST_FIELDS, "direct owner request"
+        request, DIRECT_OWNER_REQUEST_FIELDS, "direct owner request"
     )
     if (
         type(request["interface_version"]) is not int
@@ -1968,9 +2062,10 @@ def validate_direct_owner_request(value):
         "attempt_budget_minutes",
         minimum=1,
     )
-    if not isinstance(request["now"], str):
-        raise WorkflowError("invalid direct owner now: expected an RFC3339 UTC timestamp")
-    request["now"] = format_utc(parse_utc(request["now"], "direct owner now"))
+    if not omitted:
+        if not isinstance(request["now"], str):
+            raise WorkflowError("invalid direct owner now: expected an RFC3339 UTC timestamp")
+        request["now"] = format_utc(supplied_time(request["now"], "direct owner now"))
     for field in ("new_run", "owner_unavailable"):
         if type(request[field]) is not bool:
             raise WorkflowError(f"invalid {field}: expected boolean")
@@ -2020,11 +2115,12 @@ def reject_reserved_direct_run_id(run_id: str) -> None:
 def command_init_run(args: argparse.Namespace) -> int:
     _delivery()
     reject_reserved_direct_run_id(args.run_id)
-    now = format_utc(parse_utc(args.now, "--now"))
+    supplied = supplied_time(args.now, "--now")
 
     def initialize(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
         if state is not None:
             return state, False
+        now = format_utc(ledger_time(supplied))
         state = new_run_state(run_id=args.run_id, now=now, issues={})
         return state, True
 
@@ -2537,8 +2633,8 @@ def command_control(args: argparse.Namespace) -> int:
     runtime = _delivery()
     reject_reserved_direct_run_id(args.run_id)
     request, migration_contracts = load_control_request(args.request_file)
-    now = request["now"]
-    now_value = parse_utc(now, "control now")
+    now: str | None = None
+    now_value: datetime | None = None
     run_dir, _, _ = workflow_paths(args.repo_root, args.run_id)
     tracker_by_issue = {item["issue"]: item for item in request["tracker"]}
     worktree_by_issue = {item["issue"]: item for item in request["worktrees"]}
@@ -2561,9 +2657,13 @@ def command_control(args: argparse.Namespace) -> int:
                 "released_at": None, "release_event": None, "release_seq": None}
 
     def control(state: dict[str, Any] | None) -> tuple[bytes, bool]:
+        nonlocal now, now_value
+        now_value = stamp_request(request)
+        now = request["now"]
         assert state is not None
         if now_value < parse_utc(state["updated_at"], "run update time"):
-            raise WorkflowError("control time must not move backward")
+            raise backward_refusal("control time must not move backward", now_value,
+                                   "run updated_at", state["updated_at"])
         # A null request contract means "none supplied": an installed contract
         # governs, and a supplied one must equal it before anything is written
         # (per D10).
@@ -3251,6 +3351,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                 retained.append(
                     (sequence, run_id, run_dir, state_path, state)
                 )
+            stamp_request(request)
             nonterminal = [
                 item for item in retained
                 if not direct_run_is_terminal(item[4]["issues"][str(issue)])
@@ -3361,7 +3462,10 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         parse_utc(request["now"], "direct owner now")
                         < parse_utc(state["updated_at"], "run update time")
                     ):
-                        raise WorkflowError("direct owner time must not move backward")
+                        raise backward_refusal(
+                            "direct owner time must not move backward",
+                            parse_utc(request["now"], "direct owner now"),
+                            "run updated_at", state["updated_at"])
 
                 policy = _apply_one_issue_policy(
                     ledger_issue=issue_state,
@@ -3513,17 +3617,20 @@ def command_checkpoint_delivery(args):
     if args.worker_id is not None and not WORKER_ID_PATTERN.fullmatch(args.worker_id):
         raise WorkflowError("invalid worker_id")
     runtime = _delivery()
-    now = format_utc(parse_utc(args.now, "--now"))
+    supplied = supplied_time(args.now, "--now")
     report = artifact_budget_validate(
         "validate-report", boundary="ship-checkpoint",
         input_bytes=read_input_bytes(args.checkpoint_file, "checkpoint"))
 
-    response = transact(args.repo_root, args.run_id, fence_owner_exit(
-        runtime, lambda state: _call(
+    def checkpoint(state):
+        now = format_utc(ledger_time(supplied))
+        return _call(
             "checkpoint transition refused", runtime.checkpoint_state,
             state, report, now=now, suspend_attempt=suspend_attempt,
-            ledger_repo_root=str(resolve_repo_root(args.repo_root)), run_id=args.run_id),
-        excused_worker=args.worker_id))
+            ledger_repo_root=str(resolve_repo_root(args.repo_root)), run_id=args.run_id)
+
+    response = transact(args.repo_root, args.run_id, fence_owner_exit(
+        runtime, checkpoint, excused_worker=args.worker_id))
     print_json(response)
     return 0
 
@@ -3570,8 +3677,7 @@ def validate_durable_detail(repo_root: str, report_path: str) -> None:
 
 
 def command_progress(args: argparse.Namespace) -> int:
-    now_value = parse_utc(args.now, "--now")
-    now = format_utc(now_value)
+    supplied = supplied_time(args.now, "--now")
     phase_inputs = {
         "turn_count": args.turn_count,
         "context_tokens": args.context_tokens,
@@ -3591,6 +3697,8 @@ def command_progress(args: argparse.Namespace) -> int:
     runtime = _delivery()
 
     def progress(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        now_value = ledger_time(supplied)
+        now = format_utc(now_value)
         assert state is not None
         issue_state = state["issues"].get(str(args.issue))
         if issue_state is None:
@@ -3605,7 +3713,8 @@ def command_progress(args: argparse.Namespace) -> int:
         if args.phase < attempt["phase"]:
             raise WorkflowError("phase must not move backward")
         if now_value < parse_utc(attempt["last_progress_at"], "attempt progress time"):
-            raise WorkflowError("progress time must not move backward")
+            raise backward_refusal("progress time must not move backward", now_value,
+                                   "attempt last_progress_at", attempt["last_progress_at"])
         if now_value >= parse_utc(attempt["deadline_at"], "attempt deadline"):
             raise WorkflowError("cannot record progress at or after attempt deadline")
 
@@ -3636,11 +3745,12 @@ def command_suspend(args: argparse.Namespace) -> int:
     reaper, which cannot); the envelope carries back the re-entry line that
     resumes the run, so callers never compose it themselves (per D2, D14).
     """
-    now_value = parse_utc(args.now, "--now")
-    now = format_utc(now_value)
+    supplied = supplied_time(args.now, "--now")
     runtime = _delivery()
 
     def suspend(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        now_value = ledger_time(supplied)
+        now = format_utc(now_value)
         assert state is not None
         issue_state = state["issues"].get(str(args.issue))
         if issue_state is None:
@@ -3653,7 +3763,8 @@ def command_suspend(args: argparse.Namespace) -> int:
         if attempt["state"] != "active":
             raise WorkflowError("only an active attempt can suspend")
         if now_value < parse_utc(attempt["last_progress_at"], "attempt progress time"):
-            raise WorkflowError("suspend time must not move backward")
+            raise backward_refusal("suspend time must not move backward", now_value,
+                                   "attempt last_progress_at", attempt["last_progress_at"])
         suspended = suspend_attempt(attempt, blocked_on=args.blocked_on, now=now)
         state["updated_at"] = now
         if not suspended:
@@ -3697,14 +3808,15 @@ def command_finish(args: argparse.Namespace) -> int:
         return command_finish_delivery(args)
     if args.issue is None or args.attempt is None or args.result_file is None:
         raise WorkflowError("finish requires --summary-file")
-    now_value = parse_utc(args.now, "--now")
-    now = format_utc(now_value)
+    supplied = supplied_time(args.now, "--now")
     result = load_result_file(args.result_file, args.issue)
     if result["detail_state"] == "present":
         assert isinstance(result["report_path"], str)
         validate_durable_detail(args.repo_root, result["report_path"])
 
     def finish(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        now_value = ledger_time(supplied)
+        now = format_utc(now_value)
         assert state is not None
         issue_state = state["issues"].get(str(args.issue))
         if issue_state is None:
@@ -3730,7 +3842,8 @@ def command_finish(args: argparse.Namespace) -> int:
             result.clear()
             result.update(normalized_result)
         if now_value < parse_utc(attempt["last_progress_at"], "attempt progress time"):
-            raise WorkflowError("finish time must not move backward")
+            raise backward_refusal("finish time must not move backward", now_value,
+                                   "attempt last_progress_at", attempt["last_progress_at"])
         existing = attempt["result"]
         outcome = issue_state["outcome"]
         if existing == result and outcome == result:
@@ -3768,13 +3881,14 @@ def command_finish(args: argparse.Namespace) -> int:
 
 def command_finish_delivery(args):
     runtime = _delivery()
-    now = format_utc(parse_utc(args.now, "--now"))
+    supplied = supplied_time(args.now, "--now")
     report = artifact_budget_validate(
         "validate-report", boundary="ship-summary",
         input_bytes=read_input_bytes(args.summary_file, "summary"))
 
     def finish_delivery(state):
         assert state is not None
+        now = format_utc(ledger_time(supplied))
         response = _call(
             "delivery finish refused", runtime.finish_state, state, report, now=now,
             remainder_deadline=format_utc(parse_utc(now) + timedelta(minutes=180)),
@@ -4111,11 +4225,12 @@ def command_register_worker(args: argparse.Namespace) -> int:
     if not RUN_ID_PATTERN.fullmatch(args.run_id):
         raise WorkflowError("invalid run_id")
     parse_action_id(args.action_id)
-    now_value = parse_utc(args.now, "--now")
-    now = format_utc(now_value)
+    supplied = supplied_time(args.now, "--now")
     runtime = _delivery()
 
     def register(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        now_value = ledger_time(supplied)
+        now = format_utc(now_value)
         assert state is not None
         _, reason = launch_verdict(runtime, state, args.action_id)
         if reason != "current":
@@ -4130,7 +4245,8 @@ def command_register_worker(args: argparse.Namespace) -> int:
                 raise WorkflowError(
                     f"register-worker refused: parent {args.parent} is {parent_reason}")
         if now_value < parse_utc(state["updated_at"], "run update time"):
-            raise WorkflowError("register-worker time must not move backward")
+            raise backward_refusal("register-worker time must not move backward", now_value,
+                                   "run updated_at", state["updated_at"])
         ordinal = 1 + sum(1 for worker in state["workers"]
                           if worker["launch"] == args.action_id)
         worker_id = f"{args.action_id}:w{ordinal}"
@@ -4164,8 +4280,7 @@ def command_mark_progress(args: argparse.Namespace) -> int:
     if not RUN_ID_PATTERN.fullmatch(args.run_id):
         raise WorkflowError("invalid run_id")
     issue, _, _ = parse_action_id(args.action_id)
-    now_value = parse_utc(args.now, "--now")
-    now = format_utc(now_value)
+    supplied = supplied_time(args.now, "--now")
     if ":r" in args.action_id:
         raise WorkflowError(
             "mark-progress refused: a remainder launch keeps its own bound")
@@ -4195,13 +4310,16 @@ def command_mark_progress(args: argparse.Namespace) -> int:
         raise WorkflowError(f"mark-progress refused: {unavailable}") from unavailable
 
     def record(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        now_value = ledger_time(supplied)
+        now = format_utc(now_value)
         attempt = current_attempt(state)
         if attempt["worktree"] != worktree or attempt["progress_marker"] != stored:
             raise WorkflowError(
                 "mark-progress refused: the attempt changed during the probe")
         assert state is not None
         if now_value < parse_utc(state["updated_at"], "run update time"):
-            raise WorkflowError("mark-progress refused: time must not move backward")
+            raise backward_refusal("mark-progress refused: time must not move backward",
+                                   now_value, "run updated_at", state["updated_at"])
         outcome = record_progress_marker(
             attempt, head=head, marker_is_ancestor=marker_is_ancestor)
         changed = outcome in {"baseline", "advanced"}
@@ -4218,7 +4336,8 @@ def command_declare_lane(args: argparse.Namespace) -> int:
     """Record the current launch's lane and re-base its deadline (#280).
 
     The deadline becomes the current launch's ``at`` plus ``--budget-minutes``,
-    for either lane, and is refused unless it is after ``--now`` (#280 D1).
+    for either lane, and is refused unless it is after the write's time: ``--now``,
+    or the ledger clock when it is omitted (#280 D1, #309 D7).
     Only the transitions and reasons in ``LANE_TRANSITION_REASONS`` are legal
     (#280 D2); a repeated declaration is refused, not replayed (#280 D4). The
     write does not pass ``fence_owner_exit``: this verb ends no launch.
@@ -4226,21 +4345,23 @@ def command_declare_lane(args: argparse.Namespace) -> int:
     if not RUN_ID_PATTERN.fullmatch(args.run_id):
         raise WorkflowError("invalid run_id")
     issue, _, _ = parse_action_id(args.action_id)
-    now_value = parse_utc(args.now, "--now")
-    now = format_utc(now_value)
+    supplied = supplied_time(args.now, "--now")
     budget = require_plain_int(args.budget_minutes, "--budget-minutes", minimum=1)
     if ":r" in args.action_id:
         raise WorkflowError("declare-lane refused: a remainder launch carries no lane")
     runtime = _delivery()
 
     def declare(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        now_value = ledger_time(supplied)
+        now = format_utc(now_value)
         _, reason = launch_verdict(runtime, state, args.action_id)
         if reason != "current":
             raise WorkflowError(
                 f"declare-lane refused: launch {args.action_id} is {reason}")
         assert state is not None
         if now_value < parse_utc(state["updated_at"], "run update time"):
-            raise WorkflowError("declare-lane refused: time must not move backward")
+            raise backward_refusal("declare-lane refused: time must not move backward",
+                                   now_value, "run updated_at", state["updated_at"])
         attempt = state["issues"][str(issue)]["attempts"][-1]
         current = attempt["lane"]
         allowed = LANE_TRANSITION_REASONS.get((current, args.lane))
@@ -4331,11 +4452,12 @@ def command_release_worker(args: argparse.Namespace) -> int:
     if not RUN_ID_PATTERN.fullmatch(args.run_id):
         raise WorkflowError("invalid run_id")
     parse_worker_id(args.worker_id)
-    now_value = parse_utc(args.now, "--now")
-    now = format_utc(now_value)
+    supplied = supplied_time(args.now, "--now")
     runtime = _delivery()
 
     def release(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        now_value = ledger_time(supplied)
+        now = format_utc(now_value)
         assert state is not None
         workers = state["workers"]
         record = next((worker for worker in workers
@@ -4343,7 +4465,8 @@ def command_release_worker(args: argparse.Namespace) -> int:
         if record is None:
             raise WorkflowError(f"release-worker refused: unknown worker {args.worker_id}")
         if now_value < parse_utc(state["updated_at"], "run update time"):
-            raise WorkflowError("release-worker time must not move backward")
+            raise backward_refusal("release-worker time must not move backward", now_value,
+                                   "run updated_at", state["updated_at"])
         if record["release_event"] is not None:
             if record["release_event"] != args.event:
                 raise WorkflowError(
@@ -4768,7 +4891,7 @@ def read_sdd_position(bucket: Path, worktree: str
 
 
 def command_build_delivery(args: argparse.Namespace) -> int:
-    """Print one sealed delivery value; read-only (no lock, clock or write).
+    """Print one sealed delivery value: no lock and no write, and a clock read only for a contract input's ``now``: to stamp an omitted one and to skew-check a supplied one (#309 D5).
 
     A contract the builder cannot re-derive is served only against the initial
     intent a ledger under --repo-root installed with it, which
@@ -4782,6 +4905,8 @@ def command_build_delivery(args: argparse.Namespace) -> int:
         raise WorkflowError("repository root path must be absolute")
     runtime = _delivery()
     value = load_json_request(args.input, "builder input")
+    if args.kind == "contract" and isinstance(value, dict):
+        stamp_contract_input(value)
     policy = resolve_project_policy(args.repo_root, "repo-root") if args.kind == "contract" else None
     worktree_branch = None
     if args.kind == "contract" and runtime.requires_worktree_branch(value, policy):
@@ -4865,7 +4990,9 @@ def build_parser() -> argparse.ArgumentParser:
     def add_run_arguments(command: argparse.ArgumentParser) -> None:
         command.add_argument("--repo-root", required=True)
         command.add_argument("--run-id", required=True)
-        command.add_argument("--now", required=True)
+        command.add_argument(
+            "--now", default=None,
+            help="omit to use the clock; a supplied time may lead it by at most 60 seconds")
 
     init_run = subparsers.add_parser("init-run")
     add_run_arguments(init_run)
@@ -4898,7 +5025,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     build_delivery = subparsers.add_parser("build-delivery", description=(
         "Build one sealed delivery value from --input and print it as canonical JSON. "
-        "It takes no lock, reads no clock and writes nothing. "
+        "It takes no lock and writes nothing, and it reads the clock only for a --kind contract input's now: to stamp an omitted one and to skew-check a supplied one. "
         "A contract the builder cannot re-derive is served only when a ledger under "
         "--repo-root has installed it, and then against that ledger's stored initial "
         "intent. --kind current-selection serves the current selection of the "
