@@ -366,9 +366,10 @@ def mentions_raise_label(texts):
 def adds_raise_label(tokens):
     """True when a `gh` invocation in `tokens` adds the raise label.
 
-    Looks at every `gh` word, in any position: its words run to the end of the
-    segment, skipping operator tokens, so a substitution or group before the
-    label (`gh pr edit $(…) --add-label …`) cannot hide it. A label value is
+    Looks at every `gh` word, in any position: its words run to the end of
+    `tokens` (the whole command's tokenised segments), skipping operator
+    tokens, so a substitution, group or pipeline before the label
+    (`gh pr edit $(… | …) --add-label …`) cannot hide it. A label value is
     the word after `--add-label` or the rest of a `--add-label=` word. No
     subcommand parsing and no comma splitting: a value that contains the label
     anywhere counts.
@@ -420,9 +421,11 @@ def guarded_operations(command):
     are refused rather than waved through — the parser and the shell have to
     agree, and where they cannot the guard fails closed.
 
-    The `label` operation is mention-gated: it is considered only in a segment
-    that mentions the raise label, always carries a problem, and is refused for
-    any `gh` invocation, in any position, whose `--add-label` value contains it.
+    The `label` operation is mention-gated: it is considered only when the
+    command's tokens mention the raise label, always carries a problem, and is
+    refused for any `gh` invocation, in any position, whose `--add-label` value
+    contains it. That check runs over every tokenised segment at once, because
+    a separator inside a substitution splits a `gh` word from its label.
     """
     segments = split_segments(command)
     if segments is None:
@@ -431,6 +434,7 @@ def guarded_operations(command):
             mentions_raise_label([command]),
         )
     found = []
+    stream = []
     for segment in segments:
         tokens = tokenize_segment(segment)
         if tokens is None:
@@ -465,8 +469,13 @@ def guarded_operations(command):
                         "validate; quote it if you only mean to mention it",
                     ))
                 break
-        if mentions and adds_raise_label(tokens):
-            found.append(("label", segment, RAISE_LABEL_REFUSAL))
+        stream.extend(tokens)
+        stream.append((";", True))
+    # Judged over every tokenised segment at once: a separator inside a
+    # substitution (`gh pr edit $(gh pr view | jq …) --add-label …`) splits
+    # the `gh` word from its label, so a per-segment check would miss it.
+    if mentions_raise_label([value for value, _ in stream]) and adds_raise_label(stream):
+        found.append(("label", command, RAISE_LABEL_REFUSAL))
     return found
 
 

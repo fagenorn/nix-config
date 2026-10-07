@@ -394,6 +394,12 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "gh pr edit $(gh pr view --json number --jq .number) "
             "--add-label instruction-budget-raise",
             "gh pr edit `echo 1` --add-label instruction-budget-raise",
+            # A separator inside the substitution splits `gh` from its label.
+            "gh pr edit $(gh pr view --json number | jq -r .number) "
+            "--add-label instruction-budget-raise",
+            "gh pr edit `gh pr view --json number | jq -r .number` "
+            "--add-label instruction-budget-raise",
+            "gh pr edit $(true; echo 1) --add-label instruction-budget-raise",
         ):
             # Every row except the four fail-closed rows names the direct-add reason.
             reason = {
