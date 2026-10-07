@@ -141,7 +141,7 @@ SDD_MACHINE_TEXT = {
         "--action-id <action_id>",
         "workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> "
         "--now <utc> --action-id <action_id>",
-        WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV,
+        WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV, "launch fence refused:",
     ),
     SDD_DIR / "fix-loop.md": (PRODUCER_VALIDATION,),
     SDD_DIR / "final-review.md": (
@@ -156,7 +156,7 @@ SDD_MACHINE_TEXT = {
     SDD_DIR / "implementer-prompt.md": (
         "launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
         "--worker-id <worker_id> -- ",
-        WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV,
+        WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV, "launch fence refused:",
     ),
     SDD_DIR / "task-reviewer-prompt.md": (WHOLE_FILE_POLICY,),
     SDD_DIR / "re-review-prompt.md": (WHOLE_FILE_POLICY,),
@@ -200,8 +200,9 @@ CODEX_COLLABORATION_MACHINE_TEXT = {
 }
 
 # Machine-consumed text each orchestrate-issues tree must carry (#291 D6):
-# lifecycle helper argv, the control request's host route and the observation
-# values the dispatcher sends. No guidance sentence is pinned.
+# lifecycle helper argv, the control request's host route, the owner-object
+# projection the delivery wire validates and the observation values the
+# dispatcher sends. No guidance sentence is pinned.
 ORCHESTRATE_MACHINE_TEXT = {
     ORCHESTRATE: (
         "workflow-state host-route --route claude-code", '`host_route: "claude-code"`',
@@ -215,6 +216,8 @@ ORCHESTRATE_MACHINE_TEXT = {
         "--action-id <action-id>",
         "launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --sweep",
         "run_in_background=true",
+        "rename `id` to `action_id`", "`kind` to `launch_kind`", "`kind: owner`",
+        "`interface_version: 2`", "`launch_refused`", "`unavailable`",
     ),
     CODEX_ORCHESTRATE: (
         "workflow-state host-route --route codex", "--boundary workflow-response",
@@ -239,6 +242,8 @@ SHIP_ISSUE_MACHINE_TEXT = {
         "workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> "
         "--now <utc> --worker-id <worker_id> --event returned",
         "--parent <worker_id>", "git merge --no-commit --no-ff origin/<integration>",
+        "Lifecycle worker:", "--kind scope", "`test_ref`",
+        "`tracker_held`", "`comment_url`", "`record_path`",
         WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV,
         "verified-tree check --verification <id>",
         "verified-tree record --tree <the checked tree>",
@@ -253,7 +258,8 @@ SHIP_ISSUE_MACHINE_TEXT = {
     ),
     SHIP_ISSUE_REVIEW: ("validate-detail-input", 'detail_state: "unpublished"'),
     SHIP_ISSUE_CI_MERGE: (
-        "--kind current-selection", "--kind sync-selection", "launch-commit",
+        "--kind current-selection", "--kind sync-selection", "--kind scope", "`test_ref`",
+        "launch-commit",
         "gh pr view <pr-num> --json state,headRefOid,mergeable",
         REQUIRED_WATCH, ALL_CHECKS_WATCH, ADVISORY_CALL,
     ),
@@ -514,13 +520,6 @@ def select_context_map(paths):
 
 
 class ProjectPolicySurfaceTest(unittest.TestCase):
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(next_position, 0, anchor)
-            position = next_position
-
     def test_shared_source_phase_entries_use_one_resolved_project(self):
         assert_policy_entries(
             self, REPO_ROOT / "home/common/agent-skills/skills", SHARED_POLICY_ENTRIES,
@@ -2626,6 +2625,11 @@ class CodebaseDesignSkillContractsTest(unittest.TestCase):
         frontmatter = skill_frontmatter(self.skill)
         self.assertEqual(frontmatter.get("name"), CODEBASE_DESIGN_DIR.name)
         self.assertTrue(frontmatter.get("description", "").strip())
+        # The trigger other skills rely on to load this vocabulary (D14).
+        self.assertIn(
+            "another skill needs the deep-module vocabulary",
+            frontmatter["description"],
+        )
 
     def test_every_relative_link_in_the_package_resolves(self):
         documents = {
