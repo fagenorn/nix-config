@@ -5492,5 +5492,76 @@ class ToIssuesCriterionLineContractsTest(unittest.TestCase):
         )
 
 
+class AcceptanceMapContractsTest(unittest.TestCase):
+    """#274 AC2: plans carry an Acceptance map and plan review blocks a gap (D2-D5)."""
+
+    WRITING_PLANS = REPO_ROOT / "home/common/agent-skills/skills/writing-plans/SKILL.md"
+    REVIEW_CONTRACT = (
+        REPO_ROOT / "home/common/agent-skills/skills/from-issue/REVIEW-CONTRACT.md")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.plans = cls.WRITING_PLANS.read_text(encoding="utf-8")
+        cls.review = cls.REVIEW_CONTRACT.read_text(encoding="utf-8")
+
+    @staticmethod
+    def section(text, heading):
+        start = text.index("\n" + heading + "\n") + 1
+        end = text.find("\n## ", start + len(heading))
+        return text[start:] if end < 0 else text[start:end]
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(position, 0, anchor)
+
+    def test_the_plan_template_places_the_map_directly_after_the_task_index(self):
+        headings = [line for line in self.plans.splitlines() if line.startswith("## ")]
+        self.assertEqual(headings.count("## Task index"), 1)
+        self.assertEqual(headings.count("## Acceptance map"), 1)
+        self.assertEqual(headings[headings.index("## Task index") + 1], "## Acceptance map")
+        self.assertIn("Task index, Acceptance map, and decision-ID", normalized(self.plans))
+
+    def test_the_map_section_fixes_its_columns_kinds_owner_and_checks(self):
+        mapping = normalized(self.section(self.plans, "## Acceptance map"))
+        for phrase in (
+            "| AC | Kind | Task | Check |",
+            "`None — no acceptance criteria.`",
+            "a tagged criterion is never reclassified",
+            "`<kind> (classified)`",
+            "exactly one owning `Task N` from the index",
+            "the task that adds or runs the check",
+            "the acceptance-record row `AC<n>` the owning task's implementer fills in",
+            "The map is the plan's only acceptance surface",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, mapping)
+
+    def test_self_review_checks_the_map_before_final_remeasurement(self):
+        self.assert_ordered(
+            normalized(self.plans), "## Self-review",
+            "8. **Acceptance map** — one row per issue criterion",
+            "9. **Final remeasurement**")
+
+    def test_review_contract_blocks_a_missing_or_duplicated_row(self):
+        self.assert_ordered(
+            self.review, "## Reviewer instructions\n", "## Acceptance map check\n",
+            "## Common-miss checklist\n")
+        check = normalized(self.section(self.review, "## Acceptance map check"))
+        for phrase in (
+            "Each of these is **Blocking**:",
+            "the `## Acceptance map` section is missing;",
+            "a criterion has no row, or more than one;",
+            "rows are out of issue order (`AC1` to `AC<n>`);",
+            "a kind is outside `code`, `evidence`, `human`, or contradicts the issue's tag;",
+            "an owning task is not a `Task N` in the Task index;",
+            "an `evidence` row lacks its command, its conditions or its literal threshold.",
+            "A `(classified)` kind you disagree with is **Should-fix**",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, check)
+
+
 if __name__ == "__main__":
     unittest.main()
