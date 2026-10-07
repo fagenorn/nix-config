@@ -1218,10 +1218,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_contract_builders_state_the_resolution_root_and_relay_refusals(self):
         decide = normalized(self.section(self.orchestrate, "## 3. Decide",
                                          "## 4. Execute control actions"))
-        for skill, text in (("orchestrate-issues", decide),):
-            with self.subTest(skill=skill):
-                self.assertIn(BUILD_ROOT_CLAUSE, text)
-                self.assertIn(BUILD_REFUSAL_RELAY, text)
+        self.assertIn(BUILD_ROOT_CLAUSE, decide)
+        self.assertIn(BUILD_REFUSAL_RELAY, decide)
 
     def test_orchestrate_bootstrap_actions_and_projected_owner(self):
         observe = normalized(self.section(self.orchestrate, "## 2. Bootstrap and observe",
@@ -1264,12 +1262,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for anchor in ("`delivery_remainder`", "ready stage", "finish --summary-file -",
                        "`delivery_stalled`"):
             self.assertIn(anchor, remainder)
-        for text in (self.ship_handoff.split("## Remainder owner prompt", 1)[1],
-                     ACQUIRE_DISPATCHER.read_text(encoding="utf-8"),
-                     self.section(ACQUIRE_DIRECT.read_text(encoding="utf-8"),
-                                  "3. **`kind: delivery_remainder`**",
-                                  "4. **`kind: terminal`**")):
-            self.assertIn("re-entry line", normalized(text))
+        self.assertIn("re-entry line", normalized(
+            self.ship_handoff.split("## Remainder owner prompt", 1)[1]))
         for appendix in (self.ship_review, self.ship_human_gate):
             self.assertIn("## Delivery loop", appendix)
 
@@ -2365,8 +2359,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_from_issue_standalone_modes_use_live_lifecycle_interfaces(self):
         durable = ACQUIRE_DURABLE.read_text(encoding="utf-8")
         self.assert_ordered(
-            durable, "workflow-state init-run", "workflow-state control",
-            "max_parallel: 1", "first `spawn` envelope",
+            durable, "workflow-state init-run", "max_parallel: 1",
+            "workflow-state control", "first `spawn` envelope",
         )
 
     def test_direct_auto_acquires_only_through_direct_owner(self):

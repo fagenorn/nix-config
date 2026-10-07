@@ -39,8 +39,8 @@
         "from-issue/acquire-dispatcher.md": "a controller invocation carries no dispatcher envelope"
       },
       "ceiling_bytes": {
-        "claude": 85837,
-        "codex": 85837
+        "claude": 85831,
+        "codex": 85831
       },
       "conditional_ceiling_bytes": {
         "claude": 53513,
@@ -1058,6 +1058,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 542240,
+  "corpus_ceiling_bytes": 542234,
   "description_ceiling_bytes": 3034
 }
