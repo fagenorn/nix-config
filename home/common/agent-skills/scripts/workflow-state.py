@@ -1716,7 +1716,8 @@ def resume_attempt(
     is what makes it free to repeat (per D2, D5).
 
     ``attempt_budget_minutes`` re-bases the budget window, and the progress clock
-    with it: a suspension resume passes the fresh full window D8 grants it, since
+    with it: a suspension resume passes the attempt's declared lane budget, or
+    the request's budget when the attempt has no lane (#280), since
     an interruption may outlast the window the attempt started with. An attempt
     the reaper demoted for passing its deadline is one of those suspensions, so
     a resumed expiry gets a whole new window rather than the remains of the one
@@ -2375,10 +2376,10 @@ def _apply_one_issue_policy(
             return decision(
                 "contract", desired="resume", changed=expired, expired=expired,
             )
-        resume_attempt(
-            latest, now=now,
-            attempt_budget_minutes=attempt_budget_minutes if suspended else None,
-        )
+        window = (attempt_budget_minutes if latest["lane_budget_minutes"] is None
+                  else latest["lane_budget_minutes"])
+        resume_attempt(latest, now=now,
+                       attempt_budget_minutes=window if suspended else None)
         return decision("resume", changed=True, expired=expired)
 
     # Below this line an expired attempt is impossible: the reaper made it
@@ -4213,6 +4214,59 @@ def command_mark_progress(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_declare_lane(args: argparse.Namespace) -> int:
+    """Record the current launch's lane and re-base its deadline (#280).
+
+    The deadline becomes the current launch's ``at`` plus ``--budget-minutes``,
+    for either lane, and is refused unless it is after ``--now`` (#280 D1).
+    Only the transitions and reasons in ``LANE_TRANSITION_REASONS`` are legal
+    (#280 D2); a repeated declaration is refused, not replayed (#280 D4). The
+    write does not pass ``fence_owner_exit``: this verb ends no launch.
+    """
+    if not RUN_ID_PATTERN.fullmatch(args.run_id):
+        raise WorkflowError("invalid run_id")
+    issue, _, _ = parse_action_id(args.action_id)
+    now_value = parse_utc(args.now, "--now")
+    now = format_utc(now_value)
+    budget = require_plain_int(args.budget_minutes, "--budget-minutes", minimum=1)
+    if ":r" in args.action_id:
+        raise WorkflowError("declare-lane refused: a remainder launch carries no lane")
+    runtime = _delivery()
+
+    def declare(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        _, reason = launch_verdict(runtime, state, args.action_id)
+        if reason != "current":
+            raise WorkflowError(
+                f"declare-lane refused: launch {args.action_id} is {reason}")
+        assert state is not None
+        if now_value < parse_utc(state["updated_at"], "run update time"):
+            raise WorkflowError("declare-lane refused: time must not move backward")
+        attempt = state["issues"][str(issue)]["attempts"][-1]
+        current = attempt["lane"]
+        allowed = LANE_TRANSITION_REASONS.get((current, args.lane))
+        if allowed is None:
+            raise WorkflowError(
+                f"declare-lane refused: lane {current or 'none'} cannot become {args.lane}")
+        if args.reason not in allowed:
+            raise WorkflowError(
+                f"declare-lane refused: reason {args.reason} does not allow "
+                f"lane {current or 'none'} to become {args.lane}")
+        deadline = attempt_deadline(attempt["launches"][-1]["at"], budget)
+        if parse_utc(deadline, "re-based deadline") <= now_value:
+            raise WorkflowError(
+                f"declare-lane refused: deadline {deadline} is not after {now}")
+        attempt["lane"] = args.lane
+        attempt["lane_budget_minutes"] = budget
+        attempt["deadline_at"] = deadline
+        attempt["lane_history"].append({"lane": args.lane, "reason": args.reason, "at": now})
+        state["updated_at"] = now
+        return {"action_id": args.action_id, "lane": args.lane,
+                "budget_minutes": budget, "deadline_at": deadline}, True
+
+    print_json(transact(args.repo_root, args.run_id, declare))
+    return 0
+
+
 def command_resume_pack(args: argparse.Namespace) -> int:
     """Print one launch's resume pack for its relaunched owner (#265 D2, D3).
 
@@ -4924,6 +4978,14 @@ def build_parser() -> argparse.ArgumentParser:
     add_run_arguments(mark_progress)
     mark_progress.add_argument("--action-id", required=True)
     mark_progress.set_defaults(handler=command_mark_progress)
+
+    declare_lane = subparsers.add_parser("declare-lane")
+    add_run_arguments(declare_lane)
+    declare_lane.add_argument("--action-id", required=True)
+    declare_lane.add_argument("--lane", required=True, choices=sorted(LANES))
+    declare_lane.add_argument("--budget-minutes", required=True, type=int)
+    declare_lane.add_argument("--reason", required=True, choices=sorted(LANE_REASONS))
+    declare_lane.set_defaults(handler=command_declare_lane)
 
     resume_pack = subparsers.add_parser("resume-pack")
     resume_pack.add_argument("--repo-root", required=True)

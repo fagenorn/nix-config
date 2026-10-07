@@ -836,6 +836,13 @@ class LifecycleHarness:
             "--now", now, "--action-id", action_id, ok=ok)
         return json.loads(completed.stdout) if ok else completed
 
+    def declare_lane(self, *, action_id, now, lane, budget_minutes, reason, ok=True):
+        completed = self.run_cli(
+            "declare-lane", "--repo-root", self.root, "--run-id", self.run_id,
+            "--now", now, "--action-id", action_id, "--lane", lane,
+            "--budget-minutes", str(budget_minutes), "--reason", reason, ok=ok)
+        return json.loads(completed.stdout) if ok else completed
+
     @staticmethod
     def git(worktree, *args):
         completed = subprocess.run(["git", "-C", str(worktree), *args], check=True,
@@ -6688,6 +6695,167 @@ class LaneSchemaTest(LifecycleHarness, unittest.TestCase):
                 missing = copy.deepcopy(valid)
                 del missing["issues"]["16"]["attempts"][0][field]
                 self.assert_refused_unchanged(missing)
+
+
+class DeclareLaneTest(LifecycleHarness, unittest.TestCase):
+    """#280: `declare-lane` records an attempt's lane and re-bases its deadline."""
+
+    def setUp(self):
+        super().setUp()
+        self.init_run()
+        self.worktree = str(self.root / "wt-16")
+        self.spawn(issue=16, worktree=self.worktree, budget_minutes=240)
+
+    def attempt(self, issue=16):
+        return self.read_state()["issues"][str(issue)]["attempts"][-1]
+
+    def declare(self, lane, *, now, budget=None, reason="triage", action_id="16:1:1",
+                ok=True):
+        if budget is None:
+            budget = 90 if lane == "light" else 240
+        return self.declare_lane(action_id=action_id, now=now, lane=lane,
+                                 budget_minutes=budget, reason=reason, ok=ok)
+
+    def assert_refused(self, clause, lane, **declare):
+        before = self.state_path.read_bytes()
+        refused = self.declare(lane, ok=False, **declare)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, self.state_path.read_bytes()),
+            (2, "", before))
+        self.assertIn(clause, refused.stderr)
+
+    def test_light_rebases_the_deadline_from_the_launch_and_records_history(self):
+        before = self.attempt()
+        self.assertEqual(before["deadline_at"], "2026-08-14T00:00:00Z")
+        reply = self.declare("light", now="2026-08-13T20:05:00Z")
+        self.assertEqual(reply, {"action_id": "16:1:1", "lane": "light",
+                                 "budget_minutes": 90,
+                                 "deadline_at": "2026-08-13T21:30:00Z"})
+        after = self.attempt()
+        self.assertEqual(
+            (after["lane"], after["lane_budget_minutes"], after["deadline_at"],
+             after["lane_history"]),
+            ("light", 90, "2026-08-13T21:30:00Z",
+             [{"lane": "light", "reason": "triage", "at": "2026-08-13T20:05:00Z"}]))
+        self.assertEqual(self.read_state()["updated_at"], "2026-08-13T20:05:00Z")
+        untouched = ("last_progress_at", "phase", "suspend_phase", "stalled_resumes",
+                     "launches", "state", "started_at")
+        self.assertEqual({key: after[key] for key in untouched},
+                         {key: before[key] for key in untouched})
+
+    def test_light_escalates_to_full_from_the_same_launch(self):
+        self.declare("light", now="2026-08-13T20:05:00Z")
+        reply = self.declare("full", now="2026-08-13T20:40:00Z",
+                             reason="second_fix_round")
+        self.assertEqual(reply["deadline_at"], "2026-08-14T00:00:00Z")
+        self.assertEqual(
+            [(entry["lane"], entry["reason"]) for entry in self.attempt()["lane_history"]],
+            [("light", "triage"), ("full", "second_fix_round")])
+
+    def test_full_is_declared_from_triage_with_its_own_budget(self):
+        reply = self.declare("full", now="2026-08-13T20:05:00Z", budget=200)
+        self.assertEqual((reply["lane"], reply["budget_minutes"], reply["deadline_at"]),
+                         ("full", 200, "2026-08-13T23:20:00Z"))
+
+    def test_a_live_worker_does_not_block_a_declaration(self):
+        self.register_worker(action_id="16:1:1", now="2026-08-13T20:01:00Z")
+        self.assertEqual(self.declare("light", now="2026-08-13T20:02:00Z")["lane"],
+                         "light")
+
+    def test_refuses_full_to_light_and_light_to_light(self):
+        self.spawn(issue=17, worktree=str(self.root / "wt-17"), budget_minutes=240)
+        self.declare("full", now="2026-08-13T20:05:00Z")
+        self.assert_refused("declare-lane refused: lane full cannot become light",
+                            "light", now="2026-08-13T20:06:00Z")
+        self.assert_refused("declare-lane refused: lane full cannot become full",
+                            "full", now="2026-08-13T20:06:00Z",
+                            reason="important_finding")
+        self.declare("light", now="2026-08-13T20:07:00Z", action_id="17:1:1")
+        self.assert_refused("declare-lane refused: lane light cannot become light",
+                            "light", now="2026-08-13T20:08:00Z", action_id="17:1:1")
+
+    def test_refuses_a_reason_the_transition_does_not_allow(self):
+        self.assert_refused(
+            "declare-lane refused: reason important_finding does not allow "
+            "lane none to become light",
+            "light", now="2026-08-13T20:05:00Z", reason="important_finding")
+        self.declare("light", now="2026-08-13T20:05:00Z")
+        self.assert_refused(
+            "declare-lane refused: reason triage does not allow lane light to become full",
+            "full", now="2026-08-13T20:06:00Z", reason="triage")
+        self.assert_refused("invalid choice", "light", now="2026-08-13T20:06:00Z",
+                            reason="whim")
+
+    def test_refuses_a_launch_that_is_not_current(self):
+        self.assert_refused("declare-lane refused: launch 99:1:1 is unknown_issue",
+                            "light", now="2026-08-13T20:01:00Z", action_id="99:1:1")
+        self.suspend(issue=16, attempt=1, blocked_on="usage_limit",
+                     now="2026-08-13T20:01:00Z")
+        self.assert_refused("declare-lane refused: launch 16:1:1 is inactive_attempt",
+                            "light", now="2026-08-13T20:02:00Z")
+        self.resume(issue=16, worktree=self.worktree, now="2026-08-13T20:03:00Z")
+        self.assert_refused("declare-lane refused: launch 16:1:1 is superseded_launch",
+                            "light", now="2026-08-13T20:04:00Z")
+        reply = self.declare("light", now="2026-08-13T20:04:00Z", action_id="16:1:2")
+        self.assertEqual(reply["deadline_at"], "2026-08-13T21:33:00Z")
+
+    def test_refuses_a_remainder_launch_a_zero_budget_and_time_moving_backward(self):
+        self.assert_refused("declare-lane refused: a remainder launch carries no lane",
+                            "light", now="2026-08-13T20:01:00Z", action_id="16:r1:1")
+        self.assert_refused("invalid --budget-minutes", "light",
+                            now="2026-08-13T20:01:00Z", budget=0)
+        self.declare("light", now="2026-08-13T20:05:00Z")
+        self.assert_refused("declare-lane refused: time must not move backward",
+                            "full", now="2026-08-13T20:04:00Z",
+                            reason="important_finding")
+
+    def test_refuses_a_rebased_deadline_that_is_not_after_now(self):
+        for now in ("2026-08-13T21:30:00Z", "2026-08-13T21:31:00Z"):
+            with self.subTest(lane="light", now=now):
+                self.assert_refused(
+                    f"declare-lane refused: deadline 2026-08-13T21:30:00Z is not after {now}",
+                    "light", now=now)
+        self.assert_refused(
+            "declare-lane refused: deadline 2026-08-13T21:00:00Z is not after "
+            "2026-08-13T21:31:00Z",
+            "full", now="2026-08-13T21:31:00Z", budget=60)
+        self.assertIsNone(self.attempt()["lane"])
+        self.assert_refused(
+            "declare-lane refused: deadline 2026-08-13T21:31:00Z is not after "
+            "2026-08-13T21:31:00Z",
+            "light", now="2026-08-13T21:31:00Z", budget=91)
+        reply = self.declare("light", now="2026-08-13T21:31:00Z", budget=92)
+        self.assertEqual(reply["deadline_at"], "2026-08-13T21:32:00Z")
+
+    def test_a_suspension_resume_uses_the_lane_budget_or_the_request_budget(self):
+        for issue in (17, 18):
+            self.spawn(issue=issue, worktree=str(self.root / f"wt-{issue}"),
+                       budget_minutes=240)
+        self.declare("light", now="2026-08-13T20:05:00Z")
+        self.declare("full", now="2026-08-13T20:05:00Z", budget=200, action_id="18:1:1")
+        for issue in (16, 17, 18):
+            self.suspend(issue=issue, attempt=1, blocked_on="usage_limit",
+                         now="2026-08-13T20:10:00Z")
+        # `resume` sends the harness's default request budget of 30 minutes.
+        expected = {16: ("2026-08-13T23:00:00Z", "2026-08-14T00:30:00Z", "light"),
+                    17: ("2026-08-13T23:01:00Z", "2026-08-13T23:31:00Z", None),
+                    18: ("2026-08-13T23:02:00Z", "2026-08-14T02:22:00Z", "full")}
+        for issue, (now, deadline, lane) in expected.items():
+            with self.subTest(issue=issue):
+                self.resume(issue=issue, worktree=str(self.root / f"wt-{issue}"), now=now)
+                attempt = self.attempt(issue)
+                self.assertEqual(
+                    (attempt["state"], attempt["deadline_at"], attempt["last_progress_at"],
+                     attempt["lane"], len(attempt["launches"])),
+                    ("active", deadline, now, lane, 2))
+
+    def test_a_takeover_inside_the_window_keeps_the_declared_deadline(self):
+        self.declare("light", now="2026-08-13T20:05:00Z")
+        self.resume(issue=16, worktree=self.worktree, now="2026-08-13T20:20:00Z",
+                    owner_unavailable=True)
+        attempt = self.attempt()
+        self.assertEqual((attempt["deadline_at"], attempt["lane"], len(attempt["launches"])),
+                         ("2026-08-13T21:30:00Z", "light", 2))
 
 
 class ProgressMarkerTest(LifecycleHarness, unittest.TestCase):
