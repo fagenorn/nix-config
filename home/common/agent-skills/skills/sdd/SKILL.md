@@ -110,7 +110,10 @@ fix-round implementer) is a registered worker of that launch. Immediately
 before the dispatch or resume, run
 `workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`
 and put its printed `worker_id` into the prompt as the single line
-`Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>`.
+`Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>`,
+followed by the sentence "Run each long command, every verification command included, as
+`launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <argv>`,
+still in the foreground."
 When that agent returns, run
 `workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --worker-id <worker_id> --event returned`.
 A resumed agent is registered again and gets a fresh `worker_id`.
