@@ -19,6 +19,7 @@ EXPECTED_TIERS = {
     "auto-owner": ("opus", "xhigh"),
     "ship-owner": ("opus", "high"),
     "implementer": ("opus", "high"),
+    "task-implementer": ("sonnet", "high"),
     "reviewer": ("opus", "high"),
     "conformance-reviewer": ("sonnet", "high"),
     "reviewer-lite": ("sonnet", "medium"),
@@ -34,6 +35,7 @@ EXPECTED_SUBAGENT_TYPES = {
     "auto-owner": {"general-purpose"},
     "ship-owner": {"general-purpose"},
     "implementer": {"implementer"},
+    "task-implementer": {"implementer"},
     "reviewer": {"reviewer"},
     "conformance-reviewer": {"reviewer"},
     "reviewer-lite": {"reviewer-lite"},
@@ -154,8 +156,8 @@ EXPECTED_SDD_SITES = {
     ),
     "sdd-nonmechanical-implementation": (
         "home/common/agent-skills/skills/sdd/implementer-prompt.md",
-        "implementer",
-        "opus",
+        "task-implementer",
+        "sonnet",
         "high",
         [],
     ),
@@ -427,6 +429,67 @@ class AgentModelMatrixTest(unittest.TestCase):
                 site["marker"],
                 f"<!-- agent-dispatch: id={site_id} role={role} "
                 f"model={model} effort={effort} -->",
+            )
+
+    def test_task_implementer_is_a_sonnet_role_on_the_opus_implementer_type(self):
+        data = json.loads(MATRIX.read_text(encoding="utf-8"))
+        roles = data["roles"]
+        self.assertEqual(
+            roles["task-implementer"]["eligible"],
+            ["planned task implementation", "task fix rounds 1–3"],
+        )
+        self.assertEqual(
+            roles["task-implementer"]["prohibited"],
+            ["deterministic mechanical work", "stuck-task escalation"],
+        )
+        self.assertEqual(
+            roles["implementer"]["eligible"],
+            ["non-mechanical implementation", "stuck-task escalation"],
+        )
+        # No new agent file: an implementer dispatch that omitted its model
+        # still runs on the definition's Opus/high.
+        self.assertEqual(
+            agent_model_matrix.CUSTOM_AGENT_ROLES,
+            {"implementer", "reviewer", "reviewer-lite", "mechanic"},
+        )
+        definition = frontmatter(AGENTS / "implementer.md")
+        self.assertEqual((definition["model"], definition["effort"]), ("opus", "high"))
+
+        by_role = {}
+        for site in data["dispatch_sites"]:
+            by_role.setdefault(site["role"], set()).add(site["id"])
+            if site["role"] in ("task-implementer", "implementer"):
+                model = "sonnet" if site["role"] == "task-implementer" else "opus"
+                self.assertTrue(
+                    site["call"].startswith(
+                        f'Agent(subagent_type="implementer", model="{model}", '
+                        'effort="high")'
+                    ),
+                    site["id"],
+                )
+        self.assertEqual(
+            by_role["task-implementer"], {"sdd-nonmechanical-implementation"}
+        )
+        self.assertEqual(
+            by_role["implementer"],
+            {
+                "sdd-post-rescue-implementation",
+                "sdd-rescue-fallback-implementation",
+                "sdd-round-five-implementation",
+                "sdd-final-review-fixer",
+            },
+        )
+        for scenario in ("sdd", "representative"):
+            events = [
+                event
+                for event in agent_model_matrix.trace(REPO_ROOT, scenario)
+                if event["dispatch"] == "sdd-nonmechanical-implementation"
+            ]
+            self.assertEqual(len(events), 1, scenario)
+            self.assertEqual(
+                (events[0]["role"], events[0]["model"], events[0]["effort"]),
+                ("task-implementer", "sonnet", "high"),
+                scenario,
             )
 
     def test_shipping_and_codex_dispatches_select_exact_tiers(self):

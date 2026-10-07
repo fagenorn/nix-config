@@ -11,8 +11,8 @@ Agent(subagent_type="mechanic", model="sonnet", effort="high") executes the task
 
 For every non-mechanical implementation task:
 
-<!-- agent-dispatch: id=sdd-nonmechanical-implementation role=implementer model=opus effort=high -->
-Agent(subagent_type="implementer", model="opus", effort="high") executes the task from this prompt.
+<!-- agent-dispatch: id=sdd-nonmechanical-implementation role=task-implementer model=sonnet effort=high -->
+Agent(subagent_type="implementer", model="sonnet", effort="high") executes the task from this prompt.
 
 ```
 Subagent (the explicitly selected implementer or mechanic above):
