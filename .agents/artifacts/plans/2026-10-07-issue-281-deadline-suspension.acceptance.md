@@ -1,0 +1,7 @@
+# Acceptance record — issue #281
+
+| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |
+|----|-----------|------|------------------|----------|--------|------------|---------|
+| AC1 | [code] suspend --blocked-on deadline is accepted and auto-resumable, and is refused while a registered worker is live — measured: test_workflow_state.py | code | `test_workflow_state.py` (`test_deadline_suspension_parks_the_attempt_without_spending_it`, `test_direct_reentry_resumes_a_deadline_suspension_in_place`, `test_a_deadline_suspend_refuses_until_the_worker_is_released`) | in final verification | — | `just agent-workflow-tests` | met |
+| AC2 | [code] sdd states the headroom rule and the order release, mark-progress, suspend — measured: test_workflow_skill_contracts.py under just agent-workflow-tests | code | `test_workflow_skill_contracts.py::test_sdd_states_the_deadline_suspension_order` | in final verification | — | `just agent-workflow-tests` | met |
+| AC3 | [code] control resumes a deadline suspension without a human-directed request — measured: test_workflow_state.py | code | `test_workflow_state.py::test_a_label_sweep_resumes_a_deadline_suspension` | in final verification | — | `just agent-workflow-tests` | met |
