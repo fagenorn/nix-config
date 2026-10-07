@@ -29,6 +29,13 @@ Add these methods to `ClaudePermissionGuardTest`, after `test_shell_equivalent_s
 ```python
     LABEL_REFUSAL_PREFIX = (
         "lifecycle guard: unsafe instruction-budget-raise label edit:")
+    DIRECT_ADD_REASON = (
+        "only the user applies this label (Instruction Budget raise control)")
+    EVALUATOR_REASON = "shell source passed to an evaluator cannot be validated"
+    # The unterminated-quote row's existing fail-closed reason: pin the exact string the
+    # live guard yields for it — "the command could not be parsed" when split_segments
+    # returns None, else "the segment could not be tokenised" (check once, then pin).
+    UNPARSED_REASON = "the command could not be parsed"
 
     def test_raise_label_additions_are_refused_in_every_spelling(self):
         # Every command here adds the instruction-budget-raise label, so exit 0
@@ -67,19 +74,21 @@ Add these methods to `ClaudePermissionGuardTest`, after `test_shell_equivalent_s
             "sh -c 'gh pr edit 1 --add-label instruction-budget-raise'",
             "gh pr edit 1 --add-label 'instruction-budget-raise",  # unterminated
         ):
+            # Every row except the three fail-closed rows names the direct-add reason.
+            reason = {
+                "eval 'gh pr edit 1 --add-label instruction-budget-raise'": self.EVALUATOR_REASON,
+                "sh -c 'gh pr edit 1 --add-label instruction-budget-raise'": self.EVALUATOR_REASON,
+                "gh pr edit 1 --add-label 'instruction-budget-raise": self.UNPARSED_REASON,
+            }.get(command, self.DIRECT_ADD_REASON)
             with self.subTest(command=command):
                 result = self.run_guard(command)
                 self.assertEqual(2, result.returncode, (command, result.stderr))
-                self.assertIn(self.LABEL_REFUSAL_PREFIX, result.stderr)
-        plain = self.run_guard("gh pr edit 1 --add-label instruction-budget-raise")
-        self.assertIn(
-            "only the user applies this label (Instruction Budget raise control)",
-            plain.stderr)
+                self.assertIn(f"{self.LABEL_REFUSAL_PREFIX} {reason}", result.stderr)
         elsewhere = self.make_repo("https://github.com/someoneelse/tool.git")
         result = self.invoke_command_in(
             "gh pr edit 1 --add-label instruction-budget-raise", elsewhere)
         self.assertEqual(2, result.returncode, result.stderr)
-        self.assertIn(self.LABEL_REFUSAL_PREFIX, result.stderr)
+        self.assertIn(f"{self.LABEL_REFUSAL_PREFIX} {self.DIRECT_ADD_REASON}", result.stderr)
 
     def test_raise_label_refusal_precedes_every_other_verb(self):
         # The push alone would be refused as a push; the label wins, so the
@@ -89,7 +98,7 @@ Add these methods to `ClaudePermissionGuardTest`, after `test_shell_equivalent_s
             "git push origin main; gh pr edit 1 --add-label instruction-budget-raise",
             cwd=repo)
         self.assertEqual(2, result.returncode, result.stderr)
-        self.assertIn(self.LABEL_REFUSAL_PREFIX, result.stderr)
+        self.assertIn(f"{self.LABEL_REFUSAL_PREFIX} {self.DIRECT_ADD_REASON}", result.stderr)
         self.assertNotIn("unsafe push", result.stderr)
 
     def test_other_label_edits_and_mentions_pass(self):
@@ -112,7 +121,7 @@ Add these methods to `ClaudePermissionGuardTest`, after `test_shell_equivalent_s
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run (Global Constraints' D6 command, `<selection>` = `-k raise_label -k other_label_edits`, timeout 1800 s):
-`just build >/dev/null && CLAUDE_SETTINGS_PATH="$(nix-store --query --requisites ./result | grep -- '-claude-code-settings\.json$')" python3 -m unittest -k raise_label -k other_label_edits tests/test_claude_permission_guard.py 2>&1 | tail -15`
+`just build >/dev/null && CLAUDE_SETTINGS_PATH="$(nix-store --query --requisites ./result | grep -- '-claude-code-settings\.json$')" python3 -m unittest -k raise_label -k other_label_edits tests/test_claude_permission_guard.py`
 Expected: FAIL — `test_raise_label_additions_are_refused_in_every_spelling` sees exit 0 for `gh pr edit 1 --add-label instruction-budget-raise`; `test_raise_label_refusal_precedes_every_other_verb` sees `unsafe push`. `test_other_label_edits_and_mentions_pass` already passes (regression pin).
 
 - [ ] **Step 3: Write the minimal implementation**
@@ -139,7 +148,7 @@ In `lifecycle_guard.py`:
 - [ ] **Step 4: Verify**
 
 Run the Step 2 command. Expected: OK, 3 tests.
-Then the whole guard file (D6 command with empty `<selection>`, timeout 1800 s): `CLAUDE_SETTINGS_PATH="$(nix-store --query --requisites ./result | grep -- '-claude-code-settings\.json$')" python3 -m unittest tests/test_claude_permission_guard.py 2>&1 | tail -3` — Expected: `OK`; any existing test failing means a verb's behavior changed (violates D5).
+Then the whole guard file (D6 command with empty `<selection>`, timeout 1800 s): `CLAUDE_SETTINGS_PATH="$(nix-store --query --requisites ./result | grep -- '-claude-code-settings\.json$')" python3 -m unittest tests/test_claude_permission_guard.py` — Expected: `OK`; any existing test failing means a verb's behavior changed (violates D5).
 Scope check: `git diff --stat origin/main -- home/common/claude-code/ tests/test_claude_permission_guard.py` lists only the two files above (no `default.nix` change).
 
 - [ ] **Step 5: Commit**

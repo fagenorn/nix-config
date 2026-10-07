@@ -20,7 +20,7 @@ Spec: `.agents/artifacts/specs/2026-10-07-issue-294-raise-label-guard-design.md`
 - No edit to `home/common/agent-skills/instruction-load.json`, to the gate's files, or to `.github/`; `instruction_load tighten` is not run (D4).
 - No test pins the `AGENTS.md` sentence (`docs/standards/agent-helpers.md` rule 6).
 - Guard tests run the installed store hook, so every guard-test command rebuilds first and reads the generated settings (D6):
-  `just build >/dev/null && CLAUDE_SETTINGS_PATH="$(nix-store --query --requisites ./result | grep -- '-claude-code-settings\.json$')" python3 -m unittest <selection> tests/test_claude_permission_guard.py 2>&1 | tail -15`
+  `just build >/dev/null && CLAUDE_SETTINGS_PATH="$(nix-store --query --requisites ./result | grep -- '-claude-code-settings\.json$')" python3 -m unittest <selection> tests/test_claude_permission_guard.py`
 - Run every command from the worktree root, in the foreground, with a timeout of at least 1800 s for any command that runs `just build`.
 - **Final gate** (sdd's final gate, once, on the final head; no task runs it as a per-task gate): `just build`, `just agent-workflow-tests` and the full guard suite (the D6 command with an empty `<selection>`), each with a 3600 s timeout, and `PYTHONPATH=python python3 -m agent_tools.instruction_load check --base origin/main` (= `just agent-instruction-budget`) **without** `--raise-label`, which must print `check: pass`.
 
@@ -48,6 +48,12 @@ Task 2 — Frame sentence, budget offset and CLAUDE.md limits note — home/comm
 
 ## Decisions
 
-Tasks rest on spec rows D1–D5 and on the plan-level rows D6 (the guard suite runs against the built settings, outside `agent-workflow-tests`) and D7 (label findings are refused before any other verb is adjudicated).
+Tasks rest on spec rows D1–D5 and on the plan-level rows D6 (the guard suite runs against the built settings, outside `agent-workflow-tests`) and D7 (label findings are refused before any other verb is adjudicated), plus D8 (each refused row asserts its full message).
 
----
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only fresh thread; no fallback.
+- Base SHA: 07be312c50f0e8e822e73f6f4cccc5fa05acff65.
+- Findings: 0 Blocking, 2 Should fix, 0 Discussion items; 2 accepted, 0 rejected, 0 deferred.
+  - PR294-01 (accepted): verification commands no longer pipe through `tail`, so a failing unittest's exit status reaches the gate.
+  - PR294-02 (accepted, per D8): Task 1's refusal table asserts each row's full expected message.

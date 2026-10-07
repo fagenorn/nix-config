@@ -48,8 +48,8 @@ if grep -q 'This does two things at once' home/common/agent-skills/skills/doc-gr
 grep -q 'When the docs fully answer it:' home/common/agent-skills/skills/doc-grounded-questions/REFERENCE.md
 grep -q 'instruction-budget-raise` label (#294)' CLAUDE.md
 if git diff --name-only origin/main -- home/common/agent-skills/instruction-load.json .github | grep -q .; then exit 1; fi
-PYTHONPATH=python python3 -m agent_tools.instruction_load check --base origin/main 2>&1 | tail -3
-PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_dispatch_contracts.py home/common/agent-skills/tests/test_skill_lint.py home/common/agent-skills/tests/test_instruction_load.py 2>&1 | tail -3
+PYTHONPATH=python python3 -m agent_tools.instruction_load check --base origin/main
+PYTHONPATH=python python3 -m unittest home/common/agent-skills/tests/test_dispatch_contracts.py home/common/agent-skills/tests/test_skill_lint.py home/common/agent-skills/tests/test_instruction_load.py
 ```
 Expected: every line succeeds, the gate prints `check: pass` (no `--raise-label`), and the unit tests print `OK`. A gate failure means the byte arithmetic is off (D4): fix the edit, never raise a ceiling or run `tighten`.
 
