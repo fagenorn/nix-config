@@ -236,6 +236,38 @@ check "SIGTERM: the runner exits 143" test "$status" -eq 143
 check "SIGTERM: the temp root is gone" root_gone "$CFG"
 check "SIGTERM: no row was written" test "$(row_count)" -eq 0
 
+# --- setup kinds, smoke-tested in deployed mode (D15, D16) -------------------------
+cat >"$FAKE_BIN/resolve-project" <<SHIM
+#!/usr/bin/env bash
+PYTHONPATH="$TREE/python" exec python3 -P -m agent_tools.resolve_project "\$@"
+SHIM
+chmod +x "$FAKE_BIN/resolve-project"
+row_is_deployed_pass() {
+  last_row | jq -e '.verdict == "PASS" and .failed == 0 and .tree == "deployed"
+    and .tree_rev == null and .tree_dirty == null and .input_tokens == 246' >/dev/null
+}
+smoke_tmp_holds_only_its_sandbox() {
+  local entry
+  for entry in "$RUN_TMP"/* "$RUN_TMP"/.[!.]*; do
+    [ -e "$entry" ] || continue
+    case "$(basename "$entry")" in
+      eval-setup-smoke-"$1".*) ;;
+      *) echo "left behind: $entry"; return 1 ;;
+    esac
+  done
+}
+for id in 1 2 3; do
+  scenario "setup-smoke-$id"
+  mkdir -p "$S/skills/setup-smoke/evals"
+  cp "$EVALS_SRC/tests/fixtures/setup-smoke-evals.json" "$S/skills/setup-smoke/evals/evals.json"
+  env FAKE_STATE="$STATE" TMPDIR="$RUN_TMP" PATH="$FAKE_BIN:$PATH" EVAL_TIMEOUT=120 \
+    bash "$COPY/run-eval.sh" setup-smoke "$id" >"$S/log" 2>&1
+  status=$?
+  check "setup smoke $id: every setup assert passes" test "$status" -eq 0
+  check "setup smoke $id: the row is a deployed-mode PASS" row_is_deployed_pass
+  check "setup smoke $id: deployed mode makes no temp root" smoke_tmp_holds_only_its_sandbox "$id"
+done
+
 if [ "$FAILURES" -ne 0 ]; then
   for log in "$SCRATCH"/*/log; do
     echo "--- $log (last 15 lines)"

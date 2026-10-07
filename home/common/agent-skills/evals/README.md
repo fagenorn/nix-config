@@ -89,6 +89,12 @@ of another skill names its own stop in its prompt.
   when its tracker capability is unsupported: a map, an unblocked ticket, a ticket blocked by it, and
   fog. The wayfind evals work it; every other eval must leave it untouched. Verify the fixture
   with `python3 -m unittest discover` from its root.
+- A pipeline case's `setup.kind` is one of four closed kinds: `dirty-worktree`,
+  `shippable-worktree`, `planned-worktree` and `release-ready`. The last three take no
+  parameters and read their inputs (the issue-3 spec, plan package and
+  `implementation.patch`) from the committed `setups/issue-3/`; `fixture-repo/` itself
+  stays unchanged. Every pipeline assert also sees `BASE_MAIN`, local `main`'s SHA right
+  after the setup.
 - Env: `EVAL_MODEL` (default `sonnet`), `EVAL_TIMEOUT` seconds (default 2700),
   `EVAL_MAX_USD` (optional ceiling), `EVAL_TRIALS` (default 1).
 - Sandboxes are kept after the run and their path is printed, so you can inspect the spec

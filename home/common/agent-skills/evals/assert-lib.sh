@@ -13,6 +13,8 @@
 #   WT        first worktree other than REPO ("" when none was created)
 #   WT_COUNT  how many worktrees exist besides REPO
 #   PRE_WT    worktree the setup hook pre-created ("" when the eval has no setup)
+#   BASE_MAIN local `main`'s SHA right after the setup hook (the initial commit when
+#             there is no setup)
 #   SPEC_DIR / PLAN_DIR  absolute paths from the fixture's retained resolver snapshot
 #   CLAUDE_EXIT          exit status of the claude run
 

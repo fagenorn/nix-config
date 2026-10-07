@@ -88,6 +88,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_shell_example_contracts.py \
     home/common/agent-skills/tests/test_ship_release_contracts.py \
+    home/common/agent-skills/tests/test_eval_cases.py \
     home/common/agent-skills/tests/test_agent_evidence.py \
     home/common/agent-skills/tests/test_agent_model_matrix.py \
     home/common/agent-skills/tests/test_instruction_load.py \

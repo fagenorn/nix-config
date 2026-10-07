@@ -34,6 +34,7 @@ set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FIXTURE="$HERE/fixture-repo"
+SETUPS="$HERE/setups"
 ASSERT_LIB="$HERE/assert-lib.sh"
 # Two skill roots: the shared tree and the Claude-only tree.
 SKILL_ROOTS=("$HERE/../skills" "$HERE/../../claude-code/skills")
@@ -283,8 +284,50 @@ run_trial() {
       printf 'scratch notes from the interrupted run\n' >"$PRE_WT/NOTES.wip"
       echo "setup: pre-created dirty worktree at $PRE_WT"
       ;;
+    shippable-worktree|planned-worktree)
+      local spec_rel plan_rel
+      PRE_WT="$WORK/worktree-issue-3-rename-flag"
+      git -C "$REPO" worktree add -q -b worktree-issue-3-rename-flag "$PRE_WT" origin/main ||
+        die "setup: could not create worktree worktree-issue-3-rename-flag"
+      spec_rel=${SPEC_DIR#"$REPO"/}
+      plan_rel=${PLAN_DIR#"$REPO"/}
+      mkdir -p "$PRE_WT/$spec_rel" || die "setup: could not create $spec_rel"
+      cp "$SETUPS/issue-3/2026-10-07-issue-3-rename-flag-design.md" "$PRE_WT/$spec_rel/" ||
+        die "setup: could not copy the spec"
+      git -C "$PRE_WT" add -A && git -C "$PRE_WT" commit -qm "docs(spec): issue 3 rename-flag design" ||
+        die "setup: could not commit the spec"
+      mkdir -p "$PRE_WT/$plan_rel" || die "setup: could not create $plan_rel"
+      cp -R "$SETUPS/issue-3/2026-10-07-issue-3-rename-flag.md" \
+        "$SETUPS/issue-3/2026-10-07-issue-3-rename-flag.tasks" "$PRE_WT/$plan_rel/" ||
+        die "setup: could not copy the plan"
+      git -C "$PRE_WT" add -A && git -C "$PRE_WT" commit -qm "docs(plan): issue 3 rename-flag plan" ||
+        die "setup: could not commit the plan"
+      if [ "$SETUP_KIND" = shippable-worktree ]; then
+        git -C "$PRE_WT" apply "$SETUPS/issue-3/implementation.patch" ||
+          die "setup: could not apply the implementation patch"
+        git -C "$PRE_WT" add -A && git -C "$PRE_WT" commit -qm "feat: rename list --all to --include-done (#3)" ||
+          die "setup: could not commit the implementation"
+      fi
+      echo "setup: $SETUP_KIND worktree at $PRE_WT"
+      ;;
+    release-ready)
+      git -C "$REPO" tag -a v0.1.0 -m "release: v0.1.0" main &&
+        git -C "$REPO" switch -q -c feat/include-done || die "setup: could not tag v0.1.0 and branch"
+      git -C "$REPO" apply "$SETUPS/issue-3/implementation.patch" ||
+        die "setup: could not apply the implementation patch"
+      git -C "$REPO" add -A && git -C "$REPO" commit -qm "feat: rename list --all to --include-done" ||
+        die "setup: could not commit the feature"
+      git -C "$REPO" switch -q main &&
+        git -C "$REPO" merge -q --no-ff -m "Merge branch 'feat/include-done'" feat/include-done ||
+        die "setup: could not merge the feature into main"
+      git -C "$REPO" branch -q -d feat/include-done &&
+        git -C "$REPO" push -q origin main v0.1.0 || die "setup: could not publish main and v0.1.0"
+      echo "setup: release-ready main at $(git -C "$REPO" rev-parse --short main)"
+      ;;
     *) die "unknown setup kind: $SETUP_KIND" ;;
   esac
+  local BASE_MAIN
+  BASE_MAIN=$(git -C "$REPO" rev-parse main) || die "setup: could not read main"
 
   # --- run --------------------------------------------------------------------
 
@@ -332,7 +375,7 @@ run_trial() {
 
   # --- grade ------------------------------------------------------------------
 
-  export WORK REPO ORIGIN OUT WT WT_COUNT PRE_WT SPEC_DIR PLAN_DIR CLAUDE_EXIT
+  export WORK REPO ORIGIN OUT BASE_MAIN WT WT_COUNT PRE_WT SPEC_DIR PLAN_DIR CLAUDE_EXIT
 
   echo
   echo "--- asserts ---"
