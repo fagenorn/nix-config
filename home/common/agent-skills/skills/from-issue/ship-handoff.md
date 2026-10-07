@@ -64,8 +64,9 @@ it is `custody.action_id`.
 
 With lifecycle identity, the prompt also carries the single line
 Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>
-from from-issue's **Writing workers** rule — beside the handoff, never inside the handoff — followed by the sentence
+from from-issue's **Writing workers** rule — beside the handoff, never inside the handoff — followed by the sentences
 Run each long command, every verification command included, as `launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <argv>`, still in the foreground.
+Create every scratch directory or scratch worktree under the path that `launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>` prints.
 
 Your task:
   1. Invoke the `ship-issue` skill via the Skill tool. Read its SKILL.md and follow
@@ -162,8 +163,9 @@ before decoding any field.
 
 With lifecycle identity, the prompt also carries the single line
 Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>
-beside the remainder object, never inside it, followed by the sentence
+beside the remainder object, never inside it, followed by the sentences
 Run each long command, every verification command included, as `launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <argv>`, still in the foreground.
+Create every scratch directory or scratch worktree under the path that `launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>` prints.
 
 Your task: invoke the `ship-issue` skill via the Skill tool and follow its
 `## Remainder mode` from the ledger's ready stage. You hold this remainder
