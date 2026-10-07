@@ -248,9 +248,8 @@ class AgentEvidenceTest(unittest.TestCase):
         produced the result was scoped — a scoped result with no disclosure is
         indistinguishable from a legitimate unscoped one and validates. Widening
         the validator is not the fix (it is shared by every operation); the
-        omission obligation is pinned as prose in
-        `test_workflow_skill_contracts.py`
-        (`test_diff_review_makes_the_scoped_coverage_disclosure_mandatory`).
+        omission obligation is stated as prose in codex-collaboration's
+        DIFF-REVIEW.md, which #291 D6 no longer pins with a phrase test.
         """
         original = self.fixture("bridge-fresh-end-to-end.json")
         sections = "\n\n## Critical\nNone.\n\n## Important\nNone.\n\n## Minor\nNone."
