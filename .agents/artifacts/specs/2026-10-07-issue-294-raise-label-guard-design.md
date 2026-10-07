@@ -37,21 +37,27 @@ and its limits written down, so that no one mistakes the guard for enforcement.
 A fifth guarded operation, `label`, sits beside the four existing ones. It
 reuses the same splitter, tokeniser and command-position logic. It differs
 from them in one way: it is **mention-gated** (D1). The operation is
-considered only in a segment that mentions the raise label. A mention is a
+considered only in a command that mentions the raise label. A mention is a
 case-insensitive substring of any token value, or of the raw segment text
-when the segment cannot be tokenised. A segment that does not mention the
-label is never adjudicated for this rule, whatever `gh pr edit` it contains.
+when the segment cannot be tokenised. The fail-closed cases below are judged
+per segment that mentions it; the `gh` check is judged over the whole
+command's tokens once any of them mention it (D10). A command that does not
+mention the label is never adjudicated for this rule, whatever `gh pr edit`
+it contains.
 Because the existing four verbs are left alone, this keeps
 `xargs gh pr edit 1 --add-label bug` and
 `sh -c 'gh pr edit 1 --add-label bug'` passing, as they do today.
 
-Within a segment that does mention the label:
+Within a command that does mention the label:
 
 - **Fail closed where the guard cannot see.** The segment is refused when the
   command cannot be split, when the segment cannot be tokenised, or when it
   hands shell source to an evaluator (`eval`, `sh -c`, …). These are the same
   three cases that already refuse the other verbs. In these cases the verb
-  itself does not need to be found: a mention is enough.
+  itself does not need to be found: a mention is enough. A token that
+  mentions the label and carries a `$(` or backtick substitution is refused
+  as well, because a substitution inside double quotes runs while the
+  tokeniser keeps it as one word (D11).
 - **A `gh` invocation adding the label.** A `gh` invocation is a word whose
   basename is `gh`, together with every later word of the command's
   tokenised segments, operator tokens skipped (D9, D10). Its label values are the token after each `--add-label` and the
@@ -212,3 +218,4 @@ instruction-budget-raise` exits 2 with
 | D8 | Each refused label row asserts its full expected message (direct-add, evaluator, or parse reason), not just the prefix | Phase-5 Codex plan review PR294-02: a prefix-only assertion passes if every case returned the direct-add reason, hiding the spec's distinct fail-closed reasons | Prefix-only assertions plus one plain-command reason check (the plan's first draft) |
 | D9 | Amends D1's word boundary: a `gh` invocation's words now run to the end of its segment, skipping operator tokens, so a label added after a `$(…)`/backtick substitution is caught | Final-review correctness finding CR-294-01 | Ending words at the next operator (the original wording of the rule in Design), which let `gh pr edit $(…) --add-label instruction-budget-raise` pass |
 | D10 | Amends D9: once the command's tokens mention the raise label, the `gh` invocation check runs over every tokenised segment of the command at once, so a separator inside a substitution (`gh pr edit $(gh pr view … \| jq …) --add-label …`) cannot split the `gh` word from its label. A later program's own `--add-label` naming the label after an unrelated `gh` call is refused too, which fails closed | PR review correctness finding PR-294-R1 (ship-issue Phase 5; distinct from the parked SDD finding CR-294-02) | Tracking substitution depth in the segment splitter, which reworks the splitter every other verb relies on |
+| D11 | Amends D10: every tokenised segment joins the whole-command stream, evaluator segments included, and a token that mentions the label inside a `$(…)` or backtick substitution is refused with `a command substitution inside a quoted word cannot be validated` | PR review correctness findings PR-294-R2 (`gh pr edit $(sh -c '…'; true) --add-label …` put the `gh` word in a skipped evaluator segment) and PR-294-R3 (`x="$(gh pr edit … --add-label …)"` is one quoted word) | Tokenising inside double-quoted substitutions, which the four other verbs do not do either |

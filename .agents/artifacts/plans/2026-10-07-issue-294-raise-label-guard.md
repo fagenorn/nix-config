@@ -48,7 +48,7 @@ Task 2 — Frame sentence, budget offset and CLAUDE.md limits note — home/comm
 
 ## Decisions
 
-Tasks rest on spec rows D1–D5 and on the plan-level rows D6 (the guard suite runs against the built settings, outside `agent-workflow-tests`) and D7 (label findings are refused before any other verb is adjudicated), plus D8 (each refused row asserts its full message).
+Tasks rest on spec rows D1–D5 and on the plan-level rows D6 (the guard suite runs against the built settings, outside `agent-workflow-tests`) and D7 (label findings are refused before any other verb is adjudicated), plus D8 (each refused row asserts its full message). Spec rows D9–D11 later amend the word boundary: the label check reads the whole command's tokenised segments, and a quoted substitution that mentions the label is refused.
 
 ## Standards review provenance
 

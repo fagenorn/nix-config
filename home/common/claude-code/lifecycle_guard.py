@@ -425,7 +425,9 @@ def guarded_operations(command):
     command's tokens mention the raise label, always carries a problem, and is
     refused for any `gh` invocation, in any position, whose `--add-label` value
     contains it. That check runs over every tokenised segment at once, because
-    a separator inside a substitution splits a `gh` word from its label.
+    a separator inside a substitution splits a `gh` word from its label. A
+    word that mentions the label inside a `$(…)` or backtick substitution is
+    refused too, because a quoted substitution still runs.
     """
     segments = split_segments(command)
     if segments is None:
@@ -443,6 +445,11 @@ def guarded_operations(command):
                 mentions_raise_label([segment]),
             ))
             continue
+        # Every tokenised segment joins the label stream, evaluator segments
+        # included: `gh pr edit $(sh -c '…'; true) --add-label …` puts the
+        # `gh` word in an evaluator segment and its label in the next one.
+        stream.extend(tokens)
+        stream.append((";", True))
         flags = command_position_flags(tokens)
         values = [value for value, _ in tokens]
         mentions = mentions_raise_label(values)
@@ -469,13 +476,23 @@ def guarded_operations(command):
                         "validate; quote it if you only mean to mention it",
                     ))
                 break
-        stream.extend(tokens)
-        stream.append((";", True))
     # Judged over every tokenised segment at once: a separator inside a
     # substitution (`gh pr edit $(gh pr view | jq …) --add-label …`) splits
     # the `gh` word from its label, so a per-segment check would miss it.
     if mentions_raise_label([value for value, _ in stream]) and adds_raise_label(stream):
         found.append(("label", command, RAISE_LABEL_REFUSAL))
+    # A substitution inside a double-quoted word (`x="$(gh pr edit … )"`) runs,
+    # but the tokeniser keeps it as one word, so the guard cannot see its `gh`.
+    # A word that mentions the label and carries a substitution fails closed.
+    if any(
+        not is_operator and mentions_raise_label([value])
+        and ("$(" in value or "`" in value)
+        for value, is_operator in stream
+    ):
+        found.append((
+            "label", command,
+            "a command substitution inside a quoted word cannot be validated",
+        ))
     return found
 
 
