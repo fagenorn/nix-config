@@ -37,10 +37,8 @@ every phase checkpoint and obey its returned action before the next phase starts
 durable handoff, invoke `handoff` at the per-run destination, finalize it through
 `workflow-state progress`, and stop. For every ordinarily owned terminal result, call
 `workflow-state finish` successfully before any notification to the dispatcher; persistence always
-precedes notification. The only exception is the successful direct Phase-5 relay: the delegated
-fresh owner has already persisted the canonical terminal result, so the earlier controller must
-not call `workflow-state finish` again. A delegated-owner dispatch failure remains an ordinarily
-owned terminal result and is persisted before notification.
+precedes notification. A delegated-owner dispatch failure is such a result and must be persisted
+before notification.
 
 Sub-skills (`design`, `grill-with-docs`, `writing-plans`, `sdd`, `ship-issue`) don't know about
 `--auto`. *You* carry the autonomous-mode context: when one tells you to ask or wait, run the
@@ -53,12 +51,10 @@ stops that action and is never routed around.
 
 ## When *not* to auto-resolve
 
-There are no checkpoint gates, but two content-level stops still apply, because they are judgments
-about the work itself rather than user-approval gates:
+There are no checkpoint gates, but two content-level stops still apply:
 
 - **Phase 0 wrong-issue-type stop.** If the issue is several issues bundled, a duplicate, a pure
-  question, or otherwise not implementable, surface that and stop. Auto-mode means "decide without
-  asking", not "implement something incoherent". Phase 0 reconciles an exact
+  question, or otherwise not implementable, surface that and stop. Phase 0 reconciles an exact
   open or merged PR per Phase 0's PR pre-flight; it remains a stop only when ownership,
   target, scope, acceptance evidence, or authority is unknown. The same stop
   rule applies to dirty or multiple matching worktrees and a matching worktree
@@ -85,16 +81,11 @@ granularity — you decide and log.
 
 ## Phases 2–4 run as subagents
 
-Interactive mode runs these phases inline and conversationally. **In `--auto` they are dispatched.**
+**In `--auto` these phases are dispatched.**
 
 **The orchestrator (this session) holds only three things: the Phase-0 issue summary, the resolved
 config bindings, and each phase's returned report.** Brainstorm and grill conversation must never
-enter this context. Don't ask a subagent to "show its reasoning"; the reasoning belongs in the
-committed artifact.
-
-Both dispatches select the `auto-owner` matrix role on Opus/xhigh. Purely mechanical dispatches elsewhere
-in the flow use `mechanic` on Sonnet/high; reviewer-shaped first passes use
-`reviewer` on Opus/high.
+enter this context.
 
 Both prompts must carry, inline (the subagent starts with no context and loads no skills of its own
 beyond the exceptions named below):
@@ -114,7 +105,7 @@ beyond the exceptions named below):
 **Skill exception.** Each subagent *should* invoke, through its own `Skill` tool, the globally
 installed skills its phase names — `grill-with-docs` and `doc-grounded-questions` for the design
 subagent, `writing-plans` and `doc-grounded-questions` for the plan subagent, plus
-`design` if present. Those load in the subagent's context, not yours. If one isn't
+`design` if present. If one isn't
 installed, it uses the inline fallback named in the corresponding `SKILL.md` phase.
 
 A Phase 2–4 subagent's interim result follows `SKILL.md`'s **Interim child results** rule.
@@ -146,8 +137,6 @@ The exact over-budget report includes the checker's ordered, non-empty
 For `failed`, `artifact` is exactly `null` before a root exists or exactly
 `{"kind":"design-spec","path":"<root relative to repo>"}` after one exists;
 metrics, budget status, and violations are forbidden in both failed rows.
-The orchestrator keeps only the artifact root and metrics; ADR paths and ledger
-choices stay in the spec.
 
 ### Plan subagent — Phase 4 (+ mechanical Phase 5)
 
@@ -201,8 +190,6 @@ Dispatcher-owned autonomous, explicitly durable interactive, and ledger-free
 interactive owners retain their existing behavior: Phase 5 dispatches the
 reviewer (or `codex-collaboration`) with `REVIEW-CONTRACT.md`'s path, Phase 6
 runs `sdd`, and Phase 7 dispatches `ship-issue` with the appropriate handoff.
-Reviewer, SDD, and shipping contracts remain unchanged for these routes, and
-the owning controller continues to verify and disposition findings.
 
 At every Phase-6 or Phase-7 push, PR-open, or merge gate, first apply repository
 policy or an explicit user grant covering the concrete action, target, and

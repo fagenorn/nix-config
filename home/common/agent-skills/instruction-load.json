@@ -34,8 +34,8 @@
         "from-issue/delegated-owner.md": "the controller delegates Phases 6–7 at the rollover and never runs them as the fresh owner"
       },
       "ceiling_bytes": {
-        "claude": 94843,
-        "codex": 94843
+        "claude": 93801,
+        "codex": 93801
       },
       "conditional_ceiling_bytes": {
         "claude": 48918,
@@ -111,7 +111,7 @@
         "from-issue/delegated-owner.md": "only the owner delegated at the direct Phase-5 rollover reads it"
       },
       "ceiling_bytes": {
-        "claude": 175965
+        "claude": 174912
       },
       "conditional_ceiling_bytes": {
         "claude": 153646
@@ -226,8 +226,8 @@
         "from-issue/rollover.md": "the transfer gate and the earlier controller's stop run in the controller; this owner receives the continuation"
       },
       "ceiling_bytes": {
-        "claude": 172690,
-        "codex": 172690
+        "claude": 171632,
+        "codex": 171632
       },
       "conditional_ceiling_bytes": {
         "claude": 135746,
@@ -1043,6 +1043,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 545184,
+  "corpus_ceiling_bytes": 544137,
   "description_ceiling_bytes": 3034
 }

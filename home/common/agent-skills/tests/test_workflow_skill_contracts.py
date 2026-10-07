@@ -2207,6 +2207,15 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertNotIn("--boundary ship-summary", rollover)
 
+    def test_auto_blocked_on_values_are_the_closed_set(self):
+        self.assertEqual(
+            sorted(set(re.findall(r"blocked_on[:=] ?(\w+)", normalized(self.auto)))),
+            ["human_gate"],
+        )
+
+    def test_auto_persists_a_terminal_result_with_finish(self):
+        self.assertIn("workflow-state finish", self.auto)
+
     def test_human_gate_carries_no_affirmative_bypass_instruction(self):
         # AC3 (per D14). The closed negative list under
         # `## Never route around a denial` is the file's ONLY home for these
@@ -2355,6 +2364,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # the parent that dispatches it (per D9).
         delegated = DELEGATED_OWNER.read_text(encoding="utf-8")
         self.assert_ordered(normalized(delegated), "check-launch", "workflow-state finish")
+        self.assertIn("/from-issue <num> --auto", delegated)
         self.assertNotIn("workflow-state suspend", delegated)
 
     def test_lifecycle_phase_one_paths_are_acquisition_mode_specific(self):
