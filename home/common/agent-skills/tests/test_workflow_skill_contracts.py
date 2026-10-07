@@ -5563,5 +5563,137 @@ class AcceptanceMapContractsTest(unittest.TestCase):
                 self.assertIn(phrase, check)
 
 
+class AcceptanceMapEvalGradingTest(unittest.TestCase):
+    """#274 AC3: fixture 001 is tagged and both evals grade its map (D6, D7, D10)."""
+
+    ASSERT_LIB = REPO_ROOT / "home/common/agent-skills/evals/assert-lib.sh"
+    FIXTURE = (REPO_ROOT
+               / "home/common/agent-skills/evals/fixture-repo/issues/001-well-specified.md")
+    EVALS = (
+        REPO_ROOT / "home/common/agent-skills/skills/from-issue/evals/evals.json",
+        REPO_ROOT / "home/common/agent-skills/skills/writing-plans/evals/evals.json",
+    )
+    ASSERT_NAME = "the plan's acceptance map has one row per issue criterion"
+    TAGGED = ("# Issue\n\n## Acceptance criteria\n\n"
+              "- [ ] [code] a — measured: t\n"
+              "- [ ] [evidence] b — measured: cmd, idle, ≤ 5 s\n"
+              "- [x] [human] c — measured: the user, on mbp\n\n"
+              "## Blocked by\n\nNone\n")
+    LEGACY = "# Issue\n\n## Acceptance criteria\n\n1. a\n   more of a\n2. b\n\n## Notes\n"
+    EMPTY = "# Issue\n\n## Acceptance criteria\n\n## Notes\n"
+
+    @staticmethod
+    def plan(*rows):
+        return ("# Plan\n\n## Task index\n\nTask 1 — x — f — full — [task-1.md](p.tasks/task-1.md)\n\n"
+                "## Acceptance map\n\n| AC | Kind | Task | Check |\n|----|------|------|-------|\n"
+                + "".join(f"| {ac} | {kind} | Task 1 | check |\n" for ac, kind in rows)
+                + "\n## Decisions\n")
+
+    def covers(self, plan_text, issue_text=None, issue_path=None):
+        with tempfile.TemporaryDirectory() as temporary:
+            plan_path = Path(temporary) / "plan.md"
+            plan_path.write_text(plan_text, encoding="utf-8")
+            if issue_path is None:
+                issue_path = Path(temporary) / "issue.md"
+                issue_path.write_text(issue_text, encoding="utf-8")
+            return subprocess.run(
+                ["bash", "-c", 'source "$0"; acceptance_map_covers "$1" "$2"',
+                 str(self.ASSERT_LIB), str(plan_path), str(issue_path)],
+                check=False, capture_output=True, text=True)
+
+    def test_a_conforming_tagged_map_passes(self):
+        result = self.covers(self.plan(("AC1", "code"), ("AC2", "evidence"), ("AC3", "human")),
+                             self.TAGGED)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_each_structural_gap_fails_with_a_reason(self):
+        cases = {
+            "missing row": (("AC1", "code"), ("AC2", "evidence")),
+            "duplicate row": (("AC1", "code"), ("AC1", "code"), ("AC2", "evidence"),
+                              ("AC3", "human")),
+            "out of order": (("AC2", "evidence"), ("AC1", "code"), ("AC3", "human")),
+            "kind contradicts tag": (("AC1", "evidence"), ("AC2", "evidence"),
+                                     ("AC3", "human")),
+            "tagged kind reclassified": (("AC1", "code (classified)"), ("AC2", "evidence"),
+                                         ("AC3", "human")),
+        }
+        for name, rows in cases.items():
+            with self.subTest(case=name):
+                result = self.covers(self.plan(*rows), self.TAGGED)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(result.stdout.strip(), "a failing helper names its reason")
+
+    def test_legacy_numbered_criteria_need_a_classified_kind(self):
+        good = self.covers(self.plan(("AC1", "code (classified)"), ("AC2", "human (classified)")),
+                           self.LEGACY)
+        self.assertEqual(good.returncode, 0, good.stdout)
+        bare = self.covers(self.plan(("AC1", "code"), ("AC2", "human (classified)")),
+                           self.LEGACY)
+        self.assertNotEqual(bare.returncode, 0)
+
+    def test_no_criteria_pass_only_on_the_none_line(self):
+        none = "# Plan\n\n## Acceptance map\n\nNone — no acceptance criteria.\n"
+        self.assertEqual(self.covers(none, self.EMPTY).returncode, 0)
+        self.assertNotEqual(self.covers("# Plan\n\n## Acceptance map\n", self.EMPTY).returncode, 0)
+        self.assertNotEqual(self.covers("# Plan\n\n## Task index\n", self.TAGGED).returncode, 0)
+
+    def test_fixture_001_has_seven_tagged_code_criteria_graded_by_the_helper(self):
+        text = self.FIXTURE.read_text(encoding="utf-8")
+        section = text[text.index("## Acceptance criteria\n"):]
+        section = section[:section.index("\n## ", 1)]
+        items = [line for line in section.splitlines()
+                 if re.match(r"^(- \[[ xX]\] |[0-9]+\. )", line)]
+        self.assertEqual(len(items), 7)
+        for line in items:
+            with self.subTest(line=line):
+                self.assertRegex(
+                    line, r"^- \[ \] \[code\] \S.* — measured: .*tests/test_cli\.py$")
+        result = self.covers(self.plan(*((f"AC{n}", "code") for n in range(1, 8))),
+                             issue_path=self.FIXTURE)
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_both_fixture_001_evals_call_the_helper(self):
+        for path in self.EVALS:
+            with self.subTest(evals=path.parent.parent.name):
+                case = next(item for item in json.loads(path.read_text(encoding="utf-8"))["evals"]
+                            if item["id"] == 1)
+                shells = [item["shell"] for item in case["asserts"]
+                          if item["name"] == self.ASSERT_NAME]
+                self.assertEqual(len(shells), 1)
+                self.assertIn("acceptance_map_covers", shells[0])
+                self.assertIn('"$REPO/issues/001-well-specified.md"', shells[0])
+
+    def test_both_eval_assert_shells_grade_a_plan_under_harness_paths(self):
+        # run-eval.sh exports PLAN_DIR as the resolver's ABSOLUTE path under
+        # $REPO and runs each shell as `cd $REPO && bash -c "source lib; …"`;
+        # from-issue's plan lands in the worktree at the same relative suffix.
+        full = self.plan(*((f"AC{n}", "code") for n in range(1, 8)))
+        short = self.plan(*((f"AC{n}", "code") for n in range(1, 7)))
+        for path in self.EVALS:
+            case = next(item for item in json.loads(path.read_text(encoding="utf-8"))["evals"]
+                        if item["id"] == 1)
+            shell = next(item["shell"] for item in case["asserts"]
+                         if item["name"] == self.ASSERT_NAME)
+            for label, text, passes in (("complete", full, True), ("missing row", short, False)):
+                with self.subTest(evals=path.parent.parent.name, plan=label), \
+                        tempfile.TemporaryDirectory() as temporary:
+                    repo = Path(temporary) / "repo"
+                    worktree = Path(temporary) / "wt"
+                    plan_dir = repo / ".agents/artifacts/plans"
+                    (repo / "issues").mkdir(parents=True)
+                    (repo / "issues/001-well-specified.md").write_text(
+                        self.FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
+                    owner = (worktree if "from-issue" in str(path) else repo)
+                    (owner / ".agents/artifacts/plans").mkdir(parents=True)
+                    (owner / ".agents/artifacts/plans/plan.md").write_text(text, encoding="utf-8")
+                    env = dict(os.environ, REPO=str(repo), WT=str(worktree),
+                               PLAN_DIR=str(plan_dir))
+                    result = subprocess.run(
+                        ["bash", "-c", f"source '{self.ASSERT_LIB}'; {shell}"],
+                        cwd=repo, env=env, check=False, capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, passes,
+                                     result.stdout + result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
