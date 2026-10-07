@@ -24,20 +24,58 @@ sourced) and prints PASS/FAIL per assert plus a verdict. Non-zero exit on failur
 existing file still works) — the runner prints the prompt and the `expected_output`. Grade
 by pasting the prompt into a session and reading the transcript against it.
 
-## Evals exercise the DEPLOYED skills
+## Two modes: deployed and working tree
 
-The sandboxed `claude -p` reads skills from `~/.claude/skills` — the store links
-from the last `just switch`, not this working tree (user-level skills shadow
-project-level copies of the same name, so injecting the working tree into the
-sandbox does not work). Editing a skill therefore means: commit, `just switch`,
-then run the eval. A failed parity run is one `git revert` + re-switch away from
-the previous behavior.
+**Deployed (the default).** The sandboxed `claude -p` reads skills from `~/.claude/skills`
+- the store links from the last `just switch`, not this working tree (user-level skills
+shadow project-level copies of the same name, so injecting the working tree into the
+sandbox does not work). Editing a skill therefore means: commit, `just switch`, then run
+the eval. A failed parity run is one `git revert` + re-switch away from the previous
+behavior. The row records `tree: "deployed"` with `tree_rev` and `tree_dirty` null.
+
+**Working tree.** `EVAL_TREE=. just evals from-issue 1` evaluates a checkout without a
+switch. The runner resolves the eval from that checkout's two skill roots, then, for a
+pipeline eval, builds a temporary root `${TMPDIR:-/tmp}/run-eval-tree.XXXXXX` holding:
+
+- `config/`, exported as `CLAUDE_CONFIG_DIR` for the probe and the run: `skills/<name>/`
+  real directories whose files are symlinks to the tree's files (a name in both skill
+  roots is an error), `CLAUDE.md` (a copy of the tree's `AGENTS.md`), `agents/` (copies of
+  the tree's agent files) and `settings.json` (`EVAL_SETTINGS` without its
+  `enabledPlugins` and `extraKnownMarketplaces` keys);
+- `bin/`, put first on `PATH`: one shim per command in the tree's `lib/agent-tools.nix`
+  table, each running `python3 -P -m agent_tools.<module>` from the tree's `python/`, so
+  `resolve-project`, `workflow-state` and the rest are the tree's code, not the installed
+  ones.
+
+The temp root is removed on every exit path: a normal end, an error, a non-zero claude
+exit, Ctrl-C (exit 130) and SIGTERM (exit 143). A plan-only eval creates none of it.
+
+Tree mode does not cover the legacy flat helpers (`workflow-state`, `artifact-budget`,
+`sdd-workspace`), `~/.agents/standards` and `~/.agents/share`: those still come from the
+deployed home, as do the absolute `~/.agents/bin/...` paths some skills name. The
+`impeccable` and plugin skills are omitted (the settings copy drops `enabledPlugins` and
+`extraKnownMarketplaces`). Helper changes are outside what this mode measures.
+
+**One-time login.** A temp config dir has no stored login, so the runner probes
+`claude auth status` against it and refuses (exit 2, before any sandbox or row) if that
+fails. Run `claude setup-token` once and export the printed token as
+`CLAUDE_CODE_OAUTH_TOKEN`; the temp config dir picks it up.
+
+`EVAL_SETTINGS` names the settings file copied into the config dir. It defaults to
+`$HOME/.claude/settings.json` and is read only in tree mode; a missing or non-JSON file
+is an error.
+
+A row from tree mode records `tree` (the checkout's absolute path), `tree_rev` (its
+`HEAD`) and `tree_dirty` (whether `git status --porcelain` shows changes under the
+instruction paths: both skill roots, `home/common/claude-code/agents` and
+`home/common/agent-guidance/AGENTS.md`, ignoring each skill's own `evals/`).
 
 ## Cheap-first
 
-Pipeline prompts stop the flow after Phase 5 and grade the artifacts — spec, plan, worktree
-placement, decision logs. The implementation never runs. A full end-to-end run costs an
-order of magnitude more and is reserved for risky landings.
+The `from-issue` pipeline cases stop the flow after Phase 5 and grade the artifacts - spec,
+plan, worktree placement, decision logs. The implementation never runs. A full end-to-end
+run costs an order of magnitude more and is reserved for risky landings. A pipeline case
+of another skill names its own stop in its prompt.
 
 ## Conventions
 
@@ -61,17 +99,27 @@ order of magnitude more and is reserved for risky landings.
 
 ## Results persistence
 
-Every run appends one JSON line per trial to `results/results.jsonl` (gitignored):
-timestamp, skill, eval id/name, mode, model, trial number, verdict, per-assert
-pass/fail, wall seconds, claude exit code, sandbox path, and the `EVAL_MAX_USD`
-ceiling when one was set (the harness has no per-run actual-cost source — `claude -p
---output-format text` does not report spend, so only the ceiling is recorded).
-Plan-only runs record a `PRINTED` verdict. With `EVAL_TRIALS=N` (N>1) the runner
-reruns the eval in a fresh sandbox per trial and prints a summary — pass rate and
-nearest-rank p50/p90 wall time — so repeatability comparisons (before/after a skill
-edit) are one `jq` away:
+Every run appends one JSON line per trial to `results/results.jsonl`, which is committed
+and append-only (the rest of `results/` is gitignored). Fields: timestamp, skill, eval
+id/name, mode, model, trial number, verdict, per-assert pass/fail, wall seconds, claude
+exit code, sandbox path, the `EVAL_MAX_USD` ceiling when one was set, the tree fields
+above, and the usage the claude run reported (`--output-format json`):
+
+- `input_tokens` = `uncached_input_tokens` + `cache_read_input_tokens` +
+  `cache_creation_input_tokens`, each summed over every model in the result's
+  `modelUsage`;
+- `output_tokens`, `cost_usd`, `num_turns` and `models` (the sorted model ids used).
+
+All of those are `null` for a plan-only run (verdict `PRINTED`), and for a run whose
+stdout held no single parseable result object (a timeout or a crash), which still
+writes its row. `result.json` and `stderr.txt` stay in the sandbox beside `output.txt`,
+the transcript the asserts grep: the result text followed by claude's stderr.
+
+With `EVAL_TRIALS=N` (N>1) the runner reruns the eval in a fresh sandbox per trial and
+prints a summary - pass rate and nearest-rank p50/p90 wall time. Comparing runs before and
+after a skill edit is one `jq` away:
 
 ```sh
-jq -r 'select(.skill=="from-issue" and .id==1) | [.ts,.verdict,.wall_s] | @tsv' \
+jq -r 'select(.skill=="from-issue" and .id==1 and .input_tokens != null) | [.ts, .model, (.tree_rev // "deployed"), .verdict, .wall_s, .input_tokens] | @tsv' \
   results/results.jsonl
 ```

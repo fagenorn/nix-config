@@ -14,13 +14,21 @@
 # then grade the artifacts with the eval's scripted asserts. Plan-only evals just print
 # the prompt and the expected output for manual or CI grading.
 #
-# Every run appends one JSON line per trial to results/results.jsonl (gitignored):
-# skill, id, per-assert pass/fail, wall seconds, verdict, model, budget ceiling.
+# Every run appends one JSON line per trial to results/results.jsonl, which is tracked
+# and append-only: skill, id, per-assert pass/fail, wall seconds, verdict, model, budget
+# ceiling, which tree ran (deployed or a checkout path, its revision and whether its
+# instruction files were dirty), and the token and cost totals the claude run reported.
 #
 # Env: EVAL_MODEL (default sonnet), EVAL_TIMEOUT seconds (default 2700),
 #      EVAL_MAX_USD (optional spend ceiling), EVAL_TRIALS repeat count (default 1;
 #      >1 reruns the same eval in fresh sandboxes and prints pass rate + p50/p90
 #      wall time so run-to-run comparisons are possible).
+#      EVAL_TREE  a checkout to evaluate instead of the deployed skills. A pipeline run
+#                 then gets a temporary CLAUDE_CONFIG_DIR built from that checkout, and
+#                 shims for its agent_tools commands ahead on PATH; both are removed on
+#                 every exit path.
+#      EVAL_SETTINGS  the settings file copied (minus plugin keys) into that config dir
+#                 (default $HOME/.claude/settings.json). Used only with EVAL_TREE.
 
 set -uo pipefail
 
@@ -31,6 +39,9 @@ ASSERT_LIB="$HERE/assert-lib.sh"
 SKILL_ROOTS=("$HERE/../skills" "$HERE/../../claude-code/skills")
 RESULTS_DIR="$HERE/results"
 RESULTS_FILE="$RESULTS_DIR/results.jsonl"
+TREE_LABEL=deployed
+TREE_REV=""
+TREE_DIRTY=""
 
 EVAL_MODEL=${EVAL_MODEL:-sonnet}
 EVAL_TIMEOUT=${EVAL_TIMEOUT:-2700}
@@ -49,6 +60,28 @@ case "$EVAL_TRIALS" in
   0) die "EVAL_TRIALS must be >= 1" ;;
 esac
 
+if [ -n "${EVAL_TREE:-}" ]; then
+  [ -d "$EVAL_TREE" ] || die "EVAL_TREE is not a directory: $EVAL_TREE"
+  EVAL_TREE=$(cd "$EVAL_TREE" && pwd -P)
+  for member in home/common/agent-skills/skills home/common/claude-code/skills \
+    home/common/agent-guidance/AGENTS.md home/common/claude-code/agents \
+    python/agent_tools lib/agent-tools.nix; do
+    [ -e "$EVAL_TREE/$member" ] || die "EVAL_TREE lacks $member: $EVAL_TREE"
+  done
+  SKILL_ROOTS=("$EVAL_TREE/home/common/agent-skills/skills" "$EVAL_TREE/home/common/claude-code/skills")
+  TREE_LABEL=$EVAL_TREE
+  TREE_REV=$(git -C "$EVAL_TREE" rev-parse HEAD) || die "EVAL_TREE is not a git checkout: $EVAL_TREE"
+  if [ -n "$(git -C "$EVAL_TREE" status --porcelain -- \
+    home/common/agent-skills/skills home/common/claude-code/skills \
+    home/common/claude-code/agents home/common/agent-guidance/AGENTS.md \
+    ':(exclude)home/common/agent-skills/skills/*/evals/*' \
+    ':(exclude)home/common/claude-code/skills/*/evals/*')" ]; then
+    TREE_DIRTY=true
+  else
+    TREE_DIRTY=false
+  fi
+fi
+
 EVALS_FILE=""
 for skill_root in "${SKILL_ROOTS[@]}"; do
   candidate="$skill_root/$SKILL/evals/evals.json"
@@ -66,7 +99,25 @@ PROMPT=$(jq -r '.prompt' <<<"$EVAL")
 EXPECTED_TODAY=$(jq -r '.expected_today // "pass"' <<<"$EVAL")
 NOTE=$(jq -r '.note // ""' <<<"$EVAL")
 
-# record_result <trial> <verdict> <passed> <failed> <total> <wall_s> <claude_exit> <workdir> <asserts-json>
+# usage_json <result-file> — print exactly one compact JSON object: the token and cost
+# totals of the claude result, or {} when there is no single parseable result object.
+# input_tokens is the sum of uncached, cache-read and cache-creation input, over every
+# model in modelUsage. Slurping makes an empty file yield [] (so {}), and a parse error
+# prints nothing before the fallback.
+usage_json() {
+  jq -cs 'if length == 1 and (.[0] | type) == "object" and (.[0].modelUsage | type) == "object" then
+      .[0] | [.modelUsage[]] as $m
+      | {uncached_input_tokens: ($m | map(.inputTokens // 0) | add // 0),
+         cache_read_input_tokens: ($m | map(.cacheReadInputTokens // 0) | add // 0),
+         cache_creation_input_tokens: ($m | map(.cacheCreationInputTokens // 0) | add // 0),
+         output_tokens: ($m | map(.outputTokens // 0) | add // 0),
+         cost_usd: .total_cost_usd, num_turns: .num_turns,
+         models: (.modelUsage | keys | sort)}
+      | .input_tokens = .uncached_input_tokens + .cache_read_input_tokens + .cache_creation_input_tokens
+    else {} end' "$1" 2>/dev/null || echo '{}'
+}
+
+# record_result <trial> <verdict> <passed> <failed> <total> <wall_s> <claude_exit> <workdir> <asserts-json> <usage-json>
 record_result() {
   mkdir -p "$RESULTS_DIR"
   jq -cn \
@@ -76,13 +127,20 @@ record_result() {
     --arg verdict "$2" --argjson passed "$3" --argjson failed "$4" --argjson total "$5" \
     --argjson wall_s "$6" --arg claude_exit "$7" --arg workdir "$8" --argjson asserts "$9" \
     --arg max_usd "${EVAL_MAX_USD:-}" \
+    --arg tree "$TREE_LABEL" --arg tree_rev "$TREE_REV" --arg tree_dirty "$TREE_DIRTY" \
+    --argjson usage "${10}" \
     '{ts:$ts, skill:$skill, id:$id, name:$name, mode:$mode, model:$model,
       trial:$trial, trials:$trials, verdict:$verdict,
       passed:$passed, failed:$failed, total:$total, wall_s:$wall_s,
       claude_exit:($claude_exit | if . == "" then null else tonumber end),
       workdir:($workdir | if . == "" then null else . end),
       eval_max_usd:($max_usd | if . == "" then null else tonumber end),
-      asserts:$asserts}' >>"$RESULTS_FILE"
+      asserts:$asserts,
+      tree:$tree, tree_rev:($tree_rev | if . == "" then null else . end),
+      tree_dirty:($tree_dirty | if . == "" then null else . == "true" end)}
+    + ({input_tokens:null, uncached_input_tokens:null, cache_read_input_tokens:null,
+        cache_creation_input_tokens:null, output_tokens:null, cost_usd:null,
+        num_turns:null, models:null} + $usage)' >>"$RESULTS_FILE"
 }
 
 echo "=== $SKILL eval $ID: $NAME ($MODE) ==="
@@ -97,13 +155,67 @@ if [ "$MODE" = "plan-only" ]; then
   echo
   echo "Plan-only eval: graded by reading the transcript against the expected output."
   echo "Paste the prompt into a session on a repo matching this skill's assumptions."
-  record_result 1 "PRINTED" 0 0 0 0 "" "" "[]"
+  record_result 1 "PRINTED" 0 0 0 0 "" "" "[]" '{}'
   exit 0
 fi
 
 [ "$MODE" = "pipeline" ] || die "unknown mode '$MODE'"
 command -v claude >/dev/null || die "claude CLI is required"
 command -v git >/dev/null || die "git is required"
+
+# prepare_tree_env — build the temporary CLAUDE_CONFIG_DIR and command shims for EVAL_TREE.
+# Runs in the main shell, so a die here exits the runner and the EXIT trap removes the root.
+prepare_tree_env() {
+  local settings=${EVAL_SETTINGS:-$HOME/.claude/settings.json}
+  [ -f "$settings" ] || die "settings file not found: $settings (set EVAL_SETTINGS)"
+
+  TREE_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/run-eval-tree.XXXXXX") || die "mktemp failed"
+  trap 'rm -rf -- "$TREE_ROOT"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  TREE_ROOT=$(cd "$TREE_ROOT" && pwd -P)
+
+  local CONFIG="$TREE_ROOT/config" SHIM_BIN="$TREE_ROOT/bin"
+  mkdir -p "$CONFIG/skills" "$CONFIG/agents" "$SHIM_BIN"
+
+  local root dir name rel
+  for root in "${SKILL_ROOTS[@]}"; do
+    for dir in "$root"/*/; do
+      [ -d "$dir" ] || continue
+      name=$(basename "$dir")
+      [ -e "$CONFIG/skills/$name" ] && die "skill '$name' exists in both skill roots"
+      mkdir "$CONFIG/skills/$name"
+      while IFS= read -r rel; do
+        mkdir -p "$(dirname "$CONFIG/skills/$name/$rel")"
+        ln -s "$root/$name/$rel" "$CONFIG/skills/$name/$rel"
+      done < <(cd "$root/$name" && find . -type f ! -path '*/__pycache__/*' | sed 's|^\./||')
+    done
+  done
+
+  cp "$EVAL_TREE/home/common/agent-guidance/AGENTS.md" "$CONFIG/CLAUDE.md"
+  cp "$EVAL_TREE"/home/common/claude-code/agents/*.md "$CONFIG/agents/"
+  jq 'del(.enabledPlugins, .extraKnownMarketplaces)' "$settings" >"$CONFIG/settings.json" ||
+    die "settings file is not JSON: $settings"
+
+  local commands cmd
+  commands=$(awk '/^[[:space:]]*commands = \[/ {inside = 1; next} inside && /\];/ {exit} inside {gsub(/[" \t]/, ""); if ($0 != "") print}' "$EVAL_TREE/lib/agent-tools.nix")
+  [ -n "$commands" ] || die "no commands found in $EVAL_TREE/lib/agent-tools.nix"
+  while IFS= read -r cmd; do
+    {
+      echo '#!/usr/bin/env bash'
+      echo 'unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE'
+      printf 'PYTHONPATH=%q exec python3 -P -m agent_tools.%s "$@"\n' "$EVAL_TREE/python" "${cmd//-/_}"
+    } >"$SHIM_BIN/$cmd"
+    chmod +x "$SHIM_BIN/$cmd"
+  done <<<"$commands"
+
+  CLAUDE_CONFIG_DIR="$CONFIG" claude auth status >/dev/null 2>&1 ||
+    die "claude is not logged in for the temporary config dir. One-time step: run \`claude setup-token\` and export the printed token as CLAUDE_CODE_OAUTH_TOKEN, then rerun."
+
+  export CLAUDE_CONFIG_DIR="$CONFIG"
+  export PATH="$SHIM_BIN:$PATH"
+}
+[ -n "${EVAL_TREE:-}" ] && prepare_tree_env
 command -v resolve-project >/dev/null || die "resolve-project is required"
 
 # run_trial <trial-number> — build a fresh sandbox, run the eval, grade it.
@@ -180,7 +292,7 @@ run_trial() {
     -p "$PROMPT"
     --model "$EVAL_MODEL"
     --dangerously-skip-permissions
-    --output-format text
+    --output-format json
     --no-session-persistence
     --add-dir "$WORK"
   )
@@ -190,8 +302,16 @@ run_trial() {
   echo "running: claude -p --model $EVAL_MODEL (timeout ${EVAL_TIMEOUT}s)"
   local start CLAUDE_EXIT
   start=$(date +%s)
-  ( cd "$REPO" && timeout "$EVAL_TIMEOUT" claude "${claude_args[@]}" ) 2>&1 | tee "$OUT"
-  CLAUDE_EXIT=${PIPESTATUS[0]}
+  ( cd "$REPO" && timeout "$EVAL_TIMEOUT" claude "${claude_args[@]}" ) >"$WORK/result.json" 2>"$WORK/stderr.txt"
+  CLAUDE_EXIT=$?
+  # The transcript the asserts grep: the result text (raw stdout when no result object
+  # parsed), then claude's stderr.
+  if ! jq -er 'if type == "object" and (.result | type) == "string" then .result else error("no result") end' \
+    "$WORK/result.json" >"$OUT" 2>/dev/null; then
+    cat "$WORK/result.json" >"$OUT"
+  fi
+  cat "$WORK/stderr.txt" >>"$OUT"
+  cat "$OUT"
   TRIAL_WALL_S=$(( $(date +%s) - start ))
   echo "claude exited $CLAUDE_EXIT after ${TRIAL_WALL_S}s"
   [ "$CLAUDE_EXIT" = 124 ] && echo "NOTE: the run hit EVAL_TIMEOUT — asserts below grade a truncated run"
@@ -256,7 +376,7 @@ run_trial() {
   fi
 
   record_result "$trial" "$TRIAL_VERDICT" "$((total - failed))" "$failed" "$total" \
-    "$TRIAL_WALL_S" "$CLAUDE_EXIT" "$WORK" "$asserts_json"
+    "$TRIAL_WALL_S" "$CLAUDE_EXIT" "$WORK" "$asserts_json" "$(usage_json "$WORK/result.json")"
 }
 
 FAIL_TRIALS=0

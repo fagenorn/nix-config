@@ -131,6 +131,7 @@ agent-workflow-tests:
     tests/test_promotion_demo.py \
     tests/test_context_map_lint.py \
     tests/test_branch_protection.py
+  bash home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
 # Validate every explicit pipeline dispatch and print the four-family demo trace.
 agent-model-matrix:

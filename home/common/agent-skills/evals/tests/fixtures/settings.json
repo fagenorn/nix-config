@@ -1,0 +1,7 @@
+{
+  "env": { "EVAL_FIXTURE": "1" },
+  "hooks": { "PreToolUse": [] },
+  "permissions": { "allow": [], "defaultMode": "auto" },
+  "enabledPlugins": { "example@market": true },
+  "extraKnownMarketplaces": { "market": { "source": { "source": "directory", "path": "/nonexistent" } } }
+}

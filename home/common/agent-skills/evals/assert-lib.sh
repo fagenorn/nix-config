@@ -8,7 +8,8 @@
 #   WORK      the eval's temp dir
 #   REPO      the fixture checkout (base branch, `main`)
 #   ORIGIN    the bare remote
-#   OUT       file holding everything `claude -p` printed
+#   OUT       the run's transcript: the result text (or raw stdout when no result
+#             object parsed) followed by claude's stderr
 #   WT        first worktree other than REPO ("" when none was created)
 #   WT_COUNT  how many worktrees exist besides REPO
 #   PRE_WT    worktree the setup hook pre-created ("" when the eval has no setup)
