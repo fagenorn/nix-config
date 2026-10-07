@@ -35,7 +35,7 @@ Counterpart to `to-issues`. Take one tracker issue from triage to merged code by
   the file this index names for that phase, and the phase's sub-skill (`sdd` for Phase 6,
   `ship-issue` for Phase 7).
 - **`rollover.md`** — the direct autonomous controller's Phase-5 transfer and its stop afterwards.
-- **`delegated-owner.md`** — the owner delegated at that rollover; read it before any resume pack.
+- **`delegated-owner.md`** — the rollover's delegated owner; read it first, before any resume pack.
 - **`investigate.md`** — read at Phase 0.
 - **`decision-ledger.md`** — read before writing the first ledger row.
 - **`standards-review.md`** — read at Phase 5.
@@ -171,8 +171,8 @@ your own turn while the re-engaged child is live; the host wakes you
 with its next notification. Never answer an interim result with a text-only reply, never suspend for it (it
 is not an `external` wait), and never dispatch a replacement or stop the child.
 A registered lifecycle worker stays registered under its existing worker id: an
-interim result is not its `returned` event. If the message cannot be delivered, the child is
-one you cannot wait for: follow from-issue's **Writing workers** route
+interim result is not its `returned` event, and re-engagement is not a resume, so it registers nothing new. If the message cannot be delivered, the child is
+one you cannot wait for: follow **Writing workers** route
 (task-stop, then release `--event stopped`), then this skill's ordinary handling
 of a lost child; that is the one case that may lead to a fresh dispatch. Only
 the child's final hand-back counts as its result.
@@ -195,7 +195,7 @@ corresponding `workflow-state progress` call.
 
 1. **`continue`** — proceed in this conversation.
 2. **`fresh_start`** — start a fresh conversation from committed artifacts; do not carry conversational state.
-3. **`handoff`** — first release every worker this owner registered (see **Writing workers**), then run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` (see **Self-reap**). Beneath `ledger_repo_root`, create only the run's non-symlink `handoffs/` directory if missing; never pre-create the destination leaf (the `handoff` skill owns safe first-file creation). Invoke `handoff` with a destination beneath `.superpowers/workflows/<run-id>/handoffs/`, repeat `workflow-state progress` with `--handoff-path <exact-path>` to finalize `handed_off` on the same attempt, persist the handoff, and stop. The relaunch comes only from the acquisition's own envelope (`control`'s returned `resume` envelope, or the persisted `direct-owner` owner envelope for a direct autonomous restart).
+3. **`handoff`** — first release every worker this owner registered (see **Writing workers**), then run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` (see **Self-reap**). Beneath `ledger_repo_root`, create only the run's non-symlink `handoffs/` directory if missing; never pre-create the destination leaf. Invoke `handoff` with a destination beneath `.superpowers/workflows/<run-id>/handoffs/`, repeat `workflow-state progress` with `--handoff-path <exact-path>` to finalize `handed_off` on the same attempt, persist the handoff, and stop. The relaunch comes only from the acquisition's own envelope (`control`'s returned `resume` envelope, or the persisted `direct-owner` owner envelope for a direct autonomous restart).
 4. **`delegate`** —
 <!-- agent-dispatch: id=from-issue-phase-delegate role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") delegates the entire remainder to a fresh issue owner with the lifecycle envelope and artifact paths.
@@ -288,7 +288,7 @@ That line is the last thing you emit — stop there, make no `finish` call, and
 emit no result JSON. Suspension is NOT a terminal return.
 
 ## Phase 0 — Investigate
-Build a shared mental model *before* the brainstorm; no files yet. Read `investigate.md`: run its PR pre-flight (skipped when the retained tracker capability is unsupported), then its worktree pre-flight, then investigate and post the note. Several issues bundled → stop, suggest `to-issues`. Question or duplicate → report and stop. With lifecycle identity, every Phase-0 early stop uses the terminal return procedure: a `terminal_failed` summary carrying the `stopped` or `failed` row through `workflow-state finish` before notifying the caller. **Open questions is mandatory even in `--auto`** — self-answering happens in the spec's `## Decision ledger`; with nothing open, write "None — Phase 2 will surface anything missed". **Mechanical-only shortcut:** declare `mechanical-only` only when the **entire** change fits the mechanical lane (§Risk lanes); Phase 5 then self-grades against `REVIEW-CONTRACT.md` and Phase 6 dispatches one mechanic+reviewer pair for the whole change. Every phase still runs; skip manufactured TDD framing.
+Build a shared mental model *before* the brainstorm; no files yet. Read `investigate.md`: run its PR pre-flight, then its worktree pre-flight, then investigate and post the note (when the retained tracker capability is unsupported, skip the issue fetch and the PR pre-flight). Several issues bundled → stop, suggest `to-issues`. Question or duplicate → report and stop. With lifecycle identity, every Phase-0 early stop uses the terminal return procedure: a `terminal_failed` summary carrying the `stopped` or `failed` row through `workflow-state finish` before notifying the caller. **Open questions is mandatory even in `--auto`** — self-answering happens in the spec's `## Decision ledger`; with nothing open, write "None — Phase 2 will surface anything missed". **Mechanical-only shortcut:** declare `mechanical-only` only when the **entire** change fits the mechanical lane (§Risk lanes); Phase 5 then self-grades against `REVIEW-CONTRACT.md` and Phase 6 dispatches one mechanic+reviewer pair for the whole change. Every phase still runs; skip manufactured TDD framing.
 
 **CHECKPOINT** — Record the restatement and scope. Every open question needs a
 disposition: an answer, "defer to brainstorm", or "agent-choose". Apply the
@@ -366,7 +366,7 @@ final-review head only when `review_state` is `clean`.
 <!-- agent-dispatch: id=from-issue-ship-owner role=ship-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") launches `ship-issue` as a fresh ship owner, not inline via `Skill`. By now this conversation carries every artifact of the flow; a fresh ~10k subagent returns one summary instead of ~100 turns over a 200–300k prefix.
 
-Read `ship-handoff.md` for the exact subagent prompt (with lifecycle identity the `ship-handoff/v2` candidate built from the owner object; ledger-free the legacy handoff), the inline fallback when `ship-issue` is absent, and the `## Remainder owner prompt` this same site launches for a validated `delivery_remainder` object; the remainder owner writes its own `finish`, so relay its validated reply unchanged and skip the terminal write.
+Read `ship-handoff.md` for the exact subagent prompt (with lifecycle identity the `ship-handoff/v2` candidate; ledger-free the legacy handoff), the inline fallback when `ship-issue` is absent, and the `## Remainder owner prompt` this same site launches for a validated `delivery_remainder` object; the remainder owner writes its own `finish`, so relay its validated reply unchanged and skip the terminal write.
 
 From-issue owns the terminal durable write; handle the ship report as `ship-handoff.md` § Ship report handling says. Apply the same procedure to any Phase-6 execution failure or Phase-7 stopped/failed report.
 
@@ -380,4 +380,4 @@ From-issue owns the terminal durable write; handle the ship report as `ship-hand
   launch-guard denial stops the action and is never routed around.
 - Append `Co-Authored-By` when retained `bindings.vcs.commit.co_authored_by` is true. **Never disable GPG signing defensively** — no `-c commit.gpgsign=false`, no `--no-gpg-sign`; surface signing failures.
 - **PR bodies, comments, and subagent prompts use full URLs, not bare `#N`**; use retained `bindings.tracker.repo_slug`.
-- If a phase reveals the previous one was wrong, back up to that phase and redo it. Don't paper over it.
+- If a phase reveals the previous one was wrong, back up to that phase and redo it.
