@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -32,6 +33,24 @@ UNMARKED_ENV = {key: value for key, value in os.environ.items() if key != MARKER
 MARKER = "run-x/1:1:1/" + "a" * 32
 # darwin hides an Apple platform binary's environment (D15): a marker proof needs this.
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(300)"]
+# D16: on SIGTERM, fork a child (in this group, or one that calls setsid) and exit.
+# argv: <base path> <"group" | "setsid">. Writes its own pid to <base>.ready once
+# armed, and the child's pid to <base> before it exits.
+FORK_ON_TERM = """
+import os, signal, subprocess, sys, time
+base, variant = sys.argv[1], sys.argv[2]
+CHILD = ("import os, time; " + ("os.setsid(); " if variant == "setsid" else "")
+         + "time.sleep(300)")
+def fork_and_exit(signum, frame):
+    child = subprocess.Popen([sys.executable, "-c", CHILD])
+    open(base + ".tmp", "w").write(str(child.pid))
+    os.replace(base + ".tmp", base)
+    os._exit(0)
+signal.signal(signal.SIGTERM, fork_and_exit)
+open(base + ".ready.tmp", "w").write(str(os.getpid()))
+os.replace(base + ".ready.tmp", base + ".ready")
+time.sleep(300)
+"""
 
 
 def is_dead(pid):
@@ -163,15 +182,48 @@ class ProcessSeamTest(unittest.TestCase):
         self.assertEqual(result, (1, frozenset({4242424})))
         self.assertEqual(sent, [(4242424, signal.SIGTERM), (4242424, signal.SIGKILL)])
 
-    def test_a_reused_pid_is_not_sent_sigkill(self):  # D11
+    def group_changer(self, *, is_marked):
         tables = iter([{4242424: Proc(4242424, 1, 4242424, False)}]
                       + [{4242424: Proc(4242424, 1, 77, False)}] * 1000)
         sent = []
+        options = {} if is_marked is None else {"is_marked": is_marked}
         result = terminate([4242424], [], read_table=lambda: next(tables),
                            send=lambda pid, sig: sent.append((pid, sig)),
                            send_group=lambda pgid, sig: sent.append(("group", pgid, sig)),
-                           term_seconds=0.1, kill_seconds=0.1)
-        self.assertEqual((result, sent), ((1, frozenset()), [(4242424, signal.SIGTERM)]))
+                           term_seconds=0.1, kill_seconds=0.1, **options)
+        return result, sent
+
+    def test_a_reused_pid_is_not_sent_sigkill(self):  # D11, D16
+        # Genuine reuse: the pid moved to another group and no longer carries the marker.
+        for label, is_marked in (("no marker reader", None),
+                                 ("unmarked after the change", lambda pid: False)):
+            with self.subTest(case=label):
+                self.assertEqual(self.group_changer(is_marked=is_marked),
+                                 ((1, frozenset()), [(4242424, signal.SIGTERM)]))
+
+    def test_a_marked_target_that_changes_group_is_still_killed(self):  # D16
+        result, sent = self.group_changer(is_marked=lambda pid: pid == 4242424)
+        self.assertEqual(result, (1, frozenset({4242424})))
+        self.assertEqual(sent, [(4242424, signal.SIGTERM), (4242424, signal.SIGKILL)])
+
+    def test_a_child_forked_on_sigterm_is_killed_too(self):  # D16
+        base_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        for variant in ("group", "setsid"):
+            with self.subTest(variant=variant):
+                base = base_dir / variant
+                parent = self.spawn([sys.executable, "-c", FORK_ON_TERM, str(base), variant],
+                                    marker=MARKER)
+                self.assertTrue(wait_until(Path(f"{base}.ready").exists))
+                if variant == "group":
+                    result = terminate([], [parent.pid], term_seconds=2.0)
+                else:
+                    result = terminate([parent.pid], [], term_seconds=2.0,
+                                       is_marked=lambda pid: read_marker(pid) == MARKER)
+                self.assertTrue(base.exists(), "the SIGTERM handler did not fork")
+                child = int(base.read_text())
+                self.addCleanup(kill_quietly, child)
+                self.assertEqual(result[1], frozenset())
+                self.assertTrue(wait_until(lambda: is_dead(child), 2.0), child)
 
     def test_a_target_gone_before_sigterm_is_not_counted(self):  # D14
         tables = iter([{4242424: Proc(4242424, 1, 4242424, False),
@@ -451,6 +503,20 @@ class ExecTest(ScopeHarness, unittest.TestCase):
         self.assertTrue(is_dead(pid))
         self.assertEqual(self.rows("14:1:1"), [])
 
+    def test_a_child_forked_on_sigterm_does_not_outlive_exec(self):  # D16
+        start = ("import os, subprocess, sys, time; "
+                 "subprocess.Popen([sys.executable, '-c', sys.argv[3], sys.argv[1], sys.argv[2]], "
+                 "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+                 "[time.sleep(0.05) for _ in iter(lambda: os.path.exists(sys.argv[1] + '.ready'), True)]")
+        for variant in ("group", "setsid"):
+            with self.subTest(variant=variant):
+                base = self.root / f"forked-{variant}"
+                done = self.exec_(sys.executable, "-c", start, str(base), variant, FORK_ON_TERM)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                (child,) = self.pid_from(base)
+                self.assertTrue(wait_until(lambda: is_dead(child), 2.0), child)
+                self.assertEqual(self.rows("14:1:1"), [])
+
     def test_an_ignored_signal_stays_ignored_in_the_command(self):
         probe = "import signal, sys; sys.exit(0 if signal.getsignal(signal.SIGHUP) is signal.SIG_IGN else 9)"
         done = subprocess.run(
@@ -575,6 +641,75 @@ class ReapTest(ScopeHarness, unittest.TestCase):
                            [{"action_id": "14:1:1", "signalled": 2}], [])
         self.assertTrue(wait_until(lambda: is_dead(leader), 2.0))
         self.assertTrue(wait_until(lambda: is_dead(member), 2.0))
+        self.assertFalse((self.registry / "14:1:1").exists())
+
+    def test_a_reap_kills_a_child_forked_on_sigterm(self):  # D16
+        for variant in ("group", "setsid"):
+            with self.subTest(variant=variant):
+                base = self.root / f"forked-{variant}"
+                supervisor = self.background_exec(sys.executable, "-c", FORK_ON_TERM,
+                                                  str(base), variant)
+                (leader,) = self.pid_from(Path(f"{base}.ready"))
+                self.assertTrue(wait_until(lambda: self.recorded_pgids("14:1:1") == [leader]))
+                supervisor.kill()
+                supervisor.wait(timeout=30)
+                reaped = self.scope(*self.reap_args("--action-id", "14:1:1"))
+                self.assertEqual(reaped.returncode, 0, reaped.stderr)
+                self.assertEqual([item["action_id"] for item in json.loads(reaped.stdout)["reaped"]],
+                                 ["14:1:1"])
+                (child,) = self.pid_from(base)
+                self.assertTrue(wait_until(lambda: is_dead(child), 2.0), child)
+                self.assertFalse((self.registry / "14:1:1").exists())
+
+    def racing_terminate(self, rounds):
+        """`terminate`, then, for the first `rounds` calls, an exec that registers after the snapshot."""
+        real, raced = launch_scope.terminate, []
+
+        def terminate(pids, groups, **options):
+            result = real(pids, groups, **options)
+            if len(raced) < rounds:
+                nonce = secrets.token_hex(16)
+                env = {**UNMARKED_ENV, MARKER_ENV: f"{self.run_id}/14:1:1/{nonce}"}
+                late = subprocess.Popen(SLEEPER, env=env, start_new_session=True)
+                self.addCleanup(late.wait)
+                self.addCleanup(kill_quietly, late.pid)
+                directory = self.registry / "14:1:1"
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / f"{nonce}.json").write_text(json.dumps(
+                    {"argv0": "sh", "nonce": nonce, "pgid": late.pid,
+                     "started_at": "2026-08-13T20:00:00Z"}))
+                self.assertTrue(wait_until(lambda: read_marker(late.pid) is not None))
+                raced.append((nonce, late.pid))
+            return result
+        return mock.patch.object(launch_scope, "terminate", terminate), raced
+
+    def reap_in_process(self):
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            return launch_scope.reap(str(self.root), self.run_id, action_id="14:1:1")
+
+    def test_an_exec_that_registers_mid_reap_is_reaped_in_a_second_round(self):  # D16
+        patch, raced = self.racing_terminate(rounds=1)
+        with patch:
+            status, report = self.reap_in_process()
+        self.assertEqual((status, report["skipped"]), (0, []), report)
+        ((_, late),) = raced
+        self.assertTrue(wait_until(lambda: is_dead(late), 2.0), late)
+        self.assertFalse((self.registry / "14:1:1").exists())
+
+    def test_a_registration_that_keeps_racing_the_reap_is_kept_for_the_next(self):  # D16
+        patch, raced = self.racing_terminate(rounds=99)
+        with patch:
+            status, report = self.reap_in_process()
+        self.assertEqual((status, report), (1, {"reaped": [], "skipped": [
+            {"action_id": "14:1:1", "reason": "processes_survived"}]}))
+        self.assertTrue(raced)
+        for nonce, late in raced:
+            self.assertTrue((self.registry / "14:1:1" / f"{nonce}.json").is_file(), nonce)
+        survivors = [late for _, late in raced if not is_dead(late)]
+        self.assertTrue(survivors)
+        self.assertEqual(self.reap_in_process()[0], 0)
+        for _, late in raced:
+            self.assertTrue(wait_until(lambda: is_dead(late), 2.0), late)
         self.assertFalse((self.registry / "14:1:1").exists())
 
     def test_a_sweep_leaves_the_current_launch_alone_and_a_self_reap_ends_it(self):

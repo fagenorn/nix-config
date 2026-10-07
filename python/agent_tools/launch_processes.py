@@ -19,9 +19,12 @@
   table, at a pid of 1 or lower, or at a repeat.
 - `terminate()` never signals a protected pid, and never calls `send_group` on
   a group with a protected member: that group's other members are signalled
-  one by one (spec Signalling). SIGTERM, then SIGKILL for what remains; a target
-  whose group changed meanwhile is a reused pid and is never sent SIGKILL (D11).
-  Its count is the distinct targets SIGTERM actually reached (D14).
+  one by one (spec Signalling). SIGTERM, then SIGKILL for what remains. Every
+  poll re-collects the targets from a fresh table (D16): a pid that joins a safe
+  recorded group, or that the caller's `is_marked` proves, becomes a target and
+  is signalled on its own, and a target whose group changed stays one while
+  `is_marked` still proves it; otherwise it is a reused pid and is never sent
+  SIGKILL (D11). Its count is the distinct targets SIGTERM actually reached (D14).
 - Importing this module loads no libc, runs no `ps` and reads no `/proc`: the
   darwin `ctypes` handle is created lazily, under `functools.cache`.
 """
@@ -167,9 +170,15 @@ def protected_pids(table: Mapping[int, Proc]) -> frozenset[int]:
 
 
 def terminate(pids: Iterable[int], groups: Iterable[int], *, read_table=process_table,
-              send=os.kill, send_group=os.killpg, term_seconds=TERM_SECONDS,
+              send=os.kill, send_group=os.killpg, is_marked=None, term_seconds=TERM_SECONDS,
               kill_seconds=KILL_SECONDS) -> tuple[int, frozenset[int]]:
-    """Signal the live, unprotected targets; return (SIGTERM reached, survivors)."""
+    """Signal the live, unprotected targets; return (SIGTERM reached, survivors).
+
+    Membership is re-collected from every fresh table (D16): a target stays one
+    while it is live in its group, or, when `is_marked` is given, while it still
+    carries the launch's marker; and a pid that appears in a safe recorded group,
+    or that `is_marked` proves, joins as a new target and is signalled on its own.
+    """
     table = read_table()
     protected = protected_pids(table)
     groups = set(groups)
@@ -182,12 +191,56 @@ def terminate(pids: Iterable[int], groups: Iterable[int], *, read_table=process_
     targets = {pid: pgid for pid, pgid in targets.items() if pid > 1 and pid not in protected}
     if not targets:
         return 0, frozenset()
+    members = _Membership(targets, safe_groups, protected, is_marked)
     reached = _deliver(signal.SIGTERM, targets, safe_groups, send, send_group)
-    remaining = _await(targets, read_table, term_seconds)
+    remaining = _await(members, read_table, term_seconds, signal.SIGTERM, send, reached)
     if remaining:
         _deliver(signal.SIGKILL, remaining, safe_groups, send, send_group)
-        remaining = _await(remaining, read_table, kill_seconds)
+        remaining = _await(members, read_table, kill_seconds, signal.SIGKILL, send, set())
     return len(reached), frozenset(remaining)
+
+
+class _Membership:
+    """The cleanup's targets, re-collected from each fresh table (D16)."""
+
+    def __init__(self, targets: Mapping[int, int], safe_groups: set[int],
+                 protected: frozenset[int], is_marked) -> None:
+        self.targets = dict(targets)
+        self.signalled = set(targets)
+        self.safe_groups = safe_groups
+        self.protected = protected
+        self.is_marked = is_marked
+        self.markers: dict[tuple[int, int, int], bool] = {}
+
+    def marked(self, proc: Proc) -> bool:
+        """Whether `proc` carries the marker; one read per (pid, ppid, pgid) seen live."""
+        key = (proc.pid, proc.ppid, proc.pgid)
+        if key not in self.markers:
+            self.markers[key] = bool(self.is_marked(proc.pid))
+        return self.markers[key]
+
+    def refresh(self, table: Mapping[int, Proc]) -> dict[int, int]:
+        live = {pid: proc for pid, proc in table.items()
+                if not proc.zombie and pid > 1 and pid not in self.protected}
+        self.markers = {key: value for key, value in self.markers.items()
+                        if key[0] in live and (live[key[0]].ppid, live[key[0]].pgid) == key[1:]}
+        current = {}
+        for pid, pgid in self.targets.items():
+            proc = live.get(pid)
+            if proc is None:
+                continue                 # absent or a zombie: gone
+            if proc.pgid == pgid or (self.is_marked is not None and self.marked(proc)):
+                current[pid] = proc.pgid  # a marked group-changer is still live (D16)
+            # an unmarked pid in another group is a reused pid (D11)
+        for pid, proc in live.items():
+            if pid not in current and (proc.pgid in self.safe_groups or (
+                    self.is_marked is not None and self.marked(proc))):
+                current[pid] = proc.pgid  # forked since the last table (D16)
+        self.targets = current
+        return current
+
+    def unsignalled(self) -> dict[int, int]:
+        return {pid: pgid for pid, pgid in self.targets.items() if pid not in self.signalled}
 
 
 def _deliver(sig, targets: Mapping[int, int], safe_groups: set[int], send,
@@ -210,14 +263,20 @@ def _deliver(sig, targets: Mapping[int, int], safe_groups: set[int], send,
     return reached
 
 
-def _await(targets: Mapping[int, int], read_table, seconds: float) -> dict[int, int]:
-    """Poll until every target is gone: absent, a zombie, or in another group (reused)."""
+def _await(members: _Membership, read_table, seconds: float, sig, send,
+           reached: set[int]) -> dict[int, int]:
+    """Poll until every target is gone, sending `sig` to each target that joins meanwhile."""
     deadline = time.monotonic() + seconds
-    remaining = dict(targets)
+    members.signalled = set(members.targets)
     while True:
-        table = read_table()
-        remaining = {pid: pgid for pid, pgid in remaining.items()
-                     if pid in table and not table[pid].zombie and table[pid].pgid == pgid}
+        remaining = members.refresh(read_table())
+        for pid in sorted(members.unsignalled()):
+            members.signalled.add(pid)
+            try:
+                send(pid, sig)           # one by one: its group may hold a target mid-shutdown
+            except _IGNORED_SIGNAL_ERRORS:
+                continue
+            reached.add(pid)
         if not remaining or time.monotonic() >= deadline:
             return remaining
         time.sleep(POLL_SECONDS)

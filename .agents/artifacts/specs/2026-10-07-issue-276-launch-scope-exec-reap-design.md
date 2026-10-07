@@ -84,7 +84,8 @@ writer. `exec` deletes only its own row. The action directory is removed only by
    when the program is not found, or 126 when it cannot be run, as a shell does.
 5. Forward SIGINT, SIGTERM and SIGHUP to the child's group, so that a host
    timeout's SIGTERM reaches the command in its new session, and wait for the
-   child.
+   child. A signal whose disposition is `SIG_IGN` when `exec` starts is not
+   forwarded, and stays ignored in the child.
 6. Clean up (see **Signalling**) every process that carries this exact marker,
    plus the child's group. Another `exec` of the same launch has a different
    nonce, so it is untouched. Then delete the row and exit with the child's status.
@@ -104,9 +105,12 @@ writer. `exec` deletes only its own row. The action directory is removed only by
   every launch that ever ran `exec`.
 - To reap a launch, the reaper signals every process whose marker starts with
   `<run-id>/<action-id>/` followed by a well-formed nonce, plus every recorded
-  group that a live member's exact marker proves. It then deletes the launch's
-  registry directory. When a process survives, the directory stays and the
-  launch is listed as skipped with `processes_survived`.
+  group that a live member's exact marker proves. It then deletes the files it
+  proved, and the launch's registry directory once empty, but only when no row
+  was added or changed since its snapshot and no process carrying the launch's
+  marker is live. Otherwise it runs one more round. When a process survives, or
+  the second round still is not clean, the directory stays and the launch is
+  listed as skipped with `processes_survived` (D16).
 - The reaper prints one canonical JSON line:
   `{"reaped": [{"action_id", "signalled"}], "skipped": [{"action_id", "reason"}]}`.
   Both lists are sorted by `action_id`, and `signalled` is the count of distinct
@@ -116,7 +120,9 @@ writer. `exec` deletes only its own row. The action directory is removed only by
 
 ### Signalling
 
-The process table is `ps -A -o pid=,ppid=,pgid=`. The reaper reads each pid's
+The process table is `ps -A -o pid=,ppid=,pgid=,stat=` (D11). A line whose
+`stat` is blank is a live process that is not a zombie, and a `stat` starting
+with `Z` is a zombie (D15). The reaper reads each pid's
 environment through one platform seam (D7): `/proc/<pid>/environ` on Linux, and
 `sysctl` `{CTL_KERN, KERN_PROCARGS2, pid}` through `ctypes` on darwin. On darwin
 the buffer holds an int32 argc, the exec path, NUL padding, argc argument
@@ -130,6 +136,11 @@ unreadable environment, a zombie or a vanished pid is not a proof.
 - Send SIGTERM, poll until the targets are gone, for at most 5 seconds, then
   send SIGKILL and poll for at most 1 second more. A target that is still alive
   after that is a survivor.
+- Every poll re-collects the targets from a fresh table (D16). A pid that has
+  joined a safe proved group, or that carries the launch's marker, becomes a
+  target and is sent the current phase's signal on its own. A target whose group
+  changed stays a target while it still carries the marker. One that no longer
+  does is a reused pid and is never sent SIGKILL (D11).
 
 ### Skill wiring
 
@@ -180,8 +191,8 @@ unreadable environment, a zombie or a vanished pid is not a proof.
   git repository so the registry resolves. A superseded launch is produced the
   way the `launch-commit` suite does it: `resume(owner_unavailable=True)`. Cases
   use real processes. A child writes the pids it spawned to a file, and the test
-  checks liveness with `kill(pid, 0)`, treating a zombie as dead, under a
-  bounded poll. The cases cover parent S2 AC1–AC3 (AC3 uses a Python `os.setsid`
+  checks liveness with a per-pid `ps -o pid=,stat= -p <pid>`, where only an
+  unlisted pid or a `Z` stat is dead, under a bounded poll (D15). The cases cover parent S2 AC1–AC3 (AC3 uses a Python `os.setsid`
   escapee, because darwin has no `setsid` binary), worker identity and
   `released`, malformed and failed checks, a sweep that leaves the current
   launch alone, an idempotent repeat reap, and exit 127.
@@ -222,3 +233,4 @@ unreadable environment, a zombie or a vanished pid is not a proof.
 | D13 | AUTO.md's Phase 2–4 prompt list also carries the worker `exec` sentence. The orchestrate-issues stop pass "writes nothing to the ledger", because the sweep removes host-local registry directories. The pass's last sweep that exited non-zero joins §5 **Stop failures** | Spec **Skill wiring**: "wherever a prompt is composed with a `Lifecycle worker:` line"; the-bar truthful prose | Leaving out AUTO.md means design and plan subagents run their builds outside any scope. Keeping "writes nothing" would be false once the sweep deletes directories |
 | D14 | Phase-5 Codex plan review: `exec` cleans up exception-safely after the spawn (kill/reap the group, restore handlers, keep the row when cleanup is unproven, exit 2); `terminate`'s `signalled` counts SIGTERM deliveries that succeeded, not selected targets; reap tests pin group proof with a stale unmarked row that survives and a proved group whose unmarked member dies | Codex plan-review B1, S1, S2 (spec `exec` behaviour: every exit after the row exists cleans up; `signalled` defined as pids sent SIGTERM) | Reviewer's call accepted as-is |
 | D15 | Tolerate a blank procps `stat` column (a 3-field line whose fields are integers is a live non-zombie; amends D11) and observe test liveness with per-pid `ps -o pid=,stat= -p`, where only an unlisted pid or a `Z` stat is dead. darwin Apple platform binaries (`/bin`, `/usr/bin`) expose no environment through `KERN_PROCARGS2`, so they are unprovable by marker, a documented residual; tests that need a marker proof use `sys.executable` sleepers | Task-1 observation on this darwin host (2026-10-07): the procps `ps` from the claude-code closure precedes `/bin` on PATH and prints an empty `stat` for live processes, while zombies still print `Z`; `KERN_PROCARGS2` returns no environment for `/bin/sleep`. Parent D4: an unreadable environment is not a proof | Pinning `/bin/ps` by absolute path breaks agent-helpers rule 3 and has no Linux meaning. Treating an unreadable environment as marked would signal unproven processes |
+| D16 | Cleanup re-collects its targets from every fresh table: a pid that joins a safe recorded group, or that carries the launch's marker, becomes a target and is signalled on its own, and a target whose group changed stays one while it still carries the marker (`terminate` gains `is_marked`; amends D11 and D12). Reap removes only the files it proved, by renaming each aside and deleting it only when its bytes match its snapshot, and the directory only when it is empty, after a round with no survivor, no row added or changed since the snapshot and no live marked process. Otherwise it runs one more round, then keeps the directory and reports `processes_survived` | Final correctness review C1–C3: a child forked by a SIGTERM handler, or a marked target that calls `setsid()`, escaped cleanup and was reported gone, and a reap could delete the row of an `exec` that registered after its snapshot. Parent D4 (proof before signal) | A fixed target snapshot misses forks and `setsid`. Accepting the race as a D11 residual loses the registry row, so no later sweep can recover the launch. Unbounded rounds let a launch that keeps registering stall a sweep |

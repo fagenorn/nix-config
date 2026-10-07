@@ -25,13 +25,17 @@ stderr and still exits with the command's status.
 reaps each one that is not current; a failed or malformed check skips it. A
 reap terminates every live process whose marker names the launch, plus every
 recorded group that such a process proves (a pid carrying that row's exact
-marker, in that group), then deletes the launch's directory. It prints one JSON
-line {"reaped": [{"action_id", "signalled"}], "skipped": [{"action_id", "reason"}]}.
+marker, in that group). It then deletes the files it proved, and the launch's
+directory once empty, only when no row changed since its snapshot and no marked
+process is live; otherwise it runs one more round, and then keeps the directory
+(`processes_survived`). It prints one JSON line
+{"reaped": [{"action_id", "signalled"}], "skipped": [{"action_id", "reason"}]}.
 
 `reap` exit codes:
   0  nothing was skipped
   1  a launch was skipped: its check failed or was malformed, or a process
-     survived SIGKILL (`processes_survived`, and its directory is kept)
+     survived SIGKILL or a row kept changing (`processes_survived`, and its
+     directory is kept)
   2  a usage or helper error, with nothing on stdout
 
 Residual: a process that leaves the command's session and also scrubs
@@ -44,12 +48,12 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+import errno
 import json
 import os
 from pathlib import Path
 import re
 import secrets
-import shutil
 import signal
 import subprocess
 import sys
@@ -59,8 +63,8 @@ from agent_tools.agent_platform import write_atomically
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.launch_commit import LIVE, MALFORMED_REPLY, LaunchCommitError, ask_worker
 from agent_tools.launch_processes import (
-    MARKER_ENV, ProcessTableError, UnsupportedPlatform, process_table, read_marker,
-    require_supported_platform, terminate)
+    MARKER_ENV, ProcessTableError, UnsupportedPlatform, process_table, protected_pids,
+    read_marker, require_supported_platform, terminate)
 
 REGISTRY_DIR = "agent-launch"
 SAFE_SEGMENT = re.compile(r"[A-Za-z0-9._:-]+")
@@ -224,7 +228,7 @@ def _clean_up(marker: str, pgid: int) -> frozenset[int]:
     table = process_table()
     marked = [pid for pid, proc in table.items()
               if not proc.zombie and read_marker(pid) == marker]
-    return terminate(marked, [pgid])[1]
+    return terminate(marked, [pgid], is_marked=lambda pid: read_marker(pid) == marker)[1]
 
 
 def _clean_up_after_failure(marker: str, pgid: int) -> bool:
@@ -317,28 +321,45 @@ def _run(argv: Sequence[str], row: Path, nonce: str, started_at: str, marker: st
     return (rc if rc >= 0 else 128 - rc), None
 
 
-def _load_row(path: Path) -> tuple[str, int | None] | None:
-    """A row's (nonce, pgid), strictly loaded; None for anything unreadable or malformed."""
+def _parse_row(name: str, data: bytes) -> tuple[str, int | None] | None:
+    """A row's (nonce, pgid), strictly loaded; None for anything malformed."""
     try:
-        row = json.loads(path.read_bytes(), object_pairs_hook=reject_duplicate_keys,
+        row = json.loads(data, object_pairs_hook=reject_duplicate_keys,
                          parse_constant=reject_nonfinite_literal)
-    except (OSError, ValueError):
+    except ValueError:
         return None
     if not isinstance(row, dict) or set(row) != ROW_KEYS:
         return None
     nonce, pgid = row["nonce"], row["pgid"]
-    if (not isinstance(nonce, str) or NONCE.fullmatch(nonce) is None or nonce != path.stem
+    if (not isinstance(nonce, str) or NONCE.fullmatch(nonce) is None
+            or name != f"{nonce}.json"
             or not (pgid is None or (type(pgid) is int and pgid > 0))):
         return None
     return nonce, pgid
 
 
-def reap_launch(registry: Path, run_id: str, action_id: str) -> tuple[int, bool]:
-    """Terminate what the launch left, proving before signalling: (signalled, survived)."""
-    directory = launch_directory(registry, run_id, action_id)
-    rows = [row for row in map(_load_row, sorted(directory.glob("*.json"))) if row is not None]
-    launch = re.compile(re.escape(f"{run_id}/{action_id}/") + NONCE.pattern)
-    table = process_table()              # fresh, right before terminate: the pid-reuse window
+def _directory_files(directory: Path) -> dict[str, bytes]:
+    """Every regular file in the launch directory, by name, with its bytes; none when missing."""
+    files = {}
+    try:
+        with os.scandir(directory) as entries:
+            names = [entry.name for entry in entries if entry.is_file(follow_symlinks=False)]
+    except FileNotFoundError:
+        return files
+    except OSError as error:
+        raise LaunchScopeError(f"cannot list {directory}: {error}") from error
+    for name in names:
+        try:
+            files[name] = (directory / name).read_bytes()
+        except FileNotFoundError:
+            continue                     # deleted since the listing (an exec ended)
+        except OSError as error:
+            raise LaunchScopeError(f"cannot read {directory / name}: {error}") from error
+    return files
+
+
+def _launch_marked(launch: re.Pattern, table) -> dict[int, str]:
+    """The live, non-zombie pids whose marker names the launch."""
     marked = {}
     for pid, proc in table.items():
         if proc.zombie:
@@ -346,19 +367,83 @@ def reap_launch(registry: Path, run_id: str, action_id: str) -> tuple[int, bool]
         marker = read_marker(pid)
         if marker is not None and launch.fullmatch(marker):
             marked[pid] = marker
-    proved = {pgid for nonce, pgid in rows if pgid is not None
-              and any(marker == launch_marker(run_id, action_id, nonce)
-                      and table[pid].pgid == pgid for pid, marker in marked.items())}
-    signalled, survivors = terminate(list(marked), proved)
-    if survivors:
-        return signalled, True
+    return marked
+
+
+def _remove_proved(directory: Path, proved: dict[str, bytes]) -> bool:
+    """Remove each file still holding the bytes it was proved with, then the empty directory.
+
+    A file is first renamed aside, so a row an exec rewrites meanwhile lands at
+    its own name and is never the one deleted; a claimed file whose bytes
+    changed is put back. False when the directory keeps anything (D16).
+    """
+    for name, data in proved.items():
+        path = directory / name
+        claimed = directory / f".{name}.reaping"
+        try:
+            os.rename(path, claimed)
+        except FileNotFoundError:
+            continue                     # deleted since the snapshot (an exec ended)
+        except OSError as error:
+            raise LaunchScopeError(f"cannot claim {path}: {error}") from error
+        try:
+            if claimed.read_bytes() == data:
+                claimed.unlink()
+            else:
+                os.rename(claimed, path)  # rewritten after the snapshot: not ours to delete
+        except OSError as error:
+            raise LaunchScopeError(f"cannot remove {path}: {error}") from error
     try:
-        shutil.rmtree(directory)
+        directory.rmdir()
     except FileNotFoundError:
         pass
     except OSError as error:
-        raise LaunchScopeError(f"cannot remove {directory}: {error}") from error
-    return signalled, False
+        if error.errno != errno.ENOTEMPTY:
+            raise LaunchScopeError(f"cannot remove {directory}: {error}") from error
+        return False
+    return True
+
+
+REAP_ROUNDS = 2
+
+
+def reap_launch(registry: Path, run_id: str, action_id: str) -> tuple[int, bool]:
+    """Terminate what the launch left, proving before signalling: (signalled, survived).
+
+    The directory goes only when a round ends with no survivor, with every file
+    unchanged since that round's snapshot, and with no live process carrying the
+    launch's marker. Otherwise one more round runs; after `REAP_ROUNDS` the
+    directory is kept and the launch counts as survived (D16).
+    """
+    directory = launch_directory(registry, run_id, action_id)
+    launch = re.compile(re.escape(f"{run_id}/{action_id}/") + NONCE.pattern)
+
+    def is_marked(pid: int) -> bool:
+        marker = read_marker(pid)
+        return marker is not None and launch.fullmatch(marker) is not None
+    signalled = 0
+    for _ in range(REAP_ROUNDS):
+        snapshot = _directory_files(directory)
+        rows = [row for row in (_parse_row(name, data) for name, data in sorted(snapshot.items())
+                                if name.endswith(".json")) if row is not None]
+        table = process_table()          # fresh, right before terminate: the pid-reuse window
+        marked = _launch_marked(launch, table)
+        proved = {pgid for nonce, pgid in rows if pgid is not None
+                  and any(marker == launch_marker(run_id, action_id, nonce)
+                          and table[pid].pgid == pgid for pid, marker in marked.items())}
+        reached, survivors = terminate(list(marked), proved, is_marked=is_marked)
+        signalled += reached
+        if survivors:
+            return signalled, True
+        if _directory_files(directory) != snapshot:
+            continue                     # an exec registered or rewrote a row meanwhile
+        after = process_table()
+        protected = protected_pids(after)
+        if any(pid not in protected for pid in _launch_marked(launch, after)):
+            continue                     # a marked process started after the snapshot
+        if _remove_proved(directory, snapshot):
+            return signalled, False
+    return signalled, True
 
 
 def _launch_names(run_directory: Path) -> list[str]:
