@@ -45,4 +45,8 @@ Task 2 — State the `sdd` headroom rule and wire from-issue — home/common/age
 
 ## Decisions
 
-Tasks cite the spec's ledger: D2, D3 (Task 1); D1, D4, D5, D6, D8, D9 (Task 2). Planning added D8 (instruction-ceiling raise and its human label) and D9 (contract-test anchoring).
+Tasks cite the spec's ledger: D2, D3 (Task 1); D1, D4, D5, D6, D8, D9 (Task 2). Planning added D8 (instruction-ceiling raise and its human label) and D9 (contract-test anchoring); Phase-5 review added D10 (Task 2).
+
+## Standards review provenance
+
+Reviewer: Codex (codex-companion plan-review, isolated read-only, fresh thread). Base SHA e346eb2f. Focus: none. Findings: 1 Blocking, 1 Should fix, 0 Discussion — 2 accepted (applied to Task 2 per D10), 0 rejected, 0 deferred. No fallback.

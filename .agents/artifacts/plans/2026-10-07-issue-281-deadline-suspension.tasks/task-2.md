@@ -84,7 +84,9 @@ a `deadline_at`, this rule does not apply.
 - In the first paragraph, change "or a context that cannot launch the agents a phase needs." to "a context that cannot launch the agents a phase needs, or too little attempt budget left for the next `sdd` task."
 - Change "with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`, or `agent_dispatch` (the reaper alone owns `unknown`)." to "with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`, `agent_dispatch`, or `deadline` (the reaper alone owns `unknown`). Only sdd's deadline headroom rule writes `deadline`."
 
-`from-issue/SKILL.md`, `## Phase 6 — Execute`: directly after the sentence ending "and records a progress marker after each completed task.", insert: "Also hand `sdd` the `deadline_at` this owner adopted at acquisition, so sdd's deadline headroom rule can suspend cleanly at a task boundary."
+`from-issue/SKILL.md`, `## Phase 6 — Execute`: directly after the sentence ending "and records a progress marker after each completed task.", insert: "Also hand `sdd` the `deadline_at` this owner currently holds — the one adopted at acquisition, or the one from a later `declare-lane` reply — so sdd's deadline headroom rule can suspend cleanly at a task boundary." (per D10)
+
+`sdd/SKILL.md`, the opening **Continuous execution** paragraph: change "or all-tasks-complete." to "all-tasks-complete, or the deadline headroom rule in `### Lifecycle workers`." (per D10)
 
 - [ ] **Step 4: Run the focused tests**
 
