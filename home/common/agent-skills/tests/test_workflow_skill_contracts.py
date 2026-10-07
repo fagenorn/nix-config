@@ -37,6 +37,8 @@ SHIP_ISSUE_CI_MERGE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/CI
 SHIP_ISSUE_HUMAN_GATE = (
     REPO_ROOT / "home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md"
 )
+SHIP_ISSUE_DELIVERY_LOOP = SHIP_ISSUE.parent / "DELIVERY-LOOP.md"
+SHIP_ISSUE_REMAINDER = SHIP_ISSUE.parent / "REMAINDER.md"
 SMALL_BUDGET_FIXTURE = (
     REPO_ROOT / "home/common/agent-skills/tests/fixtures/artifact-budgets/small-issue.json"
 )
@@ -73,7 +75,7 @@ REPORT_CANDIDATE_CLAUSE = (
 )
 
 LIFECYCLE_DOCS = (*sorted((REPO_ROOT / "home/common/agent-skills/skills/from-issue").glob("*.md")),
-                  SHIP_ISSUE, SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE, ORCHESTRATE)
+                  *sorted(SHIP_ISSUE.parent.glob("*.md")), ORCHESTRATE)
 STDIN_CLAUSE = ("lifecycle call is one command that reads its input from stdin "
                 "through a quoted heredoc")
 BUILD_ROOT_CLAUSE = ("The builder seals the policy `resolve-project` resolves at "
@@ -237,8 +239,7 @@ ORCHESTRATE_MACHINE_TEXT = {
 # back from the PR body or an issue comment. No guidance sentence is pinned.
 SHIP_ISSUE_MACHINE_TEXT = {
     SHIP_ISSUE: (
-        "--kind selected-output", "--kind current-selection", "checkpoint-delivery",
-        "finish --summary-file -", "validate-report --boundary ship-summary",
+        "validate-report --boundary ship-summary",
         "review-range --integration-ref origin/<integration> --head $HEAD_SHA"
         " --final-review-head <final-review head> --max-lines 1000 --max-files 20"
         " --artifact-path <spec_path> --artifact-path <plan_path>",
@@ -246,22 +247,34 @@ SHIP_ISSUE_MACHINE_TEXT = {
         "--run-id <run-id> --action-id <issue:attempt:launch>",
         "launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
         "--worker-id <worker_id> -- ",
-        "workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--worker-id <worker_id> --event returned",
         "--parent <worker_id>", "git merge --no-commit --no-ff origin/<integration>",
-        "Lifecycle worker:", "--kind scope", "`test_ref`",
-        "`tracker_held`", "`comment_url`", "`record_path`",
+        "Lifecycle worker:",
         WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV,
         "verified-tree check --verification <id>",
         "verified-tree record --tree <the checked tree>",
         REQUIRED_WATCH, ALL_CHECKS_WATCH, ADVISORY_CALL,
         "Acceptance state: <effective acceptance state>",
         "Acceptance record: <record-path or none>", "Closes #<num>",
-        "Held for verification: <PR URL>", "`github:issue:<num>:held`",
+        "Held for verification: <PR URL>",
         "gh label list --repo <resolved-repository> --search needs-verification --json name",
         "gh label create needs-verification", "gh issue reopen <num>",
         "gh issue edit <num> --add-label needs-verification", "gh issue comment <num>",
         "gh issue close <num>",
+    ),
+    SHIP_ISSUE_DELIVERY_LOOP: (
+        "--kind selected-output", "checkpoint-delivery", "--kind scope", "`test_ref`",
+        "`tracker_held`", "`comment_url`", "`record_path`", "`github:issue:<num>:held`",
+        "--boundary ship-checkpoint", "ship-checkpoint/v2", "--worker-id <worker_id>",
+        "~/.agents/bin/workflow-state current-launch --repo-root <ledger_repo_root> "
+        "--run-id <run-id> --action-id <custody action_id>",
+        "validate-report --boundary ship-summary",
+    ),
+    SHIP_ISSUE_REMAINDER: (
+        "--kind current-selection", "finish --summary-file -",
+        "workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--worker-id <worker_id> --event returned",
+        "gh pr view <pr-num> --repo <resolved-repository> --json body",
+        "Held for verification: <PR URL>",
     ),
     SHIP_ISSUE_REVIEW: ("validate-detail-input", 'detail_state: "unpublished"'),
     SHIP_ISSUE_CI_MERGE: (
@@ -880,13 +893,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         documents = {
             str(path.relative_to(REPO_ROOT)): normalized(path.read_text(encoding="utf-8"))
             for path in (FROM_ISSUE, AUTO, FROM_ISSUE.parent / "ship-handoff.md",
-                         SHIP_ISSUE, SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE,
                          ORCHESTRATE)
         }
         corpus = " ".join(documents.values())
         for phrase in ("workflow-response", "validate before decoding", "custody",
-                       "current-launch", "requested_scope", "bind the actual invocation",
-                       "ship-checkpoint/v2", "ship-summary/v2", "delivery_remainder"):
+                       "requested_scope", "ship-summary/v2", "delivery_remainder"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, corpus)
         self.assertIn("workflow_bootstrap", normalized(self.orchestrate))
@@ -1051,7 +1062,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 for flag, value in INPUT_FLAG_RE.findall(text):
                     self.assertEqual(value.strip("`.,;"), "-", flag)
                 self.assertLessEqual(text.count("--result-file"), 1)
-        for path in (ORCHESTRATE, SHIP_ISSUE):
+        for path in (ORCHESTRATE,):
             with self.subTest(clause=path.name):
                 self.assertIn(STDIN_CLAUSE, normalized(path.read_text(encoding="utf-8")))
 

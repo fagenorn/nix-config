@@ -45,6 +45,16 @@ Keep that private
 list inside ship-issue: do not put the member list in the handoff, report, or
 review prompt.
 
+## Files beside this one
+
+- `SYNC.md` — Phase 1: divergence, foreign commits, scope creep, the allowlist, the escalation format.
+- `CONSOLIDATE.md` — Phase 3: the bar, the rubric, destinations and the procedure.
+- `REVIEW.md` — Phase 5: Codex failure semantics, templates, the delta brief, the range record, severity mapping, the five-step fix flow, durable Minor/Discussion detail.
+- `CI-MERGE.md` — Phases 6–7: the CI escalation, failing checks, advisory overflow, merge quirks, and the post-selection sync.
+- `HUMAN-GATE.md` — the operator gates, entered only when `## Standing authorization` finds no grant.
+- `DELIVERY-LOOP.md` — lifecycle identity: read it for every `ship-handoff/v2` and every remainder.
+- `REMAINDER.md` — a `delivery_remainder` owner's entry, start points, close or hold, and `finish`.
+
 ## The flow
 
 ```
@@ -418,10 +428,7 @@ immediately before the merge. Never use the gate to retry an actual denial.
 
 Run `check-launch` (see `## Launch guard`) immediately before the merge, and
 run it regardless of how Phase 6's tip check came out. On anything but
-`current: true`, refuse the merge and take the no-write stop. Under lifecycle
-identity the merge is the `merge_pr` cycle of `## Delivery loop`: its scope was
-checkpointed at the pre-merge selection gate, the fence is that cycle's
-`current-launch` call, and `current-launch` runs again after the merge.
+`current: true`, refuse the merge and take the no-write stop. Under lifecycle identity this effect is a `## Delivery loop` cycle.
 
 Use retained `bindings.tracker.repo_slug` and `bindings.vcs` values to build the subject. Emit the subject form only when the rendered result is nonempty and representable by D18's quoted-subject grammar: it contains none of double quote, dollar, backtick, backslash, NUL, LF, or CR; otherwise omit `--subject` and its value and let the forge choose its normal subject. Never pass `--no-ff` (rejected by recent `gh`; `--merge` already produces a true merge commit).
 
@@ -433,10 +440,7 @@ gh pr merge <pr-num> --repo <resolved-repository> --merge --subject "<rendered s
 
 Verify: `gh pr view <pr-num> --json state,mergeCommit` → `MERGED` plus a non-null `mergeCommit.oid` means it landed.
 
-After verifying the merge, ask the REMOTE whether the branch still exists — `git ls-remote --heads origin <branch>` (the actual configured branch name); PR metadata like `headRefName` is retained after deletion and proves nothing. Non-empty output → `git push origin --delete <branch>`. Under lifecycle
-identity, when the contract has a `delete_remote_branch` stage, empty output is
-that stage's `remote_branch_absent` observation (observation-only, made true by
-`--delete-branch`), and a non-empty one makes the delete that stage's loop cycle.
+After verifying the merge, ask the REMOTE whether the branch still exists — `git ls-remote --heads origin <branch>` (the actual configured branch name); PR metadata like `headRefName` is retained after deletion and proves nothing. Non-empty output → `git push origin --delete <branch>`.
 
 ## Phase 8 — Cleanup
 
@@ -451,11 +455,7 @@ source passes `validate-detail-input`; keep the worktree and do not remove it.
 Otherwise fail closed. Only `none` or a checker-valid `present` detail can proceed
 to remove the worktree.
 
-The steps below are the ledger-free order. Under lifecycle identity the same
-effects run as `## Delivery loop` cycles in the contract's stage order — issue close or hold (`close_tracker`; on the close branch observation-only when the merge already closed it),
-`git worktree remove` (`remove_worktree`), then `git branch -d`
-(`delete_local_branch`) — each fenced by `current-launch`, and the summary is
-the loop's `ship-summary/v2`.
+Under lifecycle identity this effect is a `## Delivery loop` cycle.
 
 1. Close or hold, per Phase 0's effective acceptance state.
    - **Close** (`met` or `not_applicable`): `gh issue view <num> --json state`; if `OPEN`, `gh issue close <num>` (the real close mechanism when retained integration and default branches differ — see Phase 4).
@@ -515,165 +515,8 @@ returns. Under implementation custody a ship owner writes only
 
 ## Delivery loop
 
-Under lifecycle identity — a validated `ship-handoff/v2`, or the
-`delivery_remainder` object of remainder mode below — every delivery effect from
-the pre-merge selection gate on runs through this loop. Ledger-free, Phases 7–8
-run as written and no ledger call is made.
-
-Every lifecycle call is one command that reads its input from stdin through a
-quoted heredoc, with the helper named bare or as `~/.agents/bin/workflow-state`,
-optionally piped into or out of `artifact-budget validate-report --input -`. A
-checkpoint is one such command:
-
-```text
-artifact-budget validate-report --boundary ship-checkpoint --input - <<'EOF' | workflow-state checkpoint-delivery --repo-root <ledger_repo_root> --run-id <run-id> --checkpoint-file - | artifact-budget validate-report --boundary workflow-response --input -
-<ship-checkpoint/v2 JSON>
-EOF
-```
-
-When this run holds a `Lifecycle worker:` line, append `--worker-id <worker_id>`
-to every `checkpoint-delivery`: it excuses this run alone when its own
-checkpoint suspends the launch.
-
-A `ship-checkpoint/v2` has exactly `interface_version` (2), `issue`, `custody`,
-`contract_digest`, `delivery_observations`, `authority_observations`,
-`reevaluation_evidence` (each sorted by `id`), `requested_scope`,
-`detail_state`, `report_path` and `notes`. Every scope, selection, observation
-and authority observation comes from `workflow-state build-delivery --repo-root
-<ledger_repo_root> --kind <kind> --input -`, fed the installed contract and the
-kind's facts in a quoted heredoc: the builder seals every id and digest, so
-never compose one. Validate each reply before decoding and treat its
-`pending_stage_ids`, `requirements` and `state` as current truth.
-
-1. **Synchronize.** The first ledger act is a null-scope checkpoint with empty
-   arrays; the ledger, not the handoff, says which stages are pending.
-2. **Pre-selection publication stays as it is.** The Phase-1 sync, the Phase-4
-   push and PR, REVIEW.md's fix pushes and the Phase-6 CI wait precede
-   selection, so no stage is ready for them: they run under the native guard,
-   repository policy and the `check-launch` fence of `## Launch guard`, with no
-   checkpoint.
-3. **The pre-merge selection gate.** Selection is immutable, so it waits for the
-   final CI-green head: once Phase 6 (with its tip check) has passed, build the
-   selection with `--kind selected-output` over the reviewed `HEAD_SHA`, its
-   tree (`git rev-parse <HEAD_SHA>^{tree}`), and the fixed refs — the spec root for `acceptance_ref`, the durable
-   review report path (else the literal review state) for `review_ref`, and
-   `checks` for `test_ref` — so a relaunched owner re-derives the identical
-   selection. Build the now-true `selected_output`, `branch_published` and
-   `pr_opened` observations with `--kind observation` (the selection; the head;
-   the PR number, URL and head), and checkpoint them through
-   `checkpoint-delivery` with the `--kind scope` for `merge_pr`, the ready stage
-   once they fold. Selection has no cycle of its own: its effect is that
-   checkpoint write. Before the merge, run the trigger check of CI-MERGE.md's
-   `## Post-selection sync`: a later sync of the integration branch extends
-   this selection with a sync selection and never replaces it.
-4. **Each post-selection effect is one cycle.** Checkpoint the stage's
-   `--kind scope` as `requested_scope` (for the merge, the selection checkpoint
-   already did); require the validated echo to equal the scope you sent, and
-   bind the actual invocation to it; run
-   `~/.agents/bin/workflow-state current-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <custody action_id>`
-   and proceed only on `current: true`; run the effect; run `current-launch`
-   again; then the next checkpoint carries the effect's observation, one
-   `--kind authority-observation` for that scope and this launch (`launch_id`
-   the custody `action_id`), and the next stage's scope. The cycles are the
-   merge (`merge_pr` → `pr_merged`), the issue close or hold (`close_tracker` → `tracker_closed`, or `tracker_held` on a hold), the remote delete (`delete_remote_branch` →
-   `remote_branch_absent`), `git worktree remove` (`remove_worktree` →
-   `worktree_absent`) and `git branch -d` (`delete_local_branch` →
-   `local_branch_absent`), in the contract's stage order.
-   On a hold the `close_tracker` cycle runs Phase 8 step 1's hold branch (reopen
-   when closed, the `needs-verification` label, the hold comment) under that
-   stage's own scope and fences, and its observation is `--kind observation`
-   `tracker_held` with the facts `comment_url` (the hold comment's URL),
-   `record_path` (exactly the PR body's repository-relative `Acceptance record:`
-   value, never an absolute path), `acceptance_state` (the effective
-   state) and `observation_identity` `github:issue:<num>:held`. A hold whose
-   `Acceptance record:` is `none` stops with `terminal_failed` before any hold
-   effect: no hold exists without a record. A hold records
-   exactly one such observation: a retried or remainder hold recovers the
-   existing hold comment's URL rather than posting a second comment.
-5. **Already-true stages are observation-only.** A stage the previous effect
-   already made true is recorded by its observation alone, without a proposal:
-   remote deletion by the merge's `--delete-branch`, and, on the close branch only, closure by a merge that closes the issue; a hold always runs its cycle. Fold it into the next checkpoint.
-6. **Denials.** A merge the provider refuses because the PR cannot merge into
-   its base is not a denial: record no authority observation for it, and take
-   CI-MERGE.md's `## Post-selection sync`. A guard, host or provider denial of
-   an effect is checkpointed
-   with the denied stage's scope as `requested_scope` — the reducer weighs a
-   rejection only against a proposed scope — carrying the
-   `authority-observation` with verdict `rejected` for that scope, plus the
-   observation of any partial effect. It becomes the reducer's `human_gate`
-   suspension: require the validated reply's `state: suspended` and
-   `blocked_on: human_gate`, and fail loudly on anything else. Then print the
-   canonical re-entry line `/from-issue <num> --auto` on its own line as your
-   whole return and stop. The checkpoint already suspended the custody, so no
-   summary or `finish` follows it. Never route around it. A checkpoint reply of
-   kind `delivery_stalled` means the reducer already ended the custody: stop
-   the loop, write nothing more, and return that validated reply as your whole
-   result.
-7. **Completion.** Do not checkpoint the last cycle: once delivery is complete
-   `check-launch` reports the attempt inactive, which would make the parent's
-   fence refuse. Build the last stage's absence, `implementation_delivered`
-   (the current selection, merge SHA, integrated ref and the `pr_merged` observation
-   id) and `cleanup_complete` (the three absence observation ids, the detail
-   pointer and its read evidence), and return them with the last cycle's
-   authority observation in a `ship-summary/v2` whose `state` is
-   `delivery_complete` and whose `historical_owner_result` is the legacy `merged` row (`issue_closed: false` on a hold). A failure returns `terminal_failed` with the legacy
-   `stopped`/`failed` row and the partial observations. Only after the last
-   cycle, validate it with
-   `artifact-budget validate-report --boundary ship-summary --input -` and
-   return only canonical stdout.
+Under lifecycle identity — a validated `ship-handoff/v2`, or the `delivery_remainder` of `## Remainder mode` — every delivery effect from the pre-merge selection gate on runs through this loop. Ledger-free, Phases 7–8 run as written and no ledger call is made. The builder is `workflow-state build-delivery --repo-root <ledger_repo_root> --kind <kind> --input -`. The lifecycle-call rule, the checkpoint call, the `ship-checkpoint/v2` keys and loop steps 1–7 are in `DELIVERY-LOOP.md`.
 
 ## Remainder mode
 
-Entered with a validated `delivery_remainder` object (from-issue's
-`## Remainder owner prompt`) instead of a handoff: validate it at the
-`workflow-response` boundary before decoding. Its `custody` (a remainder, whose
-`action_id` is `<issue>:r<n>:<launch>`), `contract`, `contract_digest`,
-`worktree` and `pending_stage_ids` are the whole identity; there is no spec,
-plan or reviewed head to review, so skip Phases 0–5. Run `## Delivery loop`
-from the ledger's ready stage, starting with its synchronizing null-scope
-checkpoint. When selection is pending, build it from the PR head
-(`gh pr view <pr-num> --json headRefOid`) and that head's tree with literal
-refs — `acceptance_ref` the issue URL
-(`https://github.com/<resolved-repository>/issues/<num>`), `review_ref` `unknown`,
-`test_ref` `checks` — so a relaunched remainder owner re-derives the identical
-selection; then build its observations. When the merge is pending, start at the merge gate: Phase 6's CI
-wait and Phase 7's gate and fence still bind, and so does CI-MERGE.md's
-`## Post-selection sync`, which also folds a merge that already landed at a
-sync run. A selection this owner did not build, such as that route's first
-`prior_selection` or the one `implementation_delivered` names, is the ledger's
-current selection: read it with `--kind current-selection`, fed the installed
-contract. Otherwise start at the first
-pending cleanup cycle. `## Launch guard` fences with this custody's
-`action_id`.
-
-A remainder has no handoff, so it takes the close-or-hold choice from its PR
-body. On every remainder entry, whichever cycle it starts at (including a
-cleanup cycle after `close_tracker` is already observed), run
-`gh pr view <pr-num> --repo <resolved-repository> --json body` and take the
-body's one `Acceptance state:` line, its one `Acceptance record:` line and its
-acceptance table. `met` or `not_applicable` closes and `unmet` or
-`human_pending` holds, exactly as in Phase 8 step 1. A missing or repeated line,
-or a value outside those four, stops before its next effect with
-`terminal_failed`, whose notes name the line; never default. When the stage is
-already observed as a hold, recover the hold comment URL from
-`gh issue view <num> --json comments` (the earliest comment whose first line is
-`Held for verification: <PR URL>`) for the summary's notes instead of posting a
-second comment.
-
-A denial or a `delivery_stalled` reply ends a remainder owner's loop exactly as
-step 6 of `## Delivery loop` says: its whole return is the re-entry line or that
-reply, and it writes no `finish`. Otherwise a remainder owner holds its custody,
-so it writes its own `finish --summary-file -`. A remainder owner whose prompt
-carries a `Lifecycle worker:` line releases every worker it registered and
-then itself with
-`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> --event returned`
-after its last commit and immediately before its own `finish`; after that
-release it creates no commit. After the last cycle, validate the `ship-summary/v2` (its `historical_owner_result` is
-the legacy row) and write it in one command, then return exactly the validated
-reply and nothing else:
-
-```text
-workflow-state finish --repo-root <ledger_repo_root> --run-id <run-id> --summary-file - <<'EOF' | artifact-budget validate-report --boundary workflow-response --input -
-<canonical ship-summary/v2>
-EOF
-```
+Entered with a validated `delivery_remainder` object instead of a handoff. It skips Phases 0–5 and runs `## Delivery loop` from the ledger's ready stage, as `REMAINDER.md` says.
