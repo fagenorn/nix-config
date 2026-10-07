@@ -471,9 +471,9 @@ semantics unchanged.
 If `workflow-state progress` is rejected because the attempt deadline has passed —
 `cannot record progress at or after attempt deadline`, or
 `progress requires an active attempt` once the lazy reaper demoted the attempt to
-`suspended(unknown)` — that is an environmental interruption, not a verdict or a
-fault: never retry it and never write a `workflow-state finish` (the helper rejects
-one on a non-active attempt). Print the re-entry line and stop. The reaper has
+`suspended(unknown)` — it is an environmental interruption, not a verdict or a
+fault: never retry it and never write a `workflow-state finish` (rejected on a
+non-active attempt). Follow the suspension procedure: print the re-entry line and stop. The reaper has
 already durably recorded either a resumable suspension or, at the anti-zombie bound
 (parked too often in a row without a phase advance or a newly recorded progress marker), a
 `stopped(stalled)` terminal; do not assert which, since re-entry resumes the one
