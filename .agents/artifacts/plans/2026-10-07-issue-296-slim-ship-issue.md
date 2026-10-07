@@ -62,3 +62,7 @@ Task 6 — Measure the slice and record acceptance evidence — home/common/agen
 The spec owns the ledger. This plan cites D1–D15 and adds D16 (each machine-read item is pinned only in its one home).
 
 ---
+
+## Standards review provenance
+
+Reviewer: Codex (gpt-6-astra, xhigh), fresh isolated read-only thread; base SHA baac2897f15daab46a4f25ec625b40d384d3573c, plan HEAD ba33302e. No fallback. Findings: 2 Blocking accepted (R1 keep the `check-launch` four-key list in Task 5 step 4; R2 keep the `wt-<worktree-name>` bucket literal in Task 5 step 13), 0 Should fix, 0 Discussion; 0 rejected, 0 deferred. Both were verified against the live `SKILL.md` and `test_workflow_skill_contracts.py`. Neither needed a ledger row, because both restore text the spec's preservation inventory already keeps.
