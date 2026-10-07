@@ -131,8 +131,12 @@ Agent(subagent_type="reviewer", model="opus", effort="high") launches a fresh fi
 
 Then wait for CI (`<tracker-cli> pr checks --watch`), merge `--no-ff`, then close
 the issue when the sdd report's `acceptance_state` is `met` or `not_applicable`;
-otherwise hold it: label it `needs-verification` (creating the label when
-missing), comment the verdict table, leaving it open. In both cases, publish
+otherwise hold it with ship-issue Phase 8 step 1's hold sequence, in its order:
+view the issue's state and reopen it only when `CLOSED` (a merged commit's
+closing keyword can close it even though the PR body has none), create the
+`needs-verification` label only when it is missing and never with `--force`,
+label it `needs-verification`, comment the verdict table, then verify the issue
+is `OPEN` with `needs-verification`, leaving it open. In both cases, publish
 every non-empty review detail beneath the primary worktree's
 `.superpowers/issue-delivery/` home before cleanup. Publication failure must keep
 the worktree and report `unpublished`. With an unsupported tracker capability,

@@ -1,11 +1,11 @@
 ---
 name: ship-issue
-description: Deliver a finished feature-branch worktree — sync integration branch, PR, review, CI, merge, close issue, clean up. Phase 7 of from-issue. Use for "ship #X", "land it".
+description: Deliver a finished feature-branch worktree — sync integration branch, PR, review, CI, merge, close or hold issue, clean up. Phase 7 of from-issue. Use for "ship #X", "land it".
 ---
 
 # Ship Issue
 
-Counterpart to `to-issues` and `from-issue`. Take a worktree branch with the implementation committed and deliver it: merged on the integration branch, issue closed, workspace gone.
+Counterpart to `to-issues` and `from-issue`. Take a worktree branch with the implementation committed and deliver it: merged on the integration branch, issue closed or held as `needs-verification`, workspace gone.
 
 ## Project bindings (resolve first)
 
@@ -111,7 +111,7 @@ environment is broken.
 Guarded: the Phase-4 push, the Phase-4 PR create, every push in REVIEW.md's
 five-step apply/push flow, and the Phase-7 merge. There is no post-merge
 exemption: under lifecycle identity each post-merge effect is a `## Delivery loop`
-cycle — the remote branch delete, and Phase 8's issue close, `git worktree
+cycle — the remote branch delete, and Phase 8's issue close or hold, `git worktree
 remove` and `git branch -d` — fenced by `current-launch` before and after the
 effect exactly like the merge. Local commits are fenced separately
 (### Local commits).
@@ -205,15 +205,18 @@ Any failure: pause, ground, surface. Don't auto-fix the branch name or stash cha
 
 **Effective acceptance state.** Start from the handoff's `acceptance_state`;
 standalone with `review_state: unknown` it is `not_applicable`. The acceptance
-record is `<plan stem>.acceptance.md` beside the plan root, or `none` when no
-such file exists. With `human_pending` and `auto: false`, ask the user, as one
+record is `<plan stem>.acceptance.md` beside the plan root, named by its
+repository-relative path, never an absolute one, or `none` when no such file
+exists. With `human_pending` and `auto: false`, ask the user, as one
 grounded question, to attest each `human_pending` row of the record. When every
 row is attested, rewrite those Verdict cells to `met (attested)`, commit the
 record (### Local commits) and continue with `met`; the new commit means Phase 2
 cannot skip its rerun. Otherwise keep `human_pending`. `--auto` never asks and
 never self-attests. The value is then fixed for the run, and ship grades
 nothing: `met` or `not_applicable` **closes** the issue, while `unmet` or
-`human_pending` **holds** it open as `needs-verification` (Phase 8).
+`human_pending` **holds** it open as `needs-verification` (Phase 8). A hold
+whose record is `none` stops with `terminal_failed` before any hold effect: no
+hold exists without a record.
 
 ## Phase 1 — Sync from the integration branch
 
@@ -453,7 +456,7 @@ the loop's `ship-summary/v2`.
 
 1. Close or hold, per Phase 0's effective acceptance state.
    - **Close** (`met` or `not_applicable`): `gh issue view <num> --json state`; if `OPEN`, `gh issue close <num>` (the real close mechanism when retained integration and default branches differ — see Phase 4).
-   - **Hold** (`unmet` or `human_pending`), in this order: `gh issue view <num> --json state,comments`; if `CLOSED` (a commit's closing keyword can close it), `gh issue reopen <num>`. When `gh label list --repo <resolved-repository> --search needs-verification --json name` shows no name exactly `needs-verification`, run `gh label create needs-verification --repo <resolved-repository> --description "Merged, acceptance criteria await verification"` — never `--force`, which would overwrite a user's label. Then `gh issue edit <num> --add-label needs-verification`. The hold comment's first line is `Held for verification: <PR URL>`; the rest gives the effective acceptance state, the PR body's three-column table and the record's link at the merge SHA (`https://github.com/<resolved-repository>/blob/<merge-sha>/<record-path>`). When the earlier view already shows a comment with that first line, reuse its URL; otherwise post it with `gh issue comment <num> --body "<hold comment>"`, whose stdout is the comment URL. Finally `gh issue view <num> --json state,labels` must show `OPEN` with `needs-verification`; anything else keeps ownership and retries, as for any failed post-merge action.
+   - **Hold** (`unmet` or `human_pending`), in this order: `gh issue view <num> --json state,comments`; if `CLOSED` (a commit's closing keyword can close it), `gh issue reopen <num>`. When `gh label list --repo <resolved-repository> --search needs-verification --json name` shows no name exactly `needs-verification`, run `gh label create needs-verification --repo <resolved-repository> --description "Merged, acceptance criteria await verification"` — never `--force`, which would overwrite a user's label. Then `gh issue edit <num> --add-label needs-verification`. The hold comment's first line is `Held for verification: <PR URL>`; the rest gives the effective acceptance state, the PR body's three-column table and the record's link at the merge SHA (`https://github.com/<resolved-repository>/blob/<merge-sha>/<record-path>`). When the earlier view already shows one or more comments with that first line, reuse the earliest one's URL; otherwise post it with `gh issue comment <num> --body "<hold comment>"`, whose stdout is the comment URL. Finally `gh issue view <num> --json state,labels` must show `OPEN` with `needs-verification`; anything else keeps ownership and retries, as for any failed post-merge action.
 
 2. Remove the worktree from the main repo root, never from inside the worktree:
    ```
@@ -577,8 +580,11 @@ never compose one. Validate each reply before decoding and treat its
    when closed, the `needs-verification` label, the hold comment) under that
    stage's own scope and fences, and its observation is `--kind observation`
    `tracker_held` with the facts `comment_url` (the hold comment's URL),
-   `record_path` (the acceptance record), `acceptance_state` (the effective
-   state) and `observation_identity` `github:issue:<num>:held`. A hold records
+   `record_path` (exactly the PR body's repository-relative `Acceptance record:`
+   value, never an absolute path), `acceptance_state` (the effective
+   state) and `observation_identity` `github:issue:<num>:held`. A hold whose
+   `Acceptance record:` is `none` stops with `terminal_failed` before any hold
+   effect: no hold exists without a record. A hold records
    exactly one such observation: a retried or remainder hold recovers the
    existing hold comment's URL rather than posting a second comment.
 5. **Already-true stages are observation-only.** A stage the previous effect
@@ -644,10 +650,10 @@ cleanup cycle after `close_tracker` is already observed), run
 body's one `Acceptance state:` line, its one `Acceptance record:` line and its
 acceptance table. `met` or `not_applicable` closes and `unmet` or
 `human_pending` holds, exactly as in Phase 8 step 1. A missing or repeated line,
-or a value outside those four, stops before the `close_tracker` effect with
+or a value outside those four, stops before its next effect with
 `terminal_failed`, whose notes name the line; never default. When the stage is
 already observed as a hold, recover the hold comment URL from
-`gh issue view <num> --json comments` (the comment whose first line is
+`gh issue view <num> --json comments` (the earliest comment whose first line is
 `Held for verification: <PR URL>`) for the summary's notes instead of posting a
 second comment.
 

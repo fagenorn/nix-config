@@ -6018,8 +6018,44 @@ class TrackerHoldContractsTest(unittest.TestCase):
         remainder = self.section(self.ship, "## Remainder mode")
         self.assert_ordered(
             remainder, "--json body", "one `Acceptance state:` line",
-            "one `Acceptance record:` line", "stops before the `close_tracker` effect "
-            "with `terminal_failed`", "never default")
+            "one `Acceptance record:` line", "stops before its next effect "
+            "with `terminal_failed`", "never default",
+            "the earliest comment whose first line is")
+        self.assertNotIn("stops before the `close_tracker` effect", remainder)
+
+    def test_record_path_is_the_pr_bodys_relative_record_and_a_hold_needs_one(self):
+        phase0 = self.section(self.ship, "## Phase 0 — Pre-flight", "## Phase 1")
+        self.assert_ordered(
+            phase0, "`<plan stem>.acceptance.md` beside the plan root",
+            "named by its repository-relative path, never an absolute one",
+            "**holds** it open as `needs-verification`",
+            "A hold whose record is `none` stops with `terminal_failed` before any "
+            "hold effect: no hold exists without a record")
+        loop = self.section(self.ship, "## Delivery loop", "## Remainder mode")
+        self.assert_ordered(
+            loop, "`tracker_held` with the facts `comment_url`",
+            "`record_path` (exactly the PR body's repository-relative "
+            "`Acceptance record:` value, never an absolute path)",
+            "A hold whose `Acceptance record:` is `none` stops with `terminal_failed` "
+            "before any hold effect")
+
+    def test_phase_8_reuses_the_earliest_hold_comment(self):
+        phase8 = self.section(self.ship, "## Phase 8 — Cleanup", "## Notes")
+        self.assert_ordered(
+            phase8, "Held for verification: <PR URL>",
+            "shows one or more comments with that first line, reuse the earliest "
+            "one's URL", "gh issue comment <num>")
+
+    def test_no_close_only_prose_remains(self):
+        self.assertIn("merge, close or hold issue, clean up.", self.ship)
+        self.assertIn("issue closed or held as `needs-verification`, workspace gone",
+                      self.ship)
+        self.assertIn("Phase 8's issue close or hold", self.ship)
+        self.assertIn("runs the chain to issue close or hold and cleanup", self.gate)
+        for stale in ("merge, close issue, clean up", "issue closed, workspace gone",
+                      "Phase 8's issue close, "):
+            self.assertNotIn(stale, self.ship)
+        self.assertNotIn("runs the chain to issue closure", self.gate)
 
     def test_the_human_gate_mirrors_close_or_hold(self):
         self.assert_ordered(
@@ -6065,8 +6101,19 @@ class HeldReportContractsTest(unittest.TestCase):
             fallback, "The PR body carries `Closes #<num>` only when the sdd report's "
             "`acceptance_state` is `met` or `not_applicable`, and no closing keyword "
             "otherwise", "close the issue when the sdd report's `acceptance_state` is "
-            "`met` or `not_applicable`", "label it `needs-verification`",
-            "comment the verdict table", "leaving it open. In both cases, publish")
+            "`met` or `not_applicable`",
+            "otherwise hold it with ship-issue Phase 8 step 1's hold sequence",
+            "reopen it only when `CLOSED`", "never with `--force`",
+            "label it `needs-verification`", "comment the verdict table",
+            "verify the issue is `OPEN` with `needs-verification`",
+            "leaving it open. In both cases, publish")
+
+    def test_final_review_lets_ship_attest_a_verdict(self):
+        final = normalized((SDD_DIR / "final-review.md").read_text(encoding="utf-8"))
+        self.assertNotIn("Only you, the controller, write `Verdict`", final)
+        self.assert_ordered(
+            final, "You, the controller, write `Verdict`, using the four grading tokens",
+            "ship-issue Phase 0 may later rewrite an attested row to `met (attested)`")
 
 
 if __name__ == "__main__":

@@ -88,7 +88,7 @@ Phase 6's CI wait has already bound before this gate is entered, and the grant
 does not re-litigate it.
 
 After this grant nothing further is asked on the successful path: the same
-session resumes in place and runs the chain to issue closure and cleanup. A
+session resumes in place and runs the chain to issue close or hold and cleanup. A
 transient execution failure does not erase the grant; retry only after
 diagnosing the failure and re-validating the same required checks. An actual
 permission denial stops the action and is never retried through another spelling.
