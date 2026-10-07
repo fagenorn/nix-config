@@ -5952,5 +5952,84 @@ class SupersededOwnerStopPassContractsTest(unittest.TestCase):
         self.assertNotIn("stop pass", section.lower())
 
 
+class LaunchScopeWiringContractsTest(unittest.TestCase):
+    """#276: owners and writing workers run long commands in a launch scope; owners self-reap."""
+
+    WORKER_LINE = ("Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> "
+                   "--worker-id <worker_id>")
+    WORKER_EXEC = ("Run each long command, every verification command included, as "
+                   "`launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> "
+                   "--worker-id <worker_id> -- <argv>`, still in the foreground.")
+    OWNER_EXEC = ("run each long command, every verification command included, as "
+                  "`launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> "
+                  "--action-id <action_id> -- <argv>`, still in the foreground")
+    REAP = ("launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> "
+            "--action-id <action_id>")
+    COMMIT = ("launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
+              "--worker-id <worker_id> -- ")
+    RELEASE = ("workflow-state release-worker --repo-root <ledger_repo_root> "
+               "--run-id <run-id> --now <utc> --worker-id <worker_id> --event returned")
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def read(path):
+        return normalized(path.read_text(encoding="utf-8"))
+
+    def test_the_owner_runs_long_commands_through_exec(self):
+        self.assert_ordered(self.read(FROM_ISSUE), "## Lifecycle identity", self.OWNER_EXEC,
+                            "a forge verb never goes through it",
+                            "### Dispatcher-owned acquisition")
+
+    def test_the_worker_sentence_follows_every_composed_worker_line(self):
+        self.assert_ordered(self.read(FROM_ISSUE), "**Writing workers.**", self.WORKER_LINE,
+                            self.WORKER_EXEC, "launch-commit", "**Self-reap.**")
+        self.assert_ordered(self.read(SDD), "### Lifecycle workers", self.WORKER_LINE,
+                            self.WORKER_EXEC, self.RELEASE)
+        self.assert_ordered(self.read(SDD_DIR / "implementer-prompt.md"),
+                            "## Lifecycle Worker", self.COMMIT, "never run `git commit` directly",
+                            self.WORKER_EXEC, "only the most recent one governs",
+                            "## Report Format")
+        handoff = self.read(FROM_ISSUE_DIR / "ship-handoff.md")
+        self.assert_ordered(handoff, "## Ship-owner subagent prompt", self.WORKER_LINE,
+                            "never inside the handoff", self.WORKER_EXEC, "Your task:")
+        self.assert_ordered(handoff, "## Remainder owner prompt", self.WORKER_LINE,
+                            "never inside it", self.WORKER_EXEC, "Your task:")
+        self.assert_ordered(self.read(SHIP_ISSUE), "### Local commits", "--parent <worker_id>",
+                            "`Lifecycle worker:`", self.WORKER_EXEC,
+                            "## Doc-grounded escalations")
+        self.assert_ordered(self.read(AUTO), "Both prompts must carry", "`Lifecycle worker:` line",
+                            "the `launch-scope exec` sentence that follows it there",
+                            "launch-commit")
+
+    def test_every_owner_exit_reaps_between_release_and_write(self):
+        text = self.read(FROM_ISSUE)
+        self.assert_ordered(
+            text, "**Self-reap.**", self.REAP,
+            "the reap runs before the bookkeeper is dispatched",
+            "does not block the exit write",
+            "A delegating owner does not reap",
+            "**`handoff`** — first release every worker", self.REAP, "--handoff-path",
+            "## Terminal return procedure", "release every worker", self.REAP,
+            "workflow-state finish --repo-root",
+            "## Suspension procedure", "release every worker", "live workers:", self.REAP,
+            "workflow-state suspend --repo-root")
+
+    def test_the_bookkeeper_route_reaps_before_dispatch(self):
+        self.assert_ordered(self.read(AUTO), "ledger-only bookkeeper route",
+                            "releases every worker it registered", self.REAP,
+                            "The bookkeeper is never registered")
+
+    def test_the_leaf_clauses_do_not_name_launch_scope(self):
+        text = self.read(FROM_ISSUE)
+        start = text.index("**Leaf-agent clauses.**")
+        self.assertNotIn("launch-scope", text[start:text.index("**Writing workers.**", start)])
+
+
 if __name__ == "__main__":
     unittest.main()

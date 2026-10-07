@@ -39,6 +39,12 @@ never substitute the current checkout or owner worktree. `action_id` is the one 
 changes when the attempt is relaunched; pass it through verbatim and never
 recompute it.
 
+With lifecycle identity, run each long command, every verification command
+included, as
+`launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> -- <argv>`,
+still in the foreground; a forge verb never goes through it, and the
+lifecycle guard refuses one that sits behind another program.
+
 Every lifecycle call is one command that reads its input from stdin through a
 quoted heredoc (`<<'EOF'`): `--request-file -`, `--checkpoint-file -`,
 `--summary-file -` or `--input -`, with the helper named bare or as
@@ -353,7 +359,10 @@ is registered first:
 `workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`.
 Its prompt carries the printed id as the single line
 `Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>`,
-and it creates every commit through `launch-commit`. Release it with
+followed by the sentence "Run each long command, every verification command included, as
+`launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <argv>`,
+still in the foreground.", and it
+creates every commit through `launch-commit`. Release it with
 `--event returned` when it returns. Two dispatches are never registered:
 the fresh delegated owner, which adopts this owner's own launch, and the
 ledger-only bookkeeper, whose only job is the terminal write. A background
@@ -361,6 +370,19 @@ worker this owner cannot wait for is first stopped through the host's
 task-stop and then released with `--event stopped`. On a host with no stop
 capability, wait for it to return. An owner that can neither wait nor stop
 must return without a terminal write and leave recovery to the dispatcher.
+
+**Self-reap.** With lifecycle identity, each exit that ends this owner's
+launch — the `handoff` action, the terminal return procedure and the
+suspension procedure — first releases every worker this owner registered,
+then runs
+`launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
+with this owner's own `action_id`, and only then makes the exit write. The
+reap kills every process that a `launch-scope exec` of this launch left
+behind. When the ledger-only bookkeeper makes the exit write, the reap runs
+before the bookkeeper is dispatched. A reap that exits non-zero does not block
+the exit write: name its exit code and its `skipped` launches in this owner's
+result. A delegating owner does not reap, because the fresh delegated owner
+adopts its launch and reaps it at its own exit.
 
 **Interim child results.** A child's return that the host marks interim — it
 stopped with background work of its own still running, or its result may be
@@ -410,7 +432,9 @@ defaults `--turn-ceiling 120 --context-ceiling 150000 --turn-headroom 2
 2. **`fresh_start`** — start a fresh conversation from committed artifacts; do
    not carry conversational state.
 3. **`handoff`** — first release every worker this owner registered (see
-   **Writing workers**). Beneath `ledger_repo_root`, create only the run's non-symlink
+   **Writing workers**), then run
+   `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
+   (see **Self-reap**). Beneath `ledger_repo_root`, create only the run's non-symlink
    `handoffs/` directory if missing; never pre-create the destination leaf (the
    `handoff` skill owns safe first-file creation). Invoke `handoff` with a
    destination beneath `.superpowers/workflows/<run-id>/handoffs/`, repeat
@@ -495,7 +519,9 @@ arrays. Validate the raw candidate with `artifact-budget validate-report
 --boundary ship-summary --input -` before decoding, and use only its canonical
 stdout as the summary bytes. The policy's `phase_reports.notes_max_characters`
 is authoritative. Before the terminal write, release every worker this owner
-registered (see **Writing workers**). After the `check-launch` fence of this owner's own
+registered (see **Writing workers**), then run
+`launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
+(see **Self-reap**). After the `check-launch` fence of this owner's own
 `action_id`, feed those bytes on stdin as `--summary-file -` to
 `workflow-state finish` using the exact run and current time, in one command
 whose reply is validated before decoding:
@@ -537,7 +563,9 @@ authorization phrase, and re-entry resumes it in place.
 Before suspending, release every worker this owner registered (see
 **Writing workers**): the helper refuses a suspend, a handoff `progress` or a
 `finish` that ends this launch while a registered worker is live, exiting 2
-with `live workers: <ids>` and writing nothing. Then call:
+with `live workers: <ids>` and writing nothing. Then run
+`launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
+(see **Self-reap**), and then call:
 
 ```text
 workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --issue <n> --attempt <k> --blocked-on <value> | artifact-budget validate-report --boundary workflow-response --input -
