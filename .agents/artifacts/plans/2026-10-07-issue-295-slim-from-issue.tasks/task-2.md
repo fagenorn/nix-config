@@ -88,7 +88,7 @@ Expected: ERROR, `FileNotFoundError` for `rollover.md` / `delegated-owner.md`.
    - `#### Mandatory transfer gate`, through the continuation JSON fence (relabelled ```` ```json ```` if needed), the "Pass the unchanged owner object…" constraint list, and the resume-pack-beside-the-continuation paragraph;
    - `#### Earlier controller stop`.
 
-   Cut the sentence "The fresh owner resolves once at its own phase entry…", which restates `SKILL.md`'s resolve rule. Collapse the seven "no …" bullets into one sentence with the same seven exclusions.
+   (Task 1 already cut the sentence "The fresh owner resolves once at its own phase entry…".) Collapse the seven "no …" bullets into one sentence with the same seven exclusions.
 2. `delegated-owner.md` gets `#### Fresh delegated owner` plus the mechanical-only paragraph that follows it. Rewrite "`SKILL.md`'s `### Resume pack` says" as "the resume pack's checks say". Rewrite "`SKILL.md`'s Phase-7 dispatch-gap fallback" as "Phase 7's dispatch-gap fallback". Name no file.
 3. `AUTO.md`:
    - Delete the moved text.

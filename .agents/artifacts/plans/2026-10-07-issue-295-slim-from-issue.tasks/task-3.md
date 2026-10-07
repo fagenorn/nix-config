@@ -91,7 +91,7 @@ Expected: ERROR, `FileNotFoundError` for `acquire-direct.md`.
 6. `SKILL.md`:
    - Replace the four `###` sections with the selector (Invariants), and `### Resume pack` with the one-line stub: "A relaunched owner whose prompt carries a resume pack follows `resume-pack.md` before using it."
    - Add one index bullet per new file, with its load condition.
-   - Extend the `AUTO.md` bullet with the resume-pack scoping, per phase. Phases 2–4 read its opening, `The self-answer pattern`, `When *not* to auto-resolve` and `Phases 2–4 run as subagents`. Phases 5–7 read `Other Phase 5–7 routes` with `Interface_version 2 delivery relay`. The controller at Phase 5 reads `rollover.md` instead, and the delegated owner reads `delegated-owner.md`.
+   - Extend the `AUTO.md` bullet with the resume-pack scoping, per phase (per D15). At every phase an autonomous resumed owner reads `AUTO.md`'s opening, `The self-answer pattern` and `When *not* to auto-resolve`. It then adds its phase's route section: `Phases 2–4 run as subagents` for Phases 2–4; for Phases 5–7, `Other Phase 5–7 routes` with `Interface_version 2 delivery relay`, except that the direct-autonomous controller at Phase 5 reads `rollover.md` and the delegated owner reads `delegated-owner.md` in place of `Other Phase 5–7 routes` (each still with `Interface_version 2 delivery relay`).
 
 - [ ] **Step 4: Delete the prose pins on the moved text**
 

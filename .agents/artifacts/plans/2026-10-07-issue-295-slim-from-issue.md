@@ -63,3 +63,13 @@ Task 7 — Reconcile profile notes, measure the slice and record acceptance evid
 The spec owns the ledger. This plan cites D1–D11 and adds D12 (each task keeps the gate green at its own commit), D13 (a test that also pins other skills loses only its scoped-file prose) and D14 (`REVIEW-CONTRACT.md` keeps its no-resolve clause).
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), isolated and read-only, no fallback.
+- Base SHA: a891b08cc4d1599c71e7802ba49ec5da07631132.
+- Findings: 1 Blocking, 2 Should fix, 0 Discussion. Accepted 3, rejected 0, deferred 0.
+  - R1 (Blocking): Task 3's resume-pack `AUTO.md` scoping now keeps the shared sections at every phase (per D15).
+  - R2 (Should fix): the `AUTO.md` "fresh owner resolves once" sentence is cut in Task 1, so Task 1's Step 6 passes on its own.
+  - R3 (Should fix): Task 7's AC5 inventory counts indirect readers (`LIFECYCLE_DOCS` and aliases), and the stdin-commands loop keeps its English forbidden phrases only for out-of-scope paths.
+- The reviewer could not reach `api.github.com`; the issue criteria were supplied in the packet.
