@@ -90,9 +90,8 @@ this route does not perform any other acquisition.
 When the invocation contains literal `--auto` and no dispatcher envelope,
 resolve through the existing bindings and adapters the immutable absolute ledger
 repository root (`ledger_repo_root`), positive issue and configured positive
-attempt budget. Resolve a fresh current RFC3339 UTC instant for every request,
-including before the first call. Every call sends exactly this interface_version
-2 shape. For each request, populate
+attempt budget. Every call sends exactly this interface_version 2 shape. For each
+request, populate
 every observation kind the helper has requested at least once during this acquisition;
 keep an observation kind `null` until the helper requests it:
 
@@ -100,7 +99,6 @@ keep an observation kind `null` until the helper requests it:
 {
   "interface_version": 2,
   "issue": 73,
-  "now": "2026-09-24T10:00:00Z",
   "attempt_budget_minutes": 180,
   "new_run": false,
   "owner_unavailable": false,
@@ -117,7 +115,7 @@ keep an observation kind `null` until the helper requests it:
 }
 ```
 
-The concrete `issue`, `now`, and `attempt_budget_minutes` values above stand for
+The concrete `issue` and `attempt_budget_minutes` values above stand for
 the values just resolved; they are not fixed literals. Keep every unrequested
 nullable observation slot (`tracker`, `worktree`, `forge`, `delivery_contract`)
 `null`, keep `authorization_intents` `[]` until a contract is sent, keep
@@ -162,7 +160,7 @@ follows:
 
    ```text
    workflow-state build-delivery --repo-root <ledger_repo_root> --kind contract --input - <<'EOF'
-   {"issue": <num>, "worktree": "<absolute-worktree>", "source_kind": "explicit_user", "source_reference": "invocation:/from-issue <num> --auto", "now": "<RFC3339-now>"}
+   {"issue": <num>, "worktree": "<absolute-worktree>", "source_kind": "explicit_user", "source_reference": "invocation:/from-issue <num> --auto"}
    EOF
    ```
 
@@ -242,7 +240,7 @@ reply naming this issue is that ask, not a missing dispatch: build this issue's
 contract then and call `workflow-state control` once more, as
 orchestrate-issues §4 describes; only that follow-up reply is held to the
 dispatch rule below. Then send the interface-3 control request — orchestrate-issues' exact
-18-key shape, with `host_route: "direct"`, `max_parallel: 1`, `human_directed: true`, the resolved
+17-key shape, with `host_route: "direct"`, `max_parallel: 1`, `human_directed: true`, the resolved
 attempt budget, the contract and `[initial_intent]` (null and `[]` once a
 contract is installed) — and call `workflow-state control` with
 `--request-file -`. Require exactly one dispatch action and require that the
@@ -349,15 +347,15 @@ Sub-skills named here — `worktrees`, `design`, `grill-with-docs`, `writing-pla
 
 **Structured report-backs.** A subagent's final message is re-read by its caller on every later turn, so every `Agent` dispatch states the applicable fixed JSON return schema; details live in budgeted worktree files. Prefer the tiered agent types over `general-purpose`.
 
-**Leaf-agent clauses.** Every prompt this skill or a file beside it composes for an `Agent` dispatch carries these three clauses verbatim, as a paragraph of their own; a prompt built from `ship-handoff.md` already carries them:
+**Leaf-agent clauses.** Every prompt this skill or a file beside it composes for an `Agent` dispatch carries these four clauses verbatim, as a paragraph of their own; a prompt built from `ship-handoff.md` already carries them:
 
-> Launch any subagent by type only, never by name: a subagent cannot spawn a named teammate, and a named launch returns an error instead of work. Read an existing file before writing to it: overwriting content you have not read destroys work you cannot see. Run each long command, every verification command included, in the foreground with an explicit timeout above its expected duration. If the host moves one to the background anyway, wait for it within the same turn: never end your turn while a command you started is still running.
+> Launch any subagent by type only, never by name: a subagent cannot spawn a named teammate, and a named launch returns an error instead of work. Read an existing file before writing to it: overwriting content you have not read destroys work you cannot see. Run each long command, every verification command included, in the foreground with an explicit timeout above its expected duration. If the host moves one to the background anyway, wait for it within the same turn: never end your turn while a command you started is still running. Never write an `until` or `while` loop around `sleep` to wait for something: if a wait is truly needed, run one bounded foreground `sleep N`, then check once.
 
 **Writing workers.** With lifecycle identity, every agent this owner
 dispatches that may commit or write to the forge — a Phase 2–4 subagent that
 commits artifacts, sdd's writing agents (Phase 6) and the Phase-7 ship owner —
 is registered first:
-`workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`.
+`workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`.
 Its prompt carries the printed id as the single line
 `Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>`,
 followed by the sentences "Run each long command, every verification command included, as
@@ -525,11 +523,11 @@ registered (see **Writing workers**), then run
 `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
 (see **Self-reap**). After the `check-launch` fence of this owner's own
 `action_id`, feed those bytes on stdin as `--summary-file -` to
-`workflow-state finish` using the exact run and current time, in one command
+`workflow-state finish` using the exact run, in one command
 whose reply is validated before decoding:
 
 ```text
-workflow-state finish --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --summary-file - <<'EOF' | artifact-budget validate-report --boundary workflow-response --input -
+workflow-state finish --repo-root <ledger_repo_root> --run-id <run-id> --summary-file - <<'EOF' | artifact-budget validate-report --boundary workflow-response --input -
 <canonical ship-summary/v2>
 EOF
 ```
@@ -570,7 +568,7 @@ with `live workers: <ids>` and writing nothing. Then run
 (see **Self-reap**), and then call:
 
 ```text
-workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --issue <n> --attempt <k> --blocked-on <value> | artifact-budget validate-report --boundary workflow-response --input -
+workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --issue <n> --attempt <k> --blocked-on <value> | artifact-budget validate-report --boundary workflow-response --input -
 ```
 
 with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`, or
@@ -686,7 +684,7 @@ mechanical route's mechanic is registered the same way: run
 `workflow-state register-worker` before dispatching it, put the
 `Lifecycle worker:` line in its prompt, and release it when it returns. On
 that route this owner records the marker itself: run
-`workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`
+`workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
 once before dispatching the mechanic and once after its change is
 committed. A refusal changes nothing and is not a suspension cause.
 

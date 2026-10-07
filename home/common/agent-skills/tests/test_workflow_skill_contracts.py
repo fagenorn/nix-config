@@ -101,11 +101,11 @@ WRITER_RULE = ("Under implementation custody a ship owner writes only "
 # no subagent-launch tool, spelled once for the module (per D4).
 CAPABILITY_GAP_LINE = "capability_gap: agent_dispatch"
 INPUT_FLAG_RE = re.compile(r"(--request-file|--checkpoint-file|--summary-file|--input)\s+(\S+)")
-V2_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "now", "attempt_budget_minutes",
+V2_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "attempt_budget_minutes",
     "new_run", "owner_unavailable", "tracker", "worktree", "forge", "delivery_contract",
     "authorization_intents", "authority_observations", "reevaluation_evidence",
     "delivery_observations", "requested_scope", "recovery"}
-V2_CONTROL_REQUEST_KEYS = {"interface_version", "now", "max_parallel",
+V2_CONTROL_REQUEST_KEYS = {"interface_version", "max_parallel",
     "attempt_budget_minutes", "human_directed", "issues", "tracker", "owners",
     "worktrees", "forge", "delivery_contracts", "authorization_intents",
     "authority_observations", "reevaluation_evidence", "delivery_observations",
@@ -113,6 +113,11 @@ V2_CONTROL_REQUEST_KEYS = {"interface_version", "now", "max_parallel",
 V3_CONTROL_REQUEST_KEYS = V2_CONTROL_REQUEST_KEYS | {"host_route"}
 CODEX_ORCHESTRATE = REPO_ROOT / "home/common/codex/skills/orchestrate-issues/SKILL.md"
 CODEX_MODULE = REPO_ROOT / "home/common/codex/default.nix"
+SKILL_TREES = (REPO_ROOT / "home/common/agent-skills/skills",
+               REPO_ROOT / "home/common/claude-code/skills",
+               REPO_ROOT / "home/common/codex/skills")
+NOW_FLAG = re.compile(r"(?<![\w-])--now(?![\w-])")
+NOW_KEY = re.compile(r'"now"\s*:')
 V2_OWNER_KEYS = {"interface_version", "kind", "ledger_repo_root", "run_id", "issue",
     "attempt", "owner", "action_id", "launch_kind", "worktree", "handoff_path",
     "deadline_at", "custody", "contract", "contract_digest", "pending_stage_ids",
@@ -2706,7 +2711,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertIn(
             "workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> "
-            "--now <utc> --issue <n> --attempt <k> --blocked-on <value>",
+            "--issue <n> --attempt <k> --blocked-on <value>",
             suspension,
         )
         self.assertIn(
@@ -2738,7 +2743,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertIn(
             "workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> "
-            "--now <utc> --issue <n> --attempt <k> --blocked-on <value> "
+            "--issue <n> --attempt <k> --blocked-on <value> "
             "| artifact-budget validate-report --boundary workflow-response --input -\n",
             suspension,
         )
@@ -4135,9 +4140,9 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
     WORKER_LINE = ("Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> "
                    "--worker-id <worker_id>")
     REGISTER = ("workflow-state register-worker --repo-root <ledger_repo_root> "
-                "--run-id <run-id> --now <utc> --action-id <action_id>")
+                "--run-id <run-id> --action-id <action_id>")
     RELEASE = ("workflow-state release-worker --repo-root <ledger_repo_root> "
-               "--run-id <run-id> --now <utc> --worker-id <worker_id> --event returned")
+               "--run-id <run-id> --worker-id <worker_id> --event returned")
     COMMIT = ("launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
               "--worker-id <worker_id> -- ")
 
@@ -4256,7 +4261,7 @@ class ProgressMarkerContractsTest(unittest.TestCase):
     """#250: the Phase 6 owner records a progress marker after each completed task."""
 
     MARK = ("workflow-state mark-progress --repo-root <ledger_repo_root> "
-            "--run-id <run-id> --now <utc> --action-id <action_id>")
+            "--run-id <run-id> --action-id <action_id>")
     BOUND = "without a phase advance or a newly recorded progress marker"
 
     def assert_ordered(self, text, *anchors):
@@ -6182,7 +6187,7 @@ class LaunchScopeWiringContractsTest(unittest.TestCase):
     COMMIT = ("launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
               "--worker-id <worker_id> -- ")
     RELEASE = ("workflow-state release-worker --repo-root <ledger_repo_root> "
-               "--run-id <run-id> --now <utc> --worker-id <worker_id> --event returned")
+               "--run-id <run-id> --worker-id <worker_id> --event returned")
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -6284,6 +6289,25 @@ class LaunchScopeSweepContractsTest(unittest.TestCase):
             "`launch-scope reap --action-id`", "`reap --sweep`",
             "agent-launch/<run-id>/<action-id>/", "`launch-scope scratch` (#277)",
             "`scratch.json`", "`unattributed_worktrees`")
+
+
+class HandBuiltTimeContractsTest(unittest.TestCase):
+    """#309 D9: no skill document hands workflow-state a time; the helper reads its clock."""
+
+    def documents(self):
+        for tree in SKILL_TREES:
+            self.assertTrue(tree.is_dir(), tree)
+            yield from sorted(path for path in tree.rglob("*.md") if path.is_file())
+
+    def test_no_skill_document_passes_now(self):
+        checked = 0
+        for path in self.documents():
+            text = path.read_text(encoding="utf-8")
+            checked += 1
+            with self.subTest(document=str(path.relative_to(REPO_ROOT))):
+                self.assertIsNone(NOW_FLAG.search(text))
+                self.assertIsNone(NOW_KEY.search(text))
+        self.assertGreater(checked, 20)
 
 
 if __name__ == "__main__":
