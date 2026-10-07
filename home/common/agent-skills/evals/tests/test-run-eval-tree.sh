@@ -217,6 +217,30 @@ check "auth refusal: claude -p never ran" test -z "$(recorded run_config_dir)"
 check "auth refusal: no row was written" test "$(row_count)" -eq 0
 check "auth refusal: no sandbox and no temp root remain" tmp_is_empty
 
+# --- a preparation failure: the tree's agents/ holds no agent file -----------------
+# Every member the runner validates is present, so only the copy of agents/*.md fails.
+scenario prep-failure
+BROKEN="$S/tree"
+mkdir -p "$BROKEN/home/common/agent-skills" "$BROKEN/home/common/claude-code/agents" \
+  "$BROKEN/home/common/agent-guidance" "$BROKEN/python" "$BROKEN/lib"
+ln -s "$TREE/home/common/agent-skills/skills" "$BROKEN/home/common/agent-skills/skills"
+ln -s "$TREE/home/common/claude-code/skills" "$BROKEN/home/common/claude-code/skills"
+ln -s "$TREE/python/agent_tools" "$BROKEN/python/agent_tools"
+cp "$TREE/home/common/agent-guidance/AGENTS.md" "$BROKEN/home/common/agent-guidance/"
+cp "$TREE/lib/agent-tools.nix" "$BROKEN/lib/"
+git -C "$BROKEN" init -q
+git -C "$BROKEN" add -A
+git -C "$BROKEN" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false \
+  commit -qm "broken tree"
+run_env EVAL_TREE="$BROKEN"
+status=$?
+check "prep failure: the runner exits 2" test "$status" -eq 2
+check "prep failure: the message names the agent copy" grep -q 'run-eval: could not copy agents' "$S/log"
+check "prep failure: the auth probe never ran" test -z "$(recorded auth_config_dir)"
+check "prep failure: claude -p never ran" test -z "$(recorded run_config_dir)"
+check "prep failure: no row was written" test "$(row_count)" -eq 0
+check "prep failure: no sandbox and no temp root remain" tmp_is_empty
+
 # --- exit path 4: SIGTERM to the runner during the claude run ----------------------
 scenario sigterm
 runner_env

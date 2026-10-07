@@ -26,10 +26,10 @@ by pasting the prompt into a session and reading the transcript against it.
 
 ## Two modes: deployed and working tree
 
-**Deployed (the default).** The sandboxed `claude -p` reads skills from `~/.claude/skills`
-- the store links from the last `just switch`, not this working tree (user-level skills
-shadow project-level copies of the same name, so injecting the working tree into the
-sandbox does not work). Editing a skill therefore means: commit, `just switch`, then run
+**Deployed (the default).** The sandboxed `claude -p` reads skills from
+`~/.claude/skills` — the store links from the last `just switch`, not this working tree
+(user-level skills shadow project-level copies of the same name, so injecting the working
+tree into the sandbox does not work). Editing a skill therefore means: commit, `just switch`, then run
 the eval. A failed parity run is one `git revert` + re-switch away from the previous
 behavior. The row records `tree: "deployed"` with `tree_rev` and `tree_dirty` null.
 
@@ -72,7 +72,7 @@ instruction paths: both skill roots, `home/common/claude-code/agents` and
 
 ## Cheap-first
 
-The `from-issue` pipeline cases stop the flow after Phase 5 and grade the artifacts - spec,
+The `from-issue` pipeline cases stop the flow after Phase 5 and grade the artifacts — spec,
 plan, worktree placement, decision logs. The implementation never runs. A full end-to-end
 run costs an order of magnitude more and is reserved for risky landings. A pipeline case
 of another skill names its own stop in its prompt.
@@ -96,7 +96,9 @@ of another skill names its own stop in its prompt.
   stays unchanged. Every pipeline assert also sees `BASE_MAIN`, local `main`'s SHA right
   after the setup.
 - Env: `EVAL_MODEL` (default `sonnet`), `EVAL_TIMEOUT` seconds (default 2700),
-  `EVAL_MAX_USD` (optional ceiling), `EVAL_TRIALS` (default 1).
+  `EVAL_MAX_USD` (optional ceiling), `EVAL_TRIALS` (default 1), `EVAL_TREE` (a checkout
+  to evaluate instead of the deployed skills) and `EVAL_SETTINGS` (the settings file
+  tree mode copies; default `$HOME/.claude/settings.json`), both described above.
 - Sandboxes are kept after the run and their path is printed, so you can inspect the spec
   and plan a failing assert complained about. Clean up with `rm -rf $TMPDIR/eval-*`.
 - Asserts may carry a `"contract": "..."` key documenting a target artifact contract
@@ -107,7 +109,8 @@ of another skill names its own stop in its prompt.
 
 Every run appends one JSON line per trial to `results/results.jsonl`, which is committed
 and append-only (the rest of `results/` is gitignored). Fields: timestamp, skill, eval
-id/name, mode, model, trial number, verdict, per-assert pass/fail, wall seconds, claude
+id/name, mode, model (the root session's `EVAL_MODEL`; the models subagents used show
+under `models`), trial number, verdict, per-assert pass/fail, wall seconds, claude
 exit code, sandbox path, the `EVAL_MAX_USD` ceiling when one was set, the tree fields
 above, and the usage the claude run reported (`--output-format json`):
 
@@ -122,7 +125,7 @@ writes its row. `result.json` and `stderr.txt` stay in the sandbox beside `outpu
 the transcript the asserts grep: the result text followed by claude's stderr.
 
 With `EVAL_TRIALS=N` (N>1) the runner reruns the eval in a fresh sandbox per trial and
-prints a summary - pass rate and nearest-rank p50/p90 wall time. Comparing runs before and
+prints a summary — pass rate and nearest-rank p50/p90 wall time. Comparing runs before and
 after a skill edit is one `jq` away:
 
 ```sh

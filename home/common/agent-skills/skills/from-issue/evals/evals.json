@@ -51,7 +51,8 @@
       "id": 2,
       "name": "fuzzy-issue-should-abort",
       "mode": "pipeline",
-      "note": "guards the F2 fog-gate in AUTO.md Phase 0",
+      "note": "guards the F2 fog-gate in AUTO.md Phase 0. Expected to fail today (D22): a literal --auto takes direct-owner acquisition, whose first response asks for a tracker observation that the fixture's tracker kind 'none' cannot supply, so the run stops at acquisition before the fog gate is reached.",
+      "expected_today": "fail",
       "prompt": "/from-issue issues/002-fuzzy.md --auto\n\nResolve once into a retained ResolvedProject. The tracker capability is unsupported, so this file is issue 2. Refusal is fatal; do not default or infer policy. Autonomous mode.\n\nIf you get that far, **stop after Phase 5**: phases 0 through 5 only, no execute, no ship, and no edits under `tinytask/` or `tests/`.",
       "expected_output": "The run stops in Phase 0 and says why: the issue has no acceptance criteria, bundles several unrelated directions, and leans on terms the project has not defined (importance score, grouping, sync) that docs/areas/backlog/CONTEXT.md explicitly lists as out of scope pending an ADR. No worktree, no spec, no plan — auto mode means deciding without asking, not implementing something incoherent.",
       "asserts": [
@@ -60,12 +61,16 @@
           "shell": "out_matches 'too (vague|fuzzy|broad|ambiguous)|under.?specified|not implementable|cannot proceed|needs? (clarification|scoping|to be split)|fog|stopping (here|before)|abort'"
         },
         {
+          "name": "the run reached the fog gate rather than stopping at acquisition",
+          "shell": "out_lacks 'direct-owner[^.]{0,80}(observe|tracker)|build-delivery refused|tracker kind '\\''?none'\\''? is unsupported|\"kind\":\"observe\"[^}]*\"requirements\":\\[\\{\"kind\":\"tracker\"\\}\\]|stopped (issue [0-9]+ )?(during|at) acquisition'"
+        },
+        {
           "name": "no worktree was created",
           "shell": "[ \"$WT_COUNT\" -eq 0 ] || fail \"created $WT_COUNT worktree(s), first: $WT\""
         },
         {
           "name": "no spec or plan was written",
-          "shell": "[ -z \"$(ls -A \"$SPEC_DIR\" \"$PLAN_DIR\" 2>/dev/null)\" ] || fail \"artifacts written despite the abort\""
+          "shell": "dirs_empty \"$SPEC_DIR\" \"$PLAN_DIR\" || fail \"artifacts written despite the abort\""
         }
       ]
     },
@@ -73,12 +78,13 @@
       "id": 3,
       "name": "preflight-existing-work-stop",
       "mode": "pipeline",
+      "note": "D22: runs the ledger-free route like case 1 (D20), with no literal --auto, because the pre-flight lives in SKILL.md Phase 0 on every route and a literal --auto stops at direct-owner acquisition first (tracker kind 'none').",
       "setup": {
         "kind": "dirty-worktree",
         "branch": "worktree-issue-3-rename-flag"
       },
-      "prompt": "/from-issue issues/003-mechanical.md --auto\n\nResolve once into a retained ResolvedProject. The tracker capability is unsupported, so this file is issue 3. Refusal is fatal; do not default or infer policy. Autonomous mode.\n\nIf you get that far, **stop after Phase 5**: phases 0 through 5 only, no execute, no ship, and no edits under `tinytask/` or `tests/`.",
-      "expected_output": "Phase 0 pre-flight finds one worktree matching `worktree-issue-3-` that has uncommitted work, and stops there. The documented one-match-dirty behavior is to surface the situation rather than discard someone else's in-progress state, and it holds under --auto — that stop is a judgment about the workspace, not a user-approval checkpoint. Nothing new is created and the dirty worktree is left exactly as found.",
+      "prompt": "/from-issue issues/003-mechanical.md\n\nResolve once into a retained ResolvedProject. The tracker capability is unsupported, so `issues/003-mechanical.md` is the issue; treat it as issue 3 for branch naming. A resolver refusal is fatal and values are never defaulted or inferred.\n\nI authorize you to make every design and plan decision yourself: self-answer each question you would otherwise ask me, record each decision in the spec's decision ledger, and never wait for me.\n\n**Stop after Phase 5.** Run phases 0 through 5 only — investigate, worktree, brainstorm, grill, plan, standards review. Do not run Phase 6 or Phase 7. Do not edit `tinytask/` or `tests/`.\n\nReport the pre-flight outcome, and the resolved worktree, spec and plan if you got that far.",
+      "expected_output": "Phase 0 pre-flight finds one worktree matching `worktree-issue-3-` that has uncommitted work, and stops there. The documented one-match-dirty behavior is to surface the situation rather than discard someone else's in-progress state, and it holds even though the user authorized every design and plan decision — that stop is a judgment about the workspace, not a design or plan decision. Nothing new is created and the dirty worktree is left exactly as found.",
       "asserts": [
         {
           "name": "the pre-existing worktree still exists",
@@ -98,7 +104,7 @@
         },
         {
           "name": "no spec or plan was written",
-          "shell": "[ -z \"$(ls -A \"$SPEC_DIR\" \"$PLAN_DIR\" \"$PRE_WT/${SPEC_DIR#\"$REPO\"/}\" \"$PRE_WT/${PLAN_DIR#\"$REPO\"/}\" 2>/dev/null)\" ] || fail \"artifacts written despite the pre-flight stop\""
+          "shell": "dirs_empty \"$SPEC_DIR\" \"$PLAN_DIR\" \"$PRE_WT/${SPEC_DIR#\"$REPO\"/}\" \"$PRE_WT/${PLAN_DIR#\"$REPO\"/}\" || fail \"artifacts written despite the pre-flight stop\""
         }
       ]
     },

@@ -177,24 +177,28 @@ prepare_tree_env() {
   TREE_ROOT=$(cd "$TREE_ROOT" && pwd -P)
 
   local CONFIG="$TREE_ROOT/config" SHIM_BIN="$TREE_ROOT/bin"
-  mkdir -p "$CONFIG/skills" "$CONFIG/agents" "$SHIM_BIN"
+  mkdir -p "$CONFIG/skills" "$CONFIG/agents" "$SHIM_BIN" || die "could not create the temporary config dir under $TREE_ROOT"
 
+  # Every step below is checked: the runner has no `set -e`, and a half-built config dir
+  # would still let the model run.
   local root dir name rel
   for root in "${SKILL_ROOTS[@]}"; do
     for dir in "$root"/*/; do
       [ -d "$dir" ] || continue
       name=$(basename "$dir")
       [ -e "$CONFIG/skills/$name" ] && die "skill '$name' exists in both skill roots"
-      mkdir "$CONFIG/skills/$name"
+      mkdir "$CONFIG/skills/$name" || die "could not create skills/$name in the config dir"
       while IFS= read -r rel; do
-        mkdir -p "$(dirname "$CONFIG/skills/$name/$rel")"
-        ln -s "$root/$name/$rel" "$CONFIG/skills/$name/$rel"
+        mkdir -p "$(dirname "$CONFIG/skills/$name/$rel")" || die "could not create the directory for skills/$name/$rel"
+        ln -s "$root/$name/$rel" "$CONFIG/skills/$name/$rel" || die "could not link skills/$name/$rel"
       done < <(cd "$root/$name" && find . -type f ! -path '*/__pycache__/*' | sed 's|^\./||')
     done
   done
 
-  cp "$EVAL_TREE/home/common/agent-guidance/AGENTS.md" "$CONFIG/CLAUDE.md"
-  cp "$EVAL_TREE"/home/common/claude-code/agents/*.md "$CONFIG/agents/"
+  cp "$EVAL_TREE/home/common/agent-guidance/AGENTS.md" "$CONFIG/CLAUDE.md" ||
+    die "could not copy AGENTS.md from $EVAL_TREE/home/common/agent-guidance"
+  cp "$EVAL_TREE"/home/common/claude-code/agents/*.md "$CONFIG/agents/" ||
+    die "could not copy agents from $EVAL_TREE/home/common/claude-code/agents"
   jq 'del(.enabledPlugins, .extraKnownMarketplaces)' "$settings" >"$CONFIG/settings.json" ||
     die "settings file is not JSON: $settings"
 
@@ -206,8 +210,8 @@ prepare_tree_env() {
       echo '#!/usr/bin/env bash'
       echo 'unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE'
       printf 'PYTHONPATH=%q exec python3 -P -m agent_tools.%s "$@"\n' "$EVAL_TREE/python" "${cmd//-/_}"
-    } >"$SHIM_BIN/$cmd"
-    chmod +x "$SHIM_BIN/$cmd"
+    } >"$SHIM_BIN/$cmd" || die "could not write the $cmd shim"
+    chmod +x "$SHIM_BIN/$cmd" || die "could not make the $cmd shim executable"
   done <<<"$commands"
 
   CLAUDE_CONFIG_DIR="$CONFIG" claude auth status >/dev/null 2>&1 ||

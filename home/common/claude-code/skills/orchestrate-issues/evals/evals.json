@@ -55,7 +55,7 @@
       "asserts": [
         {
           "name": "a run ledger exists and records no attempt",
-          "shell": "found=0; for f in \"$REPO\"/.superpowers/workflows/*/state.json; do [ -f \"$f\" ] || continue; found=$((found + 1)); jq -e '[.issues[]?.attempts[]?] | length == 0' \"$f\" >/dev/null || { fail \"$f records an attempt\"; exit 1; }; done; [ \"$found\" -ge 1 ] || fail \"no run ledger under .superpowers/workflows\""
+          "shell": "found=0; for f in \"$REPO\"/.superpowers/workflows/*/state.json; do [ -f \"$f\" ] || continue; found=$((found + 1)); jq -e '(.schema_version | type) == \"number\" and (.run_id | type) == \"string\" and (.issues | type) == \"object\" and all(.issues[]; (.attempts | type) == \"array\" and (.attempts | length) == 0) and (.admission.claims | type) == \"array\" and (.admission.claims | length) == 0 and .workers == []' \"$f\" >/dev/null 2>&1 || { fail \"$f is not a run ledger with no attempt, no claim and no worker\"; exit 1; }; done; [ \"$found\" -ge 1 ] || fail \"no run ledger under .superpowers/workflows\""
         },
         {
           "name": "no worktree was created",

@@ -5,7 +5,7 @@
 
 **Goal:** `run-eval.sh` evaluates a checkout's skills through `EVAL_TREE` and records tokens in every row. `ship-issue`, `sdd`, `ship-release` and `orchestrate-issues` each gain a scripted `pipeline` case, and a committed Sonnet/Opus baseline covers the five pipeline skills (#293, slice S3 of #291).
 
-**Architecture:** Working-tree mode is one setup prologue in `run-eval.sh`. It validates the tree, builds one temp root holding `config/` (the `CLAUDE_CONFIG_DIR`) and `bin/` (the command-table shims), probes auth, and removes the root on every exit path. After that it shares every code path with deployed mode. Both modes switch to `--output-format json`, and the row writer adds the tree and token fields. Three new closed setup kinds take their committed inputs from `evals/setups/issue-3/`. Spec: `.agents/artifacts/specs/2026-10-07-issue-293-eval-working-tree-mode-design.md` (ledger D1–D19).
+**Architecture:** Working-tree mode is one setup prologue in `run-eval.sh`. It validates the tree, builds one temp root holding `config/` (the `CLAUDE_CONFIG_DIR`) and `bin/` (the command-table shims), probes auth, and removes the root on every exit path. After that it shares every code path with deployed mode. Both modes switch to `--output-format json`, and the row writer adds the tree and token fields. Three new closed setup kinds take their committed inputs from `evals/setups/issue-3/`. Spec: `.agents/artifacts/specs/2026-10-07-issue-293-eval-working-tree-mode-design.md` (ledger D1–D22).
 
 **Tech stack:** Bash (GNU and BSD portable), `jq`, git, Python 3 standard-library `unittest`, the `claude` CLI (`-p --output-format json`).
 
