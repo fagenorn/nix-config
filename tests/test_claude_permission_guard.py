@@ -331,6 +331,97 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(2, result.returncode, command)
 
+    def assert_detaching_refusal(self, result, word, command):
+        self.assertEqual(2, result.returncode, (command, result.stderr))
+        self.assertIn(
+            f"lifecycle guard: detaching command `{word}` refused:", result.stderr,
+            command,
+        )
+        self.assertIn("run_in_background", result.stderr, command)
+        self.assertIn("launch-scope exec", result.stderr, command)
+
+    def test_detaching_words_are_refused_globally(self):
+        # Every form below makes the shell run a detaching word (or hands it to
+        # source the guard cannot parse), so exit 0 means the guard missed it.
+        # No cwd: the refusal is global and needs no repository.
+        templates = (
+            "W x", "W x &", "(W x)", "{ W x; }", "`W x`", "y=$(W x)", "$(W)",
+            "case a in a) W x;; esac", "! W x", "time W x",
+            "if true; then W x; fi", "for i in a; do W x; done",
+            "true && W x", "x & W", '"W" x', "/usr/bin/W x",
+            "command W x", "builtin W x", "exec W x", "env W x", "env -i W x",
+            "env FOO=bar W x", "sudo W x", "sudo -E W x",
+            "eval 'W x'", "sh -c 'W x'", 'bash -c "W x"', "zsh -c 'W x'",
+            "dash -c 'W x'", "ksh -c 'W x'", "/bin/sh -c 'W x &'",   # per D6
+            'echo "$(W x &)"', 'echo "`W x`"',                     # per D3
+            'echo "unterminated ; W x',                              # unparseable
+            ">log 2>&1 W x &", "2>&1 W x", "</dev/null W x", "> log W x",
+            ">> log 2>&1 W x", "&>log W x", "FOO=bar >log W x",       # redirections
+            "sudo -u anis W x", "sudo -g wheel W x", "sudo -u anis -E W x",
+            "exec -a foo W x", "env -u FOO W x", "env -C /tmp W x",
+            "env -S -i W x", "sudo -E -u anis env -u FOO W x",         # option args
+            "W>/dev/null sleep 60 &", "W</dev/null x", "W>&2", "W>log x",
+            "W>>log x", "sudo>/dev/null W x", "sudo -u >log anis W x",  # attached
+            "env -u || W x", "sudo -u; W x", "exec -a && W x",          # separators
+            "env -u FOO 2>&1 W x",
+            "env -S 'W x'", "env --split-string='W x'", 'env -S"W x"',
+            "env --split-string 'W x'", "env -iS 'W x'",                # split-string
+            "X='>' W x &", "exec -a 'worker>' W x", "X=1> out W x",
+            "X='>' sh -c 'W x'", "sudo -u 'a>' W x",                    # quoted `>`
+        )
+        for word in ("nohup", "setsid", "disown"):
+            for template in templates:
+                command = template.replace("W", word)
+                with self.subTest(command=command):
+                    self.assert_detaching_refusal(
+                        self.run_guard(command), word, command)
+        # The issue's AC1 forms verbatim, and the deliberate over-refusal of D3.
+        for command, word in (
+            ("nohup x &", "nohup"), ("(setsid x)", "setsid"),
+            ("env nohup x", "nohup"), ("$(disown)", "disown"),
+            ("sh -c 'nohup x'", "nohup"), ("x & disown", "disown"),
+            ("sh -c 'cat nohup.out'", "nohup"),
+            ("sh -c 'setsid a; nohup b'", "setsid"),               # earliest, per D6
+        ):
+            with self.subTest(command=command):
+                self.assert_detaching_refusal(self.run_guard(command), word, command)
+
+    def test_detaching_word_mentions_pass(self):
+        for command in (
+            'echo "nohup"',
+            "grep nohup log",
+            "rg -n 'setsid|disown' docs/",
+            'echo "run nohup x & later"',
+            "cat > notes.md <<'EOF'\nnohup x &\nsetsid y\ndisown\nEOF\n",
+            "true # nohup x & disown",
+            "a & b & wait",
+            "sleep 1 &",
+            "make > nohup.out 2>&1",
+            "tail -f nohup.out",
+            "sudo -u anis ls nohup.out",
+            "sudo -u >log anis ls nohup",
+            "make 2>&1 >nohup.out",
+            "ls >nohup.out",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_detaching_refusal_precedes_the_push_grammar(self):
+        # AC3: still refused, now for detaching rather than as a push.
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        result = self.run_guard("nohup git push origin main", cwd=repo)
+        self.assert_detaching_refusal(result, "nohup", "nohup git push origin main")
+        self.assertNotIn("unsafe push", result.stderr)
+        # D1: the check runs before the policy loads. The registered wrapper
+        # forwards "$@", so a later --policy overrides the store policy.
+        bad_policy = ("--policy", "/nonexistent/lifecycle-guard-policy.json")
+        refused = self.invoke_command("setsid x", *bad_policy)
+        self.assert_detaching_refusal(refused, "setsid", "setsid x")
+        control = self.invoke_command("true", *bad_policy)
+        self.assertEqual(2, control.returncode)
+        self.assertIn("lifecycle guard: invalid policy:", control.stderr)
+
     def test_whitespace_normalisation_still_accepts_a_valid_push(self):
         repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
         for command in ("git  push -u origin topic", "git\tpush origin topic"):

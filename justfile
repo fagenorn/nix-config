@@ -88,6 +88,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_shell_example_contracts.py \
     home/common/agent-skills/tests/test_ship_release_contracts.py \
+    home/common/agent-skills/tests/test_eval_cases.py \
     home/common/agent-skills/tests/test_agent_evidence.py \
     home/common/agent-skills/tests/test_agent_model_matrix.py \
     home/common/agent-skills/tests/test_instruction_load.py \
@@ -134,6 +135,7 @@ agent-workflow-tests:
     tests/test_promotion_demo.py \
     tests/test_context_map_lint.py \
     tests/test_branch_protection.py
+  bash home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
 # Validate every explicit pipeline dispatch and print the four-family demo trace.
 agent-model-matrix:
