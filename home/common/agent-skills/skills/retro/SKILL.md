@@ -1,6 +1,6 @@
 ---
 name: retro
-description: Conduct a retrospective on a coding session and propose improvements to the agent environment that ran it.
+description: Review a coding session and propose fixes to the agent environment that ran it. Use for a retro or post-mortem.
 disable-model-invocation: true
 ---
 
