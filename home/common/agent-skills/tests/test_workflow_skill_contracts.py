@@ -276,7 +276,12 @@ SHIP_ISSUE_MACHINE_TEXT = {
         "gh pr view <pr-num> --repo <resolved-repository> --json body",
         "Held for verification: <PR URL>",
     ),
-    SHIP_ISSUE_REVIEW: ("validate-detail-input", 'detail_state: "unpublished"'),
+    SHIP_ISSUE_REVIEW: (
+        "validate-detail-input", 'detail_state: "unpublished"',
+        ".superpowers/ship-review/<issue>/retained-detail.json",
+        "review range: delta <review_base7>..<head7> since final-review <R7> (<L> lines, <F> files)",
+        "review range: empty since final-review <R7>", "review range: full (<reason>)",
+    ),
     SHIP_ISSUE_POST_SELECTION_SYNC: (
         "--kind current-selection", "--kind sync-selection", "--kind scope", "`test_ref`",
         "launch-commit", "gh pr view <pr-num> --json state,headRefOid,mergeable",
@@ -396,9 +401,7 @@ SHARED_POLICY_SUPPORT = {
 RETAINED_SUPPORT_CONTRACTS = {
     "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
     "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
-    "ship-issue/CONSOLIDATE.md": ("bindings.paths", "bindings.vcs"),
     "ship-issue/HUMAN-GATE.md": ("bindings.vcs", "bindings.tracker"),
-    "ship-issue/SYNC.md": ("bindings.vcs", "bindings.paths.hints"),
     "ship-release/CHANGELOG.md": ("bindings.tracker", "bindings.vcs", "bindings.workflow.release"),
 }
 
@@ -1340,7 +1343,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_durable_review_detail_precedes_every_removable_cleanup(self):
         self.assertIn(".superpowers/issue-delivery/", self.sdd)
         self.assertIn(".superpowers/issue-delivery/", self.ship_review)
-        for text in (self.sdd, self.ship_review, self.ship_issue, self.ship_handoff):
+        for text in (self.sdd, self.ship_issue, self.ship_handoff):
             self.assertIn("report_path", text)
             self.assertIn("keep the worktree", text)
         self.assertIn("primary worktree", self.ship_handoff)
