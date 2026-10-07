@@ -58,10 +58,6 @@ CODEX_COLLABORATION_EVALS = (
     REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/evals/evals.json"
 )
 
-# The Phase-5 degradation boundary, spelled once for the whole module: the skill
-# and its eval are both checked against these two strings so they cannot drift.
-GATE_LINE_BOUNDARY = "≤1,000 product lines"
-GATE_FILE_BOUNDARY = "≤20 product files"
 REQUIRED_WATCH = "timeout 300 gh pr checks <pr-num> --required --watch --fail-fast --interval 30"
 ALL_CHECKS_WATCH = "timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30"
 ADVISORY_CALL = "gh pr checks <pr-num> --json name,bucket"
@@ -94,9 +90,6 @@ BUILD_ROOT_CLAUSE = ("The builder seals the policy `resolve-project` resolves at
 BUILD_REFUSAL_RELAY = ("report the builder's stderr line verbatim: for a resolver refusal "
                        "it carries the resolver's `error.code`, `repair_id` and ordered "
                        "`violations` exactly.")
-WRITER_RULE = ("Under implementation custody a ship owner writes only "
-               "`checkpoint-delivery`, never `finish`; a remainder owner writes its "
-               "own `finish --summary-file -`.")
 # The closed capability-gap line ship-issue returns when its Phase-0 probe finds
 # no subagent-launch tool, spelled once for the module (per D4).
 CAPABILITY_GAP_LINE = "capability_gap: agent_dispatch"
@@ -129,6 +122,54 @@ SHIP_SUMMARY_V2_KEYS = {"interface_version", "issue", "state", "custody",
     "authority_observations", "reevaluation_evidence", "detail_state", "report_path",
     "notes"}
 
+# Machine-consumed text each ship-issue document must carry (#291 D6): helper
+# argv, the command constants above, and the closed lines a later agent reads
+# back from the PR body or an issue comment. No guidance sentence is pinned.
+SHIP_ISSUE_MACHINE_TEXT = {
+    SHIP_ISSUE: (
+        "--kind selected-output", "--kind current-selection", "checkpoint-delivery",
+        "finish --summary-file -", "validate-report --boundary ship-summary",
+        "review-range --integration-ref origin/<integration> --head $HEAD_SHA"
+        " --final-review-head <final-review head> --max-lines 1000 --max-files 20"
+        " --artifact-path <spec_path> --artifact-path <plan_path>",
+        "~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> "
+        "--run-id <run-id> --action-id <issue:attempt:launch>",
+        "launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--worker-id <worker_id> -- ",
+        "workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--now <utc> --worker-id <worker_id> --event returned",
+        "--parent <worker_id>", "git merge --no-commit --no-ff origin/<integration>",
+        "launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--worker-id <worker_id> -- <argv>",
+        "launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--worker-id <worker_id>",
+        "verified-tree check --verification <id>",
+        "verified-tree record --tree <the checked tree>",
+        REQUIRED_WATCH, ALL_CHECKS_WATCH, ADVISORY_CALL,
+        "Acceptance state: <effective acceptance state>",
+        "Acceptance record: <record-path or none>", "Closes #<num>",
+        "Held for verification: <PR URL>", "`github:issue:<num>:held`",
+        "gh label list --repo <resolved-repository> --search needs-verification --json name",
+        "gh label create needs-verification", "gh issue reopen <num>",
+        "gh issue edit <num> --add-label needs-verification", "gh issue comment <num>",
+        "gh issue close <num>",
+    ),
+    SHIP_ISSUE_CI_MERGE: (
+        "--kind current-selection", "--kind sync-selection", "launch-commit",
+        "gh pr view <pr-num> --json state,headRefOid,mergeable",
+        REQUIRED_WATCH, ALL_CHECKS_WATCH, ADVISORY_CALL,
+    ),
+    SHIP_ISSUE_HUMAN_GATE: (
+        "git push -u origin <branch>",
+        'gh pr create --repo <resolved-repository> --base <integration-branch> '
+        '--head <branch> --title "<title>" --body',
+        "Closes #<num>", "gh issue close <num>", "gh issue reopen <num>",
+        "gh issue edit <num> --add-label needs-verification",
+        "git push origin --delete <branch>", "git ls-remote --heads origin <branch>",
+        "git worktree remove <worktree-path>", "git branch -d <branch>",
+    ),
+}
+
 # "sibling <=2 words> candidate" — the in-working-tree prescription being
 # removed. The bounded gap keeps it off handoff's legitimate
 # "candidate ... sibling temporary" sentences, where the words appear in the
@@ -144,11 +185,6 @@ REPO_ROOT_WORKSPACE_LITERAL = "<repo-root>/.superpowers/sdd"
 # Every `.superpowers/` home the corpus is allowed to name, spelled once (D10).
 SUPERPOWERS_SEGMENTS = {"workflows", "issue-delivery", "sdd", "ship-review"}
 SUPERPOWERS_SEGMENT_RE = re.compile(r"\.superpowers/([A-Za-z0-9_.-]+)")
-
-SHIP_REVIEW_EXCEPTION = (
-    "the one exception to the rule that workflow scratch never lives in a "
-    "working tree"
-)
 
 # The orphaned-bucket prune, spelled once (D5, D8).
 WORKTREE_BUCKET_LITERAL = "`<primary-checkout>/.superpowers/sdd/wt-<worktree-name>/`"
@@ -647,9 +683,6 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
     def test_sdd_configured_review_pair_is_complete(self):
         assert_configured_code_review_pair(self, SDD, SDD_DIR / "final-review.md")
 
-    def test_ship_issue_configured_review_pair_is_complete(self):
-        assert_configured_code_review_pair(self, SHIP_ISSUE, SHIP_ISSUE_REVIEW)
-
     def test_configured_review_paragraph_copies_stay_identical(self):
         # ship-issue REVIEW.md and sdd final-review.md share one configured-review
         # paragraph, so its capacity scope changes in both at once (issue 195, D7).
@@ -671,66 +704,6 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             self, DIFF_REVIEW, "bindings.workflow.review.code",
             ("Critical", "Important", "Minor"),
         )
-
-    def test_ship_correctness_route_is_the_capability_ladder(self):
-        route = ship_correctness_route()
-        assert_correctness_route_ladder(self, route, SHIP_CORRECTNESS_TARGET)
-        route = normalized(route)
-        self.assertIn(
-            "This is the only rung that reaches Codex and the only one where a "
-            "capacity rejection binds, on the terms in REVIEW.md.", route)
-        # sdd words its rung 2 differently, so ship pins its own
-        # non-capacity sentence inside rung 2 (D14).
-        rung_2 = route[route.index("2. `available`"):route.index("3. `unsupported`")]
-        self.assertIn(
-            "A completed non-capacity failure takes that skill's one native "
-            "fallback.", rung_2)
-        self.assertIn(
-            "A Codex call made under `unsupported` anyway is a routing error: "
-            "discard its outcome — verdict, refusal or failure — record the "
-            "routing error in the PR body beside the correctness verdict, and "
-            "run the rung-3 native dispatch, with no retry, stop or suspension.",
-            route)
-        # REVIEW.md names the rung-3 template as the native form, not a
-        # fallback (D13).
-        self.assertIn(
-            "the native correctness form uses `correctness-reviewer-prompt.md`",
-            normalized(SHIP_ISSUE_REVIEW.read_text(encoding="utf-8")))
-
-    def test_correctness_route_ladder_rejects_each_broken_route(self):
-        # The helper is not vacuous: putting the pre-fix route back, or breaking
-        # one clause of the ladder, makes it raise (issue 195, D3).
-        ship = SHIP_ISSUE.read_text(encoding="utf-8")
-        ladder = ship[
-            ship.index("Run it in parallel with the correctness axis"):
-            ship.index("<!-- agent-dispatch: id=ship-issue-full-correctness-fallback")
-        ]
-        mutants = {
-            "pre-fix route": (ladder, SHIP_PRE_FIX_ROUTE + "\n\n"),
-            # Injected after rung 3's full lead, so the lead check passes and
-            # the rung's no-`diff-review` guard is what raises.
-            "diff-review in rung 3": (
-                "this native first-pass dispatch, directly",
-                "this native first-pass dispatch via `diff-review`, directly"),
-            "capacity rule leaves rung 2": (
-                "a capacity rejection binds", "a refusal binds"),
-            "routing-error outcome kept": (
-                "discard its outcome", "keep its outcome"),
-            "rung 3 invokes codex-collaboration": (
-                "is never invoked on this rung", "is always invoked on this rung"),
-            "rung 3 drops available without the skill": (
-                ", or `available` without `codex-collaboration` installed →",
-                " →"),
-            "routing error skips the native dispatch": (
-                "run the rung-3 native dispatch", "skip the rung-3 native dispatch"),
-        }
-        for name, (old, new) in mutants.items():
-            with self.subTest(mutant=name):
-                self.assertTrue(old in ship, f"mutant anchor missing: {old!r}")
-                with self.assertRaises(AssertionError):
-                    assert_correctness_route_ladder(
-                        self, ship_correctness_route(ship.replace(old, new)),
-                        SHIP_CORRECTNESS_TARGET)
 
     def test_sdd_correctness_route_is_the_capability_ladder(self):
         route = sdd_correctness_route()
@@ -955,14 +928,6 @@ CORRECTNESS_ROUTE_OPENER = (
     "Choose the correctness route from the retained `capabilities.review.code` "
     "state before either axis is dispatched, never from how a Codex call failed:"
 )
-SHIP_CORRECTNESS_TARGET = "id=ship-issue-full-correctness-fallback"
-# ship-issue Phase 5's correctness sentence before issue 195, kept only so the
-# ladder helper's self-check can put it back.
-SHIP_PRE_FIX_ROUTE = (
-    "Run it in parallel with the correctness axis via `codex-collaboration`'s "
-    "`diff-review`; when that capability is unavailable, use this native "
-    "first-pass dispatch instead:"
-)
 SDD_CORRECTNESS_TARGET = "[correctness-reviewer-prompt.md](correctness-reviewer-prompt.md)"
 # sdd final-review's correctness routing before issue 195, kept only so the
 # ladder helper's self-check can put it back.
@@ -983,14 +948,6 @@ def sdd_correctness_route(text=None):
     start = text.index("- **Correctness axis**")
     # The acceptance-criteria paragraph follows the axes (#272 D13).
     return text[start:text.index("**Acceptance criteria.**", start)]
-
-
-def ship_correctness_route(text=None):
-    """ship-issue Phase 5's full-review text, up to its scope-recording sentence."""
-    if text is None:
-        text = SHIP_ISSUE.read_text(encoding="utf-8")
-    start = text.index("**Full two-axis review.**")
-    return text[start:text.index("Axis reports are never merged", start)]
 
 
 def assert_correctness_route_ladder(case, route, native_target):
@@ -1103,7 +1060,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.worktrees = WORKTREES.read_text(encoding="utf-8")
         cls.ship_issue = SHIP_ISSUE.read_text(encoding="utf-8")
         cls.ship_review = SHIP_ISSUE_REVIEW.read_text(encoding="utf-8")
-        cls.ship_ci_merge = SHIP_ISSUE_CI_MERGE.read_text(encoding="utf-8")
         cls.ship_human_gate = SHIP_ISSUE_HUMAN_GATE.read_text(encoding="utf-8")
         cls.ship_issue_evals = json.loads(SHIP_ISSUE_EVALS.read_text(encoding="utf-8"))
         cls.writing_plans = WRITING_PLANS.read_text(encoding="utf-8")
@@ -1244,96 +1200,13 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertIn(anchor, self.ship_handoff)
         self.assertNotIn("## Delivery handoff v2", self.ship_handoff)
 
-    def test_ship_issue_writer_rule_delivery_loop_and_remainder_mode(self):
-        self.assertIn(WRITER_RULE, normalized(self.ship_issue))
-        self.assertNotIn("never writes workflow-state itself", normalized(self.ship_issue))
-        loop = normalized(self.section(self.ship_issue, "## Delivery loop", "## Remainder mode"))
-        self.assert_ordered(loop, "pre-merge selection gate", "--kind selected-output",
-            "`selected_output`, `branch_published` and `pr_opened`", "checkpoint-delivery",
-            "equal the scope", "current-launch", "current-launch", "authority-observation",
-            "observation-only", "`human_gate`", "`delivery_complete`")
-        self.assert_ordered(loop, "the denied stage's scope as `requested_scope`",
-                            "`state: suspended`", "`blocked_on: human_gate`", "fail loudly")
-        remainder = normalized(self.ship_issue.split("## Remainder mode", 1)[1])
-        for anchor in ("`delivery_remainder`", "ready stage", "finish --summary-file -",
-                       "`delivery_stalled`"):
-            self.assertIn(anchor, remainder)
+    def test_from_issue_remainder_routes_name_the_re_entry_line(self):
         for text in (self.ship_handoff.split("## Remainder owner prompt", 1)[1],
                      self.section(self.from_issue, "### Dispatcher-owned acquisition",
                                   "### Direct autonomous acquisition"),
                      self.section(self.from_issue, "3. **`kind: delivery_remainder`**",
                                   "4. **`kind: terminal`**")):
             self.assertIn("re-entry line", normalized(text))
-        for appendix in (self.ship_review, self.ship_human_gate):
-            self.assertIn("## Delivery loop", appendix)
-
-    def test_ship_issue_post_selection_sync_route(self):
-        """#192 T11: CI-MERGE.md owns the route; SKILL.md points to it from five places.
-
-        The fifth is Phase 5's merge-delta reviewer, which only that route dispatches (#264).
-        """
-        route = normalized(self.ship_ci_merge.split("## Post-selection sync", 1)[1])
-        self.assert_ordered(route, "**sync selection**", "whoever holds the merge gate",
-            "**current selection**", "`--kind current-selection`",
-            "`implementation_delivered`", "*sync run*",
-            "`git merge-base --is-ancestor", "one sync selection, oldest first",
-            "`gh pr view <pr-num> --json state,headRefOid,mergeable`",
-            "`mergeable: CONFLICTING`", "merely behind", "resume at step 3",
-            "`mergeable: UNKNOWN`", "proceed to the merge",
-            "not an authority denial", "no `authority-observation`")
-        self.assert_ordered(route, "**Sync.**", "[`SYNC.md`](./SYNC.md)", "**Verify.**",
-            "Run Phase 2's verification step.", "**Review.**", "`git show --cc", "merge-delta reviewer",
-            "re-run Phase 2's verification step before the push",
-            "`merge-delta-empty`", "`merge-delta-clean`", "**Push.**", "`check-launch`",
-            "`git push origin <branch>`", "**Wait for CI.**", "Phase 6's CI wait",
-            "**Select.**", "--kind sync-selection", "`git rev-list --parents -n 1",
-            "`test_ref` `checks`", "`branch_published` and `pr_opened`",
-            "`--kind scope` for `merge_pr`", "**Merge.**")
-        self.assert_ordered(route, "**A merge that already landed.**",
-            "without a push or a CI wait", "`pr_merged` observation", "**Stops.**",
-            "genuinely-blocked stop", "In `--auto`, a step-1 conflict", "`git merge --abort`",
-            "Should-fix", "`terminal_failed` `ship-summary/v2`", "`stopped` row",
-            "its own `finish`")
-        self.assertNotIn("Agent(", self.ship_ci_merge)
-        self.assertEqual(self.ship_issue.count("`## Post-selection sync`"), 5)
-        loop = normalized(self.section(self.ship_issue, "## Delivery loop", "## Remainder mode"))
-        self.assert_ordered(loop, "**The pre-merge selection gate.**",
-            "`## Post-selection sync`", "**Denials.**", "cannot merge into its base",
-            "no authority observation", "`## Post-selection sync`",
-            "A guard, host or provider denial", "the current selection, merge SHA")
-        remainder = normalized(self.ship_issue.split("## Remainder mode", 1)[1])
-        self.assert_ordered(remainder, "start at the merge gate", "`## Post-selection sync`",
-                            "already landed", "`--kind current-selection`")
-        phase_six = normalized(self.section(self.ship_issue, "## Phase 6 — Wait for CI",
-                                            "## Phase 7 — Merge"))
-        self.assert_ordered(phase_six, "unreviewed commits", "`## Post-selection sync`",
-                            "genuinely-blocked stop")
-
-    def test_ship_issue_probes_reviewer_dispatch_before_any_write(self):
-        # The probe is Phase 0's first step, so a context that cannot launch
-        # the reviewers stops before the synchronizing checkpoint, the Phase-1
-        # sync and every other write (per D3, D13). It has one home (per D9).
-        heading = "## Phase 0 — Pre-flight"
-        phase_zero = self.section(self.ship_issue, heading, "## Phase 1")
-        body = phase_zero[len(heading):].lstrip()
-        self.assertTrue(body.startswith("**Reviewer-dispatch probe"), body[:80])
-        self.assert_ordered(
-            normalized(phase_zero),
-            "Reviewer-dispatch probe",
-            "synchronizing null-scope checkpoint",
-            "the Phase-1 sync",
-            "`ToolSearch` `select:Agent`",
-            "never a host by name",
-            "launches nothing, writes nothing",
-            "Remainder mode skips",
-            CAPABILITY_GAP_LINE,
-            "Standalone",
-            "git rev-parse --git-common-dir",
-        )
-        review = normalized(self.ship_review)
-        self.assertNotIn("nested dispatch works even inside", review)
-        self.assertNotIn("ToolSearch", review)
-        self.assertIn("Phase-0 reviewer-dispatch probe", review)
 
     def test_ship_handoff_returns_the_gap_line_before_either_loop_exit(self):
         # The prompt stops promising nested dispatch, points at the probe, and
@@ -2019,22 +1892,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("only findings transport", finish)
         self.assertIn("only terminal transport", severity)
 
-    def test_merged_ship_summary_is_validated_only_after_cleanup(self):
-        cleanup = self.section(self.ship_issue, "## Phase 8", "## Notes")
-        self.assert_ordered(
-            cleanup,
-            "do not construct or validate a successful `merged` ship summary yet",
-            "gh issue close",
-            "git worktree remove",
-            "Only after issue closure and worktree cleanup both succeed",
-            "validate-report --boundary ship-summary",
-        )
-        self.assertIn("do not forge", cleanup)
-        self.assert_ordered(normalized(self.section(self.ship_issue, "## Delivery loop",
-                                                    "## Remainder mode")),
-                            "Only after the last cycle",
-                            "validate-report --boundary ship-summary")
-
     def test_review_package_failure_before_dispatch_has_no_fabricated_detail(self):
         self.assert_ordered(self.sdd, "base_sha and head_sha", "review-package",
                             "exit 2", 'detail_state: "none"', "report_path: null",
@@ -2058,14 +1915,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                             "artifact-budget check", "decompose_required")
         self.assertIn("check the spec too when its decision ledger changed", self.standards_review)
         self.assertIn("do not dispatch SDD", self.standards_review)
-
-    def test_ship_expands_validated_plan_only_for_review_range_exclusion(self):
-        self.assert_ordered(self.ship_issue, "artifact-budget check", "discover the plan members",
-                            "review-range", "--artifact-path")
-        self.assertIn("one argument for the plan root and each discovered member", self.ship_issue)
-        self.assertIn("≤1,000 product lines", self.ship_issue)
-        self.assertIn("≤20 product files", self.ship_issue)
-        self.assertIn("do not put the member list in the handoff", self.ship_issue)
 
     def test_fixture_producer_states_supplement_behavioral_cli_cases(self):
         self.assertTrue(all(item["expected"]["producer_state"] == "complete"
@@ -2352,8 +2201,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         # own bullet.
         gate = self.ship_human_gate
         split = gate.index("## Never route around a denial")
-        outside, ban = gate[:split], normalized(gate[split:])
-        self.assertIn("On this path the session must not:", ban)
+        outside = gate[:split]
         for bypass in (
             "--admin",
             "--force",
@@ -3275,153 +3123,32 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 self.assertIn("not a request to execute anything", packet)
         self.assertIn("so the reviewer need not re-measure them", plan_packet)
 
-    def test_degradation_gate_delegates_counting_and_carries_the_retuned_boundary(self):
-        # The gate states a policy and calls the helper; the ancestry and
-        # accounting live in `agent_tools.review_range` / `diff_scope` (#264 D2).
-        gate = self.section(self.ship_issue, "**Pick the range first.**",
-                            "**Route the review.**")
-        for fragment in (
-            GATE_LINE_BOUNDARY,
-            GATE_FILE_BOUNDARY,
-            # the whole invocation: the thresholds passed must be the ones stated (D2).
-            "review-range --integration-ref origin/<integration> --head $HEAD_SHA"
-            " --final-review-head <final-review head> --max-lines 1000 --max-files 20"
-            " --artifact-path <spec_path> --artifact-path <plan_path>",
-            "distinct from the reviewed `HEAD_SHA`",
-            "No measurement",
-            "is not a small diff",
-            "`review-range unavailable`",
-            "a historical artifact that is itself the requested product still counts",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, gate)
-        for absent in ("--numstat", "400", "--root", "diff-scope $BASE_SHA"):
-            with self.subTest(absent=absent):
-                self.assertNotIn(absent, gate)
-        self.assert_ordered(
-            gate,
-            "`review_state` is `clean`",
-            "needed no manual conflict escalation",
-            GATE_LINE_BOUNDARY,
-            "does NOT carry the `risky` label",
-            "`capabilities.review.code` state",
-        )
+    def test_ship_issue_documents_carry_their_machine_text(self):
+        for path, items in SHIP_ISSUE_MACHINE_TEXT.items():
+            text = normalized(path.read_text(encoding="utf-8"))
+            for item in items:
+                with self.subTest(path=path.name, item=item):
+                    self.assertIn(item, text)
 
-    def test_ship_issue_eval_restates_the_gate_boundary_it_grades(self):
-        # Eval 1 grades a whole phase walk; its one degradation clause must
-        # quote the same boundary the skill states, or a graded walk can be
-        # "correct" against a number the skill no longer carries.
-        expected = next(
-            case for case in self.ship_issue_evals["evals"] if case["id"] == 1
-        )["expected_output"]
-        # The delegation is pinned as a whole affirmative clause: a bare
-        # "diff-scope" token also matches a clause saying the boundary is *not*
-        # measured with the helper, which is the inversion this test guards.
-        for fragment in (
-            GATE_LINE_BOUNDARY,
-            GATE_FILE_BOUNDARY,
-            f"the delta is small ({GATE_LINE_BOUNDARY} / {GATE_FILE_BOUNDARY},"
-            " measured with `review-range` rather than hand-counted numstat arithmetic)",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, expected)
-        self.assertNotIn("measured with `diff-scope`", expected)
-        self.assertNotIn("≤400", expected)
-
-    def test_phase_five_reviews_the_selected_range_on_two_axes(self):
-        phase_five = normalized(self.section(self.ship_issue, "## Phase 5 — Review the PR",
-                                             "## Phase 6 — Wait for CI"))
-        route = normalized(self.section(self.ship_issue, "**Route the review.**",
-                                        "**Merge-delta reviewer (post-selection sync only).**"))
-        self.assert_ordered(route, "`delta`", "`<review_base>..$HEAD_SHA`",
-                            "delta-route conformance brief", "`empty`", "skip to Phase 6",
-                            "`full`", "`$BASE_SHA..$HEAD_SHA`", "per REVIEW.md")
-        merge_delta = self.section(self.ship_issue,
-                                   "**Merge-delta reviewer (post-selection sync only).**",
-                                   "**Full two-axis review.**")
-        self.assertIn("Phase 5 never dispatches it", normalized(merge_delta))
+    def test_phase_five_merge_delta_dispatch_and_handoff_reviewer_count(self):
         self.assertIn("<!-- agent-dispatch: id=ship-issue-merge-delta-review role=reviewer"
-                      " model=opus effort=high -->", merge_delta)
-        full = normalized(ship_correctness_route(self.ship_issue))
-        self.assertIn("Both the `delta` and `full` routes run it", full)
-        self.assertIn("`<review_base>..$HEAD_SHA` on `delta`, `$BASE_SHA..$HEAD_SHA` otherwise",
-                      full)
-        self.assertNotIn("merge-delta empty, nothing to review", phase_five)
-        self.assertIn("5. Review the PR → review-range picks delta, empty or full;"
-                      " two-axis review over it", normalized(self.ship_issue))
+                      " model=opus effort=high -->", self.ship_issue)
         self.assertIn("it dispatches zero (empty review range) or two first-pass reviewer"
                       " subagents", normalized(self.ship_handoff))
         self.assertNotIn("zero (empty merge-delta), one, or two", normalized(self.ship_handoff))
 
-    def test_review_md_owns_the_delta_brief_and_the_range_record(self):
-        review = normalized(self.ship_review)
-        delta = normalized(self.section(self.ship_review, "## Delta route",
-                                        "## Severity mapping (full path)"))
-        for fragment in (
-            "`<review_base>..$HEAD_SHA`",
-            "already graded delivered-vs-promised for the branch at R",
-            "scope-creep categories", "review hint path",
-            "stale-prose audit limited to files the delta touches",
-            "never grades the whole branch's delivery again",
-            "`review range: delta <review_base7>..<head7> since final-review <R7>"
-            " (<L> lines, <F> files)`",
-            "`review range: empty since final-review <R7>`",
-            "`review range: full (<reason>)`",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, delta)
-        merge_delta = normalized(self.section(self.ship_review,
-                                              "## Merge-delta check (post-selection sync)",
-                                              "## Full two-axis review — templates"))
-        self.assertIn("Phase 5 never does", merge_delta)
-        self.assertIn("`git show --cc <merge-commit>`", merge_delta)
-        self.assertNotIn("after the head sdd reviewed", review)
-        self.assertNotIn("merge-delta empty, nothing to review", review)
-
     def test_phase_six_waits_on_required_checks_and_lists_advisory_states(self):
-        # #264 D6-D8: block on the forge's required set, fall back to every
-        # check when none is reported, and report the rest in notes.
-        phase_six = self.section(self.ship_issue, "## Phase 6 — Wait for CI",
-                                 "## Phase 7 — Merge")
-        self.assertIn(REQUIRED_WATCH, re.findall(r"```\n(.*?)\n```", phase_six, re.S))
-        collapsed = normalized(phase_six)
-        self.assert_ordered(collapsed, REQUIRED_WATCH, "Exit `124`",
-                            "`no required checks reported`", ALL_CHECKS_WATCH,
-                            "`CI: no required checks reported; waited on all`",
-                            "a gating check failed", ADVISORY_CALL,
-                            "`advisory CI: <name>=<bucket>, …`")
-        self.assertNotIn("Nix Eval", phase_six)
-        flow = normalized(self.section(self.ship_issue, "## The flow", "## Standing authorization"))
-        self.assertIn("6. Wait for CI → gh pr checks --required --watch (one blocking call;"
-                      " all checks when none is required)", flow)
+        # #264 D6-D8: the blocking watch is its own fence; the handoff names it.
+        self.assertIn(f"```\n{REQUIRED_WATCH}\n```", self.ship_issue)
         self.assertIn("block on `<tracker-cli> pr checks --required --watch`",
                       normalized(self.ship_handoff))
-
-    def test_ci_merge_explains_the_required_watch_and_its_fallback(self):
-        why = self.section(self.ship_ci_merge, "## Why the blocking watch is shaped that way",
-                           "## Exit codes")
-        self.assertIn(REQUIRED_WATCH, why)
-        self.assertIn("branch protection's own", normalized(why))
-        exits = normalized(self.section(self.ship_ci_merge, "## Exit codes", "## Advisory states"))
-        self.assert_ordered(exits, "**`0`**", "**`124`**", "`no required checks reported`",
-                            ALL_CHECKS_WATCH, "same exit codes and retry budget",
-                            "**any other non-zero**")
-        advisory = normalized(self.section(self.ship_ci_merge, "## Advisory states",
-                                           "## Merge quirks (Phase 7)"))
-        for fragment in (ADVISORY_CALL, "is not `pass`", "`advisory CI: <name>=<bucket>, …`",
-                         "`+<n> more`", "`historical_owner_result`",
-                         "does not block the merge"):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, advisory)
 
     def test_ship_issue_eval_restates_the_required_ci_wait(self):
         expected = next(case for case in self.ship_issue_evals["evals"]
                         if case["id"] == 1)["expected_output"]
-        for fragment in (f"CI is exactly foreground `{REQUIRED_WATCH}`",
-                         f"falling back to `{ALL_CHECKS_WATCH}` when gh reports no required checks",
-                         f"`{ADVISORY_CALL}`"):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, expected)
+        for command in (REQUIRED_WATCH, ALL_CHECKS_WATCH, ADVISORY_CALL):
+            with self.subTest(command=command):
+                self.assertIn(command, expected)
 
     def test_ship_issue_merge_is_bound_to_the_resolved_repository(self):
         optional_subject = (
@@ -3432,270 +3159,14 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             'gh pr merge <pr-num> --repo <resolved-repository> --merge '
             '--subject "<rendered subject>" --delete-branch'
         )
-        expected_occurrences = [
-            "7. Merge                   → "
-            f"{optional_subject} (true merge commit)",
-            rendered_subject,
-        ]
-        occurrences = [
-            line.strip()
-            for line in self.ship_issue.splitlines()
-            if "gh pr merge" in line
-        ]
-        self.assertEqual(expected_occurrences, occurrences)
-
-        phase = self.section(self.ship_issue, "## Phase 7 — Merge", "## Phase 8 — Cleanup")
-        phase_lines = [line.strip() for line in phase.splitlines()]
-        self.assertIn(rendered_subject, phase_lines)
-        guard_and_fallback = (
-            "Use retained `bindings.tracker.repo_slug` and `bindings.vcs` values to build the subject. Emit the "
-            "subject form only when the rendered result is nonempty and "
-            "representable by D18's quoted-subject grammar: it contains none "
-            "of double quote, dollar, backtick, backslash, NUL, LF, or CR; "
-            "otherwise omit `--subject` and its value and let the forge choose its normal subject. "
-            "Never pass `--no-ff` (rejected by recent `gh`; `--merge` "
-            "already produces a true merge commit)."
-        )
-        self.assertIn(guard_and_fallback, phase_lines)
-
-    def test_ship_issue_authorization_is_scoped_to_the_host_enforcement_model(self):
-        auth = self.section(
-            self.ship_issue, "## Standing authorization", "## Launch guard"
-        )
-        # AC1: the bare unconditional opener is gone.
-        self.assertNotIn(
-            "In a qualifying repository this skill IS that chain:", auth
-        )
-        self.assertIn("[`HUMAN-GATE.md`](./HUMAN-GATE.md)", auth)
-        self.assertNotIn("CLAUDECODE", auth)
-        phase4 = self.section(
-            self.ship_issue, "## Phase 4 — Open PR", "## Phase 5 — Review the PR"
-        )
-        phase7 = self.section(
-            self.ship_issue, "## Phase 7 — Merge", "## Phase 8 — Cleanup"
-        )
-        self.assert_ordered(
-            phase7,
-            "Gate 2 of [`HUMAN-GATE.md`](./HUMAN-GATE.md)",
-            "Run `check-launch` (see `## Launch guard`) immediately before the merge",
-            "gh pr merge <pr-num> --repo <resolved-repository> --merge",
-        )
-        self.assertIn("the `merge_pr` cycle of `## Delivery loop`", normalized(phase7))
-        self.assertIn("current-launch", phase7)
-        # D6/D10: the new Phase-4 pointer introduces no merge spelling, so
-        # Phase 4 stays free of `gh pr merge` exactly as it is today.
-        self.assertNotIn("gh pr merge", phase4)
-
-    def test_ship_issue_human_gate_consolidates_and_forbids_bypass(self):
-        gate = self.ship_human_gate
-        # The sidecar hard-wraps like the rest of the corpus, so every prose
-        # assertion runs against the normalized text and only headings and
-        # section slicing use the raw file.
-        flat = normalized(gate)
-        # D6: Phase 7 is the single home for the merge spelling. A second home
-        # would drift silently — the pinned exact-list test only scans SKILL.md.
-        self.assertNotIn("gh pr merge", gate)
-        # D5: the gate reuses the one suspension mechanism, defining no new one.
-        self.assertIn("blocked_on: human_gate", flat)
-        # D17: the `--auto` pause routes through whoever owns the ledger. A
-        # fresh ship owner cannot suspend — `ship-issue/SKILL.md`'s launch
-        # guard forbids it any workflow-state write, and `ship-handoff.md`
-        # requires it to return a validated ship summary — so it returns a
-        # truthful `stopped` row and its parent suspends. Pinned as an ordered
-        # split so a future edit cannot collapse the two cases back into one
-        # instruction addressed to whoever happens to be running.
-        self.assert_ordered(
-            flat,
-            "A fresh ship owner launched per `from-issue/ship-handoff.md` "
-            "writes no workflow state",
-            "returns the truthful `stopped` ship summary naming the human gate",
-            "`artifact-budget validate-report --boundary ship-summary`",
-            "keeping the worktree and claiming no merge success",
-            "its parent, the `from-issue` owner, is what suspends "
-            "`blocked_on: human_gate` and prints the canonical re-entry line",
-            "A `from-issue` owner running this path itself, with no fresh ship "
-            "owner in between, follows `from-issue/SKILL.md`'s existing "
-            "suspension procedure directly",
-            "This file defines no new suspension shape and no new "
-            "`blocked_on` value.",
-        )
-        self.assert_ordered(
-            gate,
-            "## Gate 1 — before the first push (Phase 4)",
-            "## Gate 2 — after CI, before the merge (Phase 7)",
-            "## Grant semantics",
-            "## Never route around a denial",
-        )
-        # D7: entered instead of the attempt, never as a denial fallback.
-        self.assertIn(
-            "Enter the gate *instead of* attempting the verb — never attempt a "
-            "shipping verb and then react to the denial.",
-            flat,
-        )
-        # D2/#90: Gate 1 shows the whole remaining chain once.
-        self.assertIn(
-            "Gate 1 also names that a second and final gate follows after CI and "
-            "what it will cover, so the operator sees the whole remaining chain "
-            "once.",
-            flat,
-        )
-        # D6: Gate 2 refers to the merge, never re-spells it.
-        self.assertIn(
-            "Present the merge command exactly as Phase 7 renders it.", flat
-        )
-        # D15/AC2: the literal payloads are what make the handoff
-        # *consolidated*. Pin each gate's block, in order, inside its own
-        # section — the assertions above would all pass with the commands
-        # omitted entirely.
-        gate_1 = self.section(
-            gate,
-            "## Gate 1 — before the first push (Phase 4)",
-            "## Gate 2 — after CI, before the merge (Phase 7)",
-        )
-        self.assert_ordered(
-            normalized(gate_1),
-            "git push -u origin <branch>",
-            'gh pr create --repo <resolved-repository> --base <integration-branch> --head <branch> --title "<title>" --body',
-            "Closes #<num>",
-        )
-        gate_2 = self.section(
-            gate,
-            "## Gate 2 — after CI, before the merge (Phase 7)",
-            "## Grant semantics",
-        )
-        self.assert_ordered(
-            normalized(gate_2),
-            "Present the merge command exactly as Phase 7 renders it.",
-            "gh issue close <num>",
-            # The delete is the action and the ls-remote its condition, so the
-            # bullet spells them in that order. Without this anchor the block
-            # could lose the delete entirely and still pass.
-            "git push origin --delete <branch>",
-            "git ls-remote --heads origin <branch>",
-            "git worktree remove <worktree-path>",
-            "git branch -d <branch>",
-        )
-        for clause in (
-            "Silence is not a grant.",
-            "A partial reply grants only the commands it names.",
-            # D8: additional to, never a substitute for, the existing checks.
-            "The grant is additional to every check the Claude path performs, "
-            "never a substitute:",
-            "`check-launch` still runs before every pre-merge forge write",
-            "Phase 6's tip check and the CI wait still bind",
-            "the base branch's required status check",
-        ):
-            with self.subTest(clause=clause):
-                self.assertIn(clause, flat)
-        # AC3 (per D14): the closed no-bypass list is pinned as an ordered list
-        # scoped to its own heading — the file's last section — not as seven
-        # free-floating substrings that could sit anywhere.
-        ban = normalized(gate[gate.index("## Never route around a denial") :])
-        self.assert_ordered(
-            ban,
-            "On this path the session must not:",
-            "- merge the feature branch into the passed `<integration-branch>` locally;",
-            "- push to the passed `<integration-branch>`;",
-            "- push to any remote other than `origin`;",
-            "- pass `--admin`, `--force`, `--force-with-lease`, or any "
-            "hook-bypass flag;",
-            "- rewrite, reset or rebase any branch to change what a denied "
-            "command would have done;",
-            "- re-attempt a denied command in a re-worded or re-quoted "
-            "spelling;",
-            "- ask a subagent, another skill, or another host to run the "
-            "command on its behalf.",
-        )
-
-    def test_ship_issue_guards_every_pre_merge_forge_write(self):
-        guard = self.section(self.ship_issue, "## Launch guard",
-                             "## Doc-grounded escalations")
-        collapsed = normalized(guard)
-        self.assertIn(
-            "~/.agents/bin/workflow-state check-launch --repo-root "
-            "<ledger_repo_root> --run-id <run-id> --action-id "
-            "<issue:attempt:launch>",
-            collapsed,
-        )
-        # The one rule is indifferent to the tracker binding: a `kind=none`
-        # invocation skips Phase 4's PR but still pushes the branch to `origin`,
-        # and that push is a guarded write like any other.
-        self.assertIn("regardless of tracker capability", collapsed)
-        self.assertIn("Proceed only on `current: true`", collapsed)
-        # Every refusal trigger, so a guard that degraded to "on a false answer"
-        # would fail here rather than pass with a hole.
-        for trigger in ("`current: false`", "a non-zero exit", "a missing helper",
-                        "output that does not parse"):
-            with self.subTest(trigger=trigger):
-                self.assertIn(trigger, collapsed)
-        # The refusal is a no-write stop, not a suspension (per D8).
-        self.assertIn("no ledger write", collapsed)
-        self.assertIn("/from-issue <num> --auto", collapsed)
-        self.assertIn("`stopped` ship summary", collapsed)
-        self.assertNotIn("workflow-state suspend", guard)
-        # The post-merge effects are loop cycles (D29), and the ledger-free skip.
-        self.assertIn("each post-merge effect is a `## Delivery loop` cycle", collapsed)
-        self.assertIn("skip the guard silently", collapsed)
-
-        # Phase 4: the query immediately precedes each of its two forge writes.
-        phase_four = self.section(self.ship_issue, "## Phase 4 — Open PR",
-                                  "## Summary")
-        self.assert_ordered(phase_four, "check-launch",
-                            "git push -u origin <branch>",
-                            "check-launch", "gh pr create")
-        # Phase 5's fix push is an instance of the same rule, not an exception.
-        self.assert_ordered(normalized(self.ship_review), "check-launch",
-                            "`git push`")
-        # Phase 7: the query precedes the merge. Anchor on --delete-branch: the
-        # literal `gh pr merge` is pinned line-by-line elsewhere in this file.
-        phase_seven = self.section(self.ship_issue, "## Phase 7 — Merge",
-                                   "## Phase 8 — Cleanup")
-        self.assert_ordered(phase_seven, "check-launch", "--delete-branch")
-
-    def test_phase_six_tip_check_compares_against_the_reviewed_head(self):
-        phase_six = self.section(self.ship_issue, "## Phase 6 — Wait for CI",
-                                 "## Phase 7 — Merge")
-        collapsed = normalized(phase_six)
-        self.assert_ordered(collapsed, "headRefOid", "the reviewed `HEAD_SHA`",
-                            "unreviewed commits")
-        # The remedy that would make a superseded predecessor push the
-        # successor's unreviewed work, and the comparand that hid the problem.
-        self.assertNotIn("re-push first", phase_six)
-        self.assertNotIn("must equal `git rev-parse HEAD`", collapsed)
-        # The escalation is the existing genuinely-blocked stop, spelled out so
-        # an implementer cannot read "escalate" as "surface and continue".
-        for fragment in ("stop before the CI wait", "no further forge write",
-                         "keep the worktree", "`stopped` ship summary",
-                         "both SHAs"):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, collapsed)
-        # The reviewed value is re-fixed where fixes land, not left at Phase 5.
-        self.assertIn("re-fix `HEAD_SHA` to that observed `headRefOid`",
-                      normalized(self.ship_review))
-
-    def test_ship_issue_evals_expect_the_reviewed_tip_check(self):
-        evals = {case["id"]: case for case in self.ship_issue_evals["evals"]}
-        phase_walk = normalized(evals[1]["expected_output"])
-        # The eval is the behavioural spec a graded run is scored against; left
-        # naming live `git rev-parse HEAD` it would fail a correct run and pass
-        # the defect this issue removes.
-        self.assertNotIn("headRefOid` against `git rev-parse HEAD`", phase_walk)
-        self.assert_ordered(phase_walk, "headRefOid", "the reviewed `HEAD_SHA`",
-                            "unreviewed commits")
-        # D23: the same reasoning applied to the guard -- eval 1's graded Phase-4
-        # walk must require `check-launch` before each of its two forge writes,
-        # or a run that omits the guard entirely still scores as a pass.
-        self.assertIn("check-launch", phase_walk)
-        self.assertIn("`## Launch guard`", phase_walk)
-        self.assert_ordered(phase_walk, "check-launch", "git push -u",
-                            "check-launch", "gh pr create")
-        apply_push = normalized(evals[2]["expected_output"])
-        # Phase 5 still verifies its own push against live HEAD -- that is the
-        # committed-and-pushed check, not a statement about what was reviewed --
-        # but it re-fixes the reviewed value, and Phase 6 does not repeat it.
-        self.assertIn("re-fix `HEAD_SHA`", apply_push)
-        self.assertNotIn("repeats the headRefOid equality check", apply_push)
-        self.assertIn("the reviewed `HEAD_SHA`", apply_push)
+        # Every merge spelling is one of the two forms the lifecycle guard
+        # validates, and the rendered form stands on a line of its own.
+        lines = [line.strip() for line in self.ship_issue.splitlines()
+                 if "gh pr merge" in line]
+        self.assertIn(rendered_subject, lines)
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertTrue(optional_subject in line or rendered_subject in line, line)
 
     def test_phase0_size_note_delegates_counting_to_diff_scope(self):
         # Issues #21-#22 made diff-scope the accounting authority and retired the
@@ -3893,16 +3364,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertEqual(
             carriers, ["home/common/agent-skills/skills/ship-issue/REVIEW.md"]
         )
-        self.assertIn(SHIP_REVIEW_EXCEPTION, normalized(self.ship_review))
 
     def test_ship_issue_prunes_the_removed_worktrees_sdd_bucket(self):
         text = normalized(self.ship_issue)
         self.assertIn(WORKTREE_BUCKET_LITERAL, text)
-        self.assertIn(
-            "Remove only that one worktree's bucket — never `primary/`, and "
-            "never another worktree's.",
-            text,
-        )
 
     def test_worktrees_names_the_scratch_git_clean_destroys(self):
         text = normalized(self.worktrees)
@@ -4205,22 +3670,6 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
         self.assert_ordered(
             self.read(FROM_ISSUE_DIR / "ship-handoff.md"), "## Ship-owner subagent prompt",
             self.WORKER_LINE, "never inside the handoff")
-
-    def test_ship_issue_fences_local_commits_and_registers_its_children(self):
-        text = self.read(SHIP_ISSUE)
-        self.assert_ordered(
-            text, "## Launch guard", "### Local commits", self.COMMIT,
-            "git merge --no-commit --no-ff origin/<integration>", "--parent <worker_id>",
-            "## Phase 1 — Sync from the integration branch")
-        self.assertNotIn("Phase 3's local commits are not forge writes", text)
-        self.assertNotIn("Otherwise `git merge origin/<integration>`; commit the merge", text)
-        self.assert_ordered(text, "## Phase 1 — Sync from the integration branch",
-                            "git merge --no-commit --no-ff origin/<integration>",
-                            "Already up to date")
-        self.assert_ordered(text, "## Remainder mode", self.RELEASE, "finish")
-        self.assert_ordered(self.read(SHIP_ISSUE.parent / "CI-MERGE.md"),
-                            "## Post-selection sync", "launch-commit", "--amend --no-edit")
-        self.assert_ordered(text, "## Delivery loop", "--worker-id <worker_id>")
 
     def test_the_remainder_prompt_releases_itself_before_its_finish(self):
         self.assert_ordered(
@@ -5443,48 +4892,6 @@ class CheckpointVerificationContractsTest(unittest.TestCase):
             "sdd's final gate runs it once on the final head",
             "## Package construction and budget boundary")
 
-    def test_ship_phase_two_skips_only_on_a_verified_tree(self):
-        phase = self.read(SHIP_ISSUE).split("## Phase 2 — Verify locally", 1)[1]
-        phase = phase.split("## Phase 3", 1)[0]
-        self.assert_ordered(
-            phase, "This is the one verification step.",
-            "Phase 3 after a promotion commit, REVIEW.md's apply/push step 2 and CI-MERGE.md's post-selection sync run it too.",
-            "A blocked verification capability stops",
-            "1. **Check.** Run `verified-tree check --verification <id>`",
-            "in order, and keep the `tree` it prints.",
-            "2. **Skip only on `verified`.**", "Exit 0 with `verified`", "skip the run",
-            "`verification reused: tree <id>`",
-            "3. **Otherwise run and record.**", "On any other answer, run every command id",
-            "When every command passes, run `verified-tree record --tree <the checked tree>`",
-            "`tree_changed` is a failing verification",
-            "A `check` that exits 2 leaves no tree to record",
-            "A `record` that exits 2 leaves the pass unrecorded",
-            "the run itself still counts by its commands' results",
-            "These failure rules apply only to an actual run.",
-            "On a failing verification command, pause, ground, and surface",
-            "baselining the same project in a scratch worktree")
-        self.assertEqual(phase.count("verified-tree record"), 1)
-
-    def test_review_and_ci_merge_reruns_use_phase_two(self):
-        review = self.read(SHIP_ISSUE_REVIEW)
-        self.assert_ordered(
-            review, "## The five-step apply/push flow", "1. Edit the file(s).",
-            "2. Run Phase 2's verification step (SKILL.md's `## Phase 2 — Verify locally`)",
-            "3. `git add`")
-        consolidate = self.read(SHIP_ISSUE).split("## Phase 3 — Consolidate learnings", 1)[1]
-        consolidate = consolidate.split("## Phase 4", 1)[0]
-        self.assert_ordered(
-            consolidate, "Promoted candidates commit as",
-            "When Phase 3 commits anything, run Phase 2's verification step again before Phase 4.")
-        self.assertNotIn("Re-run every retained `bindings.workflow.verification` command",
-                         review)
-        ci_merge = self.read(SHIP_ISSUE_CI_MERGE)
-        self.assert_ordered(
-            ci_merge, "## Post-selection sync",
-            "2. **Verify.** Run Phase 2's verification step.",
-            "after every amend re-run Phase 2's verification step before the push.")
-        self.assertNotIn("Phase 2 verification commands", ci_merge)
-
 
 class AcceptanceGradingContractsTest(unittest.TestCase):
     """#272: the conformance axis grades every acceptance criterion on Opus/high."""
@@ -5680,8 +5087,6 @@ class AcceptanceGradingContractsTest(unittest.TestCase):
             "holds it open as `needs-verification`")
         self.assertIn("`head_sha`, `acceptance_state` and `report_path` may be used to "
                       "construct the Phase-7 handoff", self.read(FROM_ISSUE))
-        self.assertIn("`head_sha`, `review_state`, `acceptance_state`, `auto`",
-                      self.read(SHIP_ISSUE))
 
 
 class ToIssuesCriterionLineContractsTest(unittest.TestCase):
@@ -5996,119 +5401,6 @@ class SupersededOwnerStopPassContractsTest(unittest.TestCase):
         self.assertNotIn("stop pass", section.lower())
 
 
-class TrackerHoldContractsTest(unittest.TestCase):
-    """#273 AC4: ship-issue holds as needs-verification in the delivery loop and Phase 8."""
-
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(next_position, 0, anchor)
-            position = next_position
-
-    @staticmethod
-    def section(text, heading, next_heading=None):
-        start = text.index(heading)
-        if next_heading is None:
-            return text[start:]
-        return text[start:text.index(next_heading, start + len(heading))]
-
-    def setUp(self):
-        self.ship = normalized(SHIP_ISSUE.read_text(encoding="utf-8"))
-        self.gate = normalized(SHIP_ISSUE_HUMAN_GATE.read_text(encoding="utf-8"))
-
-    def test_phase_0_fixes_the_effective_acceptance_state(self):
-        phase0 = self.section(self.ship, "## Phase 0 — Pre-flight", "## Phase 1")
-        self.assert_ordered(
-            phase0, "**Effective acceptance state.**",
-            "`<plan stem>.acceptance.md` beside the plan root", "`met (attested)`",
-            "`--auto` never asks and never self-attests",
-            "`met` or `not_applicable` **closes** the issue",
-            "`unmet` or `human_pending` **holds** it open as `needs-verification`")
-
-    def test_the_pr_body_carries_the_verdict_table_and_a_conditional_trailer(self):
-        phase4 = self.section(self.ship, "## Phase 4 — Open PR", "## Phase 5")
-        self.assert_ordered(
-            phase4, "## Acceptance", "Acceptance state: <effective acceptance state>",
-            "Acceptance record: <record-path or none>", "<acceptance table>",
-            "Closes #<num>")
-        self.assertIn("a Markdown table with the three columns `AC`, `Kind` and "
-                      "`Verdict`, one row per record row", phase4)
-        self.assertIn("On a **hold** drop the `Closes #<num>` line too: a hold body "
-                      "carries no closing keyword", phase4)
-
-    def test_phase_8_names_the_hold_branch_and_creates_the_label_on_demand(self):
-        phase8 = self.section(self.ship, "## Phase 8 — Cleanup", "## Notes")
-        self.assert_ordered(
-            phase8, "**Close** (`met` or `not_applicable`)", "gh issue close <num>",
-            "**Hold** (`unmet` or `human_pending`)", "gh issue reopen <num>",
-            "gh label list --repo <resolved-repository> --search needs-verification --json name",
-            "gh label create needs-verification", "never `--force`",
-            "gh issue edit <num> --add-label needs-verification",
-            "Held for verification: <PR URL>", "gh issue comment <num>",
-            "git worktree remove")
-        self.assertIn("`issue_closed: false` on hold", phase8)
-
-    def test_the_delivery_loop_records_a_hold_as_tracker_held(self):
-        loop = self.section(self.ship, "## Delivery loop", "## Remainder mode")
-        self.assert_ordered(
-            loop, "`close_tracker` → `tracker_closed`, or `tracker_held` on a hold",
-            "On a hold the `close_tracker` cycle runs Phase 8 step 1's hold branch",
-            "`needs-verification`", "`tracker_held` with the facts `comment_url`",
-            "`observation_identity` `github:issue:<num>:held`",
-            "on the close branch only, closure by a merge that closes the issue")
-
-    def test_a_remainder_reads_its_acceptance_state_from_the_pr_body(self):
-        remainder = self.section(self.ship, "## Remainder mode")
-        self.assert_ordered(
-            remainder, "--json body", "one `Acceptance state:` line",
-            "one `Acceptance record:` line", "stops before its next effect "
-            "with `terminal_failed`", "never default",
-            "the earliest comment whose first line is")
-        self.assertNotIn("stops before the `close_tracker` effect", remainder)
-
-    def test_record_path_is_the_pr_bodys_relative_record_and_a_hold_needs_one(self):
-        phase0 = self.section(self.ship, "## Phase 0 — Pre-flight", "## Phase 1")
-        self.assert_ordered(
-            phase0, "`<plan stem>.acceptance.md` beside the plan root",
-            "named by its repository-relative path, never an absolute one",
-            "**holds** it open as `needs-verification`",
-            "A hold whose record is `none` stops with `terminal_failed` before any "
-            "hold effect: no hold exists without a record")
-        loop = self.section(self.ship, "## Delivery loop", "## Remainder mode")
-        self.assert_ordered(
-            loop, "`tracker_held` with the facts `comment_url`",
-            "`record_path` (exactly the PR body's repository-relative "
-            "`Acceptance record:` value, never an absolute path)",
-            "A hold whose `Acceptance record:` is `none` stops with `terminal_failed` "
-            "before any hold effect")
-
-    def test_phase_8_reuses_the_earliest_hold_comment(self):
-        phase8 = self.section(self.ship, "## Phase 8 — Cleanup", "## Notes")
-        self.assert_ordered(
-            phase8, "Held for verification: <PR URL>",
-            "shows one or more comments with that first line, reuse the earliest "
-            "one's URL", "gh issue comment <num>")
-
-    def test_no_close_only_prose_remains(self):
-        self.assertIn("merge, close or hold issue, clean up.", self.ship)
-        self.assertIn("issue closed or held as `needs-verification`, workspace gone",
-                      self.ship)
-        self.assertIn("Phase 8's issue close or hold", self.ship)
-        self.assertIn("runs the chain to issue close or hold and cleanup", self.gate)
-        for stale in ("merge, close issue, clean up", "issue closed, workspace gone",
-                      "Phase 8's issue close, "):
-            self.assertNotIn(stale, self.ship)
-        self.assertNotIn("runs the chain to issue closure", self.gate)
-
-    def test_the_human_gate_mirrors_close_or_hold(self):
-        self.assert_ordered(
-            self.gate, "## Acceptance", "Closes #<num>",
-            "present on the close branch and absent on a hold", "gh issue close <num>",
-            "gh issue reopen <num>", "gh issue edit <num> --add-label needs-verification",
-            "git push origin --delete <branch>")
-
-
 class HeldReportContractsTest(unittest.TestCase):
     """#273: orchestrate-issues reports held issues; the ship handoff closes or holds."""
 
@@ -6218,9 +5510,6 @@ class LaunchScopeWiringContractsTest(unittest.TestCase):
         self.assert_ordered(handoff, "## Remainder owner prompt", self.WORKER_LINE,
                             "never inside it", self.WORKER_EXEC, self.WORKER_SCRATCH,
                             "Your task:")
-        self.assert_ordered(self.read(SHIP_ISSUE), "### Local commits", "--parent <worker_id>",
-                            "`Lifecycle worker:`", self.WORKER_EXEC, self.WORKER_SCRATCH,
-                            "## Doc-grounded escalations")
         self.assert_ordered(self.read(AUTO), "Both prompts must carry", "`Lifecycle worker:` line",
                             "the `launch-scope exec` and `scratch` sentences that follow it there",
                             "launch-commit")
