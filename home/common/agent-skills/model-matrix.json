@@ -367,6 +367,26 @@
       ]
     },
     {
+      "id": "sdd-blocked-reasoning-escalation",
+      "path": "home/common/agent-skills/skills/sdd/SKILL.md",
+      "marker": "<!-- agent-dispatch: id=sdd-blocked-reasoning-escalation role=implementer model=opus effort=high -->",
+      "call": "Agent(subagent_type=\"implementer\", model=\"opus\", effort=\"high\") takes over a task whose implementer reported BLOCKED on a reasoning problem.",
+      "role": "implementer",
+      "model": "opus",
+      "effort": "high",
+      "requires": []
+    },
+    {
+      "id": "sdd-task-fix-redispatch",
+      "path": "home/common/agent-skills/skills/sdd/fix-loop.md",
+      "marker": "<!-- agent-dispatch: id=sdd-task-fix-redispatch role=task-implementer model=sonnet effort=high -->",
+      "call": "Agent(subagent_type=\"implementer\", model=\"sonnet\", effort=\"high\") takes over fix rounds 1–3 when the original task implementer cannot be resumed.",
+      "role": "task-implementer",
+      "model": "sonnet",
+      "effort": "high",
+      "requires": []
+    },
+    {
       "id": "sdd-codex-rescue-transport",
       "path": "home/common/agent-skills/skills/sdd/fix-loop.md",
       "marker": "<!-- agent-dispatch: id=sdd-codex-rescue-transport role=codex-transport model=sonnet effort=medium -->",

@@ -4,22 +4,25 @@ Loaded by `SKILL.md` when a task review fails: spec ❌, any Critical/Important 
 
 A round is one fix dispatch plus one scoped re-review. Five rounds maximum:
 
-- **Rounds 1–3 — resume the original implementer** with the open findings verbatim; its context is intact. (Can't resume? Fresh dispatch carrying brief path, report path, findings — the report file is the persistent memory.)
-- **Round 4 — the stuck-breaker.** Three same-context rounds failing usually means the implementer cannot see its own problem, and another same-model retry re-runs the blindness. Use the bounded Codex transport with the failing command or test, the diff so far (`BASE..HEAD`), the brief and report paths, and the open findings:
+- **Rounds 1–3 — resume the original implementer** with the open findings verbatim; its context is intact, and it keeps the Sonnet/high tier it was launched with. Can't resume? Dispatch a fresh one at that same tier, carrying brief path, report path and findings — the report file is the persistent memory:
+
+<!-- agent-dispatch: id=sdd-task-fix-redispatch role=task-implementer model=sonnet effort=high -->
+Agent(subagent_type="implementer", model="sonnet", effort="high") takes over fix rounds 1–3 when the original task implementer cannot be resumed.
+- **Round 4 — the stuck-breaker.** Three same-context rounds failing usually means the implementer cannot see its own problem, and another same-model retry re-runs the blindness. The original implementer ran on Sonnet/high, so from here every fix dispatch escalates to Opus/high — a model change, not only a fresh context. Use the bounded Codex transport with the failing command or test, the diff so far (`BASE..HEAD`), the brief and report paths, and the open findings:
 
 <!-- agent-dispatch: id=sdd-codex-rescue-transport role=codex-transport model=sonnet effort=medium -->
 Agent(subagent_type="codex:rescue", model="sonnet", effort="medium") transports the bounded stuck-breaker diagnosis to the external Codex runtime without selecting that runtime's model.
 
-  **Verify its diagnosis against the live worktree before acting on it**, then use a fresh judgment-bearing implementer:
+  **Verify its diagnosis against the live worktree before acting on it**, then escalate to a fresh Opus/high implementer:
 
 <!-- agent-dispatch: id=sdd-post-rescue-implementation role=implementer model=opus effort=high -->
 Agent(subagent_type="implementer", model="opus", effort="high") applies the verified rescue diagnosis plus the open findings.
 
-  Codex unavailable → the same tier, framed "a prior implementer attempted this task 3 times; you own it now — read the report file for what was tried":
+  Codex unavailable → the same Opus/high escalation, framed "a prior implementer attempted this task 3 times; you own it now — read the report file for what was tried":
 
 <!-- agent-dispatch: id=sdd-rescue-fallback-implementation role=implementer model=opus effort=high -->
 Agent(subagent_type="implementer", model="opus", effort="high") owns the fresh-context rescue fallback.
-- **Round 5 — last round**, same packet plus round 4's findings:
+- **Round 5 — last round**, still on Opus/high, same packet plus round 4's findings:
 
 <!-- agent-dispatch: id=sdd-round-five-implementation role=implementer model=opus effort=high -->
 Agent(subagent_type="implementer", model="opus", effort="high") owns the fifth and final fix round.

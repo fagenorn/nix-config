@@ -154,6 +154,13 @@ EXPECTED_SDD_SITES = {
         "medium",
         ["risk-lane-mechanical-or-low", "bounded-task-diff"],
     ),
+    "sdd-blocked-reasoning-escalation": (
+        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "implementer",
+        "opus",
+        "high",
+        [],
+    ),
     "sdd-nonmechanical-implementation": (
         "home/common/agent-skills/skills/sdd/implementer-prompt.md",
         "task-implementer",
@@ -174,6 +181,13 @@ EXPECTED_SDD_SITES = {
         "sonnet",
         "medium",
         ["named-prior-findings", "bounded-fix-diff"],
+    ),
+    "sdd-task-fix-redispatch": (
+        "home/common/agent-skills/skills/sdd/fix-loop.md",
+        "task-implementer",
+        "sonnet",
+        "high",
+        [],
     ),
     "sdd-codex-rescue-transport": (
         "home/common/agent-skills/skills/sdd/fix-loop.md",
@@ -468,7 +482,8 @@ class AgentModelMatrixTest(unittest.TestCase):
                     site["id"],
                 )
         self.assertEqual(
-            by_role["task-implementer"], {"sdd-nonmechanical-implementation"}
+            by_role["task-implementer"],
+            {"sdd-nonmechanical-implementation", "sdd-task-fix-redispatch"},
         )
         self.assertEqual(
             by_role["implementer"],
@@ -476,6 +491,7 @@ class AgentModelMatrixTest(unittest.TestCase):
                 "sdd-post-rescue-implementation",
                 "sdd-rescue-fallback-implementation",
                 "sdd-round-five-implementation",
+                "sdd-blocked-reasoning-escalation",
                 "sdd-final-review-fixer",
             },
         )

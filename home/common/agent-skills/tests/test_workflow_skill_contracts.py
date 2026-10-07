@@ -4051,6 +4051,51 @@ def glossary_entries(glossary):
     return entries
 
 
+class SonnetTaskImplementerContractsTest(unittest.TestCase):
+    """#270: Sonnet task implementers; stuck tasks escalate to Opus (D1, D2)."""
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def read(path):
+        return normalized(path.read_text(encoding="utf-8"))
+
+    def test_the_fix_loop_escalates_a_sonnet_implementer_to_opus(self):
+        self.assert_ordered(
+            self.read(SDD_DIR / "fix-loop.md"),
+            "**Rounds 1–3 — resume the original implementer**",
+            "it keeps the Sonnet/high tier it was launched with",
+            "<!-- agent-dispatch: id=sdd-task-fix-redispatch role=task-implementer "
+            "model=sonnet effort=high -->",
+            "**Round 4 — the stuck-breaker.**",
+            "The original implementer ran on Sonnet/high, so from here every fix "
+            "dispatch escalates to Opus/high — a model change, not only a fresh context.",
+            "then escalate to a fresh Opus/high implementer:",
+            "id=sdd-post-rescue-implementation role=implementer model=opus",
+            "Codex unavailable → the same Opus/high escalation",
+            "id=sdd-rescue-fallback-implementation role=implementer model=opus",
+            "**Round 5 — last round**, still on Opus/high",
+            "id=sdd-round-five-implementation role=implementer model=opus")
+
+    def test_a_reasoning_problem_blocked_escalates_to_opus(self):
+        sdd = self.read(SDD)
+        self.assert_ordered(
+            sdd, "### 2. Handle the report", "**BLOCKED**",
+            "context problem: add context, re-dispatch at the same tier",
+            "Reasoning problem: escalate to a fresh Opus/high implementer",
+            "<!-- agent-dispatch: id=sdd-blocked-reasoning-escalation role=implementer "
+            "model=opus effort=high -->",
+            "Too large: split it.")
+        self.assertNotIn("or bump the model", sdd)
+        self.assertIn("round 4 is the Codex-assisted stuck-breaker and round 5 the "
+                      "final fresh dispatch, both on Opus/high", sdd)
+
+
 class LaunchFencedWorkerContractsTest(unittest.TestCase):
     """#222: writing dispatches register, commit through launch-commit, release."""
 
