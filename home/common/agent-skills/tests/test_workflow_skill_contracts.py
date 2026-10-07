@@ -40,10 +40,12 @@ RESUME_PACK = FROM_ISSUE_DIR / "resume-pack.md"
 SHIP_HANDOFF_DOC = FROM_ISSUE_DIR / "ship-handoff.md"
 SHIP_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/SKILL.md"
 SHIP_ISSUE_REVIEW = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/REVIEW.md"
-SHIP_ISSUE_CI_MERGE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/CI-MERGE.md"
 SHIP_ISSUE_HUMAN_GATE = (
     REPO_ROOT / "home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md"
 )
+SHIP_ISSUE_DELIVERY_LOOP = SHIP_ISSUE.parent / "DELIVERY-LOOP.md"
+SHIP_ISSUE_REMAINDER = SHIP_ISSUE.parent / "REMAINDER.md"
+SHIP_ISSUE_POST_SELECTION_SYNC = SHIP_ISSUE.parent / "POST-SELECTION-SYNC.md"
 SMALL_BUDGET_FIXTURE = (
     REPO_ROOT / "home/common/agent-skills/tests/fixtures/artifact-budgets/small-issue.json"
 )
@@ -80,7 +82,7 @@ REPORT_CANDIDATE_CLAUSE = (
 )
 
 LIFECYCLE_DOCS = (*sorted((REPO_ROOT / "home/common/agent-skills/skills/from-issue").glob("*.md")),
-                  SHIP_ISSUE, SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE, ORCHESTRATE)
+                  *sorted(SHIP_ISSUE.parent.glob("*.md")), ORCHESTRATE)
 STDIN_CLAUSE = ("lifecycle call is one command that reads its input from stdin "
                 "through a quoted heredoc")
 BUILD_ROOT_CLAUSE = ("The builder seals the policy `resolve-project` resolves at "
@@ -244,8 +246,7 @@ ORCHESTRATE_MACHINE_TEXT = {
 # back from the PR body or an issue comment. No guidance sentence is pinned.
 SHIP_ISSUE_MACHINE_TEXT = {
     SHIP_ISSUE: (
-        "--kind selected-output", "--kind current-selection", "checkpoint-delivery",
-        "finish --summary-file -", "validate-report --boundary ship-summary",
+        "validate-report --boundary ship-summary",
         "review-range --integration-ref origin/<integration> --head $HEAD_SHA"
         " --final-review-head <final-review head> --max-lines 1000 --max-files 20"
         " --artifact-path <spec_path> --artifact-path <plan_path>",
@@ -253,38 +254,55 @@ SHIP_ISSUE_MACHINE_TEXT = {
         "--run-id <run-id> --action-id <issue:attempt:launch>",
         "launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
         "--worker-id <worker_id> -- ",
-        "workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--worker-id <worker_id> --event returned",
         "--parent <worker_id>", "git merge --no-commit --no-ff origin/<integration>",
-        "Lifecycle worker:", "--kind scope", "`test_ref`",
-        "`tracker_held`", "`comment_url`", "`record_path`",
+        "git push -u origin <branch>",
+        'gh pr create --repo <resolved-repository> --base <integration> '
+        '--head <branch> --title "<title>" --body',
+        "Lifecycle worker:",
         WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV,
         "verified-tree check --verification <id>",
         "verified-tree record --tree <the checked tree>",
         REQUIRED_WATCH, ALL_CHECKS_WATCH, ADVISORY_CALL,
         "Acceptance state: <effective acceptance state>",
         "Acceptance record: <record-path or none>", "Closes #<num>",
-        "Held for verification: <PR URL>", "`github:issue:<num>:held`",
+        "Held for verification: <PR URL>",
         "gh label list --repo <resolved-repository> --search needs-verification --json name",
         "gh label create needs-verification", "gh issue reopen <num>",
         "gh issue edit <num> --add-label needs-verification", "gh issue comment <num>",
         "gh issue close <num>",
     ),
-    SHIP_ISSUE_REVIEW: ("validate-detail-input", 'detail_state: "unpublished"'),
-    SHIP_ISSUE_CI_MERGE: (
+    SHIP_ISSUE_DELIVERY_LOOP: (
+        "--kind selected-output", "checkpoint-delivery", "--kind scope", "`test_ref`",
+        "`tracker_held`", "`comment_url`", "`record_path`", "`github:issue:<num>:held`",
+        "--boundary ship-checkpoint", "ship-checkpoint/v2", "--worker-id <worker_id>",
+        "~/.agents/bin/workflow-state current-launch --repo-root <ledger_repo_root> "
+        "--run-id <run-id> --action-id <custody action_id>",
+        "validate-report --boundary ship-summary",
+    ),
+    SHIP_ISSUE_REMAINDER: (
+        "--kind current-selection", "finish --summary-file -",
+        "workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--worker-id <worker_id> --event returned",
+        "gh pr view <pr-num> --repo <resolved-repository> --json body",
+        "Held for verification: <PR URL>",
+    ),
+    SHIP_ISSUE_REVIEW: (
+        "validate-detail-input", 'detail_state: "unpublished"',
+        ".superpowers/ship-review/<issue>/retained-detail.json",
+    ),
+    SHIP_ISSUE_POST_SELECTION_SYNC: (
         "--kind current-selection", "--kind sync-selection", "--kind scope", "`test_ref`",
-        "launch-commit",
-        "gh pr view <pr-num> --json state,headRefOid,mergeable",
-        REQUIRED_WATCH, ALL_CHECKS_WATCH, ADVISORY_CALL,
+        "launch-commit", "gh pr view <pr-num> --json state,headRefOid,mergeable",
+        "git merge --no-commit --no-ff origin/<integration>",
+        "git merge-base --is-ancestor <second-parent> origin/<integration>",
+        "git show --cc <merge-sha>", "`merge-delta-empty`", "`merge-delta-clean`",
     ),
     SHIP_ISSUE_HUMAN_GATE: (
-        "git push -u origin <branch>",
-        'gh pr create --repo <resolved-repository> --base <integration-branch> '
-        '--head <branch> --title "<title>" --body',
-        "Closes #<num>", "gh issue close <num>", "gh issue reopen <num>",
-        "gh issue edit <num> --add-label needs-verification",
+        "gh issue close <num>", "gh issue reopen <num>", "gh label create needs-verification",
+        "gh issue edit <num> --add-label needs-verification", "gh issue comment <num>",
         "git push origin --delete <branch>", "git ls-remote --heads origin <branch>",
         "git worktree remove <worktree-path>", "git branch -d <branch>",
+        "validate-report --boundary ship-summary", "## Never route around a denial",
     ),
 }
 
@@ -389,9 +407,6 @@ SHARED_POLICY_SUPPORT = {
 RETAINED_SUPPORT_CONTRACTS = {
     "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
     "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
-    "ship-issue/CONSOLIDATE.md": ("bindings.paths", "bindings.vcs"),
-    "ship-issue/HUMAN-GATE.md": ("bindings.vcs", "bindings.tracker"),
-    "ship-issue/SYNC.md": ("bindings.vcs", "bindings.paths.hints"),
     "ship-release/CHANGELOG.md": ("bindings.tracker", "bindings.vcs", "bindings.workflow.release"),
 }
 
@@ -886,13 +901,12 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_delivery_interface_two_is_one_atomic_production_caller_contract(self):
         documents = {
             str(path.relative_to(REPO_ROOT)): normalized(path.read_text(encoding="utf-8"))
-            for path in (SHIP_ISSUE, SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE,
+            for path in (
                          ORCHESTRATE)
         }
         corpus = " ".join(documents.values())
         for phrase in ("workflow-response", "validate before decoding", "custody",
-                       "current-launch", "requested_scope", "bind the actual invocation",
-                       "ship-checkpoint/v2", "ship-summary/v2", "delivery_remainder"):
+                       "requested_scope", "ship-summary/v2", "delivery_remainder"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, corpus)
         self.assertIn("workflow_bootstrap", normalized(self.orchestrate))
@@ -1028,14 +1042,14 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             text = normalized(path.read_text(encoding="utf-8"))
             with self.subTest(path=path.name):
                 self.assertNotIn('"interface_version": 1', text)
-                if path.parent != FROM_ISSUE_DIR:
+                if path.parent != FROM_ISSUE_DIR and "skills/ship-issue/" not in path.as_posix():
                     for forbidden in ("version-1", "temporary request file",
                                       "temporary `ship-summary/v2` file"):
                         self.assertNotIn(forbidden, text)
                 for flag, value in INPUT_FLAG_RE.findall(text):
                     self.assertEqual(value.strip("`.,;"), "-", flag)
                 self.assertLessEqual(text.count("--result-file"), 1)
-        for path in (ORCHESTRATE, SHIP_ISSUE):
+        for path in (ORCHESTRATE,):
             with self.subTest(clause=path.name):
                 self.assertIn(STDIN_CLAUSE, normalized(path.read_text(encoding="utf-8")))
 
@@ -1280,7 +1294,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_durable_review_detail_precedes_every_removable_cleanup(self):
         self.assertIn(".superpowers/issue-delivery/", self.sdd)
         self.assertIn(".superpowers/issue-delivery/", self.ship_review)
-        for text in (self.sdd, self.ship_review, self.ship_issue):
+        for text in (self.sdd,):
             self.assertIn("report_path", text)
             self.assertIn("keep the worktree", text)
 
@@ -1940,7 +1954,7 @@ class InterimChildResultContractsTest(unittest.TestCase):
     """#261: an owner treats a child's interim return as still running."""
 
     HEAD = "**Interim child results.**"
-    OWNERS = (SDD, SHIP_ISSUE)
+    OWNERS = (FROM_ISSUE, SDD)
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -1967,7 +1981,7 @@ class InterimChildResultContractsTest(unittest.TestCase):
 
     def test_the_paragraph_copies_stay_identical(self):
         canonical = self.paragraph(SDD)
-        for path in (SHIP_ISSUE,):
+        for path in (FROM_ISSUE,):
             with self.subTest(path=path.parent.name):
                 self.assertEqual(self.paragraph(path), canonical)
 
@@ -1991,7 +2005,6 @@ class InterimChildResultContractsTest(unittest.TestCase):
     def test_each_copy_sits_in_its_owner_section(self):
         for path, start, end in (
             (SDD, "### 2. Handle the report", "### 3. Review the task"),
-            (SHIP_ISSUE, "## Phase 5 — Review the PR", "## Phase 6 — Wait for CI"),
         ):
             with self.subTest(path=path.parent.name):
                 self.assert_ordered(self.read(path), start, self.HEAD, end)
