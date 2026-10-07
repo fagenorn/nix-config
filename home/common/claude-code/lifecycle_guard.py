@@ -366,19 +366,20 @@ def mentions_raise_label(texts):
 def adds_raise_label(tokens):
     """True when a `gh` invocation in `tokens` adds the raise label.
 
-    Looks at every `gh` word, in any position: its words run to the next
-    operator, and a label value is the word after `--add-label` or the rest of
-    a `--add-label=` word. No subcommand parsing and no comma splitting: a
-    value that contains the label anywhere counts.
+    Looks at every `gh` word, in any position: its words run to the end of the
+    segment, skipping operator tokens, so a substitution or group before the
+    label (`gh pr edit $(…) --add-label …`) cannot hide it. A label value is
+    the word after `--add-label` or the rest of a `--add-label=` word. No
+    subcommand parsing and no comma splitting: a value that contains the label
+    anywhere counts.
     """
     for index, (value, is_operator) in enumerate(tokens):
         if is_operator or os.path.basename(value) != "gh":
             continue
-        words = []
-        for word, word_is_operator in tokens[index + 1:]:
-            if word_is_operator:
-                break
-            words.append(word)
+        words = [
+            word for word, word_is_operator in tokens[index + 1:]
+            if not word_is_operator
+        ]
         labels = [
             words[position + 1]
             for position, word in enumerate(words[:-1])

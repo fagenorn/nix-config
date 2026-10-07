@@ -172,7 +172,7 @@ No test pins the `AGENTS.md` sentence. That would be a pinned English phrase
 
 | Issue criterion | Met by | Measured by |
 |-----------------|--------|-------------|
-| (1) [code] The guard blocks the label verbs in quoted, wrapped and spaced spellings, and passes other labels through | The label operation | New block and pass rows in the adversarial table of `tests/test_claude_permission_guard.py`, run by `just agent-workflow-tests` |
+| (1) [code] The guard blocks the label verbs in quoted, wrapped and spaced spellings, and passes other labels through | The label operation | New block and pass rows in the adversarial table of `tests/test_claude_permission_guard.py`, run against the built settings (`just build`, then `CLAUDE_SETTINGS_PATH` set to the `-claude-code-settings.json` store path), not by `just agent-workflow-tests` (D6) |
 | (2) [code] `just build` succeeds | Unchanged Nix wiring, and the guard still loads | `Nix Eval` CI, and `just build` locally |
 
 The demo comes from the first rows. `gh pr edit 1 --add-label

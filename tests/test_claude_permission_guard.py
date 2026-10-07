@@ -258,6 +258,16 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
 
+    def test_raise_label_mentions_pass(self):
+        for command in (
+            'echo "gh pr edit 1 --add-label instruction-budget-raise"',
+            "cat > notes.md <<'EOF'\ngh pr edit 1 --add-label instruction-budget-raise\nEOF\n",
+            "git commit -m 'docs: explain the instruction-budget-raise label'",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
     # ------------------------------------------------------------------
     # Adversarial table. Each case is one class of "the guard's parser and
     # the shell disagree". Every command below really runs a guarded verb, so
@@ -340,6 +350,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     # live guard yields for it — "the command could not be parsed" when split_segments
     # returns None, else "the segment could not be tokenised" (check once, then pin).
     UNPARSED_REASON = "the command could not be parsed"
+    UNTOKENISED_REASON = "the segment could not be tokenised"
 
     def test_raise_label_additions_are_refused_in_every_spelling(self):
         # Every command here adds the instruction-budget-raise label, so exit 0
@@ -377,12 +388,20 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "eval 'gh pr edit 1 --add-label instruction-budget-raise'",
             "sh -c 'gh pr edit 1 --add-label instruction-budget-raise'",
             "gh pr edit 1 --add-label 'instruction-budget-raise",  # unterminated
+            # split_segments takes `<<"a\"` as a heredoc delimiter, while the
+            # tokeniser reads `\"` as an escaped quote and never closes it.
+            'gh pr edit 1 --add-label instruction-budget-raise <<"a\\"\nbody\na\\\n',
+            "gh pr edit $(gh pr view --json number --jq .number) "
+            "--add-label instruction-budget-raise",
+            "gh pr edit `echo 1` --add-label instruction-budget-raise",
         ):
-            # Every row except the three fail-closed rows names the direct-add reason.
+            # Every row except the four fail-closed rows names the direct-add reason.
             reason = {
                 "eval 'gh pr edit 1 --add-label instruction-budget-raise'": self.EVALUATOR_REASON,
                 "sh -c 'gh pr edit 1 --add-label instruction-budget-raise'": self.EVALUATOR_REASON,
                 "gh pr edit 1 --add-label 'instruction-budget-raise": self.UNPARSED_REASON,
+                'gh pr edit 1 --add-label instruction-budget-raise <<"a\\"\nbody\na\\\n':
+                    self.UNTOKENISED_REASON,
             }.get(command, self.DIRECT_ADD_REASON)
             with self.subTest(command=command):
                 result = self.run_guard(command)
@@ -413,9 +432,6 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "gh pr edit 1 --body 'the user may add instruction-budget-raise'",
             "xargs gh pr edit 1 --add-label bug",
             "sh -c 'gh pr edit 1 --add-label bug'",
-            'echo "gh pr edit 1 --add-label instruction-budget-raise"',
-            "cat > notes.md <<'EOF'\ngh pr edit 1 --add-label instruction-budget-raise\nEOF\n",
-            "git commit -m 'docs: explain the instruction-budget-raise label'",
         ):
             with self.subTest(command=command):
                 result = self.run_guard(command)
