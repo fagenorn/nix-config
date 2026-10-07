@@ -14,11 +14,12 @@ Counterpart to `to-issues`. Take one tracker issue from triage to merged code by
 - **`AUTO.md`** — autonomous-mode rules. Read it *once*, now, only if the invocation contains the literal token `--auto`.
   When the prompt carries a resume pack, defer that read until the checks in
   `### Resume pack`: a pack that passes them limits it to the sections that
-  subsection names, and one that fails them restores the whole read. An owner
-  delegated at `AUTO.md`'s Phase-5 rollover still reads its
-  `#### Fresh delegated owner` section now, because those checks come first.
-- **`bindings.md`** — phase binding notes. Included routines receive values from this phase's retained snapshot; use `bindings.tracker`, `bindings.vcs`, and `bindings.paths.artifacts`.
-- **`grounding.md`** (Phases 2–5), **`decision-ledger.md`**, **`investigate.md`** (Phase 0), **`standards-review.md`** (Phase 5), **`ship-handoff.md`** (Phase 7) — loaded at the named phase.
+  subsection names, and one that fails them restores the whole read.
+- **`rollover.md`** — the direct autonomous controller's Phase-5 transfer and its stop afterwards.
+- **`delegated-owner.md`** — the fresh owner delegated at that rollover; read it first, before any resume pack.
+- `<tracker-cli>` is `bindings.tracker.cli`; before invoking it, unset only the names `bindings.tracker.credential_env.unset_before_invocation` lists.
+- **`decision-ledger.md`**, **`investigate.md`** (Phase 0), **`standards-review.md`** (Phase 5), **`ship-handoff.md`** (Phase 7) — loaded at the named phase.
+- Phases 2–5 ground through `doc-grounded-questions` before their first question, option set or review pass; that skill owns the pass and its git-dir `GROUNDING.md` cache.
 - **`REVIEW-CONTRACT.md`** — the Phase-5 reviewer contract. Hand it over **by absolute path**, never read it into this conversation.
 
 ## Lifecycle identity
@@ -262,10 +263,10 @@ It is not a workflow response and is never piped through `validate-report`:
 it stays untrusted until the checks below pass.
 A pack-carrying relaunch still resolves the project once, validates its
 owner object and runs `check-launch`, and obeys a `current: false` answer
-exactly as it would without a pack. An owner delegated at `AUTO.md`'s
-Phase-5 rollover, whose prompt carries that rollover's continuation
+exactly as it would without a pack. An owner delegated at the Phase-5
+rollover, whose prompt carries that rollover's continuation
 (`reviewed_head_sha` and two measured artifact blocks), also passes every
-`AUTO.md` `#### Fresh delegated owner` check first; a generic `delegate`
+check in `delegated-owner.md` first; a generic `delegate`
 owner carries no continuation and runs none of them. Then it checks the pack
 against what it can see: the pack's `action_id` must equal the envelope's,
 `git -C <worktree> rev-parse HEAD` must equal `worktree.head`, and
@@ -287,9 +288,9 @@ Under `--auto`, read from `AUTO.md` (not the whole file) its opening
 section and those headed `The self-answer pattern` and
 `When *not* to auto-resolve`, plus the one governing your route at that
 phase: `Phases 2–4 run as subagents` for Phases 2–4; from Phase 5 on,
-`Mandatory direct implementation-owner rollover` for a module-owned
-direct autonomous run and `Other Phase 5–7 routes` for every other
-route, each with `Interface_version 2 delivery relay`.
+`Other Phase 5–7 routes` for every route but a module-owned direct
+autonomous run (whose rollover is in `rollover.md`), each with
+`Interface_version 2 delivery relay`.
 Everything the pack does not replace
 still runs unchanged, sdd's own `progress.md` check on entry included: that
 check stays sdd's resume mechanism, and where it disagrees with the pack's
@@ -298,7 +299,7 @@ at its `path`; `reorient` re-orients in full, as does a relaunch with no
 pack.
 
 orchestrate-issues adds the pack to `resume` prompts; this skill adds it on
-direct re-entry, on `delegate` and on `AUTO.md`'s Phase-5 rollover. A
+direct re-entry, on `delegate` and at the Phase-5 rollover (`rollover.md`). A
 `resume-pack` refusal or failure only means the prompt carries no pack; it
 never stops a relaunch.
 
@@ -460,9 +461,9 @@ Agent(subagent_type="mechanic", model="haiku", effort="low") executes the ledger
    Give it the exact commands, identities, and paths inline; it decides nothing and edits nothing.
 
 For the direct-autonomous Phase-5 `delegate` case, the
-mandatory direct-autonomous Phase-5 rollover in `AUTO.md` replaces the generic delegation
+mandatory direct-autonomous Phase-5 rollover in `rollover.md` replaces the generic delegation
 behavior above. Its post-rollover Phase-6 and Phase-7 gates also use the narrow
-routes defined there: Phase-6 `delegate` launches the existing fresh ship owner
+routes defined in `delegated-owner.md`: Phase-6 `delegate` launches the existing fresh ship owner
 (or, on a dispatch gap, runs Phase 7's dispatch-gap fallback),
 and Phase-7 `delegate` launches only the ledger-only finish bookkeeper. The
 behavior for all other acquisition modes retains the existing generic action
@@ -542,7 +543,7 @@ The legacy `--issue/--attempt/--result-file` transport is historical input only:
 The earlier direct-autonomous controller that delegated at the mandatory
 Phase-5 rollover does not run this procedure after receiving the fresh owner's
 canonical terminal bytes. Its only terminal work is the validate-and-relay stop
-defined in `AUTO.md`; the delegated owner already performed the single durable
+defined in `rollover.md`; the delegated owner already performed the single durable
 `finish`.
 
 When acquisition returns a terminal replay (`kind: terminal`) rather than an owner, print that envelope's `reentry` field to the user verbatim on its own line before relaying the compact response unchanged; a replay writes no `finish`.
@@ -646,7 +647,7 @@ A ledger-free interactive direct invocation keeps the standard `worktrees` flow:
 
 ## Phase 2 — Brainstorm
 
-Invoke `design` for a design doc under the retained specifications directory, committed in the worktree. Ground first per `grounding.md`. Resolve every Phase-0 carryover before opening a new question.
+Invoke `design` for a design doc under the retained specifications directory, committed in the worktree. Ground first through `doc-grounded-questions`. Resolve every Phase-0 carryover before opening a new question.
 
 **CHECKPOINT** — Record the spec path and approval source. Apply the shared checkpoint rule; existing authorization for autonomous design decisions suffices within its scope.
 
