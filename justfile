@@ -105,6 +105,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_artifact_budget.py \
     tests/test_agent_tools_canonical.py \
     tests/test_agent_tools_siblings.py \
+    tests/test_lane_triage.py \
     tests/test_launch_commit.py \
     tests/test_launch_scope.py \
     tests/test_review_range.py \
