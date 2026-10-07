@@ -72,9 +72,10 @@ class FoundationTest(unittest.TestCase):
     def test_frontmatter_parses_single_line_scalars(self):
         fields, body = skill_lint.parse_frontmatter(
             '---\nname: alpha\ndescription: "Quoted. Use when x."\nflag: true\n'
-            "hint: 'single'\nempty:\n---\n# Body\n")
+            "hint: 'single'\nempty:\nnote: # Use when commented.\n---\n# Body\n")
         self.assertEqual(fields, {"name": "alpha", "description": "Quoted. Use when x.",
-                                  "flag": "true", "hint": "single", "empty": ""})
+                                  "flag": "true", "hint": "single", "empty": "",
+                                  "note": ""})
         self.assertEqual(body, "# Body\n")
 
     def test_frontmatter_rejects_every_shape_it_cannot_vouch_for(self):
@@ -186,6 +187,8 @@ class RuleTest(unittest.TestCase):
             "missing name": b"---\ndescription: Alphas. Use when testing.\n---\n" + body,
             "missing description": b"---\nname: alpha\n---\n" + body,
             "empty description": b"---\nname: alpha\ndescription:\n---\n" + body,
+            "comment-only description": b"---\nname: alpha\ndescription: # Use when testing.\n"
+                                        b"---\n" + body,
             "long description": skill("alpha", "Use when testing. " + "x" * 1010, ALPHA_BODY),
             "xml description": skill("alpha", "Alphas <b>things</b>. Use when testing.",
                                      ALPHA_BODY),

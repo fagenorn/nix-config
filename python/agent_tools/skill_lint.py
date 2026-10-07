@@ -141,6 +141,8 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
         key, value = match.group(1), (match.group(2) or "").strip()
         if value in _BLOCK_SCALARS:
             raise ValueError(f"frontmatter: {key} is a block scalar")
+        if value.startswith("#"):
+            value = ""  # YAML reads a value that opens with `#` as a comment: no value
         if value[:1] in ("\"", "'") or value[-1:] in ("\"", "'"):
             if len(value) < 2 or value[0] != value[-1]:
                 raise ValueError(f"frontmatter: {key} has an unterminated quote")

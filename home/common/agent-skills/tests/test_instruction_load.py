@@ -446,6 +446,19 @@ class ReportCommandTest(unittest.TestCase):
         self.assertTrue(completed.stderr.startswith("agent-instruction-load: "))
         self.assertFalse(output.exists())
 
+    def test_a_model_from_before_the_gate_still_reports(self):
+        model = fixture_model()
+        for key in instruction_load.GATE_TOP_LEVEL_KEYS:
+            del model[key]
+        for profile in model["profiles"]:
+            for key in instruction_load.GATE_PROFILE_KEYS:
+                del profile[key]
+        legacy = self.commit({instruction_load.MODEL_PATH: json.dumps(model).encode()}, "legacy")
+        completed = self.report("--base", self.base, "--head", legacy, "--format", "json")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["head"], legacy)
+        self.assertNotEqual(instruction_load.validate(model, dict_reader(HEAD_FILES)), [])
+
     def test_an_invalid_model_at_head_exits_2(self):
         model = fixture_model()
         del model["excluded_sites"]["demo-plugin"]

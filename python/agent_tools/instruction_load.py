@@ -61,6 +61,10 @@ PROFILE_KEYS = (
     "note",
 )
 PROFILE_CHOICE_KEYS = ("entry", "launch")
+# The gate's ceilings (#292 D4). A model committed before the gate has none of
+# them, and `report` still reads such a model; `check` and `tighten` require them.
+GATE_TOP_LEVEL_KEYS = ("corpus_ceiling_bytes", "description_ceiling_bytes")
+GATE_PROFILE_KEYS = ("conditional_ceiling_bytes",)
 SKILL_NAME = re.compile(r"[A-Za-z0-9_-]+")
 WORKFLOW_PATH = ".github/workflows/instruction-budget.yaml"
 RAISE_LABEL = "instruction-budget-raise"
@@ -156,8 +160,9 @@ def _is_byte_count(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
-def _top_level_violations(model: dict, read: Reader) -> list[str]:
-    found = [f"model: missing key '{key}'" for key in TOP_LEVEL_KEYS if key not in model]
+def _top_level_violations(model: dict, read: Reader, gate_fields: bool = True) -> list[str]:
+    found = [f"model: missing key '{key}'" for key in TOP_LEVEL_KEYS
+             if key not in model and (gate_fields or key not in GATE_TOP_LEVEL_KEYS)]
     found += [f"model: unknown key '{key}'" for key in sorted(set(model) - set(TOP_LEVEL_KEYS))]
     if "frame" in model:
         if model["frame"] != FRAME_MEMBER:
@@ -197,11 +202,12 @@ def _ceiling_map_violations(key: str, value: object, hosts: object,
     return found
 
 
-def _profile_violations(profile: object) -> list[str]:
+def _profile_violations(profile: object, gate_fields: bool = True) -> list[str]:
     """Unprefixed structural violations of one profile."""
     if not isinstance(profile, dict):
         return ["must be an object"]
-    found = [f"missing key '{key}'" for key in PROFILE_KEYS if key not in profile]
+    found = [f"missing key '{key}'" for key in PROFILE_KEYS
+             if key not in profile and (gate_fields or key not in GATE_PROFILE_KEYS)]
     unknown = set(profile) - set(PROFILE_KEYS) - set(PROFILE_CHOICE_KEYS)
     found += [f"unknown key '{key}'" for key in sorted(unknown)]
     if "id" in profile and not (isinstance(profile["id"], str) and profile["id"]):
@@ -251,14 +257,16 @@ def _profile_violations(profile: object) -> list[str]:
         if listed.count(member) > 1
     ]
     for key in ("ceiling_bytes", "conditional_ceiling_bytes"):
-        found += _ceiling_map_violations(key, profile.get(key), hosts, hosts_valid)
+        if gate_fields or key not in GATE_PROFILE_KEYS or key in profile:
+            found += _ceiling_map_violations(key, profile.get(key), hosts, hosts_valid)
     note = profile.get("note")
     if not isinstance(note, str) or not note.strip():
         found.append("empty note")
     return found
 
 
-def _structure_violations(profiles: list) -> tuple[list[str], list[dict]]:
+def _structure_violations(profiles: list,
+                          gate_fields: bool = True) -> tuple[list[str], list[dict]]:
     """Every profile's structural violations, and the profiles that have none."""
     violations: list[str] = []
     sound: list[dict] = []
@@ -267,7 +275,7 @@ def _structure_violations(profiles: list) -> tuple[list[str], list[dict]]:
         profile_id = profile.get("id") if isinstance(profile, dict) else None
         named = isinstance(profile_id, str) and bool(profile_id)
         label = profile_id if named else f"#{index}"
-        found = _profile_violations(profile)
+        found = _profile_violations(profile, gate_fields)
         if named:
             if profile_id in seen:
                 found.append("duplicate id")
@@ -381,12 +389,16 @@ def _member_violations(profile: dict, read: Reader, sites: Optional[list[dict]])
     return [f"profile {profile['id']}: {message}" for message in found]
 
 
-def validate(model: dict, read: Reader) -> list[str]:
-    """Every violation of the model, in report order; empty when it is sound."""
-    violations = _top_level_violations(model, read)
+def validate(model: dict, read: Reader, *, gate_fields: bool = True) -> list[str]:
+    """Every violation of the model, in report order; empty when it is sound.
+
+    With ``gate_fields`` false, a model that predates the gate's ceilings is
+    still sound: ``report`` reads models committed before them.
+    """
+    violations = _top_level_violations(model, read, gate_fields)
     profiles = model.get("profiles")
     profiles = profiles if isinstance(profiles, list) else []
-    structure, sound = _structure_violations(profiles)
+    structure, sound = _structure_violations(profiles, gate_fields)
     violations += structure
     matrix, sites = _matrix_sites(read)
     violations += matrix
@@ -832,7 +844,7 @@ def _report(args: argparse.Namespace) -> int:
         model = load_model(raw)
     except ValueError as error:
         raise ValueError(f"invalid model at {head}: {error}") from None
-    violations = validate(model, read_head)
+    violations = validate(model, read_head, gate_fields=False)
     if violations:
         raise ValueError(f"invalid model at {head}: " + "; ".join(violations))
     report = compare(model, measure(model, read_base), measure(model, read_head), base, head)
