@@ -2,14 +2,21 @@
 
 Loaded from `SKILL.md` at Phase 7.
 
+## Contents
+
+- Ship-owner subagent prompt
+- Ship report handling
+- Dispatch-gap fallback
+- Inline fallback (no ship-issue skill)
+- Remainder owner prompt
+
 ## Ship-owner subagent prompt
 
-The handoff goes in the prompt, not a file — the subagent's starting context *is*
-the prompt. Recheck the current spec and plan roots immediately before building
-it and include their canonical checker objects. The public handoff must never carry task member paths
-and must never carry artifact contents; ship-issue
-discovers validated members locally. A durable SDD `report_path` is relative to
-the primary worktree and is the only detail pointer.
+The handoff goes in the prompt, not a file. Recheck the current spec and plan roots
+immediately before building it and include their canonical checker objects. The public
+handoff must never carry task member paths and must never carry artifact contents;
+ship-issue discovers validated members locally. A durable SDD `report_path` is relative
+to the primary worktree and is the only detail pointer.
 
 ```
 You are running ship-issue for issue #<num> in <autonomous|interactive> mode. Use
@@ -24,28 +31,20 @@ Without lifecycle identity the candidate is the legacy handoff, exactly these
 fields, with the whole lifecycle group null:
 {"state":"complete","ledger_repo_root":"<immutable ledger root or null>","run_id":"<run or null>","attempt":<integer or null>,"owner":"<owner or null>","owner_worktree":"<owner worktree or null>","action_id":"<action id or null>","issue_number":<num>,"branch":"<branch-name>","worktree_path":"<absolute-worktree-path>","spec_artifact":{"kind":"design-spec","path":"<root>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"within_budget"},"plan_artifact":{"kind":"implementation-plan","path":"<root>","metrics":{"root_bytes":<int>,"total_bytes":<int>,"file_count":<int>,"largest_member_bytes":<int>},"budget_status":"within_budget"},"head_sha":"<full sha>","review_state":"clean|residuals","acceptance_state":"met|unmet|human_pending|not_applicable","auto":true,"report_path":null,"notes":"<bounded notes>"}
 
-In `ship-handoff/v2`, `custody`, `delivery_contract` and
-`delivery_contract_digest` are the owner object's `custody`, `contract` and
-`contract_digest`, and `pending_stage_ids` is its `pending_stage_ids`.
-`authorization_intents` is the one initial intent the builder prints for that
-contract, printed by
+In `ship-handoff/v2`, `custody`, `delivery_contract`, `delivery_contract_digest` and `pending_stage_ids` are the owner object's `custody`, `contract`, `contract_digest` and `pending_stage_ids`.
+`authorization_intents` is the one initial intent that
 `workflow-state build-delivery --repo-root <ledger_repo_root> --kind initial-intent --input -`
-over `{"contract": <installed contract>}` in a quoted heredoc.
-`authorization_chain_digest` is the value the builder seals from those held
-intents, printed by
+prints over `{"contract": <installed contract>}` in a quoted heredoc.
+`authorization_chain_digest` is the value that
 `workflow-state build-delivery --repo-root <ledger_repo_root> --kind authorization-chain --input -`
-over `{"contract": <installed contract>, "authorization_intents": [<initial intent>]}`
+seals over `{"contract": <installed contract>, "authorization_intents": [<initial intent>]}`
 in a quoted heredoc; never compute it by hand. The three id arrays and `selected_outputs` are the ones this
 owner actually holds — empty at a first ship — and `requested_scope` is null.
-The handoff records historical custody and grants no current-stage authority:
-the ledger, not the handoff, is current truth. A v2 handoff carries the full
-contract, so its boundary reads it under the `workflow_responses` wire bound.
 
 In both handoff shapes, `head_sha` is the validated sdd report's `head_sha`,
-copied unchanged and never the branch tip: it is the *final-review head*
-ship-issue's Phase 5 reviews from.
+copied unchanged and never the branch tip.
 
-In both handoff shapes, `acceptance_state` is the validated sdd report's `acceptance_state`, copied unchanged. A `state: failed` handoff built without an sdd report (`review_state: unknown`) carries `not_applicable`. ship-issue validates the field and fixes its effective acceptance state from it: `met` or `not_applicable` closes the issue, and `unmet` or `human_pending` holds it open as `needs-verification` (ship-issue Phase 8 step 1).
+In both handoff shapes, `acceptance_state` is the validated sdd report's `acceptance_state`, copied unchanged. A `state: failed` handoff built without an sdd report (`review_state: unknown`) carries `not_applicable`.
 
 Use `state: failed` only according to the ship-handoff validator's before/after
 matrix. `notes` is bounded by `phase_reports.notes_max_characters`; it names a
@@ -55,9 +54,7 @@ quoted heredoc, and dispatch only the validated stdout bytes. A residual SDD
 report requires the durable path.
 
 `action_id` is the `issue:attempt:launch` string the acquisition envelope
-issued; it joins the all-or-nothing lifecycle group and is passed through
-verbatim — never recomputed, never derived from `attempt` — so ship-issue's
-launch guard can re-validate it before each forge write. In `ship-handoff/v2`
+issued, passed through verbatim and never recomputed; in `ship-handoff/v2`
 it is `custody.action_id`.
 
 With lifecycle identity, the prompt also carries the single line
@@ -121,12 +118,27 @@ single report. `detail_state` is `none`, `present`, or failure-only `unpublished
 per the validator matrix. With `unpublished`, name the readable retained source
 and the root it resolves against in notes — a retained path is
 worktree-relative, unlike a `present` one — keep the worktree, and do not claim
-merge success. Never inline detail.
+merge success.
 ```
+
+## Ship report handling
+
+Items 1-3 are alternatives, in order; any other report runs items 4-6 in order.
+
+1. A report that is only the re-entry line `/from-issue <num> --auto` means the ship-issue run checkpointed a denial, which already suspended this attempt: relay that line and write nothing.
+2. A report that is only the line `capability_gap: agent_dispatch` means ship-issue's Phase-0 reviewer-dispatch probe found the ship owner cannot launch its reviewers. A `from-issue-ship-owner` launch this context cannot make, because it has no subagent-launch tool, counts as that same line. Compare it byte for byte, never decode or validate it, and take the dispatch-gap fallback below.
+3. A report that validates at `--boundary workflow-response` as `delivery_stalled` means the checkpoint already ended the custody: relay it and write nothing.
+4. Pipe the received bytes through `artifact-budget validate-report --boundary ship-summary --input -`, decode only canonical stdout, consume a durable `report_path` before advancing, and never inline either durable or retained detail. For `unpublished`, independently re-read the retained candidate through `validate-detail-input`, require non-empty findings, keep the worktree, and accept only `terminal_failed` with a `stopped`/`failed` historical row. Resolve that `report_path` against the owner worktree, not `ledger_repo_root` — only a `present` path is primary-checkout-relative, and `workflow-state finish` resolves the two the same way.
+5. Before the terminal write, run `~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <issue:attempt:launch>` with this owner's own `action_id`. On `current: false` or any helper failure, write nothing, print the canonical re-entry line `/from-issue <num> --auto` on its own line, and stop.
+6. Call `workflow-state finish --summary-file -` with the validated `ship-summary/v2` bytes on stdin, per the terminal return procedure, and validate its raw response before sending the canonical JSON unchanged. A fresh ship agent writes only `checkpoint-delivery` under this custody, never the owner's final ledger result.
+
+## Dispatch-gap fallback
+
+It is the one exception to shipping through a fresh ship owner, and the one allowed departure from a rollover Phase-6 `delegate`. With lifecycle identity, first run the same `check-launch` fence with this owner's `action_id`; on `current: false` or any helper failure, write nothing, print the canonical re-entry line `/from-issue <num> --auto` on its own line, and stop. Ledger-free, skip the fence. Then invoke `ship-issue` through your `Skill` tool with the same validated handoff bytes and carry out the ship-owner prompt's task list yourself: every phase, the auto-mode rules and, with a `ship-handoff/v2`, the `## Delivery loop`, writing only `checkpoint-delivery` inside it. Handle its return as § Ship report handling does, except case 2; a human gate reached inside the run is `ship-issue/HUMAN-GATE.md`'s case of an owner running that path itself. A `capability_gap: agent_dispatch` line returned by the inline run is the genuine gap and never starts a second inline run: with lifecycle identity follow the suspension procedure with `<value>` = `agent_dispatch`, making no `finish` call; ledger-free, report the gap to the user and stop, keeping the worktree. A `delivery_remainder` launch never takes this fallback: remainder mode never returns the gap line.
 
 ## Inline fallback (no ship-issue skill)
 
-Deliver inline: push the branch, open a PR against `<integration-branch>`, then use the same full-review tier over the diff. The PR body carries `Closes #<num>` only when the sdd report's `acceptance_state` is `met` or `not_applicable`, and no closing keyword otherwise, so that merging a held PR never closes the issue:
+Deliver inline: push the branch, open a PR against `<integration-branch>`, then use the same full-review tier over the diff. The PR body carries `Closes #<num>` only when the sdd report's `acceptance_state` is `met` or `not_applicable`, and no closing keyword otherwise:
 
 <!-- agent-dispatch: id=from-issue-inline-ship-review role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") launches a fresh first-pass reviewer over the shipping diff.
@@ -134,8 +146,7 @@ Agent(subagent_type="reviewer", model="opus", effort="high") launches a fresh fi
 Then wait for CI (`<tracker-cli> pr checks --watch`), merge `--no-ff`, then close
 the issue when the sdd report's `acceptance_state` is `met` or `not_applicable`;
 otherwise hold it with ship-issue Phase 8 step 1's hold sequence, in its order:
-view the issue's state and reopen it only when `CLOSED` (a merged commit's
-closing keyword can close it even though the PR body has none), create the
+view the issue's state and reopen it only when `CLOSED`, create the
 `needs-verification` label only when it is missing and never with `--force`,
 label it `needs-verification`, comment the verdict table, then verify the issue
 is `OPEN` with `needs-verification`, leaving it open. In both cases, publish
@@ -182,6 +193,4 @@ reply, return that validated reply.
 <the four leaf-agent clauses of the ship-owner prompt above, verbatim>
 ```
 
-The placeholder line stands for those four clauses copied verbatim as a
-paragraph of their own; they are spelled once in this file, inside the
-ship-owner prompt.
+The placeholder line stands for those clauses copied verbatim as a paragraph of their own.

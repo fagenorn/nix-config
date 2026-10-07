@@ -5,9 +5,6 @@ behavior in `SKILL.md`; everything else in `SKILL.md` still applies.
 
 You don't get to skip thinking — you only stop waiting for the user.
 
-Under direct autonomous acquisition, a resume is not a takeover:
-resuming a `suspended` attempt requires neither `new_run` nor `owner_unavailable` — suspension is not a terminal replay, so re-entry clears it with both flags left `false`.
-
 ## Contents
 
 - The self-answer pattern
