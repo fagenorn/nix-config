@@ -6,7 +6,8 @@ from typing import Any
 
 from ._canonical import (canonical_bytes, canonical_digest, _boolean, _digest,
     _integer, _members, _object, _reject, _sorted_unique, _string, _utc)
-from ._objects import (_POSTCONDITIONS, _STAGE_ACTIONS, _authority, _consumption,
+from ._objects import (_POSTCONDITIONS, _POSTCONDITION_OBSERVATION_KINDS,
+    _STAGE_OBSERVATION_KINDS, _authority, _consumption,
     _contract, _custody_issue, _delivery_observation, _intent, _reevaluation,
     _recovery,
     _postcondition_observation_matches, _scope, _selected, _selection_chains,
@@ -532,7 +533,7 @@ def _delivery(value: Any, notes_max: int) -> dict[str, Any]:
         if fact["state"] == "observed":
             observed = delivery_by_id.get(fact["observation_id"])
             stage = stages_by_id[fact["stage_id"]]
-            if observed is None or observed["observation_kind"] != _STAGE_ACTIONS[stage["kind"]][2] \
+            if observed is None or observed["observation_kind"] not in _STAGE_OBSERVATION_KINDS[stage["kind"]] \
                     or not _stage_observation_matches(contract, value, stage, observed): _reject()
     postconditions = _object(value["postconditions"], set(_POSTCONDITIONS), "postconditions")
     for key, state in postconditions.items():
@@ -541,7 +542,7 @@ def _delivery(value: Any, notes_max: int) -> dict[str, Any]:
         if (state["state"] == "observed") != (state["observation_id"] is not None): _reject()
         if state["state"] == "observed":
             observed = delivery_by_id.get(state["observation_id"])
-            if observed is None or observed["observation_kind"] != key: _reject()
+            if observed is None or observed["observation_kind"] not in _POSTCONDITION_OBSERVATION_KINDS[key]: _reject()
             if key == "pr_merged":
                 if not any(stage["kind"] == "merge_pr" and _stage_observation_matches(
                         contract, value, stage, observed) for stage in contract["stages"]): _reject()
