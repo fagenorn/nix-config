@@ -13,7 +13,7 @@ retained `capabilities.review.code` first: `blocked` stops and authored
 
 Execute a plan by dispatching a fresh implementer per task, a lane-scoped task review after each, and one two-axis whole-branch review (conformance ∥ correctness) at the end. Subagents never inherit your session's history — you construct exactly what each needs, which also keeps your own context flat for coordination.
 
-**Continuous execution:** don't pause between tasks. Stop only for BLOCKED you cannot resolve, ambiguity that genuinely prevents progress, all-tasks-complete, or the deadline headroom rule in `### Lifecycle workers`. Narrate at most one short line between tool calls — the ledger and tool results carry the record.
+**Continuous execution:** don't pause between tasks. Stop only for BLOCKED you cannot resolve, ambiguity that genuinely prevents progress, all-tasks-complete, or the deadline headroom rule. Narrate at most one short line between tool calls — the ledger and tool results carry the record.
 
 ## Setup
 
@@ -121,9 +121,8 @@ A resumed agent is registered again and gets a fresh `worker_id`.
 Read-only reviewers are not registered.
 
 A report of `BLOCKED` with `launch fence refused: <reason>` means that
-worker's launch fence refused its commit. Whatever the reason, release that
-worker and make no retry and no re-dispatch; not every reason means a
-supersession, so then run
+worker's launch fence refused its commit. Release that worker and make no
+retry and no re-dispatch; then run
 `workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
 on this launch. On `current: false` or any helper failure, follow from-issue's
 superseded route: after that release nothing more is written; print
@@ -135,42 +134,26 @@ workers commit with plain `git`.
 Under a lifecycle identity, also record this launch's progress marker. Run
 `workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
 once before dispatching the first task this session will execute, and again
-after each task completes (step 5). The helper reads the commit checked out
-in the attempt's worktree itself; a commit that strictly descends from the
-last recorded one starts a fresh anti-zombie stall count, so a long run that
-suspends between tasks is not stopped as stalled. The reply's `outcome` is
-informational. A refusal changes nothing, is not a suspension cause and
-never stops the task loop: the next `workflow-state progress` or
-`check-launch` remains the authority on the attempt's state.
+after each task completes (step 5). A commit that strictly descends from the
+last recorded one starts a fresh anti-zombie stall count. A refusal changes
+nothing, is not a suspension cause and never stops the task loop.
 
-When the caller also hands over the attempt's `deadline_at`, stop cleanly at
-a task boundary instead of letting the reaper expire the attempt mid-task. A
-task boundary is the moment before you dispatch a plan task, and the moment
-after the last task's `complete` line, before the final review. Note each
-task's dispatch instant with `date -u`; at its `complete` line, its wall time
-is the elapsed difference. `longest` is the largest wall time of a task
-completed this session (0 before the first), and `remaining` is `deadline_at`
-minus `date -u`. At each boundary, when `remaining` is less than the larger of
-15 minutes and `longest`:
-1. release every worker this launch still has registered — normally none,
-   because each is released when it returns; stop a still-live one and run
-   `workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> --event stopped`,
-   as from-issue's **Writing workers** route says;
-2. run
-   `workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`;
-   a refusal does not stop these steps;
-3. run
-   `workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`,
-   because `suspend` does not fence the launch: on `current: false` or any
-   helper failure, write nothing more, print `/from-issue <num> --auto` on
-   its own line and stop, as from-issue's superseded route says;
-4. on `current: true`, follow from-issue's suspension procedure with
-   `blocked_on=deadline`.
-
-If the suspend is refused because the attempt is no longer active, the
-reaper expired it first: follow from-issue's expired-deadline route — print
-`/from-issue <num> --auto` on its own line and stop, with no retry. Without
-a `deadline_at`, this rule does not apply.
+With the attempt's `deadline_at` also handed over, check headroom at each
+task boundary: before dispatching a task, and after the last `complete` line,
+before the final review. `remaining` is `deadline_at` minus `date -u`;
+`longest` is the largest dispatch-to-`complete` wall time of a task completed
+this session (0 before the first). When `remaining` is under the larger of
+15 minutes and `longest`, stop any still-live worker and run
+`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> --event stopped`,
+then
+`workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
+(a refusal does not stop you), then
+`workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`.
+On `current: false` or any helper failure, write nothing more, print
+`/from-issue <num> --auto` on its own line and stop. On `current: true`,
+follow from-issue's suspension procedure with `blocked_on=deadline`; a suspend
+refused because the attempt is no longer active means the reaper expired it:
+follow from-issue's expired-deadline route, with no retry.
 
 ### 1. Dispatch the implementer
 
@@ -212,45 +195,32 @@ Agent(subagent_type="implementer", model="opus", effort="high") takes over a tas
 
 If the implementer asks questions — before or during — answer completely; don't rush it.
 
-Every initial review-package call uses the same closed gate before any review
-dispatch. Generator exit 0 plus validator exit 0, a strict `complete` report,
-and report/checker agreement permits dispatch. Generator exit 3 must validate as
-`decompose_required`; record and return it with no reviewer dispatched.
-Generator exit 2, validator exit 2, malformed or unknown output, or any
-report/checker disagreement is `failed`; record and return it before dispatch.
+Every initial review-package call uses one closed gate before any review
+dispatch. Record the exact `base_sha and head_sha` before invoking any
+`review-package` producer. Parse every producer report only after the
+producer-boundary validator, then independently run
+`artifact-budget check --kind review-package` on its root and compare all four
+metrics. Only generator exit 0, validator exit 0, a strict `complete` report
+and report/checker agreement permit dispatch. Exit 3 must validate as
+`decompose_required`; record and return it with no reviewer dispatched. On
+generator or validator exit 2, construct the exact failed SDD candidate with
+`detail_state: "none"` and `report_path: null`, pass it through
+`artifact-budget validate-report --boundary sdd` and return only canonical
+stdout. Malformed or unknown output and any report/checker disagreement are
+`failed`, recorded and returned before dispatch. `complete` plus `over_budget`
+is a contract error.
 
-A diff-review manifest may use interface version 2 only when an individually
-oversized file is a positively identified auto-generated EF Core migration
-designer. In that form every handwritten file remains byte-complete and the
-designer is replaced by bounded, deterministic evidence: its Git blob and
-content identities, migration/product identities, source-diff bytes, and model
-shape counts. The reviewer must inspect that evidence together with the
-companion migration/snapshot diff and the implementer's no-pending-model-change,
-generated-SQL, and provider-backed migration evidence. A large file that does
-not meet the exact generated-designer contract remains over budget and exits 3;
-never classify by suffix alone, truncate a diff, or treat generated evidence as
-a review waiver.
+Interface version 2 is allowed only when an individually oversized file is a
+positively identified auto-generated EF Core migration designer, replaced by
+bounded deterministic evidence; anything else that large exits 3. Never
+classify by suffix alone, truncate a diff, or treat generated evidence as a
+review waiver.
 
-Interface version 3 is the producer's bounded remediation only when the complete
-version-1/2 `-U10` package fails solely on `member_count` and/or
-`aggregate_bytes`. It retries the closed context sequence 7, 5, 3, 1, 0 and
-selects the first checker-valid package, packing complete file-diff records with
-`stable-first-fit-whole-file`. It never splits a file diff or omits a changed
-line. Reviewers read every shard, honor the declared `packaging.context_lines`,
-and inspect the live file when that bounded unchanged context is insufficient.
-Version 3 may also contain the same strictly identified generated evidence as
-version 2. `member_bytes` and `root_bytes` never take this remediation: an
-individually oversized handwritten diff or manifest still exits 3.
-
-Record the exact `base_sha and head_sha` before invoking any `review-package`
-producer. Parse every producer report only after the producer-boundary validator,
-then independently run `artifact-budget check --kind review-package` on its root
-and compare all four metrics before reviewer dispatch. On generator or validator
-exit 2, do not dispatch and construct the exact failed SDD candidate with
-`detail_state: "none"` and `report_path: null`; pass it through
-`artifact-budget validate-report --boundary sdd` and return only canonical stdout.
-Exit 3 must be a validated `decompose_required` producer report and also stops
-before dispatch. `complete` plus `over_budget` is a contract error.
+Interface version 3 is allowed only when a complete version-1/2 `-U10` package
+fails solely on `member_count` and/or `aggregate_bytes`. It retries contexts 7,
+5, 3, 1, 0, packing whole file-diff records with `stable-first-fit-whole-file`;
+it never splits a file diff or omits a changed line. `member_bytes` and
+`root_bytes` never take it.
 
 ### 3. Review the task
 
@@ -293,7 +263,7 @@ Never fix findings yourself in the controller session — controller fixes skip 
 
 ### 5. Complete the task
 
-Clean review — or everything parked-with-ruling at the cap — appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)`; mark the todo, run the cumulative delivery gate, then move on only when it passes. Never advance past open Critical/Important findings that are neither fixed nor parked. Under a lifecycle identity, run `workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` immediately after appending that `complete` line, as `### Lifecycle workers` describes.
+Clean review — or everything parked-with-ruling at the cap — appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)`; mark the todo, run the cumulative delivery gate, then move on only when it passes. Never advance past open Critical/Important findings that are neither fixed nor parked. Under a lifecycle identity, record the progress marker right after that `complete` line (`### Lifecycle workers`).
 
 ## Final review — two axes
 

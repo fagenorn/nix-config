@@ -556,11 +556,10 @@ Without lifecycle identity, send the same compact schema directly.
 Suspend — do not finish — when an environmental interruption pauses the work
 rather than resolving it: an imminent quota or session limit, a repeated
 transport failure, a permission prompt only a human can approve, an external
-wait (never a child's interim result; see **Interim child results**), a
-context that cannot launch the agents a phase needs, or too little attempt
-budget left for the next `sdd` task. A suspension parks the attempt without
-ending it — it consumes no attempt, needs no authorization phrase, and
-re-entry resumes it in place.
+wait (never a child's interim result; see **Interim child results**), or a
+context that cannot launch the agents a phase needs. A suspension
+parks the attempt without ending it — it consumes no attempt, needs no
+authorization phrase, and re-entry resumes it in place.
 
 Before suspending, release every worker this owner registered (see
 **Writing workers**): the helper refuses a suspend, a handoff `progress` or a
@@ -574,8 +573,7 @@ workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --issue 
 ```
 
 with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`,
-`agent_dispatch`, or `deadline` (the reaper alone owns `unknown`). Only sdd's
-deadline headroom rule writes `deadline`. A validated `kind: terminal`
+`agent_dispatch`, or sdd's `deadline` (the reaper alone owns `unknown`). A validated `kind: terminal`
 reply means the anti-zombie bound ended the attempt instead: handle it as the
 terminal replay in the terminal return procedure — print its `reentry`, relay
 it, and write no `finish` — and stop. Otherwise the reply is `kind: suspended`;
@@ -682,14 +680,11 @@ Invoke `sdd`: it reads the plan header, dispatches an implementer per task, and 
 With lifecycle identity, invoke `sdd` with this owner's
 `ledger_repo_root`, `run_id` and `action_id` as its lifecycle identity, so
 sdd's `### Lifecycle workers` registers each writing agent under this
-launch and records a progress marker after each completed task. Also hand
-`sdd` the `deadline_at` this owner currently holds — the one adopted at
-acquisition, or the one from a later `declare-lane` reply — so sdd's deadline
-headroom rule can suspend cleanly at a task boundary. The
-mechanical route's mechanic is registered the same way: run
-`workflow-state register-worker` before dispatching it, put the
-`Lifecycle worker:` line in its prompt, and release it when it returns. On
-that route this owner records the marker itself: run
+launch and records a progress marker after each completed task. Also hand it
+the `deadline_at` this owner holds (a later `declare-lane` reply's
+value supersedes the acquired one). On the mechanical route, register its
+mechanic the same way (`workflow-state register-worker` before dispatch, the
+`Lifecycle worker:` line in its prompt, release on return) and run
 `workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
 once before dispatching the mechanic and once after its change is
 committed. A refusal changes nothing and is not a suspension cause.
