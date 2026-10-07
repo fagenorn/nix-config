@@ -91,7 +91,7 @@ Measured at base `baac2897` with `just agent-instruction-load report --base
 origin/main --head HEAD --format json`. Each of the three profile-hosts (O
 claude, I claude, I codex) lists all eight scoped files hot or conditional, so
 the **sdd share** is 3 × 93,317 = 279,951 bytes. The slice is held to `head ≤
-0.65 × base`, which is `head ≤ 181,968` (D1). The whole-profile totals (O
+0.65 × base`, which is `head ≤ 181,968` (D1); the issue's amendment sets the acceptance line at `head ≤ 0.80 × base`, `≤ 223,960` (D19), and 0.65 stays this design's aim. The whole-profile totals (O
 claude 175,587 hot plus 153,836 conditional; I claude 172,466 plus 135,765; I
 codex 172,466 plus 119,354) are reported beside the share. They cannot fall by
 35% from this slice alone, as #295 already recorded.
@@ -114,7 +114,7 @@ At the targets, one host loads 56,400 bytes, so the share is 169,200 (60.4% of
 base). That leaves 12.8 KB of slack under the 0.65 line, so a single overshoot
 does not fail the slice. `SKILL.md` and `final-review.md` are where an
 overshoot costs the most. The hard lines are the share (AC3) and `SKILL.md` ≤
-300 reflowed lines (AC2). A file over its target is allowed only when every
+300 reflowed lines (AC2), now ≤ 500 per the amended issue (D19). A file over its target is allowed only when every
 remaining sentence is machine-read or carries a rule, and the commit body must
 then name the file and its size.
 
@@ -334,3 +334,5 @@ These are filed after this phase, not fixed here:
 | D16 | A sync conflict in a test structure shared with a parallel slice (`InterimChildResultContractsTest.OWNERS`, the policy-support tables, `SDD_MACHINE_TEXT` neighbours) resolves to the union of both slices' deletions, never to either side alone | #291 D8: each slice deletes only its own documents' pins; #296 edits the same test file | Re-running one side's edit over the other: silently restores the other slice's deleted pin |
 | D17 | When `PRODUCER_VALIDATION` leaves it (D15), `fix-loop.md`'s `SDD_MACHINE_TEXT` entry is deleted whole, with no replacement item such as its `review-package PLAN_FILE FIX_BASE HEAD` range argv | D11 (no replacement pins); an empty tuple asserts nothing | Pinning the fix-range argv instead: a new pin this slice's test policy rules out |
 | D18 | Execution starts from a branch that contains `origin/main`: the sdd controller merges it before Setup pins `DELIVERY_BASE`, and a conflict stops. The tasks cut the synced text and keep #281's `blocked_on=deadline` paragraph in `### Lifecycle workers` in its tested order. AC3's base stays `baac2897` (D1), with the synced-base share reported beside it | #320 and #321 (#281) changed `sdd/SKILL.md`, the test file and `instruction-load.json` after `baac2897`; sdd pins `DELIVERY_BASE` once at Setup; `test_sdd_states_the_deadline_suspension_order` reads that paragraph | Cutting the `baac2897` text and leaving #281 to ship's sync: a foreseen whole-file conflict resolved outside task review. Merging inside Task 1: the pinned base would put #320/#321 in every cumulative review package |
+| D19 | The acceptance lines follow the issue's 2026-10-07 amendment: `SKILL.md` ≤ 500 reflowed lines (skill-lint L2) and the sdd share head ≤ 0.80 × base (≤ 223,960); the per-file targets stay as ceilings, and none is met by moving a cited anchor or changing semantics; supersedes the 300-line and 0.65 lines in D1 and § Byte and line targets | Issue #297 body amended by the #291 program owner after #296 showed the old lines conflict with keeping cited anchors and semantics | Keeping the stricter lines as hard gates: invites the anchor cuts the amendment forbids |
+| D20 | Task 6 checks that the branch contains `origin/main` before reading any budget line; when it does not, it stops with `needs sync` for the controller's sync and remeasurement instead of calling a `raise:` a design defect | Phase-5 Codex plan review R2: the budget recipe compares the complete model against `origin/main`, so a parallel slice landing (#296) can fail it independently of this slice | Treating every `raise:` as a D2 design defect: misattributes another slice's landing |

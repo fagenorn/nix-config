@@ -14,7 +14,7 @@
 - No eval result is written, estimated or copied when the token is absent (per D14).
 - No forge or tracker write, and no label.
 
-- [ ] **Step 1: Measure the 300-line line (AC2)**
+- [ ] **Step 1: Measure the L2 line limit (AC2, per D19)**
 
 ```bash
 PYTHONPATH=python python3 - <<'EOF'
@@ -23,11 +23,11 @@ from agent_tools import skill_lint
 text = Path("home/common/agent-skills/skills/sdd/SKILL.md").read_text(encoding="utf-8")
 lines = skill_lint.reflowed_lines(skill_lint.parse_frontmatter(text)[1])
 print(lines)
-raise SystemExit(0 if lines <= 300 else 1)
+raise SystemExit(0 if lines <= 500 else 1)
 EOF
 ```
 
-Expected: a number ≤ 300 (plan target ≤ 230) and exit 0. At the base it prints 433 and exits 1.
+Expected: a number ≤ 500 (plan target ≤ 230) and exit 0; `skill-lint check` (L2) passes with no allowlist entry for the scoped files. At the base it prints 433, which already meets the amended line; the plan target is the cut the content allows without moving a cited anchor (per D19).
 
 - [ ] **Step 2: Measure the sdd share (AC3, per D1)**
 
@@ -58,11 +58,11 @@ PYTHONPATH=python python3 -m agent_tools.instruction_load report --base "$SYNCED
 PYTHONPATH=python python3 -m agent_tools.instruction_load report --base HEAD --head HEAD --format json | python3 <scratch>/share.py
 ```
 
-Expected: the base prints `{"sdd_share": 279951, "whole_profiles": 929474}`; the synced base (per D18) is reported beside it (278,916 at 75784bed). The head must print `sdd_share` ≤ 181968. A head share above 181,968 is an unmet criterion: report it and do not alter the measurement. Also run `PYTHONPATH=python python3 -m agent_tools.instruction_load report --base origin/main --head HEAD` and keep its summary lines for the task report (the issue's demo).
+Expected: the base prints `{"sdd_share": 279951, "whole_profiles": 929474}`; the synced base (per D18) is reported beside it (278,916 at 75784bed). The head must print `sdd_share` ≤ 223960 (0.80 × base, per D19). A head share above 223,960 is an unmet criterion: report it and do not alter the measurement. Also run `PYTHONPATH=python python3 -m agent_tools.instruction_load report --base origin/main --head HEAD` and keep its summary lines for the task report (the issue's demo).
 
 - [ ] **Step 3: Gate and diff bound (AC1, per D2, D13)**
 
-Run `git fetch origin`, then `just agent-instruction-load tighten` and `just agent-instruction-budget` (timeout 300 s each). Expected: exit 0, with no `lint:`, `raise:`, `ceiling:`, `tightness:` or `debt:` line. Any `raise:` line is a design defect (per D2): stop and report BLOCKED.
+Run `git fetch origin` and `git merge-base --is-ancestor origin/main HEAD`; when it fails, `origin/main` has advanced (for example by #296), so stop and report BLOCKED with `needs sync` for the controller's sync and remeasurement before reading any budget line (per D20). Only on a synced branch run `just agent-instruction-load tighten` and `just agent-instruction-budget` (timeout 300 s each). Expected: exit 0, with no `lint:`, `raise:`, `ceiling:`, `tightness:` or `debt:` line. Any `raise:` line is a design defect (per D2): stop and report BLOCKED.
 Run: `if grep -q 'skills/sdd/' home/common/agent-skills/skill-lint-debt.json; then exit 1; fi`. Expected: exit 0.
 Run the D13 diff-bound script. Expected: exit 0; put each sdd path's byte count in the task report.
 If `tighten` changed `instruction-load.json`, commit it as `chore(instruction-load): re-tighten the sdd profiles (#297)`.
@@ -84,9 +84,9 @@ Compare each new row's `passed` with 6, then commit `results.jsonl` as `test(eva
 
 - [ ] **Step 6: Acceptance record**
 
-Create the record in the schema `final-review.md` § Acceptance record gives: `# Acceptance record — issue #297`, then `| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |` with rows AC1–AC5. `Criterion` is the issue line verbatim, without its checkbox, read once with `gh issue view 297 --repo fagenorn/nix-config --json body` (unset `GITHUB_TOKEN` first). `Verdict` is `—` on every row.
+Create the record in the schema `final-review.md` § Acceptance record gives: `# Acceptance record — issue #297`, then `| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |` with rows AC1–AC5. `Criterion` is the issue line verbatim, without its checkbox, read once with `gh issue view 297 --repo fagenorn/nix-config --json body` (unsetting only the names `bindings.tracker.credential_env.unset_before_invocation` lists, none in this project). `Verdict` is `—` on every row.
 - AC1, AC2, AC5 (`code`): `Observed` is `in final verification`; AC2 adds the Step 1 number; AC1 adds `just agent-instruction-budget exit 0, no raise:` from Step 3.
-- AC3 (`evidence`): `Observed` is `base 279951 → head <n> (threshold ≤ 181968); synced base <s>; whole profiles 929474 → <m>`. `Commit` is the short SHA of the HEAD measured. `Conditions` is `report --base X --head X at each revision; O and I profiles, all hosts (D1)`.
+- AC3 (`evidence`): `Observed` is `base 279951 → head <n> (threshold ≤ 223960); synced base <s>; whole profiles 929474 → <m>`. `Commit` is the short SHA of the HEAD measured. `Conditions` is `report --base X --head X at each revision; O and I profiles, all hosts (D1)`.
 - AC4 (`evidence`): with the token, the two `passed` values against 6 and the results commit. Without it, `Observed` is `not run — CLAUDE_CODE_OAUTH_TOKEN unset`, `Commit` is `—`, and `Conditions` lists the two Step 5 commands and `human_pending (D14)`.
 
 Commit as `docs(plans): acceptance record for #297`.

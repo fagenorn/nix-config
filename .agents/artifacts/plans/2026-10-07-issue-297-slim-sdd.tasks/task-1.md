@@ -7,7 +7,7 @@
 
 **Interfaces:**
 - Consumes: the branch synced with `origin/main` (Global Constraints, execution precondition; per D18). Its `SKILL.md` already carries #281's deadline-headroom paragraph in `### Lifecycle workers`. `fix-loop.md` and `final-review.md` still carry their own gate copies; Tasks 2 and 3 replace them.
-- Produces: a new heading `### Review-package gate`, the one home of the gate (per D3, D15). Tasks 2 and 3 point at it by the exact text "`SKILL.md`'s `### Review-package gate`". `SKILL.md` ends ≤ 14,500 bytes and ≤ 230 reflowed body lines (hard line 300).
+- Produces: a new heading `### Review-package gate`, the one home of the gate (per D3, D15). Tasks 2 and 3 point at it by the exact text "`SKILL.md`'s `### Review-package gate`". `SKILL.md` ends ≤ 14,500 bytes and ≤ 230 reflowed body lines (hard line 500, skill-lint L2, per D19).
 
 **Invariants:**
 - Byte for byte (per D8): frontmatter; both dispatch markers with their `Agent(...)` call lines (`sdd-blocked-reasoning-escalation`, `sdd-lane-task-verification`); the leaf-clause blockquote, exactly once, inside `## Agent tiers`; every argv in `### Lifecycle workers` and the `Lifecycle worker:` line with its two following quoted sentences; the `launch fence refused: <reason>` token; `scripts/task-brief PLAN_FILE N`; `scripts/sdd-workspace PLAN_FILE`; the workspace literal `` `<primary-checkout>/.superpowers/sdd/<checkout-bucket>/<plan-basename>/` ``; the three ledger formats `# SDD ledger — plan: <plan file path>`, `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)`, `Task <N>: minor (deferred): <one-liner>` and `Task <N>: verified inline (mechanical)`; the eleven report keys and `review_state` values; `validate-report --boundary sdd`, `validate-detail-input`, `detail_state: "none"`, `report_path: null`, `detail_state: "unpublished"`.
@@ -38,7 +38,7 @@ low = flat.lower()
 lines = skill_lint.reflowed_lines(skill_lint.parse_frontmatter(text)[1])
 size = len(text.encode("utf-8"))
 print(f"SKILL.md {size} bytes, {lines} reflowed body lines")
-assert lines <= 300, "over the 300-line acceptance line"
+assert lines <= 500, "over the L2 500-line limit"
 if size > 14500 or lines > 230:
     print("over target: name it in the commit body")
 assert text.count("### Review-package gate") == 1, "gate heading"
@@ -57,7 +57,7 @@ assert text.count("**Interim child results.**") == 1
 - [ ] **Step 2: Watch it fail**
 
 Run: `PYTHONPATH=python python3 <scratch>/task1_gate.py` (timeout 120 s).
-Expected: AssertionError `over the 300-line acceptance line` (at `origin/main` 75784bed it prints 27494 bytes, 434 lines).
+Expected: it prints 27494 bytes, 434 lines and `over target: name it in the commit body` (at `origin/main` 75784bed), then fails with AssertionError `gate heading`.
 
 - [ ] **Step 3: Cut SKILL.md**
 

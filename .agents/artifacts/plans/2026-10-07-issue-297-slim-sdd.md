@@ -3,7 +3,7 @@
 > **For agentic workers:** execute this plan with the `sdd` skill — one implementer
 > per task, reviewed between tasks. Steps use `- [ ]` checkboxes.
 
-**Goal:** Cut the eight `sdd` documents by content class, give the review-package gate one home in `SKILL.md`, delete the remaining prose pins on them, and lower the two loading profiles' ceilings, so the sdd share drops by at least 35% with no workflow change (#297, slice S6 of #291).
+**Goal:** Cut the eight `sdd` documents by content class, give the review-package gate one home in `SKILL.md`, delete the remaining prose pins on them, and lower the two loading profiles' ceilings, so the sdd share drops by at least 20% (per D19) with no workflow change (#297, slice S6 of #291).
 
 **Architecture:** Spec `.agents/artifacts/specs/2026-10-07-issue-297-slim-sdd-design.md` (ledger D1–D18; program rows cited as "#291 Dn", sibling rows as "#295 Dn"). Its `### Target layout` table is the file map, `### Content classes and their disposition` is the cutting rule, `### Cutting rules per document` says what each file keeps, and `### Test changes` lists the only test edits. Each task cuts one file group and, in the same commit, makes the test edits that text forces, drops the debt key it clears and runs `tighten` (per D12). Every commit passes the gate.
 
@@ -20,7 +20,7 @@
 - Anchors stay true (per D9): `### Cumulative delivery gate`, `## Agent tiers`, `## The task loop`, `### Lifecycle workers`, `### 1. Dispatch the implementer`, `### 2. Handle the report`, **Interim child results** (inside §2), `### 3. Review the task`, `### 4. The fix loop`, `### 5. Complete the task`, `## Final review — two axes`, `## Finish`, `## Acceptance record`, `## Final verification`, and the `progress.md` check.
 - Hub rule (spec Decisions, "One home per rule"): `fix-loop.md` and `final-review.md` name `SKILL.md` sections by heading and never name each other; payloads name no controller section.
 - `SKILL.md`'s opening paragraph must not contain `resolve-project resolve` (it stays a no-resolve rule).
-- Per-file ceilings (spec § Byte and line targets; "ceiling, not goal"): `SKILL.md` ≤ 14,500 bytes and ≤ 230 reflowed body lines; `final-review.md` ≤ 10,500; `fix-loop.md` ≤ 4,300 and ≤ 95 reflowed lines; `implementer-prompt.md` ≤ 5,200; `task-reviewer-prompt.md` ≤ 6,000; `re-review-prompt.md` ≤ 4,200; `conformance-reviewer-prompt.md` ≤ 6,500; `correctness-reviewer-prompt.md` ≤ 5,200. An overshoot is allowed only when every remaining sentence is machine-read or carries a rule, and the commit body names the file and its size. Hard lines: `SKILL.md` ≤ 300 reflowed lines (AC2) and the share (AC3).
+- Per-file ceilings (spec § Byte and line targets; "ceiling, not goal"): `SKILL.md` ≤ 14,500 bytes and ≤ 230 reflowed body lines; `final-review.md` ≤ 10,500; `fix-loop.md` ≤ 4,300 and ≤ 95 reflowed lines; `implementer-prompt.md` ≤ 5,200; `task-reviewer-prompt.md` ≤ 6,000; `re-review-prompt.md` ≤ 4,200; `conformance-reviewer-prompt.md` ≤ 6,500; `correctness-reviewer-prompt.md` ≤ 5,200. An overshoot is allowed only when every remaining sentence is machine-read or carries a rule, and the commit body names the file and its size. Hard lines: `SKILL.md` ≤ 500 reflowed lines (AC2, skill-lint L2) and the share (AC3), per D19. No target justifies moving an anchor another file cites or changing semantics; an overshoot that keeps them is the right outcome.
 - Review-package bound (per D13): before each commit, every plan-owned path's net diff against `git merge-base HEAD origin/main` stays ≤ 49,152 bytes. Run this from the worktree root (timeout 120 s):
 
 ```bash
@@ -43,7 +43,7 @@ exit $status
 
 ## Test seams
 
-- `skill-lint check` (L1–L5 plus the shrink-only debt file) and `skill_lint.reflowed_lines` over `parse_frontmatter`'s body for the 300-line line.
+- `skill-lint check` (L1–L5 plus the shrink-only debt file) and `skill_lint.reflowed_lines` over `parse_frontmatter`'s body for the 500-line L2 line.
 - `instruction_load` `report`/`check`/`tighten` for the share, the ceilings and the absence of any `raise:` line; `LiveBudgetTest` runs them on every commit.
 - The machine-read checks: `test_dispatch_contracts`, `test_agent_model_matrix`, `test_shell_example_contracts`, `SDD_MACHINE_TEXT`, the sdd report key-set test.
 - The eval harness (`EVAL_TREE=. EVAL_MODEL=<model> just evals sdd 4`), gated by D14.
@@ -66,8 +66,8 @@ Task 6 — Measure the slice and record acceptance evidence — .agents/artifact
 | AC | Kind | Task | Check |
 |----|------|------|-------|
 | AC1 | code | Task 6 | `PYTHONPATH=python python3 -m agent_tools.skill_lint check` exits 0, `skill-lint-debt.json` holds no `skills/sdd/` key, and `just agent-instruction-budget` exits 0 with no `lint:` or `raise:` line (the `Instruction Budget` job's checks; per D2) |
-| AC2 | code | Task 6 | The Task 6 Step 1 command: `skill_lint.reflowed_lines` over `parse_frontmatter(SKILL.md)[1]` prints ≤ 300 (plan target ≤ 230) |
-| AC3 | evidence | Task 6 | Command: the Task 6 Step 2 share script over `instruction_load report --format json`, run at base `baac2897f15daab46a4f25ec625b40d384d3573c` and at the Task 6 head. Conditions: profiles `orchestrated-issue-owner` and `implementation-owner` over all hosts, `sdd/` members listed hot or conditional (per D1). Threshold: head share ≤ 181,968 (0.65 × 279,951), with the synced-base share (per D18) and the whole-profile total reported beside it. Implementer fills acceptance-record row `AC3` |
+| AC2 | code | Task 6 | The Task 6 Step 1 command: `skill_lint.reflowed_lines` over `parse_frontmatter(SKILL.md)[1]` prints ≤ 500 (plan target ≤ 230), and `skill-lint check` (L2) passes with no scoped allowlist entry (per D19) |
+| AC3 | evidence | Task 6 | Command: the Task 6 Step 2 share script over `instruction_load report --format json`, run at base `baac2897f15daab46a4f25ec625b40d384d3573c` and at the Task 6 head. Conditions: profiles `orchestrated-issue-owner` and `implementation-owner` over all hosts, `sdd/` members listed hot or conditional (per D1). Threshold: head share ≤ 223,960 (0.80 × 279,951, per D19), with the synced-base share (per D18) and the whole-profile total reported beside it. Implementer fills acceptance-record row `AC3` |
 | AC4 | evidence | Task 6 | Command: `EVAL_TREE=. EVAL_MODEL=<sonnet|opus> just evals sdd 4` (two runs). Conditions: run only when `CLAUDE_CODE_OAUTH_TOKEN` is non-empty (per D14). Threshold: `passed` ≥ 6 on each model (S3 baseline 6/6 sonnet, 6/6 opus). Without the token, row `AC4` records `not run — CLAUDE_CODE_OAUTH_TOKEN unset` and both commands, and grades `human_pending`. Implementer fills acceptance-record row `AC4` |
 | AC5 | code | Task 6 | `just agent-workflow-tests` on the final head, plus the Task 6 Step 4 inventory with the reviewer's attestation that every remaining assertion over an sdd document pins machine-read text only |
 
@@ -76,3 +76,9 @@ Task 6 — Measure the slice and record acceptance evidence — .agents/artifact
 The spec owns the ledger. This plan cites D1–D16 and adds D17 (`fix-loop.md` leaves `SDD_MACHINE_TEXT` without a replacement pin) and D18 (execution starts from a branch synced with `origin/main`; #281's deadline paragraph is kept; AC3's base stays `baac2897`).
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only, against live HEAD `097325bd` (slice base `baac2897`, after the D18 merge of `origin/main`).
+- Findings: 0 Blocking, 2 Should fix, 0 Discussion. Accepted 2 (R1: Task 6 unsets only the tracker binding's credential names; R2: Task 6 checks sync before reading budget lines, per D20), rejected 0, deferred 0. No fallback.
+- Scope amendment applied in the same pass: the issue's acceptance lines changed to ≤ 500 reflowed lines and head ≤ 0.80 × base (per D19).
