@@ -8,10 +8,13 @@
 #   WORK      the eval's temp dir
 #   REPO      the fixture checkout (base branch, `main`)
 #   ORIGIN    the bare remote
-#   OUT       file holding everything `claude -p` printed
+#   OUT       the run's transcript: the result text (or raw stdout when no result
+#             object parsed) followed by claude's stderr
 #   WT        first worktree other than REPO ("" when none was created)
 #   WT_COUNT  how many worktrees exist besides REPO
 #   PRE_WT    worktree the setup hook pre-created ("" when the eval has no setup)
+#   BASE_MAIN local `main`'s SHA right after the setup hook (the initial commit when
+#             there is no setup)
 #   SPEC_DIR / PLAN_DIR  absolute paths from the fixture's retained resolver snapshot
 #   CLAUDE_EXIT          exit status of the claude run
 
@@ -75,11 +78,78 @@ ledger_has_rows() {
   ' "$file"
 }
 
-# plan_tasks_verifiable <file> — every `### Task N` section carries at least one
-# falsifiable verification line (Expected/Verify/Acceptance/Assert).
+# plan_tasks_verifiable <plan-root> — every task carries at least one falsifiable
+# verification line. A root with a `## Task index` is graded through its members: each
+# `[task-N.md](<stem>.tasks/task-N.md)` link must resolve, beside the root, to a member
+# holding a check — a verification command and a line that opens with an `Expected`
+# label (`Expected:`, `**Expected:**`, `- Expected output:`) — so a title like "Verify
+# configuration" is not one. A verification command is an inline code span on a line
+# that opens with a `Run` label (`Run: `, `**Run:**`, `Run, from outside the tree:`),
+# or a fenced block whose nearest non-blank line above it carries `Run` or `Verify`.
+# A backticked filename, a backticked expected value or a fenced commit or code step is
+# not one. The index must cover every task: each non-blank index row links exactly one
+# member, the members are numbered contiguously from 1 with one row each, and every
+# `task-N.md` in a linked `.tasks/` directory is linked, so a task whose row lost its
+# link cannot drop out of grading. An index that links no member fails. A root without
+# one is a legacy single-file plan, graded by its `### Task N` sections
+# (Expected/Verify/Acceptance/Assert).
 plan_tasks_verifiable() {
-  local file="$1"
+  local file="$1" dir member members bad=0
   [ -f "$file" ] || fail "not a file: $file" || return 1
+  members=$(awk '
+    tolower($0) == "## task index" { inside = 1; found = 1; next }
+    inside && /^## / { inside = 0 }
+    inside && NF {
+      row = $0; links = 0
+      while (match(row, /\]\([^)]*\.tasks\/task-[0-9]+\.md\)/)) {
+        print substr(row, RSTART + 2, RLENGTH - 3)
+        row = substr(row, RSTART + RLENGTH); links++
+      }
+      if (links != 1) print "@row " links " " $0
+    }
+    END { if (found) print "@index" }
+  ' "$file")
+  if [ -n "$members" ]; then
+    local rows numbers linked_dir extra
+    rows=$(grep '^@row ' <<<"$members")
+    members=$(grep -v '^@row ' <<<"$members")
+    [ "$members" != "@index" ] || fail "the task index links no task member" || return 1
+    dir=$(dirname "$file")
+    if [ -n "$rows" ]; then
+      printf 'index row does not link exactly one member: %s\n' "$(sed 's/^@row //' <<<"$rows")"; bad=1
+    fi
+    numbers=$(grep -v '^@index$' <<<"$members" | sed 's/.*task-\([0-9]*\)\.md$/\1/' | sort -n)
+    if [ "$numbers" != "$(seq 1 "$(grep -c . <<<"$numbers")")" ]; then
+      echo "index members are not numbered contiguously from 1 with one row each: $(tr '\n' ' ' <<<"$numbers")"; bad=1
+    fi
+    while IFS= read -r linked_dir; do
+      [ -d "$dir/$linked_dir" ] || continue
+      for extra in "$dir/$linked_dir"/task-*.md; do
+        [ -e "$extra" ] || continue
+        grep -qxF "$linked_dir/$(basename "$extra")" <<<"$members" \
+          || { echo "task member not linked from the index: $linked_dir/$(basename "$extra")"; bad=1; }
+      done
+    done < <(grep -v '^@index$' <<<"$members" | sed 's|/[^/]*$||' | sort -u)
+    while IFS= read -r member; do
+      [ "$member" = "@index" ] && continue
+      if [ ! -f "$dir/$member" ]; then
+        echo "task member missing: $member"; bad=1
+      elif ! awk '
+          /^[[:space:]]*```/ {
+            if (!fenced && prev ~ /(^|[^[:alpha:]])(run|verify)([^[:alpha:]]|$)/) command = 1
+            fenced = !fenced; next
+          }
+          fenced { next }
+          tolower($0) ~ /^[[:space:]>*-]*(\[[ x]\][[:space:]]*)?[*]*run([,[:space:]*][^:`]*)?:.*`[^`]+`/ { command = 1 }
+          tolower($0) ~ /^[[:space:]>*-]*expected[[:alpha:] ]*[*]*:/ { expected = 1 }
+          NF { prev = tolower($0) }
+          END { exit !(command && expected) }
+        ' "$dir/$member"; then
+        echo "no check (a command and an Expected line) in: $member"; bad=1
+      fi
+    done <<<"$members"
+    return "$bad"
+  fi
   awk '
     function close_task() {
       if (tasks > 0 && !verified) { print "no verification line under: " title; bad++ }
@@ -96,6 +166,21 @@ plan_tasks_verifiable() {
   ' "$file"
 }
 
+# dirs_empty <dir...> — each path is missing or an empty directory. Each is inspected
+# on its own: `ls -A a b` prints directory headers even when both are empty.
+dirs_empty() {
+  local dir bad=0
+  for dir in "$@"; do
+    [ -e "$dir" ] || continue
+    if [ ! -d "$dir" ]; then
+      echo "not a directory: $dir"; bad=1
+    elif [ -n "$(ls -A "$dir")" ]; then
+      echo "not empty: $dir: $(ls -A "$dir" | tr '\n' ' ')"; bad=1
+    fi
+  done
+  return "$bad"
+}
+
 # out_matches <extended-regex> — the captured claude output matches, case-insensitively.
 out_matches() {
   grep -Eiq -- "$1" "$OUT" || fail "output does not match /$1/"
@@ -103,8 +188,9 @@ out_matches() {
 
 # out_lacks <extended-regex> — the captured claude output does not match.
 out_lacks() {
-  grep -Eiq -- "$1" "$OUT" && fail "output unexpectedly matches /$1/ — $(grep -Eio -m1 -- "$1" "$OUT")"
-  return 0
+  if grep -Eiq -- "$1" "$OUT"; then
+    fail "output unexpectedly matches /$1/ — $(grep -Eio -m1 -- "$1" "$OUT")"
+  fi
 }
 
 # commits_touch <dir> <pathspec...> — HEAD is ahead of main and the commits between

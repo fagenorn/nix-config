@@ -6,7 +6,7 @@
       "id": 1,
       "name": "well-specified-through-phase-5",
       "mode": "pipeline",
-      "prompt": "/from-issue issues/001-well-specified.md --auto\n\nResolve once into a retained ResolvedProject. The tracker capability is unsupported, so `issues/001-well-specified.md` is the issue; treat it as issue 1 for branch naming. A resolver refusal is fatal and values are never defaulted or inferred. Autonomous mode: self-answer and record decisions.\n\n**Stop after Phase 5.** Run phases 0 through 5 only — investigate, worktree, brainstorm, grill, plan, standards review. Do not run Phase 6 or Phase 7. Do not edit `tinytask/` or `tests/`.\n\nReport the resolved worktree, spec, plan, and standards-review outcome.",
+      "prompt": "/from-issue issues/001-well-specified.md\n\nResolve once into a retained ResolvedProject. The tracker capability is unsupported, so `issues/001-well-specified.md` is the issue; treat it as issue 1 for branch naming. A resolver refusal is fatal and values are never defaulted or inferred.\n\nI authorize you to make every design and plan decision yourself: self-answer each question you would otherwise ask me, record each decision in the spec's decision ledger, and never wait for me.\n\n**Stop after Phase 5.** Run phases 0 through 5 only — investigate, worktree, brainstorm, grill, plan, standards review. Do not run Phase 6 or Phase 7. Do not edit `tinytask/` or `tests/`.\n\nReport the resolved worktree, spec, plan, and standards-review outcome.",
       "expected_output": "A worktree branched off origin/main holding a spec and a plan, both committed there and not on main, with the self-answered decisions logged in each artifact and every plan task carrying a falsifiable verification step. No source file touched. The plan root carries an Acceptance map with rows AC1 to AC7, each of kind code, each owned by one task.",
       "asserts": [
         {
@@ -15,19 +15,19 @@
         },
         {
           "name": "spec file exists under the retained specifications directory",
-          "shell": "has_file \"$WT/$SPEC_DIR\"/*.md"
+          "shell": "has_file \"$WT/${SPEC_DIR#\"$REPO\"/}\"/*.md"
         },
         {
           "name": "spec logs at least one decision (ledger row or legacy auto-resolved entry)",
-          "shell": "f=$(first_file \"$WT/$SPEC_DIR\"/*.md); ledger_has_rows \"$f\" '## Decision ledger' || ledger_has_rows \"$f\" '## Auto-resolved decisions'"
+          "shell": "f=$(first_file \"$WT/${SPEC_DIR#\"$REPO\"/}\"/*.md); ledger_has_rows \"$f\" '## Decision ledger' || ledger_has_rows \"$f\" '## Auto-resolved decisions'"
         },
         {
           "name": "plan file exists under the retained plans directory",
-          "shell": "has_file \"$WT/$PLAN_DIR\"/*.md"
+          "shell": "has_file \"$WT/${PLAN_DIR#\"$REPO\"/}\"/*.md"
         },
         {
           "name": "every plan task has a falsifiable verification line",
-          "shell": "plan_tasks_verifiable \"$(first_file \"$WT/$PLAN_DIR\"/*.md)\""
+          "shell": "plan_tasks_verifiable \"$(first_file \"$WT/${PLAN_DIR#\"$REPO\"/}\"/*.md)\""
         },
         {
           "name": "the plan's acceptance map has one row per issue criterion",
@@ -35,7 +35,7 @@
         },
         {
           "name": "spec and plan commits landed in the worktree",
-          "shell": "commits_touch \"$WT\" \"$SPEC_DIR\" \"$PLAN_DIR\""
+          "shell": "commits_touch \"$WT\" \"${SPEC_DIR#\"$REPO\"/}\" \"${PLAN_DIR#\"$REPO\"/}\""
         },
         {
           "name": "the base branch carries no spec or plan commits",
@@ -51,7 +51,8 @@
       "id": 2,
       "name": "fuzzy-issue-should-abort",
       "mode": "pipeline",
-      "note": "guards the F2 fog-gate in AUTO.md Phase 0",
+      "note": "guards the F2 fog-gate in AUTO.md Phase 0. Expected to fail today (D22): a literal --auto takes direct-owner acquisition, whose first response asks for a tracker observation that the fixture's tracker kind 'none' cannot supply, so the run stops at acquisition before the fog gate is reached. Whether a run takes that acquisition first depends on the model and the run: in the baseline opus took it and recorded EXPECTED-FAIL, while sonnet judged the stop to precede any mutation, skipped acquisition, reached the fog gate and recorded UNEXPECTED-PASS. An UNEXPECTED-PASS here is therefore not on its own a reason to drop expected_today; drop it once runs on both models reach the fog gate. The fog-gate assert needs positive evidence of the issue-specific fog decision, so a stop that only names acquisition fails it.",
+      "expected_today": "fail",
       "prompt": "/from-issue issues/002-fuzzy.md --auto\n\nResolve once into a retained ResolvedProject. The tracker capability is unsupported, so this file is issue 2. Refusal is fatal; do not default or infer policy. Autonomous mode.\n\nIf you get that far, **stop after Phase 5**: phases 0 through 5 only, no execute, no ship, and no edits under `tinytask/` or `tests/`.",
       "expected_output": "The run stops in Phase 0 and says why: the issue has no acceptance criteria, bundles several unrelated directions, and leans on terms the project has not defined (importance score, grouping, sync) that docs/areas/backlog/CONTEXT.md explicitly lists as out of scope pending an ADR. No worktree, no spec, no plan — auto mode means deciding without asking, not implementing something incoherent.",
       "asserts": [
@@ -60,12 +61,16 @@
           "shell": "out_matches 'too (vague|fuzzy|broad|ambiguous)|under.?specified|not implementable|cannot proceed|needs? (clarification|scoping|to be split)|fog|stopping (here|before)|abort'"
         },
         {
+          "name": "the run reached the fog gate rather than stopping at acquisition",
+          "shell": "out_lacks 'direct-owner[^.]{0,80}(observe|tracker)|build-delivery refused|tracker kind '\\''?none'\\''? is unsupported|\"kind\":\"observe\"[^}]*\"requirements\":\\[\\{\"kind\":\"tracker\"\\}\\]|(stop|stops|stopped|stopping|blocked) (issue [0-9]+ )?(during|at|in) acquisition|acquisition (is )?blocked' && out_matches 'importance|acceptance criteria|out of scope|bundles|(several|multiple|five|unrelated) (features|directions|asks)'"
+        },
+        {
           "name": "no worktree was created",
           "shell": "[ \"$WT_COUNT\" -eq 0 ] || fail \"created $WT_COUNT worktree(s), first: $WT\""
         },
         {
           "name": "no spec or plan was written",
-          "shell": "[ -z \"$(ls -A \"$REPO/$SPEC_DIR\" \"$REPO/$PLAN_DIR\" 2>/dev/null)\" ] || fail \"artifacts written despite the abort\""
+          "shell": "dirs_empty \"$SPEC_DIR\" \"$PLAN_DIR\" || fail \"artifacts written despite the abort\""
         }
       ]
     },
@@ -73,12 +78,13 @@
       "id": 3,
       "name": "preflight-existing-work-stop",
       "mode": "pipeline",
+      "note": "D22: runs the ledger-free route like case 1 (D20), with no literal --auto, because the pre-flight lives in SKILL.md Phase 0 on every route and a literal --auto stops at direct-owner acquisition first (tracker kind 'none').",
       "setup": {
         "kind": "dirty-worktree",
         "branch": "worktree-issue-3-rename-flag"
       },
-      "prompt": "/from-issue issues/003-mechanical.md --auto\n\nResolve once into a retained ResolvedProject. The tracker capability is unsupported, so this file is issue 3. Refusal is fatal; do not default or infer policy. Autonomous mode.\n\nIf you get that far, **stop after Phase 5**: phases 0 through 5 only, no execute, no ship, and no edits under `tinytask/` or `tests/`.",
-      "expected_output": "Phase 0 pre-flight finds one worktree matching `worktree-issue-3-` that has uncommitted work, and stops there. The documented one-match-dirty behavior is to surface the situation rather than discard someone else's in-progress state, and it holds under --auto — that stop is a judgment about the workspace, not a user-approval checkpoint. Nothing new is created and the dirty worktree is left exactly as found.",
+      "prompt": "/from-issue issues/003-mechanical.md\n\nResolve once into a retained ResolvedProject. The tracker capability is unsupported, so `issues/003-mechanical.md` is the issue; treat it as issue 3 for branch naming. A resolver refusal is fatal and values are never defaulted or inferred.\n\nI authorize you to make every design and plan decision yourself: self-answer each question you would otherwise ask me, record each decision in the spec's decision ledger, and never wait for me.\n\n**Stop after Phase 5.** Run phases 0 through 5 only — investigate, worktree, brainstorm, grill, plan, standards review. Do not run Phase 6 or Phase 7. Do not edit `tinytask/` or `tests/`.\n\nReport the pre-flight outcome, and the resolved worktree, spec and plan if you got that far.",
+      "expected_output": "Phase 0 pre-flight finds one worktree matching `worktree-issue-3-` that has uncommitted work, and stops there. The documented one-match-dirty behavior is to surface the situation rather than discard someone else's in-progress state, and it holds even though the user authorized every design and plan decision — that stop is a judgment about the workspace, not a design or plan decision. Nothing new is created and the dirty worktree is left exactly as found.",
       "asserts": [
         {
           "name": "the pre-existing worktree still exists",
@@ -98,7 +104,7 @@
         },
         {
           "name": "no spec or plan was written",
-          "shell": "[ -z \"$(ls -A \"$REPO/$SPEC_DIR\" \"$REPO/$PLAN_DIR\" \"$PRE_WT/$SPEC_DIR\" \"$PRE_WT/$PLAN_DIR\" 2>/dev/null)\" ] || fail \"artifacts written despite the pre-flight stop\""
+          "shell": "dirs_empty \"$SPEC_DIR\" \"$PLAN_DIR\" \"$PRE_WT/${SPEC_DIR#\"$REPO\"/}\" \"$PRE_WT/${PLAN_DIR#\"$REPO\"/}\" || fail \"artifacts written despite the pre-flight stop\""
         }
       ]
     },

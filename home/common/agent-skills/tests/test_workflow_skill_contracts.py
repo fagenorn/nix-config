@@ -4718,6 +4718,50 @@ class CodebaseDesignSkillContractsTest(unittest.TestCase):
         self.assertNotIn("Permission is hereby granted", self.skill)
 
 
+RETRO_DIR = REPO_ROOT / "home/common/agent-skills/skills/retro"
+RETRO_REVISION = "a7d038f6bf7f01b516408e95e2fb56e0b338fa6f"
+RETRO_FILES = ("SKILL.md", "LICENSE", "agents/openai.yaml")
+
+
+class RetroSkillContractsTest(unittest.TestCase):
+    """The vendored, user-invoked retrospective skill."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.skill = (RETRO_DIR / "SKILL.md").read_text(encoding="utf-8")
+        cls.notice = (RETRO_DIR / "LICENSE").read_text(encoding="utf-8")
+        cls.manifest = (RETRO_DIR / "agents/openai.yaml").read_text(encoding="utf-8")
+
+    def test_structure_and_explicit_only_metadata(self):
+        self.assertEqual(sorted(str(p.relative_to(RETRO_DIR)) for p in RETRO_DIR.rglob("*") if p.is_file()), sorted(RETRO_FILES))
+        frontmatter = skill_frontmatter(self.skill)
+        self.assertEqual(frontmatter.get("name"), "retro")
+        self.assertEqual(frontmatter.get("disable-model-invocation"), "true")
+        self.assertIn("allow_implicit_invocation: false", self.manifest)
+        self.assertNotIn("Agent(", self.skill)
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    def test_routes_every_finding_and_never_edits_generated_output(self):
+        self.assert_ordered(self.skill, "### 1. Read the session", "### 2. Find candidates", "### 3. Route each candidate", "### 4. Present", "Then stop.")
+        for fragment in ("~/.claude/projects/", "~/.codex/sessions/", "exactly one home", "fagenorn/nix-config", "never propose an edit there", "write-projections", "`to-issues`"):
+            self.assertIn(fragment, self.skill)
+        self.assertTrue((REPO_ROOT / "home/common/agent-skills/skills/to-issues").is_dir())
+        self.assertNotIn("writing-for-agents", self.skill)
+
+    def test_license_records_provenance_and_the_upstream_notice(self):
+        for fragment in (CODEBASE_DESIGN_UPSTREAM, "skills/engineering/retro/", RETRO_REVISION, "Copyright (c) 2026 Matt Pocock", "no automatic synchronisation"):
+            self.assertIn(fragment, self.notice)
+        self.assertIn(MIT_NOTICE.strip(), self.notice)
+        self.assertIn("[LICENSE](LICENSE)", self.skill)
+        self.assertNotIn("Permission is hereby granted", self.skill)
+
+
 IMPROVE_DIR = REPO_ROOT / "home/common/agent-skills/skills/improve-codebase-architecture"
 IMPROVE_REVISION = "9c9f36ccd3995266cd675468af71639c8dde1ec5"
 IMPROVE_FILES = ("SKILL.md", "HTML-REPORT.md", "LICENSE", "agents/openai.yaml", "evals/evals.json")
