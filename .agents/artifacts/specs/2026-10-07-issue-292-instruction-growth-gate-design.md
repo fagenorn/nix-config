@@ -98,8 +98,8 @@ gate to compare against.
   every failing step rather than stopping at the first, with each line prefixed
   by its step (`lint`, `ceiling`, `tightness`, `raise`, `debt`) and each naming
   its remedy. It exits 0 when every step passes, 1 when any fails, and 2 when it
-  cannot run (an unknown base, or a head model that does not load). The steps
-  are:
+  cannot run (an unknown base, or a head or base model that does not load
+  strictly). The steps are:
   1. `skill_lint.lint` with the debt file, as `skill-lint check` runs it.
   2. The head model validates, and no hot, conditional, corpus or description
      ceiling is below its measurement.
@@ -154,7 +154,9 @@ gate to compare against.
 
 - `just agent-instruction-budget *args` runs `check --base origin/main {{args}}`
   from source. A local run that needs the label's waiver passes `--raise-label`
-  explicitly. The recipe never fetches (D9).
+  explicitly. The recipe never fetches (D9). A branch behind `origin/main`
+  reports main's later changes as its own edits, so it should be synced before
+  the result is read; CI compares the merge commit and has no such skew.
 - `lib/agent-tools.nix` gains the `skill-lint` row. The import check already
   walks every module, so it needs no edit.
 - `just agent-workflow-tests` gains `test_skill_lint.py`. The other two suites
@@ -222,7 +224,7 @@ These are the program's seams (program "Test seams"); this slice adds no other.
 | D2 | `just protect-main` is run by the user after merge; the [evidence] criterion is reported as remaining evidence; no agent step applies live protection or creates the label | Live protection is outside the delivery contract and must not require a context that `main` cannot yet report; forge writes are not the agent's to authorize | Agent-applied protection before merge (would block every other open PR on an unreportable context) |
 | D3 | Corpus = `.md` files of authored skill dirs outside `evals/`/`scripts/` + agent definitions + frame; descriptions = frontmatter `description` value bytes summed over authored `SKILL.md`; both host-agnostic single numbers; authored trees = the three source roots, so upstream skills are excluded structurally | Program gate step 2 and Vocabulary; program D10; `evals/` and `scripts/` are never loaded as instructions | Per-host corpus/description ceilings (no route loads "the corpus" per host); counting every file (LICENSE, JSON evals are not instructions) |
 | D4 | Additive schema: per-profile `conditional_ceiling_bytes` beside the unchanged `ceiling_bytes` (hot); top-level `corpus_ceiling_bytes`, `description_ceiling_bytes` | Keeps `report`'s consumers and existing tests intact; program D1 keeps one budget file | Reshaping `ceiling_bytes` into `{host: {hot, conditional}}` (breaks every consumer for no gain) |
-| D5 | Debt file `skill-lint-debt.json` = sorted unique violation keys only; a stale entry fails lint; shrink = head key set ⊆ base key set | Program gate step 4; stale-entry failure banks fixes the way tightness banks cuts (program D3); byte growth of a debt file is already caught by the ceilings | Recording measured line counts per entry (duplicates the byte budget's job); silently tolerating stale entries (the debt never visibly shrinks) |
+| D5 | Debt file `skill-lint-debt.json` = sorted unique violation keys only; a stale entry fails lint; shrink = head key set ⊆ base key set, so debt cannot follow a renamed or split file and must be paid there | Program gate step 4; stale-entry failure banks fixes the way tightness banks cuts (program D3); byte growth of a debt file is already caught by the ceilings | Recording measured line counts per entry (duplicates the byte budget's job); silently tolerating stale entries (the debt never visibly shrinks) |
 | D6 | L5 violations (five descriptions today) are recorded as debt too, although the issue names L1–L4 | Program D8 gives those documents to S7/S8 and program D9 schedules description rewrites there; one description is pinned by a test; new skills still must pass L5 | Rewriting five descriptions in S1 (edits documents another slice owns and a prose pin) |
 | D7 | Tightness is the integer test `100 × ceiling ≤ 105 × measured`; `tighten` sets every ceiling above measured to measured, never raises, and rewrites in the file's canonical form | Program D3; integer arithmetic has no rounding to argue about; a zero measurement then demands a zero ceiling | Float `measured * 1.05` with rounding (edge-dependent); tightening only ceilings outside the 5% band (leaves slack to refill) |
 | D8 | Raise control compares head to base after lowering-normalisation: each head ceiling at or below its base value is set to the base value, and anything still unequal (any raise, profile, host, member move, `excluded_sites`, note or key) needs the label; the label waives only that and gate-file edits | Program gate step 4: "any change other than lowering a ceiling"; one equality test covers every listed and unlisted edit | Enumerating allowed edit kinds (an unlisted edit slips through) |
@@ -231,3 +233,4 @@ These are the program's seams (program "Test seams"); this slice adds no other.
 | D11 | Payload = `*-prompt.md`, or a reference file whose basename is on a same-skill dispatch site's `call` line (dispatch sites carry no prompt field); L4 judges same-skill siblings only; the naming matcher moves to `skill_lint`, and `instruction_load` imports it | Program D4 and Vocabulary; the matrix's site shape; `REVIEW-CONTRACT.md` is named on its site's call; the bar's DRY | Treating `unread` profile members as payloads (`unread` also means "not this route"); two copies of the matcher |
 | D12 | Frontmatter is parsed as fenced single-line `key: value` scalars; any other shape is an L1 violation | The package has no dependencies (stack shard: environment declared); every live skill already fits; fail loud on what the parser cannot vouch for | Adding PyYAML (a new dependency for one block) |
 | D13 | The skill-text test policy becomes rule 6 of `docs/standards/agent-helpers.md`, and the standards README's `governs` column gains `home/common/agent-skills/tests/**` so the rule loads where those tests are edited | Issue item 6; the README is how a shard is selected | A new standards shard (one rule does not warrant a file) |
+| D14 | Accepted limit: on `pull_request` the job runs the head's own workflow and checker, so a PR that edits a gate file can neuter its own run; the gate-file rule catches the honest edit, and a neutering edit stays visible in the diff the user reviews | Program D2 (the label is a human signal, not airtight; the protection that holds is the required check plus the user's review); `rejections/ungated-agent-merges.md` | `pull_request_target` running the base's checker over head data (never runs on the PR that adds the workflow, so this PR could not go green, and it widens the token's event scope) |
