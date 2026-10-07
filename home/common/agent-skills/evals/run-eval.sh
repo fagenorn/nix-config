@@ -24,11 +24,15 @@
 #      >1 reruns the same eval in fresh sandboxes and prints pass rate + p50/p90
 #      wall time so run-to-run comparisons are possible).
 #      EVAL_TREE  a checkout to evaluate instead of the deployed skills. A pipeline run
-#                 then gets a temporary CLAUDE_CONFIG_DIR built from that checkout, and
-#                 shims for its agent_tools commands ahead on PATH; both are removed on
-#                 every exit path.
-#      EVAL_SETTINGS  the settings file copied (minus plugin keys) into that config dir
-#                 (default $HOME/.claude/settings.json). Used only with EVAL_TREE.
+#                 then links that checkout's skills, agents and AGENTS.md into the
+#                 sandbox repo's .claude/ as project copies, runs claude with
+#                 --setting-sources project,local so no user-level copy shadows them,
+#                 and puts shims for its agent_tools commands ahead on PATH. The login
+#                 is the normal one: CLAUDE_CONFIG_DIR is never set. The shim root is
+#                 removed on every exit path.
+#      EVAL_SETTINGS  the settings file passed as --settings in tree mode (default
+#                 $HOME/.claude/settings.json), so its hooks, permissions and plugins
+#                 still apply. Used only with EVAL_TREE.
 
 set -uo pipefail
 
@@ -43,6 +47,7 @@ RESULTS_FILE="$RESULTS_DIR/results.jsonl"
 TREE_LABEL=deployed
 TREE_REV=""
 TREE_DIRTY=""
+TREE_MODE=""
 
 EVAL_MODEL=${EVAL_MODEL:-sonnet}
 EVAL_TIMEOUT=${EVAL_TIMEOUT:-2700}
@@ -71,6 +76,7 @@ if [ -n "${EVAL_TREE:-}" ]; then
   done
   SKILL_ROOTS=("$EVAL_TREE/home/common/agent-skills/skills" "$EVAL_TREE/home/common/claude-code/skills")
   TREE_LABEL=$EVAL_TREE
+  TREE_MODE=project-skills
   TREE_REV=$(git -C "$EVAL_TREE" rev-parse HEAD) || die "EVAL_TREE is not a git checkout: $EVAL_TREE"
   if [ -n "$(git -C "$EVAL_TREE" status --porcelain -- \
     home/common/agent-skills/skills home/common/claude-code/skills \
@@ -129,6 +135,7 @@ record_result() {
     --argjson wall_s "$6" --arg claude_exit "$7" --arg workdir "$8" --argjson asserts "$9" \
     --arg max_usd "${EVAL_MAX_USD:-}" \
     --arg tree "$TREE_LABEL" --arg tree_rev "$TREE_REV" --arg tree_dirty "$TREE_DIRTY" \
+    --arg tree_mode "$TREE_MODE" \
     --argjson usage "${10}" \
     '{ts:$ts, skill:$skill, id:$id, name:$name, mode:$mode, model:$model,
       trial:$trial, trials:$trials, verdict:$verdict,
@@ -138,7 +145,8 @@ record_result() {
       eval_max_usd:($max_usd | if . == "" then null else tonumber end),
       asserts:$asserts,
       tree:$tree, tree_rev:($tree_rev | if . == "" then null else . end),
-      tree_dirty:($tree_dirty | if . == "" then null else . == "true" end)}
+      tree_dirty:($tree_dirty | if . == "" then null else . == "true" end),
+      tree_mode:($tree_mode | if . == "" then null else . end)}
     + ({input_tokens:null, uncached_input_tokens:null, cache_read_input_tokens:null,
         cache_creation_input_tokens:null, output_tokens:null, cost_usd:null,
         num_turns:null, models:null} + $usage)' >>"$RESULTS_FILE"
@@ -178,43 +186,42 @@ stop_claude_and_exit() {
   exit "$1"
 }
 
-# prepare_tree_env — build the temporary CLAUDE_CONFIG_DIR and command shims for EVAL_TREE.
-# Runs in the main shell, so a die here exits the runner and the EXIT trap removes the root.
+# prepare_tree_env — check the tree's injectable members and the settings file, and
+# build the command shims for EVAL_TREE. Runs in the main shell, so a die here exits the
+# runner and the EXIT trap removes the shim root.
+TREE_SETTINGS=""
+TREE_AGENTS=()
 prepare_tree_env() {
-  local settings=${EVAL_SETTINGS:-$HOME/.claude/settings.json}
-  [ -f "$settings" ] || die "settings file not found: $settings (set EVAL_SETTINGS)"
+  TREE_SETTINGS=${EVAL_SETTINGS:-$HOME/.claude/settings.json}
+  [ -f "$TREE_SETTINGS" ] || die "settings file not found: $TREE_SETTINGS (set EVAL_SETTINGS)"
+  jq empty "$TREE_SETTINGS" || die "settings file is not JSON: $TREE_SETTINGS"
+
+  # Every step below is checked: the runner has no `set -e`, and a half-prepared tree
+  # would still let the model run.
+  local root dir name seen=" "
+  for root in "${SKILL_ROOTS[@]}"; do
+    for dir in "$root"/*/; do
+      [ -d "$dir" ] || continue
+      name=$(basename "$dir")
+      case "$seen" in *" $name "*) die "skill '$name' exists in both skill roots" ;; esac
+      seen="$seen$name "
+    done
+  done
+  local agent
+  for agent in "$EVAL_TREE"/home/common/claude-code/agents/*.md; do
+    [ -f "$agent" ] && TREE_AGENTS+=("$agent")
+  done
+  [ "${#TREE_AGENTS[@]}" -gt 0 ] || die "no agent files in $EVAL_TREE/home/common/claude-code/agents"
+  [ -f "$EVAL_TREE/home/common/agent-guidance/AGENTS.md" ] ||
+    die "EVAL_TREE's AGENTS.md is not a file: $EVAL_TREE/home/common/agent-guidance/AGENTS.md"
 
   TREE_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/run-eval-tree.XXXXXX") || die "mktemp failed"
   trap 'rm -rf -- "$TREE_ROOT"' EXIT
   trap 'stop_claude_and_exit 130' INT
   trap 'stop_claude_and_exit 143' TERM
   TREE_ROOT=$(cd "$TREE_ROOT" && pwd -P)
-
-  local CONFIG="$TREE_ROOT/config" SHIM_BIN="$TREE_ROOT/bin"
-  mkdir -p "$CONFIG/skills" "$CONFIG/agents" "$SHIM_BIN" || die "could not create the temporary config dir under $TREE_ROOT"
-
-  # Every step below is checked: the runner has no `set -e`, and a half-built config dir
-  # would still let the model run.
-  local root dir name rel
-  for root in "${SKILL_ROOTS[@]}"; do
-    for dir in "$root"/*/; do
-      [ -d "$dir" ] || continue
-      name=$(basename "$dir")
-      [ -e "$CONFIG/skills/$name" ] && die "skill '$name' exists in both skill roots"
-      mkdir "$CONFIG/skills/$name" || die "could not create skills/$name in the config dir"
-      while IFS= read -r rel; do
-        mkdir -p "$(dirname "$CONFIG/skills/$name/$rel")" || die "could not create the directory for skills/$name/$rel"
-        ln -s "$root/$name/$rel" "$CONFIG/skills/$name/$rel" || die "could not link skills/$name/$rel"
-      done < <(cd "$root/$name" && find . -type f ! -path '*/__pycache__/*' | sed 's|^\./||')
-    done
-  done
-
-  cp "$EVAL_TREE/home/common/agent-guidance/AGENTS.md" "$CONFIG/CLAUDE.md" ||
-    die "could not copy AGENTS.md from $EVAL_TREE/home/common/agent-guidance"
-  cp "$EVAL_TREE"/home/common/claude-code/agents/*.md "$CONFIG/agents/" ||
-    die "could not copy agents from $EVAL_TREE/home/common/claude-code/agents"
-  jq 'del(.enabledPlugins, .extraKnownMarketplaces)' "$settings" >"$CONFIG/settings.json" ||
-    die "settings file is not JSON: $settings"
+  local SHIM_BIN="$TREE_ROOT/bin"
+  mkdir -p "$SHIM_BIN" || die "could not create the shim dir under $TREE_ROOT"
 
   local commands cmd
   commands=$(awk '/^[[:space:]]*commands = \[/ {inside = 1; next} inside && /\];/ {exit} inside {gsub(/[" \t]/, ""); if ($0 != "") print}' "$EVAL_TREE/lib/agent-tools.nix")
@@ -228,11 +235,37 @@ prepare_tree_env() {
     chmod +x "$SHIM_BIN/$cmd" || die "could not make the $cmd shim executable"
   done <<<"$commands"
 
-  CLAUDE_CONFIG_DIR="$CONFIG" claude auth status >/dev/null 2>&1 ||
-    die "claude is not logged in for the temporary config dir. One-time step: run \`claude setup-token\` and export the printed token as CLAUDE_CODE_OAUTH_TOKEN, then rerun."
-
-  export CLAUDE_CONFIG_DIR="$CONFIG"
   export PATH="$SHIM_BIN:$PATH"
+}
+
+# inject_tree <repo> — make EVAL_TREE's instructions the sandbox repo's project copies:
+# .claude/skills/<name> links each skill directory of both roots, .claude/agents/<file>
+# links each agent file, and .claude/CLAUDE.md links AGENTS.md (project memory beside the
+# fixture's own root CLAUDE.md, which stays as it is). The three injected paths, and only
+# those, go in .git/info/exclude: the fixture's tracked .claude/ content and the specs,
+# plans and maps an eval writes there must stay visible to git.
+inject_tree() {
+  local repo=$1 root dir name agent
+  [ ! -e "$repo/.claude/skills" ] && [ ! -e "$repo/.claude/agents" ] && [ ! -e "$repo/.claude/CLAUDE.md" ] ||
+    die "the fixture already has .claude/skills, .claude/agents or .claude/CLAUDE.md"
+  mkdir -p "$repo/.claude/skills" "$repo/.claude/agents" || die "could not create the sandbox's .claude/ dirs"
+  for root in "${SKILL_ROOTS[@]}"; do
+    for dir in "$root"/*/; do
+      [ -d "$dir" ] || continue
+      name=$(basename "$dir")
+      ln -s "$root/$name" "$repo/.claude/skills/$name" || die "could not link .claude/skills/$name"
+    done
+  done
+  for agent in "${TREE_AGENTS[@]}"; do
+    ln -s "$agent" "$repo/.claude/agents/$(basename "$agent")" ||
+      die "could not link .claude/agents/$(basename "$agent")"
+  done
+  ln -s "$EVAL_TREE/home/common/agent-guidance/AGENTS.md" "$repo/.claude/CLAUDE.md" ||
+    die "could not link .claude/CLAUDE.md"
+  mkdir -p "$repo/.git/info" &&
+    printf '%s\n' '# run-eval tree mode: the injected project copies' \
+      '/.claude/skills/' '/.claude/agents/' '/.claude/CLAUDE.md' >>"$repo/.git/info/exclude" ||
+    die "could not write the sandbox's .git/info/exclude"
 }
 [ -n "${EVAL_TREE:-}" ] && prepare_tree_env
 command -v resolve-project >/dev/null || die "resolve-project is required"
@@ -272,6 +305,9 @@ run_trial() {
   git init -q --bare -b main "$ORIGIN"
   git -C "$REPO" remote add origin "$ORIGIN"
   git -C "$REPO" push -q -u origin main
+  # After the initial commit, before any setup hook stages files: the injected links are
+  # never part of the fixture's history.
+  [ -n "${EVAL_TREE:-}" ] && inject_tree "$REPO"
 
   local RESOLVED_PROJECT SPEC_DIR PLAN_DIR
   if ! RESOLVED_PROJECT=$(resolve-project resolve --repo-root "$REPO"); then
@@ -358,6 +394,9 @@ run_trial() {
     --add-dir "$WORK"
   )
   [ -n "${EVAL_MAX_USD:-}" ] && claude_args+=(--max-budget-usd "$EVAL_MAX_USD")
+  # Tree mode: project and local settings only, so the user-level skills, agents and
+  # memory cannot shadow the project copies; the user's settings come back by flag.
+  [ -n "${EVAL_TREE:-}" ] && claude_args+=(--setting-sources project,local --settings "$TREE_SETTINGS")
 
   echo "workdir: $WORK"
   echo "running: claude -p --model $EVAL_MODEL (timeout ${EVAL_TIMEOUT}s)"

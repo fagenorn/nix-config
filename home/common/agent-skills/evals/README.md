@@ -28,45 +28,55 @@ by pasting the prompt into a session and reading the transcript against it.
 
 **Deployed (the default).** The sandboxed `claude -p` reads skills from
 `~/.claude/skills` — the store links from the last `just switch`, not this working tree
-(user-level skills shadow project-level copies of the same name, so injecting the working
-tree into the sandbox does not work). Editing a skill therefore means: commit, `just switch`, then run
-the eval. A failed parity run is one `git revert` + re-switch away from the previous
-behavior. The row records `tree: "deployed"` with `tree_rev` and `tree_dirty` null.
+(under the default setting sources, user-level skills shadow project-level copies of the
+same name). Editing a skill therefore means: commit, `just switch`, then run the eval. A
+failed parity run is one `git revert` + re-switch away from the previous behavior. The
+row records `tree: "deployed"` with `tree_rev`, `tree_dirty` and `tree_mode` null.
 
 **Working tree.** `EVAL_TREE=. just evals from-issue 1` evaluates a checkout without a
-switch. The runner resolves the eval from that checkout's two skill roots, then, for a
-pipeline eval, builds a temporary root `${TMPDIR:-/tmp}/run-eval-tree.XXXXXX` holding:
+switch, under your normal login: the runner never sets `CLAUDE_CONFIG_DIR`. It resolves
+the eval from that checkout's two skill roots, then, for a pipeline eval, makes the
+checkout's instructions the sandbox repo's project copies. Right after the fixture's
+initial commit it creates, inside the sandbox repo:
 
-- `config/`, exported as `CLAUDE_CONFIG_DIR` for the probe and the run: `skills/<name>/`
-  real directories whose files are symlinks to the tree's files (a name in both skill
-  roots is an error), `CLAUDE.md` (a copy of the tree's `AGENTS.md`), `agents/` (copies of
-  the tree's agent files) and `settings.json` (`EVAL_SETTINGS` without its
-  `enabledPlugins` and `extraKnownMarketplaces` keys);
-- `bin/`, put first on `PATH`: one shim per command in the tree's `lib/agent-tools.nix`
-  table, each running `python3 -P -m agent_tools.<module>` from the tree's `python/`, so
-  `resolve-project`, `workflow-state` and the rest are the tree's code, not the installed
-  ones.
+- `.claude/skills/<name>`, a symlink to each skill directory of both skill roots (a name
+  in both roots is an error);
+- `.claude/agents/<file>`, a symlink to each of the checkout's
+  `home/common/claude-code/agents/*.md`;
+- `.claude/CLAUDE.md`, a symlink to the checkout's `home/common/agent-guidance/AGENTS.md`,
+  loaded as project memory beside the fixture's own root `CLAUDE.md`, which is unchanged.
 
-The temp root is removed on every exit path: a normal end, an error, a non-zero claude
-exit, Ctrl-C (exit 130) and SIGTERM (exit 143). A plan-only eval creates none of it.
+Those three paths, and only those, are listed in the sandbox's `.git/info/exclude`, so
+they never show in `git status` and the agent under test cannot commit them; the
+fixture's tracked `.claude/` content and the specs, plans and maps an eval writes there
+stay visible to git.
+
+The run adds `--setting-sources project,local`, which drops the user-level sources —
+so `~/.claude/skills`, `~/.claude/agents` and `~/.claude/CLAUDE.md` no longer shadow the
+project copies — and `--settings "$EVAL_SETTINGS"`, which brings the user's generated
+settings back by flag, so its hooks (the lifecycle guard), permissions, env and enabled
+plugins still apply. `EVAL_SETTINGS` defaults to `$HOME/.claude/settings.json` and is read
+only in tree mode; a missing or non-JSON file is an error before any sandbox. The one
+limit: user-level settings and memory are replaced, not merged — the run sees the
+flag-passed settings file and the project copies above, and nothing else from
+`~/.claude` (user-level skills outside the checkout, such as `impeccable`, are not
+loaded).
+
+The runner also builds a temporary root `${TMPDIR:-/tmp}/run-eval-tree.XXXXXX` whose
+`bin/` goes first on `PATH`: one shim per command in the tree's `lib/agent-tools.nix`
+table, each running `python3 -P -m agent_tools.<module>` from the tree's `python/`, so
+`resolve-project` and the rest of the package commands are the tree's code, not the
+installed ones. That root is removed on every exit path: a normal end, an error, a
+non-zero claude exit, Ctrl-C (exit 130) and SIGTERM (exit 143). A plan-only eval creates
+none of it. The sandbox, with its `.claude/` links, is kept like any other.
 
 Tree mode does not cover the legacy flat helpers (`workflow-state`, `artifact-budget`,
 `sdd-workspace`), `~/.agents/standards` and `~/.agents/share`: those still come from the
-deployed home, as do the absolute `~/.agents/bin/...` paths some skills name. The
-`impeccable` and plugin skills are omitted (the settings copy drops `enabledPlugins` and
-`extraKnownMarketplaces`). Helper changes are outside what this mode measures.
-
-**One-time login.** A temp config dir has no stored login, so the runner probes
-`claude auth status` against it and refuses (exit 2, before any sandbox or row) if that
-fails. Run `claude setup-token` once and export the printed token as
-`CLAUDE_CODE_OAUTH_TOKEN`; the temp config dir picks it up.
-
-`EVAL_SETTINGS` names the settings file copied into the config dir. It defaults to
-`$HOME/.claude/settings.json` and is read only in tree mode; a missing or non-JSON file
-is an error.
+deployed home, as do the absolute `~/.agents/bin/...` paths some skills name. Helper
+changes are outside what this mode measures.
 
 A row from tree mode records `tree` (the checkout's absolute path), `tree_rev` (its
-`HEAD`) and `tree_dirty` (whether `git status --porcelain` shows changes under the
+`HEAD`), `tree_mode` (`"project-skills"`, the layout above) and `tree_dirty` (whether `git status --porcelain` shows changes under the
 instruction paths: both skill roots, `home/common/claude-code/agents` and
 `home/common/agent-guidance/AGENTS.md`, ignoring each skill's own `evals/`).
 
@@ -98,7 +108,7 @@ of another skill names its own stop in its prompt.
 - Env: `EVAL_MODEL` (default `sonnet`), `EVAL_TIMEOUT` seconds (default 2700),
   `EVAL_MAX_USD` (optional ceiling), `EVAL_TRIALS` (default 1), `EVAL_TREE` (a checkout
   to evaluate instead of the deployed skills) and `EVAL_SETTINGS` (the settings file
-  tree mode copies; default `$HOME/.claude/settings.json`), both described above.
+  tree mode passes as `--settings`; default `$HOME/.claude/settings.json`), both described above.
 - Sandboxes are kept after the run and their path is printed, so you can inspect the spec
   and plan a failing assert complained about. Clean up with `rm -rf $TMPDIR/eval-*`.
 - Asserts may carry a `"contract": "..."` key documenting a target artifact contract
