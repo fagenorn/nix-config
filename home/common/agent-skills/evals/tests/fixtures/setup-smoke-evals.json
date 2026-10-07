@@ -1,0 +1,40 @@
+{
+  "skill_name": "setup-smoke",
+  "evals": [
+    {
+      "id": 1, "name": "shippable-worktree-shape", "mode": "pipeline",
+      "setup": { "kind": "shippable-worktree" },
+      "prompt": "setup smoke", "expected_output": "setup state only",
+      "asserts": [
+        { "name": "worktree on the issue-3 branch", "shell": "[ \"$PRE_WT\" = \"$WORK/worktree-issue-3-rename-flag\" ] && [ \"$(git -C \"$PRE_WT\" rev-parse --abbrev-ref HEAD)\" = worktree-issue-3-rename-flag ]" },
+        { "name": "three clean commits", "shell": "[ \"$(git -C \"$PRE_WT\" rev-list --count main..HEAD)\" -eq 3 ] && [ -z \"$(git -C \"$PRE_WT\" status --porcelain)\" ]" },
+        { "name": "spec and plan package in the retained dirs", "shell": "has_file \"$PRE_WT/${SPEC_DIR#\"$REPO\"/}\"/2026-10-07-issue-3-rename-flag-design.md && has_file \"$PRE_WT/${PLAN_DIR#\"$REPO\"/}\"/2026-10-07-issue-3-rename-flag.md && has_file \"$PRE_WT/${PLAN_DIR#\"$REPO\"/}\"/2026-10-07-issue-3-rename-flag.tasks/task-1.md" },
+        { "name": "implementation applied and tests pass", "shell": "cd \"$PRE_WT\" && TMPDIR=\"$WORK\" python3 -m unittest discover -q 2>/dev/null && python3 -m tinytask --file \"$WORK/probe.json\" list --include-done >/dev/null && ! python3 -m tinytask --file \"$WORK/probe.json\" list --all 2>/dev/null" },
+        { "name": "main unchanged and named by BASE_MAIN", "shell": "[ \"$BASE_MAIN\" = \"$(git -C \"$REPO\" rev-parse main)\" ] && [ \"$BASE_MAIN\" = \"$(git -C \"$ORIGIN\" rev-parse main)\" ] && [ \"$(git -C \"$REPO\" rev-list --count main)\" -eq 1 ]" }
+      ]
+    },
+    {
+      "id": 2, "name": "planned-worktree-shape", "mode": "pipeline",
+      "setup": { "kind": "planned-worktree" },
+      "prompt": "setup smoke", "expected_output": "setup state only",
+      "asserts": [
+        { "name": "worktree on the issue-3 branch", "shell": "[ \"$PRE_WT\" = \"$WORK/worktree-issue-3-rename-flag\" ] && [ \"$(git -C \"$PRE_WT\" rev-parse --abbrev-ref HEAD)\" = worktree-issue-3-rename-flag ]" },
+        { "name": "two clean commits", "shell": "[ \"$(git -C \"$PRE_WT\" rev-list --count main..HEAD)\" -eq 2 ] && [ -z \"$(git -C \"$PRE_WT\" status --porcelain)\" ]" },
+        { "name": "spec and plan package in the retained dirs", "shell": "has_file \"$PRE_WT/${SPEC_DIR#\"$REPO\"/}\"/2026-10-07-issue-3-rename-flag-design.md && has_file \"$PRE_WT/${PLAN_DIR#\"$REPO\"/}\"/2026-10-07-issue-3-rename-flag.tasks/task-1.md" },
+        { "name": "implementation not applied", "shell": "grep -q -- 'add_argument(.--all' \"$PRE_WT/tinytask/cli.py\"" },
+        { "name": "main unchanged and named by BASE_MAIN", "shell": "[ \"$BASE_MAIN\" = \"$(git -C \"$REPO\" rev-parse main)\" ] && [ \"$BASE_MAIN\" = \"$(git -C \"$ORIGIN\" rev-parse main)\" ] && [ \"$(git -C \"$REPO\" rev-list --count main)\" -eq 1 ]" }
+      ]
+    },
+    {
+      "id": 3, "name": "release-ready-shape", "mode": "pipeline",
+      "setup": { "kind": "release-ready" },
+      "prompt": "setup smoke", "expected_output": "setup state only",
+      "asserts": [
+        { "name": "v0.1.0 annotated on the root commit", "shell": "[ \"$(git -C \"$REPO\" cat-file -t v0.1.0)\" = tag ] && [ \"$(git -C \"$REPO\" rev-parse 'v0.1.0^{commit}')\" = \"$(git -C \"$REPO\" rev-list --max-parents=0 main)\" ]" },
+        { "name": "main ends in a --no-ff merge of a feat: commit", "shell": "[ \"$(git -C \"$REPO\" rev-list --merges --count main)\" -eq 1 ] && git -C \"$REPO\" log -1 --format=%s 'main^2' | grep -q '^feat'" },
+        { "name": "origin carries main and only v0.1.0", "shell": "[ \"$(git -C \"$ORIGIN\" rev-parse main)\" = \"$BASE_MAIN\" ] && [ \"$(git -C \"$ORIGIN\" tag -l)\" = v0.1.0 ]" },
+        { "name": "clean main checkout and no worktree", "shell": "[ -z \"$PRE_WT\" ] && [ \"$WT_COUNT\" -eq 0 ] && [ -z \"$(git -C \"$REPO\" status --porcelain)\" ] && [ \"$(git -C \"$REPO\" rev-parse --abbrev-ref HEAD)\" = main ] && [ -z \"$(git -C \"$REPO\" branch --list 'feat/*')\" ]" }
+      ]
+    }
+  ]
+}

@@ -88,9 +88,11 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_shell_example_contracts.py \
     home/common/agent-skills/tests/test_ship_release_contracts.py \
+    home/common/agent-skills/tests/test_eval_cases.py \
     home/common/agent-skills/tests/test_agent_evidence.py \
     home/common/agent-skills/tests/test_agent_model_matrix.py \
     home/common/agent-skills/tests/test_instruction_load.py \
+    home/common/agent-skills/tests/test_skill_lint.py \
     home/common/agent-skills/tests/test_diff_scope.py \
     home/common/agent-skills/tests/test_resolve_project.py \
     home/common/agent-skills/tests/test_resolve_platform.py \
@@ -106,6 +108,7 @@ agent-workflow-tests:
     tests/test_agent_tools_canonical.py \
     tests/test_agent_tools_siblings.py \
     tests/test_launch_commit.py \
+    tests/test_launch_scope.py \
     tests/test_review_range.py \
     tests/test_verified_tree.py \
     tests/test_transaction_core.py \
@@ -131,6 +134,7 @@ agent-workflow-tests:
     tests/test_promotion_demo.py \
     tests/test_context_map_lint.py \
     tests/test_branch_protection.py
+  bash home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
 # Validate every explicit pipeline dispatch and print the four-family demo trace.
 agent-model-matrix:
@@ -140,6 +144,10 @@ agent-model-matrix:
 # Compare the instruction documents each agent profile loads at two revisions (#155 D9).
 agent-instruction-load *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.instruction_load {{args}}
+
+# Run the Instruction Budget gate against origin/main; pass --raise-label for a labelled raise (#292 D9).
+agent-instruction-budget *args:
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.instruction_load check --base origin/main {{args}}
 
 # Check the skill contracts and agent-tool launchers against what the Nix build installs.
 agent-installed-skill-tests: build
@@ -198,7 +206,7 @@ show-claude-settings: build
 # `just` shows only the LAST comment line of a block in `just --list`, so each recipe
 # keeps its one-line summary immediately above it.
 
-# Apply .github/branch-protection.json to `main`, making `Nix Eval` a required check.
+# Apply .github/branch-protection.json to `main`, making `Nix Eval` and `Instruction Budget` required checks.
 protect-main:
   gh api --method PUT repos/{owner}/{repo}/branches/main/protection \
     --input .github/branch-protection.json

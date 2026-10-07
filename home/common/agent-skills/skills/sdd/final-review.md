@@ -151,8 +151,9 @@ so the plan's metrics do not change. Its schema:
   `Conditions`): an implementer whose task brief names the measurement, or the
   final-review fixer. For a `code` row, `Observed` is `in final verification` or
   the cited run. For a `human` row the evidence columns hold `—`.
-- Only you, the controller, write `Verdict`, using the four grading tokens
-  `met`, `unmet`, `unverified` and `human_pending`. No code parses the record:
+- You, the controller, write `Verdict`, using the four grading tokens
+  `met`, `unmet`, `unverified` and `human_pending`; ship-issue Phase 0 may later
+  rewrite an attested row to `met (attested)`. No code parses the record:
   the gate is the report's `acceptance_state`.
 
 Before writing, check freshness against each `evidence` row's own `Commit`, not

@@ -285,8 +285,14 @@ A `check-launch` that exits non-zero, or whose output cannot be parsed, is
 unknown, never `current: false`: leave the handle a candidate. A failed stop
 also leaves it a candidate, and the next pass tries both again. A stop failure
 never blocks dispatch: keep it a candidate for §5 and continue. The pass sends
-no observation, makes no control call and writes nothing, so a later
-notification from a stopped handle still falls under §2 rule (b). Only after
+no observation, makes no control call and writes nothing to the ledger, so a
+later notification from a stopped handle still falls under §2 rule (b). After
+its stops, the pass ends by running
+`launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --sweep`
+once, which kills every process that a `launch-scope exec` of a non-current
+launch of this run left behind. A sweep that exits non-zero never blocks
+dispatch: keep its exit code and, when it printed a report, its `skipped`
+launches for §5. Only after
 the pass, execute the response's actions in returned order.
 
 For `spawn`, `resume`, and `retry`, project the action into the interface-2
@@ -438,7 +444,12 @@ summary with a non-null `contract_digest`, an empty `pending_stage_ids`, an
 empty `requirements`, a null `owner` and a non-null `custody` is a delivered
 issue whose `custody` names a stale record that control will never dispatch:
 report it as delivered with that stale custody, never as an active or
-progressing owner. A summary whose `worktree_fact` requirement reads
+progressing owner. A `held` summary is an issue whose PR merged while ship held
+the issue open with the `needs-verification` label: report it as held, waiting
+for a human to verify it, never as queued, progressing or closed, and with no
+re-entry line. A held issue is still open on the tracker, so it stays in its
+dependents' `open_blockers` and they stay `blocked` until a human closes it. A
+summary whose `worktree_fact` requirement reads
 `recorded_worktree_absent` or `recorded_worktree_mismatch` is an issue that
 cannot resume, because its recorded worktree is gone or is not on the issue
 branch: report it as unable to resume for that reason, never as progressing.
@@ -447,7 +458,10 @@ a human. List every issue in that same control response's `admission.waiting` as
 queued for agent slots, with its summary state. Below the table, under
 **Stop failures**, list each owner handle the final stop pass still left a
 candidate because its stop failed or its `check-launch` answer was unknown,
-with its `action_id` and the failure; omit the list when there is none. These
+with its `action_id` and the failure, and the pass's last sweep when it exited
+non-zero, with its exit code and, when it printed a report, its `skipped`
+launches; omit the list when
+there is none. These
 are facts local to this adapter, not fields of the finalize summary. Do not
 perform a second ledger read or reconstruct omitted history.
 

@@ -5677,7 +5677,7 @@ class AcceptanceGradingContractsTest(unittest.TestCase):
             "In both handoff shapes, `acceptance_state` is the validated sdd report's "
             "`acceptance_state`, copied unchanged.",
             "(`review_state: unknown`) carries `not_applicable`",
-            "its close stage does not read it")
+            "holds it open as `needs-verification`")
         self.assertIn("`head_sha`, `acceptance_state` and `report_path` may be used to "
                       "construct the Phase-7 handoff", self.read(FROM_ISSUE))
         self.assertIn("`head_sha`, `review_state`, `acceptance_state`, `auto`",
@@ -5982,7 +5982,7 @@ class SupersededOwnerStopPassContractsTest(unittest.TestCase):
             "both again.",
             "A stop failure never blocks dispatch: keep it a candidate for §5 "
             "and continue.",
-            "sends no observation, makes no control call and writes nothing",
+            "sends no observation, makes no control call and writes nothing to the ledger",
             "## 5. Final report",
             "**Stop failures**",
             "still left a candidate because its stop failed or its "
@@ -5994,6 +5994,296 @@ class SupersededOwnerStopPassContractsTest(unittest.TestCase):
         text = self.text()
         section = text[text.index("## 2. Bootstrap and observe"):text.index("## 3. Decide")]
         self.assertNotIn("stop pass", section.lower())
+
+
+class TrackerHoldContractsTest(unittest.TestCase):
+    """#273 AC4: ship-issue holds as needs-verification in the delivery loop and Phase 8."""
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def section(text, heading, next_heading=None):
+        start = text.index(heading)
+        if next_heading is None:
+            return text[start:]
+        return text[start:text.index(next_heading, start + len(heading))]
+
+    def setUp(self):
+        self.ship = normalized(SHIP_ISSUE.read_text(encoding="utf-8"))
+        self.gate = normalized(SHIP_ISSUE_HUMAN_GATE.read_text(encoding="utf-8"))
+
+    def test_phase_0_fixes_the_effective_acceptance_state(self):
+        phase0 = self.section(self.ship, "## Phase 0 — Pre-flight", "## Phase 1")
+        self.assert_ordered(
+            phase0, "**Effective acceptance state.**",
+            "`<plan stem>.acceptance.md` beside the plan root", "`met (attested)`",
+            "`--auto` never asks and never self-attests",
+            "`met` or `not_applicable` **closes** the issue",
+            "`unmet` or `human_pending` **holds** it open as `needs-verification`")
+
+    def test_the_pr_body_carries_the_verdict_table_and_a_conditional_trailer(self):
+        phase4 = self.section(self.ship, "## Phase 4 — Open PR", "## Phase 5")
+        self.assert_ordered(
+            phase4, "## Acceptance", "Acceptance state: <effective acceptance state>",
+            "Acceptance record: <record-path or none>", "<acceptance table>",
+            "Closes #<num>")
+        self.assertIn("a Markdown table with the three columns `AC`, `Kind` and "
+                      "`Verdict`, one row per record row", phase4)
+        self.assertIn("On a **hold** drop the `Closes #<num>` line too: a hold body "
+                      "carries no closing keyword", phase4)
+
+    def test_phase_8_names_the_hold_branch_and_creates_the_label_on_demand(self):
+        phase8 = self.section(self.ship, "## Phase 8 — Cleanup", "## Notes")
+        self.assert_ordered(
+            phase8, "**Close** (`met` or `not_applicable`)", "gh issue close <num>",
+            "**Hold** (`unmet` or `human_pending`)", "gh issue reopen <num>",
+            "gh label list --repo <resolved-repository> --search needs-verification --json name",
+            "gh label create needs-verification", "never `--force`",
+            "gh issue edit <num> --add-label needs-verification",
+            "Held for verification: <PR URL>", "gh issue comment <num>",
+            "git worktree remove")
+        self.assertIn("`issue_closed: false` on hold", phase8)
+
+    def test_the_delivery_loop_records_a_hold_as_tracker_held(self):
+        loop = self.section(self.ship, "## Delivery loop", "## Remainder mode")
+        self.assert_ordered(
+            loop, "`close_tracker` → `tracker_closed`, or `tracker_held` on a hold",
+            "On a hold the `close_tracker` cycle runs Phase 8 step 1's hold branch",
+            "`needs-verification`", "`tracker_held` with the facts `comment_url`",
+            "`observation_identity` `github:issue:<num>:held`",
+            "on the close branch only, closure by a merge that closes the issue")
+
+    def test_a_remainder_reads_its_acceptance_state_from_the_pr_body(self):
+        remainder = self.section(self.ship, "## Remainder mode")
+        self.assert_ordered(
+            remainder, "--json body", "one `Acceptance state:` line",
+            "one `Acceptance record:` line", "stops before its next effect "
+            "with `terminal_failed`", "never default",
+            "the earliest comment whose first line is")
+        self.assertNotIn("stops before the `close_tracker` effect", remainder)
+
+    def test_record_path_is_the_pr_bodys_relative_record_and_a_hold_needs_one(self):
+        phase0 = self.section(self.ship, "## Phase 0 — Pre-flight", "## Phase 1")
+        self.assert_ordered(
+            phase0, "`<plan stem>.acceptance.md` beside the plan root",
+            "named by its repository-relative path, never an absolute one",
+            "**holds** it open as `needs-verification`",
+            "A hold whose record is `none` stops with `terminal_failed` before any "
+            "hold effect: no hold exists without a record")
+        loop = self.section(self.ship, "## Delivery loop", "## Remainder mode")
+        self.assert_ordered(
+            loop, "`tracker_held` with the facts `comment_url`",
+            "`record_path` (exactly the PR body's repository-relative "
+            "`Acceptance record:` value, never an absolute path)",
+            "A hold whose `Acceptance record:` is `none` stops with `terminal_failed` "
+            "before any hold effect")
+
+    def test_phase_8_reuses_the_earliest_hold_comment(self):
+        phase8 = self.section(self.ship, "## Phase 8 — Cleanup", "## Notes")
+        self.assert_ordered(
+            phase8, "Held for verification: <PR URL>",
+            "shows one or more comments with that first line, reuse the earliest "
+            "one's URL", "gh issue comment <num>")
+
+    def test_no_close_only_prose_remains(self):
+        self.assertIn("merge, close or hold issue, clean up.", self.ship)
+        self.assertIn("issue closed or held as `needs-verification`, workspace gone",
+                      self.ship)
+        self.assertIn("Phase 8's issue close or hold", self.ship)
+        self.assertIn("runs the chain to issue close or hold and cleanup", self.gate)
+        for stale in ("merge, close issue, clean up", "issue closed, workspace gone",
+                      "Phase 8's issue close, "):
+            self.assertNotIn(stale, self.ship)
+        self.assertNotIn("runs the chain to issue closure", self.gate)
+
+    def test_the_human_gate_mirrors_close_or_hold(self):
+        self.assert_ordered(
+            self.gate, "## Acceptance", "Closes #<num>",
+            "present on the close branch and absent on a hold", "gh issue close <num>",
+            "gh issue reopen <num>", "gh issue edit <num> --add-label needs-verification",
+            "git push origin --delete <branch>")
+
+
+class HeldReportContractsTest(unittest.TestCase):
+    """#273: orchestrate-issues reports held issues; the ship handoff closes or holds."""
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def section(text, heading, next_heading):
+        start = text.index(heading)
+        return text[start:text.index(next_heading, start + len(heading))]
+
+    def test_the_final_report_names_held_and_keeps_it_a_blocker(self):
+        report = self.section(normalized(ORCHESTRATE.read_text(encoding="utf-8")),
+                              "## 5. Final report", "## Notes")
+        self.assert_ordered(
+            report, "A `held` summary is an issue whose PR merged",
+            "`needs-verification`", "report it as held",
+            "never as queued, progressing or closed", "with no re-entry line",
+            "stays in its dependents' `open_blockers`", "they stay `blocked`")
+
+    def test_the_handoff_and_its_inline_fallback_close_or_hold(self):
+        handoff = normalized((FROM_ISSUE_DIR / "ship-handoff.md").read_text(encoding="utf-8"))
+        self.assertNotIn("its close stage does not read it", handoff)
+        self.assertIn("`met` or `not_applicable` closes the issue, and `unmet` or "
+                      "`human_pending` holds it open as `needs-verification` "
+                      "(ship-issue Phase 8 step 1)", handoff)
+        fallback = self.section(handoff, "## Inline fallback (no ship-issue skill)",
+                                "## Remainder owner prompt")
+        self.assert_ordered(
+            fallback, "The PR body carries `Closes #<num>` only when the sdd report's "
+            "`acceptance_state` is `met` or `not_applicable`, and no closing keyword "
+            "otherwise", "close the issue when the sdd report's `acceptance_state` is "
+            "`met` or `not_applicable`",
+            "otherwise hold it with ship-issue Phase 8 step 1's hold sequence",
+            "reopen it only when `CLOSED`", "never with `--force`",
+            "label it `needs-verification`", "comment the verdict table",
+            "verify the issue is `OPEN` with `needs-verification`",
+            "leaving it open. In both cases, publish")
+
+    def test_final_review_lets_ship_attest_a_verdict(self):
+        final = normalized((SDD_DIR / "final-review.md").read_text(encoding="utf-8"))
+        self.assertNotIn("Only you, the controller, write `Verdict`", final)
+        self.assert_ordered(
+            final, "You, the controller, write `Verdict`, using the four grading tokens",
+            "ship-issue Phase 0 may later rewrite an attested row to `met (attested)`")
+
+
+class LaunchScopeWiringContractsTest(unittest.TestCase):
+    """#276: owners and writing workers run long commands in a launch scope; owners self-reap."""
+
+    WORKER_LINE = ("Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> "
+                   "--worker-id <worker_id>")
+    WORKER_EXEC = ("Run each long command, every verification command included, as "
+                   "`launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> "
+                   "--worker-id <worker_id> -- <argv>`, still in the foreground.")
+    OWNER_EXEC = ("run each long command, every verification command included, as "
+                  "`launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> "
+                  "--action-id <action_id> -- <argv>`, still in the foreground")
+    WORKER_SCRATCH = ("Create every scratch directory or scratch worktree under the path that "
+                      "`launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> "
+                      "--worker-id <worker_id>` prints.")
+    OWNER_SCRATCH = ("Create every scratch directory or scratch worktree under the path that "
+                     "`launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> "
+                     "--action-id <action_id>` prints.")
+    REAP = ("launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> "
+            "--action-id <action_id>")
+    COMMIT = ("launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
+              "--worker-id <worker_id> -- ")
+    RELEASE = ("workflow-state release-worker --repo-root <ledger_repo_root> "
+               "--run-id <run-id> --now <utc> --worker-id <worker_id> --event returned")
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def read(path):
+        return normalized(path.read_text(encoding="utf-8"))
+
+    def test_the_owner_runs_long_commands_through_exec(self):
+        self.assert_ordered(self.read(FROM_ISSUE), "## Lifecycle identity", self.OWNER_EXEC,
+                            "a forge verb never goes through it", self.OWNER_SCRATCH,
+                            "Every lifecycle call is one command",
+                            "### Dispatcher-owned acquisition")
+
+    def test_the_worker_sentence_follows_every_composed_worker_line(self):
+        self.assert_ordered(self.read(FROM_ISSUE), "**Writing workers.**", self.WORKER_LINE,
+                            self.WORKER_EXEC, self.WORKER_SCRATCH, "launch-commit",
+                            "**Self-reap.**")
+        self.assert_ordered(self.read(SDD), "### Lifecycle workers", self.WORKER_LINE,
+                            self.WORKER_EXEC, self.WORKER_SCRATCH, self.RELEASE)
+        self.assert_ordered(self.read(SDD_DIR / "implementer-prompt.md"),
+                            "## Lifecycle Worker", self.COMMIT, "never run `git commit` directly",
+                            self.WORKER_EXEC, self.WORKER_SCRATCH,
+                            "only the most recent one governs", "## Report Format")
+        handoff = self.read(FROM_ISSUE_DIR / "ship-handoff.md")
+        self.assert_ordered(handoff, "## Ship-owner subagent prompt", self.WORKER_LINE,
+                            "never inside the handoff", self.WORKER_EXEC, self.WORKER_SCRATCH,
+                            "Your task:")
+        self.assert_ordered(handoff, "## Remainder owner prompt", self.WORKER_LINE,
+                            "never inside it", self.WORKER_EXEC, self.WORKER_SCRATCH,
+                            "Your task:")
+        self.assert_ordered(self.read(SHIP_ISSUE), "### Local commits", "--parent <worker_id>",
+                            "`Lifecycle worker:`", self.WORKER_EXEC, self.WORKER_SCRATCH,
+                            "## Doc-grounded escalations")
+        self.assert_ordered(self.read(AUTO), "Both prompts must carry", "`Lifecycle worker:` line",
+                            "the `launch-scope exec` and `scratch` sentences that follow it there",
+                            "launch-commit")
+
+    def test_every_owner_exit_reaps_between_release_and_write(self):
+        text = self.read(FROM_ISSUE)
+        self.assert_ordered(
+            text, "**Self-reap.**", self.REAP,
+            "then removes the launch's scratch root and every worktree inside it",
+            "the reap runs before the bookkeeper is dispatched",
+            "does not block the exit write",
+            "A delegating owner does not reap",
+            "**`handoff`** — first release every worker", self.REAP, "--handoff-path",
+            "## Terminal return procedure", "release every worker", self.REAP,
+            "workflow-state finish --repo-root",
+            "## Suspension procedure", "release every worker", "live workers:", self.REAP,
+            "workflow-state suspend --repo-root")
+
+    def test_the_bookkeeper_route_reaps_before_dispatch(self):
+        self.assert_ordered(self.read(AUTO), "ledger-only bookkeeper route",
+                            "releases every worker it registered", self.REAP,
+                            "The bookkeeper is never registered")
+
+    def test_the_leaf_clauses_do_not_name_launch_scope(self):
+        text = self.read(FROM_ISSUE)
+        start = text.index("**Leaf-agent clauses.**")
+        self.assertNotIn("launch-scope", text[start:text.index("**Writing workers.**", start)])
+
+
+class LaunchScopeSweepContractsTest(unittest.TestCase):
+    """#276: the stop pass ends with one sweep of the run's non-current launches."""
+
+    SWEEP = "launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --sweep"
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    def test_the_stop_pass_ends_with_one_sweep_that_never_blocks(self):
+        self.assert_ordered(
+            normalized(ORCHESTRATE.read_text(encoding="utf-8")),
+            "**Stop pass.**",
+            "On `current: false`, stop that handle through the host's task-stop",
+            "writes nothing to the ledger",
+            f"After its stops, the pass ends by running `{self.SWEEP}` once",
+            "A sweep that exits non-zero never blocks dispatch",
+            "Only after the pass, execute the response's actions in returned order.",
+            "## 5. Final report", "**Stop failures**",
+            "the pass's last sweep when it exited non-zero, with its exit code and, "
+            "when it printed a report, its `skipped` launches",
+            "omit the list when there is none")
+
+    def test_claude_md_describes_launch_scope(self):
+        self.assert_ordered(
+            normalized((REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")),
+            "**Agent helper package.**", "`launch-scope` (#276)",
+            "AGENT_LAUNCH_SCOPE=<repo-scope>/<run-id>/<action-id>/<nonce>",
+            "`launch-scope reap --action-id`", "`reap --sweep`",
+            "agent-launch/<run-id>/<action-id>/", "`launch-scope scratch` (#277)",
+            "`scratch.json`", "`unattributed_worktrees`")
 
 
 if __name__ == "__main__":

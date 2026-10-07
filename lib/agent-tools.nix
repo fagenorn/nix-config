@@ -46,12 +46,14 @@ let
     "derive-review-feasibility-fixtures"
     "diff-scope"
     "launch-commit"
+    "launch-scope"
     "promotion"
     "replay-retained"
     "resolve-project"
     "review-feasibility"
     "review-package"
     "review-range"
+    "skill-lint"
     "verified-tree"
   ];
 

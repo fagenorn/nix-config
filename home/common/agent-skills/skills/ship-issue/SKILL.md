@@ -1,11 +1,11 @@
 ---
 name: ship-issue
-description: Deliver a finished feature-branch worktree — sync integration branch, PR, review, CI, merge, close issue, clean up. Phase 7 of from-issue. Use for "ship #X", "land it".
+description: Deliver a finished feature-branch worktree — sync integration branch, PR, review, CI, merge, close or hold issue, clean up. Phase 7 of from-issue. Use for "ship #X", "land it".
 ---
 
 # Ship Issue
 
-Counterpart to `to-issues` and `from-issue`. Take a worktree branch with the implementation committed and deliver it: merged on the integration branch, issue closed, workspace gone.
+Counterpart to `to-issues` and `from-issue`. Take a worktree branch with the implementation committed and deliver it: merged on the integration branch, issue closed or held as `needs-verification`, workspace gone.
 
 ## Project bindings (resolve first)
 
@@ -52,12 +52,12 @@ review prompt.
 1. Sync integration branch → fetch + merge origin/<integration>, hybrid conflict policy
 2. Verify locally          → verified-tree check; run + record unless verified
 3. Consolidate learnings   → see CONSOLIDATE.md; drop most candidates
-4. Open PR                 → push -u; gh pr create with "Closes #<num>"
+4. Open PR                 → push -u; gh pr create with "Closes #<num>" unless held
 5. Review the PR           → review-range picks delta, empty or full; two-axis review over it
 6. Wait for CI             → gh pr checks --required --watch (one blocking call; all checks when none is required)
    Selection gate          → lifecycle identity only: select the CI-green head (## Delivery loop)
 7. Merge                   → gh pr merge <pr-num> --repo <resolved-repository> --merge [--subject "<rendered subject>"] --delete-branch (true merge commit)
-8. Cleanup                 → issue closed; worktree + branches removed
+8. Cleanup                 → issue closed or held; worktree + branches removed
                              (lifecycle identity: each 7–8 effect is one ## Delivery loop cycle)
 ```
 
@@ -111,7 +111,7 @@ environment is broken.
 Guarded: the Phase-4 push, the Phase-4 PR create, every push in REVIEW.md's
 five-step apply/push flow, and the Phase-7 merge. There is no post-merge
 exemption: under lifecycle identity each post-merge effect is a `## Delivery loop`
-cycle — the remote branch delete, and Phase 8's issue close, `git worktree
+cycle — the remote branch delete, and Phase 8's issue close or hold, `git worktree
 remove` and `git branch -d` — fenced by `current-launch` before and after the
 effect exactly like the merge. Local commits are fenced separately
 (### Local commits).
@@ -152,7 +152,10 @@ That includes Phase 1's sync, run as
 dispatches that can write is registered with
 `--parent <worker_id>` added to `workflow-state register-worker` (this
 handoff's `action_id` as `--action-id`), gets its own `Lifecycle worker:`
-line, and is released when it returns. Without the line, commit with plain
+line followed by the sentences "Run each long command, every verification command included, as
+`launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <argv>`,
+still in the foreground." and "Create every scratch directory or scratch worktree under the path that
+`launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>` prints.", and is released when it returns. Without the line, commit with plain
 `git`.
 
 ## Doc-grounded escalations
@@ -202,6 +205,21 @@ Then verify the workspace is shippable before doing anything destructive:
 4. `gh pr list --head <branch> --json number,url` returns `[]` — no open PR for this branch.
 
 Any failure: pause, ground, surface. Don't auto-fix the branch name or stash changes.
+
+**Effective acceptance state.** Start from the handoff's `acceptance_state`;
+standalone with `review_state: unknown` it is `not_applicable`. The acceptance
+record is `<plan stem>.acceptance.md` beside the plan root, named by its
+repository-relative path, never an absolute one, or `none` when no such file
+exists. With `human_pending` and `auto: false`, ask the user, as one
+grounded question, to attest each `human_pending` row of the record. When every
+row is attested, rewrite those Verdict cells to `met (attested)`, commit the
+record (### Local commits) and continue with `met`; the new commit means Phase 2
+cannot skip its rerun. Otherwise keep `human_pending`. `--auto` never asks and
+never self-attests. The value is then fixed for the run, and ship grades
+nothing: `met` or `not_applicable` **closes** the issue, while `unmet` or
+`human_pending` **holds** it open as `needs-verification` (Phase 8). A hold
+whose record is `none` stops with `terminal_failed` before any hold effect: no
+hold exists without a record.
 
 ## Phase 1 — Sync from the integration branch
 
@@ -284,14 +302,30 @@ gh pr create --repo <resolved-repository> --base <integration> --head <branch> -
 ## Plan
 <plan-path>
 
+## Acceptance
+Acceptance state: <effective acceptance state>
+
+Acceptance record: <record-path or none>
+
+<acceptance table>
+
 Closes #<num>"
 ```
 
 This is the one form the lifecycle guard accepts: one command, those five flags in that order, `<resolved-repository>` the retained `bindings.tracker.repo_slug`, and the body a single double-quoted argument that may span lines but contains no `"`, `$`, backtick or backslash. A body written to a file, a heredoc or a command substitution is refused, so render the body in place.
 
+The `## Acceptance` section always appears. `Acceptance state:` carries Phase 0's
+effective value, and `Acceptance record:` carries the record's repository-relative
+path or `none`. With a record, `<acceptance table>` is a Markdown table with the
+three columns `AC`, `Kind` and `Verdict`, one row per record row, copying its
+closed tokens; without one, drop that line. On a **hold** drop the
+`Closes #<num>` line too: a hold body carries no closing keyword (close, closes,
+closed, fix, fixes, fixed, resolve, resolves or resolved before an issue
+reference), so the merge cannot close the issue.
+
 Title: the issue title verbatim unless the implementation deviated meaningfully. Under 70 chars; details go in the body.
 
-GitHub auto-close on merge fires only when the PR base equals the **default branch**; when retained integration and default branches differ, the real close mechanism is Phase 8's explicit `gh issue close <num>` — keep the `Closes #<num>` trailer for traceability, don't rely on it.
+GitHub auto-close on merge fires only when the PR base equals the **default branch**; when retained integration and default branches differ, the real close mechanism is Phase 8's explicit `gh issue close <num>` — on the close branch keep the `Closes #<num>` trailer for traceability, don't rely on it.
 
 **Use full URLs, not bare `#N`**, in PR bodies, comments, and commit-message references (`https://github.com/<resolved-repository>/issues/<n>`) — GitHub resolves bare `#N` against the source repo context, which under cross-references lands on unrelated refs. The `Closes #<num>` trailer is the one exception.
 
@@ -418,13 +452,14 @@ Otherwise fail closed. Only `none` or a checker-valid `present` detail can proce
 to remove the worktree.
 
 The steps below are the ledger-free order. Under lifecycle identity the same
-effects run as `## Delivery loop` cycles in the contract's stage order — issue
-close (`close_tracker`, observation-only when the merge already closed it),
+effects run as `## Delivery loop` cycles in the contract's stage order — issue close or hold (`close_tracker`; on the close branch observation-only when the merge already closed it),
 `git worktree remove` (`remove_worktree`), then `git branch -d`
 (`delete_local_branch`) — each fenced by `current-launch`, and the summary is
 the loop's `ship-summary/v2`.
 
-1. `gh issue view <num> --json state`; if `OPEN`, `gh issue close <num>` (the real close mechanism when retained integration and default branches differ — see Phase 4).
+1. Close or hold, per Phase 0's effective acceptance state.
+   - **Close** (`met` or `not_applicable`): `gh issue view <num> --json state`; if `OPEN`, `gh issue close <num>` (the real close mechanism when retained integration and default branches differ — see Phase 4).
+   - **Hold** (`unmet` or `human_pending`), in this order: `gh issue view <num> --json state,comments`; if `CLOSED` (a commit's closing keyword can close it), `gh issue reopen <num>`. When `gh label list --repo <resolved-repository> --search needs-verification --json name` shows no name exactly `needs-verification`, run `gh label create needs-verification --repo <resolved-repository> --description "Merged, acceptance criteria await verification"` — never `--force`, which would overwrite a user's label. Then `gh issue edit <num> --add-label needs-verification`. The hold comment's first line is `Held for verification: <PR URL>`; the rest gives the effective acceptance state, the PR body's three-column table and the record's link at the merge SHA (`https://github.com/<resolved-repository>/blob/<merge-sha>/<record-path>`). When the earlier view already shows one or more comments with that first line, reuse the earliest one's URL; otherwise post it with `gh issue comment <num> --body "<hold comment>"`, whose stdout is the comment URL. Finally `gh issue view <num> --json state,labels` must show `OPEN` with `needs-verification`; anything else keeps ownership and retries, as for any failed post-merge action.
 
 2. Remove the worktree from the main repo root, never from inside the worktree:
    ```
@@ -450,9 +485,9 @@ the loop's `ship-summary/v2`.
 
 3. If `git worktree remove` refuses on the rebased-branch case: confirm the PR landed via `gh pr view`, then retry with `ExitWorktree action: "remove", discard_changes: true` — the "discarded N commits" wording is misleading; the content is on the integration branch.
 
-4. Only after issue closure and worktree cleanup both succeed, construct the
+4. Only after issue closure and worktree cleanup both succeed — on a hold the confirmed hold stands in for closure — construct the
    successful `merged` ship summary with the observed full `merge_sha`,
-   `issue_closed: true`, `discussion_items: []`, and the checked detail fields.
+   `issue_closed: true` on close or `issue_closed: false` on hold (its notes name the hold and the comment URL), `discussion_items: []`, and the checked detail fields.
    Validate it through `artifact-budget validate-report --boundary ship-summary`
    and report only canonical stdout. Never predeclare closure or cleanup in a
    candidate. If an earlier phase fails before merge, validate and return the
@@ -540,15 +575,24 @@ never compose one. Validate each reply before decoding and treat its
    again; then the next checkpoint carries the effect's observation, one
    `--kind authority-observation` for that scope and this launch (`launch_id`
    the custody `action_id`), and the next stage's scope. The cycles are the
-   merge (`merge_pr` → `pr_merged`), the issue close (`close_tracker` →
-   `tracker_closed`), the remote delete (`delete_remote_branch` →
+   merge (`merge_pr` → `pr_merged`), the issue close or hold (`close_tracker` → `tracker_closed`, or `tracker_held` on a hold), the remote delete (`delete_remote_branch` →
    `remote_branch_absent`), `git worktree remove` (`remove_worktree` →
    `worktree_absent`) and `git branch -d` (`delete_local_branch` →
    `local_branch_absent`), in the contract's stage order.
+   On a hold the `close_tracker` cycle runs Phase 8 step 1's hold branch (reopen
+   when closed, the `needs-verification` label, the hold comment) under that
+   stage's own scope and fences, and its observation is `--kind observation`
+   `tracker_held` with the facts `comment_url` (the hold comment's URL),
+   `record_path` (exactly the PR body's repository-relative `Acceptance record:`
+   value, never an absolute path), `acceptance_state` (the effective
+   state) and `observation_identity` `github:issue:<num>:held`. A hold whose
+   `Acceptance record:` is `none` stops with `terminal_failed` before any hold
+   effect: no hold exists without a record. A hold records
+   exactly one such observation: a retried or remainder hold recovers the
+   existing hold comment's URL rather than posting a second comment.
 5. **Already-true stages are observation-only.** A stage the previous effect
    already made true is recorded by its observation alone, without a proposal:
-   remote deletion by the merge's `--delete-branch`, and closure by a merge
-   that closes the issue. Fold it into the next checkpoint.
+   remote deletion by the merge's `--delete-branch`, and, on the close branch only, closure by a merge that closes the issue; a hold always runs its cycle. Fold it into the next checkpoint.
 6. **Denials.** A merge the provider refuses because the PR cannot merge into
    its base is not a denial: record no authority observation for it, and take
    CI-MERGE.md's `## Post-selection sync`. A guard, host or provider denial of
@@ -572,8 +616,7 @@ never compose one. Validate each reply before decoding and treat its
    id) and `cleanup_complete` (the three absence observation ids, the detail
    pointer and its read evidence), and return them with the last cycle's
    authority observation in a `ship-summary/v2` whose `state` is
-   `delivery_complete` and whose `historical_owner_result` is the legacy
-   `merged` row. A failure returns `terminal_failed` with the legacy
+   `delivery_complete` and whose `historical_owner_result` is the legacy `merged` row (`issue_closed: false` on a hold). A failure returns `terminal_failed` with the legacy
    `stopped`/`failed` row and the partial observations. Only after the last
    cycle, validate it with
    `artifact-budget validate-report --boundary ship-summary --input -` and
@@ -602,6 +645,20 @@ current selection: read it with `--kind current-selection`, fed the installed
 contract. Otherwise start at the first
 pending cleanup cycle. `## Launch guard` fences with this custody's
 `action_id`.
+
+A remainder has no handoff, so it takes the close-or-hold choice from its PR
+body. On every remainder entry, whichever cycle it starts at (including a
+cleanup cycle after `close_tracker` is already observed), run
+`gh pr view <pr-num> --repo <resolved-repository> --json body` and take the
+body's one `Acceptance state:` line, its one `Acceptance record:` line and its
+acceptance table. `met` or `not_applicable` closes and `unmet` or
+`human_pending` holds, exactly as in Phase 8 step 1. A missing or repeated line,
+or a value outside those four, stops before its next effect with
+`terminal_failed`, whose notes name the line; never default. When the stage is
+already observed as a hold, recover the hold comment URL from
+`gh issue view <num> --json comments` (the earliest comment whose first line is
+`Held for verification: <PR URL>`) for the summary's notes instead of posting a
+second comment.
 
 A denial or a `delivery_stalled` reply ends a remainder owner's loop exactly as
 step 6 of `## Delivery loop` says: its whole return is the re-entry line or that
