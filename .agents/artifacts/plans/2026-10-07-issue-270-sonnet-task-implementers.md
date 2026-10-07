@@ -19,7 +19,7 @@
   then set each printed profile's `ceiling_bytes.<host>` to the printed measured value and append one sentence to that profile's `note`: `Ceiling raised for #270: <what grew> (#155 D10).` Re-run until it prints nothing.
 - Focused test runner: `PYTHONPATH=python python3 -m unittest <test files>` from the worktree root.
 - Matrix CLI: `PYTHONPATH=python python3 -m agent_tools.agent_model_matrix validate --root .` must print `agent model matrix: valid`.
-- Declared verification (final gate and ship only, never a per-task gate): `just build` and `just agent-workflow-tests`, each run in the foreground with an explicit timeout of 3000000 ms.
+- Declared verification: the full set, `just build` together with `just agent-workflow-tests`, runs at the final gate and ship only, never as a per-task gate. A task's own `just build` step is its brief's build check (sdd `implementer-prompt.md`: run it when the task changes files the build evaluates) and stays required; it is not the declared set. Each runs in the foreground with an explicit timeout of 3000000 ms.
 - Commits are SSH-signed and go through the caller's `launch-commit` when a `Lifecycle worker:` line is present; never disable signing.
 
 ## Test seams
@@ -45,4 +45,6 @@ Task 5 — Update the living tier docs — home/common/claude-code/default.nix, 
 
 Role model per D1; site routing per D2 and D3; re-evaluation rule placement and thresholds per D4; cost-telemetry ambiguity per D5; new site and profile ids, scenario-trace scope and the `implementer` eligibility line per D6. All rows live in the spec's `## Decision ledger`.
 
----
+## Standards review provenance
+
+Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra/xhigh), isolated read-only, base 3b911376cfbb47f3480956daa571097d53f4715d, no focus, no fallback. Findings: 0 Blocking; 1 Should fix accepted (build-gate wording in Global Constraints reconciled with the per-task build check); 0 rejected; 0 deferred.
