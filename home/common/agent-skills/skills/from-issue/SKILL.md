@@ -43,7 +43,8 @@ With lifecycle identity, run each long command, every verification command
 included, as
 `launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> -- <argv>`,
 still in the foreground; a forge verb never goes through it, and the
-lifecycle guard refuses one that sits behind another program.
+lifecycle guard refuses one that sits behind another program. Create every scratch directory or scratch worktree under the path that
+`launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` prints.
 
 Every lifecycle call is one command that reads its input from stdin through a
 quoted heredoc (`<<'EOF'`): `--request-file -`, `--checkpoint-file -`,
@@ -359,9 +360,10 @@ is registered first:
 `workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`.
 Its prompt carries the printed id as the single line
 `Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>`,
-followed by the sentence "Run each long command, every verification command included, as
+followed by the sentences "Run each long command, every verification command included, as
 `launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <argv>`,
-still in the foreground.", and it
+still in the foreground." and "Create every scratch directory or scratch worktree under the path that
+`launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>` prints.", and it
 creates every commit through `launch-commit`. Release it with
 `--event returned` when it returns. Two dispatches are never registered:
 the fresh delegated owner, which adopts this owner's own launch, and the
@@ -378,7 +380,7 @@ then runs
 `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
 with this owner's own `action_id`, and only then makes the exit write. The
 reap kills every process that a `launch-scope exec` of this launch left
-behind. When the ledger-only bookkeeper makes the exit write, the reap runs
+behind, then removes the launch's scratch root and every worktree inside it. When the ledger-only bookkeeper makes the exit write, the reap runs
 before the bookkeeper is dispatched. A reap that exits non-zero does not block
 the exit write: name its exit code and, when it printed a report, its
 `skipped` launches in this owner's result. A delegating owner does not reap, because the fresh delegated owner

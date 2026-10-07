@@ -152,9 +152,10 @@ That includes Phase 1's sync, run as
 dispatches that can write is registered with
 `--parent <worker_id>` added to `workflow-state register-worker` (this
 handoff's `action_id` as `--action-id`), gets its own `Lifecycle worker:`
-line followed by the sentence "Run each long command, every verification command included, as
+line followed by the sentences "Run each long command, every verification command included, as
 `launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <argv>`,
-still in the foreground.", and is released when it returns. Without the line, commit with plain
+still in the foreground." and "Create every scratch directory or scratch worktree under the path that
+`launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>` prints.", and is released when it returns. Without the line, commit with plain
 `git`.
 
 ## Doc-grounded escalations
