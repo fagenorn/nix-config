@@ -284,10 +284,10 @@ already exited handle counts as stopped. On `current: true`, leave it running.
 A `check-launch` that exits non-zero, or whose output cannot be parsed, is
 unknown, never `current: false`: leave the handle a candidate. A failed stop
 also leaves it a candidate, and the next pass tries both again. A stop failure
-never blocks dispatch: keep it for §5 and continue. The pass sends no
-observation, makes no control call and writes nothing, so a later notification
-from a stopped handle still falls under §2 rule (b). Only after the pass,
-execute the response's actions in returned order.
+never blocks dispatch: keep it a candidate for §5 and continue. The pass sends
+no observation, makes no control call and writes nothing, so a later
+notification from a stopped handle still falls under §2 rule (b). Only after
+the pass, execute the response's actions in returned order.
 
 For `spawn`, `resume`, and `retry`, project the action into the interface-2
 owner object: rename `id` to `action_id` and `kind` to `launch_kind`, add
@@ -330,8 +330,8 @@ run and is independent of any issue worktree. The worktree is the exact returned
 path. For `resume`, include the returned `handoff_path` when present. For a
 `delivery_remainder`, `attempt` is its `source_attempt`, `action_id` is its
 custody's `action_id`, and there is no `handoff_path`. Record the host task
-handle beside the returned action ID only for later notification correlation and the stop pass; it
-is never an owner token or action identity.
+handle beside the returned action ID only for later notification correlation
+and the stop pass; it is never an owner token or action identity.
 
 If the host refuses an owner launch, never retry it: make exactly one control
 call carrying a `launch_refused` owner observation for that action's `custody`,
@@ -402,10 +402,10 @@ Arm the one-shot observer for the returned wake conditions and its `deadline_at`
 control never returns a deadline-less wait; every wait carries deadline_at, and when nothing can proceed without a human, control returns finalize instead, or `delivery_contract` when a missing contract is all that stops an issue.
 No polling or repeated short sleeps are allowed.
 
-For `finalize`, first run the stop pass, then clear `current_wait_id`, then cancel the outstanding handle
-(a missing/already-exited handle is harmless), and clear
-`current_wait_handle`. Do not issue another control call merely to prepare the
-report.
+For `finalize`, first run the stop pass, then clear `current_wait_id`, then
+cancel the outstanding handle (a missing/already-exited handle is harmless),
+and clear `current_wait_handle`. Do not issue another control call merely to
+prepare the report.
 
 For `delivery_contract`, a missing delivery contract is all that stops each
 issue in its `issues` list, and nothing else will wake the run: control armed
@@ -415,7 +415,8 @@ else build it now) and make the next control call at once; that response
 takes over from this one. Never rebuild an issue whose build this invocation
 refused: send null and `[]` for it. When the builder has refused every listed
 issue in this invocation, the action ends the run as `finalize` does: run the
-stop pass, clear the wait state as for `finalize` and render §5 from this response.
+stop pass, clear the wait state as for `finalize` and render §5 from this
+response.
 
 ## 5. Final report
 
@@ -443,12 +444,12 @@ cannot resume, because its recorded worktree is gone or is not on the issue
 branch: report it as unable to resume for that reason, never as progressing.
 Then group every `discussion_items` entry by issue and call out anything needing
 a human. List every issue in that same control response's `admission.waiting` as
-queued for agent slots, with its summary state. Below the table, under **Stop failures**, list each owner handle the final stop
-pass still left a candidate because its stop failed or its `check-launch` answer
-was unknown, with its `action_id` and the failure; omit the list when there is
-none. These are facts local to this adapter, not fields of the finalize summary.
-Do not perform a second ledger
-read or reconstruct omitted history.
+queued for agent slots, with its summary state. Below the table, under
+**Stop failures**, list each owner handle the final stop pass still left a
+candidate because its stop failed or its `check-launch` answer was unknown,
+with its `action_id` and the failure; omit the list when there is none. These
+are facts local to this adapter, not fields of the finalize summary. Do not
+perform a second ledger read or reconstruct omitted history.
 
 An `expired` delta is an interruption, not a verdict on the work: it consumes
 no attempt, and the attempt number never advances because of it. Three things

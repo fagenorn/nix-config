@@ -5731,8 +5731,13 @@ class SupersededOwnerStopPassContractsTest(unittest.TestCase):
         self.assert_ordered(
             self.text(), "**Stop pass.**",
             "a missing or already exited handle counts as stopped",
-            "is unknown, never `current: false`",
-            "A stop failure never blocks dispatch",
+            "A `check-launch` that exits non-zero, or whose output cannot be "
+            "parsed, is unknown, never `current: false`: leave the handle a "
+            "candidate.",
+            "A failed stop also leaves it a candidate, and the next pass tries "
+            "both again.",
+            "A stop failure never blocks dispatch: keep it a candidate for §5 "
+            "and continue.",
             "sends no observation, makes no control call and writes nothing",
             "## 5. Final report",
             "**Stop failures**",
