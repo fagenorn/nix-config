@@ -53,6 +53,7 @@ let
     "review-feasibility"
     "review-package"
     "review-range"
+    "skill-lint"
     "verified-tree"
   ];
 
