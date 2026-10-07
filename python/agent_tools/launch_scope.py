@@ -21,8 +21,10 @@ A process that survives SIGKILL keeps the row for `reap`; `exec` names it on
 stderr and still exits with the command's status.
 
 `reap --action-id A` reaps that one launch without asking the ledger. `reap
---sweep` asks `check-launch` about every launch directory under the run and
-reaps each one that is not current; a failed or malformed check skips it. A
+--sweep` asks `check-launch` about every launch under the run, each launch
+directory and each launch a live process's marker names (an earlier reap can
+have deleted the directory of an exec paused before its spawn), and reaps each
+one that is not current; a failed or malformed check skips it. A
 reap terminates every live process whose marker names the launch, plus every
 recorded group that such a process proves (a pid carrying that row's exact
 marker, in that group). It then deletes the files it proved, and the launch's
@@ -459,6 +461,20 @@ def _launch_names(run_directory: Path) -> list[str]:
     return sorted(names)
 
 
+def _marked_launch_names(run_id: str) -> set[str]:
+    """The safe action ids that a live, non-zombie process's marker names under `run_id`."""
+    launch = re.compile(re.escape(f"{run_id}/") + r"([^/]+)/" + NONCE.pattern)
+    names = set()
+    for pid, proc in process_table().items():
+        if proc.zombie:
+            continue
+        marker = read_marker(pid)
+        match = None if marker is None else launch.fullmatch(marker)
+        if match is not None and is_safe_segment(match.group(1)):
+            names.add(match.group(1))
+    return names
+
+
 def reap(repo_root: str, run_id: str, *, action_id: str | None = None,
          sweep: bool = False) -> tuple[int, dict]:
     """Reap one launch, or sweep the run's non-current launches: (exit status, report)."""
@@ -474,7 +490,8 @@ def reap(repo_root: str, run_id: str, *, action_id: str | None = None,
         launches = [action_id]
     else:
         launches = []
-        for name in _launch_names(registry / run_id):
+        names = set(_launch_names(registry / run_id)) | _marked_launch_names(run_id)
+        for name in sorted(names):
             reason = ask_launch(repo_root, run_id, name)
             if reason in (CHECK_LAUNCH_FAILED, MALFORMED_REPLY):
                 skipped.append({"action_id": name, "reason": reason})

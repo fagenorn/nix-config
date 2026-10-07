@@ -241,6 +241,19 @@ class ProcessSeamTest(unittest.TestCase):
         self.assertEqual(result, (1, frozenset()))
         self.assertEqual(sorted(sent), [(4242424, signal.SIGTERM), (4242425, signal.SIGTERM)])
 
+    def test_a_marked_process_forked_before_the_first_table_is_a_target(self):  # D16
+        # The caller's target exited after forking a marked child into its own
+        # session: the first fresh table already lacks the target.
+        tables = iter([{4242425: Proc(4242425, 1, 4242425, False)}] + [{}] * 1000)
+        sent = []
+        result = terminate([4242424], [], read_table=lambda: next(tables),
+                           send=lambda pid, sig: sent.append((pid, sig)),
+                           send_group=lambda pgid, sig: sent.append(("group", pgid, sig)),
+                           is_marked=lambda pid: pid == 4242425,
+                           term_seconds=0.1, kill_seconds=0.1)
+        self.assertEqual(result, (1, frozenset()))
+        self.assertEqual(sent, [(4242425, signal.SIGTERM)])
+
     def test_an_unsupported_platform_fails_loud(self):
         with mock.patch.object(launch_processes.sys, "platform", "win32"):
             with self.assertRaises(UnsupportedPlatform):
@@ -613,6 +626,21 @@ class ReapTest(ScopeHarness, unittest.TestCase):
         self.assertTrue(wait_until(lambda: is_dead(escapee), 2.0))
         self.assertFalse(is_dead(sibling.pid))
         self.assertFalse((self.registry / "14:1:1").exists())
+
+    def test_a_sweep_reaps_a_marked_launch_whose_directory_is_gone(self):
+        # An exec paused before its spawn can have had its directory reaped.
+        marker = f"{self.run_id}/14:1:1/" + "c" * 32
+        orphan = subprocess.Popen(SLEEPER, env={**UNMARKED_ENV, MARKER_ENV: marker},
+                                  start_new_session=True)
+        self.addCleanup(orphan.wait)
+        self.addCleanup(kill_quietly, orphan.pid)
+        self.assertTrue(wait_until(lambda: read_marker(orphan.pid) == marker))
+        self.assertFalse((self.registry / "14:1:1").exists())
+        self.assertEqual(self.resume(issue=14, worktree=str(self.root / "wt-14"), now=LATER,
+                                     owner_unavailable=True)["id"], "14:1:2")
+        self.assert_report(self.scope(*self.reap_args("--sweep")), 0,
+                           [{"action_id": "14:1:1", "signalled": 1}], [])
+        self.assertTrue(wait_until(lambda: is_dead(orphan.pid), 2.0))
 
     def test_a_stale_row_does_not_prove_a_live_unmarked_group(self):  # D14
         stranger = subprocess.Popen(SLEEPER, env=UNMARKED_ENV, start_new_session=True)

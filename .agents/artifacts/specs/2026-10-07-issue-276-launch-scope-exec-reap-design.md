@@ -97,12 +97,15 @@ writer. `exec` deletes only its own row. The action directory is removed only by
 
 - `--action-id A` reaps launch A without asking the ledger, because the caller
   asserts that A is ending.
-- `--sweep` lists the action directories under the run's registry root and asks
+- `--sweep` lists the action directories under the run's registry root, adds
+  every launch that a live process's marker names under the run, and asks
   `check-launch` about each one. It leaves current launches alone, reaps the
   launches whose reply reads `current: false`, and marks a failed or malformed
-  check as skipped with `check_launch_failed` or `malformed_reply`. A launch
-  that has no registry directory is never visited by a sweep. One exists for
-  every launch that ever ran `exec`.
+  check as skipped with `check_launch_failed` or `malformed_reply`. The marker
+  half matters because a directory is not proof of every launch: a reap can
+  delete the pending row and directory of an `exec` paused between its
+  positive check and its spawn, and a supervisor killed after that spawn and
+  before it records the group leaves a marked command with no directory.
 - To reap a launch, the reaper signals every process whose marker starts with
   `<run-id>/<action-id>/` followed by a well-formed nonce, plus every recorded
   group that a live member's exact marker proves. It then deletes the files it

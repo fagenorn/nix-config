@@ -189,9 +189,13 @@ def terminate(pids: Iterable[int], groups: Iterable[int], *, read_table=process_
     targets.update({pid: proc.pgid for pid, proc in table.items()
                     if proc.pgid in groups and not proc.zombie})
     targets = {pid: pgid for pid, pgid in targets.items() if pid > 1 and pid not in protected}
+    members = _Membership(targets, safe_groups, protected, is_marked)
+    if is_marked is not None:
+        # The caller's targets come from an earlier table: a marked process
+        # forked since then (by a target that has exited) joins now (D16).
+        targets = members.refresh(table)
     if not targets:
         return 0, frozenset()
-    members = _Membership(targets, safe_groups, protected, is_marked)
     reached = _deliver(signal.SIGTERM, targets, safe_groups, send, send_group)
     remaining = _await(members, read_table, term_seconds, signal.SIGTERM, send, reached)
     if remaining:
