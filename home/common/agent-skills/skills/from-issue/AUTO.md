@@ -3,8 +3,6 @@
 Read this file once, when you detect `--auto` in the invocation. It replaces the checkpoint
 behavior in `SKILL.md`; everything else in `SKILL.md` still applies.
 
-This included document receives the phase owner's retained `ResolvedProject`; it uses `bindings.paths.artifacts`, `bindings.tracker`, `bindings.vcs`, and `bindings.workflow` without resolving or inferring policy.
-
 The shift is *what you do at a decision point*, not *what work gets done*. Every phase still
 produces the same artifact at the same quality bar. Brainstorm still happens. Grill still happens.
 Standards review still happens. You don't get to skip thinking — you only stop waiting for the user.
@@ -17,7 +15,7 @@ resuming a `suspended` attempt requires neither `new_run` nor `owner_unavailable
 Wherever a phase or sub-skill would ask the user a clarifying question, present option sets, or pause
 at a `**CHECKPOINT**`:
 
-1. **Ground first.** Use this phase's `GROUNDING.md` cache (see `grounding.md` beside `SKILL.md`). If the
+1. **Ground first.** Use this phase's `GROUNDING.md` cache. If the
    decision reaches into an area the cache doesn't cover, load that area and append it.
 2. **Pick the most defensible default** — the choice that aligns with documented invariants and ADRs,
    matches existing precedent in the codebase, honors the issue author's stated intent, and keeps
@@ -282,8 +280,6 @@ artifact blocks only:
 - no alternate worktree;
 - no reconstructed lifecycle field; and
 - no authorization flag.
-
-The fresh owner resolves once at its own phase entry and applies that retained `ResolvedProject` to these checks; it is never a member of the continuation object.
 
 Beside the continuation, never inside it, pass a resume pack: after
 `progress` persists `delegate`, run

@@ -235,18 +235,11 @@ CLAUDE_POLICY_ENTRIES = {
 
 SHARED_POLICY_SUPPORT = {
     "doc-grounded-questions/REFERENCE.md": ("bindings.paths.context",),
-    "from-issue/grounding.md": ("bindings.paths.context", "bindings.paths.standards"),
-    "from-issue/investigate.md": ("bindings.tracker", "bindings.vcs"),
-    "from-issue/ship-handoff.md": ("bindings.vcs", "bindings.workflow"),
-    "from-issue/standards-review.md": ("bindings.paths.standards",),
     "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
     "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
 }
 
 RETAINED_SUPPORT_CONTRACTS = {
-    "from-issue/bindings.md": ("bindings.tracker", "bindings.vcs", "bindings.paths.artifacts", "bindings.workflow"),
-    "from-issue/AUTO.md": ("bindings.paths.artifacts", "bindings.tracker", "bindings.vcs", "bindings.workflow"),
-    "from-issue/REVIEW-CONTRACT.md": ("bindings.workflow.review", "bindings.commands"),
     "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
     "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
     "ship-issue/CONSOLIDATE.md": ("bindings.paths", "bindings.vcs"),
@@ -839,22 +832,33 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
     def test_build_delivery_callers_name_the_sanctioned_resolution_exception(self):
         exception = ("only sanctioned exception is `workflow-state build-delivery`, "
                      "which performs its own sealed, read-only resolution")
+        scoped = "home/common/agent-skills/skills/from-issue/"
         callers = []
         for root in (REPO_ROOT / "home/common/agent-skills/skills",
                      REPO_ROOT / "home/common/claude-code/skills"):
             for path in sorted(root.rglob("*.md")):
+                relative = path.relative_to(REPO_ROOT).as_posix()
+                if relative.startswith(scoped) and relative != scoped + "SKILL.md":
+                    continue
                 text = normalized(path.read_text(encoding="utf-8"))
                 if "build-delivery" not in text:
                     continue
-                callers.append(path.relative_to(REPO_ROOT).as_posix())
-                with self.subTest(path=path.relative_to(REPO_ROOT)):
+                callers.append(relative)
+                with self.subTest(path=relative):
                     self.assertIn(exception, text)
         self.assertEqual(sorted(callers), [
             "home/common/agent-skills/skills/from-issue/SKILL.md",
-            "home/common/agent-skills/skills/from-issue/ship-handoff.md",
             "home/common/agent-skills/skills/ship-issue/SKILL.md",
             "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
         ])
+
+    def test_from_issue_has_no_bindings_or_grounding_reference_file(self):
+        directory = REPO_ROOT / "home/common/agent-skills/skills/from-issue"
+        for name in ("bindings.md", "grounding.md"):
+            with self.subTest(name=name):
+                self.assertFalse((directory / name).exists())
+                for path in sorted(directory.glob("*.md")):
+                    self.assertNotIn(name, path.read_text(encoding="utf-8"), path.name)
 
 
 # The capacity rule binds only on the `available` route, and a Codex call made

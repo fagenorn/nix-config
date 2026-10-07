@@ -17,8 +17,9 @@ Counterpart to `to-issues`. Take one tracker issue from triage to merged code by
   subsection names, and one that fails them restores the whole read. An owner
   delegated at `AUTO.md`'s Phase-5 rollover still reads its
   `#### Fresh delegated owner` section now, because those checks come first.
-- **`bindings.md`** — phase binding notes. Included routines receive values from this phase's retained snapshot; use `bindings.tracker`, `bindings.vcs`, and `bindings.paths.artifacts`.
-- **`grounding.md`** (Phases 2–5), **`decision-ledger.md`**, **`investigate.md`** (Phase 0), **`standards-review.md`** (Phase 5), **`ship-handoff.md`** (Phase 7) — loaded at the named phase.
+- `<tracker-cli>` is `bindings.tracker.cli`; before invoking it, unset only the names `bindings.tracker.credential_env.unset_before_invocation` lists.
+- **`decision-ledger.md`**, **`investigate.md`** (Phase 0), **`standards-review.md`** (Phase 5), **`ship-handoff.md`** (Phase 7) — loaded at the named phase.
+- Phases 2–5 ground through `doc-grounded-questions` before their first question, option set or review pass; that skill owns the pass and its git-dir `GROUNDING.md` cache.
 - **`REVIEW-CONTRACT.md`** — the Phase-5 reviewer contract. Hand it over **by absolute path**, never read it into this conversation.
 
 ## Lifecycle identity
@@ -646,7 +647,7 @@ A ledger-free interactive direct invocation keeps the standard `worktrees` flow:
 
 ## Phase 2 — Brainstorm
 
-Invoke `design` for a design doc under the retained specifications directory, committed in the worktree. Ground first per `grounding.md`. Resolve every Phase-0 carryover before opening a new question.
+Invoke `design` for a design doc under the retained specifications directory, committed in the worktree. Ground first through `doc-grounded-questions`. Resolve every Phase-0 carryover before opening a new question.
 
 **CHECKPOINT** — Record the spec path and approval source. Apply the shared checkpoint rule; existing authorization for autonomous design decisions suffices within its scope.
 

@@ -12,9 +12,7 @@
       "hot": [
         "from-issue/SKILL.md",
         "from-issue/AUTO.md",
-        "from-issue/bindings.md",
         "from-issue/investigate.md",
-        "from-issue/grounding.md",
         "from-issue/decision-ledger.md",
         "from-issue/standards-review.md",
         "doc-grounded-questions/SKILL.md",
@@ -34,12 +32,12 @@
         "codex-collaboration/DIFF-REVIEW.md": "diff-review is not a Phase 0–5 operation"
       },
       "ceiling_bytes": {
-        "claude": 102914,
-        "codex": 102914
+        "claude": 100418,
+        "codex": 100418
       },
       "conditional_ceiling_bytes": {
-        "claude": 49297,
-        "codex": 37958
+        "claude": 48918,
+        "codex": 37579
       },
       "note": "Direct autonomous `--auto` run of Phases 0–5 and the rollover. Design, grill and planning run in their owners. The hot path keeps from-issue's top-level acquisition routes and AUTO.md's rollover, whose route-scoping is deferred (#155 D6). Ceiling raised for #198: from-issue/SKILL.md grew with the Phase-7 dispatch-gap fallback, which this route carries but never runs, and AUTO.md with the earlier controller's relay of the suspension line (#155 D10). Ceiling raised for #191's validated `progress` and `suspend` replies, which grew `from-issue/SKILL.md` (#155 D10). Ceiling raised for #192: AUTO.md's fresh delegated owner checks its worktree against the contract's remove_worktree target (#155 D10). Ceiling raised for #192's review fix: a remainder owner probes reviewer dispatch before a post-selection sync (#155 D10). Ceiling raised for #221: from-issue/SKILL.md's durable interactive route answers control's `delivery_contract` (#221 D10). Ceiling raised for #222: sdd and from-issue Phase 6 register writing workers and fence their commits (#155 D10). Ceiling raised for #222: from-issue and ship-issue register writing workers, fence local commits and release before exit (#155 D10). Ceiling raised for #222: ship review fixes (handoff release step, current wait-handle carve-out) (#155 D10). Ceiling raised for #250: sdd and from-issue Phase 6 record a progress marker after each task, and the stall bound's description names it (#155 D10). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10). Ceiling raised for #261: from-issue, sdd and ship-issue carry the Interim child results rule (#155 D10). Ceiling raised for #264: sdd and from-issue state that head_sha is the final-review head (#155 D10). Ceiling raised for #265: relaunchers carry a resume pack and the owner's resume-pack guidance (#155 D10). Ceiling raised for #265: final-review fixes name the always-read owner sections and scope the rollover checks in the resume-pack guidance (#155 D10). Ceiling raised for #272: both ship-handoff shapes carry acceptance_state from the sdd report (#155 D10). Ceiling raised for #276: owners and writing workers run long commands through launch-scope exec, and owners self-reap before every exit write (#155 D10). Ceiling raised for #276's final-review fixes: Self-reap names a failed reap's `skipped` launches only when it printed a report (#155 D10). Ceiling raised for #277: owners and writing workers create scratch under launch-scope scratch, and self-reap removes the scratch root (#155 D10). Conditional ceiling re-measured after merging origin/main at 2d3ba38, where #276's launch-scope text met this gate (#155 D19). Conditional ceiling re-measured after merging origin/main at e63f626, where #277's scratch-root text met this gate (#155 D19). Conditional ceiling re-measured after merging origin/main at 07f4f95, where #273's tracker-hold text met this gate (#155 D19)."
     },
@@ -75,9 +73,7 @@
       "hot": [
         "from-issue/SKILL.md",
         "from-issue/AUTO.md",
-        "from-issue/bindings.md",
         "from-issue/investigate.md",
-        "from-issue/grounding.md",
         "from-issue/decision-ledger.md",
         "from-issue/standards-review.md",
         "from-issue/ship-handoff.md",
@@ -111,7 +107,7 @@
         "from-issue/REVIEW-CONTRACT.md": "handed to the plan reviewer by absolute path, never read into this conversation"
       },
       "ceiling_bytes": {
-        "claude": 189089
+        "claude": 186214
       },
       "conditional_ceiling_bytes": {
         "claude": 153646
@@ -174,8 +170,8 @@
         "codex": 24308
       },
       "conditional_ceiling_bytes": {
-        "claude": 13953,
-        "codex": 13953
+        "claude": 13852,
+        "codex": 13852
       },
       "note": "Phase 4 from AUTO.md's prompt: writing-plans and doc-grounded-questions, plus the review contract for a mechanical-only self-grade. The producer-report block stays per skill (#155 D5). Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10). Ceiling raised for #263: the implementer, fixer and writing-plans name the per-task verification ladder (#155 D10). Ceiling raised for #274: writing-plans/SKILL.md's plan template carries the Acceptance map section and its self-review check (#155 D10, #274 D12)."
     },
@@ -192,7 +188,6 @@
       "hot": [
         "from-issue/SKILL.md",
         "from-issue/AUTO.md",
-        "from-issue/bindings.md",
         "from-issue/ship-handoff.md",
         "sdd/SKILL.md",
         "sdd/implementer-prompt.md",
@@ -220,14 +215,13 @@
       ],
       "unread": {
         "from-issue/investigate.md": "Phase 0 ran in the earlier controller",
-        "from-issue/grounding.md": "Phases 2–5 ran in the earlier controller",
         "from-issue/standards-review.md": "Phase 5 ran in the earlier controller",
         "from-issue/REVIEW-CONTRACT.md": "the Phase-5 reviewer contract, handed over by path",
         "codex-collaboration/PLAN-REVIEW.md": "plan-review ran at Phase 5"
       },
       "ceiling_bytes": {
-        "claude": 180508,
-        "codex": 180508
+        "claude": 179014,
+        "codex": 179014
       },
       "conditional_ceiling_bytes": {
         "claude": 135746,
@@ -481,8 +475,8 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 10775,
-        "codex": 9479
+        "claude": 10674,
+        "codex": 9378
       },
       "conditional_ceiling_bytes": {
         "claude": 0,
@@ -1043,6 +1037,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 549810,
+  "corpus_ceiling_bytes": 546834,
   "description_ceiling_bytes": 3034
 }
