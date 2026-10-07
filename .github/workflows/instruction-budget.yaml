@@ -1,0 +1,50 @@
+# The growth gate (#292, program #291 D5). Required on `main` beside `Nix Eval` once
+# `just protect-main` has been applied. It runs `instruction_load check`: skill lint,
+# no ceiling breached, every ceiling within 5% of measured, and, on a pull request,
+# raise control against the merge commit's first parent. The label is read from the
+# event payload, which is why the label event types are listed: without them, adding
+# or removing the label would not re-run the check. tests/test_branch_protection.py
+# pins this file's shape; run `just agent-workflow-tests` after editing it.
+name: Instruction Budget
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  push:
+    branches:
+      - main
+
+# One run per pull request, superseded by the PR's next event; a push run is keyed
+# by event and SHA, after ci.yaml.
+concurrency:
+  group: instruction-budget-${{ github.event.pull_request.number || format('{0}-{1}', github.event_name, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  instruction-budget:
+    name: Instruction Budget
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check the instruction budget
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RAISE_LABEL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'instruction-budget-raise') }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "$EVENT_NAME" = pull_request ]; then
+            args+=(--base HEAD^1)
+            if [ "$RAISE_LABEL" = true ]; then
+              args+=(--raise-label)
+            fi
+          fi
+          PYTHONPATH=python python3 -m agent_tools.instruction_load check "${args[@]}"

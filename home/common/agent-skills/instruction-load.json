@@ -37,7 +37,11 @@
         "claude": 105269,
         "codex": 105269
       },
-      "note": "Direct autonomous `--auto` run of Phases 0–5 and the rollover. Design, grill and planning run in their owners. The hot path keeps from-issue's top-level acquisition routes and AUTO.md's rollover, whose route-scoping is deferred (#155 D6). Ceiling raised for #198: from-issue/SKILL.md grew with the Phase-7 dispatch-gap fallback, which this route carries but never runs, and AUTO.md with the earlier controller's relay of the suspension line (#155 D10). Ceiling raised for #191's validated `progress` and `suspend` replies, which grew `from-issue/SKILL.md` (#155 D10). Ceiling raised for #192: AUTO.md's fresh delegated owner checks its worktree against the contract's remove_worktree target (#155 D10). Ceiling raised for #192's review fix: a remainder owner probes reviewer dispatch before a post-selection sync (#155 D10). Ceiling raised for #221: from-issue/SKILL.md's durable interactive route answers control's `delivery_contract` (#221 D10). Ceiling raised for #222: sdd and from-issue Phase 6 register writing workers and fence their commits (#155 D10). Ceiling raised for #222: from-issue and ship-issue register writing workers, fence local commits and release before exit (#155 D10). Ceiling raised for #222: ship review fixes (handoff release step, current wait-handle carve-out) (#155 D10). Ceiling raised for #250: sdd and from-issue Phase 6 record a progress marker after each task, and the stall bound's description names it (#155 D10). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10). Ceiling raised for #261: from-issue, sdd and ship-issue carry the Interim child results rule (#155 D10). Ceiling raised for #264: sdd and from-issue state that head_sha is the final-review head (#155 D10). Ceiling raised for #265: relaunchers carry a resume pack and the owner's resume-pack guidance (#155 D10). Ceiling raised for #265: final-review fixes name the always-read owner sections and scope the rollover checks in the resume-pack guidance (#155 D10). Ceiling raised for #272: both ship-handoff shapes carry acceptance_state from the sdd report (#155 D10). Ceiling raised for #276: owners and writing workers run long commands through launch-scope exec, and owners self-reap before every exit write (#155 D10). Ceiling raised for #276's final-review fixes: Self-reap names a failed reap's `skipped` launches only when it printed a report (#155 D10). Ceiling raised for #277: owners and writing workers create scratch under launch-scope scratch, and self-reap removes the scratch root (#155 D10). Ceiling raised for #279: from-issue Phase 0 runs lane-triage and records its shadow verdict (#155 D10)."
+      "conditional_ceiling_bytes": {
+        "claude": 49297,
+        "codex": 37958
+      },
+      "note": "Direct autonomous `--auto` run of Phases 0–5 and the rollover. Design, grill and planning run in their owners. The hot path keeps from-issue's top-level acquisition routes and AUTO.md's rollover, whose route-scoping is deferred (#155 D6). Ceiling raised for #198: from-issue/SKILL.md grew with the Phase-7 dispatch-gap fallback, which this route carries but never runs, and AUTO.md with the earlier controller's relay of the suspension line (#155 D10). Ceiling raised for #191's validated `progress` and `suspend` replies, which grew `from-issue/SKILL.md` (#155 D10). Ceiling raised for #192: AUTO.md's fresh delegated owner checks its worktree against the contract's remove_worktree target (#155 D10). Ceiling raised for #192's review fix: a remainder owner probes reviewer dispatch before a post-selection sync (#155 D10). Ceiling raised for #221: from-issue/SKILL.md's durable interactive route answers control's `delivery_contract` (#221 D10). Ceiling raised for #222: sdd and from-issue Phase 6 register writing workers and fence their commits (#155 D10). Ceiling raised for #222: from-issue and ship-issue register writing workers, fence local commits and release before exit (#155 D10). Ceiling raised for #222: ship review fixes (handoff release step, current wait-handle carve-out) (#155 D10). Ceiling raised for #250: sdd and from-issue Phase 6 record a progress marker after each task, and the stall bound's description names it (#155 D10). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10). Ceiling raised for #261: from-issue, sdd and ship-issue carry the Interim child results rule (#155 D10). Ceiling raised for #264: sdd and from-issue state that head_sha is the final-review head (#155 D10). Ceiling raised for #265: relaunchers carry a resume pack and the owner's resume-pack guidance (#155 D10). Ceiling raised for #265: final-review fixes name the always-read owner sections and scope the rollover checks in the resume-pack guidance (#155 D10). Ceiling raised for #272: both ship-handoff shapes carry acceptance_state from the sdd report (#155 D10). Ceiling raised for #276: owners and writing workers run long commands through launch-scope exec, and owners self-reap before every exit write (#155 D10). Ceiling raised for #276's final-review fixes: Self-reap names a failed reap's `skipped` launches only when it printed a report (#155 D10). Ceiling raised for #277: owners and writing workers create scratch under launch-scope scratch, and self-reap removes the scratch root (#155 D10). Conditional ceiling re-measured after merging origin/main at 2d3ba38, where #276's launch-scope text met this gate (#155 D19). Conditional ceiling re-measured after merging origin/main at e63f626, where #277's scratch-root text met this gate (#155 D19). Conditional ceiling re-measured after merging origin/main at 07f4f95, where #273's tracker-hold text met this gate (#155 D19). Ceiling raised for #279: from-issue Phase 0 runs lane-triage and records its shadow verdict (#155 D10)."
     },
     {
       "id": "orchestration-dispatcher",
@@ -53,6 +57,9 @@
       "unread": {},
       "ceiling_bytes": {
         "claude": 29303
+      },
+      "conditional_ceiling_bytes": {
+        "claude": 0
       },
       "note": "One control-adapter run. It loads only its entry, whose resolver paragraph and lifecycle-call rule stay per entry (#155 D5). Ceiling re-measured after merging origin/main at 382b59c (#155 D19). Ceiling raised for #198: the finalize report routes an `agent_dispatch` suspension to its re-entry line (#155 D10). Ceiling raised for #221: §4's `delivery_contract` rule (#221 D10). Ceiling raised for #222: §2's dispatcher rules for an owner return without a terminal write and a non-owner hand-back (#155 D10). Ceiling raised for #220: §5's final report names a delivered issue's stale custody (#155 D10). Ceiling raised for #222: ship review fixes (handoff release step, current wait-handle carve-out) (#155 D10). Ceiling raised for #250: the anti-zombie sentence names the progress marker (#155 D10). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10). Ceiling raised for #261: §2's interim owner notification case (#155 D10). Ceiling raised for #265: relaunchers carry a resume pack and the owner's resume-pack guidance (#155 D10). Ceiling raised for #275: §4's stop pass and §5's stop-failure list (#155 D10). Ceiling raised for #276: the stop pass ends with a launch-scope sweep, and §5 lists a failed sweep (#155 D10). Ceiling raised for #276's final-review fixes: the stop pass and §5 keep a failed sweep's `skipped` launches only when it printed a report (#155 D10). Ceiling raised for #273: orchestrate-issues reports held issues and the ship handoff closes or holds on acceptance_state (#155 D10). Ceiling re-measured after merging origin/main at 2d3ba38 (#155 D19). Ceiling re-measured after merging origin/main at e63f626 (#155 D19)."
     },
@@ -106,7 +113,10 @@
       "ceiling_bytes": {
         "claude": 191444
       },
-      "note": "Dispatcher-owned `--auto` run of Phases 0–7 in one owner: from-issue with AUTO.md, sdd at Phase 6 and the ship prompt at Phase 7. It carries from-issue's top-level acquisition routes and AUTO.md's rollover, which its route never takes (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `sdd/SKILL.md` and `sdd/final-review.md` (#155 D10). Ceiling raised for #198: from-issue/SKILL.md grew with the Phase-7 dispatch-gap fallback, AUTO.md with its relay and the ship prompt with the gap line (#155 D10). On that fallback's named branch this owner runs ship-issue itself, so the ship owner's documents are conditional here (#155 D7). Ceiling re-measured after merging origin/main at 6ab576e, where #195's and #198's raises met (#155 D19). Ceiling raised for #191's validated `progress` and `suspend` replies, which grew `from-issue/SKILL.md` (#155 D10). Ceiling raised for #192: AUTO.md's fresh delegated owner checks its worktree against the contract's remove_worktree target (#155 D10). Ceiling raised for #192's review fix: a remainder owner probes reviewer dispatch before a post-selection sync (#155 D10). Ceiling raised for #221: from-issue/SKILL.md's durable interactive route answers control's `delivery_contract` (#221 D10). Ceiling raised for #222: sdd and from-issue Phase 6 register writing workers and fence their commits (#155 D10). Ceiling raised for #222: from-issue and ship-issue register writing workers, fence local commits and release before exit (#155 D10). Ceiling raised for #222: final-review fixes to the launch-fence prose (#155 D10). Ceiling raised for #222: ship review fixes (handoff release step, current wait-handle carve-out) (#155 D10). Ceiling raised for #250: sdd and from-issue Phase 6 record a progress marker after each task, and the stall bound's description names it (#155 D10). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10). Ceiling raised for #261: from-issue, sdd and ship-issue carry the Interim child results rule (#155 D10). Ceiling raised for #264: sdd and from-issue state that head_sha is the final-review head (#155 D10). Ceiling raised for #264: ship-issue Phase 5 selects its review range with review-range (#155 D10). Ceiling raised for #264: ship-issue Phase 6 waits on required checks and lists advisory states (#155 D10). Ceiling raised for #263: sdd's final-review gained the Final verification step, and sdd's Finish carries its none-declared route (#155 D10). Ceiling raised for #263: the implementer, fixer and writing-plans name the per-task verification ladder (#155 D10). Ceiling re-measured after merging origin/main at 0ad76f6 (#155 D19). Ceiling raised for #265: relaunchers carry a resume pack and the owner's resume-pack guidance (#155 D10). Ceiling raised for #265: final-review fixes name the always-read owner sections and scope the rollover checks in the resume-pack guidance (#155 D10). Ceiling raised for #270: sdd's per-task implementer dispatch selects the Sonnet task-implementer role (#155 D10). Ceiling raised for #270: sdd's BLOCKED handling marks the Opus escalation and the fix-loop summary names Opus/high (#155 D10). Ceiling raised for #270: sdd's agent tiers name the Sonnet task implementer and carry its re-evaluation rule (#155 D10). Ceiling raised for #272: the final conformance axis moved to Opus/high (#155 D10). Ceiling raised for #272: the conformance prompt grades every acceptance criterion and ship's full review omits them (#155 D10). Ceiling raised for #272: final-review.md checks acceptance verdicts and commits the acceptance record, and sdd's Finish reports acceptance_state (#155 D10). Ceiling raised for #272: both ship-handoff shapes carry acceptance_state from the sdd report (#155 D10). Ceiling raised for #272: the final-review fix wave tightened acceptance freshness, the repair-round record commit and the grading bullet's skip condition (#155 D10). Ceiling re-measured after merging origin/main at 8121022 (#155 D19). Ceiling raised for #272's PR review: final-review.md counts numbered criterion lines like the Acceptance map, applies freshness to cited standalone `code` runs, and asks the re-review for the evidence citation (#155 D10). Ceiling raised for #276: owners and writing workers run long commands through launch-scope exec, and owners self-reap before every exit write (#155 D10). Ceiling raised for #276's final-review fixes: Self-reap names a failed reap's `skipped` launches only when it printed a report (#155 D10). Ceiling raised for #277: owners and writing workers create scratch under launch-scope scratch, and self-reap removes the scratch root (#155 D10). Ceiling raised for #273: orchestrate-issues reports held issues and the ship handoff closes or holds on acceptance_state (#155 D10). Ceiling raised for #273: the final-review fix wave makes the inline fallback hold reuse ship-issue Phase 8 step 1's sequence and lets ship-issue Phase 0 rewrite an attested Verdict (#155 D10). Ceiling re-measured after merging origin/main at 2d3ba38 (#155 D19). Ceiling re-measured after merging origin/main at e63f626 (#155 D19). Ceiling raised for #279: from-issue Phase 0 runs lane-triage and records its shadow verdict (#155 D10)."
+      "conditional_ceiling_bytes": {
+        "claude": 153646
+      },
+      "note": "Dispatcher-owned `--auto` run of Phases 0–7 in one owner: from-issue with AUTO.md, sdd at Phase 6 and the ship prompt at Phase 7. It carries from-issue's top-level acquisition routes and AUTO.md's rollover, which its route never takes (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `sdd/SKILL.md` and `sdd/final-review.md` (#155 D10). Ceiling raised for #198: from-issue/SKILL.md grew with the Phase-7 dispatch-gap fallback, AUTO.md with its relay and the ship prompt with the gap line (#155 D10). On that fallback's named branch this owner runs ship-issue itself, so the ship owner's documents are conditional here (#155 D7). Ceiling re-measured after merging origin/main at 6ab576e, where #195's and #198's raises met (#155 D19). Ceiling raised for #191's validated `progress` and `suspend` replies, which grew `from-issue/SKILL.md` (#155 D10). Ceiling raised for #192: AUTO.md's fresh delegated owner checks its worktree against the contract's remove_worktree target (#155 D10). Ceiling raised for #192's review fix: a remainder owner probes reviewer dispatch before a post-selection sync (#155 D10). Ceiling raised for #221: from-issue/SKILL.md's durable interactive route answers control's `delivery_contract` (#221 D10). Ceiling raised for #222: sdd and from-issue Phase 6 register writing workers and fence their commits (#155 D10). Ceiling raised for #222: from-issue and ship-issue register writing workers, fence local commits and release before exit (#155 D10). Ceiling raised for #222: final-review fixes to the launch-fence prose (#155 D10). Ceiling raised for #222: ship review fixes (handoff release step, current wait-handle carve-out) (#155 D10). Ceiling raised for #250: sdd and from-issue Phase 6 record a progress marker after each task, and the stall bound's description names it (#155 D10). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10). Ceiling raised for #261: from-issue, sdd and ship-issue carry the Interim child results rule (#155 D10). Ceiling raised for #264: sdd and from-issue state that head_sha is the final-review head (#155 D10). Ceiling raised for #264: ship-issue Phase 5 selects its review range with review-range (#155 D10). Ceiling raised for #264: ship-issue Phase 6 waits on required checks and lists advisory states (#155 D10). Ceiling raised for #263: sdd's final-review gained the Final verification step, and sdd's Finish carries its none-declared route (#155 D10). Ceiling raised for #263: the implementer, fixer and writing-plans name the per-task verification ladder (#155 D10). Ceiling re-measured after merging origin/main at 0ad76f6 (#155 D19). Ceiling raised for #265: relaunchers carry a resume pack and the owner's resume-pack guidance (#155 D10). Ceiling raised for #265: final-review fixes name the always-read owner sections and scope the rollover checks in the resume-pack guidance (#155 D10). Ceiling raised for #270: sdd's per-task implementer dispatch selects the Sonnet task-implementer role (#155 D10). Ceiling raised for #270: sdd's BLOCKED handling marks the Opus escalation and the fix-loop summary names Opus/high (#155 D10). Ceiling raised for #270: sdd's agent tiers name the Sonnet task implementer and carry its re-evaluation rule (#155 D10). Ceiling raised for #272: the final conformance axis moved to Opus/high (#155 D10). Ceiling raised for #272: the conformance prompt grades every acceptance criterion and ship's full review omits them (#155 D10). Ceiling raised for #272: final-review.md checks acceptance verdicts and commits the acceptance record, and sdd's Finish reports acceptance_state (#155 D10). Ceiling raised for #272: both ship-handoff shapes carry acceptance_state from the sdd report (#155 D10). Ceiling raised for #272: the final-review fix wave tightened acceptance freshness, the repair-round record commit and the grading bullet's skip condition (#155 D10). Ceiling re-measured after merging origin/main at 8121022 (#155 D19). Ceiling raised for #272's PR review: final-review.md counts numbered criterion lines like the Acceptance map, applies freshness to cited standalone `code` runs, and asks the re-review for the evidence citation (#155 D10). Ceiling raised for #276: owners and writing workers run long commands through launch-scope exec, and owners self-reap before every exit write (#155 D10). Ceiling raised for #276's final-review fixes: Self-reap names a failed reap's `skipped` launches only when it printed a report (#155 D10). Ceiling raised for #277: owners and writing workers create scratch under launch-scope scratch, and self-reap removes the scratch root (#155 D10). Ceiling raised for #273: orchestrate-issues reports held issues and the ship handoff closes or holds on acceptance_state (#155 D10). Ceiling raised for #273: the final-review fix wave makes the inline fallback hold reuse ship-issue Phase 8 step 1's sequence and lets ship-issue Phase 0 rewrite an attested Verdict (#155 D10). Ceiling re-measured after merging origin/main at 2d3ba38 (#155 D19). Ceiling re-measured after merging origin/main at e63f626 (#155 D19). Conditional ceiling re-measured after merging origin/main at 2d3ba38, where #276's launch-scope text met this gate (#155 D19). Conditional ceiling re-measured after merging origin/main at e63f626, where #277's scratch-root text met this gate (#155 D19). Conditional ceiling re-measured after merging origin/main at 07f4f95, where #273's tracker-hold text met this gate (#155 D19). Ceiling raised for #279: from-issue Phase 0 runs lane-triage and records its shadow verdict (#155 D10)."
     },
     {
       "id": "design-and-grill-owner",
@@ -134,6 +144,10 @@
         "claude": 28262,
         "codex": 28262
       },
+      "conditional_ceiling_bytes": {
+        "claude": 22544,
+        "codex": 22544
+      },
       "note": "Phases 2–3 from AUTO.md's prompt: design, grill-with-docs and doc-grounded-questions. Their producer-report and explorer-escalation blocks stay per skill (#155 D5). Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10)."
     },
     {
@@ -158,6 +172,10 @@
       "ceiling_bytes": {
         "claude": 24308,
         "codex": 24308
+      },
+      "conditional_ceiling_bytes": {
+        "claude": 13953,
+        "codex": 13953
       },
       "note": "Phase 4 from AUTO.md's prompt: writing-plans and doc-grounded-questions, plus the review contract for a mechanical-only self-grade. The producer-report block stays per skill (#155 D5). Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10). Ceiling raised for #263: the implementer, fixer and writing-plans name the per-task verification ladder (#155 D10). Ceiling raised for #274: writing-plans/SKILL.md's plan template carries the Acceptance map section and its self-review check (#155 D10, #274 D12)."
     },
@@ -211,7 +229,11 @@
         "claude": 182716,
         "codex": 182716
       },
-      "note": "Post-rollover Phases 6–7: from-issue with AUTO.md, sdd and the ship prompt; the Phase 0–5 documents stay unread. It carries from-issue's top-level acquisition routes, whose route-scoping is deferred (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `sdd/SKILL.md`, `sdd/correctness-reviewer-prompt.md` and `sdd/final-review.md` (#155 D10). Ceiling raised for #198: from-issue/SKILL.md grew with the Phase-7 dispatch-gap fallback, AUTO.md with its relay and the ship prompt with the gap line (#155 D10). On that fallback's named branch this owner runs ship-issue itself, so the ship owner's documents are conditional here (#155 D7). Ceiling re-measured after merging origin/main at 6ab576e, where #195's and #198's raises met (#155 D19). Ceiling raised for #191's validated `progress` and `suspend` replies, which grew `from-issue/SKILL.md` (#155 D10). Ceiling raised for #192: AUTO.md's fresh delegated owner checks its worktree against the contract's remove_worktree target (#155 D10). Ceiling raised for #192's review fix: a remainder owner probes reviewer dispatch before a post-selection sync (#155 D10). Ceiling raised for #221: from-issue/SKILL.md's durable interactive route answers control's `delivery_contract` (#221 D10). Ceiling raised for #222: sdd and from-issue Phase 6 register writing workers and fence their commits (#155 D10). Ceiling raised for #222: from-issue and ship-issue register writing workers, fence local commits and release before exit (#155 D10). Ceiling raised for #222: final-review fixes to the launch-fence prose (#155 D10). Ceiling raised for #222: ship review fixes (handoff release step, current wait-handle carve-out) (#155 D10). Ceiling raised for #250: sdd and from-issue Phase 6 record a progress marker after each task, and the stall bound's description names it (#155 D10). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10). Ceiling raised for #261: from-issue, sdd and ship-issue carry the Interim child results rule (#155 D10). Ceiling raised for #264: sdd and from-issue state that head_sha is the final-review head (#155 D10). Ceiling raised for #264: ship-issue Phase 5 selects its review range with review-range (#155 D10). Ceiling raised for #264: ship-issue Phase 6 waits on required checks and lists advisory states (#155 D10). Ceiling raised for #263: sdd's final-review gained the Final verification step, and sdd's Finish carries its none-declared route (#155 D10). Ceiling raised for #263: the implementer, fixer and writing-plans name the per-task verification ladder (#155 D10). Ceiling re-measured after merging origin/main at 0ad76f6 (#155 D19). Ceiling raised for #265: relaunchers carry a resume pack and the owner's resume-pack guidance (#155 D10). Ceiling raised for #265: final-review fixes name the always-read owner sections and scope the rollover checks in the resume-pack guidance (#155 D10). Ceiling raised for #270: sdd's per-task implementer dispatch selects the Sonnet task-implementer role (#155 D10). Ceiling raised for #270: sdd's BLOCKED handling marks the Opus escalation and the fix-loop summary names Opus/high (#155 D10). Ceiling raised for #270: sdd's agent tiers name the Sonnet task implementer and carry its re-evaluation rule (#155 D10). Ceiling raised for #272: the final conformance axis moved to Opus/high (#155 D10). Ceiling raised for #272: the conformance prompt grades every acceptance criterion and ship's full review omits them (#155 D10). Ceiling raised for #272: final-review.md checks acceptance verdicts and commits the acceptance record, and sdd's Finish reports acceptance_state (#155 D10). Ceiling raised for #272: both ship-handoff shapes carry acceptance_state from the sdd report (#155 D10). Ceiling raised for #272: the final-review fix wave tightened acceptance freshness, the repair-round record commit and the grading bullet's skip condition (#155 D10). Ceiling re-measured after merging origin/main at 8121022 (#155 D19). Ceiling raised for #272's PR review: final-review.md counts numbered criterion lines like the Acceptance map, applies freshness to cited standalone `code` runs, and asks the re-review for the evidence citation (#155 D10). Ceiling raised for #276: owners and writing workers run long commands through launch-scope exec, and owners self-reap before every exit write (#155 D10). Ceiling raised for #276's final-review fixes: Self-reap names a failed reap's `skipped` launches only when it printed a report (#155 D10). Ceiling raised for #277: owners and writing workers create scratch under launch-scope scratch, and self-reap removes the scratch root (#155 D10). Ceiling raised for #273: orchestrate-issues reports held issues and the ship handoff closes or holds on acceptance_state (#155 D10). Ceiling raised for #273: the final-review fix wave makes the inline fallback hold reuse ship-issue Phase 8 step 1's sequence and lets ship-issue Phase 0 rewrite an attested Verdict (#155 D10). Ceiling re-measured after merging origin/main at 2d3ba38 (#155 D19). Ceiling re-measured after merging origin/main at e63f626 (#155 D19). Ceiling raised for #279: from-issue Phase 0 runs lane-triage and records its shadow verdict (#155 D10)."
+      "conditional_ceiling_bytes": {
+        "claude": 135746,
+        "codex": 119335
+      },
+      "note": "Post-rollover Phases 6–7: from-issue with AUTO.md, sdd and the ship prompt; the Phase 0–5 documents stay unread. It carries from-issue's top-level acquisition routes, whose route-scoping is deferred (#155 D6). Ceiling re-measured after merging origin/main at 7c21ebe (#155 D19). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `sdd/SKILL.md`, `sdd/correctness-reviewer-prompt.md` and `sdd/final-review.md` (#155 D10). Ceiling raised for #198: from-issue/SKILL.md grew with the Phase-7 dispatch-gap fallback, AUTO.md with its relay and the ship prompt with the gap line (#155 D10). On that fallback's named branch this owner runs ship-issue itself, so the ship owner's documents are conditional here (#155 D7). Ceiling re-measured after merging origin/main at 6ab576e, where #195's and #198's raises met (#155 D19). Ceiling raised for #191's validated `progress` and `suspend` replies, which grew `from-issue/SKILL.md` (#155 D10). Ceiling raised for #192: AUTO.md's fresh delegated owner checks its worktree against the contract's remove_worktree target (#155 D10). Ceiling raised for #192's review fix: a remainder owner probes reviewer dispatch before a post-selection sync (#155 D10). Ceiling raised for #221: from-issue/SKILL.md's durable interactive route answers control's `delivery_contract` (#221 D10). Ceiling raised for #222: sdd and from-issue Phase 6 register writing workers and fence their commits (#155 D10). Ceiling raised for #222: from-issue and ship-issue register writing workers, fence local commits and release before exit (#155 D10). Ceiling raised for #222: final-review fixes to the launch-fence prose (#155 D10). Ceiling raised for #222: ship review fixes (handoff release step, current wait-handle carve-out) (#155 D10). Ceiling raised for #250: sdd and from-issue Phase 6 record a progress marker after each task, and the stall bound's description names it (#155 D10). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10). Ceiling raised for #261: from-issue, sdd and ship-issue carry the Interim child results rule (#155 D10). Ceiling raised for #264: sdd and from-issue state that head_sha is the final-review head (#155 D10). Ceiling raised for #264: ship-issue Phase 5 selects its review range with review-range (#155 D10). Ceiling raised for #264: ship-issue Phase 6 waits on required checks and lists advisory states (#155 D10). Ceiling raised for #263: sdd's final-review gained the Final verification step, and sdd's Finish carries its none-declared route (#155 D10). Ceiling raised for #263: the implementer, fixer and writing-plans name the per-task verification ladder (#155 D10). Ceiling re-measured after merging origin/main at 0ad76f6 (#155 D19). Ceiling raised for #265: relaunchers carry a resume pack and the owner's resume-pack guidance (#155 D10). Ceiling raised for #265: final-review fixes name the always-read owner sections and scope the rollover checks in the resume-pack guidance (#155 D10). Ceiling raised for #270: sdd's per-task implementer dispatch selects the Sonnet task-implementer role (#155 D10). Ceiling raised for #270: sdd's BLOCKED handling marks the Opus escalation and the fix-loop summary names Opus/high (#155 D10). Ceiling raised for #270: sdd's agent tiers name the Sonnet task implementer and carry its re-evaluation rule (#155 D10). Ceiling raised for #272: the final conformance axis moved to Opus/high (#155 D10). Ceiling raised for #272: the conformance prompt grades every acceptance criterion and ship's full review omits them (#155 D10). Ceiling raised for #272: final-review.md checks acceptance verdicts and commits the acceptance record, and sdd's Finish reports acceptance_state (#155 D10). Ceiling raised for #272: both ship-handoff shapes carry acceptance_state from the sdd report (#155 D10). Ceiling raised for #272: the final-review fix wave tightened acceptance freshness, the repair-round record commit and the grading bullet's skip condition (#155 D10). Ceiling re-measured after merging origin/main at 8121022 (#155 D19). Ceiling raised for #272's PR review: final-review.md counts numbered criterion lines like the Acceptance map, applies freshness to cited standalone `code` runs, and asks the re-review for the evidence citation (#155 D10). Ceiling raised for #276: owners and writing workers run long commands through launch-scope exec, and owners self-reap before every exit write (#155 D10). Ceiling raised for #276's final-review fixes: Self-reap names a failed reap's `skipped` launches only when it printed a report (#155 D10). Ceiling raised for #277: owners and writing workers create scratch under launch-scope scratch, and self-reap removes the scratch root (#155 D10). Ceiling raised for #273: orchestrate-issues reports held issues and the ship handoff closes or holds on acceptance_state (#155 D10). Ceiling raised for #273: the final-review fix wave makes the inline fallback hold reuse ship-issue Phase 8 step 1's sequence and lets ship-issue Phase 0 rewrite an attested Verdict (#155 D10). Ceiling re-measured after merging origin/main at 2d3ba38 (#155 D19). Ceiling re-measured after merging origin/main at e63f626 (#155 D19). Conditional ceiling re-measured after merging origin/main at 2d3ba38, where #276's launch-scope text met this gate (#155 D19). Conditional ceiling re-measured after merging origin/main at e63f626, where #277's scratch-root text met this gate (#155 D19). Conditional ceiling re-measured after merging origin/main at 07f4f95, where #273's tracker-hold text met this gate (#155 D19). Ceiling raised for #279: from-issue Phase 0 runs lane-triage and records its shadow verdict (#155 D10)."
     },
     {
       "id": "ship-owner",
@@ -244,7 +266,11 @@
         "claude": 68599,
         "codex": 68599
       },
-      "note": "ship-issue from ship-handoff.md's prompt, with its sync, review and consolidation files. The lifecycle stdin clause stays per entry (#155 D5). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `ship-issue/REVIEW.md` and `ship-issue/SKILL.md` (#155 D10). Ceiling raised for #198: ship-issue probes reviewer dispatch before any write and returns the gap line (#155 D10). Ceiling re-measured after merging origin/main at 6ab576e, where #195's and #198's raises met (#155 D19). Ceiling raised for #192: ship-issue's Delivery loop, Remainder mode and Phase 6 point to CI-MERGE.md's post-selection sync route (#155 D10). Ceiling raised for #192's review fix: a remainder owner probes reviewer dispatch before a post-selection sync (#155 D10). Ceiling raised for #222: from-issue and ship-issue register writing workers, fence local commits and release before exit (#155 D10). Ceiling raised for #222: final-review fixes to the launch-fence prose (#155 D10). Ceiling raised for #261: from-issue, sdd and ship-issue carry the Interim child results rule (#155 D10). Ceiling raised for #264: ship-issue Phase 5 selects its review range with review-range (#155 D10). Ceiling raised for #264: ship-issue Phase 6 waits on required checks and lists advisory states (#155 D10). Ceiling raised for #263: ship-issue Phase 2 checks and records the verified tree, and names an unrecorded pass (#155 D10). Ceiling re-measured after merging origin/main at 0ad76f6 (#155 D19). Ceiling raised for #272: the conformance prompt grades every acceptance criterion and ship's full review omits them (#155 D10). Ceiling raised for #272: both ship-handoff shapes carry acceptance_state from the sdd report (#155 D10). Ceiling raised for #272: the final-review fix wave tightened acceptance freshness, the repair-round record commit and the grading bullet's skip condition (#155 D10). Ceiling raised for #276: owners and writing workers run long commands through launch-scope exec, and owners self-reap before every exit write (#155 D10). Ceiling raised for #277: owners and writing workers create scratch under launch-scope scratch, and self-reap removes the scratch root (#155 D10). Ceiling raised for #273: ship-issue fixes an effective acceptance state and holds an unmet issue as needs-verification instead of closing it (#155 D10). Ceiling raised for #273: the final-review fix wave pins record_path to the PR body's relative record, refuses a record-less hold, reuses the earliest hold comment and rewords close-only prose (#155 D10). Ceiling re-measured after merging origin/main at 2d3ba38 (#155 D19). Ceiling re-measured after merging origin/main at e63f626 (#155 D19)."
+      "conditional_ceiling_bytes": {
+        "claude": 45328,
+        "codex": 28917
+      },
+      "note": "ship-issue from ship-handoff.md's prompt, with its sync, review and consolidation files. The lifecycle stdin clause stays per entry (#155 D5). Ceiling raised for #195's `review.code` routing of the correctness axis, which grew `ship-issue/REVIEW.md` and `ship-issue/SKILL.md` (#155 D10). Ceiling raised for #198: ship-issue probes reviewer dispatch before any write and returns the gap line (#155 D10). Ceiling re-measured after merging origin/main at 6ab576e, where #195's and #198's raises met (#155 D19). Ceiling raised for #192: ship-issue's Delivery loop, Remainder mode and Phase 6 point to CI-MERGE.md's post-selection sync route (#155 D10). Ceiling raised for #192's review fix: a remainder owner probes reviewer dispatch before a post-selection sync (#155 D10). Ceiling raised for #222: from-issue and ship-issue register writing workers, fence local commits and release before exit (#155 D10). Ceiling raised for #222: final-review fixes to the launch-fence prose (#155 D10). Ceiling raised for #261: from-issue, sdd and ship-issue carry the Interim child results rule (#155 D10). Ceiling raised for #264: ship-issue Phase 5 selects its review range with review-range (#155 D10). Ceiling raised for #264: ship-issue Phase 6 waits on required checks and lists advisory states (#155 D10). Ceiling raised for #263: ship-issue Phase 2 checks and records the verified tree, and names an unrecorded pass (#155 D10). Ceiling re-measured after merging origin/main at 0ad76f6 (#155 D19). Ceiling raised for #272: the conformance prompt grades every acceptance criterion and ship's full review omits them (#155 D10). Ceiling raised for #272: both ship-handoff shapes carry acceptance_state from the sdd report (#155 D10). Ceiling raised for #272: the final-review fix wave tightened acceptance freshness, the repair-round record commit and the grading bullet's skip condition (#155 D10). Ceiling raised for #276: owners and writing workers run long commands through launch-scope exec, and owners self-reap before every exit write (#155 D10). Ceiling raised for #277: owners and writing workers create scratch under launch-scope scratch, and self-reap removes the scratch root (#155 D10). Ceiling raised for #273: ship-issue fixes an effective acceptance state and holds an unmet issue as needs-verification instead of closing it (#155 D10). Ceiling raised for #273: the final-review fix wave pins record_path to the PR body's relative record, refuses a record-less hold, reuses the earliest hold comment and rewords close-only prose (#155 D10). Ceiling re-measured after merging origin/main at 2d3ba38 (#155 D19). Ceiling re-measured after merging origin/main at e63f626 (#155 D19). Conditional ceiling re-measured after merging origin/main at 07f4f95, where #273's tracker-hold text met this gate (#155 D19)."
     },
     {
       "id": "release-owner",
@@ -270,6 +296,10 @@
         "claude": 41929,
         "codex": 41929
       },
+      "conditional_ceiling_bytes": {
+        "claude": 17771,
+        "codex": 17771
+      },
       "note": "One delegated release through ship-release and its changelog rubric."
     },
     {
@@ -286,6 +316,10 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
+      "conditional_ceiling_bytes": {
         "claude": 0,
         "codex": 0
       },
@@ -315,6 +349,10 @@
         "claude": 12947,
         "codex": 12947
       },
+      "conditional_ceiling_bytes": {
+        "claude": 10376,
+        "codex": 10376
+      },
       "note": "The read-only scan from improve-codebase-architecture's prompt. The codebase-design vocabulary and the grounding pass are ambiguous between caller and scan owner, so they count as hot. Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10)."
     },
     {
@@ -333,6 +371,10 @@
       "ceiling_bytes": {
         "claude": 3617,
         "codex": 3617
+      },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
       },
       "note": "A standalone research launch. It loads only its entry."
     },
@@ -363,6 +405,10 @@
         "claude": 20358,
         "codex": 20358
       },
+      "conditional_ceiling_bytes": {
+        "claude": 45343,
+        "codex": 45343
+      },
       "note": "One decision session. Grilling is the default mode; research and prototype sessions are conditional. Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10)."
     },
     {
@@ -383,6 +429,10 @@
       "ceiling_bytes": {
         "claude": 10621,
         "codex": 10621
+      },
+      "conditional_ceiling_bytes": {
+        "claude": 1053,
+        "codex": 1053
       },
       "note": "One slicing run. The wide-refactor exception is conditional. Ceiling raised for #274: to-issues/SKILL.md types and locates every acceptance criterion with a `[code|evidence|human]` kind and a `measured:` clause (#155 D10, #274 D12)."
     },
@@ -408,6 +458,10 @@
         "claude": 41929,
         "codex": 41929
       },
+      "conditional_ceiling_bytes": {
+        "claude": 17771,
+        "codex": 17771
+      },
       "note": "A direct interactive release, with the current session as owner."
     },
     {
@@ -429,6 +483,10 @@
       "ceiling_bytes": {
         "claude": 10775,
         "codex": 9479
+      },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
       },
       "note": "The Phase-5 plan reviewer: its agent definition on Claude and the review contract it is told to read. Its prompt comes from standards-review.md. Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10). Ceiling raised for #274: from-issue/REVIEW-CONTRACT.md's Acceptance map check (#155 D10, #274 D12)."
     },
@@ -452,6 +510,10 @@
         "claude": 960,
         "codex": 0
       },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from from-issue/SKILL.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
     },
     {
@@ -471,6 +533,10 @@
       "unread": {},
       "ceiling_bytes": {
         "claude": 1296,
+        "codex": 0
+      },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
         "codex": 0
       },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from from-issue/SKILL.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
@@ -494,6 +560,10 @@
         "claude": 1296,
         "codex": 0
       },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from from-issue/ship-handoff.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
     },
     {
@@ -510,6 +580,10 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
+      "conditional_ceiling_bytes": {
         "claude": 0,
         "codex": 0
       },
@@ -532,6 +606,10 @@
         "claude": 0,
         "codex": 0
       },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
       "note": "The built-in Explore type: no installed definition and no skill document. Its prompt is composed from grill-with-docs/SKILL.md."
     },
     {
@@ -551,6 +629,10 @@
         "claude": 0,
         "codex": 0
       },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
       "note": "The built-in Explore type: no installed definition and no skill document. Its prompt is composed from writing-plans/SKILL.md."
     },
     {
@@ -567,6 +649,10 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
+      "conditional_ceiling_bytes": {
         "claude": 0,
         "codex": 0
       },
@@ -591,6 +677,10 @@
         "claude": 960,
         "codex": 0
       },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/implementer-prompt.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
     },
     {
@@ -610,6 +700,10 @@
       "unread": {},
       "ceiling_bytes": {
         "claude": 1370,
+        "codex": 0
+      },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
         "codex": 0
       },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/implementer-prompt.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
@@ -633,6 +727,10 @@
         "claude": 1296,
         "codex": 0
       },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/task-reviewer-prompt.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
     },
     {
@@ -654,6 +752,10 @@
         "claude": 1724,
         "codex": 0
       },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/re-review-prompt.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
     },
     {
@@ -673,6 +775,10 @@
       "unread": {},
       "ceiling_bytes": {
         "claude": 1724,
+        "codex": 0
+      },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
         "codex": 0
       },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/SKILL.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
@@ -699,6 +805,10 @@
         "claude": 1370,
         "codex": 0
       },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/fix-loop.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
     },
     {
@@ -718,6 +828,10 @@
       "unread": {},
       "ceiling_bytes": {
         "claude": 1370,
+        "codex": 0
+      },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
         "codex": 0
       },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/SKILL.md's BLOCKED handling, whose leaf clauses #153 holds (#155 D5). Added for #270: the Opus escalation of a reasoning-problem BLOCKED (#270 D2)."
@@ -741,6 +855,10 @@
         "claude": 1296,
         "codex": 0
       },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/fix-loop.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
     },
     {
@@ -760,6 +878,10 @@
       "unread": {},
       "ceiling_bytes": {
         "claude": 1296,
+        "codex": 0
+      },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
         "codex": 0
       },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/conformance-reviewer-prompt.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
@@ -783,6 +905,10 @@
         "claude": 1296,
         "codex": 0
       },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/correctness-reviewer-prompt.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
     },
     {
@@ -802,6 +928,10 @@
       "unread": {},
       "ceiling_bytes": {
         "claude": 1370,
+        "codex": 0
+      },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
         "codex": 0
       },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/final-review.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
@@ -826,6 +956,10 @@
         "claude": 1724,
         "codex": 0
       },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/final-review.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
     },
     {
@@ -845,6 +979,10 @@
       "unread": {},
       "ceiling_bytes": {
         "claude": 1296,
+        "codex": 0
+      },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
         "codex": 0
       },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from sdd/final-review.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
@@ -870,6 +1008,10 @@
         "claude": 1296,
         "codex": 0
       },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from ship-issue/SKILL.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
     },
     {
@@ -891,10 +1033,16 @@
         "claude": 1724,
         "codex": 0
       },
+      "conditional_ceiling_bytes": {
+        "claude": 0,
+        "codex": 0
+      },
       "note": "Loads only its agent definition on Claude and nothing on Codex. Its prompt comes from ship-issue/SKILL.md, whose leaf clauses #153 holds (#155 D5). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10)."
     }
   ],
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
-  }
+  },
+  "corpus_ceiling_bytes": 549810,
+  "description_ceiling_bytes": 3034
 }

@@ -905,7 +905,7 @@ class CommittedContractTest(ResolverTestCase):
     def test_orchestration_values_are_committed_contract_values(self):
         orchestration = source_contract()["bindings"]["workflow"]["orchestration"]
         self.assertEqual(orchestration["max_parallel"], 2)
-        self.assertEqual(orchestration["attempt_budget_minutes"], 180)
+        self.assertEqual(orchestration["attempt_budget_minutes"], 240)
         self.assertFalse((REPO_ROOT / ".claude" / "skills.config.json").exists())  # policy-gate-pattern
 
     def test_nix_activate_is_exact_and_deploy_stays_unsupported(self):
