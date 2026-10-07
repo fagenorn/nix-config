@@ -103,7 +103,7 @@ in the flow use `mechanic` on Sonnet/high; reviewer-shaped first passes use
 Both prompts must carry, inline (the subagent starts with no context and loads no skills of its own
 beyond the exceptions named below):
 
-- the Phase-0 issue summary and scope boundary,
+- the Phase-0 issue summary and scope boundary, with the investigation note's **Lane triage** record and verdict verbatim, which the design subagent copies into the spec's `## Triage` section,
 - the retained fields it needs (`bindings.paths.artifacts`, `bindings.paths.context`,
   `bindings.paths.hints`, `bindings.tracker`, `bindings.vcs`, and `bindings.workflow`),
 - the absolute worktree path, and an instruction to `cd` there and commit its artifacts there,

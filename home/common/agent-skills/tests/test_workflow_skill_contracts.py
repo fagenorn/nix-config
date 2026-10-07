@@ -6242,5 +6242,72 @@ class LaunchScopeSweepContractsTest(unittest.TestCase):
             "`scratch.json`", "`unattributed_worktrees`")
 
 
+class LaneTriageContractsTest(unittest.TestCase):
+    """#279: from-issue Phase 0 records a shadow lane-triage verdict."""
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def section(text, heading, next_heading):
+        start = text.index(heading)
+        return text[start:text.index(next_heading, start + len(heading))]
+
+    def setUp(self):
+        self.from_issue = normalized(FROM_ISSUE.read_text(encoding="utf-8"))
+        self.auto = normalized(AUTO.read_text(encoding="utf-8"))
+        self.investigate = normalized(INVESTIGATE.read_text(encoding="utf-8"))
+
+    def test_phase_zero_runs_lane_triage_in_shadow(self):
+        phase_zero = self.section(self.from_issue, "## Phase 0 — Investigate",
+                                  "## Phase 1 — Worktree")
+        self.assert_ordered(
+            phase_zero,
+            "run the lane triage below, and post the note",
+            "**Lane triage.**", "`contract_change`", "`concurrency_or_persistence`",
+            "`open_design_questions`", "`criteria_shape`", "The triage record is",
+            "`lane-triage evaluate --repo-root <project.root> --input -`",
+            "quoted heredoc", "no input file is written",
+            "`ran: full (shadow)`", "`ran: full (active route not yet available)`",
+            "every attempt runs full", "`light_lane_unsupported`",
+            "light lane unsupported", "terminal return procedure",
+            "Any other non-zero exit", "a traceback's exit 1",
+            "a missing command's 127", "terminal return procedure",
+            "**CHECKPOINT**", "triage verdict here as information only")
+
+    def test_resolve_once_rule_admits_the_lane_triage_resolution(self):
+        rule = self.section(self.from_issue, "The only sanctioned exception is",
+                            "Use `bindings.tracker`")
+        self.assert_ordered(
+            rule, "`workflow-state build-delivery`",
+            "`lane-triage evaluate` likewise performs its own read-only resolution",
+            "`bindings.workflow.light_lane`")
+
+    def test_phase_two_commits_the_record_as_the_spec_triage_section(self):
+        phase_two = self.section(self.from_issue, "## Phase 2 — Brainstorm",
+                                 "## Phase 3 — Grill")
+        self.assert_ordered(phase_two, "**Lane triage** record", "verbatim",
+                            "`## Triage` section")
+        self.assert_ordered(self.auto, "the Phase-0 issue summary and scope boundary",
+                            "**Lane triage** record and verdict verbatim",
+                            "`## Triage` section")
+
+    def test_the_note_names_the_lane_triage_field_without_a_binding(self):
+        self.assertIn("**Lane triage** (the triage record", self.investigate)
+        self.assertNotIn("bindings.workflow", self.investigate)
+
+    def test_claude_md_names_the_command_and_its_seam(self):
+        text = normalized((REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8"))
+        self.assert_ordered(
+            text, "`launch-scope scratch` (#277)",
+            "`lane-triage evaluate --repo-root <root> --input -` (#279)",
+            "`agent_tools.resolve_project.resolve`", "`light_lane_unsupported`",
+            "every attempt still runs full", "The remaining Python helpers")
+
+
 if __name__ == "__main__":
     unittest.main()
