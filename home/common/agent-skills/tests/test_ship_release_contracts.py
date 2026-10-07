@@ -203,7 +203,7 @@ class ShipReleaseContractsTest(unittest.TestCase):
 
     def test_durable_state_names_every_field(self):
         state_section = self.section(
-            self.skill, "## Durable release state", "## The flow"
+            self.skill, "## Durable release state", "## Phase 0 — Pre-flight"
         )
         for field in ("headSha", '"pr"', "prUrl", "mergeSha", "tag", "releaseUrl", "deployState"):
             self.assertIn(field, state_section)
