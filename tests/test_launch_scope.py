@@ -4,8 +4,15 @@ Real processes throughout. Liveness is read from `ps`, and a zombie counts as
 dead (spec Test seams). The injectable `terminate` callables cover the
 branches a real process cannot reach (D12).
 """
+import contextlib
+import importlib.util
+import io
+import json
 import os
 from pathlib import Path
+import re
+import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -14,10 +21,11 @@ import time
 import unittest
 from unittest import mock
 
-from agent_tools import launch_processes
+from agent_tools import launch_processes, launch_scope
 from agent_tools.launch_processes import (
     MARKER_ENV, Proc, ProcessTableError, UnsupportedPlatform, process_table,
     protected_pids, read_marker, require_supported_platform, terminate)
+from agent_tools.launch_scope import check_launch_reply
 
 # The suite itself may run under `launch-scope exec`; no fixture inherits that marker.
 UNMARKED_ENV = {key: value for key, value in os.environ.items() if key != MARKER_ENV}
@@ -187,6 +195,274 @@ class ProcessSeamTest(unittest.TestCase):
                 require_supported_platform()
             with self.assertRaises(UnsupportedPlatform):
                 read_marker(os.getpid())
+
+
+ROOT = Path(__file__).parents[1]
+HARNESS_SOURCE = ROOT / "home/common/agent-skills/tests/test_workflow_state.py"
+WORKFLOW = ROOT / "home/common/agent-skills/scripts/workflow-state.py"
+HERMETIC_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+LATER = "2026-08-13T20:06:00Z"
+
+
+def _harness():
+    spec = importlib.util.spec_from_file_location("launch_scope_harness", HARNESS_SOURCE)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.LifecycleHarness
+
+
+LifecycleHarness = _harness()
+
+
+class ScopeHarness(LifecycleHarness):
+    """A ledger with launch 14:1:1 current, a git root for the registry, a PATH shim."""
+
+    def setUp(self):
+        super().setUp()
+        self.cli_env = {k: v for k, v in self.cli_env.items() if k != MARKER_ENV}
+        self.shims = self.root / "shims"
+        self.shims.mkdir()
+        self.write_shim(f"exec {shlex.quote(sys.executable)} {shlex.quote(str(WORKFLOW))} \"$@\"")
+        self.env = {**self.cli_env, **HERMETIC_GIT,
+                    "PATH": f"{self.shims}{os.pathsep}{os.environ['PATH']}"}
+        subprocess.run(["git", "init", "-q", str(self.root)], env=self.env, check=True)
+        common = subprocess.run(
+            ["git", "-C", str(self.root), "rev-parse", "--path-format=absolute",
+             "--git-common-dir"], env=self.env, check=True, capture_output=True, text=True)
+        self.registry = Path(common.stdout.strip()) / "agent-launch" / self.run_id
+        self.init_run()
+        self.assertEqual(self.spawn(issue=14, worktree=str(self.root / "wt-14"))["id"], "14:1:1")
+
+    def write_shim(self, body):
+        shim = self.shims / "workflow-state"
+        shim.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        shim.chmod(0o755)
+
+    def argv(self, *args):
+        return [sys.executable, "-m", "agent_tools.launch_scope", *args]
+
+    def scope(self, *args, env=None):
+        return subprocess.run(self.argv(*args), cwd=self.root, capture_output=True, text=True,
+                              check=False, env=self.env if env is None else env, timeout=120)
+
+    def exec_args(self, *command, action_id="14:1:1", worker_id=None):
+        identity = ["--worker-id", worker_id] if worker_id else ["--action-id", action_id]
+        return ["exec", "--repo-root", str(self.root), "--run-id", self.run_id, *identity,
+                "--", *command]
+
+    def exec_(self, *command, **identity):
+        return self.scope(*self.exec_args(*command, **identity))
+
+    def background_exec(self, *command, **identity):
+        supervisor = subprocess.Popen(self.argv(*self.exec_args(*command, **identity)),
+                                      cwd=self.root, env=self.env,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(supervisor.wait)
+        self.addCleanup(kill_quietly, supervisor.pid)
+        return supervisor
+
+    def pid_from(self, path):
+        self.assertTrue(wait_until(path.exists), path)
+        pids = [int(word) for word in path.read_text().split()]
+        for pid in pids:
+            self.addCleanup(kill_quietly, pid)
+        return pids
+
+    def rows(self, action_id):
+        directory = self.registry / action_id
+        return sorted(p.name for p in directory.glob("*.json")) if directory.is_dir() else []
+
+    def assert_refused(self, completed, action_id, reason):
+        self.assertEqual(completed.returncode, 3, completed.stderr)
+        self.assertEqual(completed.stdout.count("\n"), 1)
+        self.assertEqual(json.loads(completed.stdout),
+                         {"action_id": action_id, "started": False, "reason": reason})
+
+
+# The backgrounded sleeper is a sys.executable process, so its marker is readable on darwin (D15).
+SLEEP_300 = f"{shlex.quote(sys.executable)} -c 'import time; time.sleep(300)'"
+BACKGROUND_SLEEP = f'{SLEEP_300} & echo $! > "$1.tmp" && mv "$1.tmp" "$1"; wait'
+
+
+class ExecTest(ScopeHarness, unittest.TestCase):
+    def test_a_superseded_launch_starts_nothing_and_leaves_no_row(self):
+        resumed = self.resume(issue=14, worktree=str(self.root / "wt-14"), now=LATER,
+                              owner_unavailable=True)
+        self.assertEqual(resumed["id"], "14:1:2")
+        witness = self.root / "started"
+        done = self.exec_(sys.executable, "-c",
+                          "import sys; open(sys.argv[1], 'w').close()", str(witness))
+        self.assert_refused(done, "14:1:1", "superseded_launch")
+        self.assertFalse(witness.exists())
+        self.assertEqual(self.rows("14:1:1"), [])
+
+    def test_a_backgrounded_sleep_does_not_outlive_exec(self):
+        pidfile = self.root / "sleep.pid"
+        done = self.exec_("sh", "-c", f'{SLEEP_300} & echo $! > "$1"', "sh", str(pidfile))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        (pid,) = self.pid_from(pidfile)
+        self.assertTrue(wait_until(lambda: is_dead(pid), 2.0))
+        self.assertEqual(self.rows("14:1:1"), [])
+
+    def test_the_child_carries_the_marker_and_its_status_passes_through(self):
+        seen = self.root / "marker"
+        done = self.exec_("sh", "-c", 'printf %s "$AGENT_LAUNCH_SCOPE" > "$1"; exit 7',
+                          "sh", str(seen))
+        self.assertEqual(done.returncode, 7, done.stderr)
+        self.assertRegex(seen.read_text(),
+                         rf"\A{re.escape(self.run_id)}/14:1:1/[0-9a-f]{{32}}\Z")
+        self.assertEqual(self.exec_("sh", "-c", "kill -TERM $$").returncode,
+                         128 + signal.SIGTERM)
+
+    def test_a_term_to_exec_reaches_the_command_group(self):
+        pidfile = self.root / "sleep.pid"
+        supervisor = self.background_exec("sh", "-c", BACKGROUND_SLEEP, "sh", str(pidfile))
+        (pid,) = self.pid_from(pidfile)
+        supervisor.send_signal(signal.SIGTERM)
+        self.assertEqual(supervisor.wait(timeout=30), 128 + signal.SIGTERM)
+        self.assertTrue(is_dead(pid))
+        self.assertEqual(self.rows("14:1:1"), [])
+
+    def test_a_concurrent_exec_of_the_same_launch_is_untouched(self):
+        pidfile = self.root / "sleep.pid"
+        first = self.background_exec("sh", "-c", BACKGROUND_SLEEP, "sh", str(pidfile))
+        (pid,) = self.pid_from(pidfile)
+        second = self.exec_("true")
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertFalse(is_dead(pid))
+        self.assertEqual(len(self.rows("14:1:1")), 1)
+        first.send_signal(signal.SIGTERM)
+        first.wait(timeout=30)
+        self.assertEqual(self.rows("14:1:1"), [])
+
+    def test_a_worker_runs_while_live_and_is_refused_once_released(self):
+        worker = self.register_worker(action_id="14:1:1",
+                                      now="2026-08-13T20:01:00Z")["worker_id"]
+        self.assertEqual(self.exec_("true", worker_id=worker).returncode, 0)
+        self.release_worker(worker_id=worker, event="returned", now="2026-08-13T20:02:00Z")
+        self.assert_refused(self.exec_("true", worker_id=worker), "14:1:1", "released")
+
+    def test_a_failed_or_malformed_check_starts_nothing(self):
+        worker = self.register_worker(action_id="14:1:1",
+                                      now="2026-08-13T20:01:00Z")["worker_id"]
+        self.write_shim("exit 2")
+        self.assert_refused(self.exec_("true"), "14:1:1", "check_launch_failed")
+        self.assert_refused(self.exec_("true", worker_id=worker), "14:1:1",
+                            "check_worker_failed")
+        good = {"action_id": "14:1:1", "current": True, "current_action_id": "14:1:1",
+                "reason": "current"}
+        for reply in ("not json", json.dumps({**good, "current": "yes"}),
+                      json.dumps({**good, "action_id": "14:1:2"})):
+            with self.subTest(reply=reply):
+                self.write_shim(f"echo {shlex.quote(reply)}")
+                self.assert_refused(self.exec_("true"), "14:1:1", "malformed_reply")
+        self.assertEqual(self.rows("14:1:1"), [])
+
+    def test_a_program_that_cannot_run_exits_as_a_shell_does(self):
+        self.assertEqual(self.exec_("no-such-program-276").returncode, 127)
+        plain = self.root / "plain"
+        plain.write_text("x\n")
+        plain.chmod(0o644)
+        self.assertEqual(self.exec_(str(plain)).returncode, 126)
+        self.assertEqual(self.rows("14:1:1"), [])
+
+    def test_usage_and_helper_errors_exit_two_with_empty_stdout(self):
+        not_git = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        git_only = self.root / "git-only"
+        git_only.mkdir()
+        (git_only / "git").symlink_to(shutil.which("git", path=self.env["PATH"]))
+        base = ["exec", "--repo-root", str(self.root), "--run-id", self.run_id]
+        cases = {
+            "no separator": ([*base, "--action-id", "14:1:1", "true"], None),
+            "no identity": ([*base, "--", "true"], None),
+            "two identities": ([*base, "--action-id", "14:1:1", "--worker-id", "14:1:1:w1",
+                                "--", "true"], None),
+            "empty argv": ([*base, "--action-id", "14:1:1", "--"], None),
+            "unsafe action": ([*base, "--action-id", "..", "--", "true"], None),
+            "unsafe worker": ([*base, "--worker-id", "w1", "--", "true"], None),
+            "unsafe run": (["exec", "--repo-root", str(self.root), "--run-id", "../x",
+                            "--action-id", "14:1:1", "--", "true"], None),
+            "not a repository": (["exec", "--repo-root", str(not_git), "--run-id",
+                                  self.run_id, "--action-id", "14:1:1", "--", "true"], None),
+            "no workflow-state": ([*base, "--action-id", "14:1:1", "--", "true"],
+                                  {**self.env, "PATH": str(git_only)}),
+        }
+        for label, (args, env) in cases.items():
+            with self.subTest(case=label):
+                done = self.scope(*args, env=env)
+                self.assertEqual((done.returncode, done.stdout), (2, ""), done.stderr)
+        self.assertEqual(self.rows("14:1:1"), [])
+
+    def test_a_failure_after_the_spawn_still_kills_the_group(self):  # D14
+        real_write = launch_scope.write_atomically
+
+        def failing_rewrite(pidfile):
+            def write(target, data):
+                if json.loads(data)["pgid"] is None:
+                    return real_write(target, data)
+                self.assertTrue(wait_until(pidfile.exists), pidfile)
+                raise OSError("injected rewrite failure")
+            return mock.patch.object(launch_scope, "write_atomically", write)
+
+        def failing_table(pidfile):
+            return mock.patch.object(launch_scope, "process_table",
+                                     side_effect=ProcessTableError("injected table failure"))
+        exiting = f'{SLEEP_300} & echo $! > "$1.tmp" && mv "$1.tmp" "$1"'
+        cases = {
+            # Proven clean: the row goes. Unprovable (no table): the row stays for reap.
+            "row rewrite": (failing_rewrite, BACKGROUND_SLEEP, "injected rewrite failure", 0),
+            "process table": (failing_table, exiting, "injected table failure", 1),
+        }
+        forwarded = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+        for label, (inject, script, message, rows) in cases.items():
+            with self.subTest(case=label):
+                pidfile = self.root / f"{label.replace(' ', '-')}.pid"
+                before = {signum: signal.getsignal(signum) for signum in forwarded}
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with mock.patch.dict(os.environ, self.env, clear=True), inject(pidfile), \
+                        contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    status = launch_scope.main(
+                        self.exec_args("sh", "-c", script, "sh", str(pidfile)))
+                self.assertEqual((status, stdout.getvalue()), (2, ""), stderr.getvalue())
+                self.assertIn(f"launch-scope: ", stderr.getvalue())
+                self.assertIn(message, stderr.getvalue())
+                (pid,) = self.pid_from(pidfile)
+                self.assertTrue(wait_until(lambda: is_dead(pid), 2.0), pid)
+                self.assertEqual({signum: signal.getsignal(signum) for signum in forwarded},
+                                 before)
+                self.assertEqual(len(self.rows("14:1:1")), rows)
+
+
+class CheckLaunchReplyTest(unittest.TestCase):
+    def test_only_an_exact_reply_is_believed(self):
+        good = {"action_id": "1:1:1", "current": True, "current_action_id": "1:1:1",
+                "reason": "current"}
+        stale = {**good, "current": False, "current_action_id": "1:1:2",
+                 "reason": "superseded_launch"}
+        cases = {
+            b"not json": "malformed_reply",
+            json.dumps([good]).encode(): "malformed_reply",
+            json.dumps({**good, "extra": 1}).encode(): "malformed_reply",
+            json.dumps({**good, "current": 1}).encode(): "malformed_reply",
+            json.dumps({**good, "action_id": "1:1:2"}).encode(): "malformed_reply",
+            json.dumps({**good, "reason": "superseded_launch"}).encode(): "malformed_reply",
+            json.dumps({**good, "current_action_id": "1:1:2"}).encode(): "malformed_reply",
+            json.dumps({**good, "current_action_id": None}).encode(): "malformed_reply",
+            json.dumps({**stale, "current_action_id": 7}).encode(): "malformed_reply",
+            json.dumps({**stale, "reason": 3}).encode(): "malformed_reply",
+            b'{"action_id":"1:1:1","action_id":"1:1:1","current":true,'
+            b'"current_action_id":"1:1:1","reason":"current"}': "malformed_reply",
+            b'{"action_id":"1:1:1","current":true,"current_action_id":NaN,'
+            b'"reason":"current"}': "malformed_reply",
+            json.dumps(good).encode(): "current",
+            json.dumps(stale).encode(): "superseded_launch",
+            json.dumps({**stale, "current_action_id": None,
+                        "reason": "unknown_run"}).encode(): "unknown_run",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(check_launch_reply(raw, "1:1:1"), expected)
 
 
 if __name__ == "__main__":

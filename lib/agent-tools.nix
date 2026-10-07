@@ -46,6 +46,7 @@ let
     "derive-review-feasibility-fixtures"
     "diff-scope"
     "launch-commit"
+    "launch-scope"
     "promotion"
     "replay-retained"
     "resolve-project"
