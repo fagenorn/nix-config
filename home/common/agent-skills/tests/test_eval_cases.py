@@ -191,6 +191,24 @@ class EvalCasesTest(unittest.TestCase):
             with self.subTest(case="a fenced command and a bold Expected label"):
                 done = plan_tasks_verifiable(root)
                 self.assertEqual(done.returncode, 0, done.stdout)
+            (members / "task-2.md").write_text(
+                "# Task 2: y\n\n**Files:**\n- Modify: `tinytask/cli.py`\n\n"
+                "- [ ] **Step 1: Rename the option**\n\nIn `tinytask/cli.py`, rename it.\n\n"
+                "```python\ndef run():\n    pass\n```\n\n"
+                "- [ ] **Step 5: Commit**\n\n```bash\ngit commit -m x\n```\n\nExpected: `OK`.\n",
+                encoding="utf-8")
+            with self.subTest(case="backticked filenames, code and commit fences and an Expected value"):
+                done = plan_tasks_verifiable(root)
+                self.assertNotEqual(done.returncode, 0, done.stdout)
+                self.assertIn("task-2.md", done.stdout)
+            (members / "task-2.md").write_text(
+                "# Task 2: y\n\n- Modify: `tinytask/cli.py`\n\n"
+                "Run, from outside the committed tree: `python3 -m tinytask list --help`\n"
+                "Expected: the help lists `--include-done`.\n",
+                encoding="utf-8")
+            with self.subTest(case="a qualified Run label beside backticked filenames"):
+                done = plan_tasks_verifiable(root)
+                self.assertEqual(done.returncode, 0, done.stdout)
             root.write_text("# Plan\n\n## Task index\n\nnone\n", encoding="utf-8")
             with self.subTest(case="an index that links no member"):
                 self.assertNotEqual(plan_tasks_verifiable(root).returncode, 0)
@@ -265,6 +283,11 @@ class EvalCasesTest(unittest.TestCase):
                 "I stopped at the Phase 0 fog gate.\n**Acquisition:** the first `workflow-state direct-owner` "
                 "call returned `observe` with a `tracker` requirement and no `run_id`.\n", False),
             "a builder refusal": ("build-delivery refused: tracker kind 'none' is unsupported\n", False),
+            "a bare acquisition-blocked stop": (
+                "Cannot proceed: acquisition is blocked because the tracker capability is unsupported.\n",
+                False),
+            "a stop that names no fog decision": (
+                "Cannot proceed: the tracker capability is unsupported, so I am stopping here.\n", False),
             "a fog-gate stop": (
                 "I stopped at the Phase 0 fog gate: the issue bundles five asks and has no "
                 "acceptance criteria.\n", True),

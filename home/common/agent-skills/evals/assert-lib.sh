@@ -81,9 +81,13 @@ ledger_has_rows() {
 # plan_tasks_verifiable <plan-root> — every task carries at least one falsifiable
 # verification line. A root with a `## Task index` is graded through its members: each
 # `[task-N.md](<stem>.tasks/task-N.md)` link must resolve, beside the root, to a member
-# holding a check — a command (a fenced block or an inline code span) and a line that
-# opens with an `Expected` label (`Expected:`, `**Expected:**`, `- Expected output:`) —
-# so a title like "Verify configuration" is not one. An index that links no member
+# holding a check — a verification command and a line that opens with an `Expected`
+# label (`Expected:`, `**Expected:**`, `- Expected output:`) — so a title like "Verify
+# configuration" is not one. A verification command is an inline code span on a line
+# that opens with a `Run` label (`Run: `, `**Run:**`, `Run, from outside the tree:`),
+# or a fenced block whose nearest non-blank line above it carries `Run` or `Verify`.
+# A backticked filename, a backticked expected value or a fenced commit or code step is
+# not one. An index that links no member
 # fails. A root without one is a legacy single-file plan, graded by its `### Task N`
 # sections (Expected/Verify/Acceptance/Assert).
 plan_tasks_verifiable() {
@@ -108,8 +112,14 @@ plan_tasks_verifiable() {
       if [ ! -f "$dir/$member" ]; then
         echo "task member missing: $member"; bad=1
       elif ! awk '
-          /^[[:space:]]*```/ || /`[^`]+`/ { command = 1 }
+          /^[[:space:]]*```/ {
+            if (!fenced && prev ~ /(^|[^[:alpha:]])(run|verify)([^[:alpha:]]|$)/) command = 1
+            fenced = !fenced; next
+          }
+          fenced { next }
+          tolower($0) ~ /^[[:space:]>*-]*(\[[ x]\][[:space:]]*)?[*]*run([,[:space:]*][^:`]*)?:.*`[^`]+`/ { command = 1 }
           tolower($0) ~ /^[[:space:]>*-]*expected[[:alpha:] ]*[*]*:/ { expected = 1 }
+          NF { prev = tolower($0) }
           END { exit !(command && expected) }
         ' "$dir/$member"; then
         echo "no check (a command and an Expected line) in: $member"; bad=1
