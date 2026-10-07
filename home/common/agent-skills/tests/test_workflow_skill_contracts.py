@@ -5963,6 +5963,12 @@ class LaunchScopeWiringContractsTest(unittest.TestCase):
     OWNER_EXEC = ("run each long command, every verification command included, as "
                   "`launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> "
                   "--action-id <action_id> -- <argv>`, still in the foreground")
+    WORKER_SCRATCH = ("Create every scratch directory or scratch worktree under the path that "
+                      "`launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> "
+                      "--worker-id <worker_id>` prints.")
+    OWNER_SCRATCH = ("Create every scratch directory or scratch worktree under the path that "
+                     "`launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> "
+                     "--action-id <action_id>` prints.")
     REAP = ("launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> "
             "--action-id <action_id>")
     COMMIT = ("launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
@@ -5983,34 +5989,39 @@ class LaunchScopeWiringContractsTest(unittest.TestCase):
 
     def test_the_owner_runs_long_commands_through_exec(self):
         self.assert_ordered(self.read(FROM_ISSUE), "## Lifecycle identity", self.OWNER_EXEC,
-                            "a forge verb never goes through it",
+                            "a forge verb never goes through it", self.OWNER_SCRATCH,
+                            "Every lifecycle call is one command",
                             "### Dispatcher-owned acquisition")
 
     def test_the_worker_sentence_follows_every_composed_worker_line(self):
         self.assert_ordered(self.read(FROM_ISSUE), "**Writing workers.**", self.WORKER_LINE,
-                            self.WORKER_EXEC, "launch-commit", "**Self-reap.**")
+                            self.WORKER_EXEC, self.WORKER_SCRATCH, "launch-commit",
+                            "**Self-reap.**")
         self.assert_ordered(self.read(SDD), "### Lifecycle workers", self.WORKER_LINE,
-                            self.WORKER_EXEC, self.RELEASE)
+                            self.WORKER_EXEC, self.WORKER_SCRATCH, self.RELEASE)
         self.assert_ordered(self.read(SDD_DIR / "implementer-prompt.md"),
                             "## Lifecycle Worker", self.COMMIT, "never run `git commit` directly",
-                            self.WORKER_EXEC, "only the most recent one governs",
-                            "## Report Format")
+                            self.WORKER_EXEC, self.WORKER_SCRATCH,
+                            "only the most recent one governs", "## Report Format")
         handoff = self.read(FROM_ISSUE_DIR / "ship-handoff.md")
         self.assert_ordered(handoff, "## Ship-owner subagent prompt", self.WORKER_LINE,
-                            "never inside the handoff", self.WORKER_EXEC, "Your task:")
+                            "never inside the handoff", self.WORKER_EXEC, self.WORKER_SCRATCH,
+                            "Your task:")
         self.assert_ordered(handoff, "## Remainder owner prompt", self.WORKER_LINE,
-                            "never inside it", self.WORKER_EXEC, "Your task:")
+                            "never inside it", self.WORKER_EXEC, self.WORKER_SCRATCH,
+                            "Your task:")
         self.assert_ordered(self.read(SHIP_ISSUE), "### Local commits", "--parent <worker_id>",
-                            "`Lifecycle worker:`", self.WORKER_EXEC,
+                            "`Lifecycle worker:`", self.WORKER_EXEC, self.WORKER_SCRATCH,
                             "## Doc-grounded escalations")
         self.assert_ordered(self.read(AUTO), "Both prompts must carry", "`Lifecycle worker:` line",
-                            "the `launch-scope exec` sentence that follows it there",
+                            "the `launch-scope exec` and `scratch` sentences that follow it there",
                             "launch-commit")
 
     def test_every_owner_exit_reaps_between_release_and_write(self):
         text = self.read(FROM_ISSUE)
         self.assert_ordered(
             text, "**Self-reap.**", self.REAP,
+            "then removes the launch's scratch root and every worktree inside it",
             "the reap runs before the bookkeeper is dispatched",
             "does not block the exit write",
             "A delegating owner does not reap",
@@ -6063,7 +6074,8 @@ class LaunchScopeSweepContractsTest(unittest.TestCase):
             "**Agent helper package.**", "`launch-scope` (#276)",
             "AGENT_LAUNCH_SCOPE=<repo-scope>/<run-id>/<action-id>/<nonce>",
             "`launch-scope reap --action-id`", "`reap --sweep`",
-            "agent-launch/<run-id>/<action-id>/")
+            "agent-launch/<run-id>/<action-id>/", "`launch-scope scratch` (#277)",
+            "`scratch.json`", "`unattributed_worktrees`")
 
 
 if __name__ == "__main__":
