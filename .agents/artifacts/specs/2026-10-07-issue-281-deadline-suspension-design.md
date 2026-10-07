@@ -35,6 +35,23 @@ sweep and any direct re-entry resume the suspension in place, on the same
 worktree, with a fresh window. Then `sdd`'s `progress.md` picks up at the
 next task.
 
+## Acceptance criteria
+
+From the issue. The fourth was added by user decision on 2026-10-07 and is
+binding:
+
+1. `suspend --blocked-on deadline` is accepted and auto-resumable, and is
+   refused while a registered worker is live (`test_workflow_state.py`).
+2. `sdd` states the headroom rule and the order release, mark-progress,
+   suspend (`test_workflow_skill_contracts.py`).
+3. `control` resumes a deadline suspension without a human-directed request
+   (`test_workflow_state.py`).
+4. No instruction-load ceiling is raised. The PR passes the required
+   Instruction Budget check without the `instruction-budget-raise` label, so
+   the added skill text fits under the current ceilings by trimming or
+   relocating text out of always-loaded skill files (D12–D15). Measured by
+   the Instruction Budget CI check on the PR.
+
 ## Decisions
 
 **Ledger value.** `workflow-state` adds `deadline` to the closed
@@ -117,7 +134,8 @@ any other auto-resumable cause.
 may still exceed the instruction-load ceilings. The Instruction Budget gate
 (`just agent-instruction-budget`, a required check on `main`) decides whether
 it does. Any raise is recorded in the affected profile's `note`, citing
-#155 D10, in the same commit.
+#155 D10, in the same commit. *Superseded on 2026-10-07:* no ceiling is
+raised, and the added text is paid for by cuts (D12–D15).
 
 ## Test seams
 
@@ -177,3 +195,8 @@ These are all existing seams that run under `just agent-workflow-tests`.
 | D9 | The `sdd` contract test finds the headroom paragraph by the ledger value `` `blocked_on=deadline` `` (exactly one blank-line-delimited paragraph of `### Lifecycle workers` carries it) and pins, inside it, the `release-worker` argv prefix, then the `mark-progress` argv, then that value. The from-issue Phase-6 test gains the `` `deadline_at` `` key between the identity and `register-worker`. Refines D5 | agent-helpers rule 6 admits `workflow-state` argv and lifecycle JSON keys | A bold label such as `**Deadline headroom.**` as the anchor: an English phrase pin |
 | D10 | from-issue's Phase 6 hands `sdd` the `deadline_at` the owner currently holds (a later `declare-lane` reply's value supersedes the acquired one), and sdd's **Continuous execution** stop list names the deadline headroom rule | Phase-5 plan review (Codex): the acquired value goes stale after `declare-lane` re-bases it, and the opening directive's exclusive stop list would contradict the new rule | Pass the acquisition-time value: can miss the window or suspend early. Leave the stop list alone: two conflicting instructions |
 | D11 | Before the deadline suspension, the owner fences its launch with `workflow-state check-launch`. On `current: false` or any helper failure it writes nothing more, prints `/from-issue <num> --auto` and stops (from-issue's superseded route); only on `current: true` does it suspend with `blocked_on=deadline`. A refused `mark-progress` is tolerated only while the launch stays current. The contract test pins the `check-launch` argv between the `mark-progress` argv and the value. Extends D5 and D9 | Final correctness review C-001: `suspend` selects only the issue and attempt and checks that the attempt is active, not the caller's launch, so a superseded owner whose `mark-progress` was refused (`superseded_launch`) could park its successor's live attempt | Add a launch fence inside `suspend`: new helper behaviour, out of scope under D2 and D4 |
+| D12 | Reverses D8. No instruction-load ceiling is raised, and no `instruction-budget-raise` label is requested. When the branch syncs with `main`, `instruction-load.json` takes main's file unchanged, which drops this branch's raises to from-issue-controller, orchestrated-issue-owner, implementation-owner and the corpus ceiling, together with their notes. The added text fits by cutting. A ceiling is lowered (`just agent-instruction-load tighten`) only if a cut leaves it more than 5% above its measured size | User decision 2026-10-07 (issue AC 4); `instruction_load check` rejects, without the label, any model change other than lowering a ceiling | Keep D8's exact-byte raises under the label: the user decision forbids it |
+| D13 | Fit by deleting bytes, not by relocating them. Measured against origin/main `baac2897` with main's ceilings, the merged branch is over by 270 B on from-issue-controller (both hosts), 2207 B on orchestrated-issue-owner and implementation-owner (all hosts) and 2152 B on the corpus. The growth is sdd/SKILL.md +1868 B and from-issue/SKILL.md +339 B, against base headroom of 69, 0, 0 and 55 B. Cuts, in this order: (1) #281's own text. sdd's headroom rule becomes one paragraph (1813 → about 1080 B) that keeps only the pinned argv and keys. from-issue's suspension intro reverts to main's wording, its value list says "sdd's `deadline`" in place of the "Only sdd's … writes `deadline`" sentence, the Phase-6 handover shrinks to one clause, and sdd's stop list says only "the deadline headroom rule". (2) Nearby prose. sdd `### Lifecycle workers` drops restated mechanism from its launch-fence-refused and mark-progress paragraphs, step 5 points to that section instead of repeating the argv, and from-issue Phase 6's mechanical-route sentence is condensed. (3) Duplicates in sdd step 2. The two closed review-package gate paragraphs merge into one, and the interface-version-2/3 paragraphs keep only the controller's guards, because task-reviewer-prompt.md, correctness-reviewer-prompt.md and final-review.md already carry the reviewer duties. A scratch prototype of these cuts measured sdd at 27566 B (−273 B vs main) and from-issue at 55063 B (+35 B). It passed `check --base origin/main`, leaving headroom of 34 B (controller), 238 B (owners) and 293 B (corpus), and the contract suites stayed green | User decision; the cut order set by the caller (own text, then nearby prose, then relocation); `measure_corpus` counts every skill-tree file | Relocate into a conditionally loaded file: the corpus still counts it, conditional ceilings absorb it, and a new file is a model change. Move #270's Sonnet re-evaluation rule out of sdd: #270 D4 put it there on purpose |
+| D14 | The cuts keep every pin and loosen none. The pins that bound them: sdd's `SDD_MACHINE_TEXT` (#291 D6: helper argv, `detail_state: "none"`, `report_path: null`, producer validation, `stable-first-fit-whole-file`, `member_count`, `aggregate_bytes`, `launch fence refused:`) and its "contract error" pin. #261's **Interim child results** paragraphs in sdd, from-issue and ship-issue, left untouched. #281's own headroom-paragraph pin (D9, D11). from-issue's Phase-6 order (identity, `### Lifecycle workers`, `deadline_at`, `register-worker`) and #250's marker phrases there. The suspension value-list order ending "(the reaper alone owns `unknown`)". from-issue's expired-deadline paragraph, pinned phrase by phrase and left untouched | agent-helpers standard rule 6; the cited issues' decisions | Loosen or rewrite other issues' pins to free bytes: weakens their contracts to pay a budget this issue owes |
+| D15 | #279 is being delivered in parallel and may grow from-issue or sdd text, and the controller margin is only about 34 B. The plan syncs with `main` right before ship and reruns `just agent-instruction-budget` against the fresh base. Any new overage is cut in D13's order and is never raised | D12; ship-issue's sync step; `strict` branch protection on the Instruction Budget check | Measure once at design time: #279 could use up the margin after this spec |
+| D16 | Every D13 cut outside #281's own text preserves meaning. It removes only restated mechanism, or text that a sibling file in the same hot set already carries. The merged step-2 gate keeps every exit route, including the failed SDD candidate on exit 2, and `failed` before dispatch for malformed output, disagreement and `complete` plus `over_budget`. Inside sdd's headroom paragraph, no D4, D6 or D11 behavior is dropped. from-issue's suspension intro no longer lists a deadline trigger because sdd defines it. The task review compares each cut with its pre-cut text | the-bar: no silent behavior change; agent-helpers rule 6 (other slices delete their own phrase pins) | Rewrite other issues' rules more compactly with new semantics: that is an unreviewed contract change hidden inside a budget fix |
