@@ -435,9 +435,7 @@ Invoke `writing-plans` for a plan under the retained plans directory, committed 
 
 Read `standards-review.md` and follow it: Codex `plan-review` when enabled and available, the native reviewer dispatch otherwise, the mechanical-only self-grade, and the finding-disposition rules (verify against the live worktree; ledger rows for applied findings; contract by path, never inlined).
 
-Both routes consume the planning producer's received stdout bytes through the
-Artifact report boundary above before decoding JSON or dispatching. This caller
-validation is required even when the producer already validated its own candidate.
+`standards-review.md`'s caller input gate runs first, on every route.
 
 **CHECKPOINT** — Record that standards review is clean. Apply the shared checkpoint rule.
 

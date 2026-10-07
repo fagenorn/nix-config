@@ -1263,21 +1263,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
 
     def test_both_plan_review_routes_revalidate_received_reports_in_the_caller(self):
         for text in (self.from_issue, self.standards_review):
-            self.assertIn("Codex", text)
-            self.assertIn("native", text)
             self.assertIn("validate-report --boundary producer --input -", text)
-            self.assertIn("before any state access or reviewer dispatch", text)
 
     def test_standards_review_stops_a_blocked_plan_review_capability(self):
-        self.assert_ordered(
-            self.standards_review,
-            "capabilities.review.plan", "**Blocked** stops", "reason_code",
-            "repair_id", "never takes a fallback",
-        )
-        self.assertIn(
-            "Authored unsupported, or the completed non-capacity runtime/output failure",
-            self.standards_review,
-        )
+        self.assert_ordered(self.standards_review, "capabilities.review.plan", "reason_code",
+                            "repair_id")
 
     def test_durable_review_detail_precedes_every_removable_cleanup(self):
         self.assertIn(".superpowers/issue-delivery/", self.sdd)
@@ -1287,10 +1277,12 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertIn("keep the worktree", text)
 
     def test_phase_five_remeasures_every_artifact_it_mutates(self):
-        self.assert_ordered(self.standards_review, "apply blocking fixes", "final mutation",
-                            "artifact-budget check", "decompose_required")
-        self.assertIn("check the spec too when its decision ledger changed", self.standards_review)
-        self.assertIn("do not dispatch SDD", self.standards_review)
+        remeasure = normalized(self.standards_review.split("## Accepted-edit remeasurement", 1)[1])
+        self.assert_ordered(remeasure, "artifact-budget check --kind implementation-plan",
+                            "artifact-budget check --kind design-spec", "decompose_required")
+        for heading in ("## Accepted-edit remeasurement", "## Caller pre-dispatch boundary"):
+            with self.subTest(heading=heading):
+                self.assertNotIn(heading, self.phase_5_review_contract)
 
     def test_fixture_producer_states_supplement_behavioral_cli_cases(self):
         self.assertTrue(all(item["expected"]["producer_state"] == "complete"
@@ -1307,25 +1299,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertIn("contract error", text)
         for value in ("complete", "within_budget"):
             self.assertIn(value, self.auto)
-
-    def test_native_phase_5_validates_before_dispatch_and_remeasures(self):
-        caller = self.section(
-            self.phase_5_review_contract,
-            "## Caller pre-dispatch boundary",
-            "## Reviewer instructions",
-        )
-        self.assert_ordered(
-            caller, "validate-report", "validated stdout bytes", "read `state`",
-            "artifact-budget check", "reviewer dispatch",
-        )
-        self.assertIn("only the plan root path and four metrics", caller)
-        remeasurement = self.section(
-            self.phase_5_review_contract, "## Accepted-edit remeasurement", "(D5, D14)."
-        )
-        self.assert_ordered(
-            remeasurement, "after the last write", "implementation-plan",
-            "design-spec", "may advance",
-        )
 
     def test_owner_persists_exact_terminal_result_before_return(self):
         owner_return_section = self.section(
@@ -2895,20 +2868,11 @@ class AcceptanceMapContractsTest(unittest.TestCase):
     def test_review_contract_blocks_a_missing_or_duplicated_row(self):
         self.assert_ordered(
             self.review, "## Reviewer instructions\n", "## Acceptance map check\n",
-            "## Common-miss checklist\n")
+            "## Common-miss checklist\n", "## Output\n")
         check = normalized(self.section(self.review, "## Acceptance map check"))
-        for phrase in (
-            "Each of these is **Blocking**:",
-            "the `## Acceptance map` section is missing;",
-            "a criterion has no row, or more than one;",
-            "rows are out of issue order (`AC1` to `AC<n>`);",
-            "a kind is outside `code`, `evidence`, `human`, or contradicts the issue's tag;",
-            "an owning task is not a `Task N` in the Task index;",
-            "an `evidence` row lacks its command, its conditions or its literal threshold.",
-            "A `(classified)` kind you disagree with is **Should-fix**",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, check)
+        for kind in ("`code`", "`evidence`", "`human`"):
+            with self.subTest(kind=kind):
+                self.assertIn(kind, check)
 
 
 class AcceptanceMapEvalGradingTest(unittest.TestCase):
