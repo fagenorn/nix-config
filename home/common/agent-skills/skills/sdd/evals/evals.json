@@ -24,6 +24,42 @@
       "mode": "plan-only",
       "prompt": "An approved four-task plan is running from a feature branch. Task 2's scoped review package passes, but after Task 2 the whole delivery range exceeds the review-package aggregate budget. A package directory from an earlier run has matching seven-character SHA prefixes in its name. Plan-only: explain the exact setup and between-task gates and what happens next.",
       "expected_output": "Resolve the integration branch, pin DELIVERY_BASE once to the full SHA from `git merge-base HEAD origin/<integration-branch>` rather than a local integration branch, and pin the current full HEAD for each gate. Before the first implementer and after every completed task, before any next dispatch, run the existing review-package producer over the cumulative DELIVERY_BASE..HEAD range, validate its producer report, then independently check the artifact and compare all four metrics. Record full base/head SHAs and metrics in the ledger. The old package is reusable only if its manifest full range.base/range.head exactly match, its retained producer report validates, and the independent check agrees; seven-character path prefixes are insufficient. Task 2's scoped pass does not override cumulative exit 3: preserve completed work, dispatch no Task 3, and identify an independently deliverable split. Exit 2 likewise cannot advance."
+    },
+    {
+      "id": 4,
+      "name": "planned-worktree-executes-and-stops-before-final-review",
+      "mode": "pipeline",
+      "setup": {
+        "kind": "planned-worktree"
+      },
+      "prompt": "/sdd .claude/plans/2026-10-07-issue-3-rename-flag.md\n\nResolve once into a retained ResolvedProject. A resolver refusal is fatal and values are never defaulted or inferred. The plan and its design spec are committed on the existing linked worktree branch `worktree-issue-3-rename-flag` — find it with `git worktree list` and execute from that worktree, so the plan path is relative to it. The tracker capability is unsupported and there is no lifecycle identity.\n\n**Stop after the last task's review passes, before the final review.** Do not run the final review, the final verification or any ship step, and do not push.",
+      "expected_output": "sdd resolves the plan's workspace beneath the primary checkout (`.superpowers/sdd/wt-worktree-issue-3-rename-flag/<plan>/`) and dispatches one implementer for Task 1. The implementer commits the flag rename on the worktree branch, and its task review passes. The ledger then records `Task 1: complete` and the run stops before the final review. The fixture's tests pass in the worktree, `list --all` is a usage error, nothing is pushed and `main` is unchanged.",
+      "asserts": [
+        {
+          "name": "a branch commit touches tinytask/",
+          "shell": "commits_touch \"$PRE_WT\" tinytask"
+        },
+        {
+          "name": "list --include-done works and list --all is a usage error",
+          "shell": "cd \"$PRE_WT\" && python3 -m tinytask --file \"$WORK/probe.json\" list --include-done >/dev/null && { python3 -m tinytask --file \"$WORK/probe.json\" list --all >/dev/null 2>&1; [ $? -eq 2 ]; } || fail \"the flag rename is not in place\""
+        },
+        {
+          "name": "the fixture's tests pass in the worktree",
+          "shell": "(cd \"$PRE_WT\" && TMPDIR=\"$WORK\" python3 -m unittest discover -q 2>/dev/null) || fail \"fixture tests fail in $PRE_WT\""
+        },
+        {
+          "name": "the sdd ledger records the task done",
+          "shell": "f=$(first_file \"$REPO\"/.superpowers/sdd/wt-worktree-issue-3-rename-flag/*/progress.md) && grep -q 'Task 1: complete' \"$f\" || fail \"no 'Task 1: complete' in the sdd progress ledger\""
+        },
+        {
+          "name": "local and origin main are unchanged",
+          "shell": "{ [ \"$(git -C \"$REPO\" rev-parse main)\" = \"$BASE_MAIN\" ] && [ \"$(git -C \"$ORIGIN\" rev-parse main)\" = \"$BASE_MAIN\" ]; } || fail \"main moved\""
+        },
+        {
+          "name": "nothing was pushed",
+          "shell": "[ -z \"$(git -C \"$ORIGIN\" for-each-ref refs/heads/worktree-issue-3-rename-flag)\" ] || fail \"the branch reached origin despite the stop\""
+        }
+      ]
     }
   ]
 }
