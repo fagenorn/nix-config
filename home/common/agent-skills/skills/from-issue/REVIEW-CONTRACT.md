@@ -1,32 +1,6 @@
 # Phase-5 plan review contract
 
-Operational contract for `from-issue` Phase 5. Use only the binding values and capability states the caller supplies; never resolve or infer policy. The Phase-5 caller executes the caller sections
-in order. Only after the pre-dispatch boundary passes does it hand this file's
-**path** to the reviewer (or to `codex-collaboration`, which
-passes it by path in the review packet). It supplies concrete values for every
-`<placeholder>` and binding named below — plan root path, its four checker
-metrics, spec path, issue number, passed `bindings.tracker`, `bindings.paths`,
-and the configured review capability. The orchestrator
-never inlines this text into its own context.
-
-## Caller pre-dispatch boundary
-
-Pipe the exact received planning-report bytes through `artifact-budget
-validate-report --boundary producer --input -` and retain only the exact
-validated stdout bytes. Only after validation succeeds may the caller read `state` or any artifact field. Require the exact D11 object in `state: complete`,
-with one `implementation-plan` artifact; validator failure, a legacy
-producer-specific list or summary field, or any other state stops Phase 5 as a
-contract failure. There is no prose fallback (D11, D14).
-
-Take the root path and four metrics only from that validated object, then run
-`artifact-budget check --kind
-implementation-plan --root <plan-path> --format json`. Require exit 0,
-`within_budget`, and the same `root_bytes`, `total_bytes`, `file_count`, and
-`largest_member_bytes`. Exit 2/3, missing metrics, stale metrics, or an unreadable
-member is a contract failure. Only after both gates pass may the caller build the
-reviewer dispatch. Supply only the plan root path and four metrics, plus the
-other non-plan paths and fixed scalars named below; never supply plan contents or
-a member list (D3, D5, D6, D8).
+Use only the binding values and capability states the caller supplies; never resolve or infer policy. You receive the plan root path and its four checker metrics, the spec path, the issue number, `bindings.tracker`, `bindings.paths` and the review capability. Never inline this file.
 
 ## Reviewer instructions
 
@@ -43,9 +17,7 @@ paths. Read the issue body through `bindings.tracker.cli` after unsetting only
 names in `bindings.tracker.credential_env.unset_before_invocation`, then read the
 spec at `<spec-path>` and the validated plan root plus every member.
 
-When checking specific findings, **read the live file at HEAD** rather than relying on snapshot/diff
-views — code may have been edited since the plan was written, and stale snapshots produce
-false-positive should-fixes.
+When checking specific findings, **read the live file at HEAD**, not a snapshot or diff view.
 
 For each plan task, flag anything that violates the grounded constraints. Every
 finding identifies its affected task member or root section. Explicitly report
@@ -74,8 +46,7 @@ assign and why.
 
 ## Common-miss checklist
 
-Scan against these categories — they have repeatedly slipped past plan review and surfaced only at PR
-review.
+Scan against these categories.
 
 - **UX alternate-dismiss paths.** Modal/dialog/typed-confirmation/destructive-action surfaces must
   specify state-reset behavior for every *user-reachable* dismiss path. Your finding for this category
@@ -91,8 +62,7 @@ review.
   - [ ] Programmatic close (e.g. on success): <…>
   ```
 
-  The checklist forces the *act* of checking; relying on the reviewer to mentally enumerate is how an
-  Esc-key gap once leaked. Any **user-reachable** path the plan doesn't address is a Blocker. A path
+  Any **user-reachable** path the plan doesn't address is a Blocker. A path
   that's not user-reachable on this surface (e.g. no programmatic close because there's no success
   state) is fine — say so explicitly in the checklist, don't omit the row.
 - **Boundary-error fallbacks at unfamiliar-principal / missing-entity points.** Auth user that doesn't
@@ -104,19 +74,15 @@ review.
   specify what *fails loudly* when the type/enum/hierarchy is extended later, so the next contributor
   doesn't silently fall into a default branch?
 - **Plan-prose / live-code parity.** Any docstring, comment, context-doc sentence, or ADR clause the
-  plan tells the implementer to write — does the wording match what the code will *actually* do? Drift
-  here is a PR-review fix-up commit waiting to happen.
+  plan tells the implementer to write — does the wording match what the code will *actually* do?
 - **Stale prose audit.** Distinct from the bullet above: that one checks prose the plan *dictates the
   implementer write*; this one checks prose that *already exists* in files adjacent to the diff. For
   every context-doc sentence, ADR clause, docstring, or comment near the PR's footprint, re-read the
   live file. Terminology the PR retires (renamed concepts, deprecated class names, removed fields) must
   be purged in *all* adjacent comments and doc references — not just the diff's immediate footprint.
-  One of the most common post-PR-review fix-up categories.
 - **Dead branches after iteration.** If Phase 4 → Phase 5 revisions changed the design (e.g. "use the
   framework's collapsible primitive" replacing hand-rolled state, "switch from an explicit field to a
-  derived value"), walk every code path the plan still describes and confirm each is reachable. Pivoted
-  plans leave stranded `else` branches, unused props, and `if (legacyFlag)` arms that the implementer
-  dutifully writes and the PR reviewer dutifully flags.
+  derived value"), walk every code path the plan still describes and confirm each is reachable.
 - **Test-assertion specificity, not just scenarios.** Where the plan says "add a test that returns 400"
   or "asserts the array shape", grade whether the named assertion will *pin the documented contract* —
   error-body shape and content-type, ordering with discriminating rows, specific error-message format,
@@ -124,12 +90,10 @@ review.
   matching a substring of a transformed value aren't pinning anything; flag as Should-fix.
 - **Spec ↔ implementation message-format parity.** Operator-facing error messages, fallback strings,
   audit-trail formats, and UI status labels that the spec promises must match the implementation
-  byte-for-byte (or the implementation must explain why its actual format is equivalent/better). A
-  spec-promised exact string that falls through to a generic default is a real gap caught only at PR
-  review when missed here.
+  byte-for-byte (or the implementation must explain why its actual format is equivalent/better).
 - **DRY against existing helpers.** For any new helper, hook, or utility the plan introduces, grep for
   similar prior patterns. If a near-duplicate exists, the plan should either reuse it or justify why a
-  new one is needed. Duplicate helpers fixed only at PR review are a recurring waste.
+  new one is needed.
 
 ## Output
 
@@ -141,13 +105,3 @@ Output a structured review:
 
 Write `None.` under an empty section. Don't propose new features. Don't second-guess scope. Grade only
 against the bar.
-
-## Accepted-edit remeasurement
-
-After reviewer output and disposition, accepted Phase-5 edits are not complete
-when the text is saved. The caller acts after the last write: re-run the
-implementation-plan check and retain its fresh metrics; if it amended the spec
-or appended a decision-ledger row, also re-run the design-spec check after that
-artifact's last write. Only valid, within-budget results may advance. An invalid or
-over-budget result stops the phase instead of advancing with stale measurement
-(D5, D14).
