@@ -283,6 +283,16 @@ class ScopeHarness(LifecycleHarness):
 # The backgrounded sleeper is a sys.executable process, so its marker is readable on darwin (D15).
 SLEEP_300 = f"{shlex.quote(sys.executable)} -c 'import time; time.sleep(300)'"
 BACKGROUND_SLEEP = f'{SLEEP_300} & echo $! > "$1.tmp" && mv "$1.tmp" "$1"; wait'
+# A marked escapee: it leaves the command's session, then the command exits.
+ESCAPE = """
+import os, subprocess, sys, time
+subprocess.Popen([sys.executable, "-c",
+                  "import os, sys, time; os.setsid(); "
+                  "open(sys.argv[1] + '.tmp', 'w').write(str(os.getpid())); "
+                  "os.replace(sys.argv[1] + '.tmp', sys.argv[1]); time.sleep(300)", sys.argv[1]])
+while not os.path.exists(sys.argv[1]):
+    time.sleep(0.05)
+"""
 
 
 class ExecTest(ScopeHarness, unittest.TestCase):
@@ -405,7 +415,7 @@ class ExecTest(ScopeHarness, unittest.TestCase):
                 raise OSError("injected rewrite failure")
             return mock.patch.object(launch_scope, "write_atomically", write)
 
-        def failing_table(pidfile):
+        def failing_table(_pidfile):
             return mock.patch.object(launch_scope, "process_table",
                                      side_effect=ProcessTableError("injected table failure"))
         exiting = f'{SLEEP_300} & echo $! > "$1.tmp" && mv "$1.tmp" "$1"'
@@ -425,13 +435,29 @@ class ExecTest(ScopeHarness, unittest.TestCase):
                     status = launch_scope.main(
                         self.exec_args("sh", "-c", script, "sh", str(pidfile)))
                 self.assertEqual((status, stdout.getvalue()), (2, ""), stderr.getvalue())
-                self.assertIn(f"launch-scope: ", stderr.getvalue())
+                self.assertIn("launch-scope: ", stderr.getvalue())
                 self.assertIn(message, stderr.getvalue())
                 (pid,) = self.pid_from(pidfile)
                 self.assertTrue(wait_until(lambda: is_dead(pid), 2.0), pid)
                 self.assertEqual({signum: signal.getsignal(signum) for signum in forwarded},
                                  before)
                 self.assertEqual(len(self.rows("14:1:1")), rows)
+
+    def test_a_marked_escapee_does_not_outlive_exec(self):
+        pidfile = self.root / "escapee.pid"
+        done = self.exec_(sys.executable, "-c", ESCAPE, str(pidfile))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        (pid,) = self.pid_from(pidfile)
+        self.assertTrue(is_dead(pid))
+        self.assertEqual(self.rows("14:1:1"), [])
+
+    def test_an_ignored_signal_stays_ignored_in_the_command(self):
+        probe = "import signal, sys; sys.exit(0 if signal.getsignal(signal.SIGHUP) is signal.SIG_IGN else 9)"
+        done = subprocess.run(
+            ["sh", "-c", 'trap "" HUP; exec "$@"', "sh",
+             *self.argv(*self.exec_args(sys.executable, "-c", probe))],
+            cwd=self.root, capture_output=True, text=True, check=False, env=self.env, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
 
 
 class CheckLaunchReplyTest(unittest.TestCase):
@@ -463,6 +489,146 @@ class CheckLaunchReplyTest(unittest.TestCase):
         for raw, expected in cases.items():
             with self.subTest(raw=raw):
                 self.assertEqual(check_launch_reply(raw, "1:1:1"), expected)
+
+
+# D15: the grandchild and the escapee are sys.executable processes, so their markers are readable.
+LEADER = """
+import os, subprocess, sys, time
+sleeper = [sys.executable, "-c", "import time; time.sleep(300)"]
+grandchild = subprocess.Popen(sleeper)
+escapee = subprocess.Popen(sleeper, start_new_session=True)
+with open(sys.argv[1] + ".tmp", "w") as handle:
+    handle.write(f"{os.getpid()} {grandchild.pid} {escapee.pid}")
+os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+time.sleep(300)
+"""
+# A marked leader whose group also holds a member started without the marker.
+MIXED_GROUP = """
+import os, subprocess, sys, time
+env = {k: v for k, v in os.environ.items() if k != "AGENT_LAUNCH_SCOPE"}
+member = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"], env=env)
+with open(sys.argv[1] + ".tmp", "w") as handle:
+    handle.write(f"{os.getpid()} {member.pid}")
+os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+time.sleep(300)
+"""
+
+
+class ReapTest(ScopeHarness, unittest.TestCase):
+    def reap_args(self, *selector, run_id=None):
+        return ["reap", "--repo-root", str(self.root),
+                "--run-id", self.run_id if run_id is None else run_id, *selector]
+
+    def assert_report(self, completed, status, reaped, skipped):
+        self.assertEqual(completed.returncode, status, completed.stderr)
+        self.assertEqual(completed.stdout.count("\n"), 1)
+        self.assertEqual(json.loads(completed.stdout), {"reaped": reaped, "skipped": skipped})
+
+    def recorded_pgids(self, action_id):
+        directory = self.registry / action_id
+        return [json.loads((directory / name).read_text())["pgid"] for name in self.rows(action_id)]
+
+    def test_a_sweep_kills_orphans_after_the_supervisor_and_leader_die(self):
+        pidfile = self.root / "pids"
+        supervisor = self.background_exec(sys.executable, "-c", LEADER, str(pidfile))
+        leader, grandchild, escapee = self.pid_from(pidfile)
+        sibling = subprocess.Popen(["sleep", "300"], env=UNMARKED_ENV, start_new_session=True)
+        self.addCleanup(sibling.wait)
+        self.addCleanup(kill_quietly, sibling.pid)
+        supervisor.kill()
+        supervisor.wait(timeout=30)
+        os.kill(leader, signal.SIGKILL)
+        self.assertTrue(wait_until(lambda: is_dead(leader)))
+        self.assertEqual(self.resume(issue=14, worktree=str(self.root / "wt-14"), now=LATER,
+                                     owner_unavailable=True)["id"], "14:1:2")
+        swept = self.scope(*self.reap_args("--sweep"))
+        self.assert_report(swept, 0, [{"action_id": "14:1:1", "signalled": 2}], [])
+        self.assertTrue(wait_until(lambda: is_dead(grandchild), 2.0))
+        self.assertTrue(wait_until(lambda: is_dead(escapee), 2.0))
+        self.assertFalse(is_dead(sibling.pid))
+        self.assertFalse((self.registry / "14:1:1").exists())
+
+    def test_a_stale_row_does_not_prove_a_live_unmarked_group(self):  # D14
+        stranger = subprocess.Popen(SLEEPER, env=UNMARKED_ENV, start_new_session=True)
+        self.addCleanup(stranger.wait)
+        self.addCleanup(kill_quietly, stranger.pid)
+        nonce = "b" * 32
+        directory = self.registry / "14:1:1"
+        directory.mkdir(parents=True)
+        (directory / f"{nonce}.json").write_text(json.dumps(
+            {"argv0": "sh", "nonce": nonce, "pgid": stranger.pid,
+             "started_at": "2026-08-13T20:00:00Z"}))
+        self.assert_report(self.scope(*self.reap_args("--action-id", "14:1:1")), 0,
+                           [{"action_id": "14:1:1", "signalled": 0}], [])
+        self.assertFalse(is_dead(stranger.pid))
+        self.assertFalse(directory.exists())
+
+    def test_a_proved_group_takes_its_unmarked_member_with_it(self):  # D14
+        pidfile = self.root / "pids"
+        supervisor = self.background_exec(sys.executable, "-c", MIXED_GROUP, str(pidfile))
+        leader, member = self.pid_from(pidfile)
+        self.assertTrue(wait_until(lambda: self.recorded_pgids("14:1:1") == [leader]))
+        supervisor.kill()                # exec's own cleanup must not be what kills the member
+        supervisor.wait(timeout=30)
+        self.assertIsNone(read_marker(member))
+        self.assert_report(self.scope(*self.reap_args("--action-id", "14:1:1")), 0,
+                           [{"action_id": "14:1:1", "signalled": 2}], [])
+        self.assertTrue(wait_until(lambda: is_dead(leader), 2.0))
+        self.assertTrue(wait_until(lambda: is_dead(member), 2.0))
+        self.assertFalse((self.registry / "14:1:1").exists())
+
+    def test_a_sweep_leaves_the_current_launch_alone_and_a_self_reap_ends_it(self):
+        pidfile = self.root / "pids"
+        supervisor = self.background_exec(
+            sys.executable, "-c",
+            "import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); "
+            "time.sleep(300)", str(pidfile))
+        (child,) = self.pid_from(pidfile)
+        self.assert_report(self.scope(*self.reap_args("--sweep")), 0, [], [])
+        self.assertFalse(is_dead(child))
+        self.assert_report(self.scope(*self.reap_args("--action-id", "14:1:1")), 0,
+                           [{"action_id": "14:1:1", "signalled": 1}], [])
+        self.assertEqual(supervisor.wait(timeout=30), 128 + signal.SIGTERM)
+        self.assertTrue(is_dead(child))
+        self.assert_report(self.scope(*self.reap_args("--action-id", "14:1:1")), 0,
+                           [{"action_id": "14:1:1", "signalled": 0}], [])
+        self.assertFalse((self.registry / "14:1:1").exists())
+
+    def test_a_sweep_with_no_registry_reaps_nothing(self):
+        self.assert_report(self.scope(*self.reap_args("--sweep")), 0, [], [])
+
+    def test_a_sweep_skips_a_launch_whose_check_fails_or_is_malformed(self):
+        self.assertEqual(self.exec_("true").returncode, 0)
+        for body, reason in (("exit 2", "check_launch_failed"),
+                             ("echo not-json", "malformed_reply")):
+            with self.subTest(reason=reason):
+                self.write_shim(body)
+                self.assert_report(self.scope(*self.reap_args("--sweep")), 1, [],
+                                   [{"action_id": "14:1:1", "reason": reason}])
+        self.assertTrue((self.registry / "14:1:1").is_dir())
+
+    def test_a_survivor_keeps_the_registry_and_is_skipped(self):  # D12
+        self.assertEqual(self.exec_("true").returncode, 0)
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(launch_scope, "terminate",
+                                  return_value=(1, frozenset({4242424}))):
+            status, report = launch_scope.reap(str(self.root), self.run_id, action_id="14:1:1")
+        self.assertEqual((status, report), (1, {"reaped": [], "skipped": [
+            {"action_id": "14:1:1", "reason": "processes_survived"}]}))
+        self.assertTrue((self.registry / "14:1:1").is_dir())
+
+    def test_unsafe_ids_and_usage_errors_exit_two_and_delete_nothing(self):
+        keep = self.registry.parent / "keep"
+        keep.mkdir(parents=True)
+        cases = [self.reap_args("--action-id", action) for action in ("..", ".", "../keep", "a/b")]
+        cases += [self.reap_args("--action-id", "keep", run_id=".."),
+                  self.reap_args(), self.reap_args("--sweep", "--action-id", "14:1:1"),
+                  [*self.reap_args("--sweep"), "--", "true"]]
+        for args in cases:
+            with self.subTest(args=args):
+                done = self.scope(*args)
+                self.assertEqual((done.returncode, done.stdout), (2, ""), done.stderr)
+        self.assertTrue(keep.is_dir())
 
 
 if __name__ == "__main__":

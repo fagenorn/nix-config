@@ -1,6 +1,7 @@
 """Run a lifecycle launch's commands in a scope, and reap what they leave (#276).
 
     launch-scope exec --repo-root R --run-id I (--action-id A | --worker-id W) -- <argv>
+    launch-scope reap --repo-root R --run-id I (--action-id A | --sweep)
 
 `exec` writes a registry row under `<git common dir of R>/agent-launch/I/A/`,
 asks `workflow-state check-launch` (or `check-worker` for a worker, whose action
@@ -10,7 +11,7 @@ environment. SIGINT, SIGTERM and SIGHUP are forwarded to the command's group.
 When the command exits, every process carrying that exact marker and every
 member of the command's group is terminated, and the row is deleted.
 
-Exit codes:
+`exec` exit codes:
   <status>  the command's own exit status, or 128 plus the signal that killed it
   3         refused: nothing started; one JSON line {"action_id", "reason", "started": false}
   126, 127  the command cannot be run, or is not found, as a shell reports it
@@ -18,6 +19,20 @@ Exit codes:
 
 A process that survives SIGKILL keeps the row for `reap`; `exec` names it on
 stderr and still exits with the command's status.
+
+`reap --action-id A` reaps that one launch without asking the ledger. `reap
+--sweep` asks `check-launch` about every launch directory under the run and
+reaps each one that is not current; a failed or malformed check skips it. A
+reap terminates every live process whose marker names the launch, plus every
+recorded group that such a process proves (a pid carrying that row's exact
+marker, in that group), then deletes the launch's directory. It prints one JSON
+line {"reaped": [{"action_id", "signalled"}], "skipped": [{"action_id", "reason"}]}.
+
+`reap` exit codes:
+  0  nothing was skipped
+  1  a launch was skipped: its check failed or was malformed, or a process
+     survived SIGKILL (`processes_survived`, and its directory is kept)
+  2  a usage or helper error, with nothing on stdout
 
 Residual: a process that leaves the command's session and also scrubs
 `AGENT_LAUNCH_SCOPE` from its environment is outside the scope. So is, on
@@ -34,6 +49,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -41,8 +57,7 @@ import time
 
 from agent_tools.agent_platform import write_atomically
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.launch_commit import (
-    CHECK_WORKER_FAILED, LIVE, MALFORMED_REPLY, LaunchCommitError, ask_worker)
+from agent_tools.launch_commit import LIVE, MALFORMED_REPLY, LaunchCommitError, ask_worker
 from agent_tools.launch_processes import (
     MARKER_ENV, ProcessTableError, UnsupportedPlatform, process_table, read_marker,
     require_supported_platform, terminate)
@@ -53,6 +68,7 @@ NONCE = re.compile(r"[0-9a-f]{32}")
 ROW_KEYS = frozenset({"nonce", "pgid", "started_at", "argv0"})
 CURRENT = "current"
 CHECK_LAUNCH_FAILED = "check_launch_failed"
+PROCESSES_SURVIVED = "processes_survived"
 REFUSED_EXIT = 3
 USAGE_EXIT = 2
 SEPARATOR = "--"
@@ -70,9 +86,13 @@ def canonical_line(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def is_safe_segment(value: str) -> bool:
+    return SAFE_SEGMENT.fullmatch(value) is not None and value not in (".", "..")
+
+
 def safe_segment(value: str, label: str) -> str:
     """`value`, when it is one safe path segment (D10)."""
-    if SAFE_SEGMENT.fullmatch(value) is None or value in (".", ".."):
+    if not is_safe_segment(value):
         raise LaunchScopeError(f"{label} {value!r} is not a safe path segment")
     return value
 
@@ -170,7 +190,10 @@ class _Forwarder:
         self.previous: dict[int, object] = {}
 
     def install(self) -> None:
+        """Forward each signal not ignored here; an ignored one stays ignored in the child."""
         for signum in _FORWARDED:
+            if signal.getsignal(signum) is signal.SIG_IGN:
+                continue
             self.previous[signum] = signal.signal(signum, self._handle)
 
     def _handle(self, signum, frame) -> None:
@@ -231,6 +254,7 @@ def exec_scoped(repo_root: str, run_id: str, argv: Sequence[str], *,
     marker = launch_marker(run_id, action, nonce)
     started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     _write_row(row, nonce, None, started_at, argv[0])
+    forwarder = _Forwarder()
     try:
         if worker_id is None:
             reason = ask_launch(repo_root, run_id, action)
@@ -241,15 +265,16 @@ def exec_scoped(repo_root: str, run_id: str, argv: Sequence[str], *,
             except LaunchCommitError as error:
                 raise LaunchScopeError(str(error)) from error
             positive = reason == LIVE
+        if positive:
+            forwarder.install()
     except BaseException:
+        forwarder.restore()
         _delete_row(row)
         raise
     if not positive:
         _delete_row(row)
         return REFUSED_EXIT, {"action_id": action, "started": False, "reason": reason}
 
-    forwarder = _Forwarder()
-    forwarder.install()
     try:
         return _run(argv, row, nonce, started_at, marker, forwarder)
     finally:
@@ -261,8 +286,10 @@ def _run(argv: Sequence[str], row: Path, nonce: str, started_at: str, marker: st
     try:
         child = subprocess.Popen(list(argv), start_new_session=True,
                                  env={**os.environ, MARKER_ENV: marker})
-    except OSError as error:
-        _delete_row(row)
+    except BaseException as error:
+        _delete_row(row)                 # nothing started: the pgid-null row goes
+        if not isinstance(error, OSError):
+            raise
         print(f"launch-scope: cannot run {argv[0]}: {error}", file=sys.stderr)
         return (127 if isinstance(error, FileNotFoundError) else 126), None
 
@@ -290,6 +317,95 @@ def _run(argv: Sequence[str], row: Path, nonce: str, started_at: str, marker: st
     return (rc if rc >= 0 else 128 - rc), None
 
 
+def _load_row(path: Path) -> tuple[str, int | None] | None:
+    """A row's (nonce, pgid), strictly loaded; None for anything unreadable or malformed."""
+    try:
+        row = json.loads(path.read_bytes(), object_pairs_hook=reject_duplicate_keys,
+                         parse_constant=reject_nonfinite_literal)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(row, dict) or set(row) != ROW_KEYS:
+        return None
+    nonce, pgid = row["nonce"], row["pgid"]
+    if (not isinstance(nonce, str) or NONCE.fullmatch(nonce) is None or nonce != path.stem
+            or not (pgid is None or (type(pgid) is int and pgid > 0))):
+        return None
+    return nonce, pgid
+
+
+def reap_launch(registry: Path, run_id: str, action_id: str) -> tuple[int, bool]:
+    """Terminate what the launch left, proving before signalling: (signalled, survived)."""
+    directory = launch_directory(registry, run_id, action_id)
+    rows = [row for row in map(_load_row, sorted(directory.glob("*.json"))) if row is not None]
+    launch = re.compile(re.escape(f"{run_id}/{action_id}/") + NONCE.pattern)
+    table = process_table()              # fresh, right before terminate: the pid-reuse window
+    marked = {}
+    for pid, proc in table.items():
+        if proc.zombie:
+            continue
+        marker = read_marker(pid)
+        if marker is not None and launch.fullmatch(marker):
+            marked[pid] = marker
+    proved = {pgid for nonce, pgid in rows if pgid is not None
+              and any(marker == launch_marker(run_id, action_id, nonce)
+                      and table[pid].pgid == pgid for pid, marker in marked.items())}
+    signalled, survivors = terminate(list(marked), proved)
+    if survivors:
+        return signalled, True
+    try:
+        shutil.rmtree(directory)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise LaunchScopeError(f"cannot remove {directory}: {error}") from error
+    return signalled, False
+
+
+def _launch_names(run_directory: Path) -> list[str]:
+    """The safe-named child directories of `run_directory`, sorted; none when it is missing."""
+    try:
+        with os.scandir(run_directory) as entries:
+            names = [entry.name for entry in entries
+                     if entry.is_dir(follow_symlinks=False) and is_safe_segment(entry.name)]
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        raise LaunchScopeError(f"cannot list {run_directory}: {error}") from error
+    return sorted(names)
+
+
+def reap(repo_root: str, run_id: str, *, action_id: str | None = None,
+         sweep: bool = False) -> tuple[int, dict]:
+    """Reap one launch, or sweep the run's non-current launches: (exit status, report)."""
+    require_supported_platform()
+    if (action_id is not None) == sweep:
+        raise LaunchScopeError("reap takes exactly one of --action-id and --sweep")
+    safe_segment(run_id, "run id")
+    if action_id is not None:
+        safe_segment(action_id, "action id")
+    registry = registry_root(repo_root)
+    reaped, skipped = [], []
+    if action_id is not None:
+        launches = [action_id]
+    else:
+        launches = []
+        for name in _launch_names(registry / run_id):
+            reason = ask_launch(repo_root, run_id, name)
+            if reason in (CHECK_LAUNCH_FAILED, MALFORMED_REPLY):
+                skipped.append({"action_id": name, "reason": reason})
+            elif reason != CURRENT:
+                launches.append(name)
+    for name in launches:
+        signalled, survived = reap_launch(registry, run_id, name)
+        if survived:
+            skipped.append({"action_id": name, "reason": PROCESSES_SURVIVED})
+        else:
+            reaped.append({"action_id": name, "signalled": signalled})
+    report = {"reaped": sorted(reaped, key=lambda item: item["action_id"]),
+              "skipped": sorted(skipped, key=lambda item: item["action_id"])}
+    return (0 if not skipped else 1), report
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="launch-scope", description=__doc__,
@@ -303,6 +419,15 @@ def _parser() -> argparse.ArgumentParser:
     identity = run.add_mutually_exclusive_group(required=True)
     identity.add_argument("--action-id", help="the launch's action id")
     identity.add_argument("--worker-id", help="a registered worker id")
+    sweep = verbs.add_parser(
+        "reap", help="terminate what a launch left behind, or sweep non-current launches",
+        usage="%(prog)s --repo-root R --run-id I (--action-id A | --sweep)")
+    sweep.add_argument("--repo-root", required=True, help="the ledger repository root")
+    sweep.add_argument("--run-id", required=True, help="the lifecycle run id")
+    selector = sweep.add_mutually_exclusive_group(required=True)
+    selector.add_argument("--action-id", help="reap this launch, without asking the ledger")
+    selector.add_argument("--sweep", action="store_true",
+                          help="reap every launch of the run that is not current")
     return parser
 
 
@@ -312,17 +437,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     separated = SEPARATOR in argv
     split = argv.index(SEPARATOR) if separated else len(argv)
     args = parser.parse_args(argv[:split])
-    if not separated:
+    if args.verb == "reap" and separated:
+        parser.error(f"reap takes no {SEPARATOR}")
+    if args.verb == "exec" and not separated:
         parser.error(f"missing {SEPARATOR} before the command to run")
     try:
-        status, refusal = exec_scoped(args.repo_root, args.run_id, argv[split + 1:],
-                                      action_id=args.action_id, worker_id=args.worker_id)
+        if args.verb == "reap":
+            status, report = reap(args.repo_root, args.run_id, action_id=args.action_id,
+                                  sweep=args.sweep)
+        else:
+            status, report = exec_scoped(args.repo_root, args.run_id, argv[split + 1:],
+                                         action_id=args.action_id, worker_id=args.worker_id)
     except (LaunchScopeError, LaunchCommitError, UnsupportedPlatform,
             ProcessTableError) as error:
         print(f"launch-scope: {error}", file=sys.stderr)
         return USAGE_EXIT
-    if refusal is not None:
-        print(canonical_line(refusal))
+    if report is not None:
+        print(canonical_line(report))
     return status
 
 
