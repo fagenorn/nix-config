@@ -28,8 +28,8 @@ Whoever relaunches an owner calls the verb with the relaunched launch's
 `action_id` and puts its stdout in the relaunch prompt, beside the existing
 envelope and owner object. The relaunched owner still resolves the project
 once and still validates its launch identity with `check-launch`; it then
-trusts the pack, re-reads only the skill sections for the pack's current phase,
-and starts from the pack's `next_action`. The pack is an accelerator, never a
+trusts the pack, re-reads only the shared owner sections and the skill
+sections for the pack's current phase (per D17), and starts from the pack's `next_action`. The pack is an accelerator, never a
 gate: when the verb refuses, or the pack disagrees with what the owner can see,
 the owner falls back to today's full re-orientation.
 
@@ -181,8 +181,10 @@ untrusted accelerator and cross-checked by the owner instead (per D16).
   persists `delegate`, the earlier owner runs `resume-pack` for its own
   `action_id` (the fresh owner adopts the same launch) and passes the pack
   beside the continuation object, never inside it: the continuation stays the
-  closed object AUTO.md defines, and the fresh owner's reviewed-head and
-  artifact-budget checks still run unchanged.
+  closed object AUTO.md defines. Only the Phase-5 rollover owner, which carries
+  that continuation, still runs AUTO.md's `#### Fresh delegated owner`
+  reviewed-head and artifact-budget checks unchanged; a generic `delegate` has
+  no continuation and runs none of them (per D17).
 
 ### What the relaunched owner does with it
 
@@ -196,13 +198,19 @@ stale: the owner ignores it and re-orients in full.
 Otherwise it trusts the pack, which replaces exactly the owner's own ad-hoc
 re-orientation (per D16): it does not dump the ledger, re-read git history,
 re-validate the plan, read the SDD progress log itself, or read skills end to
-end. It reads only the skill sections for the pack's phase: SKILL.md's
-`## Phase <n>` section, the file beside SKILL.md that phase names, AUTO.md's
-section governing that phase under `--auto` (in place of reading AUTO.md
-whole), and the phase's sub-skill (`sdd` for Phase 6, `ship-issue` for
-Phase 7). Every mechanism the pack does not replace still runs: resolving the
-project once, owner-object validation, `check-launch`, AUTO.md's fresh-owner
-rollover checks, and sdd's own `progress.md` entry check, which stays sdd's
+end. It reads the shared owner sections every owner obeys and the skill
+sections for the pack's phase (per D17): from-issue's `## Lifecycle identity`,
+`## Decision ledger (artifact discipline)`, `## Skill-tool invocations`,
+`## Dispatch, phase-budget and attempt-budget rules`,
+`## Terminal return procedure` and `## Suspension procedure`; SKILL.md's
+`## Phase <n>` section and the file beside SKILL.md that phase names; under
+`--auto`, AUTO.md's opening, `## The self-answer pattern`,
+`## When *not* to auto-resolve` and the section governing that phase (in place
+of reading AUTO.md whole); and the phase's sub-skill (`sdd` for Phase 6,
+`ship-issue` for Phase 7). Every mechanism the pack does not replace still
+runs: resolving the project once, owner-object validation, `check-launch`,
+AUTO.md's `#### Fresh delegated owner` checks for an owner delegated at the
+Phase-5 rollover (only that owner, which reads that section first), and sdd's own `progress.md` entry check, which stays sdd's
 resume mechanism and wins over the pack's `resume_task` if they disagree.
 `read_handoff` reads the handoff document; `reorient` re-orients in full.
 
@@ -228,8 +236,8 @@ resume mechanism and wins over the pack's `resume_task` if they disagree.
   rollover and `delegate` routes carry the pack; that both skills' validate-every-reply
   rule names the `resume-pack` exception; and that from-issue's owner
   guidance on a pack-carrying relaunch still runs `resolve-project`,
-  `check-launch` and sdd's own `progress.md` check, reads only the current
-  phase's skill sections, and that the AUTO.md read-once line yields to it.
+  `check-launch` and sdd's own `progress.md` check, reads only the shared
+  owner sections and the current phase's skill sections, and that the AUTO.md read-once line yields to it.
 
 ## Out of scope
 
