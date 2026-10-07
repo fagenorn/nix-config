@@ -2,13 +2,11 @@
 
 Phase 3 of `ship-issue`. Mine the session for high-signal learnings and promote them to docs that already exist — or drop them.
 
-This included document receives the phase owner's retained `ResolvedProject`; it uses passed `bindings.paths`, `bindings.vcs`, and `bindings.workflow` values without resolving or inferring policy.
-
-Project-agnostic: destination paths come only from the parent’s retained `bindings.paths` and `capabilities.knowledge.*`. An authored unsupported knowledge capability takes its documented no-knowledge route.
+Project-agnostic: destination paths come only from the parent’s retained `bindings.paths` and `capabilities.knowledge.*`, and an authored unsupported knowledge capability takes its documented no-knowledge route.
 
 ## The bar
 
-**Default to drop.** A junk entry costs more than a missed learning: junk compounds, because future agents discount the whole section it lives in, while a missed learning just recurs and gets caught next time.
+**Default to drop.** A junk entry costs more than a missed learning.
 
 **No abstract principles.** Concrete situation + concrete rule. "Regenerate lockfiles after integration→feature merge" is fine; "be careful with merges" is not.
 
@@ -27,7 +25,7 @@ Fail any → drop.
 
 ## The destination table
 
-A surviving candidate maps to exactly one **existing** doc. If the mapped path is absent (unconfigured, or the file doesn't exist), that learning has no home → **drop it** (or, only on explicit user request, propose creating the doc). The absence of a home is itself evidence the learning isn't load-bearing yet.
+A surviving candidate maps to exactly one **existing** doc. If the mapped path is absent (unconfigured, or the file doesn't exist), that learning has no home → **drop it** (or, only on explicit user request, propose creating the doc).
 
 | Type of learning | Destination (config key) |
 |---|---|
@@ -39,13 +37,9 @@ A surviving candidate maps to exactly one **existing** doc. If the mapped path i
 
 Where the project ships format references next to the grilling skill (`grill-with-docs`'s `CONTEXT-FORMAT.md` / `ADR-FORMAT.md`), use them for the context/ADR rows; if absent, match the destination doc's existing neighbours.
 
-A candidate requiring a brand-new top-level doc is a leap — push back unless the user explicitly wants it.
-
 ## The procedure
 
 ### 1. Mine the source surface
-
-Look only at what actually happened; don't speculate about what could go wrong in the abstract.
 
 - `git log <branch> ^origin/<integration-branch> --oneline` — look for `fixup!`/`squash!` and merge commits that needed thought.
 - Use the caller-selected verification command for failed CI runs; skip it when `capabilities.tracker` is unsupported.

@@ -1,57 +1,47 @@
 # Phase 1 — Sync mechanics
 
-Read this when Phase 1 starts. This included document receives the phase owner's
-retained `ResolvedProject`; it uses `bindings.vcs` and `bindings.paths.hints`
-without resolving or inferring policy. It owns the divergence rationale,
-foreign-commit handling, scope-creep sweeps, the auto-resolve allowlist, and the
-conflict escalation format.
+Read this when Phase 1 starts.
 
 ## Local integration-branch divergence
 
-`git log origin/<integration-branch>..<integration-branch> --oneline` non-empty AND
-those commits aren't on the feature branch (`git cherry <integration-branch>
-<feature>`) → the local integration branch has diverged. Whether to stop depends
-on what you're about to do:
+`git log origin/<integration-branch>..<integration-branch> --oneline` non-empty AND those commits
+aren't on the feature branch (`git cherry <integration-branch> <feature>`) → the local integration
+branch has diverged. Whether to stop depends on what you're about to do:
 
-- **Merging `origin/<integration-branch>` into the feature branch** (this skill's
-  normal case) doesn't touch the local integration branch, so its divergence is
-  irrelevant to the merge's safety. Note it so you don't later try to push that
-  branch, then continue. Under parallel `from-issue --auto` runs, divergence is
-  the expected steady state.
-- **Anything that rewrites the local integration branch** — `git reset --hard` +
-  cherry-pick to "clean up", `git rebase`, `git push origin <integration-branch>`
-  → **stop and surface**, ground against the passed `bindings.paths.hints`. Those can
-  discard another in-flight session's spec/plan commits.
+- **Merging `origin/<integration-branch>` into the feature branch** (this skill's normal case)
+  leaves the local integration branch untouched, so note it so you don't later push that
+  branch, and continue.
+  Under parallel `from-issue --auto` runs, divergence is the expected steady state.
+- **Anything that rewrites the local integration branch** — `git reset --hard` + cherry-pick to
+  "clean up", `git rebase`, `git push origin <integration-branch>` → **stop and surface**,
+  ground against the passed `bindings.paths.hints`: it can discard another in-flight session's
+  spec/plan commits.
 
-Auto-mode rule: `--auto` proceeds on the first case and still pauses on the
-second — auto-resolution does not extend to history rewrites. Of three audited
-`--auto` sessions that hit this, two silently cherry-picked or rebased the local
-integration branch. Don't be those two.
+Auto-mode rule: `--auto` proceeds on the first case and still pauses on the second —
+auto-resolution does not extend to history rewrites.
 
 ## Foreign commits
 
-`git log <feature> ^origin/<integration-branch> --oneline` should show only this
-issue's commits. Older flows let unrelated issues' spec/plan commits ride into a
-worktree. If you see any, surface — don't clean up silently.
+`git log <feature> ^origin/<integration-branch> --oneline` should show only this issue's commits. If
+you see any others, surface — don't clean up silently.
 
 ## Scope creep at merge time
 
-When this branch retires or extends a wire shape (field, discriminant, endpoint,
-env-var axis), siblings that landed on `origin/<integration-branch>` *during*
-execution may already consume that surface. Two shapes:
+When this branch retires or extends a wire shape (field, discriminant, endpoint, env-var axis),
+siblings that landed on `origin/<integration-branch>` *during* execution may already consume that
+surface. Two shapes:
 
 - **Retirement** — modify/delete conflicts on files the integration branch
   removed wholesale, and/or cleanly-merged *new* files still referencing the
   retired symbol. Extend scope: sweep those files and clean them in the same
-  merge commit, rather than eating a downstream typecheck failure plus a fix-up
-  commit.
+  merge commit.
 - **Addition** (symmetric) — the merge is clean, but a newly-landed sibling axis
   on the same surface now fires inside tests asserting "X is idle when X is
   unchanged". Seed the sibling axes at their intended values in the test setup so
   the test isolates its own invariant. Phase 2 catches this; the merge doesn't.
 
-Concrete instances of both live in the caller-passed `bindings.paths.hints` paths
-when the project declares them.
+Concrete instances of both live in the caller-passed `bindings.paths.hints` paths when the project
+declares them.
 
 ## Auto-resolve allowlist (silent)
 
