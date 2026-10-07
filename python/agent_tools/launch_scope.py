@@ -2,6 +2,7 @@
 
     launch-scope exec --repo-root R --run-id I (--action-id A | --worker-id W) -- <argv>
     launch-scope reap --repo-root R --run-id I (--action-id A | --sweep)
+    launch-scope scratch --repo-root R --run-id I (--action-id A | --worker-id W)
 
 `exec` writes a registry row under `<git common dir of R>/agent-launch/I/A/`,
 asks `workflow-state check-launch` (or `check-worker` for a worker, whose action
@@ -33,20 +34,54 @@ recorded group that such a process proves (a pid carrying that row's exact
 marker, in that group). It then deletes the files it proved, and the launch's
 directory once empty, only when no row changed since its snapshot and no marked
 process is live; otherwise it runs one more round, and then keeps the directory
-(`processes_survived`). It prints one JSON line
-{"reaped": [{"action_id", "signalled"}], "skipped": [{"action_id", "reason"}]}.
+(`processes_survived`). In that clean round, before the files go, it removes the
+launch's scratch root when `scratch.json` records one: it runs `git worktree
+remove --force --force` on every non-main registration whose real path is the
+root or below it, present or missing, then `shutil.rmtree` on the root, then
+re-lists the worktrees. A record that is not valid, a failed removal (named on
+stderr with its operation, path and cause), or a registration still inside the
+root keeps `scratch.json` and the directory (`scratch_not_removed`). It never
+runs a repository-wide `git worktree prune`, so a registration outside every
+root survives. It prints one JSON line
+{"reaped": [{"action_id", "scratch_removed", "signalled", "worktrees_removed"}],
+"skipped": [{"action_id", "reason"}], "unattributed_worktrees": [<path>]}, every
+list sorted. `scratch_removed` is true when a round deleted the root (a worktree
+that occupied it counts), and `worktrees_removed` lists the registrations the
+reap dropped. `unattributed_worktrees` lists every registered worktree that is
+neither the main worktree nor below it, nor inside the root of a valid
+`scratch.json` of any run; it is reported only and never changes the exit code.
 
 `reap` exit codes:
   0  nothing was skipped
-  1  a launch was skipped: its check failed or was malformed, or a process
+  1  a launch was skipped: its check failed or was malformed, a process
      survived SIGKILL or a row kept changing (`processes_survived`, and its
-     directory is kept)
-  2  a usage or helper error, with nothing on stdout
+     directory is kept), or its scratch root could not be removed
+     (`scratch_not_removed`, and `scratch.json` and the directory are kept)
+  2  a usage or helper error, with nothing on stdout, including a git that
+     cannot list the worktrees
 
 Residual: a process that leaves the command's session and also scrubs
 `AGENT_LAUNCH_SCOPE` from its environment is outside the scope. So is, on
 darwin, an Apple platform binary that left the session, because its
 environment cannot be read.
+
+`scratch` asks the same liveness question as `exec` first, and creates nothing
+for a launch that is not live. It prints the launch's scratch root: one
+directory per launch, shared with its workers, made with `tempfile.mkdtemp`
+under `TMPDIR` and recorded as `{"path": <real path>}` in `scratch.json` in the
+launch's registry directory. The record is published once, by an exclusive
+link, so concurrent callers all print the winner's root and the losers remove
+the directory they made. A repeat call prints the same path, recreating the
+directory (mode 0700) at that path if it has gone. A record that is not a strict
+`{"path"}` object naming an absolute real path whose basename is
+`launch-scope-<name>`, or a root that exists but is not a real directory, is an
+error and is left as it is. A failure before the record is published removes
+the root it just made.
+
+`scratch` exit codes:
+  0  the root's real path, one line
+  3  refused: one JSON line {"action_id", "created": false, "reason"}
+  2  a usage or helper error, with nothing on stdout
 """
 
 from __future__ import annotations
@@ -60,10 +95,13 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+from typing import NamedTuple
 
 from agent_tools.agent_platform import write_atomically
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
@@ -79,9 +117,14 @@ ROW_KEYS = frozenset({"nonce", "pgid", "started_at", "argv0"})
 CURRENT = "current"
 CHECK_LAUNCH_FAILED = "check_launch_failed"
 PROCESSES_SURVIVED = "processes_survived"
+SCRATCH_NOT_REMOVED = "scratch_not_removed"
 REFUSED_EXIT = 3
 USAGE_EXIT = 2
 SEPARATOR = "--"
+SCRATCH_RECORD = "scratch.json"
+SCRATCH_PREFIX = "launch-scope-"
+SCRATCH_NAME = re.compile(r"launch-scope-[a-z0-9_]+")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 _REPLY_KEYS = frozenset({"action_id", "current", "current_action_id", "reason"})
 _FORWARDED = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
@@ -252,6 +295,19 @@ def _clean_up_after_failure(marker: str, pgid: int) -> bool:
         return False
 
 
+def _identity_reason(repo_root: str, run_id: str, action: str,
+                     worker_id: str | None) -> tuple[str, bool]:
+    """The ledger's reason for the launch (or its worker) and whether it is live."""
+    if worker_id is None:
+        reason = ask_launch(repo_root, run_id, action)
+        return reason, reason == CURRENT
+    try:
+        reason = ask_worker(repo_root, run_id, worker_id)
+    except LaunchCommitError as error:
+        raise LaunchScopeError(str(error)) from error
+    return reason, reason == LIVE
+
+
 def exec_scoped(repo_root: str, run_id: str, argv: Sequence[str], *,
                 action_id: str | None = None,
                 worker_id: str | None = None) -> tuple[int, dict | None]:
@@ -272,15 +328,7 @@ def exec_scoped(repo_root: str, run_id: str, argv: Sequence[str], *,
     _write_row(row, nonce, None, started_at, argv[0])
     forwarder = _Forwarder()
     try:
-        if worker_id is None:
-            reason = ask_launch(repo_root, run_id, action)
-            positive = reason == CURRENT
-        else:
-            try:
-                reason = ask_worker(repo_root, run_id, worker_id)
-            except LaunchCommitError as error:
-                raise LaunchScopeError(str(error)) from error
-            positive = reason == LIVE
+        reason, positive = _identity_reason(repo_root, run_id, action, worker_id)
         if positive:
             forwarder.install()
     except BaseException:
@@ -333,12 +381,119 @@ def _run(argv: Sequence[str], row: Path, nonce: str, started_at: str, marker: st
     return (rc if rc >= 0 else 128 - rc), None
 
 
+def scratch_path(data: bytes) -> str | None:
+    """The record's root path when `data` is a strict `{"path"}` object naming one (D4)."""
+    try:
+        value = json.loads(data, object_pairs_hook=reject_duplicate_keys,
+                           parse_constant=reject_nonfinite_literal)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(value, dict) or set(value) != {"path"}:
+        return None
+    path = value["path"]
+    if (not isinstance(path, str) or _CONTROL.search(path) is not None
+            or not os.path.isabs(path)
+            or SCRATCH_NAME.fullmatch(os.path.basename(path)) is None):
+        return None
+    try:
+        if os.path.realpath(path) != path:
+            return None
+    except (ValueError, OSError):        # e.g. a lone surrogate cannot be encoded
+        return None
+    return path
+
+
+def _read_record(record: Path) -> str | None:
+    """The root a record names; None when there is no record, an error when it is malformed."""
+    try:
+        data = record.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise LaunchScopeError(f"cannot read {record}: {error}") from error
+    path = scratch_path(data)
+    if path is None:
+        raise LaunchScopeError(f"malformed scratch record {record}")
+    return path
+
+
+def _discard_root(made: str) -> None:
+    """Remove a root made before its record was published; a failure is named on stderr (D11)."""
+    try:
+        shutil.rmtree(made)
+    except OSError as error:
+        print(f"launch-scope: rmtree {made!r} failed: {error}", file=sys.stderr)
+
+
+def _create_record(directory: Path) -> str:
+    """Make the launch's root and publish its record once, by an exclusive link (D3, D11)."""
+    record = directory / SCRATCH_RECORD
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        made = os.path.realpath(tempfile.mkdtemp(prefix=SCRATCH_PREFIX))
+    except OSError as error:
+        raise LaunchScopeError(f"cannot make the scratch root: {error}") from error
+    data = (canonical_line({"path": made}) + "\n").encode("utf-8")
+    if scratch_path(data) != made:       # e.g. a TMPDIR holding a control character
+        _discard_root(made)
+        raise LaunchScopeError(f"scratch root {made!r} cannot be recorded (D4)")
+    temp = None
+    try:
+        try:
+            with tempfile.NamedTemporaryFile(dir=directory, prefix=".scratch.", suffix=".tmp",
+                                             delete=False) as handle:
+                temp = Path(handle.name)
+                handle.write(data)
+            os.link(temp, record)
+        except FileExistsError:
+            os.rmdir(made)               # the loser of the race: the winner's root stands
+            winner = _read_record(record)
+            if winner is None:
+                raise LaunchScopeError(f"scratch record {record} vanished") from None
+            return winner
+        except BaseException as error:
+            _discard_root(made)
+            if isinstance(error, OSError):
+                raise LaunchScopeError(f"cannot write {record}: {error}") from error
+            raise
+        return made
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
+
+
+def scratch(repo_root: str, run_id: str, *, action_id: str | None = None,
+            worker_id: str | None = None) -> tuple[int, str | dict]:
+    """The launch's scratch root, made on first use: (0, root) or (3, refusal)."""
+    require_supported_platform()
+    action = action_id if worker_id is None else worker_action(worker_id)
+    safe_segment(run_id, "run id")
+    safe_segment(action, "action id")
+    directory = launch_directory(registry_root(repo_root), run_id, action)
+    reason, positive = _identity_reason(repo_root, run_id, action, worker_id)
+    if not positive:
+        return REFUSED_EXIT, {"action_id": action, "created": False, "reason": reason}
+    root = _read_record(directory / SCRATCH_RECORD)
+    if root is None:
+        root = _create_record(directory)
+    if not os.path.lexists(root):
+        try:
+            os.mkdir(root, 0o700)
+        except FileExistsError:
+            pass                         # a concurrent caller recreated it
+        except OSError as error:
+            raise LaunchScopeError(f"cannot recreate scratch root {root}: {error}") from error
+    if os.path.islink(root) or not os.path.isdir(root):
+        raise LaunchScopeError(f"scratch root {root} is not a directory")
+    return 0, root
+
+
 def _parse_row(name: str, data: bytes) -> tuple[str, int | None] | None:
     """A row's (nonce, pgid), strictly loaded; None for anything malformed."""
     try:
         row = json.loads(data, object_pairs_hook=reject_duplicate_keys,
                          parse_constant=reject_nonfinite_literal)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     if not isinstance(row, dict) or set(row) != ROW_KEYS:
         return None
@@ -419,13 +574,91 @@ def _remove_proved(directory: Path, proved: dict[str, bytes]) -> bool:
 REAP_ROUNDS = 2
 
 
-def reap_launch(registry: Path, run_id: str, action_id: str) -> tuple[int, bool]:
-    """Terminate what the launch left, proving before signalling: (signalled, survived).
+class ReapOutcome(NamedTuple):
+    signalled: int
+    skip_reason: str | None              # None, PROCESSES_SURVIVED or SCRATCH_NOT_REMOVED
+    scratch_removed: bool
+    worktrees_removed: tuple[str, ...]
+
+
+def worktree_paths(repo_root: str) -> list[str]:
+    """The real paths `git worktree list` gives, in its order: the main worktree first."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", repo_root, "worktree", "list", "--porcelain", "-z"],
+            capture_output=True, check=False)
+    except OSError as error:
+        raise LaunchScopeError(f"cannot run git: {error}") from error
+    if completed.returncode != 0:
+        raise LaunchScopeError(f"git cannot list the worktrees of {repo_root!r}")
+    prefix = b"worktree "
+    paths = [os.path.realpath(os.fsdecode(field[len(prefix):]))
+             for field in completed.stdout.split(b"\0") if field.startswith(prefix)]
+    if not paths:
+        raise LaunchScopeError(f"git listed no worktree of {repo_root!r}")
+    return paths
+
+
+def _inside(path: str, root: str) -> bool:
+    """Whether the real path `path` is `root` or below it."""
+    return path == root or path.startswith(root + os.sep)
+
+
+def _git_step(repo_root: str, *args: str) -> bool:
+    """Run `git -C repo_root <args>`; a failure is named on stderr and returns False (D11)."""
+    try:
+        completed = subprocess.run(["git", "-C", repo_root, *args],
+                                   capture_output=True, text=True, check=False)
+    except OSError as error:
+        raise LaunchScopeError(f"cannot run git: {error}") from error
+    if completed.returncode != 0:
+        print(f"launch-scope: git {' '.join(args)} failed (exit {completed.returncode}): "
+              f"{completed.stderr.strip()}", file=sys.stderr)
+    return completed.returncode == 0
+
+
+def _remove_scratch(repo_root: str,
+                    snapshot: dict[str, bytes]) -> tuple[bool, tuple[str, ...]] | None:
+    """Remove the recorded scratch root and every worktree registered in it (D4, D5, D10).
+
+    (root removed, worktrees removed), or None when the launch must be skipped:
+    the record is invalid, a removal failed, or a registration inside the root
+    remains. Nothing outside the validated root is ever removed.
+    """
+    data = snapshot.get(SCRATCH_RECORD)
+    if data is None:
+        return False, ()
+    root = scratch_path(data)
+    if root is None:
+        return None
+    before = sorted(path for path in worktree_paths(repo_root)[1:] if _inside(path, root))
+    failed = False
+    root_existed = os.path.lexists(root)
+    for path in before:                  # present or missing: --force --force drops both
+        failed |= not _git_step(repo_root, "worktree", "remove", "--force", "--force", path)
+    if os.path.lexists(root):
+        try:
+            shutil.rmtree(root)
+        except OSError as error:
+            print(f"launch-scope: rmtree {root} failed: {error}", file=sys.stderr)
+            failed = True
+    removed_root = root_existed and not os.path.lexists(root)
+    relisted = worktree_paths(repo_root)
+    if failed or any(_inside(path, root) for path in relisted[1:]):
+        return None
+    return removed_root, tuple(path for path in before if path not in set(relisted))
+
+
+def reap_launch(repo_root: str, registry: Path, run_id: str, action_id: str) -> ReapOutcome:
+    """Terminate what the launch left, proving before signalling.
 
     The directory goes only when a round ends with no survivor, with every file
     unchanged since that round's snapshot, and with no live process carrying the
-    launch's marker. Otherwise one more round runs; after `REAP_ROUNDS` the
-    directory is kept and the launch counts as survived (D16).
+    launch's marker. In that clean round the launch's scratch root is removed
+    first, with the worktrees registered inside it, and any failure there keeps
+    the record and the directory (`scratch_not_removed`). Otherwise one more
+    round runs; after `REAP_ROUNDS` the directory is kept and the launch counts
+    as survived (D16).
     """
     directory = launch_directory(registry, run_id, action_id)
     scope = repository_scope(registry)
@@ -435,10 +668,13 @@ def reap_launch(registry: Path, run_id: str, action_id: str) -> tuple[int, bool]
         marker = read_marker(pid)
         return marker is not None and launch.fullmatch(marker) is not None
     signalled = 0
+    removed_root = False
+    removed: set[str] = set()
     for _ in range(REAP_ROUNDS):
         snapshot = _directory_files(directory)
         rows = [row for row in (_parse_row(name, data) for name, data in sorted(snapshot.items())
-                                if name.endswith(".json")) if row is not None]
+                                if name.endswith(".json") and name != SCRATCH_RECORD)
+                if row is not None]
         table = process_table()          # fresh, right before terminate: the pid-reuse window
         marked = _launch_marked(launch, table)
         proved = {pgid for nonce, pgid in rows if pgid is not None
@@ -447,16 +683,21 @@ def reap_launch(registry: Path, run_id: str, action_id: str) -> tuple[int, bool]
         reached, survivors = terminate(list(marked), proved, is_marked=is_marked)
         signalled += reached
         if survivors:
-            return signalled, True
+            return ReapOutcome(signalled, PROCESSES_SURVIVED, False, ())
         if _directory_files(directory) != snapshot:
             continue                     # an exec registered or rewrote a row meanwhile
         after = process_table()
         protected = protected_pids(after)
         if any(pid not in protected for pid in _launch_marked(launch, after)):
             continue                     # a marked process started after the snapshot
+        scratch = _remove_scratch(repo_root, snapshot)
+        if scratch is None:
+            return ReapOutcome(signalled, SCRATCH_NOT_REMOVED, False, ())
+        removed_root = removed_root or scratch[0]
+        removed.update(scratch[1])
         if _remove_proved(directory, snapshot):
-            return signalled, False
-    return signalled, True
+            return ReapOutcome(signalled, None, removed_root, tuple(sorted(removed)))
+    return ReapOutcome(signalled, PROCESSES_SURVIVED, False, ())
 
 
 def _launch_names(run_directory: Path) -> list[str]:
@@ -486,6 +727,34 @@ def _marked_launch_names(scope: str, run_id: str) -> set[str]:
     return names
 
 
+def recorded_roots(registry: Path) -> set[str]:
+    """The roots of every valid `scratch.json` under the registry, in any run (D6)."""
+    roots = set()
+    for run in _launch_names(registry):
+        for action in _launch_names(registry / run):
+            record = registry / run / action / SCRATCH_RECORD
+            try:
+                if record.is_symlink() or not record.is_file():
+                    continue
+                data = record.read_bytes()
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise LaunchScopeError(f"cannot read {record}: {error}") from error
+            path = scratch_path(data)
+            if path is not None:
+                roots.add(path)
+    return roots
+
+
+def unattributed_worktrees(repo_root: str, registry: Path) -> list[str]:
+    """Registered worktrees outside the main worktree and every recorded root (D6)."""
+    listed = worktree_paths(repo_root)
+    main, roots = listed[0], recorded_roots(registry)
+    return sorted(path for path in listed[1:]
+                  if not _inside(path, main) and not any(_inside(path, r) for r in roots))
+
+
 def reap(repo_root: str, run_id: str, *, action_id: str | None = None,
          sweep: bool = False) -> tuple[int, dict]:
     """Reap one launch, or sweep the run's non-current launches: (exit status, report)."""
@@ -510,13 +779,16 @@ def reap(repo_root: str, run_id: str, *, action_id: str | None = None,
             elif reason != CURRENT:
                 launches.append(name)
     for name in launches:
-        signalled, survived = reap_launch(registry, run_id, name)
-        if survived:
-            skipped.append({"action_id": name, "reason": PROCESSES_SURVIVED})
+        outcome = reap_launch(repo_root, registry, run_id, name)
+        if outcome.skip_reason is not None:
+            skipped.append({"action_id": name, "reason": outcome.skip_reason})
         else:
-            reaped.append({"action_id": name, "signalled": signalled})
+            reaped.append({"action_id": name, "signalled": outcome.signalled,
+                           "scratch_removed": outcome.scratch_removed,
+                           "worktrees_removed": list(outcome.worktrees_removed)})
     report = {"reaped": sorted(reaped, key=lambda item: item["action_id"]),
-              "skipped": sorted(skipped, key=lambda item: item["action_id"])}
+              "skipped": sorted(skipped, key=lambda item: item["action_id"]),
+              "unattributed_worktrees": unattributed_worktrees(repo_root, registry)}
     return (0 if not skipped else 1), report
 
 
@@ -533,6 +805,14 @@ def _parser() -> argparse.ArgumentParser:
     identity = run.add_mutually_exclusive_group(required=True)
     identity.add_argument("--action-id", help="the launch's action id")
     identity.add_argument("--worker-id", help="a registered worker id")
+    made = verbs.add_parser(
+        "scratch", help="print the launch's scratch root, creating it on first use",
+        usage="%(prog)s --repo-root R --run-id I (--action-id A | --worker-id W)")
+    made.add_argument("--repo-root", required=True, help="the ledger repository root")
+    made.add_argument("--run-id", required=True, help="the lifecycle run id")
+    owner = made.add_mutually_exclusive_group(required=True)
+    owner.add_argument("--action-id", help="the launch's action id")
+    owner.add_argument("--worker-id", help="a registered worker id")
     sweep = verbs.add_parser(
         "reap", help="terminate what a launch left behind, or sweep non-current launches",
         usage="%(prog)s --repo-root R --run-id I (--action-id A | --sweep)")
@@ -551,14 +831,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     separated = SEPARATOR in argv
     split = argv.index(SEPARATOR) if separated else len(argv)
     args = parser.parse_args(argv[:split])
-    if args.verb == "reap" and separated:
-        parser.error(f"reap takes no {SEPARATOR}")
+    if args.verb in ("reap", "scratch") and separated:
+        parser.error(f"{args.verb} takes no {SEPARATOR}")
     if args.verb == "exec" and not separated:
         parser.error(f"missing {SEPARATOR} before the command to run")
     try:
         if args.verb == "reap":
             status, report = reap(args.repo_root, args.run_id, action_id=args.action_id,
                                   sweep=args.sweep)
+        elif args.verb == "scratch":
+            status, report = scratch(args.repo_root, args.run_id, action_id=args.action_id,
+                                     worker_id=args.worker_id)
+            if status == 0:
+                print(report)
+                return 0
         else:
             status, report = exec_scoped(args.repo_root, args.run_id, argv[split + 1:],
                                          action_id=args.action_id, worker_id=args.worker_id)

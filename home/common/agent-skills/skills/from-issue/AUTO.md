@@ -108,7 +108,7 @@ beyond the exceptions named below):
   `bindings.paths.hints`, `bindings.tracker`, `bindings.vcs`, and `bindings.workflow`),
 - the absolute worktree path, and an instruction to `cd` there and commit its artifacts there,
 - with lifecycle identity, the `Lifecycle worker:` line from `SKILL.md`'s **Writing workers** rule, the
-  `launch-scope exec` sentence that follows it there, and the instruction to create every
+  `launch-scope exec` and `scratch` sentences that follow it there, and the instruction to create every
   commit through `launch-commit` with its three values,
 - the self-answer pattern above and the `## Decision ledger` table format with its non-obvious-only
   filter, pasted verbatim from `decision-ledger.md`,

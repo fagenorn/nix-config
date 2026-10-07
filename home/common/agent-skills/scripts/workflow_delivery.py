@@ -908,6 +908,17 @@ class DeliveryRuntime:
         changed = issue_state["delivery"] != context["before"] or blocking is not None
         return response, changed
 
+    @staticmethod
+    def _check_tracker_outcome(delivery: dict[str, Any], historical: dict[str, Any] | None) -> None:
+        """A historical row's issue_closed names the observed tracker outcome (#273 D6, D17)."""
+        post = delivery["postconditions"]["tracker_closed"]
+        if historical is None or post["state"] != "observed":
+            return
+        kind = next(item["observation_kind"] for item in delivery["delivery_observations"]
+                    if item["id"] == post["observation_id"])
+        if historical["issue_closed"] is not (kind == "tracker_closed"):
+            raise ValueError("delivery summary issue_closed does not match the tracker outcome")
+
     def finish_outcome(
         self, issue_state: dict[str, Any], record: dict[str, Any],
         report: dict[str, Any], reduction: dict[str, Any], common: dict[str, Any],
@@ -917,6 +928,7 @@ class DeliveryRuntime:
             if reduction["completion_state"] != "delivery_complete":
                 raise ValueError("delivery summary is incomplete")
             historical = report["historical_owner_result"]
+            self._check_tracker_outcome(reduction["next_delivery"], historical)
             if historical is not None and report["custody"]["kind"] == "implementation":
                 record.update(state=historical["state"], result=copy.deepcopy(historical),
                               finished_at=now, result_source="owner")

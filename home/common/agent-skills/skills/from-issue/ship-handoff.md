@@ -47,7 +47,7 @@ In both handoff shapes, `head_sha` is the validated sdd report's `head_sha`,
 copied unchanged and never the branch tip: it is the *final-review head*
 ship-issue's Phase 5 reviews from.
 
-In both handoff shapes, `acceptance_state` is the validated sdd report's `acceptance_state`, copied unchanged. A `state: failed` handoff built without an sdd report (`review_state: unknown`) carries `not_applicable`. ship-issue validates the field and carries it; its close stage does not read it.
+In both handoff shapes, `acceptance_state` is the validated sdd report's `acceptance_state`, copied unchanged. A `state: failed` handoff built without an sdd report (`review_state: unknown`) carries `not_applicable`. ship-issue validates the field and fixes its effective acceptance state from it: `met` or `not_applicable` closes the issue, and `unmet` or `human_pending` holds it open as `needs-verification` (ship-issue Phase 8 step 1).
 
 Use `state: failed` only according to the ship-handoff validator's before/after
 matrix. `notes` is bounded by `phase_reports.notes_max_characters`; it names a
@@ -64,8 +64,9 @@ it is `custody.action_id`.
 
 With lifecycle identity, the prompt also carries the single line
 Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>
-from from-issue's **Writing workers** rule — beside the handoff, never inside the handoff — followed by the sentence
+from from-issue's **Writing workers** rule — beside the handoff, never inside the handoff — followed by the sentences
 Run each long command, every verification command included, as `launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <argv>`, still in the foreground.
+Create every scratch directory or scratch worktree under the path that `launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>` prints.
 
 Your task:
   1. Invoke the `ship-issue` skill via the Skill tool. Read its SKILL.md and follow
@@ -125,16 +126,23 @@ merge success. Never inline detail.
 
 ## Inline fallback (no ship-issue skill)
 
-Deliver inline: push the branch, open a PR against `<integration-branch>`, then use the same full-review tier over the diff:
+Deliver inline: push the branch, open a PR against `<integration-branch>`, then use the same full-review tier over the diff. The PR body carries `Closes #<num>` only when the sdd report's `acceptance_state` is `met` or `not_applicable`, and no closing keyword otherwise, so that merging a held PR never closes the issue:
 
 <!-- agent-dispatch: id=from-issue-inline-ship-review role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") launches a fresh first-pass reviewer over the shipping diff.
 
-Then wait for CI (`<tracker-cli> pr checks --watch`), merge `--no-ff`, close the
-issue, and publish every non-empty review detail beneath the primary worktree's
+Then wait for CI (`<tracker-cli> pr checks --watch`), merge `--no-ff`, then close
+the issue when the sdd report's `acceptance_state` is `met` or `not_applicable`;
+otherwise hold it with ship-issue Phase 8 step 1's hold sequence, in its order:
+view the issue's state and reopen it only when `CLOSED` (a merged commit's
+closing keyword can close it even though the PR body has none), create the
+`needs-verification` label only when it is missing and never with `--force`,
+label it `needs-verification`, comment the verdict table, then verify the issue
+is `OPEN` with `needs-verification`, leaving it open. In both cases, publish
+every non-empty review detail beneath the primary worktree's
 `.superpowers/issue-delivery/` home before cleanup. Publication failure must keep
-the worktree and report `unpublished`. With an unsupported tracker capability, merge
-locally and clean up under the same detail rule.
+the worktree and report `unpublished`. With an unsupported tracker capability,
+merge locally and clean up under the same detail rule.
 
 ## Remainder owner prompt
 
@@ -155,8 +163,9 @@ before decoding any field.
 
 With lifecycle identity, the prompt also carries the single line
 Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>
-beside the remainder object, never inside it, followed by the sentence
+beside the remainder object, never inside it, followed by the sentences
 Run each long command, every verification command included, as `launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <argv>`, still in the foreground.
+Create every scratch directory or scratch worktree under the path that `launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>` prints.
 
 Your task: invoke the `ship-issue` skill via the Skill tool and follow its
 `## Remainder mode` from the ledger's ready stage. You hold this remainder
