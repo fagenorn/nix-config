@@ -349,8 +349,8 @@ with `live workers: <ids>` and writing nothing. Then run
 workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --issue <n> --attempt <k> --blocked-on <value> | artifact-budget validate-report --boundary workflow-response --input -
 ```
 
-with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`, or
-`agent_dispatch` (the reaper alone owns `unknown`). A validated `kind: terminal`
+with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`,
+`agent_dispatch`, or sdd's `deadline` (the reaper alone owns `unknown`). A validated `kind: terminal`
 reply means the anti-zombie bound ended the attempt instead: handle it as the
 terminal replay in the terminal return procedure — print its `reentry`, relay
 it, and write no `finish` — and stop. Otherwise the reply is `kind: suspended`;
@@ -446,11 +446,11 @@ Invoke `sdd`: it reads the plan header, dispatches an implementer per task, and 
 With lifecycle identity, invoke `sdd` with this owner's
 `ledger_repo_root`, `run_id` and `action_id` as its lifecycle identity, so
 sdd's `### Lifecycle workers` registers each writing agent under this
-launch and records a progress marker after each completed task. The
-mechanical route's mechanic is registered the same way: run
-`workflow-state register-worker` before dispatching it, put the
-`Lifecycle worker:` line in its prompt, and release it when it returns. On
-that route this owner records the marker itself: run
+launch and records a progress marker after each completed task. Also hand it
+the `deadline_at` this owner holds (a later `declare-lane` reply's
+value supersedes the acquired one). On the mechanical route, register its
+mechanic the same way (`workflow-state register-worker` before dispatch, the
+`Lifecycle worker:` line in its prompt, release on return) and run
 `workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
 once before dispatching the mechanic and once after its change is
 committed. A refusal changes nothing and is not a suspension cause.

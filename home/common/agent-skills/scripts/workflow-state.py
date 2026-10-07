@@ -35,13 +35,17 @@ SYNTHETIC_RESULT_SOURCES = frozenset({"expiry", "stalled"})
 # own context cannot launch the agents a phase needs. It is not auto-resumable:
 # the ledger cannot see how deep a relaunch would run, and blind resumes would
 # spend ``STALL_LIMIT``, so only a human-directed re-entry clears it (per D6).
+# ``deadline`` is an owner value: sdd's headroom rule writes it through
+# ``suspend`` when too little time is left before the attempt's
+# ``deadline_at`` for its next task. It is auto-resumable, like ``transport``,
+# because a resume's fresh window is the remedy (per #281 D2).
 BLOCKED_ON_VALUES = frozenset({
     "usage_limit", "transport", "human_gate", "external", "unknown", "host_capacity",
-    "agent_dispatch",
+    "agent_dispatch", "deadline",
 })
 OWNER_BLOCKED_ON_VALUES = BLOCKED_ON_VALUES - {"unknown", "host_capacity"}
 AUTO_RESUMABLE_BLOCKED_ON = frozenset(
-    {"usage_limit", "transport", "unknown", "host_capacity"})
+    {"usage_limit", "transport", "unknown", "host_capacity", "deadline"})
 STALL_LIMIT = 3
 RESULT_FIELDS = (
     "issue",

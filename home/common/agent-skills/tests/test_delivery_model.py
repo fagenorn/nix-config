@@ -1015,7 +1015,7 @@ class DeliveryModelTest(unittest.TestCase):
     def test_suspended_reply_is_closed_and_names_an_owner_cause(self):
         """#191 D6: a granted suspension replies with one closed v2 `suspended`."""
         suspended = workflow_responses(self.model)["suspended"]
-        for cause in ("usage_limit", "transport", "human_gate", "external", "agent_dispatch"):
+        for cause in ("usage_limit", "transport", "human_gate", "external", "agent_dispatch", "deadline"):
             value = {**copy.deepcopy(suspended), "blocked_on": cause}
             with self.subTest(blocked_on=cause):
                 self.assertEqual(self.validate(value, "workflow-response"), value)
