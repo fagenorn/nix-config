@@ -355,6 +355,11 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "dash -c 'W x'", "ksh -c 'W x'", "/bin/sh -c 'W x &'",   # per D6
             'echo "$(W x &)"', 'echo "`W x`"',                     # per D3
             'echo "unterminated ; W x',                              # unparseable
+            ">log 2>&1 W x &", "2>&1 W x", "</dev/null W x", "> log W x",
+            ">> log 2>&1 W x", "&>log W x", "FOO=bar >log W x",       # redirections
+            "sudo -u anis W x", "sudo -g wheel W x", "sudo -u anis -E W x",
+            "exec -a foo W x", "env -u FOO W x", "env -C /tmp W x",
+            "env -S -i W x", "sudo -E -u anis env -u FOO W x",         # option args
         )
         for word in ("nohup", "setsid", "disown"):
             for template in templates:
@@ -383,6 +388,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "true # nohup x & disown",
             "a & b & wait",
             "sleep 1 &",
+            "make > nohup.out 2>&1",
+            "tail -f nohup.out",
+            "sudo -u anis ls nohup.out",
         ):
             with self.subTest(command=command):
                 result = self.run_guard(command)

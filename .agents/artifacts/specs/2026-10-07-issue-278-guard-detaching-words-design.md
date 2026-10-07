@@ -103,6 +103,11 @@ invokes, following its existing adversarial-table pattern.
   `$(nohup x)`). Bodies are dropped by the splitter for every guarded verb
   today, and AC2 requires a heredoc body to pass, so this gap is shared and
   accepted (D4).
+- Evaluator source fed on stdin (`bash <<'EOF' … EOF`, `echo '…' | sh`): the
+  heredoc body or the piped text is not part of any segment the guard
+  tokenises, so a detaching word there goes unseen. The guarded-verb pass has
+  the same gap and the two share it; only an evaluator's argv (`sh -c '…'`) is
+  scanned.
 
 ## Decision ledger
 

@@ -414,6 +414,66 @@ def guarded_operations(command):
     return found
 
 
+# Wrapper options that consume the next word, so that word is not the wrapped
+# command. Used only by the detaching pass. An option not listed here is
+# treated as a flag, so the word after it is taken as the command word.
+WRAPPER_OPTIONS_WITH_ARGUMENT = {
+    "sudo": frozenset({
+        "-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-T", "-U",
+        "--user", "--group", "--close-from", "--chdir", "--host", "--prompt",
+        "--role", "--type", "--command-timeout", "--other-user",
+    }),
+    "exec": frozenset({"-a"}),
+    "env": frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
+}
+# A redirection operator standing alone takes the next word as its target.
+BARE_REDIRECTION = re.compile(r"^(\d*|&)(>>?|<<?<?|<>|>&|<&)$")
+ATTACHED_REDIRECTION = re.compile(r"^(\d+|&)?(>>?|<<?<?|<>|>&|<&)")
+
+
+def detaching_command_flags(tokens, state=(True, None, False)):
+    """Per token: is it a word at which the shell may start a simple command?
+
+    Returns (flags, state). `state` is (open_position, wrapper, skip_next) and
+    carries over a dangling redirection: `split_segments` cuts at the `&` of
+    `2>&1`, so the next segment opens with that redirection's target.
+
+    Like `command_position_flags`, but it also steps over redirections and over
+    the arguments of wrapper options, so `>log nohup x` and `sudo -u anis nohup x`
+    are seen. The verb pass keeps `command_position_flags`; this pass has no
+    such fail-closed backstop, hence the extra stepping.
+    """
+    flags = [False] * len(tokens)
+    open_position, wrapper, skip_next = state
+    for index, (value, operator) in enumerate(tokens):
+        if skip_next:
+            skip_next = False
+            continue
+        if operator:
+            open_position = True
+            wrapper = None
+            continue
+        if not open_position:
+            continue
+        if BARE_REDIRECTION.match(value) is not None:
+            skip_next = True
+            continue
+        if ATTACHED_REDIRECTION.match(value) is not None:
+            continue
+        if ASSIGNMENT_PREFIX.match(value) is not None:
+            continue
+        if value in COMMAND_KEYWORDS or value in COMMAND_WRAPPERS:
+            wrapper = value
+            continue
+        if wrapper is not None and value.startswith("-"):
+            if value in WRAPPER_OPTIONS_WITH_ARGUMENT.get(wrapper, ()):
+                skip_next = True
+            continue
+        flags[index] = True
+        open_position = False
+    return flags, (open_position, wrapper, skip_next)
+
+
 def detaching_word(command):
     """The detaching word (`nohup`, `setsid`, `disown`) the shell would run, or None.
 
@@ -435,14 +495,18 @@ def detaching_word(command):
     segments = split_segments(command)
     if segments is None:
         return earliest(command)
+    state = (True, None, False)
     for segment in segments:
         tokens = tokenize_segment(segment)
         if tokens is None:
+            state = (True, None, False)
             found = earliest(segment)
             if found is not None:
                 return found
             continue
-        flags = command_position_flags(tokens)
+        flags, after = detaching_command_flags(tokens, state)
+        # Only a dangling redirection (`2>` cut at its `&`) reaches the next segment.
+        state = after if after[2] else (True, None, False)
         if any(
             flag and not operator and base(value) in SHELL_EVALUATORS
             for flag, (value, operator) in zip(flags, tokens)
