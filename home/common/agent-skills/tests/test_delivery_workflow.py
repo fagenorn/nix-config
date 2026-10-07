@@ -1735,7 +1735,7 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
                 self.assertEqual((refused.returncode, refused.stdout), (2, b""))
                 self.assertIn(reason, refused.stderr)
         self.project()
-        missing = self.contract_input(); missing.pop("now")
+        missing = self.contract_input(); missing.pop("issue")
         for kind, value, reason in (("contract", missing, b"builder input keys"),
                                     ("nonsense", self.contract_input(), b"invalid choice")):
             with self.subTest(kind=kind):
@@ -1876,6 +1876,38 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
         self.assertIn(b"builder input keys", refused.stderr)
 
 
+    def test_a_contract_input_without_now_is_stamped_from_the_clock(self):
+        """#309 D5: the command fills `now`; the builder stays pure."""
+        self.project()
+        value = self.contract_input(); value.pop("now")
+        with mock.patch.dict(os.environ, {CLOCK_ENV: PINNED}):
+            pinned = self.build("contract", value)
+        self.assertEqual(pinned["contract"]["provenance"]["created_at"], PINNED)
+        with mock.patch.dict(os.environ):
+            os.environ.pop(CLOCK_ENV, None)
+            stamped = self.build("contract", value)["contract"]["provenance"]["created_at"]
+        recorded = datetime.fromisoformat(stamped.replace("Z", "+00:00"))
+        self.assertLessEqual(abs((datetime.now(timezone.utc) - recorded).total_seconds()), 5)
+
+    def test_a_contract_now_over_the_bound_is_refused(self):
+        """#309 D5, D12: a parsing future `now` is refused; a malformed one is the builder's."""
+        self.project()
+        ahead = "2026-09-30T12:15:00Z"
+        with mock.patch.dict(os.environ, {CLOCK_ENV: PINNED}):
+            refused = self.build("contract", self.contract_input(now=ahead), ok=False)
+            at_bound = self.build("contract", self.contract_input(now="2026-09-30T12:01:00Z"))
+            malformed = self.build("contract", self.contract_input(now="soon"), ok=False)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, refused.stderr),
+            (2, b"", SKEW.format(label="contract now", supplied=ahead, lead=900,
+                                 clock=PINNED).encode()))
+        self.assertEqual(at_bound["contract"]["provenance"]["created_at"], "2026-09-30T12:01:00Z")
+        self.assertEqual((malformed.returncode, malformed.stdout), (2, b""))
+        self.assertTrue(malformed.stderr.startswith(b"workflow-state: build-delivery refused: "),
+                        malformed.stderr)
+        self.assertNotIn(b"ahead of the clock", malformed.stderr)
+
+
 class WorktreePolicyTest(BuilderHarness, unittest.TestCase):
     """D3, D4, D7: an existing contract worktree can veto a build, never supply policy."""
 
@@ -1932,7 +1964,9 @@ class WorktreePolicyTest(BuilderHarness, unittest.TestCase):
                 "and refuses if any sealed policy member differs.",
                 "when resolve-project refuses, that line ends with the resolver's error "
                 "document",
-                "It takes no lock, reads no clock and writes nothing.",
+                "It takes no lock and writes nothing, and it reads the clock only for a "
+                "--kind contract input's now: to stamp an omitted one and to skew-check a "
+                "supplied one.",
                 "A contract the builder cannot re-derive is served only when a ledger under "
                 "--repo-root has installed it, and then against that ledger's stored initial "
                 "intent.",

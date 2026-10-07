@@ -410,6 +410,24 @@ def backward_refusal(prefix: str, now: datetime, field: str, stored: str) -> Wor
                          f"it would succeed in {wait} seconds")
 
 
+def stamp_contract_input(value: dict[str, Any]) -> None:
+    """Fill an omitted contract ``now`` from the clock, and skew-check a supplied one (#309 D5, D12).
+
+    A non-string or malformed ``now`` is left for the builder to refuse in its own words.
+    """
+    if "now" not in value:
+        value["now"] = format_utc(ledger_clock())
+        return
+    supplied = value["now"]
+    if not isinstance(supplied, str):
+        return
+    try:
+        parse_utc(supplied, "contract now")
+    except WorkflowError:
+        return
+    supplied_time(supplied, "contract now")
+
+
 def positive_int(value: str) -> int:
     try:
         parsed = int(value)
@@ -4759,7 +4777,7 @@ def read_sdd_position(bucket: Path, worktree: str
 
 
 def command_build_delivery(args: argparse.Namespace) -> int:
-    """Print one sealed delivery value; read-only (no lock, clock or write).
+    """Print one sealed delivery value: no lock and no write, and a clock read only for a contract input's ``now``: to stamp an omitted one and to skew-check a supplied one (#309 D5).
 
     A contract the builder cannot re-derive is served only against the initial
     intent a ledger under --repo-root installed with it, which
@@ -4773,6 +4791,8 @@ def command_build_delivery(args: argparse.Namespace) -> int:
         raise WorkflowError("repository root path must be absolute")
     runtime = _delivery()
     value = load_json_request(args.input, "builder input")
+    if args.kind == "contract" and isinstance(value, dict):
+        stamp_contract_input(value)
     policy = resolve_project_policy(args.repo_root, "repo-root") if args.kind == "contract" else None
     worktree_branch = None
     if args.kind == "contract" and runtime.requires_worktree_branch(value, policy):
@@ -4891,7 +4911,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     build_delivery = subparsers.add_parser("build-delivery", description=(
         "Build one sealed delivery value from --input and print it as canonical JSON. "
-        "It takes no lock, reads no clock and writes nothing. "
+        "It takes no lock and writes nothing, and it reads the clock only for a --kind contract input's now: to stamp an omitted one and to skew-check a supplied one. "
         "A contract the builder cannot re-derive is served only when a ledger under "
         "--repo-root has installed it, and then against that ledger's stored initial "
         "intent. --kind current-selection serves the current selection of the "
