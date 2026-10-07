@@ -45,6 +45,35 @@
       "mode": "plan-only",
       "prompt": "The launch becomes stale immediately before a provider action. Explain the required behavior.",
       "expected_output": "The exact four-key current-launch result is false, so perform zero external effect and zero observation write. Do not reuse historical requested_scope or authority. Return to the validated workflow response, obtain current custody and a fresh proposal, and never infer delivery state from tracker data."
+    },
+    {
+      "id": 7,
+      "name": "tracker-free-first-control-response",
+      "mode": "pipeline",
+      "prompt": "/orchestrate-issues 1 3\n\nResolve once into a retained ResolvedProject. A resolver refusal is fatal and values are never defaulted or inferred. The tracker capability is unsupported, so these facts replace the tracker read: issue 1 is `issues/001-well-specified.md` and issue 3 is `issues/003-mechanical.md`, both open and unblocked. This repository is the ledger repository root.\n\n**Stop after the first `workflow-state control` response is rendered.** Report each issue's `workflow-state build-delivery` result and the actions control returned, then stop: launch no agent, create no worktree and make no commit.",
+      "expected_output": "The dispatcher asks `workflow-state host-route --route claude-code` first, then runs `workflow-state init-run` for a fresh run under `.superpowers/workflows/`. On that fresh run it builds each issue's delivery contract, and `workflow-state build-delivery` refuses both with exit 2 and `tracker kind 'none' is unsupported`, because the builder seals only a `github` tracker. It reports that refusal verbatim, sends null contracts and `[]` intents, and makes one `workflow-state control` call. No contract governs either issue, so control spawns nothing and writes no attempt: the validated response's summaries carry `delivery_contract_required` and its action is `delivery_contract` for issues 1 and 3. It renders that response and stops. No agent is launched, no worktree is created and `main` carries no new commit.",
+      "asserts": [
+        {
+          "name": "a run ledger exists and records no attempt",
+          "shell": "found=0; for f in \"$REPO\"/.superpowers/workflows/*/state.json; do [ -f \"$f\" ] || continue; found=$((found + 1)); jq -e '[.issues[]?.attempts[]?] | length == 0' \"$f\" >/dev/null || { fail \"$f records an attempt\"; exit 1; }; done; [ \"$found\" -ge 1 ] || fail \"no run ledger under .superpowers/workflows\""
+        },
+        {
+          "name": "no worktree was created",
+          "shell": "[ \"$WT_COUNT\" -eq 0 ] || fail \"found $WT_COUNT worktrees\""
+        },
+        {
+          "name": "main carries no new commit",
+          "shell": "[ \"$(git -C \"$REPO\" rev-parse main)\" = \"$BASE_MAIN\" ] || fail \"main moved\""
+        },
+        {
+          "name": "the run reports the contract builder's refusal",
+          "shell": "out_matches 'build-delivery' && out_matches \"tracker kind '?none'? is unsupported\""
+        },
+        {
+          "name": "the response asks for both issues' contracts",
+          "shell": "out_matches 'delivery_contract' && out_matches '(issue|#) ?1([^0-9]|$)' && out_matches '(issue|#) ?3([^0-9]|$)'"
+        }
+      ]
     }
   ]
 }

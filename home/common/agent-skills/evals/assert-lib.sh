@@ -78,11 +78,39 @@ ledger_has_rows() {
   ' "$file"
 }
 
-# plan_tasks_verifiable <file> — every `### Task N` section carries at least one
-# falsifiable verification line (Expected/Verify/Acceptance/Assert).
+# plan_tasks_verifiable <plan-root> — every task carries at least one falsifiable
+# verification line (Expected/Verify/Acceptance/Assert). A root with a `## Task index`
+# is graded through its members: each `[task-N.md](<stem>.tasks/task-N.md)` link must
+# resolve, beside the root, to a member holding such a line, and an index that links no
+# member fails. A root without one is a legacy single-file plan, graded by its
+# `### Task N` sections.
 plan_tasks_verifiable() {
-  local file="$1"
+  local file="$1" dir member members bad=0
   [ -f "$file" ] || fail "not a file: $file" || return 1
+  members=$(awk '
+    tolower($0) == "## task index" { inside = 1; found = 1; next }
+    inside && /^## / { inside = 0 }
+    inside {
+      while (match($0, /\]\([^)]*\.tasks\/task-[0-9]+\.md\)/)) {
+        print substr($0, RSTART + 2, RLENGTH - 3)
+        $0 = substr($0, RSTART + RLENGTH)
+      }
+    }
+    END { if (found) print "@index" }
+  ' "$file")
+  if [ -n "$members" ]; then
+    [ "$members" != "@index" ] || fail "the task index links no task member" || return 1
+    dir=$(dirname "$file")
+    while IFS= read -r member; do
+      [ "$member" = "@index" ] && continue
+      if [ ! -f "$dir/$member" ]; then
+        echo "task member missing: $member"; bad=1
+      elif ! grep -Eiq 'expected|verif|acceptance|assert' "$dir/$member"; then
+        echo "no verification line in: $member"; bad=1
+      fi
+    done <<<"$members"
+    return "$bad"
+  fi
   awk '
     function close_task() {
       if (tasks > 0 && !verified) { print "no verification line under: " title; bad++ }

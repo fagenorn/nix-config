@@ -299,7 +299,7 @@ class ShipReleaseContractsTest(unittest.TestCase):
 
     # -- R8: evals match the fixture repo and stay non-destructive -------------
 
-    def test_evals_cover_the_fixture_shape_and_never_execute_a_release(self):
+    def test_evals_cover_the_fixture_shape_and_release_only_in_the_sandbox(self):
         notes = self.evals["notes"]
         for fragment in ("plan-only", "kind=none", "fixture-repo"):
             self.assertIn(fragment, notes)
@@ -307,11 +307,12 @@ class ShipReleaseContractsTest(unittest.TestCase):
         evals = self.evals["evals"]
         self.assertTrue(evals)
         for case in evals:
-            self.assertNotEqual(
-                case.get("mode", "plan-only"),
-                "pipeline",
-                f"eval {case['id']} must stay plan-only (non-destructive)",
-            )
+            if case.get("mode", "plan-only") == "pipeline":
+                self.assertEqual(
+                    (case.get("setup") or {}).get("kind"), "release-ready",
+                    f"eval {case['id']} is a pipeline case outside the release-ready sandbox",
+                )
+                continue
             guard = (case["prompt"]).lower()
             self.assertTrue(
                 any(
@@ -326,6 +327,10 @@ class ShipReleaseContractsTest(unittest.TestCase):
                 ),
                 f"eval {case['id']} prompt lacks a non-execution guard",
             )
+        self.assertTrue(
+            any(case.get("mode") == "pipeline" for case in evals),
+            "no ship-release pipeline case runs inside the release-ready sandbox",
+        )
 
         single_branch = [
             case

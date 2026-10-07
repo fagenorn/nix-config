@@ -15,19 +15,19 @@
         },
         {
           "name": "spec file exists under the retained specifications directory",
-          "shell": "has_file \"$WT/$SPEC_DIR\"/*.md"
+          "shell": "has_file \"$WT/${SPEC_DIR#\"$REPO\"/}\"/*.md"
         },
         {
           "name": "spec logs at least one decision (ledger row or legacy auto-resolved entry)",
-          "shell": "f=$(first_file \"$WT/$SPEC_DIR\"/*.md); ledger_has_rows \"$f\" '## Decision ledger' || ledger_has_rows \"$f\" '## Auto-resolved decisions'"
+          "shell": "f=$(first_file \"$WT/${SPEC_DIR#\"$REPO\"/}\"/*.md); ledger_has_rows \"$f\" '## Decision ledger' || ledger_has_rows \"$f\" '## Auto-resolved decisions'"
         },
         {
           "name": "plan file exists under the retained plans directory",
-          "shell": "has_file \"$WT/$PLAN_DIR\"/*.md"
+          "shell": "has_file \"$WT/${PLAN_DIR#\"$REPO\"/}\"/*.md"
         },
         {
           "name": "every plan task has a falsifiable verification line",
-          "shell": "plan_tasks_verifiable \"$(first_file \"$WT/$PLAN_DIR\"/*.md)\""
+          "shell": "plan_tasks_verifiable \"$(first_file \"$WT/${PLAN_DIR#\"$REPO\"/}\"/*.md)\""
         },
         {
           "name": "the plan's acceptance map has one row per issue criterion",
@@ -35,7 +35,7 @@
         },
         {
           "name": "spec and plan commits landed in the worktree",
-          "shell": "commits_touch \"$WT\" \"$SPEC_DIR\" \"$PLAN_DIR\""
+          "shell": "commits_touch \"$WT\" \"${SPEC_DIR#\"$REPO\"/}\" \"${PLAN_DIR#\"$REPO\"/}\""
         },
         {
           "name": "the base branch carries no spec or plan commits",
@@ -65,7 +65,7 @@
         },
         {
           "name": "no spec or plan was written",
-          "shell": "[ -z \"$(ls -A \"$REPO/$SPEC_DIR\" \"$REPO/$PLAN_DIR\" 2>/dev/null)\" ] || fail \"artifacts written despite the abort\""
+          "shell": "[ -z \"$(ls -A \"$SPEC_DIR\" \"$PLAN_DIR\" 2>/dev/null)\" ] || fail \"artifacts written despite the abort\""
         }
       ]
     },
@@ -98,7 +98,7 @@
         },
         {
           "name": "no spec or plan was written",
-          "shell": "[ -z \"$(ls -A \"$REPO/$SPEC_DIR\" \"$REPO/$PLAN_DIR\" \"$PRE_WT/$SPEC_DIR\" \"$PRE_WT/$PLAN_DIR\" 2>/dev/null)\" ] || fail \"artifacts written despite the pre-flight stop\""
+          "shell": "[ -z \"$(ls -A \"$SPEC_DIR\" \"$PLAN_DIR\" \"$PRE_WT/${SPEC_DIR#\"$REPO\"/}\" \"$PRE_WT/${PLAN_DIR#\"$REPO\"/}\" 2>/dev/null)\" ] || fail \"artifacts written despite the pre-flight stop\""
         }
       ]
     },
