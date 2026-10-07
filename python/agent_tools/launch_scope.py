@@ -375,8 +375,12 @@ def scratch_path(data: bytes) -> str | None:
     path = value["path"]
     if (not isinstance(path, str) or _CONTROL.search(path) is not None
             or not os.path.isabs(path)
-            or os.path.realpath(path) != path
             or SCRATCH_NAME.fullmatch(os.path.basename(path)) is None):
+        return None
+    try:
+        if os.path.realpath(path) != path:
+            return None
+    except (ValueError, OSError):        # e.g. a lone surrogate cannot be encoded
         return None
     return path
 

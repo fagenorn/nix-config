@@ -648,6 +648,7 @@ class ScratchTest(ScopeHarness, unittest.TestCase):
             "a NUL in the path": canonical({"path": root + "\0"}),
             "a newline in the path": canonical({"path": root + "\n"}),
             "deep nesting": b"[" * 100000,
+            "a lone surrogate": b'{"path":"/\\ud800/launch-scope-a"}\n',
             "a regular file": canonical({"path": plain}),
             "a symlink": canonical({"path": aliased}),
         }
