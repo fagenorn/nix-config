@@ -5364,5 +5364,36 @@ class CheckpointVerificationContractsTest(unittest.TestCase):
         self.assertNotIn("Phase 2 verification commands", ci_merge)
 
 
+class AcceptanceGradingContractsTest(unittest.TestCase):
+    """#272: the conformance axis grades every acceptance criterion on Opus/high."""
+
+    def assert_ordered(self, text, *anchors):
+        position = -1
+        for anchor in anchors:
+            next_position = text.find(anchor, position + 1)
+            self.assertGreaterEqual(next_position, 0, anchor)
+            position = next_position
+
+    @staticmethod
+    def read(path):
+        return normalized(path.read_text(encoding="utf-8"))
+
+    def test_the_conformance_axis_runs_on_opus_high(self):
+        final_review = self.read(SDD_DIR / "final-review.md")
+        sdd = self.read(SDD)
+        prompt = self.read(SDD_DIR / "conformance-reviewer-prompt.md")
+        self.assertIn("Native `reviewer` on the Opus/high tier selected in "
+                      "[conformance-reviewer-prompt.md](conformance-reviewer-prompt.md)",
+                      final_review)
+        self.assertIn("(parent D3)", final_review)
+        self.assertNotIn("checklist-shaped work", final_review)
+        self.assertIn("the conformance axis as `reviewer` on Opus/high;", sdd)
+        self.assertIn("Subagent (reviewer, Opus/high as selected above):", prompt)
+        for name, text in (("final review", final_review), ("sdd", sdd),
+                           ("prompt", prompt)):
+            with self.subTest(document=name):
+                self.assertNotIn("Sonnet", text)
+
+
 if __name__ == "__main__":
     unittest.main()

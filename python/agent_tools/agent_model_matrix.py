@@ -36,7 +36,7 @@ EXPECTED_ROLE_TIERS = {
     "ship-owner": ("opus", "high"),
     "implementer": ("opus", "high"),
     "reviewer": ("opus", "high"),
-    "conformance-reviewer": ("sonnet", "high"),
+    "conformance-reviewer": ("opus", "high"),
     "reviewer-lite": ("sonnet", "medium"),
     "mechanic": ("sonnet", "high"),
     "bookkeeper": ("haiku", "low"),

@@ -76,7 +76,7 @@ Dispatch by agent type — the definitions carry the model and effort tier; neve
 - **`implementer`** — every other implementation task: prose-specified work, multi-file integration, judgment inside a fixed scope.
 - **`reviewer`** — full-lane first-pass task review and every first-pass whole-branch review.
 - **`reviewer-lite`** — only a scoped re-review (named prior findings + bounded fix diff) or a mechanical/low-risk lane verification (declared lane + bounded task diff). Ambiguous adjudication or branch-wide review escalates to `reviewer` on Opus/high, recorded in the SDD ledger.
-- The **final review's two axes** dispatch per [final-review.md](final-review.md) — the conformance axis as `reviewer` on Sonnet/high; the correctness axis via `codex-collaboration`'s `diff-review` when `capabilities.review.code` is `available` and that skill is installed, and as `reviewer` on Opus/high when the capability is `unsupported` or the skill is not installed (`blocked` stops).
+- The **final review's two axes** dispatch per [final-review.md](final-review.md) — the conformance axis as `reviewer` on Opus/high; the correctness axis via `codex-collaboration`'s `diff-review` when `capabilities.review.code` is `available` and that skill is installed, and as `reviewer` on Opus/high when the capability is `unsupported` or the skill is not installed (`blocked` stops).
 - **Stuck tasks escalate across models, not just tiers** — see the fix loop's round 4.
 
 Turn count beats token price: a too-cheap agent takes 2–3× the turns on multi-step work and costs more overall. Unsure between mechanic and implementer → pick implementer.

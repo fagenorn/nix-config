@@ -20,7 +20,7 @@ EXPECTED_TIERS = {
     "ship-owner": ("opus", "high"),
     "implementer": ("opus", "high"),
     "reviewer": ("opus", "high"),
-    "conformance-reviewer": ("sonnet", "high"),
+    "conformance-reviewer": ("opus", "high"),
     "reviewer-lite": ("sonnet", "medium"),
     "mechanic": ("sonnet", "high"),
     "bookkeeper": ("haiku", "low"),
@@ -218,7 +218,7 @@ EXPECTED_SDD_SITES = {
     "sdd-final-conformance-review": (
         "home/common/agent-skills/skills/sdd/conformance-reviewer-prompt.md",
         "conformance-reviewer",
-        "sonnet",
+        "opus",
         "high",
         [],
     ),

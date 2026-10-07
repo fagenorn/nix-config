@@ -506,5 +506,36 @@ class EnrolmentGuardTest(unittest.TestCase):
         )
 
 
+# The dispatch-marker inventory across both skill source trees (#272 D12): a
+# change that adds or retires a dispatch updates this count deliberately.
+MARKER_INVENTORY = 37
+MARKER_LINE = re.compile(r"^<!-- agent-dispatch: id=([a-z0-9-]+) ", re.M)
+CONFORMANCE_MARKER = ("<!-- agent-dispatch: id=sdd-final-conformance-review "
+                      "role=conformance-reviewer model=opus effort=high -->")
+CONFORMANCE_CALL = ('Agent(subagent_type="reviewer", model="opus", effort="high") '
+                    "performs the first-pass whole-branch conformance review.")
+
+
+class MarkerInventoryTest(unittest.TestCase):
+    def markers(self):
+        found = []
+        for tree in SOURCE_TREES.values():
+            for path in sorted(tree.rglob("*.md")):
+                found += MARKER_LINE.findall(path.read_text(encoding="utf-8"))
+        return found
+
+    def test_the_marker_inventory_count_is_unchanged(self):
+        markers = self.markers()
+        self.assertEqual(len(markers), MARKER_INVENTORY)
+        self.assertEqual(len(set(markers)), MARKER_INVENTORY)
+
+    def test_the_final_conformance_marker_selects_opus_high(self):
+        text = (SHARED_TREE / "sdd/conformance-reviewer-prompt.md").read_text(encoding="utf-8")
+        markers = [line for line in text.splitlines()
+                   if line.startswith("<!-- agent-dispatch:")]
+        self.assertEqual(markers, [CONFORMANCE_MARKER])
+        self.assertIn(CONFORMANCE_CALL, text)
+
+
 if __name__ == "__main__":
     unittest.main()
