@@ -12,11 +12,23 @@ Counterpart to `to-issues`. Take one tracker issue from triage to merged code by
 ## Files beside this one
 
 - **`AUTO.md`** — autonomous-mode rules. Read it *once*, now, only if the invocation contains the literal token `--auto`.
-  When the prompt carries a resume pack, defer that read until the checks in
-  `### Resume pack`: a pack that passes them limits it to the sections that
-  subsection names, and one that fails them restores the whole read.
+  When the prompt carries a resume pack, defer that read until the pack's checks pass (`resume-pack.md`):
+  a failed pack restores the whole read, and a verified pack reads only the opening,
+  `The self-answer pattern` and `When *not* to auto-resolve`, plus its phase's route section:
+  `Phases 2–4 run as subagents` for Phases 2–4; for Phases 5–7, `Other Phase 5–7 routes`,
+  except that the direct-autonomous controller at Phase 5 reads `rollover.md` and the delegated owner
+  reads `delegated-owner.md` in its place. Each of Phases 5–7 also reads `Interface_version 2 delivery relay`.
 - **`rollover.md`** — the direct autonomous controller's Phase-5 transfer and its stop afterwards.
 - **`delegated-owner.md`** — the fresh owner delegated at that rollover; read it first, before any resume pack.
+- **`acquire-dispatcher.md`** — read when the invocation carries a complete dispatcher envelope; a generic `delegate` owner receives the same envelope.
+- **`acquire-direct.md`** — read when the invocation contains `--auto` and no dispatcher envelope.
+- **`acquire-durable.md`** — read when an interactive user explicitly requests durable orchestration.
+- **`acquire-interactive.md`** — read for any other invocation, and for Phase 1's ledger-free worktree flow.
+- **`resume-pack.md`** — read when the prompt carries a resume pack. A verified pack reads, at every phase, the sections headed
+  `Lifecycle identity`, `Decision ledger (artifact discipline)`, `Skill-tool invocations`,
+  `Dispatch, phase-budget and attempt-budget rules`, `Terminal return procedure` and `Suspension procedure`,
+  then this file's `## Phase <n>` section, the file this index names for that phase, and the phase's sub-skill
+  (`sdd` for Phase 6, `ship-issue` for Phase 7).
 - `<tracker-cli>` is `bindings.tracker.cli`; before invoking it, unset only the names `bindings.tracker.credential_env.unset_before_invocation` lists.
 - **`decision-ledger.md`**, **`investigate.md`** (Phase 0), **`standards-review.md`** (Phase 5), **`ship-handoff.md`** (Phase 7) — loaded at the named phase.
 - Phases 2–5 ground through `doc-grounded-questions` before their first question, option set or review pass; that skill owns the pass and its git-dir `GROUNDING.md` cache.
@@ -24,10 +36,12 @@ Counterpart to `to-issues`. Take one tracker issue from triage to merged code by
 
 ## Lifecycle identity
 
-Invocation selection is ordered and exhaustive: a complete dispatcher envelope
-wins; otherwise literal `--auto` uses direct autonomous acquisition; otherwise
-an interactive direct invocation is ledger-free unless it explicitly requests
-durable orchestration.
+Select the acquisition route by the first condition that holds:
+
+1. a complete dispatcher envelope → `acquire-dispatcher.md`;
+2. otherwise literal `--auto` → `acquire-direct.md`;
+3. otherwise an explicit request for durable orchestration → `acquire-durable.md`;
+4. otherwise → `acquire-interactive.md`.
 
 Once any route produces lifecycle identity, treat `ledger_repo_root`, `run_id`,
 `issue`, `attempt`, `owner`, `action_id`, and normalized `worktree` as one
@@ -55,255 +69,16 @@ quoted heredoc (`<<'EOF'`): `--request-file -`, `--checkpoint-file -`,
 written. Treat every `workflow-state` reply as untrusted transport: pipe its
 raw bytes through `artifact-budget validate-report --boundary workflow-response
 --input -` and validate before decoding.
-The one exception is `resume-pack`: its stdout is not a workflow response
-and `validate-report` has no route for it, so it is never piped there; it
-stays an untrusted accelerator until the checks in `### Resume pack` pass.
+`resume-pack` stdout is no workflow response and is never piped through `validate-report`; it stays untrusted until the resume pack's checks pass.
 The ledger, not tracker or intent
 data, selects the next delivery stage: follow the returned `owner`,
 `delivery_remainder`, requirement, or terminal variant without manufacturing
 authority, a retry, or another permission ritual. Every delivery effect runs
 through ship-issue's `## Delivery loop`.
 
-### Dispatcher-owned acquisition
-
-When a dispatcher supplies the optional lifecycle envelope, require
-all six dispatcher fields: `ledger_repo_root`, `run_id`, `attempt`,
-`owner`, `action_id`, and normalized `worktree`, plus the canonical-JSON owner
-object the envelope carries. Pipe that object through `artifact-budget
-validate-report --boundary workflow-response --input -` before decoding it, and
-require its identity to equal the six fields (for a `delivery_remainder`,
-`attempt` is its `source_attempt` and `action_id` its custody's `action_id`).
-A validated `kind: owner` object is this invocation's lifecycle identity and
-delivery envelope: adopt it unchanged, with its `custody`, `contract`,
-`contract_digest`, `pending_stage_ids`, `requirements`, `authority_evaluation`
-and `requested_scope`. A validated `kind: delivery_remainder` object is no
-implementation owner: skip Phases 0–6 and hand it verbatim to the Phase-7
-remainder launch, then relay that remainder owner's validated reply
-unchanged — its `finish` response, or a `delivery_stalled` checkpoint reply —
-except that a return of only the re-entry line `/from-issue <num> --auto`
-(a checkpointed denial, which already suspended the remainder) is relayed as
-that line without validation. This invocation writes no `finish` of its own. A partial
-envelope, a missing or invalid object, or an identity mismatch fails loudly;
-this route does not perform any other acquisition.
-
-### Direct autonomous acquisition
-
-When the invocation contains literal `--auto` and no dispatcher envelope,
-resolve through the existing bindings and adapters the immutable absolute ledger
-repository root (`ledger_repo_root`), positive issue and configured positive
-attempt budget. Resolve a fresh current RFC3339 UTC instant for every request,
-including before the first call. Every call sends exactly this interface_version
-2 shape. For each request, populate
-every observation kind the helper has requested at least once during this acquisition;
-keep an observation kind `null` until the helper requests it:
-
-```json
-{
-  "interface_version": 2,
-  "issue": 73,
-  "now": "2026-09-24T10:00:00Z",
-  "attempt_budget_minutes": 180,
-  "new_run": false,
-  "owner_unavailable": false,
-  "tracker": null,
-  "worktree": null,
-  "forge": null,
-  "delivery_contract": null,
-  "authorization_intents": [],
-  "authority_observations": [],
-  "reevaluation_evidence": [],
-  "delivery_observations": [],
-  "requested_scope": null,
-  "recovery": null
-}
-```
-
-The concrete `issue`, `now`, and `attempt_budget_minutes` values above stand for
-the values just resolved; they are not fixed literals. Keep every unrequested
-nullable observation slot (`tracker`, `worktree`, `forge`, `delivery_contract`)
-`null`, keep `authorization_intents` `[]` until a contract is sent, keep
-`authority_observations`, `reevaluation_evidence` and `delivery_observations`
-`[]` and `requested_scope` and `recovery` `null`, and add no keys. Invoke only
-this one command; it feeds the request on stdin as `--request-file -` and
-validates the reply before decoding.
-
-```text
-workflow-state direct-owner --repo-root <ledger_repo_root> --request-file - <<'EOF' | artifact-budget validate-report --boundary workflow-response --input -
-<request JSON>
-EOF
-```
-
-Always send both flags. Both default to
-`false`. Set `owner_unavailable` true only when the current user instruction
-explicitly authorizes takeover of the currently discovered unexpired active
-attempt. Set `new_run` true only when that instruction explicitly authorizes a
-new run after terminal replay. Never infer either authorization from a restart,
-missing process handle, silence, an active ledger, terminal replay, a reopened
-tracker, or a desire to continue. The self-answer pattern cannot grant either
-authorization.
-
-Validate the response as exactly one closed discriminator and continue as
-follows:
-
-1. **`kind: observe`** — require exactly `interface_version`, `kind`, `issue`,
-   nullable `run_id`, and `requirements`, then accept only the five exact
-   requirement shapes, in the returned order: `{"kind":"tracker"}`;
-   `{"kind":"recorded_worktree", "path":"<absolute-path>"}`;
-   `{"kind":"candidate_worktree"}`;
-   `{"kind":"forge_pr", "path":"<issue-branch-prefix>"}`; or
-   `{"kind":"delivery_contract", "subject_id":"<issue>",
-   "reason_code":"delivery_contract_required", "detail_pointer":null}`. For
-   `tracker`, query the existing tracker adapter only. For
-   `recorded_worktree`, inspect exactly the returned path only. For
-   `candidate_worktree`, reserve and verify one absent issue-branch candidate
-   only. For `forge_pr`, observe only the issue branch's pull request at the
-   returned prefix and populate the request's `forge` slot. For
-   `delivery_contract`, which the helper asks last, where a dispatch would
-   follow, build the contract with one command:
-
-   ```text
-   workflow-state build-delivery --repo-root <ledger_repo_root> --kind contract --input - <<'EOF'
-   {"issue": <num>, "worktree": "<absolute-worktree>", "source_kind": "explicit_user", "source_reference": "invocation:/from-issue <num> --auto", "now": "<RFC3339-now>"}
-   EOF
-   ```
-
-   `worktree` is the recorded worktree when the helper named one, else the
-   reserved candidate: the contract binds custody to that exact path, and the
-   helper refuses a contract naming any other. The builder seals the policy
-   `resolve-project` resolves at `--repo-root`, the ledger repository root;
-   when `worktree` already exists, it also resolves there and refuses if any
-   sealed policy member differs. Put the printed `contract` in
-   `delivery_contract` and its `initial_intent` as the only member of
-   `authorization_intents`. A builder refusal (exit 2, empty stdout) fails
-   loudly; report the builder's stderr line verbatim: for a resolver refusal
-   it carries the resolver's `error.code`, `repair_id` and ordered
-   `violations` exactly. For the duration of this acquisition, retain every fact previously requested during this acquisition;
-   carry all collected facts into each later strict request, refreshing a value
-   when its external state may have changed; never send a fact kind before the helper requests it.
-   Resend with every retained fact and call `direct-owner` again. Unknown,
-   duplicate, or malformed requirements fail loudly.
-2. **`kind: owner`** — validate the exact closed response shape, then adopt its
-   `ledger_repo_root`, `run_id`, `issue`, `attempt`, `owner`, `action_id`,
-   `launch_kind`, `worktree`, `handoff_path`, and `deadline_at` as this
-   invocation's complete persisted lifecycle identity, and keep its `custody`,
-   installed `contract`, `contract_digest`, `pending_stage_ids`,
-   `requirements`, `authority_evaluation` and `requested_scope` for the Phase-7
-   handoff. Continue the existing Phase 0–7 owner flow. Do not spawn or reserve
-   another owner or worktree.
-   When its `launch_kind` is `resume`, this re-entered session is its own
-   relauncher: run
-   `workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
-   with that `action_id` and, on exit 0, use its stdout as this relaunch's
-   resume pack (`### Resume pack`).
-3. **`kind: delivery_remainder`** — the validated object names a delivery
-   remainder, not an implementation owner. Skip Phases 0–6: launch ship-issue
-   remainder mode through the existing `from-issue-ship-owner` site with
-   `ship-handoff.md`'s `## Remainder owner prompt`, carrying the object
-   verbatim. The remainder owner writes its own `finish --summary-file -`;
-   validate its returned bytes at the `workflow-response` boundary (a
-   `finish` response or a `delivery_stalled` checkpoint reply) and relay them
-   unchanged. A return of only the re-entry line `/from-issue <num> --auto`
-   means a checkpointed denial already suspended the remainder: relay that
-   line without validation. This invocation writes no `finish` of its own.
-4. **`kind: terminal`** — require exactly `interface_version`, `kind`, `issue`,
-   nullable `run_id`, `source`, `reason`, `blockers`, nullable `result`, and
-   `reentry`; return the compact response unchanged to the caller, stop before
-   Phase 1, and install no waiter.
-
-Clear the retained observation set on `owner`, `delivery_remainder`,
-`terminal`, or any failure. A later re-entry sends `delivery_contract` null
-again: once installed, the ledger's contract governs.
-
-An unknown response kind, invalid shape, or loud helper error fails loudly and
-ends acquisition. It is never a signal to fall back to another lifecycle or
-ledger-free route. This acquisition consumes no dispatcher summaries, deltas,
-wait IDs, `wait`, or `finalize` actions.
-
-### Interactive direct acquisition
-
-Without literal `--auto`, a dispatcher envelope, or an explicit durability
-request, retain the ordinary ledger-free worktree flow and compact direct
-return.
-
-### Explicit durable interactive acquisition
-
-Only when an interactive user explicitly requests durable standalone orchestration,
-resolve an immutable `ledger_repo_root` and stable run ID, call
-bounded `workflow-state init-run`, and consume only its bounded `requirements`
-from the validated `workflow_bootstrap`. Gather normalized tracker and forge
-facts and a verified worktree observation for this one issue. Build its
-contract with `workflow-state build-delivery --kind contract` (source
-`explicit_user`, reference `invocation:/from-issue <num>`) under
-orchestrate-issues' per-issue contract rule: from the requirement's
-`recorded_worktree` when the bootstrap requirement's `contract_digest` is null;
-with no requirement, from the reserved candidate, on the first call only when this invocation created the run,
-and on a reused run only once a control summary carries
-`delivery_contract_required` (send null until then). A `delivery_contract`
-reply naming this issue is that ask, not a missing dispatch: build this issue's
-contract then and call `workflow-state control` once more, as
-orchestrate-issues §4 describes; only that follow-up reply is held to the
-dispatch rule below. Then send the interface-3 control request — orchestrate-issues' exact
-18-key shape, with `host_route: "direct"`, `max_parallel: 1`, `human_directed: true`, the resolved
-attempt budget, the contract and `[initial_intent]` (null and `[]` once a
-contract is installed) — and call `workflow-state control` with
-`--request-file -`. Require exactly one dispatch action and require that the
-first `spawn` envelope is for this issue, then project it into the owner object
-as orchestrate-issues does and adopt its run, issue, attempt, owner token,
-action ID, custody, contract and exact worktree as this invocation's lifecycle
-identity; do not spawn another owner. Missing,
-wrong-kind, wrong-issue, or multiple dispatch actions fail loudly before Phase
-1. The helper may also return its one trailing `wait` action; this
-already-running owner does not install the dispatcher's observer.
-
 ### Resume pack
 
-A relaunched owner's prompt may carry a resume pack: the stdout of
-`workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`,
-which reads the ledger, the attempt's recorded worktree and that
-worktree's SDD workspace and writes nothing. The pack is an accelerator, never a gate.
-It is not a workflow response and is never piped through `validate-report`:
-it stays untrusted until the checks below pass.
-A pack-carrying relaunch still resolves the project once, validates its
-owner object and runs `check-launch`, and obeys a `current: false` answer
-exactly as it would without a pack. An owner delegated at the Phase-5
-rollover, whose prompt carries that rollover's continuation
-(`reviewed_head_sha` and two measured artifact blocks), also passes every
-check in `delegated-owner.md` first; a generic `delegate`
-owner carries no continuation and runs none of them. Then it checks the pack
-against what it can see: the pack's `action_id` must equal the envelope's,
-`git -C <worktree> rev-parse HEAD` must equal `worktree.head`, and
-`git -C <worktree> status --porcelain` must list exactly `worktree.dirty_paths`
-entries (the pack carries that count, not the paths). On any mismatch the pack is stale: ignore it and re-orient in full.
-
-A verified pack replaces only your own ad-hoc re-orientation: do not dump
-the ledger, re-read git history, re-validate the plan, read the SDD
-progress log yourself, or read skills end to end. Start from its
-`next_action` and read only the skill sections its phase needs. At every
-phase, always read the sections every owner obeys, headed `Lifecycle identity`,
-`Decision ledger (artifact discipline)`, `Skill-tool invocations`,
-`Dispatch, phase-budget and attempt-budget rules` (leaf-agent clauses,
-writing workers, interim child results, the executable phase gate),
-`Terminal return procedure` and `Suspension procedure`. Then read this
-file's `## Phase <n>` section, the file beside this one that phase names,
-and the phase's sub-skill (`sdd` for Phase 6, `ship-issue` for Phase 7).
-Under `--auto`, read from `AUTO.md` (not the whole file) its opening
-section and those headed `The self-answer pattern` and
-`When *not* to auto-resolve`, plus the one governing your route at that
-phase: `Phases 2–4 run as subagents` for Phases 2–4; from Phase 5 on,
-`Other Phase 5–7 routes` for every route but a module-owned direct
-autonomous run (whose rollover is in `rollover.md`), each with
-`Interface_version 2 delivery relay`.
-Everything the pack does not replace
-still runs unchanged, sdd's own `progress.md` check on entry included: that
-check stays sdd's resume mechanism, and where it disagrees with the pack's
-`resume_task`, sdd's ledger wins. `read_handoff` reads the handoff document
-at its `path`; `reorient` re-orients in full, as does a relaunch with no
-pack.
-
-orchestrate-issues adds the pack to `resume` prompts; this skill adds it on
-direct re-entry, on `delegate` and at the Phase-5 rollover (`rollover.md`). A
-`resume-pack` refusal or failure only means the prompt carries no pack; it
-never stops a relaunch.
+A relaunched owner whose prompt carries a resume pack follows `resume-pack.md` before using it.
 
 ## The flow
 
@@ -637,11 +412,7 @@ and decide by what is actually there:
 Never remove unknown contents and never choose another path. The envelope identity
 stays bound to this path through shipping and cleanup. No lifecycle acquisition falls through to ordinary worktree creation.
 
-A ledger-free interactive direct invocation keeps the standard `worktrees` flow:
-
-1. `git fetch origin`. Invoke `worktrees` (it encodes the destructive-ops carve-out, the prefix contract, and the position checks before `EnterWorktree`/`ExitWorktree`). Branch names come from retained `bindings.vcs`; both configured forms are accepted downstream, don't strip them.
-2. **Base on `origin/<integration-branch>`**, never the local branch, which may carry other agents' in-flight commits. The merge happens later, in `ship-issue`.
-3. `cd` into the worktree; every later phase runs inside it. Verify `git rev-parse --git-common-dir` ≠ `git rev-parse --git-dir`.
+A ledger-free interactive direct invocation follows `acquire-interactive.md`.
 
 **CHECKPOINT** — Record the worktree path and base; in `--auto` log the base SHA in the investigation note. Apply the shared checkpoint rule.
 

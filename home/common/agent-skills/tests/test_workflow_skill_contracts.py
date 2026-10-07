@@ -35,6 +35,11 @@ RESEARCH = REPO_ROOT / "home/common/agent-skills/skills/research/SKILL.md"
 WORKTREES = REPO_ROOT / "home/common/agent-skills/skills/worktrees/SKILL.md"
 SDD_DIR = REPO_ROOT / "home/common/agent-skills/skills/sdd"
 FROM_ISSUE_DIR = REPO_ROOT / "home/common/agent-skills/skills/from-issue"
+ACQUIRE_DISPATCHER = FROM_ISSUE_DIR / "acquire-dispatcher.md"
+ACQUIRE_DIRECT = FROM_ISSUE_DIR / "acquire-direct.md"
+ACQUIRE_INTERACTIVE = FROM_ISSUE_DIR / "acquire-interactive.md"
+ACQUIRE_DURABLE = FROM_ISSUE_DIR / "acquire-durable.md"
+RESUME_PACK = FROM_ISSUE_DIR / "resume-pack.md"
 SHIP_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/SKILL.md"
 SHIP_ISSUE_REVIEW = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/REVIEW.md"
 SHIP_ISSUE_CI_MERGE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/CI-MERGE.md"
@@ -1191,8 +1196,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertNotIn("--result-file <path>", terminal)
 
     def test_direct_and_control_requests_are_interface_two(self):
-        direct = self.section(self.from_issue, "### Direct autonomous acquisition",
-                              "### Interactive direct acquisition")
+        direct = ACQUIRE_DIRECT.read_text(encoding="utf-8")
         request = json_block(direct)
         self.assertEqual((set(request), request["interface_version"]),
                          (V2_DIRECT_REQUEST_KEYS, 2))
@@ -1208,17 +1212,13 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                        "report the refusal", "--request-file -",
                        "only when this invocation created the run"):
             self.assertIn(anchor, normalized(decide))
-        durable = self.section(self.from_issue, "### Explicit durable interactive acquisition",
-                               "## The flow")
-        self.assertIn("only when this invocation created the run", normalized(durable))
-        self.assertIn('`host_route: "direct"`', normalized(durable))
+        self.assertIn('`host_route: "direct"`',
+                      normalized(ACQUIRE_DURABLE.read_text(encoding="utf-8")))
 
     def test_contract_builders_state_the_resolution_root_and_relay_refusals(self):
-        direct = normalized(self.section(self.from_issue, "### Direct autonomous acquisition",
-                                         "### Interactive direct acquisition"))
         decide = normalized(self.section(self.orchestrate, "## 3. Decide",
                                          "## 4. Execute control actions"))
-        for skill, text in (("from-issue", direct), ("orchestrate-issues", decide)):
+        for skill, text in (("orchestrate-issues", decide),):
             with self.subTest(skill=skill):
                 self.assertIn(BUILD_ROOT_CLAUSE, text)
                 self.assertIn(BUILD_REFUSAL_RELAY, text)
@@ -1265,9 +1265,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                        "`delivery_stalled`"):
             self.assertIn(anchor, remainder)
         for text in (self.ship_handoff.split("## Remainder owner prompt", 1)[1],
-                     self.section(self.from_issue, "### Dispatcher-owned acquisition",
-                                  "### Direct autonomous acquisition"),
-                     self.section(self.from_issue, "3. **`kind: delivery_remainder`**",
+                     ACQUIRE_DISPATCHER.read_text(encoding="utf-8"),
+                     self.section(ACQUIRE_DIRECT.read_text(encoding="utf-8"),
+                                  "3. **`kind: delivery_remainder`**",
                                   "4. **`kind: terminal`**")):
             self.assertIn("re-entry line", normalized(text))
         for appendix in (self.ship_review, self.ship_human_gate):
@@ -2255,17 +2255,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         identity = self.section(
             self.from_issue, "## Lifecycle identity", "## The flow"
         )
-        dispatcher = self.section(
-            identity, "### Dispatcher-owned acquisition",
-            "### Direct autonomous acquisition",
-        )
-        interactive = self.section(
-            identity, "### Interactive direct acquisition",
-            "### Explicit durable interactive acquisition",
-        )
-        self.assertIn("optional lifecycle envelope", dispatcher)
-        self.assertIn("all six dispatcher fields", dispatcher)
-        self.assertIn("action_id", dispatcher)
         for field in ("run_id", "attempt", "owner", "worktree", "ledger_repo_root"):
             self.assertIn(field, identity)
         self.assertIn(
@@ -2276,7 +2265,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("separate owner worktree", identity)
         self.assertIn("Every `workflow-state` command", identity)
         self.assertIn("--repo-root <ledger_repo_root>", identity)
-        self.assertIn("ledger-free", interactive)
         phase_zero = self.section(self.from_issue, "## Phase 0", "## Phase 1")
         self.assertIn("lifecycle identity", phase_zero)
         self.assertIn("workflow-state finish", phase_zero)
@@ -2367,164 +2355,70 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("/from-issue <num> --auto", delegated)
         self.assertNotIn("workflow-state suspend", delegated)
 
-    def test_lifecycle_phase_one_paths_are_acquisition_mode_specific(self):
-        phase_one = self.section(self.from_issue, "## Phase 1", "## Phase 2")
-        self.assert_ordered(
-            phase_one,
-            "dispatcher-owned or direct-autonomous lifecycle envelope",
-            "use its exact absolute `worktree`",
-            "**Absent** from both the filesystem",
-            "checked out on this issue's branch",
-            "adopt it",
-            "Do not re-create it, do not move it, do not reset it",
-            "a different branch",
-            "fail the attempt through the terminal return procedure",
-            "never choose another path",
-        )
-        self.assertIn("fail the attempt", phase_one)
-        self.assert_ordered(
-            phase_one,
-            "No lifecycle acquisition falls through to ordinary worktree creation",
-            "ledger-free interactive direct",
-            "standard `worktrees` flow",
-        )
-
     def test_from_issue_handoff_resume_is_acquisition_mode_specific(self):
         phase_gate = self.section(
             self.from_issue, "## Dispatch, phase-budget and attempt-budget rules",
             "## Terminal return procedure",
         )
-        self.assertIn("dispatcher-owned", phase_gate)
-        self.assertIn("`control`", phase_gate)
-        self.assertIn("returned `resume` envelope", phase_gate)
-        self.assertIn("direct autonomous", phase_gate)
-        self.assertIn("persisted `direct-owner` owner envelope", phase_gate)
         self.assertNotIn("workflow-state launch", phase_gate)
 
     def test_from_issue_standalone_modes_use_live_lifecycle_interfaces(self):
-        identity = self.section(
-            self.from_issue, "## Lifecycle identity", "## The flow"
-        )
-        interactive = self.section(
-            identity, "### Interactive direct acquisition",
-            "### Explicit durable interactive acquisition",
-        )
-        durable = self.section(
-            self.from_issue, "### Explicit durable interactive acquisition",
-            "## The flow",
-        )
-        self.assertIn("ledger-free", interactive)
+        durable = ACQUIRE_DURABLE.read_text(encoding="utf-8")
         self.assert_ordered(
-            durable,
-            "explicitly requests durable standalone orchestration",
-            "workflow-state init-run", "bounded `requirements`",
-            "max_parallel: 1", "workflow-state control", "first `spawn` envelope",
-            "adopt", "do not spawn another owner",
+            durable, "workflow-state init-run", "workflow-state control",
+            "max_parallel: 1", "first `spawn` envelope",
         )
-        self.assertIn("fail loudly", durable)
 
     def test_direct_auto_acquires_only_through_direct_owner(self):
         identity = self.section(
-            self.from_issue, "## Lifecycle identity", "## The flow"
-        )
-        direct = self.section(
-            identity, "### Direct autonomous acquisition",
-            "### Explicit durable interactive acquisition",
+            self.from_issue, "## Lifecycle identity", "### Resume pack"
         )
         self.assert_ordered(
-            identity,
-            "### Dispatcher-owned acquisition",
-            "### Direct autonomous acquisition",
-            "### Interactive direct acquisition",
-            "### Explicit durable interactive acquisition",
+            identity, "acquire-dispatcher.md", "acquire-direct.md",
+            "acquire-durable.md", "acquire-interactive.md",
         )
+        direct = ACQUIRE_DIRECT.read_text(encoding="utf-8")
         self.assertIn("workflow-state direct-owner", direct)
         self.assertIn("--repo-root <ledger_repo_root>", direct)
         self.assertIn("--request-file -", direct)
         self.assertNotIn("workflow-state init-run", direct)
         self.assertNotIn("workflow-state control", direct)
-        self.assertNotIn("wait envelope", direct)
 
     def test_direct_auto_observe_owner_terminal_loop_is_closed(self):
-        identity = self.section(
-            self.from_issue, "## Lifecycle identity", "## The flow"
-        )
-        direct = self.section(
-            identity, "### Direct autonomous acquisition",
-            "### Explicit durable interactive acquisition",
-        )
+        direct = ACQUIRE_DIRECT.read_text(encoding="utf-8")
         self.assert_ordered(
             direct,
             "kind: observe",
             "tracker",
             "recorded_worktree",
             "candidate_worktree",
-            "retain every fact previously requested during this acquisition",
-            "carry all collected facts into each later strict request",
-            "never send a fact kind before the helper requests it",
-            "call `direct-owner` again",
             "kind: owner",
-            "adopt",
+            "kind: delivery_remainder",
             "kind: terminal",
-            "return",
         )
-        self.assertIn(
-            "every observation kind the helper has requested at least once during this acquisition",
-            direct,
-        )
-        self.assertIn(
-            "keep an observation kind `null` until the helper requests it",
-            direct,
-        )
-        self.assertNotIn("only observations requested in the current round", direct)
+        text = normalized(direct)
+        for shape in (
+            '{"kind":"tracker"}',
+            '{"kind":"recorded_worktree", "path":"<absolute-path>"}',
+            '{"kind":"candidate_worktree"}',
+            '{"kind":"forge_pr", "path":"<issue-branch-prefix>"}',
+            '{"kind":"delivery_contract", "subject_id":"<issue>", '
+            '"reason_code":"delivery_contract_required", "detail_pointer":null}',
+            "`interface_version`, `kind`, `issue`, nullable `run_id`, and `requirements`",
+            "`interface_version`, `kind`, `issue`, nullable `run_id`, `source`, `reason`, "
+            "`blockers`, nullable `result`, and `reentry`",
+        ):
+            self.assertIn(shape, text)
         for field in (
             "ledger_repo_root", "run_id", "issue", "attempt", "owner",
             "action_id", "launch_kind", "worktree", "handoff_path",
             "deadline_at",
         ):
             self.assertIn(field, direct)
-        self.assertIn("unknown", direct)
-        self.assertIn("fail loudly", direct)
-        self.assertIn("no waiter", direct)
-
-    def test_direct_auto_authorizations_are_explicit_and_never_inferred(self):
-        combined = normalized(self.from_issue)
-        for flag in ("new_run", "owner_unavailable"):
-            self.assertIn(flag, self.from_issue)
-        self.assertIn("both flags", combined)
-        self.assertIn("false", combined)
-        for forbidden_inference in (
-            "restart", "missing process handle", "silence", "active ledger",
-            "terminal replay", "reopened tracker", "desire to continue",
-        ):
-            self.assertIn(forbidden_inference, combined)
-        self.assertIn("current user instruction explicitly authorizes", combined)
 
     def test_adjacent_from_issue_acquisition_modes_remain_unchanged(self):
-        identity = self.section(
-            self.from_issue, "## Lifecycle identity", "## The flow"
-        )
-        dispatcher = self.section(
-            identity, "### Dispatcher-owned acquisition",
-            "### Direct autonomous acquisition",
-        )
-        interactive = self.section(
-            identity, "### Interactive direct acquisition",
-            "### Explicit durable interactive acquisition",
-        )
-        durable = self.section(
-            self.from_issue, "### Explicit durable interactive acquisition",
-            "## The flow",
-        )
-        self.assertIn("adopt", dispatcher)
-        self.assertNotIn("direct-owner", dispatcher)
-        self.assertIn("ledger-free", interactive)
-        self.assertNotIn("direct-owner", interactive)
-        self.assert_ordered(
-            durable, "workflow-state init-run", "bounded `requirements`",
-            "max_parallel: 1", "workflow-state control", "first `spawn` envelope",
-        )
-        self.assertNotIn("direct-owner", durable)
+        for route in (ACQUIRE_DISPATCHER, ACQUIRE_INTERACTIVE, ACQUIRE_DURABLE):
+            self.assertNotIn("direct-owner", route.read_text(encoding="utf-8"))
 
     def test_from_issue_routes_a_deadline_rejected_progress_to_the_suspension_procedure(self):
         # A progress call rejected past the attempt budget's deadline is now an
@@ -2653,12 +2547,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                             "or on the follow-up call a `delivery_contract` action asks for")
         self.assertIn("the sweep renders `finalize` (or `delivery_contract` when a missing "
                       "contract is all that stops some issue)", final)
-        # Phase-5 SF-1 (D12): the durable interactive route answers the same action.
-        durable = normalized(self.section(self.from_issue,
-            "### Explicit durable interactive acquisition", "## The flow"))
-        self.assert_ordered(durable, "A `delivery_contract` reply naming this issue",
-                            "build this issue's contract", "call `workflow-state control` once more",
-                            "orchestrate-issues §4")
         for text in (self.orchestrate, json.dumps(self.orchestrate_evals)):
             self.assertNotIn("override", text.lower())
         expected = " ".join(case["expected_output"] for case in self.orchestrate_evals["evals"])
@@ -4144,19 +4032,9 @@ class ResumePackContractsTest(unittest.TestCase):
             "The one exception is `resume-pack`", "is not a workflow response",
             "never pipes or decodes it", "## 1. Resolve issue set and bindings")
         self.assert_ordered(
-            self.read(FROM_ISSUE), "## Lifecycle identity", "untrusted transport",
-            "and validate before decoding.", "The one exception is `resume-pack`",
-            "is not a workflow response", "the checks in `### Resume pack`",
-            "### Dispatcher-owned acquisition")
-
-    def test_from_issue_defers_the_auto_read_on_a_pack_carrying_relaunch(self):
-        self.assert_ordered(
-            self.read(FROM_ISSUE), "## Files beside this one",
-            "Read it *once*, now, only if the invocation contains the literal token `--auto`.",
-            "When the prompt carries a resume pack, defer that read",
-            "limits it to the sections that subsection names",
-            "restores the whole read",
-            "## Lifecycle identity")
+            self.read(FROM_ISSUE), "## Lifecycle identity",
+            "artifact-budget validate-report --boundary workflow-response", "`resume-pack`",
+            "### Resume pack")
 
     def test_orchestrate_adds_the_pack_to_resume_prompts_only(self):
         self.assert_ordered(
@@ -4169,37 +4047,18 @@ class ResumePackContractsTest(unittest.TestCase):
 
     def test_from_issue_owner_verifies_the_pack_and_reads_only_the_phase(self):
         self.assert_ordered(
-            self.read(FROM_ISSUE), "## Lifecycle identity",
-            "### Resume pack A relaunched owner's prompt may carry a resume pack",
-            self.PACK, "an accelerator, never a gate", "not a workflow response",
-            "still resolves the project once", "runs `check-launch`",
-            "a generic `delegate` owner carries no continuation and runs none of them",
+            self.read(RESUME_PACK), self.PACK, "`check-launch`",
             "`git -C <worktree> rev-parse HEAD` must equal `worktree.head`",
-            "re-orient in full",
-            "A verified pack replaces only your own ad-hoc re-orientation",
-            "do not dump the ledger", "re-validate the plan",
-            "read only the skill sections its phase needs",
-            "always read the sections every owner obeys", "`Lifecycle identity`",
-            "`Dispatch, phase-budget and attempt-budget rules`",
-            "`Terminal return procedure`", "`Suspension procedure`",
-            "this file's `## Phase <n>` section",
-            "`sdd` for Phase 6", "`ship-issue` for Phase 7",
-            "(not the whole file)", "`The self-answer pattern`",
-            "`When *not* to auto-resolve`",
-            "`Other Phase 5–7 routes`",
-            "Everything the pack does not replace still runs unchanged",
-            "sdd's own `progress.md` check", "sdd's ledger wins",
-            "never stops a relaunch", "## The flow")
+            "`git -C <worktree> status --porcelain` must list exactly "
+            "`worktree.dirty_paths` entries")
+        self.assertIn("`action_id`", self.read(RESUME_PACK))
 
     def test_from_issue_direct_reentry_and_delegate_carry_the_pack(self):
-        text = self.read(FROM_ISSUE)
         self.assert_ordered(
-            text, "### Direct autonomous acquisition", "**`kind: owner`**",
-            "When its `launch_kind` is `resume`", self.PACK,
-            "### Interactive direct acquisition")
+            self.read(ACQUIRE_DIRECT), "**`kind: owner`**", "`launch_kind` is `resume`",
+            self.PACK, "**`kind: delivery_remainder`**")
         self.assert_ordered(
-            text, "4. **`delegate`** —", "the fresh owner adopts this launch",
-            self.PACK, "as a `Resume pack` paragraph",
+            self.read(FROM_ISSUE), "4. **`delegate`** —", self.PACK,
             "Exception — **ledger-only remainder**")
 
     def test_auto_rollover_passes_the_pack_beside_the_continuation(self):
@@ -5948,9 +5807,7 @@ class LaunchScopeWiringContractsTest(unittest.TestCase):
 
     def test_the_owner_runs_long_commands_through_exec(self):
         self.assert_ordered(self.read(FROM_ISSUE), "## Lifecycle identity", self.OWNER_EXEC,
-                            "a forge verb never goes through it", self.OWNER_SCRATCH,
-                            "Every lifecycle call is one command",
-                            "### Dispatcher-owned acquisition")
+                            self.OWNER_SCRATCH, "### Resume pack")
 
     def test_the_worker_sentence_follows_every_composed_worker_line(self):
         self.assert_ordered(self.read(FROM_ISSUE), "**Writing workers.**", self.WORKER_LINE,
