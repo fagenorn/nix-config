@@ -8,7 +8,7 @@
 **Invariants:**
 - Behaviour is unchanged: `list --include-done` prints exactly what `list --all` printed, and bare `list` still hides done tasks.
 - The option keeps its help text, `include done tasks`.
-- No test names the old flag. The spec's criterion 4 bans the old name anywhere in the repo, so the old-flag check is a command in Verification and is not committed.
+- No test names the old flag. The spec's criterion 4 bans the old name from `tinytask/`, `tests/` and `README.md`, so the old-flag check is a command in Verification and is not committed.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -38,6 +38,9 @@ Expected: `OK`.
 
 Run, from outside the committed tree: `python3 -m tinytask --file "$(mktemp -d)/t.json" list --all; echo "exit=$?"`
 Expected: an argparse usage error, then `exit=2` (criterion 2).
+
+Run, from outside the committed tree: `python3 -m tinytask --file "$(mktemp -d)/t.json" list --help`
+Expected: the help output lists `--include-done` and contains no `--all` (criterion 3).
 
 Run: `git grep -n -- '--all' -- tinytask tests README.md`
 Expected: no output (criterion 4). The `issues/` fixtures quote the old name and are not the tool's code or docs.

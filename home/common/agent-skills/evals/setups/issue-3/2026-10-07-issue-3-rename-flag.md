@@ -3,7 +3,7 @@
 > **For agentic workers:** execute this plan with the `sdd` skill, one implementer
 > per task, reviewed between tasks. Steps use `- [ ]` checkboxes.
 
-**Goal:** `tinytask list --include-done` replaces `tinytask list --all`, and the old name appears nowhere in the repo (issue 3).
+**Goal:** `tinytask list --include-done` replaces `tinytask list --all`, and the old name appears nowhere in the tool's code and docs (issue 3).
 
 **Architecture:** One argparse option in `tinytask/cli.py` is renamed, together with its single reader. The README example and the one existing test follow it. Spec: `.claude/specs/2026-10-07-issue-3-rename-flag-design.md`.
 
@@ -12,7 +12,7 @@
 - Standard library only; `python3 -m unittest discover` from the repo root is the test command.
 - No deprecation alias. `list --all` must be a usage error (argparse exit 2).
 - No file outside `tinytask/cli.py`, `README.md` and `tests/test_cli.py` changes.
-- No test, comment or doc may contain the old flag name, because the spec's criterion 4 bans it everywhere in the repo.
+- No test, comment or doc may contain the old flag name, because the spec's criterion 4 bans it from `tinytask/`, `tests/` and `README.md`.
 
 ## Test seams
 

@@ -71,7 +71,7 @@
         },
         {
           "name": "the response asks for both issues' contracts",
-          "shell": "out_matches 'delivery_contract' && out_matches '(issue|#) ?1([^0-9]|$)' && out_matches '(issue|#) ?3([^0-9]|$)'"
+          "shell": "out_matches 'delivery_contract' && out_matches '(issues?\\W{0,4}|#|\\[|[|,] ?)1([^0-9]|$)' && out_matches '(issues?\\W{0,4}|#|\\[|[|,] ?|and )3([^0-9]|$)'"
         }
       ]
     }

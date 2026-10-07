@@ -17,7 +17,7 @@ exactly what `list --all` showed, and bare `list` is untouched.
 1. `tinytask list --include-done` behaves exactly as `tinytask list --all` does today.
 2. `tinytask list --all` is a usage error (unrecognised argument).
 3. `tinytask list --help` shows `--include-done` and does not mention `--all`.
-4. No occurrence of the old flag name remains in the repo.
+4. No occurrence of the old flag name remains in the tool's code and docs (`tinytask/`, `tests/` and `README.md`). The `issues/` fixtures and the spec and plan that discuss the rename quote it and are out of scope.
 
 ## Decision ledger
 
