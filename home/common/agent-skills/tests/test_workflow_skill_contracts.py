@@ -6062,9 +6062,11 @@ class HeldReportContractsTest(unittest.TestCase):
         fallback = self.section(handoff, "## Inline fallback (no ship-issue skill)",
                                 "## Remainder owner prompt")
         self.assert_ordered(
-            fallback, "close the issue when the sdd report's `acceptance_state` is "
+            fallback, "The PR body carries `Closes #<num>` only when the sdd report's "
+            "`acceptance_state` is `met` or `not_applicable`, and no closing keyword "
+            "otherwise", "close the issue when the sdd report's `acceptance_state` is "
             "`met` or `not_applicable`", "label it `needs-verification`",
-            "comment the verdict table", "leaving it open")
+            "comment the verdict table", "leaving it open. In both cases, publish")
 
 
 if __name__ == "__main__":

@@ -124,7 +124,7 @@ merge success. Never inline detail.
 
 ## Inline fallback (no ship-issue skill)
 
-Deliver inline: push the branch, open a PR against `<integration-branch>`, then use the same full-review tier over the diff:
+Deliver inline: push the branch, open a PR against `<integration-branch>`, then use the same full-review tier over the diff. The PR body carries `Closes #<num>` only when the sdd report's `acceptance_state` is `met` or `not_applicable`, and no closing keyword otherwise, so that merging a held PR never closes the issue:
 
 <!-- agent-dispatch: id=from-issue-inline-ship-review role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") launches a fresh first-pass reviewer over the shipping diff.
@@ -132,10 +132,11 @@ Agent(subagent_type="reviewer", model="opus", effort="high") launches a fresh fi
 Then wait for CI (`<tracker-cli> pr checks --watch`), merge `--no-ff`, then close
 the issue when the sdd report's `acceptance_state` is `met` or `not_applicable`;
 otherwise hold it: label it `needs-verification` (creating the label when
-missing), comment the verdict table, leaving it open, and publish every non-empty review detail beneath the primary worktree's
+missing), comment the verdict table, leaving it open. In both cases, publish
+every non-empty review detail beneath the primary worktree's
 `.superpowers/issue-delivery/` home before cleanup. Publication failure must keep
-the worktree and report `unpublished`. With an unsupported tracker capability, merge
-locally and clean up under the same detail rule.
+the worktree and report `unpublished`. With an unsupported tracker capability,
+merge locally and clean up under the same detail rule.
 
 ## Remainder owner prompt
 
