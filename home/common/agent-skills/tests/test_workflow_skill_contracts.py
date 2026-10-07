@@ -981,7 +981,8 @@ def sdd_correctness_route(text=None):
     if text is None:
         text = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
     start = text.index("- **Correctness axis**")
-    return text[start:text.index("Point the conformance dispatch", start)]
+    # The acceptance-criteria paragraph follows the axes (#272 D13).
+    return text[start:text.index("**Acceptance criteria.**", start)]
 
 
 def ship_correctness_route(text=None):
@@ -1938,7 +1939,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_sdd_report_is_exact_and_mechanically_validated(self):
         for field in ("state", "review_state", "conformance_verdict",
                       "correctness_verdict", "verification_state", "base_sha",
-                      "head_sha", "detail_state", "report_path", "notes"):
+                      "head_sha", "acceptance_state", "detail_state", "report_path",
+                      "notes"):
             self.assertIn(field, self.sdd)
         self.assertIn("validate-report --boundary sdd", self.sdd)
         for forbidden in ("parked_findings:", "verdict_details:", "open_items:", "summary:"):
@@ -5424,6 +5426,60 @@ class AcceptanceGradingContractsTest(unittest.TestCase):
                             "`### Acceptance` output section")
         self.assertIn("omit the ledger-triage placeholder and `[ACCEPTANCE_CRITERIA]`",
                       self.read(SHIP_ISSUE_REVIEW))
+
+    def test_final_review_never_parks_acceptance_findings(self):
+        text = self.read(SDD_DIR / "final-review.md")
+        self.assert_ordered(
+            text, "**Acceptance criteria.**",
+            "`<tracker-cli> issue view <num> --repo <repo_slug> --json body`",
+            "`## Acceptance criteria` heading", "`AC1`…`ACn`",
+            "`Declared verification:`", "`acceptance_state: not_applicable`",
+            "stops the final review before either axis is dispatched",
+            "Point the conformance dispatch")
+        self.assert_ordered(
+            text, "**Acceptance verdicts.**",
+            "An `evidence` `met` without the observed value or the threshold is "
+            "recorded as `unverified`.",
+            "On the first pass, a missing table, or a missing row, records every "
+            "missing `ACn` as `unverified`.",
+            "Every `unmet` or `unverified` row is an acceptance finding.",
+            "An acceptance finding is never parked with a ruling",
+            "forces the Residuals terminal state",
+            "id=sdd-final-review-fixer")
+        self.assert_ordered(
+            text, "Verdicts come back ≤400 words each, not counting the conformance "
+            "axis's `### Acceptance` table,", "id=sdd-final-conformance-rereview",
+            "every `ACn` it was not given keeps its first-pass verdict",
+            "a named acceptance finding it returns no verdict for stays `unverified`",
+            "`observed <value> at <sha7> vs threshold <literal>`; without it, "
+            "record `unverified`.",
+            "There is no second fix wave", "## Acceptance record",
+            "`<plans dir>/<plan stem>.acceptance.md`",
+            "| AC | Criterion | Kind | Check or command | Observed | Commit | "
+            "Conditions | Verdict |",
+            "Before writing, check freshness.",
+            "touches the measured surface of an `evidence` row recorded `met`, that "
+            "row becomes `unverified`.",
+            "Commit the acceptance record, then run the **Final verification** step.",
+            "`launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
+            "--worker-id <worker_id> -- <git commit arguments>`",
+            "--event returned", "## Final verification",
+            "after the acceptance record's commit",
+            "`correctness_verdict: findings`",
+            "every `met` `evidence` row whose measured surface the repair's commits "
+            "touch becomes `unverified`, in a second record commit")
+        raw = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
+        self.assertIn("```markdown\n# Acceptance record — issue #<n>", raw)
+
+    def test_sdd_finish_reports_acceptance_state(self):
+        finish = self.read(SDD).split("## Finish", 1)[1]
+        self.assertIn("`head_sha`, `acceptance_state`, `detail_state`, `report_path`, "
+                      "and `notes`", finish)
+        self.assert_ordered(
+            finish, "`acceptance_state` derives from the final verdicts",
+            "`not_applicable` when", "`unmet` when any verdict is `unmet` or `unverified`",
+            "`human_pending` when any verdict is `human_pending`", "otherwise `met`",
+            "- **Clean** —", "(an acceptance finding never is)")
 
 
 if __name__ == "__main__":
