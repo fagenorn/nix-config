@@ -179,7 +179,7 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
     for item in value["summaries"]:
         item = _object(item, _members("issue state custody owner worktree deadline_at blocked_on blockers result contract_digest pending_stage_ids requirements"))
         issue = _integer(item["issue"], "summary issue", minimum=1)
-        if issue in issues or item["state"] not in {"queued", "blocked", "fogged", "active", "handed_off", "suspended", "merged", "stopped", "failed", "closed"}: _reject()
+        if issue in issues or item["state"] not in {"queued", "blocked", "fogged", "active", "handed_off", "suspended", "merged", "stopped", "failed", "closed", "held"}: _reject()
         issues.add(issue); order.append(issue)
         if item["custody"] is not None: validate_custody_ref(item["custody"], issue=issue)
         for name in ("owner", "worktree", "deadline_at", "blocked_on", "contract_digest"):

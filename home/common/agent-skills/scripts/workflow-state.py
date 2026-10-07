@@ -231,6 +231,7 @@ CONTROL_SUMMARY_STATES = frozenset(
         "stopped",
         "failed",
         "closed",
+        "held",
     }
 )
 CONTROL_BLOCKER_FIELDS = frozenset({"kind", "issue", "url"})

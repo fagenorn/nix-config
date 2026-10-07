@@ -12,6 +12,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from .test_delivered_control import DELIVERED, DISPATCH, LIVE, DeliveredControlHarness
+
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "workflow-state.py"
 SDD_WORKSPACE = Path(__file__).parents[1] / "skills" / "sdd" / "scripts" / "sdd-workspace"
@@ -7707,6 +7709,49 @@ class ArtifactBudgetPolicyResolutionTest(unittest.TestCase):
             self.assertEqual(
                 Path(observed["policy"]).resolve(), policy.resolve()
             )
+
+
+class HeldControlTest(DeliveredControlHarness, unittest.TestCase):
+    """#273 AC2: a held delivery holds no custody, reads `held`, and is never relaunched."""
+
+    def summaries(self, response):
+        return {item["issue"]: item for item in response["summaries"]}
+
+    def test_a_held_delivery_is_never_relaunched_and_reads_held(self):
+        self.deliver_through_remainder(held=True)
+        before = self.records(DELIVERED)
+        # Minute 275 is past r1's deadline (274); 209 depends on held 207.
+        response = self.control(275, recorded={DELIVERED: "absent", LIVE: None},
+                                contracts=True, blockers={LIVE: [DELIVERED]})
+        self.assertEqual([a for a in response["actions"] if a.get("issue") == DELIVERED], [])
+        self.assertEqual([d for d in response["deltas"] if d["issue"] == DELIVERED], [])
+        self.assertEqual([a for a in response["actions"] if a["kind"] in DISPATCH], [])
+        self.assertNotIn(DELIVERED, response["admission"]["waiting"])
+        held = self.summaries(response)[DELIVERED]
+        # Summary custody keeps #220 D4's diagnostic projection unchanged (it may
+        # name a stale nonterminal record); "no current custody" is proven by the
+        # empty dispatch actions above and the null owner below (PR273-1).
+        self.assertEqual((held["state"], held["owner"],
+                          held["pending_stage_ids"], held["requirements"]),
+                         ("held", None, [], []))
+        self.assertIsNotNone(held["contract_digest"])
+        dependent = self.summaries(response)[LIVE]
+        self.assertEqual(dependent["state"], "blocked")
+        self.assertEqual(dependent["blockers"],
+                         [{"kind": "issue", "issue": DELIVERED, "url": None}])
+        self.assertEqual(self.records(DELIVERED), before)
+
+    def test_a_held_issue_a_human_closed_reads_closed(self):
+        self.deliver_through_remainder(held=True)
+        response = self.control(275, recorded={DELIVERED: "absent"}, contracts=True,
+                                closed={DELIVERED})
+        self.assertEqual(self.summaries(response)[DELIVERED]["state"], "closed")
+
+    def test_only_a_held_observation_projects_held(self):
+        # D15, D18: a tracker_closed delivery whose tracker reads open is not held.
+        self.deliver_through_remainder(held=False)
+        response = self.control(275, recorded={DELIVERED: "absent"}, contracts=True)
+        self.assertEqual(self.summaries(response)[DELIVERED]["state"], "queued")
 
 
 if __name__ == "__main__":
