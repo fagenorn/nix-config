@@ -70,16 +70,23 @@ caller instead of dispatching more work.
 
 ## Agent tiers
 
-Dispatch by agent type — the definitions carry the model and effort tier; never leave the tier to inheritance:
+Dispatch by agent type, with the model and effort its dispatch site declares; never leave the tier to inheritance — an `implementer` dispatch that omitted its model would run on its definition's Opus/high:
 
 - **`mechanic`** — transcription plus testing: the plan text contains the complete code, or the change is single-file mechanical. Also inventories and bulk sweeps.
-- **`implementer`** — every other implementation task: prose-specified work, multi-file integration, judgment inside a fixed scope.
+- **`implementer`** — every other implementation task: prose-specified work, multi-file integration, judgment inside a fixed scope. A planned task and its fix rounds 1–3 run on Sonnet/high (the `task-implementer` role); a stuck task's escalations — fix rounds 4–5 and a reasoning-problem BLOCKED — and the final-review fixer run on Opus/high (the `implementer` role).
 - **`reviewer`** — full-lane first-pass task review and every first-pass whole-branch review.
 - **`reviewer-lite`** — only a scoped re-review (named prior findings + bounded fix diff) or a mechanical/low-risk lane verification (declared lane + bounded task diff). Ambiguous adjudication or branch-wide review escalates to `reviewer` on Opus/high, recorded in the SDD ledger.
 - The **final review's two axes** dispatch per [final-review.md](final-review.md) — the conformance axis as `reviewer` on Opus/high; the correctness axis via `codex-collaboration`'s `diff-review` when `capabilities.review.code` is `available` and that skill is installed, and as `reviewer` on Opus/high when the capability is `unsupported` or the skill is not installed (`blocked` stops).
-- **Stuck tasks escalate across models, not just tiers** — see the fix loop's round 4.
+- **Stuck tasks escalate across models, not just tiers** — Sonnet → Opus: see the fix loop's rounds 4–5 and the BLOCKED handling under the task loop.
 
 Turn count beats token price: a too-cheap agent takes 2–3× the turns on multi-step work and costs more overall. Unsure between mechanic and implementer → pick implementer.
+
+**Re-evaluating Sonnet task implementers.** Sonnet/high task implementers replaced Opus/high on 2026-10-07. Judge that choice by this rule alone:
+
+- *Metric:* the first-pass approval rate of full-lane task reviews of tasks a `task-implementer` implemented — the share whose first-pass review needed no fix round (spec ✅ and no Critical or Important finding).
+- *Baseline:* Opus/high implementers, about 84% first-pass approval across 153 full-lane first-pass reviews, measured before 2026-10-07.
+- *When:* after about 10 delivered issues under this routing, and only once the sample holds at least 30 full-lane first-pass reviews; below that floor, keep going.
+- *Decision:* below 74% (ten points under the baseline) is clearly worse — revert by pointing the `sdd-nonmechanical-implementation` and `sdd-task-fix-redispatch` sites back at the `implementer` role and retiring the `task-implementer` role. At or above 74%, keep Sonnet; a rate between 74% and 84% is reported but is not a revert trigger.
 
 **Leaf-agent clauses.** Every prompt this skill composes for an `Agent` dispatch — here, in [fix-loop.md](fix-loop.md) or in [final-review.md](final-review.md) — carries these three clauses verbatim, as a paragraph of their own; a prompt built from one of the `*-prompt.md` templates already carries them:
 
@@ -161,7 +168,12 @@ Template: [implementer-prompt.md](implementer-prompt.md)
 - **DONE** → run `review-package PLAN_FILE BASE HEAD` (BASE from step 1 — never `HEAD~1`, which silently drops all but the last commit), capture its compact JSON stdout unchanged, and pass those bytes through `artifact-budget validate-report --boundary producer --input -` before the step-3 gate.
 - **DONE_WITH_CONCERNS** → correctness/scope concerns get addressed before review; observations get noted, review proceeds.
 - **NEEDS_CONTEXT** → provide it, re-dispatch.
-- **BLOCKED** → a `launch fence refused` report follows `### Lifecycle workers` and is never re-dispatched. Otherwise: context problem: add context, re-dispatch same tier. Reasoning problem: re-dispatch `implementer` (or bump the model). Too large: split it. Plan wrong: escalate to the human. Never force an unchanged retry — if the implementer said it's stuck, something must change.
+- **BLOCKED** → a `launch fence refused` report follows `### Lifecycle workers` and is never re-dispatched. Otherwise: context problem: add context, re-dispatch at the same tier. Reasoning problem: escalate to a fresh Opus/high implementer carrying the brief path, the report path and the blocker:
+
+<!-- agent-dispatch: id=sdd-blocked-reasoning-escalation role=implementer model=opus effort=high -->
+Agent(subagent_type="implementer", model="opus", effort="high") takes over a task whose implementer reported BLOCKED on a reasoning problem.
+
+  Too large: split it. Plan wrong: escalate to the human. Never force an unchanged retry — if the implementer said it's stuck, something must change.
 
 **Interim child results.** A child's return that the host marks interim — it stopped with background work of its own still running, or its result may be interim — is not a completion: the child is still running. Re-engage that same child by its recorded agent identity: message it to wait for its own job inside its turn and then return its final report, and wait for that report. You may end your own turn while the re-engaged child is live, because the host wakes you with its next notification; that is a child's work, not a command you started. Never answer an interim result with a text-only reply, never suspend for it (it is not an `external` wait), and never dispatch a replacement or stop the child. A registered lifecycle worker stays registered under its existing worker id: an interim result is not its `returned` event, and re-engagement is not a resume, so it registers nothing new. If the message cannot be delivered, the child is one you cannot wait for: follow from-issue's **Writing workers** route (task-stop, then release `--event stopped`), then this skill's ordinary handling of a lost child; that is the one case that may lead to a fresh dispatch. Only the child's final hand-back counts as its result.
 
@@ -237,7 +249,7 @@ Template: [task-reviewer-prompt.md](task-reviewer-prompt.md)
 
 ### 4. The fix loop
 
-Triggers on spec ❌, any Critical/Important finding, or a confirmed ⚠️ gap — read [fix-loop.md](fix-loop.md) beside this file and follow it: five capped rounds (rounds 1–3 resume the original implementer by its recorded identity, round 4 is the Codex-assisted stuck-breaker, round 5 the final fresh dispatch), scoped re-reviews, the explicit escalation dispatch, and the at-the-cap breaker that parks or blocks every residual with a ledger ruling.
+Triggers on spec ❌, any Critical/Important finding, or a confirmed ⚠️ gap — read [fix-loop.md](fix-loop.md) beside this file and follow it: five capped rounds (rounds 1–3 resume the original implementer by its recorded identity, round 4 is the Codex-assisted stuck-breaker and round 5 the final fresh dispatch, both on Opus/high), scoped re-reviews, the explicit escalation dispatch, and the at-the-cap breaker that parks or blocks every residual with a ledger ruling.
 
 Two routes exit before the loop starts:
 

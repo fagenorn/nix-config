@@ -507,8 +507,9 @@ class EnrolmentGuardTest(unittest.TestCase):
 
 
 # The dispatch-marker inventory across both skill source trees (#272 D12): a
-# change that adds or retires a dispatch updates this count deliberately.
-MARKER_INVENTORY = 37
+# change that adds or retires a dispatch updates this count deliberately. #270
+# added two (the Sonnet task-fix re-dispatch and the BLOCKED reasoning escalation).
+MARKER_INVENTORY = 39
 MARKER_LINE = re.compile(r"^<!-- agent-dispatch: id=([a-z0-9-]+) ", re.M)
 CONFORMANCE_MARKER = ("<!-- agent-dispatch: id=sdd-final-conformance-review "
                       "role=conformance-reviewer model=opus effort=high -->")

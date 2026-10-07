@@ -1217,6 +1217,34 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
         self.assertEqual(agent_costs._declaration({"subagent_type": "reviewer"}, reasons)["authority"], "unknown")
         self.assertEqual(reasons["role_ambiguous"], 1)
 
+    def test_the_shared_implementer_type_is_ambiguous_without_a_declared_role(self):
+        reasons = agent_costs.Counter()
+        self.assertEqual(agent_costs._declaration({"subagent_type": "implementer"}, reasons),
+                         {"dispatch_id": None, "role": None, "authority": "unknown"})
+        self.assertEqual(reasons["role_ambiguous"], 1)
+        self.assertEqual(reasons["dispatch_missing"], 1)
+        reasons = agent_costs.Counter()
+        self.assertEqual(agent_costs._declaration({"subagent_type": "reviewer-lite"}, reasons),
+                         {"dispatch_id": None, "role": "reviewer-lite",
+                          "authority": "runtime-agent-type"})
+        self.assertEqual(reasons["role_ambiguous"], 0)
+
+    def test_a_declared_implementer_role_is_accepted_on_either_tier(self):
+        for role in ("task-implementer", "implementer"):
+            with self.subTest(role=role):
+                reasons = agent_costs.Counter()
+                self.assertEqual(
+                    agent_costs._declaration({"subagent_type": "implementer", "role": role,
+                                              "dispatch_id": "sdd-nonmechanical-implementation"},
+                                             reasons),
+                    {"dispatch_id": "sdd-nonmechanical-implementation", "role": role,
+                     "authority": "structured-dispatch"})
+                self.assertEqual(reasons["role_ambiguous"], 0)
+                reasons = agent_costs.Counter()
+                self.assertEqual(
+                    agent_costs._declaration({"role": role}, reasons),
+                    {"dispatch_id": None, "role": role, "authority": "runtime-agent-type"})
+
     def test_unspawned_codex_evidence_respects_the_event_window(self):
         codex = self.root / "codex" / "2026"; codex.mkdir(parents=True)
         spawned = codex_meta("thread-1", thread_source="subagent", source={"subagent": {"thread_spawn": {
