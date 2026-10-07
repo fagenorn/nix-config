@@ -57,3 +57,7 @@ Task 6 — orchestrate-issues reports held; from-issue handoff close-or-hold —
 Task 1 rests on D1–D5. Task 2 rests on D1, D3, D5 and D12. Task 3 rests on D6 and D17, and closes AC1's builder-to-reducer path. Task 4 rests on D7, D12, D15 and D18. Task 5 rests on D8–D11, D13, D14 and D16. Task 6 rests on D7, D11 and D15, plus parent D7. Rows D16–D18 were appended to the spec's ledger during planning.
 
 ---
+
+## Standards review provenance
+
+Reviewer: Codex (gpt-6-astra, xhigh), fresh isolated read-only plan-review thread; base SHA 8a2e2631b173b30351480a86cd4018f8b5bccc8c; no fallback. Findings: 3 accepted (PR273-1 and PR273-2 blocking, PR273-3 should-fix; per D19 for the first two), 0 rejected, 0 deferred.

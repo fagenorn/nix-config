@@ -126,7 +126,7 @@ Expected: `test_the_contract_digest_for_an_unchanged_input_is_pinned` passes, at
 - [ ] **Step 3: Write the minimal implementation**
 
 In `workflow_delivery_build.py`:
-1. Add two checkers next to `_text`, using the exact refusal strings from Interfaces. `_hold_acceptance(value, name)` returns `value` only when `value in {"unmet", "human_pending"}`. `_record_path(value, name)` first calls `_text(value, name)`, which refuses an empty or non-string value with its own `must be a non-empty string` message. It then refuses a value that starts with `/`, contains `\`, or has a `..` segment in `value.split("/")`.
+1. Add two checkers next to `_text`, using the exact refusal strings from Interfaces. `_hold_acceptance(value, name)` returns `value` only when `isinstance(value, str) and value in {"unmet", "human_pending"}` (type check first, so an array or object gets the acceptance-state refusal rather than an unhashable-type error; add array and object refusal cases, PR273-3). `_record_path(value, name)` first calls `_text(value, name)`, which refuses an empty or non-string value with its own `must be a non-empty string` message. It then refuses a value that starts with `/`, contains `\`, or has a `..` segment in `value.split("/")`.
 2. Add a `"tracker_held"` entry to `_OBSERVATIONS`:
    ```python
    "tracker_held": ({"comment_url": _text, "record_path": _record_path,

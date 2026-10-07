@@ -64,9 +64,12 @@ class HeldControlTest(DeliveredControlHarness, unittest.TestCase):
         self.assertEqual([a for a in response["actions"] if a["kind"] in DISPATCH], [])
         self.assertNotIn(DELIVERED, response["admission"]["waiting"])
         held = self.summaries(response)[DELIVERED]
-        self.assertEqual((held["state"], held["custody"], held["owner"],
+        # Summary custody keeps #220 D4's diagnostic projection unchanged (it may
+        # name a stale nonterminal record); "no current custody" is proven by the
+        # empty dispatch actions above and the null owner below (PR273-1).
+        self.assertEqual((held["state"], held["owner"],
                           held["pending_stage_ids"], held["requirements"]),
-                         ("held", None, None, [], []))
+                         ("held", None, [], []))
         self.assertIsNotNone(held["contract_digest"])
         dependent = self.summaries(response)[LIVE]
         self.assertEqual(dependent["state"], "blocked")
