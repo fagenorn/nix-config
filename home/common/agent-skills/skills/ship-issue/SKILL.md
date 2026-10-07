@@ -50,7 +50,8 @@ review prompt.
 - `SYNC.md` — Phase 1: divergence, foreign commits, scope creep, the allowlist, the escalation format.
 - `CONSOLIDATE.md` — Phase 3: the bar, the rubric, destinations and the procedure.
 - `REVIEW.md` — Phase 5: Codex failure semantics, templates, the delta brief, the range record, severity mapping, the five-step fix flow, durable Minor/Discussion detail.
-- `CI-MERGE.md` — Phases 6–7: the CI escalation, failing checks, advisory overflow, merge quirks, and the post-selection sync.
+- `CI-MERGE.md` — Phases 6–7: the 40-minute escalation, failing checks, advisory overflow, the worktree merge-exit quirk.
+- `POST-SELECTION-SYNC.md` — a stale or conflicting PR after selection; read it with `SYNC.md` and `REVIEW.md`'s severity mapping and durable detail.
 - `HUMAN-GATE.md` — the operator gates, entered only when `## Standing authorization` finds no grant.
 - `DELIVERY-LOOP.md` — lifecycle identity: read it for every `ship-handoff/v2` and every remainder.
 - `REMAINDER.md` — a `delivery_remainder` owner's entry, start points, close or hold, and `finish`.
@@ -194,7 +195,7 @@ keeps its existing failure handling. It runs in every review-bearing
 invocation — a `ship-handoff/v2` or legacy handoff, or a standalone
 `/ship-issue <num>` — even when the review range may turn out empty, because the
 delta is unknown until the sync this probe precedes. Remainder mode skips
-Phases 0–5 and probes only before a post-selection sync, per CI-MERGE.md.
+Phases 0–5 and probes only before a post-selection sync, per POST-SELECTION-SYNC.md.
 
 When the probe fails, stop with nothing launched or written. From a handoff,
 your whole return is exactly this closed line, with no ship summary and no
@@ -251,7 +252,7 @@ Otherwise run `git merge --no-commit --no-ff origin/<integration>`; when it repo
 ## Phase 2 — Verify locally
 
 This is the one verification step. Phase 3 after a promotion commit,
-REVIEW.md's apply/push step 2 and CI-MERGE.md's post-selection sync run it too.
+REVIEW.md's apply/push step 2 and POST-SELECTION-SYNC.md's sync run it too.
 
 A blocked verification capability stops and reports its `reason_code` and
 `repair_id`; authored unsupported follows only its documented no-verification
@@ -357,7 +358,7 @@ The branch normally arrives already reviewed on two axes by sdd's final review (
 
 **Route the review.** `delta` → the full two-axis review below over `<review_base>..$HEAD_SHA`, with REVIEW.md's delta-route conformance brief. `empty` → nothing to review: record it and skip to Phase 6. `full`, a failed prerequisite, or an unavailable helper → the full two-axis review below over `$BASE_SHA..$HEAD_SHA`. Record the route in the PR body per REVIEW.md.
 
-**Merge-delta reviewer (post-selection sync only).** Phase 5 never dispatches it: CI-MERGE.md's `## Post-selection sync` reviews each later sync merge with it, over REVIEW.md's merge-delta scope and checklist:
+**Merge-delta reviewer (post-selection sync only).** Phase 5 never dispatches it: POST-SELECTION-SYNC.md reviews each later sync merge with it, over its merge-delta check:
 
 <!-- agent-dispatch: id=ship-issue-merge-delta-review role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") reviews exactly the non-empty merge delta.
@@ -399,7 +400,7 @@ is not evidence about what was reviewed.
 
 Diverged → the PR head carries **unreviewed commits** on the branch. Never
 resolve it by re-pushing, resetting, re-reviewing or merging, except for a head
-that CI-MERGE.md's `## Post-selection sync` admits. In `--auto` this
+that POST-SELECTION-SYNC.md admits. In `--auto` this
 is the genuinely-blocked stop: stop before the CI wait and before the merge,
 make no further forge write, run no cleanup, keep the worktree and the branch,
 and return a truthful `stopped` ship summary naming both SHAs — the reviewed
@@ -414,7 +415,7 @@ Then block on the required checks with `gh`'s built-in watch — one Bash call, 
 timeout 300 gh pr checks <pr-num> --required --watch --fail-fast --interval 30
 ```
 
-**Foreground only — never backgrounded, and the blocking watch is the only sanctioned wait shape: no bare re-polls, no no-op keep-alive commands.** Exit `0` → list advisory states, then Phase 7. Exit `124` → one short narration turn, re-run the identical command, up to 8 times (~40 min), then escalate. Exit `1` with gh's `no required checks reported` error → the base marks no check required, or the required check is not reported yet: run `timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30` for the rest of the phase under the same exit codes and retry budget, list no advisory states, and note `CI: no required checks reported; waited on all`. Other non-zero → a gating check failed; pull `gh run view <run-id> --log-failed`, ground, surface. After the required watch exits `0`, run `gh pr checks <pr-num> --json name,bucket` once and append each non-`pass` row to the ship summary's notes as `advisory CI: <name>=<bucket>, …`. An advisory failure does not block the merge. Rationale, escalation script, advisory format and JSON-field notes: [`CI-MERGE.md`](./CI-MERGE.md).
+**Foreground only — never backgrounded, and the blocking watch is the only sanctioned wait shape: no bare re-polls, no no-op keep-alive commands.** Exit `0` → list advisory states, then Phase 7. Exit `124` → one short narration turn, re-run the identical command, up to 8 times (~40 min), then escalate. Exit `1` with gh's `no required checks reported` error → the base marks no check required, or the required check is not reported yet: run `timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30` for the rest of the phase under the same exit codes and retry budget, list no advisory states, and note `CI: no required checks reported; waited on all`. Other non-zero → a gating check failed; pull `gh run view <run-id> --log-failed`, ground, surface. After the required watch exits `0`, run `gh pr checks <pr-num> --json name,bucket` once and append each non-`pass` row to the ship summary's notes as `advisory CI: <name>=<bucket>, …`. An advisory failure does not block the merge. Escalation, failing checks and advisory overflow: [`CI-MERGE.md`](./CI-MERGE.md).
 
 ## Phase 7 — Merge
 

@@ -33,12 +33,12 @@ SDD_DIR = REPO_ROOT / "home/common/agent-skills/skills/sdd"
 FROM_ISSUE_DIR = REPO_ROOT / "home/common/agent-skills/skills/from-issue"
 SHIP_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/SKILL.md"
 SHIP_ISSUE_REVIEW = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/REVIEW.md"
-SHIP_ISSUE_CI_MERGE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/CI-MERGE.md"
 SHIP_ISSUE_HUMAN_GATE = (
     REPO_ROOT / "home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md"
 )
 SHIP_ISSUE_DELIVERY_LOOP = SHIP_ISSUE.parent / "DELIVERY-LOOP.md"
 SHIP_ISSUE_REMAINDER = SHIP_ISSUE.parent / "REMAINDER.md"
+SHIP_ISSUE_POST_SELECTION_SYNC = SHIP_ISSUE.parent / "POST-SELECTION-SYNC.md"
 SMALL_BUDGET_FIXTURE = (
     REPO_ROOT / "home/common/agent-skills/tests/fixtures/artifact-budgets/small-issue.json"
 )
@@ -277,11 +277,12 @@ SHIP_ISSUE_MACHINE_TEXT = {
         "Held for verification: <PR URL>",
     ),
     SHIP_ISSUE_REVIEW: ("validate-detail-input", 'detail_state: "unpublished"'),
-    SHIP_ISSUE_CI_MERGE: (
+    SHIP_ISSUE_POST_SELECTION_SYNC: (
         "--kind current-selection", "--kind sync-selection", "--kind scope", "`test_ref`",
-        "launch-commit",
-        "gh pr view <pr-num> --json state,headRefOid,mergeable",
-        REQUIRED_WATCH, ALL_CHECKS_WATCH, ADVISORY_CALL,
+        "launch-commit", "gh pr view <pr-num> --json state,headRefOid,mergeable",
+        "git merge --no-commit --no-ff origin/<integration>",
+        "git merge-base --is-ancestor <second-parent> origin/<integration>",
+        "git show --cc <merge-sha>", "`merge-delta-empty`", "`merge-delta-clean`",
     ),
     SHIP_ISSUE_HUMAN_GATE: (
         "git push -u origin <branch>",

@@ -6,19 +6,6 @@ SKILL.md — never inline a review.
 
 For configured code review, the correctness axis reaches Codex only through `codex-collaboration`'s `diff-review`, which alone owns the review binding shape, its invocation and its validation; a binding shape error it reports stops this review with no Codex call, no retry and no native fallback. `blocked` stops. On the `available` route, a capacity rejection has no retry and no native fallback. A Codex call made under `unsupported` is a routing error, never a capacity rejection. Authored `unsupported` takes the caller's native correctness route directly and makes no Codex call. On the `available` route, a completed non-capacity runtime/output failure uses the existing single native fallback and records why.
 
-## Merge-delta check (post-selection sync)
-
-CI-MERGE.md's `## Post-selection sync` runs this for each later sync merge;
-Phase 5 never does. The reviewable delta is that sync-merge commit's combined
-diff (`git show --cc <merge-commit>` — conflict resolutions and scope-creep
-sweeps). Dispatch SKILL.md's merge-delta reviewer over only that delta
-(SKILL.md's Phase-0 reviewer-dispatch probe has already confirmed this context
-can launch it), with Phase 1's
-scope-creep categories (retirement /
-addition, see SYNC.md) as its checklist plus every review hint path passed in
-the retained snapshot. Findings come back Blocking / Should-fix /
-Discussion, ≤400 words, file:line anchors.
-
 ## Full two-axis review — templates
 
 Same machinery and rubrics as sdd's final review, over the range SKILL.md's
@@ -56,7 +43,7 @@ that sdd's final review already graded delivered-vs-promised for the branch at
 R. Second, its job: judge whether each delta change — a fix commit resolving a
 finding, a sync resolution, a learning doc — keeps the branch consistent with
 the issue, spec, plan and standards without breaking a promise R already kept,
-with Phase 1's scope-creep categories (retirement / addition, see SYNC.md) and
+with Phase 1's scope-creep categories (retirement / addition) and
 every review hint path passed in the retained snapshot as its checklist. Third,
 a stale-prose audit limited to files the delta touches. It never grades the
 whole branch's delivery again.
