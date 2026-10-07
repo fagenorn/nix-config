@@ -319,7 +319,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             self.assertEqual(refused.stdout, b"")
 
     def test_only_response_result_slots_accept_the_reconciliation_record(self):
-        """#191 D2-D4: the ledger-result rule widens the workflow-response slots only."""
+        """#191 D2-D4, amended by #273 D6: response slots alone accept the uncited reconciliation record."""
         self.addCleanup(lambda: [sys.modules.pop(key, None) for key in tuple(sys.modules)
                                  if key == "_artifact_budget_delivery_model"
                                  or key.startswith("_artifact_budget_delivery_model.")])
@@ -373,8 +373,13 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                     self.assertEqual((accepted.returncode, accepted.stderr), (0, b""))
             for version, value in ((2, summary(record)), (1, record)):
                 with self.subTest(record=name, ship_summary=version):
-                    refused = self.run_validate("ship-summary", value, use_stdin=True)
-                    self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+                    checked = self.run_validate("ship-summary", value, use_stdin=True)
+                    if name == "bare":
+                        # #273 D6 amends #191 D3: a held merge's owner row is
+                        # `merged` with `issue_closed` false.
+                        self.assertEqual((checked.returncode, checked.stderr), (0, b""))
+                    else:
+                        self.assertEqual((checked.returncode, checked.stdout), (2, b""))
         mutations = {
             "null PR URL": {"pr_url": None},
             "short merge SHA": {"merge_sha": "bad9416"},
@@ -394,6 +399,26 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                     refused = self.run_validate("workflow-response",
                                                 wrap({**bare, **change}), use_stdin=True)
                     self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+
+    def test_a_held_merge_row_is_an_owner_report(self):
+        """#273 D6: `merged` admits `issue_closed` false; nothing else widens."""
+        held = {"issue": 273, "state": "merged",
+                "pr_url": "https://github.com/fagenorn/nix-config/pull/300",
+                "merge_sha": "c" * 40, "issue_closed": False, "discussion_items": [],
+                "detail_state": "none", "report_path": None,
+                "notes": "held for verification: https://github.com/fagenorn/nix-config/issues/273#issuecomment-1"}
+        accepted = self.run_validate("ship-summary", held, use_stdin=True)
+        self.assertEqual((accepted.returncode, accepted.stderr), (0, b""))
+        for label, change in (("null PR URL", {"pr_url": None}),
+                              ("null merge SHA", {"merge_sha": None}),
+                              ("short merge SHA", {"merge_sha": "c" * 7}),
+                              ("unpublished detail", {"detail_state": "unpublished",
+                                                      "report_path": ".superpowers/x.json"}),
+                              ("non-boolean", {"issue_closed": 0})):
+            with self.subTest(mutation=label):
+                refused = self.run_validate("ship-summary", {**held, **change},
+                                            use_stdin=True)
+                self.assertEqual((refused.returncode, refused.stdout), (2, b""))
 
     def test_workflow_response_uses_source_and_lexical_installed_package(self):
         payload = {"interface_version": 2, "kind": "workflow_bootstrap",
