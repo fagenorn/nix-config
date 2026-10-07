@@ -5,7 +5,7 @@
 
 **Goal:** Let an `sdd` owner park its attempt cleanly as `suspended(deadline)` at a task boundary before the attempt deadline, and let any sweep or re-entry resume it.
 
-**Architecture:** `workflow-state` admits a new owner-writable, auto-resumable `blocked_on` value `deadline`, and the delivery model's closed `suspended` wire reply admits it. `sdd` states the headroom rule, and from-issue hands `sdd` its `deadline_at` and lists the value in its suspension procedure. Spec: [2026-10-07-issue-281-deadline-suspension-design.md](../specs/2026-10-07-issue-281-deadline-suspension-design.md) (decision ledger D1–D9).
+**Architecture:** `workflow-state` admits a new owner-writable, auto-resumable `blocked_on` value `deadline`, and the delivery model's closed `suspended` wire reply admits it. `sdd` states the headroom rule, and from-issue hands `sdd` its `deadline_at` and lists the value in its suspension procedure. Spec: [2026-10-07-issue-281-deadline-suspension-design.md](../specs/2026-10-07-issue-281-deadline-suspension-design.md) (decision ledger D1–D16). Task 3 syncs with `main` and fits the added text under main's instruction ceilings by cutting (D12–D16).
 
 **Tech stack:** Python 3 standard library (`unittest`), Markdown skill text, JSON instruction-load model.
 
@@ -14,6 +14,7 @@
 - No ledger schema bump, no new helper verb, no persisted task timing (D2, D4).
 - Only the `suspended` wire reply admits `deadline`; the delivery `checkpoint` response's closed `blocked_on` set is unchanged (D3).
 - No new test pins an English phrase (`docs/standards/agent-helpers.md` rule 6; D5, D9).
+- No instruction-load ceiling is raised and no `instruction-budget-raise` label is used; a ceiling may only be lowered (D12, issue AC4). D12 reverses D8, so Task 3 supersedes Task 2's Step 5.
 - orchestrate-issues and the reaper, expiry and anti-zombie accounting are untouched (D7).
 - All commits are signed and go through `launch-commit` under the implementer's `Lifecycle worker:` line.
 - Final gate commands (run once by sdd's final gate, not per task): `just build` and `just agent-workflow-tests`, each in the foreground with timeout 3600000 ms.
@@ -28,12 +29,13 @@
 
 ## Delivery estimate and boundaries
 
-Estimate: 8 changed files (2 scripts, 3 test files, 2 skills, 1 JSON model), roughly +150 test lines and +2 KB of skill prose. Aggregate growth risk is only the instruction-load ceilings (D8). One deliverable slice; Task 1 is independently shippable without Task 2.
+Estimate: 7 changed files against `main` (2 scripts, 3 test files, 2 skills; `instruction-load.json` ends equal to main's). Against `baac2897`, Tasks 1–2 overran main's ceilings by 270 B (from-issue-controller), 2207 B (both owner profiles) and 2152 B (corpus); a scratch prototype of the D13 cuts fit with 34/238/293 B headroom. These are estimates: the executor re-measures after the Task 3 merge, and ship syncs and re-measures again right before the PR, because #279 is in flight (D15). One deliverable slice; Task 1 is independently shippable.
 
 ## Task index
 
 Task 1 — Admit `deadline` in the ledger and the wire reply — home/common/agent-skills/scripts/workflow-state.py, home/common/agent-skills/scripts/delivery_model/_wire.py, home/common/agent-skills/tests/test_workflow_state.py, home/common/agent-skills/tests/test_delivery_model.py — full — [task-1.md](2026-10-07-issue-281-deadline-suspension.tasks/task-1.md)
 Task 2 — State the `sdd` headroom rule and wire from-issue — home/common/agent-skills/skills/sdd/SKILL.md, home/common/agent-skills/skills/from-issue/SKILL.md, home/common/agent-skills/tests/test_workflow_skill_contracts.py, home/common/agent-skills/instruction-load.json — full — [task-2.md](2026-10-07-issue-281-deadline-suspension.tasks/task-2.md)
+Task 3 — Sync with `main` and fit under the instruction ceilings with no raise — home/common/agent-skills/instruction-load.json, home/common/agent-skills/skills/sdd/SKILL.md, home/common/agent-skills/skills/from-issue/SKILL.md — full — [task-3.md](2026-10-07-issue-281-deadline-suspension.tasks/task-3.md)
 
 ## Acceptance map
 
@@ -42,10 +44,11 @@ Task 2 — State the `sdd` headroom rule and wire from-issue — home/common/age
 | AC1 | code | Task 1 | `test_workflow_state.py::WorkflowStateLifecycleTest::test_deadline_suspension_parks_the_attempt_without_spending_it`, `::test_direct_reentry_resumes_a_deadline_suspension_in_place`, `::OwnerExitFenceTest::test_a_deadline_suspend_refuses_until_the_worker_is_released` |
 | AC2 | code | Task 2 | `test_workflow_skill_contracts.py::WorkflowSkillContractsTest::test_sdd_states_the_deadline_suspension_order` under `just agent-workflow-tests` |
 | AC3 | code | Task 1 | `test_workflow_state.py::WorkflowStateLifecycleTest::test_a_label_sweep_resumes_a_deadline_suspension` |
+| AC4 | code | Task 3 | `just agent-instruction-budget` (no `--raise-label`) reports `check: pass`; on the PR, the required Instruction Budget check passes without the `instruction-budget-raise` label |
 
 ## Decisions
 
-Tasks cite the spec's ledger: D2, D3 (Task 1); D1, D4, D5, D6, D8, D9 (Task 2). Planning added D8 (instruction-ceiling raise and its human label) and D9 (contract-test anchoring); Phase-5 review added D10 (Task 2).
+Tasks cite the spec's ledger: D2, D3 (Task 1); D1, D4, D5, D6, D8, D9 (Task 2); D9–D16 (Task 3). Planning added D8 (instruction-ceiling raise and its human label) and D9 (contract-test anchoring); Phase-5 review added D10 (Task 2); final review added D11; the no-raise decision added D12–D16, and D12 reverses D8.
 
 ## Standards review provenance
 
