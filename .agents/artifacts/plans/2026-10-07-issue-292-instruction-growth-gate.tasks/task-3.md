@@ -1,6 +1,6 @@
 # Task 3: Conditional, corpus and description ceilings
 
-Per D3, D4, D16.
+Per D3, D4, D16, D20.
 
 **Files:**
 - Modify: `python/agent_tools/instruction_load.py`
@@ -13,13 +13,16 @@ Per D3, D4, D16.
   - `TOP_LEVEL_KEYS = ("frame", "profiles", "excluded_sites", "corpus_ceiling_bytes", "description_ceiling_bytes")`.
   - `PROFILE_KEYS` with `"conditional_ceiling_bytes"` inserted right after `"ceiling_bytes"`.
   - `measure_corpus(snapshot: Snapshot) -> dict[str, int]`, returning exactly the keys `corpus` and `descriptions`.
+  - `CEILING_KINDS = {"ceiling_bytes": "hot", "conditional_ceiling_bytes": "conditional"}`.
+  - `ceiling_locations(model: dict) -> list[tuple[str, ...]]`: the one definition of where ceilings live (per D16, D20). `ceilings` and Task 4's `lowered_to` both walk it.
   - `@dataclass(frozen=True) class Ceiling: label: str; location: tuple[str, ...]; ceiling: int; measured: int`.
   - `ceilings(model: dict, measurement: dict, corpus: dict[str, int]) -> list[Ceiling]`.
   - `breached(found: list[Ceiling]) -> list[Ceiling]`, the ceilings with `measured > ceiling`.
 
 **Invariants:**
 - `measure`, `over_ceiling`, `compare`, both renderers and the `report` CLI are unchanged (per D16). `over_ceiling` stays hot-only.
-- `ceilings` order: for each profile in model order, for each host in `profile["hosts"]` order, the hot entry and then the conditional one; then `corpus`; then `descriptions`.
+- `ceiling_locations` tolerates an invalid model. It skips a non-list `profiles`, a profile that is not a dict or has no string id, and a `hosts` that is not a list of strings.
+- `ceilings` yields one `Ceiling` per `ceiling_locations(model)` entry, in that order: for each profile in model order, for each host in `profile["hosts"]` order, the hot entry and then the conditional one; then `corpus`; then `descriptions`.
 - Labels: `f"profile {id} on {host}: hot"`, `f"profile {id} on {host}: conditional"`, `"corpus"`, `"descriptions"`. Locations: `("profiles", id, "ceiling_bytes", host)`, `("profiles", id, "conditional_ceiling_bytes", host)`, `("corpus_ceiling_bytes",)`, `("description_ceiling_bytes",)`.
 - The corpus is the bytes of each skill directory's `SKILL.md`, references and payloads. To that it adds every `.md` file directly in `home/common/claude-code/agents/` and the frame `home/common/agent-guidance/AGENTS.md` (per D3).
 - `descriptions` is the sum of `len(value.encode("utf-8"))` of each `SKILL.md`'s frontmatter `description`. A `SKILL.md` whose frontmatter does not parse, or that has no description, adds 0.
@@ -65,6 +68,10 @@ class CeilingTest(unittest.TestCase):
 
     def test_every_ceiling_is_enumerated_with_its_location(self):
         rows = [(c.label, c.location, c.ceiling, c.measured) for c in self.all_ceilings()]
+        self.assertEqual(instruction_load.ceiling_locations(fixture_model()), [r[1] for r in rows])
+        self.assertEqual(instruction_load.ceiling_locations(
+            {"profiles": [3, {"id": 1}, {"id": "x", "hosts": "claude"}]}),
+            [("corpus_ceiling_bytes",), ("description_ceiling_bytes",)])
         hot, conditional = "ceiling_bytes", "conditional_ceiling_bytes"
         self.assertEqual(rows, [
             ("profile demo on claude: hot", ("profiles", "demo", hot, "claude"), 51, 51),
@@ -108,6 +115,7 @@ class CeilingTest(unittest.TestCase):
             "model: missing key 'corpus_ceiling_bytes'",
             "model: description_ceiling_bytes must be a non-negative integer",
             "profile demo: missing key 'conditional_ceiling_bytes'",
+            "profile demo: conditional_ceiling_bytes must map hosts to byte counts",
             "profile demo-reviewer: conditional_ceiling_bytes claude must be a non-negative integer",
             "profile demo-reviewer: conditional_ceiling_bytes codex must be a non-negative integer",
         ])
@@ -141,9 +149,9 @@ In `instruction_load.py`:
 
 1. Extend `TOP_LEVEL_KEYS` and `PROFILE_KEYS` as stated under Produces.
 2. In `_top_level_violations`, after the `profiles must be a list` check, check each of `corpus_ceiling_bytes` and `description_ceiling_bytes` that is present. When it is a `bool`, a non-`int` or negative, append `f"model: {key} must be a non-negative integer"`.
-3. In `_profile_violations`, extract the existing `ceiling_bytes` block into `_ceiling_map_violations(key, value, hosts, hosts_valid) -> list[str]`, keeping the same messages with `key` substituted. Call it for `ceiling_bytes` and then for `conditional_ceiling_bytes`. Existing messages stay byte-identical.
+3. In `_profile_violations`, extract the existing `ceiling_bytes` block into `_ceiling_map_violations(key, value, hosts, hosts_valid) -> list[str]`, keeping the same messages with `key` substituted. Call it for `ceiling_bytes` and then for `conditional_ceiling_bytes`. Existing messages stay byte-identical. An absent map therefore yields both the `missing key` line (first, from the key list) and the `must map hosts to byte counts` line, as the test expects.
 4. `measure_corpus(snapshot)` computes the corpus and description sums as the Invariants state. It reads skill directories with `skill_lint.skill_dirs(snapshot)`, and a `ValueError` from it propagates. The agent definitions are the paths in `snapshot.list_files(AGENTS_DIR)` that end in `.md` and sit directly in that directory. Any missing frame counts 0 bytes.
-5. `Ceiling` and `ceilings(model, measurement, corpus)` follow the order, labels and locations stated under Invariants. `measured` is `measurement["profiles"][id][host][kind]["bytes"]`, or `corpus["corpus"]`/`corpus["descriptions"]`.
+5. `ceiling_locations(model)` follows the Invariants, with the kinds in `CEILING_KINDS` order. `ceilings(model, measurement, corpus)` maps each location to a `Ceiling` and enumerates no ceiling of its own. A profile location's label uses `CEILING_KINDS[kind]`, and its `measured` is `measurement["profiles"][id][host][CEILING_KINDS[kind]]["bytes"]`. A top-level location's label is `corpus` or `descriptions`, and its `measured` is `corpus["corpus"]` or `corpus["descriptions"]`.
 6. `breached(found)` returns `[c for c in found if c.measured > c.ceiling]`.
 
 Then add the new ceilings to the live model at their measured values, preserving key order:

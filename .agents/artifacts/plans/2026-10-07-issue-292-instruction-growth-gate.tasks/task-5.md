@@ -1,6 +1,6 @@
 # Task 5: The Instruction Budget workflow and the protection payload
 
-Per D2, D10, D14 (and program D5). Measures issue #292 AC4.
+Per D2, D10, D14, D20 (and program D5). Measures issue #292 AC4.
 
 **Files:**
 - Create: `.github/workflows/instruction-budget.yaml`
@@ -28,7 +28,8 @@ Rewrite `tests/test_branch_protection.py` as follows. Keep every existing test e
    - Give each helper that reads a workflow a trailing parameter `path=WORKFLOW`, threaded down to `workflow_lines(path)`: `workflow_lines`, `_top_level_block`, `job_blocks`, `workflow_permissions`, `job_body`, `job_names`, `trigger_block`, `trigger_branches`, `job_if_expression` and `step_blocks`.
    - Existing callers that pass no path keep reading `ci.yaml`. The two `mock.patch(f"{__name__}.workflow_lines", ...)` tests keep working, because the mock accepts any argument.
    - Update the module docstring and the `WORKFLOW` comment so they say that `ci.yaml` and `instruction-budget.yaml` share one indentation convention.
-2. **Add the cross-workflow map**, after `job_names`:
+2. **Refuse a duplicate name in one workflow.** In `job_names(path=WORKFLOW)`, before `names[name] = key`, raise `AssertionError(f"job name {name!r} is defined twice in {path.name}")` when `name` is already in `names`. Without it the map silently keeps the last job, so `required_jobs()` below could never see the duplicate (per D20).
+3. **Add the cross-workflow map**, after `job_names`:
 
 ```python
 def all_workflows():
@@ -51,7 +52,7 @@ def required_jobs():
     return found
 ```
 
-3. **Replace the expected payload**:
+4. **Replace the expected payload**:
 
 ```python
 EXPECTED_PROTECTION_PAYLOAD = {
@@ -68,12 +69,12 @@ EXPECTED_PROTECTION_PAYLOAD = {
 
    In `test_payload_carries_every_key_the_api_requires`, change `self.assertIs(False, data["required_status_checks"]["strict"])` to `self.assertIs(True, ...)`. Add the comment `# strict: two PRs that each pass on their own base cannot merge into a breach (program D5).`
 
-4. **Required-context tests over every workflow.** Rewrite these four tests to resolve each context through `required_jobs()` and read its workflow through the returned path: `test_required_jobs_are_not_gated_off_pull_requests`, `test_required_jobs_cannot_report_green_without_evaluating`, `RequiredContexts.test_every_required_context_is_a_job_name` and `RequiredContexts.test_required_jobs_are_plain_jobs`.
+5. **Required-context tests over every workflow.** Rewrite these four tests to resolve each context through `required_jobs()` and read its workflow through the returned path: `test_required_jobs_are_not_gated_off_pull_requests`, `test_required_jobs_cannot_report_green_without_evaluating`, `RequiredContexts.test_every_required_context_is_a_job_name` and `RequiredContexts.test_required_jobs_are_plain_jobs`.
    - Use `job_if_expression(key, path)`, `job_blocks(path)[key]` and so on.
    - Keep the assertion messages, naming the job's own workflow file.
    - Keep the allowed `if:` values `(None, "github.event_name != 'schedule'")`.
 
-5. **Replace `test_required_job_still_runs_the_evaluation_it_exists_for`** with:
+6. **Replace `test_required_job_still_runs_the_evaluation_it_exists_for`** with:
 
 ```python
     def test_each_required_job_still_runs_the_evaluation_it_exists_for(self):
@@ -90,13 +91,41 @@ EXPECTED_PROTECTION_PAYLOAD = {
         self.assertEqual(BUDGET_WORKFLOW, budget_path)
         budget_body = job_body(budget_key, budget_path)
         self.assertRegex(budget_body, BUDGET_COMMAND_RE)
+        self.assertTrue(forwards_budget_args(budget_body), budget_body)
         self.assertIn("--base HEAD^1", budget_body)
         self.assertIn("--raise-label", budget_body)
 ```
 
-   with the module constant `BUDGET_COMMAND_RE = re.compile(r"PYTHONPATH=python python3 -m agent_tools\.instruction_load check\b")`.
+   with these module-level definitions:
 
-6. **Add the new class**, before `class RequiredContexts`:
+```python
+BUDGET_COMMAND_RE = re.compile(r"PYTHONPATH=python python3 -m agent_tools\.instruction_load check\b")
+BUDGET_INVOCATION = 'PYTHONPATH=python python3 -m agent_tools.instruction_load check "${args[@]}"'
+
+
+def forwards_budget_args(body):
+    """Whether the one budget call is the invocation that forwards `args`.
+
+    Without the forwarding, `--base HEAD^1` and `--raise-label` are still built and
+    still in the body, yet the check runs with neither.
+    """
+    calls = [line.strip() for line in body.splitlines() if BUDGET_COMMAND_RE.search(line)]
+    return calls == [BUDGET_INVOCATION]
+```
+
+   In the class that holds that test, add the mutation test, in the style of `test_advisory_contract_rejects_step_and_summary_mutations`. The second mutation keeps both flags in the body, which leaves the separate `assertIn` checks green:
+
+```python
+    def test_the_budget_forwarding_rejects_mutations(self):
+        body = job_body("instruction-budget", BUDGET_WORKFLOW)
+        self.assertTrue(forwards_budget_args(body))
+        self.assertFalse(forwards_budget_args(body + "\n" + BUDGET_INVOCATION))
+        for mutated in ("check", "check --base HEAD^1 --raise-label", 'check "${args[*]}"'):
+            with self.subTest(invocation=mutated):
+                self.assertFalse(forwards_budget_args(body.replace('check "${args[@]}"', mutated)))
+```
+
+7. **Add the new class**, before `class RequiredContexts`:
 
 ```python
 class BudgetWorkflowShape(unittest.TestCase):
@@ -129,6 +158,10 @@ class BudgetWorkflowShape(unittest.TestCase):
         for forbidden in ("secrets.", "GITHUB_TOKEN", "GH_TOKEN", "gh api", "gh pr"):
             self.assertNotIn(forbidden, body)
 ```
+
+   Add to `RequiredContexts` the duplicate-name fixtures. Each patches `workflow_lines` with a fake that returns lines by path, in the style of the existing `mock.patch` tests:
+   - `test_job_names_refuses_a_name_twice_in_one_workflow`: one workflow whose `jobs:` holds `  a:`/`    name: Twin` and `  b:`/`    name: Twin`. `job_names(path)` raises `AssertionError` matching `defined twice in`.
+   - `test_required_jobs_refuses_a_name_in_two_workflows`: also patch `all_workflows` to return two paths, each holding one job named `Twin`. `required_jobs()` raises `AssertionError` matching `defined in a.yaml and b.yaml`.
 
    `test_job_names_are_extractable` additionally asserts `self.assertIn("Instruction Budget", job_names(BUDGET_WORKFLOW))`.
 

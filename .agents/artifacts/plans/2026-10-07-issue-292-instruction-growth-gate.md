@@ -5,7 +5,7 @@
 
 **Goal:** Make agent-instruction growth a human decision: a required `Instruction Budget` check that lints the authored skill trees, holds every instruction ceiling tight, and demands the `instruction-budget-raise` label for any raise or gate edit (#292, slice S1 of #291).
 
-**Architecture:** A new `agent_tools.skill_lint` module owns the skill-tree knowledge (snapshot seam, matcher, frontmatter, classification) and the L1–L5 rules with a shrink-only debt file. `agent_tools.instruction_load` imports it, gains conditional/corpus/description ceilings and the `check`/`tighten` subcommands. A new workflow runs `check` against `HEAD^1` on pull requests. The protection payload then requires it beside `Nix Eval` with `strict: true`. Spec: `.agents/artifacts/specs/2026-10-07-issue-292-instruction-growth-gate-design.md` (ledger D1–D19). Program spec: `.agents/artifacts/specs/2026-10-07-issue-291-skill-best-practices-design.md` (read-only; its rows are "program Dn").
+**Architecture:** A new `agent_tools.skill_lint` module owns the skill-tree knowledge (snapshot seam, matcher, frontmatter, classification) and the L1–L5 rules with a shrink-only debt file. `agent_tools.instruction_load` imports it, gains conditional/corpus/description ceilings and the `check`/`tighten` subcommands. A new workflow runs `check` against `HEAD^1` on pull requests. The protection payload then requires it beside `Nix Eval` with `strict: true`. Spec: `.agents/artifacts/specs/2026-10-07-issue-292-instruction-growth-gate-design.md` (ledger D1–D20). Program spec: `.agents/artifacts/specs/2026-10-07-issue-291-skill-best-practices-design.md` (read-only; its rows are "program Dn").
 
 **Tech stack:** Python 3 standard library only (`unittest`, `argparse`, `dataclasses`, `json`, `subprocess`), GitHub Actions YAML, `just`, Nix (command table only).
 
@@ -54,4 +54,8 @@ Task 6 — Test policy, CLAUDE.md mentions, final tighten and budget check — d
 
 ## Decisions
 
-Tasks rest on spec ledger rows: Task 1 per D3, D11, D12, D15, D17; Task 2 per D5, D6, D11, D12, D17; Task 3 per D3, D4, D16; Task 4 per D1, D7, D8, D9, D16, D18, D19; Task 5 per D2, D10, D14; Task 6 per D1, D2, D7, D13. Rows D15–D19 were appended to the spec's ledger during planning.
+Tasks rest on spec ledger rows: Task 1 per D3, D11, D12, D15, D17; Task 2 per D5, D6, D11, D12, D17; Task 3 per D3, D4, D16, D20; Task 4 per D1, D7, D8, D9, D16, D18, D19, D20; Task 5 per D2, D10, D14, D20; Task 6 per D1, D2, D7, D13. Rows D15–D19 were appended to the spec's ledger during planning, and D20 during plan review.
+
+## Standards review provenance
+
+Reviewer: Codex (gpt-6-astra, xhigh effort), isolated read-only mode, no focus, against base `f0e47f5c8963ff71a3e4728940dbc56404ba3733`. No fallback was used. Findings: 4 accepted (R292-01 to R292-04, all Should fix), 0 rejected, 0 deferred, 0 blocking. R292-01 fixes Task 3's expected `validate` lines. R292-02 pins Task 5's argument forwarding with a mutation test. R292-03 makes `job_names` refuse a duplicate name. R292-04 adds `ceiling_locations`, shared by `ceilings` and `lowered_to` (D20).

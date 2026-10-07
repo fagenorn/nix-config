@@ -1,6 +1,6 @@
 # Task 4: `check` and `tighten`, and `just agent-instruction-budget`
 
-Per D1, D7, D8, D9, D16, D18, D19. Measures issue #292 AC2 and AC3.
+Per D1, D7, D8, D9, D16, D18, D19, D20. Measures issue #292 AC2 and AC3.
 
 **Files:**
 - Modify: `python/agent_tools/instruction_load.py`
@@ -10,7 +10,7 @@ Per D1, D7, D8, D9, D16, D18, D19. Measures issue #292 AC2 and AC3.
 **Interfaces:**
 - Consumes:
   - From Task 1/2 (`agent_tools.skill_lint`): `Snapshot`, `working_tree`, `tree_lister`, `lint`, `load_debt`, `DEBT_PATH`.
-  - From Task 3 (`agent_tools.instruction_load`): `measure_corpus`, `Ceiling`, `ceilings`, `breached`, the extended `validate`.
+  - From Task 3 (`agent_tools.instruction_load`): `measure_corpus`, `ceiling_locations`, `Ceiling`, `ceilings`, `breached`, the extended `validate`.
   - From the test module: `dict_snapshot(files)`, `git_env()`.
 - Produces, in `agent_tools.instruction_load`:
   - `WORKFLOW_PATH = ".github/workflows/instruction-budget.yaml"` and `RAISE_LABEL = "instruction-budget-raise"`.
@@ -305,52 +305,46 @@ Expected: ERRORS. `run_check` and `tightened` do not exist; the CLI rejects `che
 
 `revision_snapshot(root, revision)` is the body of today's `revision_reader`. It also returns a lister over the same `present` set: `lambda prefix: sorted(p for p in present if p.startswith(prefix + "/"))`. Then `revision_reader` delegates to it.
 
-`lowered_to(model, base)` embodies D8. Implement it exactly so:
+`lowered_to(model, base)` embodies D8 and walks Task 3's `ceiling_locations`, so it can never disagree with `ceilings` about which ceilings exist (D16, D20). Implement it exactly so:
 
 ```python
 def _is_count(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def _slot(model: dict, location: tuple[str, ...]) -> Optional[dict]:
+    """The dict holding `location`'s last key, or None when it does not resolve.
+
+    A profile is matched by id, and only when `model` holds exactly one profile with it.
+    """
+    if len(location) == 1:
+        return model
+    _, profile_id, kind, _ = location
+    profiles = model.get("profiles") if isinstance(model.get("profiles"), list) else []
+    matches = [p for p in profiles if isinstance(p, dict) and p.get("id") == profile_id]
+    if len(matches) != 1 or not isinstance(matches[0].get(kind), dict):
+        return None
+    return matches[0][kind]
+
+
 def lowered_to(model: dict, base: dict) -> dict:
     """`model` with each ceiling that is at or below its base value set to that value.
 
     Raise control compares the result with `base`: anything still unequal is a change
-    other than lowering a ceiling. A profile is matched by id, and only when the base
-    holds exactly one profile with that id.
+    other than lowering a ceiling. Non-dict and non-list values are skipped, never lowered.
     """
     result = copy.deepcopy(model)
-
-    def lower(target: dict, source: dict, key: str) -> None:
-        if _is_count(target.get(key)) and _is_count(source.get(key)) \
-                and target[key] <= source[key]:
+    for location in ceiling_locations(result):
+        target, source, key = _slot(result, location), _slot(base, location), location[-1]
+        if target is not None and source is not None and _is_count(target.get(key)) \
+                and _is_count(source.get(key)) and target[key] <= source[key]:
             target[key] = source[key]
-
-    for key in ("corpus_ceiling_bytes", "description_ceiling_bytes"):
-        lower(result, base, key)
-    base_profiles = base.get("profiles") if isinstance(base.get("profiles"), list) else []
-    by_id: dict[str, list[dict]] = {}
-    for profile in base_profiles:
-        if isinstance(profile, dict) and isinstance(profile.get("id"), str):
-            by_id.setdefault(profile["id"], []).append(profile)
-    profiles = result.get("profiles") if isinstance(result.get("profiles"), list) else []
-    for profile in profiles:
-        if not (isinstance(profile, dict) and isinstance(profile.get("id"), str)):
-            continue
-        matches = by_id.get(profile["id"], [])
-        if len(matches) != 1:
-            continue
-        for kind in ("ceiling_bytes", "conditional_ceiling_bytes"):
-            head_map, base_map = profile.get(kind), matches[0].get(kind)
-            if isinstance(head_map, dict) and isinstance(base_map, dict):
-                for host in list(head_map):
-                    lower(head_map, base_map, host)
     return result
 ```
 
 `tightened(model, found)`:
 - Deep-copy `model`.
-- For each `c` in `found` with `c.ceiling > c.measured`, set the value at `c.location` to `c.measured` and append `f"lowered {c.label}: {c.ceiling} -> {c.measured}"`. A `("profiles", id, kind, host)` location finds the profile by id. A one-element location is a top-level key.
+- For each `c` in `found` with `c.ceiling > c.measured`, set `_slot(copy, c.location)[c.location[-1]]` to `c.measured` and append `f"lowered {c.label}: {c.ceiling} -> {c.measured}"`.
 - Return `(copy, lines)`.
 
 `run_check(head, base, raise_label)`:
