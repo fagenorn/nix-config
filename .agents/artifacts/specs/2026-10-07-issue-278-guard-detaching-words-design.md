@@ -35,18 +35,30 @@ defense in depth). `launch-scope` containment is the inner check.
 ## Solution
 
 The guard gets one policy-free check over the hook command. It reuses the
-existing segment splitter, tokeniser and command-position flags. It reports a
+existing segment splitter and tokeniser, and walks the tokens with a scanner of
+its own (`detaching_command_flags`, per D7) rather than the verb pass's
+command-position flags. That scanner opens a command position where the verb
+pass does, and also steps over redirections and wrapper option arguments: a
+redirection, bare (`> log`) or attached to a word (`nohup>/dev/null`), and its
+target; a wrapper option's argument (`sudo -u anis`, `env -iu FOO`, from the
+`WRAPPER_SHORT_OPTIONS_WITH_ARGUMENT`/`WRAPPER_OPTIONS_WITH_ARGUMENT` tables).
+A pending option argument ends at any separator (`env -u || nohup x`). Only a
+redirection cut at the `&` of `2>&1` carries into the next segment. It reports a
 detaching word in any of these places:
 
 1. a token at a command position whose value, or whose basename after the last
-   `/`, is `nohup`, `setsid` or `disown`;
+   `/`, is `nohup`, `setsid` or `disown`, once any attached redirection is cut
+   off;
 2. a segment with an evaluator (`eval`, `sh`, `bash`, `zsh`, `dash`, `ksh`) at a
    command position, when one of the words appears anywhere in its raw text;
 3. an unparseable command or an untokenisable segment whose raw text contains
    one of the words;
 4. a token that contains a command substitution (`$(` or a backtick) together
    with one of the words. Such a token is a double-quoted `"$(nohup x &)"`,
-   which the tokeniser keeps as one word but the shell executes.
+   which the tokeniser keeps as one word but the shell executes;
+5. the argument of `env -S`/`--split-string` (any unambiguous prefix, attached
+   or not), which env splits into a command line and runs. It is command text,
+   so it is matched as raw text (D7).
 
 `nohup` is removed from `COMMAND_WRAPPERS`, so it becomes a command of its own.
 The other wrappers, `command`, `builtin`, `exec`, `env` and `sudo`, still keep
@@ -108,6 +120,15 @@ invokes, following its existing adversarial-table pattern.
   tokenises, so a detaching word there goes unseen. The guarded-verb pass has
   the same gap and the two share it; only an evaluator's argv (`sh -c '…'`) is
   scanned.
+- Tokeniser residuals shared with the verb pass: ANSI-C quoting (`$'nohup' x`),
+  brace expansion (`{nohup,x}`), variable indirection (`w=nohup; $w x`) and
+  case variants such as `NOHUP x`, which resolves to `/usr/bin/nohup` on
+  case-insensitive APFS. The tokeniser compares literal token values, so none
+  of them is seen.
+- A wrapper option that takes an argument but is missing from the wrapper-option
+  tables (for example `sudo -X val nohup x`, were `-X` to take one). The scanner
+  treats an unlisted option as a flag, takes `val` as the command word, and
+  `nohup` then sits in argument position.
 
 ## Decision ledger
 
@@ -119,3 +140,4 @@ invokes, following its existing adversarial-table pattern.
 | D4 | A detaching word in argument position always passes, including under argv runners (`xargs nohup`, `timeout 5 nohup`, `nice setsid`, `find -exec nohup`). This is an accepted residual | Covers unquoted-heredoc substitutions too. AC2 requires `grep nohup log` and heredoc bodies to pass, and a single-word match cannot tell a runner's argv from a mention; parent D11 already accepts other detachers; `launch-scope` (D4 of the parent) is the inner check | Refusing every token-level occurrence would break AC2. Teaching the guard runner grammars (`timeout`'s duration, `find -exec`) adds parser surface and has no observed incident |
 | D5 | `CLAUDE.md`'s guard paragraph gets one sentence on the global detaching refusal and its routes. No other doc changes | `CLAUDE.md` is `bindings.paths.architecture` and already lists what the hook adjudicates | Leaving it out would make that paragraph's "adjudicates" list incomplete |
 | D6 | In the detaching pass an evaluator is also recognised by basename (`/bin/sh -c 'nohup x &'` is evaluator source), and every substring match reports the detaching word that occurs earliest in the matched text. The guarded-verb pass keeps its exact-name evaluator check | D3 already matches the words by basename, and a path-spelled evaluator is the same bypass one level up; the earliest-offset rule makes the named word deterministic for the D2 prefix | Exact-name evaluators only: `/bin/sh -c 'nohup x'` would pass. Widening the verb pass too: a behaviour change to the four guarded verbs that this spec rules out |
+| D7 | The detaching pass walks tokens with its own scanner, `detaching_command_flags`, and not the verb pass's `command_position_flags`. It steps over redirections, bare or attached to a word (`nohup>/dev/null` is the word `nohup`), and over a wrapper option's argument (clustered `-iu FOO` and attached `-uanis`/`--user=anis` included). A pending option argument is dropped at every separator; only a redirection whose segment ends in an unescaped `>`/`<` (the `2>&1` cut) carries its target into the next segment. The argument of `env -S`/`--split-string` is command text and is matched as raw text, like evaluator source under D3 | The verb pass has a fail-closed backstop, since a guarded verb outside a command position is refused, but the detaching pass has none: a mention in argument position must pass (D4), so every word the scanner wrongly takes as an argument or a redirection target becomes a bypass (`nohup>/dev/null sleep 60 &`, `env -u \|\| nohup x`, `env -S 'nohup x'`) | Reusing `command_position_flags`: `>log nohup x` and `sudo -u anis nohup x` would pass. Changing `command_position_flags` itself: a behaviour change to the four guarded verbs that this spec rules out. Re-parsing the `env -S` payload as shell: env's own escapes (`\_` is a space) differ from the shell's, so a parse could miss a word a raw match catches |

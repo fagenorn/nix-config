@@ -9,8 +9,9 @@ globally and before any policy, naming `run_in_background: true` and
 reaping design).
 
 **Architecture:** One new policy-free pass, `detaching_word(command)`, in
-`home/common/claude-code/lifecycle_guard.py` reuses `split_segments`,
-`tokenize_segment` and `command_position_flags`, and `main` runs it right after
+`home/common/claude-code/lifecycle_guard.py` reuses `split_segments` and
+`tokenize_segment` and walks their tokens with its own `detaching_command_flags`
+scanner (per D7; the verb pass keeps `command_position_flags`), and `main` runs it right after
 hook-input validation (per D1). `nohup` leaves `COMMAND_WRAPPERS` (per D1).
 Spec: `.agents/artifacts/specs/2026-10-07-issue-278-guard-detaching-words-design.md`.
 

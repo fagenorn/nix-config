@@ -8,7 +8,9 @@
 **Interfaces:**
 - Consumes (existing, unchanged): `split_segments(command) -> list[str] | None`,
   `tokenize_segment(segment) -> list[tuple[str, bool]] | None` (value, is_operator),
-  `command_position_flags(tokens) -> list[bool]`, `SHELL_EVALUATORS`, `block(reason) -> 2`.
+  `COMMAND_KEYWORDS`, `COMMAND_WRAPPERS`, `SHELL_EVALUATORS`, `block(reason) -> 2`.
+  The detaching pass walks tokens with its own `detaching_command_flags` scanner
+  (spec D7); `command_position_flags` stays the verb pass's alone.
 - Produces: `DETACHING_WORDS = ("nohup", "setsid", "disown")`;
   `detaching_word(command: str) -> str | None` — the detaching word the guard refuses, or `None`.
 

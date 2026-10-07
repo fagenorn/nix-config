@@ -58,7 +58,9 @@ COMMAND_KEYWORDS = frozenset({
 })
 COMMAND_WRAPPERS = frozenset({"command", "builtin", "exec", "env", "sudo"})
 # Programs whose argument is shell source. Arbitrary shell cannot be parsed
-# here, so a guarded verb anywhere in such a segment is refused outright.
+# here, so a guarded verb anywhere in such a segment is refused outright, and
+# so is a detaching word (matched there as raw text, including when the
+# evaluator is named by path, as in `/bin/sh -c`).
 SHELL_EVALUATORS = frozenset({"eval", "sh", "bash", "zsh", "dash", "ksh"})
 # Words that detach a process from the task that started it (#278). Refused
 # in every repository, before the policy loads.
@@ -414,101 +416,177 @@ def guarded_operations(command):
     return found
 
 
-# Wrapper options that consume the next word, so that word is not the wrapped
-# command. Used only by the detaching pass. An option not listed here is
-# treated as a flag, so the word after it is taken as the command word.
+# Wrapper options that consume an argument, so the word holding it is not the
+# wrapped command. Used only by the detaching pass. Short options may be
+# clustered (`env -iu FOO`), and an argument may be attached (`-uanis`,
+# `--user=anis`). An option not listed here is treated as a flag, so the word
+# after it is taken as the command word.
+WRAPPER_SHORT_OPTIONS_WITH_ARGUMENT = {
+    "sudo": frozenset("ugCDhprtTU"),
+    "exec": frozenset("a"),
+    "env": frozenset("uCS"),
+}
 WRAPPER_OPTIONS_WITH_ARGUMENT = {
     "sudo": frozenset({
-        "-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-T", "-U",
         "--user", "--group", "--close-from", "--chdir", "--host", "--prompt",
         "--role", "--type", "--command-timeout", "--other-user",
     }),
-    "exec": frozenset({"-a"}),
-    "env": frozenset({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}),
+    "exec": frozenset(),
+    "env": frozenset({"--unset", "--chdir", "--split-string"}),
 }
+# `env -S`/`--split-string` hands its argument to env, which splits it into a
+# command line and runs it. That argument is command text, not a name.
+ENV_SPLIT_STRING = "--split-string"
 # A redirection operator standing alone takes the next word as its target.
 BARE_REDIRECTION = re.compile(r"^(\d*|&)(>>?|<<?<?|<>|>&|<&)$")
 ATTACHED_REDIRECTION = re.compile(r"^(\d+|&)?(>>?|<<?<?|<>|>&|<&)")
+# A segment cut at the `&` of `2>&1` ends in an unescaped `>` or `<`. Only then
+# does the next segment continue the same simple command.
+DANGLING_REDIRECTION = re.compile(r"(?:^|[^\\])(?:\\\\)*[<>]$")
 
 
-def detaching_command_flags(tokens, state=(True, None, False)):
+def split_redirection(value):
+    """(word, redirection): `nohup>/dev/null` -> ("nohup", ">/dev/null").
+
+    The shell ends a word at an unquoted `<` or `>`. Token values are already
+    unquoted, so a quoted `"a>b"` splits too; that only ever over-refuses.
+    """
+    for index, character in enumerate(value):
+        if character in "<>":
+            return value[:index], value[index:]
+    return value, ""
+
+
+def wrapper_option(wrapper, option):
+    """(kind, attached) for a wrapper option word.
+
+    `kind` is None for a flag, "argument" for an option that consumes an
+    argument and "payload" for env's split-string, whose argument is command
+    text. `attached` is the argument carried in the same word, or None when the
+    option takes the next word.
+    """
+    payload_letters = "S" if wrapper == "env" else ""
+    if option.startswith("--"):
+        name, equals, attached = option.partition("=")
+        if wrapper == "env" and len(name) >= 3 and ENV_SPLIT_STRING.startswith(name):
+            # getopt_long accepts any unambiguous prefix (`--split`); reading
+            # more as command text only ever refuses more.
+            return "payload", attached if equals else None
+        if name in WRAPPER_OPTIONS_WITH_ARGUMENT.get(wrapper, ()):
+            return "argument", attached if equals else None
+        return None, None
+    letters = WRAPPER_SHORT_OPTIONS_WITH_ARGUMENT.get(wrapper, frozenset())
+    for index in range(1, len(option)):
+        letter = option[index]
+        if letter in letters:
+            kind = "payload" if letter in payload_letters else "argument"
+            return kind, option[index + 1:] or None
+    return None, None
+
+
+def detaching_command_flags(tokens, state=(True, None, (), False)):
     """Per token: is it a word at which the shell may start a simple command?
 
-    Returns (flags, state). `state` is (open_position, wrapper, skip_next) and
-    carries over a dangling redirection: `split_segments` cuts at the `&` of
-    `2>&1`, so the next segment opens with that redirection's target.
+    Returns (flags, payloads, state). `payloads` is the command text handed to
+    `env -S`. `state` is (open_position, wrapper, pending_arguments,
+    redirection_target) and carries a dangling redirection: `split_segments`
+    cuts at the `&` of `2>&1`, so the next segment opens with its target.
 
-    Like `command_position_flags`, but it also steps over redirections and over
-    the arguments of wrapper options, so `>log nohup x` and `sudo -u anis nohup x`
-    are seen. The verb pass keeps `command_position_flags`; this pass has no
-    such fail-closed backstop, hence the extra stepping.
+    Like `command_position_flags`, but it also steps over redirections, attached
+    (`nohup>log`) or not, and over the arguments of wrapper options, so
+    `>log nohup x` and `sudo -u anis nohup x` are seen. An operator token ends
+    any pending option argument. The verb pass keeps `command_position_flags`;
+    this pass has no such fail-closed backstop, hence the extra stepping.
     """
     flags = [False] * len(tokens)
-    open_position, wrapper, skip_next = state
+    payloads = []
+    open_position, wrapper, pending, target = state
+    pending = list(pending)
     for index, (value, operator) in enumerate(tokens):
-        if skip_next:
-            skip_next = False
-            continue
         if operator:
-            open_position = True
-            wrapper = None
+            open_position, wrapper, pending, target = True, None, [], False
+            continue
+        if target:
+            target = False
             continue
         if not open_position:
             continue
         if BARE_REDIRECTION.match(value) is not None:
-            skip_next = True
+            target = True
             continue
         if ATTACHED_REDIRECTION.match(value) is not None:
             continue
-        if ASSIGNMENT_PREFIX.match(value) is not None:
+        word, redirection = split_redirection(value)
+        target = BARE_REDIRECTION.match(redirection) is not None
+        if pending:
+            if pending.pop(0) == "payload":
+                payloads.append(value)
             continue
-        if value in COMMAND_KEYWORDS or value in COMMAND_WRAPPERS:
-            wrapper = value
+        if ASSIGNMENT_PREFIX.match(word) is not None:
             continue
-        if wrapper is not None and value.startswith("-"):
-            if value in WRAPPER_OPTIONS_WITH_ARGUMENT.get(wrapper, ()):
-                skip_next = True
+        if word in COMMAND_KEYWORDS or word in COMMAND_WRAPPERS:
+            wrapper = word
+            continue
+        if wrapper is not None and word.startswith("-"):
+            kind, attached = wrapper_option(wrapper, word)
+            if kind == "payload" and attached is not None:
+                payloads.append(value)
+            elif kind == "payload" or (kind == "argument" and attached is None
+                                       and not redirection):
+                # An option word that also carries a redirection may be a quoted
+                # attached argument; taking the next word as the command then
+                # only ever refuses more.
+                pending.append(kind)
             continue
         flags[index] = True
         open_position = False
-    return flags, (open_position, wrapper, skip_next)
+    return flags, payloads, (open_position, wrapper, tuple(pending), target)
 
 
 def detaching_word(command):
     """The detaching word (`nohup`, `setsid`, `disown`) the shell would run, or None.
 
-    Policy-free and global. A token at a command position matches by value or by
-    basename. Where the guard cannot see command positions it matches raw text
-    instead and fails closed: an unparseable command, an untokenisable segment, a
-    segment whose command-position word (or its basename) is an evaluator, and a
-    token carrying `$(` or a backtick. A raw-text match names the word that occurs
-    earliest in that text. A word in argument position otherwise passes.
+    Policy-free and global. A word at a command position matches by value or by
+    basename, after any attached redirection is cut off (`nohup>log`). Where the
+    guard cannot see command positions it matches raw text instead and fails
+    closed: an unparseable command, an untokenisable segment, a segment whose
+    command-position word (or its basename) is an evaluator, a token carrying
+    `$(` or a backtick, and the command text handed to `env -S`. A raw-text match
+    names the word that occurs earliest in that text. A word in argument
+    position otherwise passes.
     """
 
     def earliest(text):
         hits = [(text.find(word), word) for word in DETACHING_WORDS if word in text]
         return min(hits)[1] if hits else None
 
-    def base(value):
-        return value.rsplit("/", 1)[-1]
+    def name(value):
+        return split_redirection(value)[0].rsplit("/", 1)[-1]
 
+    fresh = (True, None, (), False)
     segments = split_segments(command)
     if segments is None:
         return earliest(command)
-    state = (True, None, False)
+    state = fresh
     for segment in segments:
         tokens = tokenize_segment(segment)
         if tokens is None:
-            state = (True, None, False)
+            state = fresh
             found = earliest(segment)
             if found is not None:
                 return found
             continue
-        flags, after = detaching_command_flags(tokens, state)
-        # Only a dangling redirection (`2>` cut at its `&`) reaches the next segment.
-        state = after if after[2] else (True, None, False)
+        flags, payloads, after = detaching_command_flags(tokens, state)
+        # Only a redirection cut at its `&` (`2>&1`) continues into the next
+        # segment; any real separator ends the simple command and its options.
+        dangling = after[3] and DANGLING_REDIRECTION.search(segment) is not None
+        state = after if dangling else fresh
+        for payload in payloads:
+            found = earliest(payload)
+            if found is not None:
+                return found
         if any(
-            flag and not operator and base(value) in SHELL_EVALUATORS
+            flag and not operator and name(value) in SHELL_EVALUATORS
             for flag, (value, operator) in zip(flags, tokens)
         ):
             found = earliest(segment)
@@ -518,8 +596,8 @@ def detaching_word(command):
         for flag, (value, operator) in zip(flags, tokens):
             if operator:
                 continue
-            if flag and base(value) in DETACHING_WORDS:
-                return base(value)
+            if flag and name(value) in DETACHING_WORDS:
+                return name(value)
             if "$(" in value or "`" in value:
                 found = earliest(value)
                 if found is not None:
