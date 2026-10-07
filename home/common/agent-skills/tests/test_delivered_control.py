@@ -11,8 +11,8 @@ import sys
 import tempfile
 import unittest
 
-from .test_delivery_workflow import (ARTIFACT_BUDGET, MODEL, NOW, POLICY, SCRIPTS,
-                                     SOURCES, BuilderHarness, load)
+from .test_delivery_workflow import (ARTIFACT_BUDGET, HELD_COMMENT, HELD_RECORD, MODEL,
+                                     NOW, POLICY, SCRIPTS, SOURCES, BuilderHarness, load)
 
 DELIVERED, LIVE = 207, 209
 ISSUES = (DELIVERED, LIVE)
@@ -25,8 +25,8 @@ def at(minute):
     return (start + timedelta(minutes=minute)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-class DeliveredControlTest(BuilderHarness, unittest.TestCase):
-    """The issue-207 shape of run-20260927-204-205-206-207-208-209 over the real CLI."""
+class DeliveredControlHarness(BuilderHarness):
+    """The #220 issue-207 driver over the real CLI, shared by #273's held case."""
 
     @classmethod
     def setUpClass(cls):
@@ -61,13 +61,14 @@ class DeliveredControlTest(BuilderHarness, unittest.TestCase):
             source_reference="invocation:/orchestrate-issues 207 209")) for n in ISSUES}
 
     def request(self, minute, *, recorded, owners=(), contracts=False, closed=(),
-                recoveries=None):
+                recoveries=None, blockers=None):
         """One control request over the issues ``recorded`` names, in its order.
 
         ``recorded`` maps each issue to its recorded worktree state, or to None
         for a spawn at the absent candidate path. Issues in ``closed`` are
         observed with a closed tracker, as the adapter sees a delivered issue.
         ``recoveries`` maps an issue to the recovery proof its request carries.
+        ``blockers`` maps an issue to the issue numbers its tracker lists as open blockers.
         """
         issues = list(recorded)
         def fact(n):
@@ -89,6 +90,8 @@ class DeliveredControlTest(BuilderHarness, unittest.TestCase):
         for item in request["tracker"]:
             if item["issue"] in closed:
                 item["state"] = "closed"
+            if blockers and item["issue"] in blockers:
+                item["open_blockers"] = list(blockers[item["issue"]])
         return json.dumps(request).encode()
 
     def control(self, minute, **kwargs):
@@ -125,7 +128,7 @@ class DeliveredControlTest(BuilderHarness, unittest.TestCase):
         self.assertEqual(remainder["kind"], "delivery_remainder")
         return remainder
 
-    def deliver(self, custody, when):
+    def deliver(self, custody, when, *, held=False):
         """Remainder custody walks every remaining stage and finishes delivery_complete."""
         issue, contract = DELIVERED, self.built[DELIVERED]["contract"]
         digest = self.model.canonical_digest(contract)
@@ -138,8 +141,12 @@ class DeliveredControlTest(BuilderHarness, unittest.TestCase):
             "open_pr": [observed("pr_opened", pr_number=issue, pr_url=url, head=head)],
             "merge_pr": [observed("pr_merged", pr_number=issue, pr_url=url, head=head,
                                   merge_sha=merge_sha)],
-            "close_tracker": [observed("tracker_closed", close_reason="completed",
-                                       observation_identity=f"github:issue:{issue}:closed")],
+            "close_tracker": [observed(
+                "tracker_held", comment_url=HELD_COMMENT, record_path=HELD_RECORD,
+                acceptance_state="unmet",
+                observation_identity=f"github:issue:{issue}:held")] if held else [
+                observed("tracker_closed", close_reason="completed",
+                         observation_identity=f"github:issue:{issue}:closed")],
             "delete_remote_branch": [observed("remote_branch_absent")],
             "remove_worktree": [observed("worktree_absent")],
             "delete_local_branch": [observed("local_branch_absent")]}
@@ -173,8 +180,9 @@ class DeliveredControlTest(BuilderHarness, unittest.TestCase):
                      detail_pointer=f".superpowers/issue-delivery/{issue}/detail.json",
                      read_evidence="detail read")]
         historical = {"issue": issue, "state": "merged", "pr_url": url,
-            "merge_sha": merge_sha, "issue_closed": True, "discussion_items": [],
-            "detail_state": "none", "report_path": None, "notes": "delivered"}
+            "merge_sha": merge_sha, "issue_closed": not held, "discussion_items": [],
+            "detail_state": "none", "report_path": None,
+            "notes": f"held for verification: {HELD_COMMENT}" if held else "delivered"}
         summary = {"interface_version": 2, "issue": issue, "state": "delivery_complete",
             "custody": custody, "historical_owner_result": historical,
             "delivery_contract_digest": digest,
@@ -185,15 +193,13 @@ class DeliveredControlTest(BuilderHarness, unittest.TestCase):
             "--summary-file", "-", stdin=self.validated("ship-summary", summary)).stdout)
         self.assertEqual(finished["kind"], "delivery_complete")
 
-    def delivered_shape(self):
-        """Drive 207 to delivery through r1 after four launches, then spawn 209.
+    def deliver_through_remainder(self, *, held=False):
+        """Drive 207 to delivery through r1 after four launches.
 
         Attempt 1 of 207 is spawned at minute 0 and resumed after each expiry at
         minutes 31, 62 and 93 (launches 2 to 4). It fails after selection at 94,
         minting r1 with deadline minute 274, and r1 finishes delivery_complete at
-        95. 209 spawns at 250, with 207 observed closed and its worktree absent, so
-        209's launch 1 is live until minute 280, past r1's deadline. Returns
-        209's custody.
+        95.
         """
         self.setup_run()
         spawned = self.control(0, recorded={DELIVERED: None}, contracts=True)
@@ -205,7 +211,15 @@ class DeliveredControlTest(BuilderHarness, unittest.TestCase):
         remainder = self.fail_after_selection(launched[0], at(94))
         self.assertEqual((remainder["custody"]["action_id"], remainder["deadline_at"]),
                          (f"{DELIVERED}:r1:1", at(274)))
-        self.deliver(remainder["custody"], at(95))
+        self.deliver(remainder["custody"], at(95), held=held)
+
+    def delivered_shape(self):
+        """Spawn 209 at minute 250 once 207 is delivered, and return its custody.
+
+        209 spawns with 207 observed closed and its worktree absent, so 209's
+        launch 1 is live until minute 280, past r1's deadline.
+        """
+        self.deliver_through_remainder()
         spawned = self.control(250, recorded={DELIVERED: "absent", LIVE: None},
                                contracts=True, closed={DELIVERED})
         live = [a["custody"] for a in spawned["actions"] if a["kind"] in DISPATCH]
@@ -242,6 +256,11 @@ class DeliveredControlTest(BuilderHarness, unittest.TestCase):
         self.assertNotIn(DELIVERED, response["admission"]["waiting"])
         self.assertEqual(self.records(DELIVERED), before)
         return response
+
+
+
+class DeliveredControlTest(DeliveredControlHarness, unittest.TestCase):
+    """The issue-207 shape of run-20260927-204-205-206-207-208-209 over the real CLI."""
 
     def test_a_delivered_issue_is_never_relaunched(self):
         """Acceptance 1: past r1's deadline, control plans nothing for delivered 207.

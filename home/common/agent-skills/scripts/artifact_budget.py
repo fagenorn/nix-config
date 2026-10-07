@@ -858,7 +858,7 @@ def validate_ship_summary_report(value: Mapping[str, object], notes_max_characte
         raise ArtifactBudgetError("invalid PR URL")
     state = value["state"]
     if state == "merged":
-        valid = _string(pr) and _sha(value["merge_sha"]) and value["issue_closed"] is True and value["detail_state"] in {"none", "present"}
+        valid = _string(pr) and _sha(value["merge_sha"]) and value["detail_state"] in {"none", "present"}
     elif state in {"stopped", "failed"}:
         valid = value["merge_sha"] is None and value["issue_closed"] is False
     else:
@@ -870,11 +870,12 @@ def validate_ship_summary_report(value: Mapping[str, object], notes_max_characte
 def validate_ledger_result(value: Mapping[str, object], notes_max_characters: int) -> None:
     """Check a result the lifecycle ledger projects onto a workflow response.
 
-    Every row the ledger holds, whether an owner reported it or the lifecycle
-    wrote it, meets the owner-report rule (``validate_ship_summary_report``)
-    except one: reconciliation's ``merged`` row with ``issue_closed`` false,
-    which asserts only the merge the forge observed. That record may carry a
-    superseded owner's detail pointer without citing it in its notes.
+    Every row the ledger holds meets the owner-report rule
+    (``validate_ship_summary_report``), except reconciliation's ``merged`` row
+    with ``issue_closed`` false. That row asserts only the merge the forge
+    observed, and it may carry a superseded owner's detail pointer without
+    citing it in its notes. An owner's held ``merged`` row (#273) has the same
+    two cells but meets the owner rule.
     """
     if not (isinstance(value, dict) and value.get("state") == "merged"
             and value.get("issue_closed") is False):

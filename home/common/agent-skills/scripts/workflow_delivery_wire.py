@@ -84,6 +84,18 @@ class DeliveryProjection:
                 and all(item["state"] in {"observed", "not_applicable"}
                         for item in delivery["postconditions"].values()))
 
+    def held(self, issue_state: dict[str, Any] | None) -> bool:
+        """A delivered issue whose tracker outcome is a tracker_held observation (#273 D7, D15)."""
+        if issue_state is None or not self.delivery_complete(issue_state):
+            return False
+        delivery = issue_state["delivery"]
+        post = delivery["postconditions"].get("tracker_closed")
+        if not isinstance(post, dict) or post.get("state") != "observed":
+            return False
+        return any(item["id"] == post["observation_id"]
+                   and item["observation_kind"] == "tracker_held"
+                   for item in delivery["delivery_observations"])
+
     def current_custody(self, issue: int, issue_state: dict[str, Any]
                         ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         if self.delivery_complete(issue_state):
@@ -358,6 +370,7 @@ class DeliveryProjection:
                 latest_kind, latest = "implementation", issue_state["attempts"][-1]
         if latest is None:
             state_name = ("closed" if tracker["state"] == "closed" else
+                          "held" if self.held(issue_state) else
                           "fogged" if tracker["decision_blockers"] else
                           "blocked" if tracker["open_blockers"] else "queued")
         else:
