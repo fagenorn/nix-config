@@ -4,27 +4,32 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 import posixpath
 import re
 import subprocess
 import sys
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from agent_tools.agent_model_matrix import (
-    AGENTS_PATH,
     MATRIX_PATH,
     SUBAGENT_TYPE,
     parse_matrix,
 )
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools.skill_lint import (
+    AGENTS_DIR,
+    CLAUDE_TREE,
+    MD_TOKEN,
+    SHARED_TREE,
+    Reader,
+    names,
+    split_member,
+    tree_reader,
+)
 
 
 MODEL_PATH = "home/common/agent-skills/instruction-load.json"
-SHARED_TREE = "home/common/agent-skills/skills"
-CLAUDE_TREE = "home/common/claude-code/skills"
-AGENTS_DIR = AGENTS_PATH.as_posix()
 FRAME_MEMBER = "agent-guidance/AGENTS.md"
 FRAME_PATH = "home/common/agent-guidance/AGENTS.md"
 HOSTS = ("claude", "codex")
@@ -42,30 +47,6 @@ PROFILE_KEYS = (
 PROFILE_CHOICE_KEYS = ("entry", "launch")
 SKILL_NAME = re.compile(r"[A-Za-z0-9_-]+")
 REGENERATE = "just agent-instruction-load report --base {base} --head {head} --output <path>"
-
-Reader = Callable[[str], Optional[bytes]]
-
-_BOUNDARY_BEFORE = r"(?<![A-Za-z0-9_-])"
-_BOUNDARY_AFTER = r"(?![A-Za-z0-9_-])"
-_BASENAME_BEFORE = r"(?<![A-Za-z0-9_.-])(?<![A-Za-z0-9_-]/)"   # not inside "<skill>/<file>"
-_MD_TOKEN = re.compile(_BASENAME_BEFORE + r"([A-Za-z0-9_-]+\.md)" + _BOUNDARY_AFTER)
-
-
-def tree_reader(root: Path) -> Reader:
-    """Read repository-relative POSIX paths under `root`, matching names exactly."""
-
-    def read(path: str) -> Optional[bytes]:
-        current = Path(root)
-        try:
-            for part in path.split("/"):
-                if part not in os.listdir(current):
-                    return None
-                current = current / part
-            return current.read_bytes() if current.is_file() else None
-        except OSError:
-            return None
-
-    return read
 
 
 def _git(root: Path, *args: str) -> bytes:
@@ -112,23 +93,15 @@ def load_model(data: bytes) -> dict:
     return model
 
 
-def _split(member: object) -> Optional[tuple[str, str]]:
-    """`(skill, file)` for a `<skill>/<file>` spelling, else None."""
-    parts = member.split("/") if isinstance(member, str) else []
-    if len(parts) != 2 or not all(parts):
-        return None
-    return parts[0], parts[1]
-
-
 def _sibling(member: str, name: str) -> str:
     """The member spelling of `name` in `member`'s own skill."""
-    skill, _ = _split(member)
+    skill, _ = split_member(member)
     return f"{skill}/{name}"
 
 
 def resolve(member: str, read: Reader) -> list[tuple[str, str]]:
     """The `(tree, path)` documents a member spelling names that exist."""
-    parts = _split(member)
+    parts = split_member(member)
     if parts is None:
         return []
     skill, name = parts
@@ -136,22 +109,6 @@ def resolve(member: str, read: Reader) -> list[tuple[str, str]]:
     if skill == "agents":
         candidates.append(("agents", f"{AGENTS_DIR}/{name}"))
     return [(tree, path) for tree, path in candidates if read(path) is not None]
-
-
-def _names(source: str, text: str, target: str) -> bool:
-    """Whether document `source`, whose content is `text`, names `target`."""
-    parts = _split(target)
-    if parts is None:
-        return False
-    skill, name = parts
-    if re.search(_BOUNDARY_BEFORE + re.escape(target) + _BOUNDARY_AFTER, text):
-        return True
-    source_parts = _split(source)
-    if source_parts is not None and source_parts[0] == skill and re.search(
-        _BASENAME_BEFORE + re.escape(name) + _BOUNDARY_AFTER, text
-    ):
-        return True
-    return name == "SKILL.md" and f"`{skill}`" in text
 
 
 def _is_string_list(value: object) -> bool:
@@ -367,12 +324,12 @@ def _member_violations(profile: dict, read: Reader, sites: Optional[list[dict]])
                 found.append(f"{member} is not the subagent_type of any of its sites")
             continue
         sources = prompt_sources + [d for d in skill_documents if d != member]
-        if not any(_names(source, texts[source], member) for source in sources):
+        if not any(names(source, texts[source], member) for source in sources):
             found.append(f"{member} is named by neither its prompt nor another member")
 
     for member in skill_documents:
         folder = posixpath.dirname(resolved[member][1])
-        for token in sorted(set(_MD_TOKEN.findall(texts[member]))):
+        for token in sorted(set(MD_TOKEN.findall(texts[member]))):
             sibling = _sibling(member, token)
             if read(f"{folder}/{token}") is not None and sibling not in listed:
                 found.append(f"{member} names {sibling}, which the profile does not list")
