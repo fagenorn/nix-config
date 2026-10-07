@@ -3555,5 +3555,166 @@ class LedgerClockTest(LifecycleHarness, unittest.TestCase):
                                  (2, "", expected))
                 self.assertEqual(self.state_path.read_bytes(), before)
 
+    def omitted(self, request):
+        request = copy.deepcopy(request)
+        del request["now"]
+        return request
+
+    def control_without_now(self, issues, *, ok=True, **facts):
+        request = self.omitted(self.control_request(now=PINNED, issues=issues, **facts))
+        completed = self.control_raw(request=request, legacy=False, ok=ok)
+        return json.loads(completed.stdout) if ok else completed
+
+    def recorded_facts(self, issues):
+        return {"tracker": [self.tracker_fact(issue) for issue in issues],
+                "worktrees": [self.worktree_fact(issue, recorded={
+                    "path": self.worktree(issue), "state": "matching_issue_branch"})
+                    for issue in issues],
+                "max_parallel": 100}
+
+    def test_a_control_time_over_the_bound_is_refused_and_writes_nothing(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.spawn_two(PINNED)
+        before = self.state_path.read_bytes()
+        ahead = self.at(PINNED, 900)
+        request = self.control_request(now=ahead, issues=[14, 15],
+                                       **self.recorded_facts([14, 15]))
+        refused = self.control_raw(request=request, legacy=False, ok=False)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, refused.stderr),
+            (2, "", SKEW.format(label="control now", supplied=ahead, lead=900, clock=PINNED)))
+        self.assertEqual(self.state_path.read_bytes(), before)
+        direct = self.direct_request(issue=73, now=ahead)
+        refused = self.direct_owner_at_root(self.root, direct, ok=False)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, refused.stderr),
+            (2, "", SKEW.format(label="direct owner now", supplied=ahead, lead=900,
+                                clock=PINNED)))
+        self.assertFalse(self.direct_state_path("direct-73-000001").exists())
+
+    def test_a_present_null_now_is_still_refused(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        request = self.control_request(now=None, issues=[14], **self.recorded_facts([14]))
+        refused = self.control_raw(request=request, legacy=False, ok=False)
+        self.assertEqual((refused.returncode, refused.stderr),
+                         (2, "workflow-state: invalid control now: expected an RFC3339 UTC "
+                             "timestamp\n"))
+
+    def test_control_and_direct_owner_without_now_stamp_the_clock(self):
+        self.run_cli("init-run", *self.run_args)
+        response = self.control_without_now(
+            [14], tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, candidate={
+                "path": self.worktree(14), "state": "absent"})],
+            max_parallel=100)
+        self.assertEqual([action["kind"] for action in response["actions"]][:1], ["spawn"])
+        self.assert_clock_stamp(response["now"])
+        self.assertEqual(self.read_state()["updated_at"], response["now"])
+        candidate = os.path.abspath(self.root / "worktree-issue-73")
+        common = {"issue": 73, "now": PINNED, "attempt_budget_minutes": 180}
+        for extra in ({}, {"tracker": self.tracker_fact(73)},
+                      {"tracker": self.tracker_fact(73), "worktree": self.worktree_fact(
+                          73, candidate={"path": candidate, "state": "absent"})}):
+            completed = self.direct_owner_at_root(
+                self.root, self.omitted(self.direct_request(**common, **extra)))
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["kind"], "owner")
+        self.assert_clock_stamp(json.loads(
+            self.direct_state_path("direct-73-000001").read_text(encoding="utf-8"))["updated_at"])
+
+    def test_control_reads_an_omitted_now_after_the_ledger_lock(self):
+        # D7, as in the flag-command lock-order test: seed the run at PINNED, re-pin
+        # the override to PINNED-600s, and patch fcntl.flock so a LOCK_EX acquisition
+        # moves the clock to PINNED+30s. A clock read before the lock would see
+        # PINNED-600s and be refused as moving backward.
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.assertEqual(self.read_state()["updated_at"], PINNED)
+        later = self.at(PINNED, 30)
+        real_flock = fcntl.flock
+
+        def flock_then_advance(descriptor, operation):
+            real_flock(descriptor, operation)
+            if operation & fcntl.LOCK_EX:
+                os.environ[CLOCK_ENV] = later
+
+        self.pin(self.at(PINNED, -600))
+        with mock.patch("fcntl.flock", side_effect=flock_then_advance):
+            response = self.control_without_now(
+                [14], tracker=[self.tracker_fact(14)],
+                worktrees=[self.worktree_fact(14, candidate={
+                    "path": self.worktree(14), "state": "absent"})],
+                max_parallel=100)
+        self.assertEqual([action["kind"] for action in response["actions"]][:1], ["spawn"])
+        self.assertEqual((response["now"], self.read_state()["updated_at"]), (later, later))
+
+        candidate = os.path.abspath(self.root / "worktree-issue-73")
+        common = {"issue": 73, "attempt_budget_minutes": 180}
+        self.pin()
+        for extra in ({}, {"tracker": self.tracker_fact(73)},
+                      {"tracker": self.tracker_fact(73), "worktree": self.worktree_fact(
+                          73, candidate={"path": candidate, "state": "absent"})}):
+            completed = self.direct_owner_at_root(
+                self.root, self.omitted(self.direct_request(**common, now=PINNED, **extra)))
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+        direct_state = self.direct_state_path("direct-73-000001")
+        self.assertEqual(json.loads(direct_state.read_text(encoding="utf-8"))["updated_at"],
+                         PINNED)
+        self.pin(self.at(PINNED, -600))
+        with mock.patch("fcntl.flock", side_effect=flock_then_advance):
+            refused = self.direct_owner_at_root(self.root, self.omitted(self.direct_request(
+                **common, now=PINNED, owner_unavailable=True, tracker=self.tracker_fact(73),
+                worktree=self.worktree_fact(73, recorded={
+                    "path": candidate, "state": "matching_issue_branch"}))))
+        self.assertEqual(refused.returncode, 0, refused.stderr)
+        self.assertEqual(json.loads(direct_state.read_text(encoding="utf-8"))["updated_at"],
+                         later)
+
+    def test_a_pinned_clock_stamps_control_exactly(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        response = self.control_without_now(
+            [14], tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, candidate={
+                "path": self.worktree(14), "state": "absent"})],
+            max_parallel=100)
+        self.assertEqual((response["now"], self.read_state()["updated_at"]), (PINNED, PINNED))
+
+    def test_control_and_direct_owner_backward_refusals_name_the_wait(self):
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        self.spawn_two(PINNED)
+        earlier = self.at(PINNED, -37)
+        before = self.state_path.read_bytes()
+        request = self.control_request(now=earlier, issues=[14, 15],
+                                       **self.recorded_facts([14, 15]))
+        refused = self.control_raw(request=request, legacy=False, ok=False)
+        self.assertEqual(
+            (refused.returncode, refused.stdout, refused.stderr),
+            (2, "", f"workflow-state: control time must not move backward: {earlier} is "
+                    f"before the run updated_at {PINNED}; it would succeed in 37 seconds\n"))
+        self.assertEqual(self.state_path.read_bytes(), before)
+        candidate = os.path.abspath(self.root / "worktree-issue-73")
+        common = {"issue": 73, "attempt_budget_minutes": 180}
+        for extra in ({}, {"tracker": self.tracker_fact(73)},
+                      {"tracker": self.tracker_fact(73), "worktree": self.worktree_fact(
+                          73, candidate={"path": candidate, "state": "absent"})}):
+            self.direct_owner_at_root(self.root, self.omitted(
+                self.direct_request(**common, now=PINNED, **extra)))
+        direct_state = self.direct_state_path("direct-73-000001")
+        direct_before = direct_state.read_bytes()
+        refused = self.direct_owner_at_root(self.root, self.direct_request(
+            **common, now=earlier, owner_unavailable=True, tracker=self.tracker_fact(73),
+            worktree=self.worktree_fact(73, recorded={
+                "path": candidate, "state": "matching_issue_branch"})), ok=False)
+        self.assertEqual(
+            (refused.returncode, refused.stderr),
+            (2, f"workflow-state: direct owner time must not move backward: {earlier} is "
+                f"before the run updated_at {PINNED}; it would succeed in 37 seconds\n"))
+        self.assertEqual(direct_state.read_bytes(), direct_before)
+
+
 if __name__ == "__main__":
     unittest.main()

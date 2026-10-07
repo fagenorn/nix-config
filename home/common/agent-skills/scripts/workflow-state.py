@@ -392,6 +392,17 @@ def ledger_time(supplied: datetime | None) -> datetime:
     return ledger_clock() if supplied is None else supplied
 
 
+def stamp_request(request: dict[str, Any]) -> datetime:
+    """Fill a request's omitted ``now`` from the clock and return the request's time (#309 D7, D11).
+
+    Call it under the ledger lock. A supplied ``now`` was already skew-checked
+    by request validation and is kept.
+    """
+    if request["now"] is None:
+        request["now"] = format_utc(ledger_clock())
+    return parse_utc(request["now"], "request now")
+
+
 def backward_refusal(prefix: str, now: datetime, field: str, stored: str) -> WorkflowError:
     """``prefix``, the stored time, and the whole seconds until the write would succeed (#309 D8)."""
     wait = math.ceil((parse_utc(stored, field) - now).total_seconds())
@@ -1860,16 +1871,20 @@ def validate_forge_observation(value: Any) -> dict[str, Any]:
 
 
 def validate_control_request(value):
-    request = require_exact_fields(
-        copy.deepcopy(value), CONTROL_REQUEST_FIELDS, "control request")
+    request = copy.deepcopy(value)
+    omitted = isinstance(request, dict) and "now" not in request
+    if omitted:
+        request["now"] = None
+    request = require_exact_fields(request, CONTROL_REQUEST_FIELDS, "control request")
     if (
         type(request["interface_version"]) is not int
         or request["interface_version"] != CONTROL_INTERFACE_VERSION
     ):
         raise WorkflowError("unsupported control interface version")
-    if not isinstance(request["now"], str):
-        raise WorkflowError("invalid control now: expected an RFC3339 UTC timestamp")
-    request["now"] = format_utc(parse_utc(request["now"], "control now"))
+    if not omitted:
+        if not isinstance(request["now"], str):
+            raise WorkflowError("invalid control now: expected an RFC3339 UTC timestamp")
+        request["now"] = format_utc(supplied_time(request["now"], "control now"))
     require_plain_int(request["max_parallel"], "max_parallel", minimum=1)
     require_plain_int(
         request["attempt_budget_minutes"], "attempt_budget_minutes", minimum=1
@@ -1952,8 +1967,12 @@ def load_control_request(path_value):
 
 
 def validate_direct_owner_request(value):
+    request = copy.deepcopy(value)
+    omitted = isinstance(request, dict) and "now" not in request
+    if omitted:
+        request["now"] = None
     request = require_exact_fields(
-        copy.deepcopy(value), DIRECT_OWNER_REQUEST_FIELDS, "direct owner request"
+        request, DIRECT_OWNER_REQUEST_FIELDS, "direct owner request"
     )
     if (
         type(request["interface_version"]) is not int
@@ -1968,9 +1987,10 @@ def validate_direct_owner_request(value):
         "attempt_budget_minutes",
         minimum=1,
     )
-    if not isinstance(request["now"], str):
-        raise WorkflowError("invalid direct owner now: expected an RFC3339 UTC timestamp")
-    request["now"] = format_utc(parse_utc(request["now"], "direct owner now"))
+    if not omitted:
+        if not isinstance(request["now"], str):
+            raise WorkflowError("invalid direct owner now: expected an RFC3339 UTC timestamp")
+        request["now"] = format_utc(supplied_time(request["now"], "direct owner now"))
     for field in ("new_run", "owner_unavailable"):
         if type(request[field]) is not bool:
             raise WorkflowError(f"invalid {field}: expected boolean")
@@ -2537,8 +2557,8 @@ def command_control(args: argparse.Namespace) -> int:
     runtime = _delivery()
     reject_reserved_direct_run_id(args.run_id)
     request, migration_contracts = load_control_request(args.request_file)
-    now = request["now"]
-    now_value = parse_utc(now, "control now")
+    now: str | None = None
+    now_value: datetime | None = None
     run_dir, _, _ = workflow_paths(args.repo_root, args.run_id)
     tracker_by_issue = {item["issue"]: item for item in request["tracker"]}
     worktree_by_issue = {item["issue"]: item for item in request["worktrees"]}
@@ -2561,9 +2581,13 @@ def command_control(args: argparse.Namespace) -> int:
                 "released_at": None, "release_event": None, "release_seq": None}
 
     def control(state: dict[str, Any] | None) -> tuple[bytes, bool]:
+        nonlocal now, now_value
+        now_value = stamp_request(request)
+        now = request["now"]
         assert state is not None
         if now_value < parse_utc(state["updated_at"], "run update time"):
-            raise WorkflowError("control time must not move backward")
+            raise backward_refusal("control time must not move backward", now_value,
+                                   "run updated_at", state["updated_at"])
         # A null request contract means "none supplied": an installed contract
         # governs, and a supplied one must equal it before anything is written
         # (per D10).
@@ -3251,6 +3275,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                 retained.append(
                     (sequence, run_id, run_dir, state_path, state)
                 )
+            stamp_request(request)
             nonterminal = [
                 item for item in retained
                 if not direct_run_is_terminal(item[4]["issues"][str(issue)])
@@ -3361,7 +3386,10 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         parse_utc(request["now"], "direct owner now")
                         < parse_utc(state["updated_at"], "run update time")
                     ):
-                        raise WorkflowError("direct owner time must not move backward")
+                        raise backward_refusal(
+                            "direct owner time must not move backward",
+                            parse_utc(request["now"], "direct owner now"),
+                            "run updated_at", state["updated_at"])
 
                 policy = _apply_one_issue_policy(
                     ledger_issue=issue_state,

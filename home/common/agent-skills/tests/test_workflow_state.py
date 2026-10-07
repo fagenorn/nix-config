@@ -3933,9 +3933,11 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
 
     def test_direct_owner_rejects_an_unrepresentable_deadline_without_traceback(self):
         candidate = os.path.abspath(self.root / "worktree-issue-73")
+        # A supplied `now` may lead the clock by at most 60 s (#309 D6), so the
+        # deadline overflow is reached by a budget too long for any date, not a late `now`.
         rejected = self.direct_owner_raw(
-            now="9999-12-31T23:59:59Z",
-            attempt_budget_minutes=1,
+            now="2026-09-30T12:00:00Z",
+            attempt_budget_minutes=10**10,
             tracker=self.tracker_fact(73),
             worktree=self.worktree_fact(
                 73, candidate={"path": candidate, "state": "absent"},
