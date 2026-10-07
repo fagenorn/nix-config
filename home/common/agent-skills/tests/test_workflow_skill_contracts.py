@@ -288,8 +288,6 @@ SHIP_ISSUE_MACHINE_TEXT = {
     SHIP_ISSUE_REVIEW: (
         "validate-detail-input", 'detail_state: "unpublished"',
         ".superpowers/ship-review/<issue>/retained-detail.json",
-        "review range: delta <review_base7>..<head7> since final-review <R7> (<L> lines, <F> files)",
-        "review range: empty since final-review <R7>", "review range: full (<reason>)",
     ),
     SHIP_ISSUE_POST_SELECTION_SYNC: (
         "--kind current-selection", "--kind sync-selection", "--kind scope", "`test_ref`",

@@ -53,7 +53,7 @@ Standing authorization exists where repository policy or an explicit user grant 
 
 ## Launch guard
 
-Before **every write to the forge or to `origin` this skill makes up to and including the merge**, an unsupported-tracker run's bare branch push included, re-validate that the handoff's launch identity is still the launch the ledger entitles:
+Before **every forge or `origin` write this skill makes up to and including the merge**, an unsupported-tracker run's bare push included, re-check the handoff's launch identity against the ledger:
 
 ```
 ~/.agents/bin/workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <issue:attempt:launch>
@@ -96,7 +96,7 @@ Before any user-facing question mid-flow, invoke `doc-grounded-questions`, read 
 ## gh hygiene
 
 Prefix a forge invocation only with the names in `bindings.tracker.credential_env.unset_before_invocation`; for example, an exhaustive list containing `GITHUB_TOKEN` yields `unset GITHUB_TOKEN && gh ...` when a harness token lacks access to the target org. When `bindings.tracker.cli` is `glab`, substitute the equivalent `glab` verbs.
-Follow `writing-plans`' Payload discipline.
+Throughout, follow `writing-plans`' Payload discipline: targeted `rg` over whole-file reads, bounded reads, summarized command output, logs on disk, artifacts handed over as paths.
 
 ## Phase 0 — Pre-flight
 
