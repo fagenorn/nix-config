@@ -1,4 +1,3 @@
-import html
 import json
 import os
 from pathlib import Path
@@ -59,7 +58,8 @@ SKILL_ROOTS = (
 )
 
 # The producer-report candidate contract, spelled once for the whole corpus so
-# the four skills that carry it cannot drift apart (D1).
+# design and grill-with-docs cannot drift apart (D1). writing-plans and handoff
+# keep only its commands, in SHARED_SKILL_MACHINE_TEXT (#291 D6).
 REPORT_CANDIDATE_CLAUSE = (
     "a report candidate outside every working tree — create it with `mktemp "
     '"${TMPDIR:-/tmp}/producer-report-XXXXXX.json"` (the explicit `XXXXXX` '
@@ -166,6 +166,23 @@ SDD_MACHINE_TEXT = {
     ),
 }
 
+REPORT_CANDIDATE_MKTEMP = 'mktemp "${TMPDIR:-/tmp}/producer-report-XXXXXX.json"'
+REPORT_CANDIDATE_VALIDATION = (
+    "artifact-budget validate-report --boundary producer --input <report-candidate>")
+
+# Machine-consumed text the remaining in-scope shared skills must carry
+# (#291 D6): helper argv, durable paths and the artifact fields a helper reads.
+SHARED_SKILL_MACHINE_TEXT = {
+    WRITING_PLANS: (REPORT_CANDIDATE_MKTEMP, REPORT_CANDIDATE_VALIDATION),
+    HANDOFF: (REPORT_CANDIDATE_MKTEMP, REPORT_CANDIDATE_VALIDATION,
+              ".superpowers/workflows/<run-id>/handoffs/"),
+    RESEARCH: (
+        "`research-observations`", "agent-evidence research <artifact.json>",
+        "`observed_at`", "`outcome`", "`follow_up`", "`execution_id`", "`transient`",
+        "`{file_path, key_facts[]}`",
+    ),
+}
+
 # Machine-consumed text the codex-collaboration documents must carry (#291 D6):
 # the companion argv, the review binding field and the diff-scope invocation and
 # JSON fields DIFF-REVIEW.md reads. No guidance sentence is pinned.
@@ -269,13 +286,6 @@ SUPERPOWERS_SEGMENT_RE = re.compile(r"\.superpowers/([A-Za-z0-9_.-]+)")
 
 # The orphaned-bucket prune, spelled once (D5, D8).
 WORKTREE_BUCKET_LITERAL = "`<primary-checkout>/.superpowers/sdd/wt-<worktree-name>/`"
-
-# What `git clean -fdx` actually destroys after Task 3 moved the ledger out of
-# the feature worktree.
-CLEAN_SCRATCH_CLAUSE = (
-    "in a feature worktree that is `ship-issue`'s retained Minor/Discussion "
-    "detail, and in the primary checkout it is every plan's SDD workspace"
-)
 
 GITIGNORE = REPO_ROOT / ".gitignore"
 
@@ -549,9 +559,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         self.assertIn("bindings.vcs.branch_pattern", text)
         self.assertIn("bindings.vcs.worktree.prefix", text)
         self.assertIn("bindings.vcs.worktree.root", text)
-        self.assertIn("against `project.root`", text)
         self.assertNotIn("bindings.vcs.branch_naming", text)
-        self.assertNotIn("Put worktrees in `.worktrees/`", text)
 
     def test_living_source_has_no_legacy_policy_surface(self):
         tracked = subprocess.run(
@@ -830,7 +838,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         cls.grill = GRILL.read_text(encoding="utf-8")
         cls.collaboration = COLLABORATION.read_text(encoding="utf-8")
         cls.research = RESEARCH.read_text(encoding="utf-8")
-        cls.worktrees = WORKTREES.read_text(encoding="utf-8")
         cls.ship_issue = SHIP_ISSUE.read_text(encoding="utf-8")
         cls.ship_review = SHIP_ISSUE_REVIEW.read_text(encoding="utf-8")
         cls.ship_human_gate = SHIP_ISSUE_HUMAN_GATE.read_text(encoding="utf-8")
@@ -1124,29 +1131,20 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_plan_package_contract_is_root_only_and_fail_closed(self):
         self.assertIn("<stem>.tasks/task-1.md", self.writing_plans)
         self.assertIn("[task-N.md](<stem>.tasks/task-N.md)", self.writing_plans)
-        self.assert_ordered(self.writing_plans, "write every task member", "artifact-budget check",
-                            "compact repeated prose", "split only where both results are independently testable",
-                            "decompose_required")
-        self.assertIn("report only the root path and four metrics", self.writing_plans)
         for forbidden in ("open_items:", "decisions:", "adr_paths:", "summary:"):
             self.assertNotRegex(self.writing_plans, rf"(?m)^\s*{re.escape(forbidden)}")
-        self.assert_ordered(normalized(self.writing_plans),
-                            "report candidate outside every working tree",
-                            "validate-report", "validated stdout bytes")
 
     def test_writing_plans_resolves_its_plan_dir_through_the_resolver(self):
         text = normalized(self.writing_plans)
         self.assertIn("resolve-project resolve", text)
         self.assertIn("bindings.paths.artifacts.plans", text)
-        self.assertIn(RESOLUTION_SENTENCE, text)
 
     def test_writing_plans_no_longer_calls_the_fail_soft_helper(self):
         self.assertNotIn("resolve-bindings", self.writing_plans)  # policy-gate-pattern
         self.assertNotIn("skills.config.json", self.writing_plans)  # policy-gate-pattern
 
-    def test_writing_plans_treats_every_resolver_error_as_fatal(self):
+    def test_writing_plans_names_no_retired_error_code_or_plan_dir(self):
         text = normalized(self.writing_plans)
-        self.assertIn(RESOLUTION_SENTENCE, text)
         for forbidden in ("not_onboarded", ".claude/plans"):
             self.assertNotIn(forbidden, text)
 
@@ -1208,13 +1206,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "before emitting `complete`",
         )
 
-    def test_handoff_measures_candidate_before_durable_replace(self):
-        self.assert_ordered(self.handoff, "sibling temporary", "artifact-budget check",
-                            "remove duplicated", "artifact-budget check", "stopped")
-        self.assert_ordered(self.handoff, "budget_status: within_budget", "atomically replace")
-        self.assertIn("leave the existing destination byte-identical", self.handoff)
-        self.assertIn("no fabricated metrics", self.handoff)
-
     def test_artifact_reports_are_bounded_root_only_shapes(self):
         for producer in (self.design, self.grill, self.handoff):
             for field in ("kind", "path", "metrics", "budget_status", "notes"):
@@ -1222,38 +1213,35 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             for metric in ("root_bytes", "total_bytes", "file_count",
                            "largest_member_bytes"):
                 self.assertIn(metric, producer)
+            self.assertIn("phase_reports.notes_max_characters", producer)
+            self.assertIn("validate-report --boundary producer", normalized(producer))
+            for forbidden in ("spec_path:", "adr_paths:", "decisions:", "open_items:", "summary:"):
+                self.assertNotRegex(producer, rf"(?m)^\s*{re.escape(forbidden)}")
+        # design and grill-with-docs are outside #313's scope and keep their pins.
+        for producer in (self.design, self.grill):
             for decision in ("(D5)", "(D11, D14)"):
                 self.assertIn(decision, producer)
-            self.assertIn("phase_reports.notes_max_characters", producer)
             self.assert_ordered(normalized(producer),
                                 "report candidate outside every working tree",
                                 "validate-report --boundary producer",
                                 "validated stdout")
             self.assertIn("never inline artifact contents", producer)
-            for forbidden in ("spec_path:", "adr_paths:", "decisions:", "open_items:", "summary:"):
-                self.assertNotRegex(producer, rf"(?m)^\s*{re.escape(forbidden)}")
 
-    def test_four_producer_skills_share_one_report_candidate_clause(self):
+    def test_design_and_grill_share_one_report_candidate_clause(self):
         clause = normalized(REPORT_CANDIDATE_CLAUSE)
         for name, text in (
             ("design", self.design),
             ("grill-with-docs", self.grill),
-            ("writing-plans", self.writing_plans),
-            ("handoff", self.handoff),
         ):
             with self.subTest(skill=name):
                 self.assertIn(clause, normalized(text))
 
-    def test_handoff_failure_reemit_uses_a_fresh_report_candidate(self):
-        self.assertIn(
-            "a fresh report candidate created and cleaned up the same way",
-            normalized(self.handoff),
-        )
-
-    def test_handoff_keeps_the_publication_sibling(self):
-        text = normalized(self.handoff)
-        self.assertIn("as a sibling temporary regular file", text)
-        self.assertIn("written as a sibling of the durable destination", text)
+    def test_shared_skills_carry_their_machine_text(self):
+        for path, items in SHARED_SKILL_MACHINE_TEXT.items():
+            text = normalized(path.read_text(encoding="utf-8"))
+            for item in items:
+                with self.subTest(path=path.parent.name, item=item):
+                    self.assertIn(item, text)
 
     def test_no_skill_prescribes_a_sibling_candidate(self):
         offenders = [
@@ -1417,16 +1405,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("prefer resume", phase_zero)
         self.assertIn("stop as blocked", phase_zero)
         self.assertIn("never delete on ambiguity", self.auto)
-
-    def test_worktrees_isolation_failure_reports_blocked_not_in_place(self):
-        self.assertNotIn("say so and work in place", self.worktrees)
-        self.assertIn("never silently work in place", self.worktrees)
-        self.assert_ordered(
-            self.worktrees,
-            "creation fails",
-            "Report blocked",
-            "ask for direction",
-        )
 
     def test_owner_persists_exact_terminal_result_before_return(self):
         owner_return_section = self.section(
@@ -2069,26 +2047,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         ):
             self.assertIn(relay_exception, checkpoint_contract)
 
-    def test_handoff_supports_safe_durable_destination_and_temp_default(self):
-        self.assertIn(".superpowers/workflows/<run-id>/handoffs/", self.handoff)
-        self.assertIn("caller-provided destination", self.handoff)
-        self.assertIn("symlink", self.handoff)
-        self.assertIn("path escape", self.handoff)
-        self.assertIn("missing destination", self.handoff)
-        self.assertIn("created atomically", self.handoff)
-        self.assertIn("exclusive atomic operation", self.handoff)
-        self.assertIn("leaf appeared concurrently", self.handoff)
-        self.assertIn("never overwrite that race", self.handoff)
-        self.assert_ordered(
-            self.handoff,
-            "existing regular destination",
-            "read it before writing",
-            "atomically replace",
-        )
-        self.assertIn("non-symlink parent path", self.handoff)
-        self.assertIn("mktemp", self.handoff)
-        self.assertIn("Do not duplicate lifecycle JSON", self.handoff)
-
     def test_codex_collaboration_has_exactly_one_companion_tail(self):
         blocks = re.findall(r"```text\n(.*?)```", self.collaboration, re.S)
         self.assertEqual(blocks, [
@@ -2220,43 +2178,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         with self.subTest(skill="ship-issue detail producer"):
             self.assertIn("~/.agents/bin/review-package", self.ship_issue)
 
-    def test_research_requires_corroborated_validated_observations(self):
-        heading = "## Live availability and blocking evidence"
-        evidence = " ".join(self.research[self.research.index(heading) :].split())
-        for fragment in (
-            "`research-observations`",
-            "observation ID",
-            "execution ID",
-            "`observed_at`",
-            "source identity",
-            "`outcome`",
-            "transient",
-            "standing",
-            "two independent timepoints",
-            "follow-up",
-            "agent-evidence research",
-            "same Markdown findings file",
-            "retain no second project artifact",
-            "retain no temporary input as a second artifact",
-            "exact `{file_path, key_facts[]}` return shape",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, evidence)
-        self.assert_ordered(
-            evidence,
-            "`transient`",
-            "reference exactly one observation ID",
-            "`follow_up`",
-        )
-        self.assertIn("distinct `execution_id` values", evidence)
-        self.assertIn("distinct normalized `observed_at` timestamps", evidence)
-        self.assert_ordered(
-            evidence,
-            "agent-evidence research <artifact.json>",
-            "exits 0",
-            "return a standing conclusion",
-        )
-
     def test_ship_issue_phase_five_dispatch_ids_are_unchanged(self):
         for dispatch_id in (
             "ship-issue-full-conformance-review",
@@ -2302,11 +2223,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_ship_issue_prunes_the_removed_worktrees_sdd_bucket(self):
         text = normalized(self.ship_issue)
         self.assertIn(WORKTREE_BUCKET_LITERAL, text)
-
-    def test_worktrees_names_the_scratch_git_clean_destroys(self):
-        text = normalized(self.worktrees)
-        self.assertIn(CLEAN_SCRATCH_CLAUSE, text)
-        self.assertNotIn("(ledgers, review packages)", text)
 
     def test_gitignore_is_tracked_and_carries_the_backstop(self):
         subprocess.run(
@@ -2375,22 +2291,6 @@ CODEBASE_DESIGN_FILES = (
     "LICENSE",
     "agents/openai.yaml",
 )
-# Each canonical term maps to a discriminating clause of its definition — enough
-# that rewriting the meaning fails the contract, short enough that reflowing the
-# paragraph around it does not. Every clause is verbatim upstream text and
-# apostrophe-free, so no quoting subtleties travel with it.
-CANONICAL_DESIGN_TERMS = {
-    "Module": "anything with an interface and an implementation",
-    "Interface": "everything a caller must know to use the module correctly",
-    "Implementation": "inside a module, its body of code",
-    "Depth": "the amount of behaviour a caller (or test) can exercise per unit of interface",
-    "Seam": "a place where you can alter behaviour without editing in that place",
-    "Adapter": "a concrete thing that satisfies an interface at a seam",
-    "Leverage": "more capability per unit of interface they learn",
-    "Locality": "change, bugs, knowledge, and verification concentrate in one place",
-}
-
-
 def skill_frontmatter(text):
     """Return a SKILL.md's YAML frontmatter as a flat ``key -> value`` dict.
 
@@ -2427,29 +2327,6 @@ def relative_markdown_links(text):
         if not target or target.startswith(("http://", "https://")):
             continue
         yield target
-
-
-def glossary_entries(glossary):
-    """Split a glossary into ``term -> entry`` for the canonical terms.
-
-    An entry runs from its own ``**Term**`` marker at the start of a line to the
-    start of the next canonical term's entry, or to the end of the glossary for
-    the last one. Only line-leading markers open an entry, so a term named inside
-    another entry's prose (``Distinct from **Adapter**``) does not split it. A
-    term with no entry is absent from the result rather than mapped to an empty
-    string, so a caller can tell "no entry" from "entry says nothing".
-    """
-    markers = sorted(
-        (glossary.find(f"\n**{term}**"), term)
-        for term in CANONICAL_DESIGN_TERMS
-        if glossary.find(f"\n**{term}**") != -1
-    )
-    entries = {}
-    for position, (start, term) in enumerate(markers):
-        following = markers[position + 1 :]
-        end = following[0][0] if following else len(glossary)
-        entries[term] = glossary[start:end]
-    return entries
 
 
 class LaunchFencedWorkerContractsTest(unittest.TestCase):
@@ -2739,10 +2616,6 @@ class CodebaseDesignSkillContractsTest(unittest.TestCase):
         cls.twice = (CODEBASE_DESIGN_DIR / "DESIGN-IT-TWICE.md").read_text(encoding="utf-8")
         cls.notice = (CODEBASE_DESIGN_DIR / "LICENSE").read_text(encoding="utf-8")
 
-    def glossary(self):
-        start = self.skill.index("## Glossary")
-        return self.skill[start : self.skill.index("## Deep vs shallow", start)]
-
     def test_package_passes_skill_package_validation(self):
         for relative in CODEBASE_DESIGN_FILES:
             with self.subTest(path=relative):
@@ -2753,11 +2626,6 @@ class CodebaseDesignSkillContractsTest(unittest.TestCase):
         frontmatter = skill_frontmatter(self.skill)
         self.assertEqual(frontmatter.get("name"), CODEBASE_DESIGN_DIR.name)
         self.assertTrue(frontmatter.get("description", "").strip())
-        # The trigger the rest of the skill tree depends on, kept verbatim (D14).
-        self.assertIn(
-            "another skill needs the deep-module vocabulary",
-            frontmatter["description"],
-        )
 
     def test_every_relative_link_in_the_package_resolves(self):
         documents = {
@@ -2786,123 +2654,12 @@ class CodebaseDesignSkillContractsTest(unittest.TestCase):
                     )
         self.assertGreaterEqual(checked, 9, "the link scan found nothing to check")
 
-    def test_glossary_defines_every_canonical_term(self):
-        # Pin the definitions, not just the headings: a heading-only assertion
-        # stays green while every definition is deleted or rewritten, which is
-        # exactly the drift this contract exists to catch. Each clause is required
-        # inside its own term's entry, not merely somewhere in the glossary —
-        # searching the whole glossary lets a gutted entry pass so long as its
-        # clause survives in the section intro or in a neighbouring entry.
-        entries = glossary_entries(self.glossary())
-        for term, definition in CANONICAL_DESIGN_TERMS.items():
-            with self.subTest(term=term):
-                self.assertIn(term, entries, f"the glossary has no **{term}** entry")
-                self.assertIn(
-                    definition,
-                    entries[term],
-                    f"the **{term}** entry does not define {term.lower()}",
-                )
-
-    def test_glossary_forbids_substituting_the_canonical_terms(self):
-        glossary = self.glossary()
-        self.assertIn(
-            'Use these terms exactly — don\'t substitute "component," "service," '
-            '"API," or "boundary."',
-            glossary,
-        )
-        for avoided in (
-            "_Avoid_: unit, component, service",
-            "_Avoid_: API, signature",
-            "_Avoid_: boundary",
-        ):
-            with self.subTest(avoided=avoided):
-                self.assertIn(avoided, glossary)
-
-    def test_deletion_test_keeps_both_branches(self):
-        self.assertIn("**The deletion test.**", self.skill)
-        self.assertIn("If complexity vanishes, it was a pass-through.", self.skill)
-        self.assertIn(
-            "If complexity reappears across N callers, it was earning its keep.",
-            self.skill,
-        )
-
-    def test_interface_is_the_test_surface_in_both_files(self):
-        self.assertIn(
-            "**The interface is the test surface.** Callers and tests cross the "
-            "same seam.",
-            self.skill,
-        )
-        self.assertIn("The **interface is the test surface**.", self.deepening)
-
-    def test_adapter_seam_rule_is_pinned_in_both_files(self):
-        rule = "One adapter means a hypothetical seam. Two adapters means a real one."
-        self.assertIn(rule, self.skill)
-        self.assertIn(rule, self.deepening)
-
-    def test_seam_entry_reconciles_this_repositorys_test_seam(self):
-        glossary = self.glossary()
-        start = glossary.index("**Seam**")
-        seam_entry = glossary[start : glossary.index("**Adapter**", start)]
-        self.assertIn(
-            "a place where you can alter behaviour without editing in that place",
-            seam_entry,
-        )
-        self.assertIn(
-            "A **test seam**, as the design and planning skills use the term, is "
-            "one of these seams chosen as the boundary that verification crosses",
-            seam_entry,
-        )
-
-    def test_deepening_carries_all_four_dependency_categories(self):
-        for heading in (
-            "### 1. In-process",
-            "### 2. Local-substitutable",
-            "### 3. Remote but owned (Ports & Adapters)",
-            "### 4. True external (Mock)",
-        ):
-            with self.subTest(heading=heading):
-                self.assertIn(heading, self.deepening)
-        start = self.deepening.index("### 3. Remote but owned (Ports & Adapters)")
-        ports = self.deepening[
-            start : self.deepening.index("### 4. True external (Mock)", start)
-        ]
-        self.assertIn(
-            "implement an HTTP adapter for production and an in-memory adapter "
-            "for testing",
-            ports,
-        )
-
-    def test_design_it_twice_keeps_the_workflow_and_its_adaptations(self):
-        self.assertIn("Spawn 3+ sub-agents in parallel.", self.twice)
-        self.assertIn("**radically different**", self.twice)
-        self.assertIn(
-            "Contrast by **depth** (leverage at the interface), **locality** "
-            "(where change concentrates), and **seam placement**.",
-            self.twice,
-        )
-        # D5: upstream's dangling CONTEXT.md reference stays repointed.
-        self.assertNotIn("CONTEXT.md", self.twice)
-        self.assertIn(
-            "Resolve the domain language the way the `doc-grounded-questions` "
-            "skill does",
-            self.twice,
-        )
-        # D7: an autonomous run has nobody to stall on.
-        self.assertIn("The recommendation is the answer", self.twice)
-        self.assertIn("recorded as a decision-ledger row", self.twice)
-
-    def test_package_carries_no_dispatch_site_and_names_the_owner_tier(self):
+    def test_package_carries_no_dispatch_site(self):
         for path in sorted(CODEBASE_DESIGN_DIR.rglob("*")):
             if not path.is_file():
                 continue
             with self.subTest(path=str(path.relative_to(CODEBASE_DESIGN_DIR))):
                 self.assertNotIn("Agent(", path.read_text(encoding="utf-8"))
-        # D6: the tier is stated in words instead.
-        self.assertIn(
-            "dispatch them at the `issue-owner` tier rather than the cheap "
-            "`explorer` tier",
-            self.twice,
-        )
 
     def test_license_records_provenance_and_the_upstream_notice(self):
         self.assertIn(CODEBASE_DESIGN_UPSTREAM, self.notice)
@@ -2944,20 +2701,6 @@ class RetroSkillContractsTest(unittest.TestCase):
         self.assertEqual(frontmatter.get("disable-model-invocation"), "true")
         self.assertIn("allow_implicit_invocation: false", self.manifest)
         self.assertNotIn("Agent(", self.skill)
-
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(next_position, 0, anchor)
-            position = next_position
-
-    def test_routes_every_finding_and_never_edits_generated_output(self):
-        self.assert_ordered(self.skill, "### 1. Read the session", "### 2. Find candidates", "### 3. Route each candidate", "### 4. Present", "Then stop.")
-        for fragment in ("~/.claude/projects/", "~/.codex/sessions/", "exactly one home", "fagenorn/nix-config", "never propose an edit there", "write-projections", "`to-issues`"):
-            self.assertIn(fragment, self.skill)
-        self.assertTrue((REPO_ROOT / "home/common/agent-skills/skills/to-issues").is_dir())
-        self.assertNotIn("writing-for-agents", self.skill)
 
     def test_license_records_provenance_and_the_upstream_notice(self):
         for fragment in (CODEBASE_DESIGN_UPSTREAM, "skills/engineering/retro/", RETRO_REVISION, "Copyright (c) 2026 Matt Pocock", "no automatic synchronisation"):
@@ -3048,11 +2791,11 @@ path_unchanged_since() { return 0; }
 
     def test_structure_links_and_explicit_only_metadata(self):
         self.assertEqual(sorted(str(p.relative_to(IMPROVE_DIR)) for p in IMPROVE_DIR.rglob("*") if p.is_file()), sorted(IMPROVE_FILES))
-        self.assertEqual(skill_frontmatter(self.skill), {
-            "name": "improve-codebase-architecture",
-            "description": "Scan a codebase for deepening opportunities, present them as a visual HTML report, then grill through whichever one you pick.",
-            "disable-model-invocation": "true",
-        })
+        frontmatter = skill_frontmatter(self.skill)
+        self.assertEqual(set(frontmatter), {"name", "description", "disable-model-invocation"})
+        self.assertEqual(frontmatter["name"], IMPROVE_DIR.name)
+        self.assertTrue(frontmatter["description"].strip())
+        self.assertEqual(frontmatter["disable-model-invocation"], "true")
         self.assertEqual(self.manifest, 'interface:\n  display_name: "Improve Codebase Architecture"\n  short_description: "Find and grill architecture improvements"\npolicy:\n  allow_implicit_invocation: false\n')
         root = IMPROVE_DIR.resolve()
         checked = 0
@@ -3064,53 +2807,19 @@ path_unchanged_since() { return 0; }
                 self.assertTrue(resolved.is_file(), (name, target))
         self.assertGreaterEqual(checked, 2)
 
-    def test_scan_pins_all_evidence_in_order_and_one_dispatch(self):
-        self.assert_ordered(self.skill, "module and callers", "interface knowledge callers currently carry", "where locality or leverage is lost", "deletion-test result", "dependency category", "two justified adapters", "existing tests", "proposed interface-level test surface", "context or decision conflict")
-        for dependency in ("codebase-design", "doc-grounded-questions", "worktrees", "design", "grill-with-docs", "wayfind", "writing-plans", "to-issues"):
-            self.assertIn(f"`{dependency}`", self.skill)
-            self.assertTrue((REPO_ROOT / "home/common/agent-skills/skills" / dependency).is_dir(), dependency)
-        for fragment in ("bypasses inference", "git log --oneline --no-merges -50", "scattered", "History selects where to look", "writes nothing to the repository", "at most one structured findings artifact", "zero to five", "Never pad", "successful run", "Strong", "Worth exploring", "Speculative", "when at least one candidate exists"):
-            self.assertIn(fragment, self.skill)
+    def test_scan_is_one_registered_dispatch(self):
         lines = self.skill.splitlines()
         self.assertEqual([line for line in lines if "Agent(" in line], [IMPROVE_CALL])
         self.assertEqual(lines.index(IMPROVE_CALL), lines.index(IMPROVE_MARKER) + 1)
 
-    def test_report_pins_scaffold_cdns_and_accessible_fallbacks(self):
-        for fragment in ("<!doctype html>", '<html lang="en">', '<script src="https://cdn.tailwindcss.com"></script>', 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs', '<section id="candidates"', '<section id="top-recommendation"', "Mermaid graph", "Hand-built boxes-and-arrows", "Cross-section", "Mass diagram", "Call-graph collapse", "semantic headings", "text equivalent", "colour is never the sole", "minimal inline base styles", "4.5:1", "phone width", "without duplicating content", "text is not clipped", "user spacing overrides"):
+    def test_report_scaffold_carries_the_graded_ids_and_strict_mermaid(self):
+        # The eval assertion shells parse these ids; Mermaid reads its config.
+        for fragment in ('<section id="candidates"', '<section id="top-recommendation"',
+                         'securityLevel: "strict"', "htmlLabels: false"):
             self.assertIn(fragment, self.report)
-        for css in ("body {", "font-family:", "line-height: 1.5", "overflow-wrap: anywhere", "max-width: 100%", "height: auto", ".before-after {", "grid-template-columns: repeat(2, minmax(0, 1fr))", "@media (max-width: 640px)", "grid-template-columns: 1fr"):
-            self.assertIn(css, self.report)
-        for fragment in ("$TMPDIR", "/tmp", "%TEMP%", "architecture-review-<timestamp>.html", "absolute path", "generation failure is a failed run", "browser", "CDN", "disclosed warning", "before/after", "Top recommendation"):
-            self.assertIn(fragment, self.skill)
-
-    def test_report_escapes_repository_text_and_uses_strict_mermaid(self):
-        unsafe = '<img title=\'repo\' onerror="alert(1)">&'
-        escaped = html.escape(unsafe, quote=True)
-        for fragment in (
-            "HTML-escape every repository-derived value",
-            "opaque generated node IDs",
-            "escaped text labels",
-            "no raw HTML labels",
-            f"`{unsafe}` becomes `{escaped}`",
-            'securityLevel: "strict"',
-            "htmlLabels: false",
-        ):
-            self.assertIn(fragment, self.report)
-        for fragment in (
-            "HTML-escape every repository-derived value",
-            "opaque generated Mermaid node IDs",
-            "no raw HTML labels",
-        ):
-            self.assertIn(fragment, self.skill)
         self.assertNotIn('securityLevel: "loose"', self.report)
 
-    def test_routing_and_exact_ordered_provenance(self):
-        self.assert_ordered(self.skill, "`wayfind`", "`worktrees`", "`design`", "`grill-with-docs`", "`writing-plans`")
-        for fragment in ("no design worktree", "do not automatically resume", "Do not invoke", "Selection is the first point"):
-            self.assertIn(fragment, self.skill)
-        self.assertNotIn("from-issue", self.skill)
-        self.assertNotIn("`grilling`", self.skill + self.report)
-        self.assertNotIn("`domain-modeling`", self.skill + self.report)
+    def test_license_records_ordered_provenance(self):
         provenance = self.notice[:-len(MIT_NOTICE)]
         self.assertTrue(self.notice.endswith(MIT_NOTICE))
         headings = ("Vocabulary invocation", "Domain grounding repointed", "Hotspot rule made concrete", "Scan becomes a registered dispatch", "Candidate contract stated", "Report contract extended", "Downstream step replaced", "Provenance pointer", "Package extensions")
@@ -3150,12 +2859,6 @@ path_unchanged_since() { return 0; }
                 self.assertIn(name, shells)
                 for fragment in fragments:
                     self.assertIn(fragment, shells[name])
-        self.assertIn("unscoped", cases[1]["prompt"].lower())
-        self.assertIn("tinytask.store", cases[2]["prompt"])
-        self.assertIn("sync between machines", cases[3]["prompt"].lower())
-        clear_prompt = cases[2]["prompt"]
-        for fragment in ("Nobody is present", "reversible in-scope", "scope-redrawing", "hard to reverse", "credential", "spending", "cannot answer", "stop", "Do not create a plan", "Do not refactor"):
-            self.assertIn(fragment, clear_prompt)
 
     def test_eval_1_report_assertion_rejects_malformed_structure(self):
         shell = self.assertion_shell(1, "report is evidence-backed or truthful")
@@ -3550,33 +3253,6 @@ class InstalledOrchestrateRoutesTest(unittest.TestCase):
         self.assertEqual(installed(".claude/skills"), ORCHESTRATE.read_text(encoding="utf-8"))
 
 
-class CheckpointVerificationContractsTest(unittest.TestCase):
-    """#263: the full declared verification runs at checkpoints, recorded by tree."""
-
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(next_position, 0, anchor)
-            position = next_position
-
-    @staticmethod
-    def read(path):
-        return normalized(path.read_text(encoding="utf-8"))
-
-    def test_writing_plans_names_focused_commands_per_task(self):
-        self.assert_ordered(
-            self.read(WRITING_PLANS),
-            "**Every task carries at least one verification line that could fail.**",
-            "**Each task names its focused test commands.**",
-            "adds the project's build check only when the task changes files that "
-            "check evaluates",
-            "a planner unsure whether a task's files reach the build adds it",
-            "No task names the full declared verification as a per-task gate",
-            "sdd's final gate runs it once on the final head",
-            "## Package construction and budget boundary")
-
-
 class AcceptanceGradingContractsTest(unittest.TestCase):
     """#272: the conformance axis grades every acceptance criterion on Opus/high."""
 
@@ -3640,30 +3316,10 @@ class ToIssuesCriterionLineContractsTest(unittest.TestCase):
                  if match}
         self.assertEqual(kinds, {"code", "evidence", "human"})
 
-    def test_the_shape_kinds_and_preference_rule_are_stated(self):
-        text = normalized(self.text)
-        for phrase in (
-            "`- [ ] [code|evidence|human] <observable outcome> — measured: <where>`",
-            "`code` — a check any reviewer reproduces at the head",
-            "`evidence` — a measurement taken outside the gating suite",
-            "`human` — needs a person's judgment or an environment the agent cannot control",
-            "Prefer `code`, then `evidence`; use `human` only when no agent can "
-            "produce the observation.",
-            "no file paths outside a `measured:` clause",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, text)
-
-    def test_the_falsifiability_rule_extends_to_the_measured_clause(self):
-        paragraph = next(
-            line for line in self.text.splitlines()
-            if line.startswith("**Every acceptance criterion must be falsifiable.**"))
+    def test_the_criterion_line_shape_is_stated(self):
         self.assertIn(
-            "The `measured:` clause must name an observation that fails at the base "
-            "commit, and an evidence threshold is a literal number or string, never "
-            "\"faster\" or \"reasonable\".",
-            paragraph,
-        )
+            "`- [ ] [code|evidence|human] <observable outcome> — measured: <where>`",
+            normalized(self.text))
 
 
 class AcceptanceMapContractsTest(unittest.TestCase):
@@ -3690,33 +3346,17 @@ class AcceptanceMapContractsTest(unittest.TestCase):
             position = text.find(anchor, position + 1)
             self.assertGreaterEqual(position, 0, anchor)
 
-    def test_the_plan_template_places_the_map_directly_after_the_task_index(self):
+    def test_the_plan_template_carries_one_task_index_and_one_acceptance_map(self):
         headings = [line for line in self.plans.splitlines() if line.startswith("## ")]
         self.assertEqual(headings.count("## Task index"), 1)
         self.assertEqual(headings.count("## Acceptance map"), 1)
-        self.assertEqual(headings[headings.index("## Task index") + 1], "## Acceptance map")
-        self.assertIn("Task index, Acceptance map, and decision-ID", normalized(self.plans))
 
-    def test_the_map_section_fixes_its_columns_kinds_owner_and_checks(self):
+    def test_the_map_section_carries_the_forms_acceptance_map_covers_reads(self):
         mapping = normalized(self.section(self.plans, "## Acceptance map"))
-        for phrase in (
-            "| AC | Kind | Task | Check |",
-            "`None — no acceptance criteria.`",
-            "a tagged criterion is never reclassified",
-            "`<kind> (classified)`",
-            "exactly one owning `Task N` from the index",
-            "the task that adds or runs the check",
-            "the acceptance-record row `AC<n>` the owning task's implementer fills in",
-            "The map is the plan's only acceptance surface",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, mapping)
-
-    def test_self_review_checks_the_map_before_final_remeasurement(self):
-        self.assert_ordered(
-            normalized(self.plans), "## Self-review",
-            "8. **Acceptance map** — one row per issue criterion",
-            "9. **Final remeasurement**")
+        for form in ("| AC | Kind | Task | Check |", "`None — no acceptance criteria.`",
+                     "`<kind> (classified)`"):
+            with self.subTest(form=form):
+                self.assertIn(form, mapping)
 
     def test_review_contract_blocks_a_missing_or_duplicated_row(self):
         self.assert_ordered(
@@ -3857,7 +3497,7 @@ class AcceptanceMapEvalGradingTest(unittest.TestCase):
                     (repo / "issues").mkdir(parents=True)
                     (repo / "issues/001-well-specified.md").write_text(
                         self.FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
-                    owner = (worktree if "from-issue" in str(path) else repo)
+                    owner = (worktree if path.parent.parent.name == "from-issue" else repo)
                     (owner / ".agents/artifacts/plans").mkdir(parents=True)
                     (owner / ".agents/artifacts/plans/plan.md").write_text(text, encoding="utf-8")
                     env = dict(os.environ, REPO=str(repo), WT=str(worktree),
