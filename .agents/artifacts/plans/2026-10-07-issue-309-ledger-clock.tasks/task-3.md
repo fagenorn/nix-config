@@ -14,7 +14,7 @@
 - A contract input without `now` gets `now = format_utc(ledger_clock())` before the builder runs. The sealed `provenance.created_at` is that value. The builder (`workflow_delivery_build.py`) is not edited and stays pure (D5).
 - A supplied `now` that is a string and parses with `parse_utc` is skew-checked with the label `contract now`. A non-string or malformed value reaches the builder unchanged, so its refusal text is unchanged (D12).
 - The skew refusal exits 2 with empty stdout and the exact `SKEW` line on stderr.
-- The help text and `CLAUDE.md` state the one clock read. No other "read-only" wording changes.
+- The help text and `CLAUDE.md` state the contract-`now` clock read (stamping an omitted one, skew-checking a supplied one). No other "read-only" wording changes.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -23,8 +23,9 @@ In `DeliveryBuilderTest`, change the existing case that expects a contract input
 In `WorktreePolicyTest.test_help_states_the_contract_resolution_root`, replace the clause `"It takes no lock, reads no clock and writes nothing.",` with:
 
 ```python
-                "It takes no lock and writes nothing, and it reads the clock only to stamp "
-                "a --kind contract input that omits now.",
+                "It takes no lock and writes nothing, and it reads the clock only for a "
+                "--kind contract input's now: to stamp an omitted one and to skew-check a "
+                "supplied one.",
 ```
 
 Append to `DeliveryBuilderTest`:
@@ -92,9 +93,9 @@ def stamp_contract_input(value: dict[str, Any]) -> None:
 
 2. In `command_build_delivery`, right after `value = load_json_request(args.input, "builder input")`, add `if args.kind == "contract" and isinstance(value, dict): stamp_contract_input(value)`.
 
-3. Change the docstring's first line to `"""Print one sealed delivery value: no lock and no write, and a clock read only to stamp a contract input that omits ``now`` (#309 D5)."""`. In the `build-delivery` parser description, replace `"It takes no lock, reads no clock and writes nothing. "` with `"It takes no lock and writes nothing, and it reads the clock only to stamp a --kind contract input that omits now. "`.
+3. Change the docstring's first line to `"""Print one sealed delivery value: no lock and no write, and a clock read only for a contract input's ``now``: to stamp an omitted one and to skew-check a supplied one (#309 D5)."""`. In the `build-delivery` parser description, replace `"It takes no lock, reads no clock and writes nothing. "` with `"It takes no lock and writes nothing, and it reads the clock only for a --kind contract input's now: to stamp an omitted one and to skew-check a supplied one. "`.
 
-4. In `CLAUDE.md`, in the "Delivery objects are built, never hand-composed" bullet, replace `It is read-only — no lock, clock or write.` with `It is read-only — no lock or write; it reads the clock only to stamp a \`--kind contract\` input that omits \`now\`.`.
+4. In `CLAUDE.md`, in the "Delivery objects are built, never hand-composed" bullet, replace `It is read-only — no lock, clock or write.` with `It is read-only — no lock or write; it reads the clock only for a \`--kind contract\` input's \`now\`, to stamp an omitted one and to skew-check a supplied one.`.
 
 - [ ] **Step 4: Verify**
 

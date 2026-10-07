@@ -104,7 +104,7 @@ class LedgerClockSeamTest(LifecycleHarness, unittest.TestCase):
                 self.assertEqual(self.sites(path), [])
 ```
 
-In `test_delivery_workflow.py`, add these imports: `from datetime import datetime, timedelta, timezone` and `from .test_workflow_state import LifecycleHarness`. Add these module constants after `SLUGLESS`:
+In `test_delivery_workflow.py`, add the imports `import fcntl` and `from datetime import datetime, timedelta, timezone`. Do not import `.test_workflow_state` as a package module: it imports `.test_delivered_control`, which imports this file, so a package import is a cycle that breaks collection (per D13). Instead, right after the module's `load` function, bind `LifecycleHarness = load(Path(__file__).with_name("test_workflow_state.py"), "delivery_workflow_lifecycle_harness").LifecycleHarness` — the standalone load `tests/test_launch_commit.py` already uses, in which `test_workflow_state` skips its `.test_delivered_control` import. Add these module constants after `SLUGLESS`:
 
 ```python
 CLOCK_ENV = "WORKFLOW_STATE_TEST_CLOCK"
@@ -191,6 +191,31 @@ class LedgerClockTest(LifecycleHarness, unittest.TestCase):
                                            "--worker-id", worker, "--event", "returned").stdout)
         self.assertEqual(released["released"], [worker])
         self.assertEqual(self.read_state()["updated_at"], at_bound)
+
+    def test_an_omitted_time_is_read_after_the_ledger_lock(self):
+        # D7: another writer may advance the ledger while this command waits for the
+        # lock. The in-process runner patches os.environ with cli_env, so a flock
+        # wrapper can move the pinned clock at the moment the lock is taken.
+        self.pin()
+        self.run_cli("init-run", *self.run_args)
+        # TODO(execute): reach a ledger whose updated_at is PINNED and on which a
+        # no-`--now` flag write is otherwise valid (e.g. register-worker, then the
+        # release-worker below), using this class's existing helpers.
+        self.pin(self.at(PINNED, -600))
+        later = self.at(PINNED, 30)
+        real_flock = fcntl.flock
+
+        def flock_then_advance(descriptor, operation):
+            real_flock(descriptor, operation)
+            if operation & fcntl.LOCK_EX:
+                os.environ[CLOCK_ENV] = later
+
+        with mock.patch("fcntl.flock", side_effect=flock_then_advance):
+            completed = self.run_cli(...)  # the no-`--now` flag write chosen above
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self.read_state()["updated_at"], later)
+        # A clock read before the lock would have seen PINNED-600s and been refused
+        # as moving backward.
 
     def test_every_flag_command_without_a_time_stamps_the_clock(self):
         self.run_cli("init-run", *self.run_args)

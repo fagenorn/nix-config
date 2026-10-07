@@ -91,6 +91,15 @@ Append these methods to `LedgerClockTest`:
         self.assert_clock_stamp(json.loads(
             self.direct_state_path("direct-73-000001").read_text(encoding="utf-8"))["updated_at"])
 
+    def test_control_reads_an_omitted_now_after_the_ledger_lock(self):
+        # D7, as in Task 1's lock-order test: seed the run at PINNED, re-pin the
+        # override to PINNED-600s, and patch fcntl.flock so a LOCK_EX acquisition
+        # sets os.environ[CLOCK_ENV] to PINNED+30s. A control request without `now`
+        # then succeeds and the run's updated_at (and the response's `now`) is
+        # exactly PINNED+30s. Do the same for one direct-owner request without `now`
+        # against a direct run seeded at PINNED.
+        ...  # TODO(execute): write from Task 1's lock-order test and this class's helpers.
+
     def test_a_pinned_clock_stamps_control_exactly(self):
         self.pin()
         self.run_cli("init-run", *self.run_args)

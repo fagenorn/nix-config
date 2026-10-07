@@ -20,18 +20,22 @@
   - override: `invalid WORKFLOW_STATE_TEST_CLOCK: expected an RFC3339 UTC timestamp` and `invalid WORKFLOW_STATE_TEST_CLOCK: <value> is later than the clock <clock>`.
 - Skill-text pins are on argv tokens, JSON keys and carrier clauses only. No new English-phrase pin (agent-helpers rule 6, D9, D10).
 - Test commands run from the worktree root, in the foreground, as `PYTHONPATH="$PWD/python" python3 -m unittest <file> [-k <pattern>]`, with a timeout of at least 600 s.
-- The final gate runs once on the final head: `just build` and `just agent-workflow-tests` (each with a 3600 s timeout), plus `just agent-instruction-budget`. The PR carries the `instruction-budget-raise` label only if Task 4 or Task 5 had to raise a ceiling.
+- The final gate runs once on the final head: `just build` and `just agent-workflow-tests` (each with a 3600 s timeout), plus `just agent-instruction-budget` — or, when Task 4 or Task 5 raised a ceiling, `just agent-instruction-budget --raise-label`. The PR carries the `instruction-budget-raise` label only if Task 4 or Task 5 had to raise a ceiling.
 
 ## Test seams
 
 - `LedgerClockSeamTest` in `home/common/agent-skills/tests/test_workflow_state.py`: CLI runs through `LifecycleHarness.run_cli`, plus an `ast` scan of the `workflow-state` sources (spec Test seams 4).
-- `LedgerClockTest` in `home/common/agent-skills/tests/test_delivery_workflow.py`. It reuses `LifecycleHarness`, imported from `.test_workflow_state`, whose `run_cli` passes `cli_env` into the in-process runner. The override goes in through `self.cli_env` (spec Test seams 1–3).
+- `LedgerClockTest` in `home/common/agent-skills/tests/test_delivery_workflow.py`. It reuses `LifecycleHarness`, loaded from `test_workflow_state.py` as a standalone module (D13), whose `run_cli` passes `cli_env` into the in-process runner. The override goes in through `self.cli_env` (spec Test seams 1–3).
 - `DeliveryBuilderTest` in `test_delivery_workflow.py` for the contract stamp. `BuilderHarness.cli` copies `os.environ`, so the override goes in through `mock.patch.dict(os.environ, …)`.
 - Skill pins in `test_workflow_skill_contracts.py`, `test_shell_example_contracts.py` and `test_dispatch_contracts.py`, plus the instruction gate (`just agent-instruction-budget`) and `test_instruction_load.py`.
 
 ## Delivery estimate and boundaries
 
 These are estimates. About 22 changed files: `workflow-state.py` (about +90/−40 lines), four test files (about +400 lines, mostly `LedgerClockTest`), about 13 skill documents (small deletions, plus nine copies of a 150-byte clause), `instruction-load.json` if a ceiling moves, and `CLAUDE.md` (two sentences). This is one slice, far from any review-package boundary.
+
+## Standards review provenance
+
+Reviewer: Codex (gpt-6-astra, xhigh), isolated read-only `plan-review`, no fallback. Base SHA `ef2c1cb8`. Findings: 4 accepted (B1 per D13, S1 per D14, S2 contract-`now` wording in Task 3, S3 conditional `--raise-label` in the final gate), 0 rejected, 0 deferred.
 
 ## Task index
 
