@@ -2129,8 +2129,11 @@ class HelperInputTest(BuilderHarness, unittest.TestCase):
 
 
 URL = "https://github.com/fagenorn/nix-config/pull/5"
+HELD_COMMENT = "https://github.com/fagenorn/nix-config/issues/171#issuecomment-1"
+HELD_RECORD = ".claude/plans/2026-09-21-issue-171.acceptance.md"
 SOURCES = {"selected_output": "repository", "branch_published": "repository",
            "pr_opened": "provider", "pr_merged": "provider", "tracker_closed": "tracker",
+           "tracker_held": "tracker",
            "remote_branch_absent": "repository", "worktree_absent": "filesystem",
            "local_branch_absent": "repository", "implementation_delivered": "repository",
            "cleanup_complete": "filesystem"}
@@ -2241,7 +2244,8 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
                                  (2, b"", self.NOT_INSTALLED))
         self.assertFalse(os.path.lexists(self.root / ".superpowers"))
 
-    def deliver(self, proposed, *, hand_built=False):
+    def deliver(self, proposed, *, hand_built=False, tracker="tracker_closed",
+                issue_closed=None):
         """Drive one implementation custody through every stage with builder outputs only.
 
         With `hand_built`, the installed contract is `hand_built`'s: it is
@@ -2286,8 +2290,13 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
             "open_pr": [self.observed("pr_opened", pr_number=5, pr_url=URL, head=head)],
             "merge_pr": [self.observed("pr_merged", pr_number=5, pr_url=URL, head=head,
                                        merge_sha=merge_sha)],
-            "close_tracker": [self.observed("tracker_closed", close_reason="completed",
-                                            observation_identity="github:issue:171:closed")],
+            "close_tracker": [self.observed(tracker, **({
+                "close_reason": "completed",
+                "observation_identity": "github:issue:171:closed"}
+                if tracker == "tracker_closed" else {
+                "comment_url": HELD_COMMENT, "record_path": HELD_RECORD,
+                "acceptance_state": "unmet",
+                "observation_identity": "github:issue:171:held"}))],
             "delete_remote_branch": [self.observed("remote_branch_absent")],
             "remove_worktree": [self.observed("worktree_absent")],
             "delete_local_branch": [self.observed("local_branch_absent")]}
@@ -2323,9 +2332,11 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
                           worktree_observation_ids=[by_kind["worktree_absent"]],
                           detail_pointer=".superpowers/issue-delivery/171/detail.json",
                           read_evidence="detail read")]
+        closed = (tracker == "tracker_closed") if issue_closed is None else issue_closed
         historical = {"issue": 171, "state": "merged", "pr_url": URL, "merge_sha": merge_sha,
-            "issue_closed": True, "discussion_items": [], "detail_state": "none",
-            "report_path": None, "notes": "delivered"}
+            "issue_closed": closed, "discussion_items": [], "detail_state": "none",
+            "report_path": None,
+            "notes": "delivered" if closed else f"held for verification: {HELD_COMMENT}"}
         summary = {"interface_version": 2, "issue": 171, "state": "delivery_complete",
             "custody": self.custody, "historical_owner_result": historical,
             "delivery_contract_digest": self.digest,
@@ -2334,6 +2345,14 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
             "detail_state": "none", "report_path": None, "notes": "delivered"}
         validated = self.validated("ship-summary", summary)
         self.assertLessEqual(len(validated), policy["phase_reports"]["wire_max_bytes"])
+        if closed is not (tracker == "tracker_closed"):
+            before = state.read_bytes()
+            refused = self.cli("finish", *self.run_args, "--now", LATER,
+                               "--summary-file", "-", stdin=validated, ok=False)
+            self.assertEqual((refused.returncode, state.read_bytes()), (2, before))
+            # `_call` swallows the ValueError text, so the refusal is the generic line.
+            self.assertEqual(refused.stderr, b"workflow-state: delivery finish refused\n")
+            return
         finished = json.loads(self.cli("finish", *self.run_args, "--now", LATER,
             "--summary-file", "-", stdin=validated).stdout)
         self.assertEqual((finished["kind"], finished["pending_stage_ids"]),
@@ -2341,6 +2360,23 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
         stored = json.loads(state.read_text(encoding="utf-8"))["issues"]["171"]
         self.assertEqual(len(stored["delivery"]["authorization_intents"]), 1)
         self.assertEqual(stored["attempts"][-1]["state"], "merged")
+        self.assertIs(stored["attempts"][-1]["result"]["issue_closed"], closed)
+        held_id = stored["delivery"]["postconditions"]["tracker_closed"]["observation_id"]
+        self.assertEqual(next(item["observation_kind"]
+                              for item in stored["delivery"]["delivery_observations"]
+                              if item["id"] == held_id), tracker)
+
+    def test_a_held_delivery_completes_with_issue_closed_false(self):
+        """#273: tracker_held satisfies close_tracker; the owner row says not closed."""
+        self.deliver({"merge_pr", "close_tracker", "remove_worktree", "delete_local_branch"},
+                     tracker="tracker_held")
+
+    def test_finish_refuses_an_issue_closed_that_disagrees_with_the_tracker(self):
+        """#273 D6, D17: the historical row agrees with the observed tracker outcome."""
+        for tracker, closed in (("tracker_held", True), ("tracker_closed", False)):
+            with self.subTest(tracker=tracker, issue_closed=closed):
+                self.deliver({"merge_pr", "close_tracker", "remove_worktree",
+                              "delete_local_branch"}, tracker=tracker, issue_closed=closed)
 
     def test_every_builder_scope_is_covered_when_its_stage_is_ready(self):
         self.deliver({"select_reviewed_output", "publish_branch", "open_pr", "merge_pr",

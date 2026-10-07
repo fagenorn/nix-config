@@ -22,6 +22,18 @@ _STAGE_ACTIONS = {
 }
 STAGE_ACTIONS = MappingProxyType(_STAGE_ACTIONS)
 _POSTCONDITIONS = ("implementation_delivered", "pr_merged", "tracker_closed", "cleanup_complete")
+_EXTRA_STAGE_KINDS = {"close_tracker": ("tracker_held",)}
+_EXTRA_POSTCONDITION_KINDS = {"tracker_closed": ("tracker_held",)}
+_STAGE_OBSERVATION_KINDS = MappingProxyType({
+    kind: frozenset({actions[2], *_EXTRA_STAGE_KINDS.get(kind, ())})
+    for kind, actions in _STAGE_ACTIONS.items()})
+_POSTCONDITION_OBSERVATION_KINDS = MappingProxyType({
+    name: frozenset({name, *_EXTRA_POSTCONDITION_KINDS.get(name, ())})
+    for name in _POSTCONDITIONS})
+OBSERVATION_KINDS = frozenset().union(*_STAGE_OBSERVATION_KINDS.values(),
+                                      *_POSTCONDITION_OBSERVATION_KINDS.values())
+_HOLD_LABEL = "needs-verification"
+_HOLD_ACCEPTANCE = frozenset({"unmet", "human_pending"})
 _EVIDENCE_IDS = ("acceptance_evidence_ids", "review_evidence_ids", "test_evidence_ids")
 
 
@@ -301,7 +313,7 @@ def _delivery_observation(value: Any, notes_max: int) -> dict[str, Any]:
     _digest(value["contract_digest"], "observation contract")
     project = _object(value["project"], _members("project_id provider repository_id repository_slug"))
     for item in project.values(): _string(item, "observation project value")
-    if value["observation_kind"] not in {item[2] for item in _STAGE_ACTIONS.values()} | set(_POSTCONDITIONS): _reject()
+    if value["observation_kind"] not in OBSERVATION_KINDS: _reject()
     if not isinstance(value["subject"], dict) or not value["subject"]: _reject()
     source = _object(value["source"], _members("kind reference"))
     if source["kind"] not in {"provider", "tracker", "repository", "filesystem", "human_completion"}: _reject()
@@ -326,6 +338,13 @@ def _delivery_observation(value: Any, notes_max: int) -> dict[str, Any]:
         if subject["state"] != "closed": _reject()
         if subject["close_reason"] is not None: _string(subject["close_reason"], "close reason")
         _string(subject["observation_identity"], "tracker observation identity")
+    elif kind == "tracker_held":
+        _object(subject, _members("tracker_repository_id issue state label comment_url record_path acceptance_state observation_identity")); _integer(subject["issue"], "tracker issue", minimum=1)
+        _string(subject["tracker_repository_id"], "tracker repository"); _string(subject["comment_url"], "hold comment"); _string(subject["observation_identity"], "tracker observation identity")
+        if subject["state"] != "open" or subject["label"] != _HOLD_LABEL: _reject()
+        if not (isinstance(subject["acceptance_state"], str) and subject["acceptance_state"] in _HOLD_ACCEPTANCE): _reject()
+        record_path = _string(subject["record_path"], "hold record path")
+        if record_path.startswith("/") or "\\" in record_path or ".." in record_path.split("/"): _reject()
     elif kind in {"remote_branch_absent", "local_branch_absent"}:
         _object(subject, _members("repository_id branch absent")); _string(subject["repository_id"], "branch repository"); _string(subject["branch"], "absent branch"); _boolean(subject["absent"], "absent")
         if not subject["absent"]: _reject()
@@ -526,6 +545,13 @@ def _selected_head(delivery: dict[str, Any], selected: dict[str, Any]) -> str | 
     return next(iter(heads)) if heads else None
 
 
+def _tracker_outcome_matches(contract: dict[str, Any], item: dict[str, Any]) -> bool:
+    subject = item["subject"]
+    return subject["tracker_repository_id"] == contract["project"]["repository_id"] \
+        and subject["issue"] == contract["issue"] \
+        and subject["state"] == ("open" if item["observation_kind"] == "tracker_held" else "closed")
+
+
 def _stage_observation_matches(contract: dict[str, Any], delivery: dict[str, Any],
                                stage: dict[str, Any], item: dict[str, Any]) -> bool:
     subject = item["subject"]; selected = _selection_for_stage(contract, delivery, stage)
@@ -563,7 +589,7 @@ def _stage_observation_matches(contract: dict[str, Any], delivery: dict[str, Any
         return valid
     target = stage["target_ref"].get("value")
     if stage["kind"] == "close_tracker":
-        return subject["tracker_repository_id"] == repo and subject["issue"] == contract["issue"] and subject["state"] == "closed"
+        return _tracker_outcome_matches(contract, item)
     if stage["kind"] in {"delete_remote_branch", "delete_local_branch"}:
         return subject["repository_id"] == repo and subject["branch"] == target and subject["absent"] is True
     if stage["kind"] == "remove_worktree":
@@ -575,8 +601,7 @@ def _postcondition_observation_matches(contract: dict[str, Any], delivery: dict[
                                        kind: str, item: dict[str, Any]) -> bool:
     subject = item["subject"]
     if kind == "tracker_closed":
-        return subject["tracker_repository_id"] == contract["project"]["repository_id"] \
-            and subject["issue"] == contract["issue"] and subject["state"] == "closed"
+        return _tracker_outcome_matches(contract, item)
     if kind == "implementation_delivered":
         selected = [candidate for candidate in delivery["selected_outputs"]
                     if candidate["contract_digest"] == delivery["contract_digest"]

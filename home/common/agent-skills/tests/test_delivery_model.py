@@ -133,6 +133,7 @@ class DeliveryModelTest(unittest.TestCase):
                 "MODEL_INTERFACE_VERSION", "DeliveryModelError", "canonical_bytes",
                 "canonical_digest", "validate_delivery_object", "validate_custody_ref",
                 "match_scope", "current_selection", "reduce_delivery", "STAGE_ACTIONS",
+                "OBSERVATION_KINDS",
             })
             self.assertEqual(set(Path(raw).iterdir()), before)
             self.assertFalse(hasattr(module, "main"))
@@ -1436,6 +1437,122 @@ class DeliveryModelTest(unittest.TestCase):
         self.assertIn("source = ./scripts/delivery_model;", nix)
         self.assertIn("recursive = false;", nix)
         self.assertIn("test_delivery_model.py", (ROOT / "justfile").read_text(encoding="utf-8"))
+
+
+class TrackerHeldModelTest(unittest.TestCase):
+    """#273 D1-D4: a tracker_held observation satisfies close_tracker and tracker_closed."""
+
+    HELD = {"tracker_repository_id": "sim-repo", "issue": 151, "state": "open",
+            "label": "needs-verification",
+            "comment_url": "https://sim.invalid/issues/151#issuecomment-1",
+            "record_path": ".agents/artifacts/plans/2026-10-07-x.acceptance.md",
+            "acceptance_state": "unmet",
+            "observation_identity": "github:issue:151:held"}
+    CLOSED = {"tracker_repository_id": "sim-repo", "issue": 151, "state": "closed",
+              "close_reason": "completed", "observation_identity": "tracker:151:closed"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = load_model(SOURCE, "delivery_model_tracker_held_test")
+
+    def merged(self):
+        contract, delivery = cleanup_contract_and_delivery(self.model)
+        return contract, with_observed(self.model, contract, delivery,
+                                       ["select", "publish", "open", "merge"])
+
+    def reduce_with(self, contract, delivery, *items):
+        candidate = copy.deepcopy(delivery)
+        candidate["delivery_observations"] = sorted(
+            candidate["delivery_observations"] + list(items), key=lambda item: item["id"])
+        return self.model.reduce_delivery(contract, candidate, evaluation=evaluation())
+
+    def assert_rejected(self, item):
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.model.validate_delivery_object(
+                item, expected_kind="delivery-observation", notes_max_characters=4096)
+
+    def test_the_observable_set_adds_tracker_held_and_keeps_the_stage_tuple(self):
+        self.assertIn("tracker_held", self.model.OBSERVATION_KINDS)
+        self.assertIn("tracker_closed", self.model.OBSERVATION_KINDS)
+        self.assertEqual(self.model.STAGE_ACTIONS["close_tracker"],
+                         ("close_issue", "tracker_write", "tracker_closed"))
+        self.assertEqual(
+            self.model.OBSERVATION_KINDS - {"tracker_held"},
+            {item[2] for item in self.model.STAGE_ACTIONS.values()}
+            | {"implementation_delivered", "pr_merged", "tracker_closed", "cleanup_complete"})
+
+    def test_a_held_observation_folds_close_tracker_and_the_postcondition(self):
+        contract, delivery = self.merged()
+        for acceptance in ("unmet", "human_pending"):
+            with self.subTest(acceptance=acceptance):
+                held = observation(self.model, contract, "tracker_held",
+                                   {**self.HELD, "acceptance_state": acceptance})
+                reduced = self.reduce_with(contract, delivery, held)
+                self.assertEqual(stage_state(reduced, "close"), "observed")
+                self.assertEqual(post_state(reduced, "tracker_closed"), "observed")
+                self.assertEqual(
+                    reduced["next_delivery"]["postconditions"]["tracker_closed"]
+                    ["observation_id"], held["id"])
+                fact = next(item for item in reduced["next_delivery"]["stage_facts"]
+                            if item["stage_id"] == "close")
+                self.assertEqual(fact["observation_id"], held["id"])
+
+    def test_a_closed_observation_still_folds_close_tracker(self):
+        contract, delivery = self.merged()
+        closed = observation(self.model, contract, "tracker_closed", self.CLOSED)
+        reduced = self.reduce_with(contract, delivery, closed)
+        self.assertEqual((stage_state(reduced, "close"),
+                          post_state(reduced, "tracker_closed")), ("observed", "observed"))
+
+    def test_malformed_held_subjects_are_rejected(self):
+        contract, _ = self.merged()
+        changes = {
+            "closed state": {"state": "closed"},
+            "other label": {"label": "verify"},
+            "met": {"acceptance_state": "met"},
+            "not applicable": {"acceptance_state": "not_applicable"},
+            "unknown acceptance": {"acceptance_state": "pending"},
+            "array acceptance": {"acceptance_state": ["unmet"]},
+            "object acceptance": {"acceptance_state": {"unmet": True}},
+            "absolute record": {"record_path": "/abs/x.acceptance.md"},
+            "parent record": {"record_path": "plans/../x.acceptance.md"},
+            "backslash record": {"record_path": "plans\\x.acceptance.md"},
+            "empty record": {"record_path": ""},
+            "null record": {"record_path": None},
+            "empty comment": {"comment_url": ""},
+            "empty identity": {"observation_identity": ""},
+            "issue zero": {"issue": 0},
+            "boolean issue": {"issue": True},
+        }
+        for label, change in changes.items():
+            with self.subTest(label=label):
+                self.assert_rejected(observation(self.model, contract, "tracker_held",
+                                                 {**self.HELD, **change}))
+        missing = {key: value for key, value in self.HELD.items() if key != "record_path"}
+        for label, subject in (("extra member", {**self.HELD, "close_reason": None}),
+                               ("missing member", missing)):
+            with self.subTest(label=label):
+                self.assert_rejected(observation(self.model, contract, "tracker_held",
+                                                 subject))
+
+    def test_a_foreign_held_subject_leaves_the_stage_pending(self):
+        contract, delivery = self.merged()
+        for label, change in (("foreign issue", {"issue": 152}),
+                              ("foreign repository", {"tracker_repository_id": "other"})):
+            with self.subTest(label=label):
+                foreign = observation(self.model, contract, "tracker_held",
+                                      {**self.HELD, **change})
+                reduced = self.reduce_with(contract, delivery, foreign)
+                self.assertEqual((stage_state(reduced, "close"),
+                                  post_state(reduced, "tracker_closed")),
+                                 ("pending", "pending"))
+
+    def test_held_and_closed_in_one_delivery_reject(self):
+        contract, delivery = self.merged()
+        held = observation(self.model, contract, "tracker_held", self.HELD)
+        closed = observation(self.model, contract, "tracker_closed", self.CLOSED)
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.reduce_with(contract, delivery, held, closed)
 
 
 if __name__ == "__main__":
