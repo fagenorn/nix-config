@@ -142,8 +142,7 @@ SDD_MACHINE_TEXT = {
     SDD: (
         "validate-report --boundary sdd", 'detail_state: "none"', "report_path: null",
         "validate-detail-input", 'detail_state: "unpublished"',
-        "scripts/task-brief PLAN_FILE N", PRODUCER_VALIDATION, WHOLE_FILE_POLICY,
-        "member_count", "aggregate_bytes",
+        "scripts/task-brief PLAN_FILE N", PRODUCER_VALIDATION,
         "`<primary-checkout>/.superpowers/sdd/<checkout-bucket>/<plan-basename>/`",
         "workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> "
         "--action-id <action_id>",
@@ -1303,7 +1302,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_durable_review_detail_precedes_every_removable_cleanup(self):
         self.assertIn(".superpowers/issue-delivery/", self.sdd)
         self.assertIn(".superpowers/issue-delivery/", self.ship_review)
-        for text in (self.sdd, self.ship_review, self.ship_issue):
+        for text in (self.ship_review, self.ship_issue):
             self.assertIn("report_path", text)
             self.assertIn("keep the worktree", text)
 
@@ -1324,12 +1323,13 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertEqual(expected[("implementation-plan", "plan-ninth-member")], "decompose_required")
         self.assertEqual(expected[("handoff", "handoff-root-plus-one")], "stopped")
         self.assertEqual(expected[("review-package", "review-member-plus-one")], "decompose_required")
-        for text in (self.from_issue, self.sdd):
+        for text in (self.from_issue,):
             self.assertIn("complete", text)
             self.assertIn("within_budget", text)
             self.assertIn("contract error", text)
         for value in ("complete", "within_budget"):
             self.assertIn(value, self.auto)
+            self.assertIn(value, self.sdd)
 
     def test_owner_persists_exact_terminal_result_before_return(self):
         owner_return_section = self.section(
@@ -2076,7 +2076,7 @@ class InterimChildResultContractsTest(unittest.TestCase):
     """#261: an owner treats a child's interim return as still running."""
 
     HEAD = "**Interim child results.**"
-    OWNERS = (FROM_ISSUE, SDD, SHIP_ISSUE)
+    OWNERS = (FROM_ISSUE, SHIP_ISSUE)
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -2103,7 +2103,7 @@ class InterimChildResultContractsTest(unittest.TestCase):
 
     def test_the_paragraph_copies_stay_identical(self):
         canonical = self.paragraph(FROM_ISSUE)
-        for path in (SDD, SHIP_ISSUE):
+        for path in (SHIP_ISSUE,):
             with self.subTest(path=path.parent.name):
                 self.assertEqual(self.paragraph(path), canonical)
 
@@ -2127,7 +2127,6 @@ class InterimChildResultContractsTest(unittest.TestCase):
     def test_each_copy_sits_in_its_owner_section(self):
         for path, start, end in (
             (FROM_ISSUE, "**Writing workers.**", "## Terminal return procedure"),
-            (SDD, "### 2. Handle the report", "### 3. Review the task"),
             (SHIP_ISSUE, "## Phase 5 — Review the PR", "## Phase 6 — Wait for CI"),
         ):
             with self.subTest(path=path.parent.name):
