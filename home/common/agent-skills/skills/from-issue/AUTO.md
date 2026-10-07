@@ -112,7 +112,7 @@ beyond the exceptions named below):
   commit through `launch-commit` with its three values,
 - the self-answer pattern above and the `## Decision ledger` table format with its non-obvious-only
   filter, pasted verbatim from `decision-ledger.md`,
-- the three clauses of `SKILL.md`'s **Leaf-agent clauses** rule, verbatim, as a paragraph of their own,
+- the four clauses of `SKILL.md`'s **Leaf-agent clauses** rule, verbatim, as a paragraph of their own,
 - the fixed return schema, with "details live in the committed files, not in your report".
 
 **Skill exception.** Each subagent *should* invoke, through its own `Skill` tool, the globally

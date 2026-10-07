@@ -379,6 +379,8 @@ Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_backg
 > expected duration. If the host moves one to the background anyway, wait for it
 > within the same turn: never end your turn while a command you started is still
 > running.
+> Never write an `until` or `while` loop around `sleep` to wait for something: if
+> a wait is truly needed, run one bounded foreground `sleep N`, then check once.
 >
 > Persist the terminal result through `from-issue`'s terminal return procedure,
 > whose `workflow-state finish --summary-file -` is the durable write, then

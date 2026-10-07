@@ -97,6 +97,8 @@ you cannot see. Run each long command, every verification command included, in
 the foreground with an explicit timeout above its expected duration. If the host
 moves one to the background anyway, wait for it within the same turn: never end
 your turn while a command you started is still running.
+Never write an `until` or `while` loop around `sleep` to wait for something: if a
+wait is truly needed, run one bounded foreground `sleep N`, then check once.
 
 Return exactly canonical JSON from `artifact-budget validate-report --boundary ship-summary`.
 One exception comes first, before any change: when ship-issue's Phase-0
@@ -179,9 +181,9 @@ denial the loop checkpointed, which already suspended this custody, return only
 the re-entry line ship-issue prints; after a `delivery_stalled` checkpoint
 reply, return that validated reply.
 
-<the three leaf-agent clauses of the ship-owner prompt above, verbatim>
+<the four leaf-agent clauses of the ship-owner prompt above, verbatim>
 ```
 
-The placeholder line stands for those three clauses copied verbatim as a
+The placeholder line stands for those four clauses copied verbatim as a
 paragraph of their own; they are spelled once in this file, inside the
 ship-owner prompt.
