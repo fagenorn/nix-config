@@ -209,6 +209,30 @@ class EvalCasesTest(unittest.TestCase):
             with self.subTest(case="a qualified Run label beside backticked filenames"):
                 done = plan_tasks_verifiable(root)
                 self.assertEqual(done.returncode, 0, done.stdout)
+            root.write_text("# Plan\n\n## Task index\n\n"
+                            "Task 1 — x — f — full — [task-1.md](p.tasks/task-1.md)\n"
+                            "Task 2 — y — g — full\n\n## Acceptance map\n", encoding="utf-8")
+            with self.subTest(case="an index row that lost its member link"):
+                done = plan_tasks_verifiable(root)
+                self.assertNotEqual(done.returncode, 0, done.stdout)
+                self.assertIn("Task 2", done.stdout)
+            root.write_text("# Plan\n\n## Task index\n\n"
+                            "Task 1 — x — f — full — [task-1.md](p.tasks/task-1.md)\n\n"
+                            "## Acceptance map\n", encoding="utf-8")
+            with self.subTest(case="a member on disk that the index never links"):
+                done = plan_tasks_verifiable(root)
+                self.assertNotEqual(done.returncode, 0, done.stdout)
+                self.assertIn("task-2.md", done.stdout)
+            root.write_text("# Plan\n\n## Task index\n\n"
+                            "Task 2 — y — g — full — [task-2.md](p.tasks/task-2.md)\n"
+                            "Task 2 — y — g — full — [task-2.md](p.tasks/task-2.md)\n\n"
+                            "## Acceptance map\n", encoding="utf-8")
+            with self.subTest(case="members not numbered contiguously from 1"):
+                self.assertNotEqual(plan_tasks_verifiable(root).returncode, 0)
+            root.write_text(index, encoding="utf-8")
+            with self.subTest(case="the full index still passes"):
+                done = plan_tasks_verifiable(root)
+                self.assertEqual(done.returncode, 0, done.stdout)
             root.write_text("# Plan\n\n## Task index\n\nnone\n", encoding="utf-8")
             with self.subTest(case="an index that links no member"):
                 self.assertNotEqual(plan_tasks_verifiable(root).returncode, 0)

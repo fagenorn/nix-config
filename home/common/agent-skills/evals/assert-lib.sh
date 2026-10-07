@@ -87,26 +87,49 @@ ledger_has_rows() {
 # that opens with a `Run` label (`Run: `, `**Run:**`, `Run, from outside the tree:`),
 # or a fenced block whose nearest non-blank line above it carries `Run` or `Verify`.
 # A backticked filename, a backticked expected value or a fenced commit or code step is
-# not one. An index that links no member
-# fails. A root without one is a legacy single-file plan, graded by its `### Task N`
-# sections (Expected/Verify/Acceptance/Assert).
+# not one. The index must cover every task: each non-blank index row links exactly one
+# member, the members are numbered contiguously from 1 with one row each, and every
+# `task-N.md` in a linked `.tasks/` directory is linked, so a task whose row lost its
+# link cannot drop out of grading. An index that links no member fails. A root without
+# one is a legacy single-file plan, graded by its `### Task N` sections
+# (Expected/Verify/Acceptance/Assert).
 plan_tasks_verifiable() {
   local file="$1" dir member members bad=0
   [ -f "$file" ] || fail "not a file: $file" || return 1
   members=$(awk '
     tolower($0) == "## task index" { inside = 1; found = 1; next }
     inside && /^## / { inside = 0 }
-    inside {
-      while (match($0, /\]\([^)]*\.tasks\/task-[0-9]+\.md\)/)) {
-        print substr($0, RSTART + 2, RLENGTH - 3)
-        $0 = substr($0, RSTART + RLENGTH)
+    inside && NF {
+      row = $0; links = 0
+      while (match(row, /\]\([^)]*\.tasks\/task-[0-9]+\.md\)/)) {
+        print substr(row, RSTART + 2, RLENGTH - 3)
+        row = substr(row, RSTART + RLENGTH); links++
       }
+      if (links != 1) print "@row " links " " $0
     }
     END { if (found) print "@index" }
   ' "$file")
   if [ -n "$members" ]; then
+    local rows numbers linked_dir extra
+    rows=$(grep '^@row ' <<<"$members")
+    members=$(grep -v '^@row ' <<<"$members")
     [ "$members" != "@index" ] || fail "the task index links no task member" || return 1
     dir=$(dirname "$file")
+    if [ -n "$rows" ]; then
+      printf 'index row does not link exactly one member: %s\n' "$(sed 's/^@row //' <<<"$rows")"; bad=1
+    fi
+    numbers=$(grep -v '^@index$' <<<"$members" | sed 's/.*task-\([0-9]*\)\.md$/\1/' | sort -n)
+    if [ "$numbers" != "$(seq 1 "$(grep -c . <<<"$numbers")")" ]; then
+      echo "index members are not numbered contiguously from 1 with one row each: $(tr '\n' ' ' <<<"$numbers")"; bad=1
+    fi
+    while IFS= read -r linked_dir; do
+      [ -d "$dir/$linked_dir" ] || continue
+      for extra in "$dir/$linked_dir"/task-*.md; do
+        [ -e "$extra" ] || continue
+        grep -qxF "$linked_dir/$(basename "$extra")" <<<"$members" \
+          || { echo "task member not linked from the index: $linked_dir/$(basename "$extra")"; bad=1; }
+      done
+    done < <(grep -v '^@index$' <<<"$members" | sed 's|/[^/]*$||' | sort -u)
     while IFS= read -r member; do
       [ "$member" = "@index" ] && continue
       if [ ! -f "$dir/$member" ]; then

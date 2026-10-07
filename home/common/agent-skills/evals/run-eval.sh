@@ -164,6 +164,20 @@ fi
 command -v claude >/dev/null || die "claude CLI is required"
 command -v git >/dev/null || die "git is required"
 
+# stop_claude_and_exit <code> — the INT/TERM trap: stop a claude run still in flight and
+# reap it before exiting, so cancelling the runner never leaves a model run spending.
+# The run is a background job the main shell `wait`s on, because bash defers a trapped
+# signal until a foreground command returns, which would let the run go on to
+# EVAL_TIMEOUT.
+CLAUDE_PID=""
+stop_claude_and_exit() {
+  if [ -n "$CLAUDE_PID" ]; then
+    kill -TERM "$CLAUDE_PID" 2>/dev/null
+    wait "$CLAUDE_PID" 2>/dev/null
+  fi
+  exit "$1"
+}
+
 # prepare_tree_env — build the temporary CLAUDE_CONFIG_DIR and command shims for EVAL_TREE.
 # Runs in the main shell, so a die here exits the runner and the EXIT trap removes the root.
 prepare_tree_env() {
@@ -172,8 +186,8 @@ prepare_tree_env() {
 
   TREE_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/run-eval-tree.XXXXXX") || die "mktemp failed"
   trap 'rm -rf -- "$TREE_ROOT"' EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  trap 'stop_claude_and_exit 130' INT
+  trap 'stop_claude_and_exit 143' TERM
   TREE_ROOT=$(cd "$TREE_ROOT" && pwd -P)
 
   local CONFIG="$TREE_ROOT/config" SHIM_BIN="$TREE_ROOT/bin"
@@ -349,8 +363,14 @@ run_trial() {
   echo "running: claude -p --model $EVAL_MODEL (timeout ${EVAL_TIMEOUT}s)"
   local start CLAUDE_EXIT
   start=$(date +%s)
-  ( cd "$REPO" && timeout "$EVAL_TIMEOUT" claude "${claude_args[@]}" ) >"$WORK/result.json" 2>"$WORK/stderr.txt"
+  # `exec` makes the job's pid timeout's own, so the trap's TERM reaches timeout, which
+  # passes it on to claude.
+  ( cd "$REPO" && exec timeout "$EVAL_TIMEOUT" claude "${claude_args[@]}" ) \
+    >"$WORK/result.json" 2>"$WORK/stderr.txt" </dev/null &
+  CLAUDE_PID=$!
+  wait "$CLAUDE_PID"
   CLAUDE_EXIT=$?
+  CLAUDE_PID=""
   # The transcript the asserts grep: the result text (raw stdout when no result object
   # parsed), then claude's stderr.
   if ! jq -er 'if type == "object" and (.result | type) == "string" then .result else error("no result") end' \

@@ -60,11 +60,13 @@ if [ -n "$cfg" ]; then
   jq -c 'keys' "$cfg/settings.json" >"$FAKE_STATE/settings-keys"
 fi
 if [ "${FAKE_HOLD:-}" = 1 ]; then
+  printf '%s\n' "$$" >"$FAKE_STATE/pid"
   : >"$FAKE_STATE/started"
   for _ in $(seq 1 300); do
     [ -e "$FAKE_STATE/release" ] && break
     sleep 0.1
   done
+  : >"$FAKE_STATE/finished"
 fi
 [ "${FAKE_EMPTY:-}" = 1 ] && exit "${FAKE_RUN_EXIT:-0}"
 cat <<'JSON'
@@ -252,11 +254,16 @@ for _ in $(seq 1 300); do
 done
 check "SIGTERM: the claude run started" test -e "$STATE/started"
 kill -TERM "$pid"
-: >"$STATE/release"
+# The fake is never released: the runner must stop it, not wait for it to finish.
 wait "$pid"
 status=$?
 CFG=$(recorded run_config_dir)
 check "SIGTERM: the runner exits 143" test "$status" -eq 143
+check "SIGTERM: the claude run was stopped, not left to finish" test ! -e "$STATE/finished"
+fake_pid=$(cat "$STATE/pid" 2>/dev/null)
+process_gone() { [ -n "$1" ] && ! kill -0 "$1" 2>/dev/null; }
+check "SIGTERM: the claude process is gone" process_gone "$fake_pid"
+: >"$STATE/release"
 check "SIGTERM: the temp root is gone" root_gone "$CFG"
 check "SIGTERM: no row was written" test "$(row_count)" -eq 0
 
