@@ -33,7 +33,7 @@ Run `git worktree list` and keep the entries whose bracketed branch field starts
 2. Read the references in the body: file paths, ADR numbers, commit SHAs, linked issues.
 3. Skim the map's area files and their `adr/` dirs for terms and decisions the issue touches.
 4. Grep the codebase for the concepts it names.
-5. Post a short investigation note covering: **Restatement** in your own words; **Relevant existing code** (paths + one-line role each); **Documented constraints** (context terms, ADRs, standards that bind the work); **Open questions**; **Suggested scope boundary** (in vs. deliberately out); **Scope-size estimate** (rough files + lines, and whether the mechanical-only shortcut applies).
+5. Post a short investigation note covering: **Restatement** in your own words; **Relevant existing code** (paths + one-line role each); **Documented constraints** (context terms, ADRs, standards that bind the work); **Open questions**; **Suggested scope boundary** (in vs. deliberately out); **Scope-size estimate** (rough files + lines, and whether the mechanical-only shortcut applies); **Lane triage** (Phase 0's record, verdict and `ran:` line, or "light lane unsupported").
 
 **Stops:** several issues bundled → stop and suggest `to-issues`; a question or a duplicate → report and stop. **Open questions is mandatory even in `--auto`** — self-answering happens in the spec's `## Decision ledger`; with nothing open, write "None — Phase 2 will surface anything missed".
 
