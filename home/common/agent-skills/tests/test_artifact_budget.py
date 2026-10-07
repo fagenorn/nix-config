@@ -23,6 +23,9 @@ FIXTURES = Path(__file__).parent / "fixtures/artifact-budgets"
 sys.path.insert(0, str(SCRIPT.parent))
 import artifact_budget
 
+# The closed acceptance_state set (#272 D8), spelled out so the test can fail.
+ACCEPTANCE = ("met", "unmet", "human_pending", "not_applicable")
+
 
 class ArtifactBudgetCliTest(unittest.TestCase):
     def test_describe_pins_exact_policy_bytes_for_every_operation(self):
@@ -659,11 +662,12 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                                  (b"", b"artifact-budget: invalid report\n"))
 
     def make_sdd(self, state, review, conformance, correctness, verification,
-                 base, head, detail_state, report_path):
+                 base, head, detail_state, report_path, acceptance="not_applicable"):
         notes = f"details: {report_path}" if report_path else "no durable detail"
         return {"state": state, "review_state": review,
                 "conformance_verdict": conformance, "correctness_verdict": correctness,
                 "verification_state": verification, "base_sha": base, "head_sha": head,
+                "acceptance_state": acceptance,
                 "detail_state": detail_state, "report_path": report_path, "notes": notes}
 
     def test_every_sdd_report_matrix_row(self):
@@ -692,11 +696,112 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             self.assertEqual((result.returncode, result.stdout, result.stderr),
                              (2, b"", b"artifact-budget: invalid report\n"))
 
+    def assert_rejected(self, boundary, payload, use_stdin):
+        result = self.run_validate(boundary, payload, use_stdin)
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (2, b"", b"artifact-budget: invalid report\n"), payload)
+
+    def test_sdd_acceptance_state_is_required_closed_and_paired(self):
+        """#272 D8: clean never carries unmet; residual unmet needs a conformance finding."""
+        detail = ".superpowers/issue-delivery/272/run-1/sdd-a.json"
+        clean = self.make_sdd("complete", "clean", "clean", "clean", "passed",
+                              "a" * 40, "b" * 40, "none", None)
+        conformance = self.make_sdd("residuals", "residuals", "findings", "clean",
+                                    "passed", "a" * 40, "b" * 40, "present", detail)
+        correctness = self.make_sdd("residuals", "residuals", "clean", "findings",
+                                    "passed", "a" * 40, "b" * 40, "present", detail)
+        before = self.make_sdd("failed", "unknown", "not_run", "not_run", "not_run",
+                               None, None, "none", None)
+        ungraded = self.make_sdd("failed", "unknown", "not_run", "clean", "failed",
+                                 "a" * 40, "b" * 40, "none", None)
+        graded = self.make_sdd("failed", "unknown", "findings", "clean", "failed",
+                               "a" * 40, "b" * 40, "present", detail)
+        accepted = [
+            *({**clean, "acceptance_state": v} for v in ("met", "human_pending", "not_applicable")),
+            *({**conformance, "acceptance_state": v} for v in ACCEPTANCE),
+            *({**correctness, "acceptance_state": v} for v in ("met", "human_pending", "not_applicable")),
+            {**before, "acceptance_state": "not_applicable"},
+            {**ungraded, "acceptance_state": "not_applicable"},
+            *({**graded, "acceptance_state": v} for v in ACCEPTANCE),
+        ]
+        for index, payload in enumerate(accepted):
+            with self.subTest(accepted=index):
+                result = self.run_validate("sdd", payload, index % 2 == 0)
+                self.assertEqual(result.returncode, 0, (payload, result.stderr))
+                self.assertEqual(json.loads(result.stdout), payload)
+        rejected = [
+            {**clean, "acceptance_state": "unmet"},
+            {**correctness, "acceptance_state": "unmet"},
+            {key: value for key, value in clean.items() if key != "acceptance_state"},
+            {**clean, "acceptance_state": "unverified"},
+            {**clean, "acceptance_state": True},
+            {**clean, "acceptance_state": None},
+            {**clean, "acceptance_state": ["met"]},
+            {**before, "acceptance_state": "met"},
+            {**ungraded, "acceptance_state": "unmet"},
+        ]
+        for index, payload in enumerate(rejected):
+            with self.subTest(rejected=index):
+                self.assert_rejected("sdd", payload, index % 2 == 1)
+
+    def test_ship_handoff_acceptance_state_is_required_closed_and_paired(self):
+        """#272 D8, D9: the legacy handoff pairs acceptance_state with review_state."""
+        detail = ".superpowers/issue-delivery/49/run-1/sdd-a.json"
+        complete = {**self.lifecycle(), "state": "complete",
+                    "spec_artifact": self.full("design-spec"),
+                    "plan_artifact": self.full("implementation-plan"),
+                    "head_sha": "b" * 40, "review_state": "clean",
+                    "report_path": None, "notes": "ok"}
+        residual = {**complete, "review_state": "residuals", "report_path": detail,
+                    "notes": f"details: {detail}"}
+        before = {**self.lifecycle(), "state": "failed", "spec_artifact": None,
+                  "plan_artifact": None, "head_sha": None, "review_state": "unknown",
+                  "report_path": None, "notes": "failed"}
+        after_unknown = {**complete, "state": "failed", "review_state": "unknown"}
+        accepted = [
+            *({**complete, "acceptance_state": v} for v in ("met", "human_pending", "not_applicable")),
+            *({**residual, "acceptance_state": v} for v in ACCEPTANCE),
+            {**before, "acceptance_state": "not_applicable"},
+            {**after_unknown, "acceptance_state": "not_applicable"},
+            {**complete, "state": "failed", "acceptance_state": "met"},
+        ]
+        for index, payload in enumerate(accepted):
+            with self.subTest(accepted=index):
+                result = self.run_validate("ship-handoff", payload, index % 2 == 0)
+                self.assertEqual(result.returncode, 0, (payload, result.stderr))
+        rejected = [
+            {**complete, "acceptance_state": "unmet"},
+            {key: value for key, value in complete.items() if key != "acceptance_state"},
+            {key: value for key, value in before.items() if key != "acceptance_state"},
+            {**residual, "acceptance_state": "unverified"},
+            {**complete, "acceptance_state": 1},
+            {**before, "acceptance_state": "met"},
+            {**after_unknown, "acceptance_state": "unmet"},
+        ]
+        for index, payload in enumerate(rejected):
+            with self.subTest(rejected=index):
+                self.assert_rejected("ship-handoff", payload, index % 2 == 1)
+
+    def test_acceptance_pairing_is_one_closed_table(self):
+        """#272 D9, D11: one pairing home; unknown review states pair with nothing."""
+        self.assertEqual(artifact_budget.ACCEPTANCE_STATES, frozenset(ACCEPTANCE))
+        table = {"clean": {"met", "human_pending", "not_applicable"},
+                 "residuals": set(ACCEPTANCE), "unknown": {"not_applicable"}}
+        for review in ("clean", "residuals", "unknown", "partial", "", None, ["clean"]):
+            for acceptance in (*ACCEPTANCE, "unverified", None, ["met"]):
+                with self.subTest(review=review, acceptance=acceptance):
+                    expected = (isinstance(review, str) and review in table
+                                and isinstance(acceptance, str)
+                                and acceptance in table[review])
+                    self.assertIs(artifact_budget.acceptance_pairs_with_review(
+                        review, acceptance), expected)
+
     def lifecycle(self):
         return {"ledger_repo_root": None, "run_id": None, "attempt": None,
                 "owner": None, "owner_worktree": None, "action_id": None,
                 "issue_number": 49, "branch": "issue-49",
-                "worktree_path": "/tmp/issue-49", "auto": True}
+                "worktree_path": "/tmp/issue-49", "auto": True,
+                "acceptance_state": "not_applicable"}
 
     def test_ship_handoff_and_summary_matrices(self):
         detail = ".superpowers/issue-delivery/49/run-1/sdd-a.json"

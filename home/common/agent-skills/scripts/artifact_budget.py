@@ -746,10 +746,37 @@ def _detail_fields(value: Mapping[str, object], notes_max: int,
     return False
 
 
+# The closed acceptance_state set and its ship-handoff pairing (#272 D8, D9).
+# This is the one home of both: the sdd rows below, the legacy handoff and the
+# v2 handoff all read them.
+ACCEPTANCE_STATES = frozenset({"met", "unmet", "human_pending", "not_applicable"})
+_CLEAN_ACCEPTANCE = frozenset({"met", "human_pending", "not_applicable"})
+_HANDOFF_ACCEPTANCE = {
+    "clean": _CLEAN_ACCEPTANCE,
+    "residuals": ACCEPTANCE_STATES,
+    "unknown": frozenset({"not_applicable"}),
+}
+
+
+def acceptance_pairs_with_review(review_state: object, acceptance_state: object) -> bool:
+    """True when a handoff's acceptance_state is allowed under its review_state.
+
+    Any review_state outside the table pairs with nothing (#272 D11).
+    """
+    if not isinstance(review_state, str) or not isinstance(acceptance_state, str):
+        return False
+    allowed = _HANDOFF_ACCEPTANCE.get(review_state)
+    return allowed is not None and acceptance_state in allowed
+
+
 def validate_sdd_report(value: Mapping[str, object], notes_max_characters: int) -> None:
     keys = {"state", "review_state", "conformance_verdict", "correctness_verdict",
-            "verification_state", "base_sha", "head_sha", "detail_state", "report_path", "notes"}
+            "verification_state", "base_sha", "head_sha", "acceptance_state", "detail_state",
+            "report_path", "notes"}
     if not _exact_keys(value, keys) or not _detail_fields(value, notes_max_characters, allow_unpublished=True):
+        raise ArtifactBudgetError("invalid SDD report")
+    acceptance = value["acceptance_state"]
+    if not isinstance(acceptance, str) or acceptance not in ACCEPTANCE_STATES:
         raise ArtifactBudgetError("invalid SDD report")
     state, review = value["state"], value["review_state"]
     axes = (value["conformance_verdict"], value["correctness_verdict"])
@@ -758,13 +785,15 @@ def validate_sdd_report(value: Mapping[str, object], notes_max_characters: int) 
     detail = value["detail_state"]
     valid = False
     if state == "complete" and review == "clean":
-        valid = axes == ("clean", "clean") and verification == "passed" and _sha(base) and _sha(head) and detail in {"none", "present"}
+        valid = (axes == ("clean", "clean") and verification == "passed" and _sha(base) and _sha(head)
+                 and detail in {"none", "present"} and acceptance in _CLEAN_ACCEPTANCE)
     elif state == "residuals" and review == "residuals":
         valid = (all(axis in {"clean", "findings"} for axis in axes) and "findings" in axes
-                 and verification in {"passed", "failed"} and _sha(base) and _sha(head) and detail == "present")
+                 and verification in {"passed", "failed"} and _sha(base) and _sha(head) and detail == "present"
+                 and (acceptance != "unmet" or value["conformance_verdict"] == "findings"))
     elif state == "failed" and review == "unknown":
         if axes == ("not_run", "not_run") and verification == "not_run" and base is None and head is None:
-            valid = detail == "none"
+            valid = detail == "none" and acceptance == "not_applicable"
         elif (_sha(base) and _sha(head) and verification in {"passed", "failed"}
               and all(axis in {"not_run", "clean", "findings"} for axis in axes)
               and axes != ("clean", "clean")):
@@ -774,6 +803,7 @@ def validate_sdd_report(value: Mapping[str, object], notes_max_characters: int) 
                 valid = all(axis in {"not_run", "clean"} for axis in axes)
             else:
                 valid = detail == "present"
+            valid = valid and (value["conformance_verdict"] != "not_run" or acceptance == "not_applicable")
     if not valid:
         raise ArtifactBudgetError("invalid SDD state")
 
@@ -781,7 +811,8 @@ def validate_sdd_report(value: Mapping[str, object], notes_max_characters: int) 
 def validate_ship_handoff_report(value: Mapping[str, object], notes_max_characters: int) -> None:
     keys = {"state", "ledger_repo_root", "run_id", "attempt", "owner", "owner_worktree",
             "action_id", "issue_number", "branch", "worktree_path", "spec_artifact",
-            "plan_artifact", "head_sha", "review_state", "auto", "report_path", "notes"}
+            "plan_artifact", "head_sha", "review_state", "acceptance_state", "auto", "report_path",
+            "notes"}
     if not _exact_keys(value, keys) or not _notes(value["notes"], notes_max_characters):
         raise ArtifactBudgetError("invalid ship handoff")
     lifecycle = [value[name] for name in
@@ -810,6 +841,7 @@ def validate_ship_handoff_report(value: Mapping[str, object], notes_max_characte
         valid = before or (after and review_detail_valid)
     else:
         valid = False
+    valid = valid and acceptance_pairs_with_review(value["review_state"], value["acceptance_state"])
     if not valid:
         raise ArtifactBudgetError("invalid ship handoff state")
 
