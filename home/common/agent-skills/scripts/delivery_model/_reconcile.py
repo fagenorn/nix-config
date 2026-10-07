@@ -7,7 +7,8 @@ from typing import Any
 
 from ._canonical import (canonical_bytes, canonical_digest, _boolean, _members,
     _object, _reject, _sorted_unique, _utc)
-from ._objects import (_POSTCONDITIONS, _STAGE_ACTIONS, _authority, _contract,
+from ._objects import (_POSTCONDITIONS, _POSTCONDITION_OBSERVATION_KINDS,
+    _STAGE_OBSERVATION_KINDS, _authority, _contract,
     _current_selections, _delivery_observation, _intent, _postcondition_observation_matches,
     _reevaluation, _scope, _selected, _stage_observation_matches, _stage_scope_matches,
     validate_custody_ref)
@@ -172,8 +173,8 @@ def reduce_delivery(contract: object, delivery: object, *, evaluation: object) -
     validate_delivery_object(next_delivery, expected_kind="delivery", notes_max_characters=1_000_000)
     stage_observation: dict[str, dict[str, Any]] = {}
     for stage in c["stages"]:
-        expected = _STAGE_ACTIONS[stage["kind"]][2]
-        matches = [item for item in next_delivery["delivery_observations"] if item["observation_kind"] == expected and _stage_observation_matches(c, next_delivery, stage, item)]
+        expected = _STAGE_OBSERVATION_KINDS[stage["kind"]]
+        matches = [item for item in next_delivery["delivery_observations"] if item["observation_kind"] in expected and _stage_observation_matches(c, next_delivery, stage, item)]
         if len({canonical_bytes(item["subject"]) for item in matches}) > 1: _reject()
         if matches: stage_observation[stage["id"]] = max(matches, key=lambda item: (item["observed_at"], item["id"]))
     facts = _stage_facts(c, d["contract_digest"], stage_observation)
@@ -185,7 +186,7 @@ def reduce_delivery(contract: object, delivery: object, *, evaluation: object) -
             matches = [stage_observation[stage["id"]] for stage in c["stages"] if stage["kind"] == "merge_pr" and stage["id"] in stage_observation]
         else:
             matches = [item for item in next_delivery["delivery_observations"]
-                       if item["observation_kind"] == name
+                       if item["observation_kind"] in _POSTCONDITION_OBSERVATION_KINDS[name]
                        and _postcondition_observation_matches(c, next_delivery, name, item)]
         if len({canonical_bytes(item["subject"]) for item in matches}) > 1: _reject()
         if matches:
