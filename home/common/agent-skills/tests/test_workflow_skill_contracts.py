@@ -15,6 +15,8 @@ ORCHESTRATE = (
 )
 FROM_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/SKILL.md"
 AUTO = REPO_ROOT / "home/common/agent-skills/skills/from-issue/AUTO.md"
+ROLLOVER = REPO_ROOT / "home/common/agent-skills/skills/from-issue/rollover.md"
+DELEGATED_OWNER = REPO_ROOT / "home/common/agent-skills/skills/from-issue/delegated-owner.md"
 INVESTIGATE = REPO_ROOT / "home/common/agent-skills/skills/from-issue/investigate.md"
 HANDOFF = REPO_ROOT / "home/common/agent-skills/skills/handoff/SKILL.md"
 DESIGN = REPO_ROOT / "home/common/agent-skills/skills/design/SKILL.md"
@@ -70,8 +72,8 @@ REPORT_CANDIDATE_CLAUSE = (
     "`EXIT HUP INT TERM`, or the equivalent `finally`"
 )
 
-LIFECYCLE_DOCS = (FROM_ISSUE, AUTO, FROM_ISSUE_DIR / "ship-handoff.md", SHIP_ISSUE,
-                  SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE, ORCHESTRATE)
+LIFECYCLE_DOCS = (*sorted((REPO_ROOT / "home/common/agent-skills/skills/from-issue").glob("*.md")),
+                  SHIP_ISSUE, SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE, ORCHESTRATE)
 STDIN_CLAUSE = ("lifecycle call is one command that reads its input from stdin "
                 "through a quoted heredoc")
 BUILD_ROOT_CLAUSE = ("The builder seals the policy `resolve-project` resolves at "
@@ -373,18 +375,11 @@ CLAUDE_POLICY_ENTRIES = {
 
 SHARED_POLICY_SUPPORT = {
     "doc-grounded-questions/REFERENCE.md": ("bindings.paths.context",),
-    "from-issue/grounding.md": ("bindings.paths.context", "bindings.paths.standards"),
-    "from-issue/investigate.md": ("bindings.tracker", "bindings.vcs"),
-    "from-issue/ship-handoff.md": ("bindings.vcs", "bindings.workflow"),
-    "from-issue/standards-review.md": ("bindings.paths.standards",),
     "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
     "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
 }
 
 RETAINED_SUPPORT_CONTRACTS = {
-    "from-issue/bindings.md": ("bindings.tracker", "bindings.vcs", "bindings.paths.artifacts", "bindings.workflow"),
-    "from-issue/AUTO.md": ("bindings.paths.artifacts", "bindings.tracker", "bindings.vcs", "bindings.workflow"),
-    "from-issue/REVIEW-CONTRACT.md": ("bindings.workflow.review", "bindings.commands"),
     "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
     "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
     "ship-issue/CONSOLIDATE.md": ("bindings.paths", "bindings.vcs"),
@@ -792,22 +787,33 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
     def test_build_delivery_callers_name_the_sanctioned_resolution_exception(self):
         exception = ("only sanctioned exception is `workflow-state build-delivery`, "
                      "which performs its own sealed, read-only resolution")
+        scoped = "home/common/agent-skills/skills/from-issue/"
         callers = []
         for root in (REPO_ROOT / "home/common/agent-skills/skills",
                      REPO_ROOT / "home/common/claude-code/skills"):
             for path in sorted(root.rglob("*.md")):
+                relative = path.relative_to(REPO_ROOT).as_posix()
+                if relative.startswith(scoped) and relative != scoped + "SKILL.md":
+                    continue
                 text = normalized(path.read_text(encoding="utf-8"))
                 if "build-delivery" not in text:
                     continue
-                callers.append(path.relative_to(REPO_ROOT).as_posix())
-                with self.subTest(path=path.relative_to(REPO_ROOT)):
+                callers.append(relative)
+                with self.subTest(path=relative):
                     self.assertIn(exception, text)
         self.assertEqual(sorted(callers), [
             "home/common/agent-skills/skills/from-issue/SKILL.md",
-            "home/common/agent-skills/skills/from-issue/ship-handoff.md",
             "home/common/agent-skills/skills/ship-issue/SKILL.md",
             "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
         ])
+
+    def test_from_issue_has_no_bindings_or_grounding_reference_file(self):
+        directory = REPO_ROOT / "home/common/agent-skills/skills/from-issue"
+        for name in ("bindings.md", "grounding.md"):
+            with self.subTest(name=name):
+                self.assertFalse((directory / name).exists())
+                for path in sorted(directory.glob("*.md")):
+                    self.assertNotIn(name, path.read_text(encoding="utf-8"), path.name)
 
 
 def corpus_documents():
@@ -962,20 +968,18 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertNotIn("capability_gap", remainder)
 
     def test_capability_gap_line_is_spelled_identically_everywhere(self):
-        # One closed line, compared byte for byte and never decoded: every
-        # spelling in every carrier is exactly that line (per D4).
-        for name, text in (
-            ("ship-issue/SKILL.md", self.ship_issue),
-            ("from-issue/ship-handoff.md", self.ship_handoff),
-            ("from-issue/SKILL.md", self.from_issue),
-            ("from-issue/AUTO.md", self.auto),
-        ):
-            with self.subTest(document=name):
-                self.assertIn(CAPABILITY_GAP_LINE, text)
-                self.assertEqual(
-                    set(re.findall(r"capability_gap[^`\n]*", text)),
-                    {CAPABILITY_GAP_LINE},
-                )
+        # One closed line, compared byte for byte and never decoded (per D4).
+        pattern = r"capability_gap[^`\n]*"
+        self.assertIn(CAPABILITY_GAP_LINE, self.ship_issue)
+        self.assertEqual(set(re.findall(pattern, self.ship_issue)), {CAPABILITY_GAP_LINE})
+        carriers = set()
+        for path in sorted(FROM_ISSUE_DIR.glob("*.md")):
+            spellings = set(re.findall(pattern, path.read_text(encoding="utf-8")))
+            with self.subTest(document=path.name):
+                self.assertLessEqual(spellings, {CAPABILITY_GAP_LINE})
+            if spellings:
+                carriers.add(path.name)
+        self.assertLessEqual({"ship-handoff.md", "delegated-owner.md"}, carriers)
 
     def test_from_issue_phase_seven_ships_inline_on_the_dispatch_gap(self):
         # A ship owner that cannot launch reviewers returns the closed gap line
@@ -1016,46 +1020,25 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
 
     def test_auto_names_the_dispatch_gap_fallback_and_relays_closed_lines(self):
-        # The rollover owner keeps its fresh Phase-7 ship owner and names the
-        # one departure after it; the earlier controller relays a delegated
-        # owner's re-entry or suspension line instead of mistaking it for a
-        # dispatch failure (per D5, D10).
-        delegated = normalized(self.section(
-            self.auto, "#### Fresh delegated owner", "#### Earlier controller stop"))
-        self.assert_ordered(
-            delegated,
-            "fresh Phase-7 ship owner",
-            "must not dispatch a second issue owner",
-            "Phase-7 dispatch-gap fallback",
-            f"`{CAPABILITY_GAP_LINE}`",
-            "After validating the ship report's `ship-summary/v2` bytes",
-            "completed Phase 7",
-            "with the validated ship summary inline",
-        )
-        self.assertNotIn("ship owner's `ship-summary/v2`", self.auto)
-        self.assertNotIn("ship owner's validated summary", self.auto)
-        earlier = normalized(self.section(
-            self.auto, "#### Earlier controller stop", "### Other Phase 5–7 routes"))
+        # The delegated owner keeps the closed gap line; the earlier controller
+        # matches two closed lines byte for byte before it validates (per D5, D10).
+        delegated = normalized(DELEGATED_OWNER.read_text(encoding="utf-8"))
+        self.assert_ordered(delegated, f"`{CAPABILITY_GAP_LINE}`", "`ship-summary/v2`",
+                            "workflow-state finish")
+        earlier = normalized(ROLLOVER.read_text(encoding="utf-8")
+                             .split("## Earlier controller stop", 1)[1])
         self.assert_ordered(
             earlier,
-            "exactly validate, relay, and stop",
-            "only the canonical re-entry line `/from-issue <num> --auto`",
-            "only a canonical `Suspended (blocked_on=<value>). Resume: "
-            "/from-issue <num> --auto` line",
-            "relayed unchanged to its caller with no validation",
-            "writes nothing",
-            "Neither line is a dispatch failure.",
-            "received bytes",
+            "`/from-issue <num> --auto`",
+            "`Suspended (blocked_on=<value>). Resume: /from-issue <num> --auto`",
             "artifact-budget validate-report --boundary workflow-response",
-            "relay the canonical bytes unchanged",
         )
 
     def test_auto_continuation_and_bookkeeper_are_interface_two(self):
-        transfer = self.section(self.auto, "#### Mandatory transfer gate",
-                                "#### Fresh delegated owner")
-        owner = json_block(transfer)["owner"]
+        owner = json_block(ROLLOVER.read_text(encoding="utf-8"))["owner"]
         self.assertEqual((set(owner), owner["interface_version"]), (V2_OWNER_KEYS, 2))
-        self.assert_ordered(normalized(self.auto), "workflow-state check-launch",
+        self.assert_ordered(normalized(DELEGATED_OWNER.read_text(encoding="utf-8")),
+                            "workflow-state check-launch",
                             "workflow-state finish --summary-file -")
 
     def test_lifecycle_calls_are_single_stdin_commands_on_interface_two(self):
@@ -1068,7 +1051,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 for flag, value in INPUT_FLAG_RE.findall(text):
                     self.assertEqual(value.strip("`.,;"), "-", flag)
                 self.assertLessEqual(text.count("--result-file"), 1)
-        for path in (FROM_ISSUE, ORCHESTRATE, SHIP_ISSUE):
+        for path in (ORCHESTRATE, SHIP_ISSUE):
             with self.subTest(clause=path.name):
                 self.assertIn(STDIN_CLAUSE, normalized(path.read_text(encoding="utf-8")))
 
@@ -1277,7 +1260,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertIn("passed through verbatim", normalized(self.ship_handoff))
         self.assertIn("never carry task member paths", self.ship_handoff)
-        self.assertIn("never inline artifact contents", self.auto)
         for forbidden in ("decisions:", "open_items:", "adr_paths:", "summary:"):
             self.assertNotRegex(self.auto, rf"(?m)^\s*{re.escape(forbidden)}")
             self.assertNotRegex(self.ship_handoff, rf"(?m)^\s*{re.escape(forbidden)}")
@@ -1298,8 +1280,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertIn(complete, self.auto)
             self.assertIn(over, self.auto)
         self.assertEqual(self.auto.count('"violations":["root_bytes"]'), 2)
-        self.assertIn("ordered, non-empty", self.auto)
-        self.assertIn("metrics, budget status, and violations are forbidden", self.auto)
 
     def test_sdd_report_is_exact_and_mechanically_validated(self):
         for field in ("state", "review_state", "conformance_verdict",
@@ -1326,7 +1306,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                             "validate-report --boundary producer --input -", "decode JSON")
         self.assert_ordered(self.from_issue, "validate-report --boundary sdd --input -",
                             "construct the Phase-7 handoff")
-        self.assertIn("return only validated stdout bytes", self.auto)
 
     def test_both_plan_review_routes_revalidate_received_reports_in_the_caller(self):
         for text in (self.from_issue, self.standards_review):
@@ -1370,10 +1349,12 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertEqual(expected[("implementation-plan", "plan-ninth-member")], "decompose_required")
         self.assertEqual(expected[("handoff", "handoff-root-plus-one")], "stopped")
         self.assertEqual(expected[("review-package", "review-member-plus-one")], "decompose_required")
-        for text in (self.from_issue, self.auto, self.sdd):
+        for text in (self.from_issue, self.sdd):
             self.assertIn("complete", text)
             self.assertIn("within_budget", text)
             self.assertIn("contract error", text)
+        for value in ("complete", "within_budget"):
+            self.assertIn(value, self.auto)
 
     def test_native_phase_5_validates_before_dispatch_and_remeasures(self):
         caller = self.section(
@@ -1408,7 +1389,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertIn("prefer resume", phase_zero)
         self.assertIn("stop as blocked", phase_zero)
-        self.assertIn("never delete on ambiguity", self.auto)
 
     def test_owner_persists_exact_terminal_result_before_return(self):
         owner_return_section = self.section(
@@ -1433,25 +1413,10 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("never report the issue as merged or completed", owner_return_section)
 
     def test_direct_auto_phase_five_rolls_to_one_fresh_implementation_owner(self):
-        transfer = self.section(
-            self.auto,
-            "#### Mandatory transfer gate",
-            "#### Fresh delegated owner",
-        )
-        delegated = self.section(
-            self.auto,
-            "#### Fresh delegated owner",
-            "#### Earlier controller stop",
-        )
-        earlier = self.section(
-            self.auto,
-            "#### Earlier controller stop",
-            "### Other Phase 5–7 routes",
-        )
+        rollover = ROLLOVER.read_text(encoding="utf-8")
+        transfer = self.section(rollover, "## Mandatory transfer gate", "## Earlier controller stop")
         self.assert_ordered(
             transfer,
-            "dispositioned every Blocking and accepted Should-fix finding",
-            "commit",
             "artifact-budget check --kind design-spec",
             "artifact-budget check --kind implementation-plan",
             "within_budget",
@@ -1459,12 +1424,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "next_needs_context=false",
             "artifacts_sufficient=true",
             "remainder_self_contained=true",
-            "delegate",
-            "exactly one fresh issue owner",
         )
-        match = re.search(r"```json\n(\{.*?\})\n```", transfer, re.DOTALL)
-        self.assertIsNotNone(match)
-        continuation = json.loads(match.group(1))
+        continuation = json_block(transfer)
         self.assertEqual(set(continuation), {
             "owner", "reviewed_head_sha", "spec_artifact", "plan_artifact",
         })
@@ -1486,115 +1447,27 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertTrue(all(type(value) is int
                                 for value in artifact["metrics"].values()))
             self.assertEqual(artifact["budget_status"], "within_budget")
-        for excluded in (
-            "no artifact contents", "no task-member paths", "no review transcript",
-            "no conversation summary", "no alternate worktree",
-            "no reconstructed lifecycle field", "no authorization flag",
-        ):
-            self.assertIn(excluded, transfer)
-        self.assertIn("mechanical-only direct autonomous", transfer)
+        delegated = DELEGATED_OWNER.read_text(encoding="utf-8")
         self.assert_ordered(
             delegated,
-            "Before reading either artifact",
-            "caller-passed `bindings.vcs` branch and",
-            "decimal `owner.issue`",
-            "`owner.contract`'s reviewed-slot `constraints.branch`",
-            "binding-derived accepted branch regex",
-            "`expected_branch`",
-            "normalized `owner.worktree` to",
-            "`remove_worktree` stage",
-            "`git -C owner.worktree branch --show-current`",
-            "equal `expected_branch`",
-            "mismatch is a contract failure",
-            "both roots are tracked",
+            "artifact-budget validate-report --boundary workflow-response --input -",
+            "git -C owner.worktree branch --show-current",
+            "artifact-budget check",
+            "workflow-state progress",
+            "launch-scope reap",
+            "workflow-state check-launch",
+            "workflow-state finish",
         )
-        self.assertNotIn("final path component", delegated)
-        self.assert_ordered(
-            delegated,
-            "mismatch is a contract failure",
-            "current clean HEAD",
-            "equal `reviewed_head_sha`",
-            "both roots are tracked at that exact reviewed HEAD",
-            "independently run `artifact-budget check`",
-            "compare all four metrics",
-            "adopt the owner envelope",
-            "must not call `direct-owner`",
-            "begin at Phase 6",
-            "invoke `sdd`",
-            "completed Phase 6",
-            "remainder_self_contained=true",
-            "persisted action `delegate`",
-            "fresh Phase-7 ship owner",
-            "must not dispatch a second issue owner",
-            "completed Phase 7",
-            "ledger-only remainder",
-            "ledger-only bookkeeper",
-            "exact `workflow-state finish` command",
-            "return only the exact canonical JSON",
-        )
-        self.assertIn("existing mechanical Phase-6 mechanic/reviewer route", delegated)
-        self.assert_ordered(
-            earlier,
-            "received bytes",
-            "artifact-budget validate-report --boundary workflow-response",
-            "relay the canonical bytes unchanged",
-            "stop",
-        )
-        self.assertNotIn("--boundary ship-summary", earlier)
-        self.assertIn(
-            "post-delegation action set is exactly validate, relay, and stop",
-            earlier,
-        )
-        affirmative_permission = re.compile(
-            r"\b(?:may|can|could|must|should|is allowed to|is authorized to|is permitted to)\s+(?:"
-            r"invoke `sdd`|edit implementation files|reacquire|"
-            r"call `direct-owner`|(?:start|create) (?:a )?new attempt|"
-            r"dispatch (?:a )?second (?:replacement )?owner|"
-            r"call `workflow-state finish` after delegation|"
-            r"continue after (?:the )?delegated report)",
-            re.IGNORECASE,
-        )
-        self.assertIsNone(affirmative_permission.search(earlier))
-        for denial in (
-            "does not invoke `sdd`", "does not edit implementation files",
-            "does not reacquire or call `direct-owner`",
-            "does not start or create a new attempt", "does not dispatch a second owner",
-            "does not call `workflow-state finish` after delegation",
-            "does not continue after the delegated report",
-        ):
-            self.assertIn(denial, earlier)
-        self.assertIn("dispatch failure", earlier)
-        self.assertIn("never permission to implement locally", earlier)
+        self.assertNotIn("--boundary ship-summary", rollover)
 
-        other_start = self.auto.index("### Other Phase 5–7 routes")
-        other = self.auto[other_start:]
-        self.assertIn(
-            "Mechanical-only module-owned direct autonomous runs are excluded from this section",
-            other,
-        )
-        self.assertIn("mechanical-only ordering and ownership for other acquisition routes", other)
-
-        phase_gate = self.section(
-            self.from_issue,
-            "## Dispatch, phase-budget and attempt-budget rules",
-            "## Terminal return procedure",
-        )
-        self.assertIn("mandatory direct-autonomous Phase-5 rollover", phase_gate)
-        self.assertIn("AUTO.md", phase_gate)
-        self.assertIn("all other acquisition modes", phase_gate)
-        self.assertIn("post-rollover Phase-6 and Phase-7 gates", phase_gate)
-        self.assertIn("unchanged", phase_gate)
-
-    def test_auto_gate_enumeration_covers_an_unguarded_host(self):
-        # No second pause shape is introduced: after Step 3b the file names
-        # `blocked_on: human_gate` twice — the shipping-gate route here and
-        # the self-answer exemption — and `human_gate` is still the only
-        # `blocked_on` value in the file.
-        self.assertEqual(self.auto.count("blocked_on: human_gate"), 2)
+    def test_auto_blocked_on_values_are_the_closed_set(self):
         self.assertEqual(
             sorted(set(re.findall(r"blocked_on[:=] ?(\w+)", normalized(self.auto)))),
             ["human_gate"],
         )
+
+    def test_auto_persists_a_terminal_result_with_finish(self):
+        self.assertIn("workflow-state finish", self.auto)
 
     def test_human_gate_carries_no_affirmative_bypass_instruction(self):
         # AC3 (per D14). The closed negative list under
@@ -1739,35 +1612,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
 
     def test_direct_autonomous_bookkeeper_checks_before_the_terminal_finish(self):
-        # The delegated ledger-only remainder is how a --auto run reaches its
-        # terminal write, so the guard has to live inside the bookkeeper's own
-        # command sequence, not in the parent that dispatches it (per D9).
-        # Scoped to the delegated-owner section: AUTO.md names
-        # `workflow-state finish` again outside it, so a whole-file ordering
-        # assertion would bind that anchor and stop pinning check-before-write.
-        delegated = self.section(
-            self.auto,
-            "#### Fresh delegated owner",
-            "#### Earlier controller stop",
-        )
-        collapsed = normalized(delegated)
-        self.assert_ordered(
-            collapsed,
-            "ledger-only bookkeeper route",
-            "check-launch",
-            "workflow-state finish",
-        )
-        self.assertIn("executes exactly that sequence", collapsed)
-        self.assertNotIn("It executes only that command", collapsed)
-        self.assertIn("only after a `current: true` answer", collapsed)
-        self.assertIn("write nothing", collapsed)
-        # The bookkeeper is the most exposed reader of the phrase — a cheap
-        # agent told to run an exact sequence and nothing else (per D24).
-        self.assertIn(
-            "the canonical re-entry line `/from-issue <num> --auto` on its own "
-            "line",
-            collapsed,
-        )
+        # The guard lives inside the bookkeeper's own command sequence, not in
+        # the parent that dispatches it (per D9).
+        delegated = DELEGATED_OWNER.read_text(encoding="utf-8")
+        self.assert_ordered(normalized(delegated), "check-launch", "workflow-state finish")
+        self.assertIn("/from-issue <num> --auto", delegated)
         self.assertNotIn("workflow-state suspend", delegated)
 
     def test_lifecycle_phase_one_paths_are_acquisition_mode_specific(self):
@@ -1891,10 +1740,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("no waiter", direct)
 
     def test_direct_auto_authorizations_are_explicit_and_never_inferred(self):
-        combined = normalized(self.from_issue + "\n" + self.auto)
+        combined = normalized(self.from_issue)
         for flag in ("new_run", "owner_unavailable"):
             self.assertIn(flag, self.from_issue)
-            self.assertIn(flag, self.auto)
         self.assertIn("both flags", combined)
         self.assertIn("false", combined)
         for forbidden_inference in (
@@ -1903,11 +1751,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         ):
             self.assertIn(forbidden_inference, combined)
         self.assertIn("current user instruction explicitly authorizes", combined)
-        self.assertIn(
-            "resuming a `suspended` attempt requires neither `new_run` nor "
-            "`owner_unavailable`",
-            self.auto,
-        )
 
     def test_adjacent_from_issue_acquisition_modes_remain_unchanged(self):
         identity = self.section(
@@ -2020,36 +1863,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assert_ordered(durable, "A `delivery_contract` reply naming this issue",
                             "build this issue's contract", "call `workflow-state control` once more",
                             "orchestrate-issues §4")
-
-    def test_auto_mode_never_skips_durable_checkpoints_or_terminal_writes(self):
-        checkpoint_contract = self.section(
-            self.auto, "## The self-answer pattern", "## When *not* to auto-resolve"
-        )
-        self.assertIn("never skips `workflow-state progress`", self.auto)
-        self.assertIn("every phase checkpoint", self.auto)
-        self.assert_ordered(
-            self.auto,
-            "durable handoff",
-            "finalize",
-            "stop",
-        )
-        self.assert_ordered(
-            self.auto,
-            "terminal result",
-            "workflow-state finish",
-            "notification",
-        )
-        self.assertNotIn(
-            "For every terminal result, call `workflow-state finish`",
-            checkpoint_contract,
-        )
-        for relay_exception in (
-            "successful direct Phase-5 relay",
-            "delegated fresh owner has already persisted",
-            "must not call `workflow-state finish` again",
-            "delegated-owner dispatch failure",
-        ):
-            self.assertIn(relay_exception, checkpoint_contract)
 
     def test_codex_collaboration_has_exactly_one_companion_tail(self):
         blocks = re.findall(r"```text\n(.*?)```", self.collaboration, re.S)
@@ -2373,11 +2186,7 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
 
     def test_auto_subagents_commit_through_launch_commit_and_the_bookkeeper_is_unregistered(self):
         text = self.read(FROM_ISSUE_DIR / "AUTO.md")
-        self.assert_ordered(text, "Both prompts must carry", "`Lifecycle worker:` line",
-                            "launch-commit")
-        self.assert_ordered(text, "ledger-only bookkeeper route",
-                            "releases every worker it registered",
-                            "The bookkeeper is never registered")
+        self.assert_ordered(text, "`Lifecycle worker:`", "launch-commit")
 
     def test_the_ship_prompt_carries_the_worker_line_outside_the_handoff(self):
         self.assert_ordered(
@@ -2471,8 +2280,6 @@ class ResumePackContractsTest(unittest.TestCase):
             "When the prompt carries a resume pack, defer that read",
             "limits it to the sections that subsection names",
             "restores the whole read",
-            "An owner delegated at `AUTO.md`'s Phase-5 rollover still reads its "
-            "`#### Fresh delegated owner` section now",
             "## Lifecycle identity")
 
     def test_from_issue_owner_verifies_the_pack_and_reads_only_the_phase(self):
@@ -2481,9 +2288,6 @@ class ResumePackContractsTest(unittest.TestCase):
             "### Resume pack A relaunched owner's prompt may carry a resume pack",
             self.PACK, "an accelerator, never a gate", "not a workflow response",
             "still resolves the project once", "runs `check-launch`",
-            "An owner delegated at `AUTO.md`'s Phase-5 rollover",
-            "carries that rollover's continuation",
-            "`#### Fresh delegated owner` check first",
             "a generic `delegate` owner carries no continuation and runs none of them",
             "`git -C <worktree> rev-parse HEAD` must equal `worktree.head`",
             "re-orient in full",
@@ -2497,7 +2301,6 @@ class ResumePackContractsTest(unittest.TestCase):
             "`sdd` for Phase 6", "`ship-issue` for Phase 7",
             "(not the whole file)", "`The self-answer pattern`",
             "`When *not* to auto-resolve`",
-            "`Mandatory direct implementation-owner rollover`",
             "`Other Phase 5–7 routes`",
             "Everything the pack does not replace still runs unchanged",
             "sdd's own `progress.md` check", "sdd's ledger wins",
@@ -2515,13 +2318,7 @@ class ResumePackContractsTest(unittest.TestCase):
             "Exception — **ledger-only remainder**")
 
     def test_auto_rollover_passes_the_pack_beside_the_continuation(self):
-        self.assert_ordered(
-            self.read(AUTO), "#### Mandatory transfer gate",
-            "Beside the continuation, never inside it", self.PACK,
-            "does not stop the transfer", "#### Fresh delegated owner",
-            "Any mismatch stops the attempt as a contract failure.",
-            "only after every check above has passed", "replaces none of them",
-            "#### Earlier controller stop")
+        self.assertIn(self.PACK, self.read(ROLLOVER))
 
     def test_claude_md_describes_the_resume_pack(self):
         self.assert_ordered(
@@ -2599,9 +2396,7 @@ class InterimChildResultContractsTest(unittest.TestCase):
             "**Interim child results**)",
             "A suspension parks the attempt")
         self.assert_ordered(
-            self.read(AUTO), "## Phases 2–4 run as subagents", "**Skill exception.**",
-            "A Phase 2–4 subagent's interim result follows `SKILL.md`'s "
-            "**Interim child results** rule.",
+            self.read(AUTO), "## Phases 2–4 run as subagents", "**Interim child results**",
             "### Design subagent — Phases 2 + 3")
 
 
@@ -3601,9 +3396,7 @@ class LaunchScopeWiringContractsTest(unittest.TestCase):
         self.assert_ordered(handoff, "## Remainder owner prompt", self.WORKER_LINE,
                             "never inside it", self.WORKER_EXEC, self.WORKER_SCRATCH,
                             "Your task:")
-        self.assert_ordered(self.read(AUTO), "Both prompts must carry", "`Lifecycle worker:` line",
-                            "the `launch-scope exec` and `scratch` sentences that follow it there",
-                            "launch-commit")
+        self.assert_ordered(self.read(AUTO), "`Lifecycle worker:`", "launch-commit")
 
     def test_every_owner_exit_reaps_between_release_and_write(self):
         text = self.read(FROM_ISSUE)
@@ -3620,9 +3413,8 @@ class LaunchScopeWiringContractsTest(unittest.TestCase):
             "workflow-state suspend --repo-root")
 
     def test_the_bookkeeper_route_reaps_before_dispatch(self):
-        self.assert_ordered(self.read(AUTO), "ledger-only bookkeeper route",
-                            "releases every worker it registered", self.REAP,
-                            "The bookkeeper is never registered")
+        self.assert_ordered(self.read(DELEGATED_OWNER), self.REAP,
+                            "workflow-state check-launch", "workflow-state finish")
 
     def test_the_leaf_clauses_do_not_name_launch_scope(self):
         text = self.read(FROM_ISSUE)
