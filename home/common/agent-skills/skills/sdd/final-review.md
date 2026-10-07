@@ -172,11 +172,11 @@ Write each row's final verdict into `Verdict`. When the record has no rows yet,
 write the whole record. Commit the acceptance record, then run the **Final
 verification** step. Under a lifecycle identity, register yourself for that
 commit as SKILL.md's `### Lifecycle workers` describes: run
-`workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`,
+`workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`,
 commit with
 `launch-commit --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <git commit arguments>`,
 then run
-`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --worker-id <worker_id> --event returned`.
+`workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> --event returned`.
 A `launch fence refused: <reason>` takes that section's refusal route. Without a
 lifecycle identity, commit with plain `git`.
 

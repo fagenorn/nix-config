@@ -1,6 +1,7 @@
 """Contracts for the ship-release skill's release state machine.
 
-Text-anchor tests in the style of test_workflow_skill_contracts.py, plus two
+Checks on the machine-consumed text of the skill (its commands, state-file
+fields and cross-file anchors; #291 D6 deletes guidance-prose pins), plus two
 executable checks that run the skill's exact commands against throwaway local
 git repositories. Nothing here ever tags, releases, pushes, or deploys against
 a real remote: the executable tests build repos under a TemporaryDirectory and
@@ -90,58 +91,16 @@ class ShipReleaseContractsTest(unittest.TestCase):
         cls.changelog = CHANGELOG.read_text(encoding="utf-8")
         cls.evals = json.loads(EVALS.read_text(encoding="utf-8"))
 
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertNotEqual(next_position, -1, f"missing anchor: {anchor!r}")
-            self.assertGreater(
-                next_position, position, f"out-of-order anchor: {anchor!r}"
-            )
-            position = next_position
-
     def section(self, text, heading, next_heading):
         start = text.index(heading)
         end = text.index(next_heading, start + len(heading))
         return text[start:end]
-
-    # -- R1: single-branch path keeps the version/changelog prerequisites -----
-
-    def test_single_branch_runs_phases_zero_and_one_then_skips_two_to_four(self):
-        bindings = self.section(
-            self.skill, "## Project bindings", "## Durable release state"
-        )
-        self.assert_ordered(
-            bindings,
-            "run Phases 0 **and** 1",
-            "skip Phases 2–4",
-            "continue at Phase 4.5",
-        )
-        self.assertNotIn("skip straight to Phase 4.5", self.skill)
-        # kind == none likewise runs the prerequisites before its local merge.
-        self.assert_ordered(
-            bindings,
-            "bindings.tracker.{kind,cli,repo_slug,credential_env.unset_before_invocation}",
-            "run Phases 0–1",
-            "git merge --no-ff",
-        )
-        # CHANGELOG documents the single-branch mining range.
-        self.assertIn("Single-branch (`<integration> == <default>`)", self.changelog)
-        self.assertIn("drop `--merges`", self.changelog)
 
     # -- R2: no-PR paths tag the local merge result, never the stale remote ---
 
     def test_merge_sha_command_targets_local_default_not_remote(self):
         self.assertIn("MERGE_SHA=$(git rev-parse <default>)", self.skill)
         self.assertNotIn("git rev-parse origin/<default>)", self.skill)
-        phase_45 = self.section(self.skill, "## Phase 4.5", "## Phase 5")
-        self.assert_ordered(
-            phase_45,
-            "no-PR paths",
-            "AFTER any local merge",
-            "MERGE_SHA=$(git rev-parse <default>)",
-        )
-        self.assertIn("stale pre-merge tip", phase_45)
 
     def test_merge_sha_command_resolves_local_merge_in_a_real_repo(self):
         """Execute the skill's exact no-PR MERGE_SHA command after a local
@@ -175,47 +134,24 @@ class ShipReleaseContractsTest(unittest.TestCase):
                 "the skill's command must not resolve the stale remote tip",
             )
 
-    # -- R4: skip-check runs before anything is tagged or created -------------
+    # -- R4: the forge-less skip-check command ---------------------------------
 
-    def test_existing_release_skip_check_precedes_tag_and_release_creation(self):
-        phase_45 = self.section(self.skill, "## Phase 4.5", "## Phase 5")
-        self.assert_ordered(
-            phase_45,
-            "### 4.5a. Resolve the merge SHA",
-            "### 4.5b. Skip condition",
-            "Don't double-tag",
-            "### 4.5e. Tag the merge commit",
-            "git tag -a",
-            "gh release create",
-        )
-        # The forge-less variant of the skip-check exists too.
-        self.assertIn('git tag --points-at "$MERGE_SHA"', phase_45)
+    def test_forge_less_skip_check_reads_the_tags_at_the_merge_sha(self):
+        self.assertIn('git tag --points-at "$MERGE_SHA"', self.skill)
 
     # -- R3: Phase 0 resumes from durable state and merged PRs ----------------
 
-    def test_phase_zero_consults_state_and_merged_prs_before_stopping(self):
-        phase_zero = self.section(self.skill, "## Phase 0", "## Phase 1")
-        self.assert_ordered(
-            phase_zero,
-            "Resume check",
-            STATE_PATH,
-            "--state merged",
-            "mergeCommit",
-            "nothing to release",
-        )
-        self.assertIn("resume at Phase 4.5", phase_zero)
-        self.assertIn("jump to Phase 5", phase_zero)
-        # The wakeup path re-enters through the same resume check.
-        self.assertIn("Phase 0 resume check", self.skill)
+    def test_phase_zero_reads_the_state_file_and_merged_prs(self):
+        for argv in (STATE_PATH, "--state merged", "mergeCommit"):
+            self.assertIn(argv, self.skill)
 
     # -- R5: PREV_TAG must be reachable from the released commit --------------
 
     def test_prev_tag_selection_is_reachability_restricted(self):
         self.assertIn('--merged "$MERGE_SHA"', self.skill)
-        phase_zero = self.section(self.skill, "## Phase 0", "## Phase 1")
         self.assertIn(
             "git describe --tags --abbrev=0 origin/<default>",
-            phase_zero,
+            self.skill,
             "pre-flight describe must name an explicit ref, not bare HEAD",
         )
         self.assertNotRegex(
@@ -255,55 +191,26 @@ class ShipReleaseContractsTest(unittest.TestCase):
             )
             self.assertEqual(repo_wide, "v9.9.9")
 
-    # -- R6: exactly one semver rubric ----------------------------------------
+    # -- R6: the cross-file anchors between SKILL.md and CHANGELOG.md resolve --
 
-    def test_semver_rubric_lives_only_in_changelog(self):
-        self.assertIn("## Version bump signals", self.changelog)
-        self.assertIn("This table is the only copy of the rubric", self.changelog)
+    def test_cross_file_anchors_resolve(self):
         self.assertIn("CHANGELOG.md#version-bump-signals", self.skill)
-        # Rubric bodies must not be duplicated back into SKILL.md.
-        for rubric_fragment in (
-            "refuses to start without",
-            "shifts down one slot",
-            "semver.org/#spec-item-4",
-        ):
-            self.assertNotIn(rubric_fragment, self.skill)
-        # The proposal template stays with the workflow.
-        self.assertIn("Proposed next version", self.skill)
-        # The CHANGELOG anchor targets a heading that actually exists.
-        self.assertIn("### 4.5d. Decide MAJOR / MINOR / PATCH", self.skill)
+        self.assertIn("## Version bump signals", self.changelog)
         self.assertIn("#45d-decide-major--minor--patch", self.changelog)
+        self.assertIn("### 4.5d. Decide MAJOR / MINOR / PATCH", self.skill)
 
-    # -- R7: durable state persisted at each transition ------------------------
+    # -- R7: the durable state file's fields ----------------------------------
 
-    def test_durable_state_is_persisted_at_every_transition(self):
-        self.assertIn("## Durable release state", self.skill)
+    def test_durable_state_names_every_field(self):
         state_section = self.section(
             self.skill, "## Durable release state", "## The flow"
         )
         for field in ("headSha", '"pr"', "prUrl", "mergeSha", "tag", "releaseUrl", "deployState"):
             self.assertIn(field, state_section)
-        self.assertIn("atomically", state_section)
-        self.assert_ordered(
-            self.skill,
-            "Persist `pr` + `prUrl`",  # Phase 2
-            "persist `mergeSha`",  # Phase 4, before anything else
-            "Persist `tag`",  # 4.5e
-            "persist `releaseUrl`",  # 4.5g
-            f"Delete `{STATE_PATH}`",  # Phase 6
-        )
-        phase_four = self.section(self.skill, "## Phase 4 — Merge", "## Phase 4.5")
-        self.assert_ordered(
-            phase_four, "mergeCommit.oid", "persist `mergeSha`", "before doing anything else"
-        )
 
     # -- R8: evals match the fixture repo and stay non-destructive -------------
 
     def test_evals_cover_the_fixture_shape_and_release_only_in_the_sandbox(self):
-        notes = self.evals["notes"]
-        for fragment in ("plan-only", "kind=none", "fixture-repo"):
-            self.assertIn(fragment, notes)
-
         evals = self.evals["evals"]
         self.assertTrue(evals)
         for case in evals:
@@ -332,21 +239,11 @@ class ShipReleaseContractsTest(unittest.TestCase):
             "no ship-release pipeline case runs inside the release-ready sandbox",
         )
 
-        single_branch = [
-            case
-            for case in evals
-            if "kind=none" in case["prompt"] or "single-branch" in case["name"]
-        ]
-        self.assertTrue(single_branch, "no eval exercises the single-branch/kind=none path")
-        expected = single_branch[0]["expected_output"]
-        for fragment in (
-            "git rev-parse <default>",
-            "--merged",
-            STATE_PATH,
-            "Phases 0 AND 1",
-            "double-tag",
-        ):
-            self.assertIn(fragment, expected)
+        self.assertTrue(
+            any("kind=none" in case["prompt"] or "single-branch" in case["name"]
+                for case in evals),
+            "no eval exercises the single-branch/kind=none path",
+        )
 
 
 if __name__ == "__main__":
