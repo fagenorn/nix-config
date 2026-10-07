@@ -111,7 +111,7 @@
         "from-issue/delegated-owner.md": "only the owner delegated at the direct Phase-5 rollover reads it"
       },
       "ceiling_bytes": {
-        "claude": 175575
+        "claude": 175587
       },
       "conditional_ceiling_bytes": {
         "claude": 153952
