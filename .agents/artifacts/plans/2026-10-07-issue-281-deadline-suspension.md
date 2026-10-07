@@ -53,3 +53,5 @@ Tasks cite the spec's ledger: D2, D3 (Task 1); D1, D4, D5, D6, D8, D9 (Task 2); 
 ## Standards review provenance
 
 Reviewer: Codex (codex-companion plan-review, isolated read-only, fresh thread). Base SHA e346eb2f. Focus: none. Findings: 1 Blocking, 1 Should fix, 0 Discussion — 2 accepted (applied to Task 2 per D10), 0 rejected, 0 deferred. No fallback.
+
+Amendment review (Task 3, AC4): Codex (codex-companion plan-review, isolated read-only, fresh thread). Base SHA defc1458. Focus: the D12–D16 amendment and Task 3. Findings: 1 Blocking, 1 Should fix, 0 Discussion — 2 accepted, 0 rejected, 0 deferred: Task 3 Step 6 now grades AC4 `met` from the local no-label gate, with the PR's required check as the delivery gate; Step 5's keyword-count prerequisite became a per-document reading of the reviewer duties. No fallback.
