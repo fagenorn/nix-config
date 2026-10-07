@@ -56,10 +56,18 @@ COMMAND_KEYWORDS = frozenset({
     "!", "time", "if", "then", "elif", "else", "while", "until", "do", "done",
     "in", "coproc",
 })
-COMMAND_WRAPPERS = frozenset({"command", "builtin", "exec", "env", "nohup", "sudo"})
+COMMAND_WRAPPERS = frozenset({"command", "builtin", "exec", "env", "sudo"})
 # Programs whose argument is shell source. Arbitrary shell cannot be parsed
 # here, so a guarded verb anywhere in such a segment is refused outright.
 SHELL_EVALUATORS = frozenset({"eval", "sh", "bash", "zsh", "dash", "ksh"})
+# Words that detach a process from the task that started it (#278). Refused
+# in every repository, before the policy loads.
+DETACHING_WORDS = ("nohup", "setsid", "disown")
+DETACHING_ROUTES = (
+    "a detached process outlives the task stop; run it with the Bash tool's "
+    "background mode (run_in_background: true), or wrap a lifecycle launch in "
+    "launch-scope exec"
+)
 # Characters that end a word and re-open the command position: subshells,
 # groups, `case` arms and command substitution all start a command after one.
 OPERATOR_CHARS = "(){}`"
@@ -404,6 +412,55 @@ def guarded_operations(command):
                     ))
                 break
     return found
+
+
+def detaching_word(command):
+    """The detaching word (`nohup`, `setsid`, `disown`) the shell would run, or None.
+
+    Policy-free and global. A token at a command position matches by value or by
+    basename. Where the guard cannot see command positions it matches raw text
+    instead and fails closed: an unparseable command, an untokenisable segment, a
+    segment whose command-position word (or its basename) is an evaluator, and a
+    token carrying `$(` or a backtick. A raw-text match names the word that occurs
+    earliest in that text. A word in argument position otherwise passes.
+    """
+
+    def earliest(text):
+        hits = [(text.find(word), word) for word in DETACHING_WORDS if word in text]
+        return min(hits)[1] if hits else None
+
+    def base(value):
+        return value.rsplit("/", 1)[-1]
+
+    segments = split_segments(command)
+    if segments is None:
+        return earliest(command)
+    for segment in segments:
+        tokens = tokenize_segment(segment)
+        if tokens is None:
+            found = earliest(segment)
+            if found is not None:
+                return found
+            continue
+        flags = command_position_flags(tokens)
+        if any(
+            flag and not operator and base(value) in SHELL_EVALUATORS
+            for flag, (value, operator) in zip(flags, tokens)
+        ):
+            found = earliest(segment)
+            if found is not None:
+                return found
+            continue
+        for flag, (value, operator) in zip(flags, tokens):
+            if operator:
+                continue
+            if flag and base(value) in DETACHING_WORDS:
+                return base(value)
+            if "$(" in value or "`" in value:
+                found = earliest(value)
+                if found is not None:
+                    return found
+    return None
 
 
 def detect_repository(git_bin, cwd, timeout):
@@ -946,6 +1003,10 @@ def main():
     command = tool_input.get("command")
     if not isinstance(command, str):
         return block("invalid hook input: expected tool_input.command to be a string")
+
+    word = detaching_word(command)
+    if word is not None:
+        return block(f"detaching command `{word}` refused: {DETACHING_ROUTES}")
 
     policy, reason = load_policy(args.policy)
     if policy is None:
