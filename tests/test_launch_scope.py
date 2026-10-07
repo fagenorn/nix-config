@@ -781,10 +781,20 @@ class ReapTest(ScopeHarness, unittest.TestCase):
         return ["reap", "--repo-root", str(self.root),
                 "--run-id", self.run_id if run_id is None else run_id, *selector]
 
-    def assert_report(self, completed, status, reaped, skipped):
+    SCRATCH_UNTOUCHED = {"scratch_removed": False, "worktrees_removed": []}
+
+    def assert_report(self, completed, status, reaped, skipped, unattributed=()):
+        """`reaped` entries omit the scratch members when the reap touched no scratch root."""
         self.assertEqual(completed.returncode, status, completed.stderr)
         self.assertEqual(completed.stdout.count("\n"), 1)
-        self.assertEqual(json.loads(completed.stdout), {"reaped": reaped, "skipped": skipped})
+        self.assertEqual(json.loads(completed.stdout), {
+            "reaped": [{**self.SCRATCH_UNTOUCHED, **entry} for entry in reaped],
+            "skipped": skipped, "unattributed_worktrees": list(unattributed)})
+
+    def scratch_root(self, **identity):
+        done = self.scratch_(**identity)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout[:-1]
 
     def recorded_pgids(self, action_id):
         directory = self.registry / action_id
@@ -932,7 +942,8 @@ class ReapTest(ScopeHarness, unittest.TestCase):
         with patch:
             status, report = self.reap_in_process()
         self.assertEqual((status, report), (1, {"reaped": [], "skipped": [
-            {"action_id": "14:1:1", "reason": "processes_survived"}]}))
+            {"action_id": "14:1:1", "reason": "processes_survived"}],
+            "unattributed_worktrees": []}))
         self.assertTrue(raced)
         for nonce, late in raced:
             self.assertTrue((self.registry / "14:1:1" / f"{nonce}.json").is_file(), nonce)
@@ -980,8 +991,103 @@ class ReapTest(ScopeHarness, unittest.TestCase):
                                   return_value=(1, frozenset({4242424}))):
             status, report = launch_scope.reap(str(self.root), self.run_id, action_id="14:1:1")
         self.assertEqual((status, report), (1, {"reaped": [], "skipped": [
-            {"action_id": "14:1:1", "reason": "processes_survived"}]}))
+            {"action_id": "14:1:1", "reason": "processes_survived"}],
+            "unattributed_worktrees": []}))
         self.assertTrue((self.registry / "14:1:1").is_dir())
+
+    def test_a_reap_removes_the_root_and_the_worktrees_inside_it(self):  # AC2
+        root = self.scratch_root()
+        # Through the unresolved temp dir spelling: git records the real path (D4).
+        inside = self.add_worktree(self.tmpdir / os.path.basename(root) / "tree")
+        nested = self.add_worktree(Path(root) / "deep" / "tree")
+        self.assertTrue({inside, nested} <= self.worktrees())
+        self.assert_report(self.scope(*self.reap_args("--action-id", "14:1:1")), 0, [
+            {"action_id": "14:1:1", "signalled": 0, "scratch_removed": True,
+             "worktrees_removed": sorted([inside, nested])}], [])
+        self.assertFalse(os.path.lexists(root))
+        self.assertEqual(self.worktrees() & {inside, nested}, set())
+        self.assertFalse((self.registry / "14:1:1").exists())
+        self.assert_report(self.scope(*self.reap_args("--action-id", "14:1:1")), 0,
+                           [{"action_id": "14:1:1", "signalled": 0}], [])
+
+    def test_a_sweep_removes_a_superseded_launchs_root(self):  # AC2
+        root = self.scratch_root()
+        inside = self.add_worktree(Path(root) / "tree")
+        self.assertEqual(self.resume(issue=14, worktree=str(self.root / "wt-14"), now=LATER,
+                                     owner_unavailable=True)["id"], "14:1:2")
+        self.assert_report(self.scope(*self.reap_args("--sweep")), 0, [
+            {"action_id": "14:1:1", "signalled": 0, "scratch_removed": True,
+             "worktrees_removed": [inside]}], [])
+        self.assertFalse(os.path.lexists(root))
+        self.assertNotIn(inside, self.worktrees())
+
+    def test_a_missing_registration_is_dropped_only_inside_the_root(self):  # D10
+        root = self.scratch_root()
+        inside = self.add_worktree(Path(root) / "tree")
+        elsewhere = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        outside = self.add_worktree(elsewhere / "gone")
+        shutil.rmtree(inside)
+        shutil.rmtree(outside)
+        self.assertTrue({inside, outside} <= self.worktrees())
+        self.assert_report(self.scope(*self.reap_args("--action-id", "14:1:1")), 0, [
+            {"action_id": "14:1:1", "signalled": 0, "scratch_removed": True,
+             "worktrees_removed": [inside]}], [], [outside])
+        self.assertNotIn(inside, self.worktrees())
+        self.assertIn(outside, self.worktrees())
+
+    def test_a_worktree_occupying_the_root_counts_as_removing_it(self):  # D5
+        root = self.scratch_root()
+        os.rmdir(root)
+        occupying = self.add_worktree(Path(root))
+        self.assert_report(self.scope(*self.reap_args("--action-id", "14:1:1")), 0, [
+            {"action_id": "14:1:1", "signalled": 0, "scratch_removed": True,
+             "worktrees_removed": [occupying]}], [])
+        self.assertFalse(os.path.lexists(root))
+
+    def test_worktrees_outside_every_root_are_reported_and_kept(self):  # AC3
+        live_root = self.scratch_root()
+        in_live = self.add_worktree(Path(live_root) / "tree")
+        below_main = self.add_worktree(self.root / ".worktrees" / "issue-1")
+        elsewhere = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        stray = self.add_worktree(elsewhere / "stray")
+        self.assert_report(self.scope(*self.reap_args("--sweep")), 0, [], [], [stray])
+        self.assert_report(self.scope(*self.reap_args("--action-id", "99:1:1")), 0,
+                           [{"action_id": "99:1:1", "signalled": 0}], [], [stray])
+        for tree in (in_live, below_main, stray):
+            with self.subTest(tree=tree):
+                self.assertTrue(os.path.isdir(tree))
+                self.assertIn(tree, self.worktrees())
+        self.assertTrue(self.record_path().is_file())
+
+    def test_a_failed_removal_keeps_the_record_for_the_next_reap(self):  # D5
+        root = self.scratch_root()
+        self.add_worktree(Path(root) / "tree")
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(launch_scope.shutil, "rmtree",
+                                  side_effect=OSError("injected")), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            status, report = launch_scope.reap(str(self.root), self.run_id, action_id="14:1:1")
+        self.assertEqual((status, report), (1, {"reaped": [], "skipped": [
+            {"action_id": "14:1:1", "reason": "scratch_not_removed"}],
+            "unattributed_worktrees": []}))
+        self.assertIn("rmtree", stderr.getvalue())
+        self.assertIn(root, stderr.getvalue())
+        self.assertIn("injected", stderr.getvalue())
+        self.assertTrue(self.record_path().is_file())
+        self.assertTrue(os.path.isdir(root))
+        self.assert_report(self.scope(*self.reap_args("--action-id", "14:1:1")), 0, [
+            {"action_id": "14:1:1", "signalled": 0, "scratch_removed": True}], [])
+        self.assertFalse(os.path.lexists(root))
+
+    def test_an_invalid_record_skips_the_launch_and_deletes_nothing(self):  # D4
+        root = self.scratch_root()
+        parent = os.path.dirname(root)
+        self.record_path().write_text(json.dumps({"path": parent}) + "\n")
+        self.assert_report(self.scope(*self.reap_args("--action-id", "14:1:1")), 1, [],
+                           [{"action_id": "14:1:1", "reason": "scratch_not_removed"}])
+        self.assertTrue(self.record_path().is_file())
+        self.assertTrue(os.path.isdir(root))
+        self.assertTrue(os.path.isdir(parent))
 
     def test_unsafe_ids_and_usage_errors_exit_two_and_delete_nothing(self):
         keep = self.registry.parent / "keep"
