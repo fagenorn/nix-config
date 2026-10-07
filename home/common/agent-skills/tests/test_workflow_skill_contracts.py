@@ -122,6 +122,59 @@ SHIP_SUMMARY_V2_KEYS = {"interface_version", "issue", "state", "custody",
     "authority_observations", "reevaluation_evidence", "detail_state", "report_path",
     "notes"}
 
+WORKER_LINE = ("Lifecycle worker: --repo-root <ledger_repo_root> --run-id <run-id> "
+               "--worker-id <worker_id>")
+WORKER_EXEC_ARGV = ("launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> "
+                    "--worker-id <worker_id> -- <argv>")
+WORKER_SCRATCH_ARGV = ("launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> "
+                       "--worker-id <worker_id>")
+PRODUCER_VALIDATION = "artifact-budget validate-report --boundary producer --input -"
+WHOLE_FILE_POLICY = "stable-first-fit-whole-file"
+
+# Machine-consumed text each sdd document must carry (#291 D6): helper argv, the
+# report fields its validator reads, the review-package packing policy id and
+# the payload placeholders the controller fills. No guidance sentence is pinned.
+SDD_MACHINE_TEXT = {
+    SDD: (
+        "validate-report --boundary sdd", 'detail_state: "none"', "report_path: null",
+        "validate-detail-input", 'detail_state: "unpublished"',
+        "scripts/task-brief PLAN_FILE N", PRODUCER_VALIDATION, WHOLE_FILE_POLICY,
+        "member_count", "aggregate_bytes",
+        "`<primary-checkout>/.superpowers/sdd/<checkout-bucket>/<plan-basename>/`",
+        "workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--now <utc> --action-id <action_id>",
+        WORKER_LINE,
+        "workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--now <utc> --worker-id <worker_id> --event returned",
+        "workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--action-id <action_id>",
+        "workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--now <utc> --action-id <action_id>",
+        WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV,
+    ),
+    SDD_DIR / "fix-loop.md": (PRODUCER_VALIDATION,),
+    SDD_DIR / "final-review.md": (
+        PRODUCER_VALIDATION, WHOLE_FILE_POLICY,
+        "review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD",
+        "verified-tree check --verification <id>",
+        "verified-tree record --tree <the checked tree>",
+        "launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--worker-id <worker_id> -- <git commit arguments>",
+        "<tracker-cli> issue view <num> --repo <repo_slug> --json body",
+    ),
+    SDD_DIR / "implementer-prompt.md": (
+        "launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--worker-id <worker_id> -- ",
+        WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV,
+    ),
+    SDD_DIR / "task-reviewer-prompt.md": (WHOLE_FILE_POLICY,),
+    SDD_DIR / "re-review-prompt.md": (WHOLE_FILE_POLICY,),
+    SDD_DIR / "conformance-reviewer-prompt.md": (WHOLE_FILE_POLICY, "[ACCEPTANCE_CRITERIA]"),
+    SDD_DIR / "correctness-reviewer-prompt.md": (
+        WHOLE_FILE_POLICY, "git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- ':(literal)<path>'",
+    ),
+}
+
 # Machine-consumed text each ship-issue document must carry (#291 D6): helper
 # argv, the command constants above, and the closed lines a later agent reads
 # back from the PR body or an issue comment. No guidance sentence is pinned.
@@ -139,10 +192,7 @@ SHIP_ISSUE_MACHINE_TEXT = {
         "workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> "
         "--now <utc> --worker-id <worker_id> --event returned",
         "--parent <worker_id>", "git merge --no-commit --no-ff origin/<integration>",
-        "launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--worker-id <worker_id> -- <argv>",
-        "launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--worker-id <worker_id>",
+        WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV,
         "verified-tree check --verification <id>",
         "verified-tree record --tree <the checked tree>",
         REQUIRED_WATCH, ALL_CHECKS_WATCH, ADVISORY_CALL,
@@ -154,6 +204,7 @@ SHIP_ISSUE_MACHINE_TEXT = {
         "gh issue edit <num> --add-label needs-verification", "gh issue comment <num>",
         "gh issue close <num>",
     ),
+    SHIP_ISSUE_REVIEW: ("validate-detail-input", 'detail_state: "unpublished"'),
     SHIP_ISSUE_CI_MERGE: (
         "--kind current-selection", "--kind sync-selection", "launch-commit",
         "gh pr view <pr-num> --json state,headRefOid,mergeable",
@@ -680,19 +731,6 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
     def test_listed_support_documents_reuse_only_passed_snapshot_fields(self):
         assert_retained_policy_support(self, REPO_ROOT / "home/common/agent-skills/skills", RETAINED_SUPPORT_CONTRACTS)
 
-    def test_sdd_configured_review_pair_is_complete(self):
-        assert_configured_code_review_pair(self, SDD, SDD_DIR / "final-review.md")
-
-    def test_configured_review_paragraph_copies_stay_identical(self):
-        # ship-issue REVIEW.md and sdd final-review.md share one configured-review
-        # paragraph, so its capacity scope changes in both at once (issue 195, D7).
-        def paragraph(path):
-            text = path.read_text(encoding="utf-8")
-            start = text.index("For configured code review,")
-            return text[start:text.index("\n", start)]
-        self.assertEqual(paragraph(SHIP_ISSUE_REVIEW),
-                         paragraph(SDD_DIR / "final-review.md"))
-
     def test_codex_plan_review_owner_and_support_are_complete(self):
         assert_codex_operation_pair(
             self, CODEX_PLAN_REVIEW, "bindings.workflow.review.plan",
@@ -704,73 +742,6 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             self, DIFF_REVIEW, "bindings.workflow.review.code",
             ("Critical", "Important", "Minor"),
         )
-
-    def test_sdd_correctness_route_is_the_capability_ladder(self):
-        route = sdd_correctness_route()
-        assert_correctness_route_ladder(self, route, SDD_CORRECTNESS_TARGET)
-        route = normalized(route)
-        self.assertIn(
-            "This is the only rung that reaches Codex and the only one where a "
-            "capacity rejection binds, on the configured-review terms above.", route)
-        self.assertIn(
-            "A Codex call made under `unsupported` anyway is a routing error: "
-            "discard its outcome — verdict, refusal or failure — record the "
-            "routing error in the ledger beside the correctness verdict, with the "
-            "axis's reviewer identity still `native`, and run the rung-3 native "
-            "dispatch, with no retry, stop or suspension.", route)
-        # sdd words its rungs 2 and 3 and its routing-error paragraph
-        # differently from ship, so sdd pins its own sentences (D14).
-        rung_2 = route[route.index("2. `available`"):route.index("3. `unsupported`")]
-        self.assertIn(
-            "→ invoke its `diff-review` operation for this axis; that skill "
-            "solely owns the isolated Codex transport launch and one-time native "
-            "fallback, while the external Codex reviewer keeps its independently "
-            "configured model.", rung_2)
-        rung_3 = route[route.index("3. `unsupported`"):route.index("routing error")]
-        self.assertIn(
-            "→ dispatch the Opus/high native reviewer selected in "
-            f"{SDD_CORRECTNESS_TARGET} directly; `codex-collaboration` is never "
-            "invoked on this rung.", rung_3)
-        self.assertTrue(route.rstrip().endswith(
-            "The axis is never skipped; `blocked` stops the whole review "
-            "instead."), route)
-        # The agent-tiers bullet and the rubric header restate the same route.
-        self.assertIn(
-            "the correctness axis via `codex-collaboration`'s `diff-review` when "
-            "`capabilities.review.code` is `available` and that skill is "
-            "installed, and as `reviewer` on Opus/high when the capability is "
-            "`unsupported` or the skill is not installed (`blocked` stops)",
-            normalized(SDD.read_text(encoding="utf-8")))
-        self.assertIn(
-            "dispatched directly when `capabilities.review.code` is `unsupported` "
-            "or `codex-collaboration` is not installed. When the capability is "
-            "`available` and that skill is installed, its `diff-review` operation "
-            "carries this file",
-            normalized((SDD_DIR / "correctness-reviewer-prompt.md").read_text(
-                encoding="utf-8")))
-
-    def test_correctness_route_ladder_rejects_the_pre_fix_sdd_route(self):
-        # Putting sdd's skill-presence routing back makes the helper raise
-        # (issue 195, D3), and so does reversing rung 3's no-invocation
-        # clause, which in sdd sits after the native target (D12).
-        text = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
-        end_anchor = "`blocked` stops the whole review instead."
-        no_invocation = "is never invoked on this rung"
-        self.assertTrue(CORRECTNESS_ROUTE_OPENER in text and end_anchor in text
-                        and no_invocation in text, "sdd ladder anchors missing")
-        start = text.index(CORRECTNESS_ROUTE_OPENER)
-        end = text.index(end_anchor, start) + len(end_anchor)
-        with self.assertRaises(AssertionError):
-            assert_correctness_route_ladder(
-                self,
-                sdd_correctness_route(text[:start] + SDD_PRE_FIX_ROUTE + text[end:]),
-                SDD_CORRECTNESS_TARGET)
-        with self.assertRaises(AssertionError):
-            assert_correctness_route_ladder(
-                self,
-                sdd_correctness_route(text.replace(
-                    no_invocation, "is always invoked on this rung")),
-                SDD_CORRECTNESS_TARGET)
 
     def test_context_map_selection_uses_only_authored_order(self):
         table = (
@@ -880,126 +851,6 @@ RETIRED_EXEC_REVIEW_TOKENS = (
     "exec --sandbox", "--output-last-message", "terminal agent-message",
     "model_reasoning_effort", "JSONL", "Exec shape", "exec shape",
 )
-
-
-# The configured-review paragraph's closing sentences: authored `unsupported`
-# is the caller's primary native route, not a fallback, and only the
-# `available` route's non-capacity failure falls back (issue 195, D15).
-CONFIGURED_REVIEW_UNSUPPORTED_ROUTE = (
-    "Authored `unsupported` takes the caller's native correctness route "
-    "directly and makes no Codex call."
-)
-CONFIGURED_REVIEW_AVAILABLE_FALLBACK = (
-    "On the `available` route, a completed non-capacity runtime/output failure "
-    "uses the existing single native fallback and records why."
-)
-
-
-def assert_configured_code_review_pair(case, owner, support):
-    owner_text = normalized(owner.read_text(encoding="utf-8"))
-    support_text = normalized(support.read_text(encoding="utf-8"))
-    case.assert_ordered(owner_text, "bindings.workflow.review.code", "capabilities.review.code", "bindings.commands[review_id].argv")
-    case.assert_ordered(
-        support_text,
-        "For configured code review,",
-        "`codex-collaboration`'s `diff-review`",
-        "binding shape error",
-        "no Codex call",
-        "`blocked` stops", *CAPACITY_SCOPE_ANCHORS,
-        CONFIGURED_REVIEW_UNSUPPORTED_ROUTE, CONFIGURED_REVIEW_AVAILABLE_FALLBACK,
-    )
-    # The skill owns the shape, invocation and validation; a caller restating
-    # them is the duplication D20 removed.
-    for restated in ("basename of `argv[0]`", *CODEX_COMPANION_INVOCATION_ANCHORS[1:],
-                     *CODEX_COMPANION_VALIDATION_ANCHORS[:-1]):
-        case.assertNotIn(restated, support_text)
-    for retired in RETIRED_EXEC_REVIEW_TOKENS:
-        case.assertNotIn(retired, support_text)
-    # The pre-D15 sentence called the primary `unsupported` route a fallback.
-    case.assertNotIn("Authored unsupported or a completed non-capacity", support_text)
-    for text in (owner_text, support_text):
-        case.assertNotIn("command -v codex-companion", text)
-        case.assertNotIn('subagent_type="codex:codex-reviewer"', text)
-
-
-# Both correctness-axis callers open their route with this sentence and then
-# number the three rungs (issue 195, D4, D5).
-CORRECTNESS_ROUTE_OPENER = (
-    "Choose the correctness route from the retained `capabilities.review.code` "
-    "state before either axis is dispatched, never from how a Codex call failed:"
-)
-SDD_CORRECTNESS_TARGET = "[correctness-reviewer-prompt.md](correctness-reviewer-prompt.md)"
-# sdd final-review's correctness routing before issue 195, kept only so the
-# ladder helper's self-check can put it back.
-SDD_PRE_FIX_ROUTE = (
-    "When the `codex-collaboration` skill is available, invoke its `diff-review` "
-    "operation for this axis; that skill solely owns the isolated Codex transport "
-    "launch and one-time native fallback, while the external Codex reviewer keeps "
-    "its independently configured model. Unavailable → use the Opus/high native "
-    "reviewer selected in [correctness-reviewer-prompt.md]"
-    "(correctness-reviewer-prompt.md). Either way the axis is never skipped."
-)
-
-
-def sdd_correctness_route(text=None):
-    """sdd final-review's correctness-axis bullet, through its routing-error paragraph."""
-    if text is None:
-        text = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
-    start = text.index("- **Correctness axis**")
-    # The acceptance-criteria paragraph follows the axes (#272 D13).
-    return text[start:text.index("**Acceptance criteria.**", start)]
-
-
-def assert_correctness_route_ladder(case, route, native_target):
-    """Pin one caller's correctness-axis route (issue 195, D2, D4, D5).
-
-    The route opens with CORRECTNESS_ROUTE_OPENER and numbers the `blocked`,
-    `available` and `unsupported` rungs in that order, each with its full lead
-    clause (D14). Only the `available` rung
-    names `diff-review`, and it names the capacity rejection after it. The
-    `unsupported` rung reaches `native_target` without naming `diff-review` or
-    `bindings.commands`, and before the routing-error paragraph it says that
-    `codex-collaboration` is never invoked on that rung. The routing-error
-    action follows the ladder, and no skill-presence wording survives.
-    """
-    route = normalized(route)
-    case.assert_ordered(
-        route, CORRECTNESS_ROUTE_OPENER, "1. `blocked`", "2. `available`",
-        "3. `unsupported`", native_target, "routing error", "discard its outcome",
-        "beside the correctness verdict", "rung-3 native dispatch",
-        "no retry, stop or suspension",
-    )
-    blocked_at = route.index("1. `blocked`")
-    available_at = route.index("2. `available`")
-    unsupported_at = route.index("3. `unsupported`")
-    available = route[available_at:unsupported_at]
-    unsupported = route[unsupported_at:route.index(native_target, unsupported_at)]
-    # Each rung's lead, which both callers word identically. The two
-    # skill-presence clauses are D5's routing condition (D14).
-    case.assertIn(
-        "1. `blocked` stops with its capability reason and repair ID; "
-        "neither axis is dispatched.", route[blocked_at:available_at])
-    case.assertTrue(available.startswith(
-        "2. `available`, with `codex-collaboration` installed →"), available)
-    case.assertTrue(unsupported.startswith(
-        "3. `unsupported`, or `available` without `codex-collaboration` "
-        "installed →"), unsupported)
-    case.assert_ordered(available, "`diff-review`", "capacity rejection")
-    for absent in ("diff-review", "bindings.commands"):
-        case.assertNotIn(absent, unsupported)
-    # The whole rung, through its dispatch, up to the routing-error paragraph:
-    # sdd's no-invocation clause sits after its native target (D12).
-    unsupported_rung = route[
-        unsupported_at:route.index("routing error", unsupported_at)]
-    case.assertIn(
-        "`codex-collaboration` is never invoked on this rung", unsupported_rung)
-    # The routing-error action's tail, which both callers word identically.
-    case.assertIn(
-        ", and run the rung-3 native dispatch, with no retry, stop or "
-        "suspension.", route[route.index("routing error", unsupported_at):])
-    case.assertEqual(route.count("diff-review"), available.count("diff-review"))
-    case.assertNotIn("unavailable", route.lower())
-    case.assertNotIn("skill is available", route)
 
 
 def assert_codex_operation_pair(case, support, review_field, headings):
@@ -1612,15 +1463,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                     self.assertNotIn("name=", line)
                     self.assertNotIn("run_in_background", line)
 
-    def test_sdd_resume_by_identity_instruction_exists(self):
-        sdd_root = (SDD_DIR / "SKILL.md").read_text(encoding="utf-8")
-        fix_loop = (SDD_DIR / "fix-loop.md").read_text(encoding="utf-8")
-        self.assertIn(
-            "Record the implementer's agent identity — fix rounds 1–3 resume it",
-            sdd_root,
-        )
-        self.assertIn("resume the original implementer", fix_loop)
-
     def test_plan_package_contract_is_root_only_and_fail_closed(self):
         self.assertIn("<stem>.tasks/task-1.md", self.writing_plans)
         self.assertIn("[task-N.md](<stem>.tasks/task-N.md)", self.writing_plans)
@@ -1819,19 +1661,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for forbidden in ("parked_findings:", "verdict_details:", "open_items:", "summary:"):
             self.assertNotRegex(self.sdd, rf"(?m)^\s*{re.escape(forbidden)}")
 
-    def test_sdd_head_sha_is_the_final_review_first_pass_head(self):
-        # The report states the range both axes reviewed whole, not the branch
-        # tip, so ship can review the fix wave again as its delta (#264 D1).
-        finish = normalized(self.section(self.sdd, "## Finish", "If publication fails"))
-        self.assertIn(
-            "`base_sha` and `head_sha` are the `DELIVERY_BASE` and `DELIVERY_HEAD`"
-            " the final review's first pass covered, never the branch tip", finish)
-        self.assertIn("the tip is past `head_sha`", finish)
-        final_review = normalized((SDD_DIR / "final-review.md").read_text(encoding="utf-8"))
-        self.assert_ordered(final_review, "review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD",
-                            "Those two pins are the report's `base_sha` and `head_sha`",
-                            "the fix wave below does not move them")
-
     def test_handoff_head_sha_is_the_sdd_report_head_sha(self):
         handoff = normalized(self.ship_handoff)
         self.assertIn("In both handoff shapes, `head_sha` is the validated sdd report's"
@@ -1869,46 +1698,12 @@ class WorkflowSkillContractsTest(unittest.TestCase):
 
     def test_durable_review_detail_precedes_every_removable_cleanup(self):
         self.assertIn(".superpowers/issue-delivery/", self.sdd)
-        self.assert_ordered(self.sdd, "delivery-detail", "artifact-budget check",
-                            "validate-report --boundary sdd", "delete this plan's workspace")
         self.assertIn(".superpowers/issue-delivery/", self.ship_review)
-        self.assertIn("Minor/Discussion", self.ship_review)
-        self.assert_ordered(self.ship_issue, "delivery-detail", "artifact-budget check",
-                            "git worktree remove",
-                            "validate-report --boundary ship-summary")
         for text in (self.sdd, self.ship_review, self.ship_issue, self.ship_handoff):
             self.assertIn("report_path", text)
             self.assertIn("keep the worktree", text)
         self.assertIn("primary worktree", self.ship_handoff)
         self.assertIn("never inline the report", self.from_issue)
-
-    def test_terminal_review_findings_use_only_the_durable_report_path(self):
-        finish = self.sdd[self.sdd.index("## Finish"):]
-        severity = self.section(self.ship_review, "## Severity mapping", "##")
-        self.assertNotIn("surfaced list", finish)
-        self.assertNotIn("`discussion_items` return carry", severity)
-        for text in (finish, severity):
-            self.assertIn("`report_path`", text)
-        self.assertIn("only findings transport", finish)
-        self.assertIn("only terminal transport", severity)
-
-    def test_review_package_failure_before_dispatch_has_no_fabricated_detail(self):
-        self.assert_ordered(self.sdd, "base_sha and head_sha", "review-package",
-                            "exit 2", 'detail_state: "none"', "report_path: null",
-                            "validate-report --boundary sdd")
-        self.assertIn("before reviewer dispatch", self.sdd)
-        self.assertIn("do not dispatch", self.sdd)
-
-    def test_unpublished_detail_keeps_readable_sources_and_forbids_cleanup(self):
-        self.assert_ordered(self.sdd, "write the retained candidate", "validate-detail-input",
-                            "consume canonical stdout", 'detail_state: "unpublished"',
-                            "validate-report --boundary sdd", "keep the workspace")
-        self.assert_ordered(self.ship_review, "write the retained candidate", "validate-detail-input",
-                            "consume canonical stdout",
-                            'detail_state: "unpublished"', "keep the worktree")
-        for text in (self.sdd, self.ship_review, self.ship_issue):
-            self.assertIn("non-empty findings", text)
-            self.assertIn("do not remove", text)
 
     def test_phase_five_remeasures_every_artifact_it_mutates(self):
         self.assert_ordered(self.standards_review, "apply blocking fixes", "final mutation",
@@ -1929,23 +1724,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertIn("complete", text)
             self.assertIn("within_budget", text)
             self.assertIn("contract error", text)
-
-    def test_sdd_validates_plan_before_extracting_a_member(self):
-        setup = self.section(self.sdd, "## Setup", "## Agent tiers")
-        self.assert_ordered(setup, "artifact-budget check", "read the root and every indexed member")
-        self.assertIn("scripts/task-brief PLAN_FILE N", self.sdd)
-        self.assertIn("root path and all four metrics", self.sdd)
-        self.assertIn("missing or unreadable member is a contract error", self.sdd)
-
-    def test_sdd_review_dispatch_is_root_only(self):
-        review = " ".join(self.section(
-            self.sdd, "For the full-lane review:", "Template: [task-reviewer-prompt.md]"
-        ).split())
-        self.assertIn("plan root path and all four metrics", review)
-        self.assertIn("brief and report paths plus the review-package manifest root path and all four metrics", review)
-        self.assertIn("reads Global Constraints from the bounded plan root", review)
-        self.assertIn("never gets a member list, shard list, artifact contents, diff contents", review)
-        self.assertNotIn("global constraints copied **verbatim**", review.lower())
 
     def test_native_phase_5_validates_before_dispatch_and_remeasures(self):
         caller = self.section(
@@ -2868,123 +2646,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, contract)
 
-    def test_sdd_review_paths_use_validated_manifest_packages(self):
-        documents = {
-            "task loop": self.sdd,
-            "fix loop": (SDD_DIR / "fix-loop.md").read_text(encoding="utf-8"),
-            "final review": (SDD_DIR / "final-review.md").read_text(encoding="utf-8"),
-            "task reviewer": (SDD_DIR / "task-reviewer-prompt.md").read_text(encoding="utf-8"),
-            "re-reviewer": (SDD_DIR / "re-review-prompt.md").read_text(encoding="utf-8"),
-            "conformance": (SDD_DIR / "conformance-reviewer-prompt.md").read_text(encoding="utf-8"),
-            "correctness": (SDD_DIR / "correctness-reviewer-prompt.md").read_text(encoding="utf-8"),
-        }
-        for name, raw in documents.items():
-            text = " ".join(raw.split())
-            with self.subTest(document=name):
-                self.assertIn("manifest", text)
-                self.assertIn("root path and all four metrics", text)
-                self.assertIn("manifest order", text)
-                self.assertIn("unreadable", text)
-
-    def test_sdd_generator_stops_are_decided_before_review_dispatch(self):
-        for name, path in (
-            ("task loop", SDD),
-            ("fix loop", SDD_DIR / "fix-loop.md"),
-            ("final review", SDD_DIR / "final-review.md"),
-        ):
-            text = " ".join(path.read_text(encoding="utf-8").split())
-            with self.subTest(document=name):
-                self.assert_ordered(
-                    text,
-                    "artifact-budget validate-report --boundary producer --input -",
-                    "exit 3",
-                    "decompose_required",
-                    "no reviewer",
-                    "exit 2",
-                    "failed",
-                    "dispatch",
-                )
-
-    def test_correctness_rubric_discloses_scope_only_when_the_packet_says_so(self):
-        rubric = (SDD_DIR / "correctness-reviewer-prompt.md").read_text(
-            encoding="utf-8"
-        )
-        # Stop at the Placeholders paragraph: it sits outside the fenced prompt
-        # and legitimately names Codex, so including it would make the
-        # reviewer-agnostic assertion below unfalsifiable.
-        output_format = rubric[
-            rubric.index("## Output Format") : rubric.index("**Placeholders:**")
-        ]
-        # The collection branch sits earlier, in its own section.
-        diff_under_review = rubric[
-            rubric.index("## Diff Under Review") : rubric.index("## What to Check")
-        ]
-        for fragment in (
-            "When the packet supplied to you states the review is scoped",
-            "scoped to <N> of <M> product files;",
-            "never between the verdict word and the dash",
-            "When the packet says nothing about scoping, write the verdict exactly",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, " ".join(output_format.split()))
-        # The scoped packet bounds what is fetched, not only what is graded
-        # (D9), while unscoped review consumes the complete manifest.
-        for fragment in (
-            "Read the strict manifest",
-            "For an unscoped review, read every shard exactly once in manifest order",
-            "When the packet states the review is scoped and lists the paths under review",
-            "do not read its shards",
-            "those listed paths are the whole of the range to fetch",
-            "`git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- ':(literal)<path>'` once per "
-            "listed path and fetch nothing wider",
-            # The named-risk carve-out survives scoping untouched (D13). Pinned
-            # whitespace-normalized: inserting the clause above re-wraps this
-            # paragraph, and the wrap is not the contract — the words are.
-            "one focused check per named risk, named in your report.",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, " ".join(diff_under_review.split()))
-        # Reviewer-agnostic: both clauses key off the packet, not the reader (D11).
-        for reader in ("Codex", "Claude", "native"):
-            with self.subTest(reader=reader):
-                self.assertNotIn(reader, output_format)
-                self.assertNotIn(reader, diff_under_review)
-
-    def test_sdd_review_contracts_preserve_adaptive_whole_file_coverage(self):
-        for name, path in (
-            ("task", SDD_DIR / "task-reviewer-prompt.md"),
-            ("re-review", SDD_DIR / "re-review-prompt.md"),
-            ("conformance", SDD_DIR / "conformance-reviewer-prompt.md"),
-            ("correctness", SDD_DIR / "correctness-reviewer-prompt.md"),
-        ):
-            text = " ".join(path.read_text(encoding="utf-8").split())
-            with self.subTest(document=name):
-                self.assertIn("version-3", text)
-                self.assertIn("stable-first-fit-whole-file", text)
-                self.assertIn("changed line", text)
-                self.assertIn("live file", text)
-        final_review = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
-        for text in (self.sdd, final_review):
-            compact = " ".join(text.split()).lower()
-            self.assertIn("interface version 3", compact)
-            self.assertIn("stable-first-fit-whole-file", compact)
-        self.assertIn("member_count", self.sdd)
-        self.assertIn("aggregate_bytes", self.sdd)
-        # The Placeholders paragraph tells a packet builder that the manifest
-        # remains coverage evidence while selected paths are the only diff reads.
-        rubric = (SDD_DIR / "correctness-reviewer-prompt.md").read_text(
-            encoding="utf-8"
-        )
-        placeholders = " ".join(rubric[rubric.index("**Placeholders:**") :].split())
-        for fragment in (
-            "manifest root path and all four metrics",
-            "On a scoped dispatch they remain range-coverage evidence",
-            "do not read its shards",
-            "fetch the selected literal paths once each",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, placeholders)
-
     def test_correctness_rubric_pins_the_scoped_fetch_quoting_protocol(self):
         # D9's argv protocol has to land in the rubric, not only in
         # DIFF-REVIEW.md item 7. Mirrored wording keeps the selected-path
@@ -3130,6 +2791,13 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                 with self.subTest(path=path.name, item=item):
                     self.assertIn(item, text)
 
+    def test_sdd_documents_carry_their_machine_text(self):
+        for path, items in SDD_MACHINE_TEXT.items():
+            text = normalized(path.read_text(encoding="utf-8"))
+            for item in items:
+                with self.subTest(path=path.name, item=item):
+                    self.assertIn(item, text)
+
     def test_phase_five_merge_delta_dispatch_and_handoff_reviewer_count(self):
         self.assertIn("<!-- agent-dispatch: id=ship-issue-merge-delta-review role=reviewer"
                       " model=opus effort=high -->", self.ship_issue)
@@ -3262,75 +2930,14 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "return a standing conclusion",
         )
 
-    def test_calling_controllers_record_the_correctness_scope(self):
-        final_review = " ".join(
-            (SDD_DIR / "final-review.md").read_text(encoding="utf-8").split()
-        )
-        ship_review = " ".join(
-            SHIP_ISSUE_REVIEW.read_text(encoding="utf-8").split()
-        )
-        ship_skill = " ".join(SHIP_ISSUE.read_text(encoding="utf-8").split())
-
-        # sdd: the scope is a fourth recorded value beside both verdicts and the
-        # correctness axis's reviewer identity (D1) — but only on the diff-review
-        # path. The capability fallback dispatches the native reviewer directly
-        # and returns no scope, so the sentence must not demand one there.
-        self.assertIn(
-            "When that axis came through `codex-collaboration`'s `diff-review`, "
-            "record the scope it returned as well (`full` | `scoped: <N> of <M> "
-            "product files` | `unmeasured`)",
-            final_review,
-        )
-        self.assertIn(
-            "the native reviewer dispatched directly returns no scope, so record "
-            "none there",
-            final_review,
-        )
-        self.assertIn("Never merge the two reports", final_review)
-        self.assertIn("`Codex` | `native` | `fallback` + failure class", final_review)
-
-        # ship-issue: the PR body is the provenance surface, and no reviewer
-        # identity is added there (D9).
-        self.assertIn(
-            "Record that scope in the PR body beside the correctness verdict",
-            ship_review,
-        )
-        self.assertIn(
-            "ship-issue records no reviewer identity; this records the scope only.",
-            ship_review,
-        )
-        # SKILL.md carries REVIEW.md's condition too: the native correctness
-        # fallback dispatched from this same paragraph returns no scope, so an
-        # unconditional sentence would send a reader looking for one.
-        self.assertIn(
-            "when the correctness axis came through `diff-review`, its scope is "
-            "recorded in the PR body per REVIEW.md",
-            ship_skill,
-        )
-        # Dispatch selection is untouched: the Phase 5 dispatch ids stay as they are.
+    def test_ship_issue_phase_five_dispatch_ids_are_unchanged(self):
         for dispatch_id in (
             "ship-issue-full-conformance-review",
             "ship-issue-full-correctness-fallback",
             "ship-issue-scoped-fix-rereview",
         ):
             with self.subTest(dispatch_id=dispatch_id):
-                self.assertIn(dispatch_id, ship_skill)
-
-    def test_sdd_documents_the_primary_rooted_bucketed_workspace(self):
-        text = normalized(self.sdd)
-        self.assertIn(
-            "`<primary-checkout>/.superpowers/sdd/<checkout-bucket>/<plan-basename>/`",
-            text,
-        )
-        self.assertIn(
-            "`primary` for the primary checkout itself and `wt-<worktree-name>` "
-            "for a linked worktree",
-            text,
-        )
-        self.assertIn(
-            "`git clean -fdx` in the primary checkout destroys the workspace",
-            text,
-        )
+                self.assertIn(dispatch_id, self.ship_issue)
 
     def test_no_document_or_script_claims_a_repo_root_workspace(self):
         offenders = [
@@ -3518,82 +3125,6 @@ def glossary_entries(glossary):
     return entries
 
 
-class SonnetTaskImplementerContractsTest(unittest.TestCase):
-    """#270: Sonnet task implementers; stuck tasks escalate to Opus (D1, D2)."""
-
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(next_position, 0, anchor)
-            position = next_position
-
-    @staticmethod
-    def read(path):
-        return normalized(path.read_text(encoding="utf-8"))
-
-    def test_the_fix_loop_escalates_a_sonnet_implementer_to_opus(self):
-        self.assert_ordered(
-            self.read(SDD_DIR / "fix-loop.md"),
-            "**Rounds 1–3 — resume the original implementer**",
-            "it keeps the tier it was launched with",
-            "A task already escalated to Opus/high through a reasoning-problem BLOCKED "
-            "stays on Opus/high: its fresh implementer is another "
-            "`sdd-blocked-reasoning-escalation` dispatch",
-            "never a step back to Sonnet",
-            "A task implementer keeps the Sonnet/high tier it was launched with:",
-            "<!-- agent-dispatch: id=sdd-task-fix-redispatch role=task-implementer "
-            "model=sonnet effort=high -->",
-            "**Round 4 — the stuck-breaker.**",
-            "The original implementer ran on Sonnet/high, so from here every fix "
-            "dispatch escalates to Opus/high — a model change, not only a fresh context.",
-            "then escalate to a fresh Opus/high implementer:",
-            "id=sdd-post-rescue-implementation role=implementer model=opus",
-            "Codex unavailable → the same Opus/high escalation",
-            "id=sdd-rescue-fallback-implementation role=implementer model=opus",
-            "**Round 5 — last round**, still on Opus/high",
-            "id=sdd-round-five-implementation role=implementer model=opus")
-
-    def test_a_reasoning_problem_blocked_escalates_to_opus(self):
-        sdd = self.read(SDD)
-        self.assert_ordered(
-            sdd, "### 2. Handle the report", "**BLOCKED**",
-            "context problem: add context, re-dispatch at the same tier",
-            "Reasoning problem: escalate to a fresh Opus/high implementer",
-            "<!-- agent-dispatch: id=sdd-blocked-reasoning-escalation role=implementer "
-            "model=opus effort=high -->",
-            "Too large: split it.")
-        self.assertNotIn("or bump the model", sdd)
-        self.assertIn("round 4 is the Codex-assisted stuck-breaker and round 5 the "
-                      "final fresh dispatch, both on Opus/high", sdd)
-
-    def test_sdd_agent_tiers_carry_the_re_evaluation_rule(self):
-        tiers = self.read(SDD).split("## Agent tiers", 1)[1].split("## The task loop", 1)[0]
-        self.assert_ordered(
-            tiers,
-            "with the model and effort its dispatch site declares",
-            "an `implementer` dispatch that omitted its model would run on its "
-            "definition's Opus/high",
-            "A planned task and its fix rounds 1–3 run on Sonnet/high (the "
-            "`task-implementer` role)",
-            "fix rounds 4–5 and a reasoning-problem BLOCKED — and the final-review "
-            "fixer run on Opus/high (the `implementer` role)",
-            "**Stuck tasks escalate across models, not just tiers** — Sonnet → Opus",
-            "**Re-evaluating Sonnet task implementers.**",
-            "*Metric:* the first-pass approval rate of full-lane task reviews",
-            "spec ✅ and no Critical or Important finding",
-            "*Baseline:* Opus/high implementers, about 84% first-pass approval "
-            "across 153 full-lane first-pass reviews",
-            "*When:* after about 10 delivered issues",
-            "at least 30 full-lane first-pass reviews",
-            "*Decision:* below 74%",
-            "`sdd-nonmechanical-implementation` and `sdd-task-fix-redispatch`",
-            "retiring the `task-implementer` role",
-            "between 74% and 84% is reported but is not a revert trigger",
-            "**Leaf-agent clauses.**")
-        self.assertNotIn("the definitions carry the model and effort tier", tiers)
-
-
 class LaunchFencedWorkerContractsTest(unittest.TestCase):
     """#222: writing dispatches register, commit through launch-commit, release."""
 
@@ -3603,8 +3134,6 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
                 "--run-id <run-id> --now <utc> --action-id <action_id>")
     RELEASE = ("workflow-state release-worker --repo-root <ledger_repo_root> "
                "--run-id <run-id> --now <utc> --worker-id <worker_id> --event returned")
-    COMMIT = ("launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
-              "--worker-id <worker_id> -- ")
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -3616,30 +3145,6 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
     @staticmethod
     def read(path):
         return normalized(path.read_text(encoding="utf-8"))
-
-    def test_sdd_registers_writing_workers_and_stops_on_a_fence_refusal(self):
-        self.assert_ordered(
-            self.read(SDD), "### Lifecycle workers", self.REGISTER, self.WORKER_LINE,
-            self.RELEASE, "Read-only reviewers are not registered.",
-            "launch fence refused: <reason>", "no retry and no re-dispatch",
-            "workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> "
-            "--action-id <action_id>",
-            "On `current: false`", "`/from-issue <num> --auto`",
-            "On `current: true`", "`blocked_on=transport`",
-            "### 1. Dispatch the implementer")
-        self.assertNotIn("write nothing more", self.read(SDD))
-
-    def test_the_implementer_commits_only_through_launch_commit(self):
-        self.assert_ordered(
-            self.read(SDD_DIR / "implementer-prompt.md"), "## Lifecycle Worker",
-            "Lifecycle worker:", self.COMMIT, "never run `git commit` directly",
-            "only the most recent one governs", "launch fence refused: <reason>",
-            "## Report Format")
-
-    def test_each_fix_round_registers_afresh(self):
-        self.assert_ordered(
-            self.read(SDD_DIR / "fix-loop.md"), "Lifecycle workers",
-            "fresh `worker_id`", "resume message", "Run the release when it returns")
 
     def test_from_issue_phase_6_hands_sdd_its_lifecycle_identity(self):
         self.assert_ordered(
@@ -3718,21 +3223,6 @@ class ProgressMarkerContractsTest(unittest.TestCase):
     @staticmethod
     def read(path):
         return normalized(path.read_text(encoding="utf-8"))
-
-    def test_sdd_records_a_marker_before_the_first_task_and_after_each_one(self):
-        self.assert_ordered(
-            self.read(SDD), "### Lifecycle workers", self.MARK,
-            "once before dispatching the first task this session will execute",
-            "after each task completes (step 5)",
-            "### 1. Dispatch the implementer", "### 5. Complete the task",
-            "appends `Task <N>: complete", self.MARK, "## Final review")
-
-    def test_a_refused_marker_is_no_suspension_cause_in_sdd(self):
-        self.assert_ordered(
-            self.read(SDD), "### Lifecycle workers", self.MARK,
-            "The reply's `outcome` is informational.",
-            "A refusal changes nothing, is not a suspension cause and never stops "
-            "the task loop", "### 1. Dispatch the implementer")
 
     def test_from_issue_phase_6_names_the_marker_on_both_routes(self):
         self.assert_ordered(
@@ -4803,83 +4293,6 @@ class CheckpointVerificationContractsTest(unittest.TestCase):
     def read(path):
         return normalized(path.read_text(encoding="utf-8"))
 
-    def test_final_verification_follows_the_fix_wave_in_order(self):
-        self.assert_ordered(
-            self.read(SDD_DIR / "final-review.md"),
-            "There is no second fix wave",
-            "## Final verification",
-            "after the fix wave and its scoped re-reviews",
-            "before you choose the terminal state",
-            "`bindings.workflow.verification`",
-            "A blocked verification capability stops",
-            "`reason_code` and `repair_id`",
-            "authored unsupported, skip this step",
-            "`Final verification: none declared`",
-            "1. **Check.**", "`verified-tree check --verification <id>`",
-            "keep the `tree` it prints", "Exit 0 with `verified`", "skip step 2.",
-            "2. **Run and record.**",
-            "in the foreground with an explicit timeout above its duration",
-            "only the tail read back",
-            "When every command passes, run `verified-tree record --tree <the checked tree>`",
-            "3. **Ledger.**",
-            "`Final verification: passed (head <full sha>, tree <tree id>)`",
-            "4. **Repair once.**", "`tree_changed`", "exits 2 is not a pass",
-            "Dispatch the final-review fixer above once",
-            "`git status --porcelain`",
-            "one scoped correctness re-review",
-            "run steps 1–3 once more",
-            "load-bearing correctness finding",
-            "the terminal state is Residuals",
-            "`verification_state: failed`",
-            "`correctness_verdict: findings`")
-
-    def test_sdd_finish_ties_passed_to_the_recorded_final_verification(self):
-        sdd = self.read(SDD)
-        self.assert_ordered(
-            sdd, "## Final review — two axes", "the **Final verification** step",
-            "## Finish",
-            "`verification_state` is `passed` only when final-review.md's "
-            "**Final verification** step recorded a pass on the branch tip it ran on",
-            "or took its none-declared route with the per-task focused tests passing",
-            "- **Clean** —",
-            "and the **Final verification** step recorded a pass on the branch tip",
-            "or took its none-declared route",
-            "- **Residuals** —")
-        finish = sdd.split("## Finish", 1)[1]
-        for restated in ("verified-tree", "Final verification: passed"):
-            with self.subTest(restated=restated):
-                self.assertNotIn(restated, finish)
-
-    def test_the_implementer_runs_focused_tests_and_the_build_check_only(self):
-        prompt = self.read(SDD_DIR / "implementer-prompt.md")
-        self.assertNotIn("run the full suite once before committing", prompt)
-        self.assert_ordered(
-            prompt, "## Test Discipline",
-            "run the focused test commands your brief names, red before green",
-            "and the brief's build check when your task changes files the build evaluates",
-            "Do not run the full declared verification: the final gate runs it once, "
-            "on the final head.",
-            "## After Review Findings",
-            "re-run the focused tests covering the amended code",
-            "the brief's build check when the fix changes files the build evaluates")
-
-    def test_fix_rounds_and_the_final_fixer_name_the_same_ladder(self):
-        self.assert_ordered(
-            self.read(SDD_DIR / "fix-loop.md"),
-            "Every round: the implementer fixes, re-runs the covering focused tests",
-            "when the fix changes files the build evaluates, the brief's build check",
-            "(never the full declared verification)",
-            "appends a fix report")
-        self.assert_ordered(
-            self.read(SDD_DIR / "final-review.md"),
-            "id=sdd-final-review-fixer",
-            "The fixer runs the focused tests covering each fix",
-            "the build check when a fix changes files the build evaluates",
-            "never the full declared verification",
-            "the **Final verification** step below runs it after the fix wave",
-            "Where both axes flag the same lines",
-            "## Final verification")
-
     def test_writing_plans_names_focused_commands_per_task(self):
         self.assert_ordered(
             self.read(WRITING_PLANS),
@@ -4906,165 +4319,6 @@ class AcceptanceGradingContractsTest(unittest.TestCase):
     @staticmethod
     def read(path):
         return normalized(path.read_text(encoding="utf-8"))
-
-    def test_the_conformance_axis_runs_on_opus_high(self):
-        final_review = self.read(SDD_DIR / "final-review.md")
-        sdd = self.read(SDD)
-        prompt = self.read(SDD_DIR / "conformance-reviewer-prompt.md")
-        self.assertIn("Native `reviewer` on the Opus/high tier selected in "
-                      "[conformance-reviewer-prompt.md](conformance-reviewer-prompt.md)",
-                      final_review)
-        self.assertIn("(parent D3)", final_review)
-        self.assertNotIn("checklist-shaped work", final_review)
-        self.assertIn("the conformance axis as `reviewer` on Opus/high;", sdd)
-        self.assertIn("Subagent (reviewer, Opus/high as selected above):", prompt)
-        # #270 names Sonnet task implementers elsewhere in sdd, so only the
-        # final-review bullet of its Agent tiers is checked there (#272 D10).
-        sdd_axes = sdd[sdd.index("The **final review's two axes**"):]
-        sdd_axes = sdd_axes[:sdd_axes.index(" - ")]
-        for name, text in (("final review", final_review), ("sdd", sdd_axes),
-                           ("prompt", prompt)):
-            with self.subTest(document=name):
-                self.assertNotIn("Sonnet", text)
-
-    def test_the_conformance_prompt_grades_every_criterion(self):
-        prompt = self.read(SDD_DIR / "conformance-reviewer-prompt.md")
-        fence = prompt[prompt.index("```"):prompt.rindex("```")]
-        for fragment in (
-            "## Acceptance criteria [ACCEPTANCE_CRITERIA]",
-            "`AC1`…`ACn` in order, as exactly one of `met`, `unmet`, `unverified` or `human_pending`",
-            "part of the Declared verification line",
-            "`<plan stem>.acceptance.md`",
-            "An evidence `met` must cite the observed value and the threshold;",
-            'rounding or "close enough" never counts',
-            "A missing row is `unverified`, a stale row is `unverified`",
-            "`human`: always `human_pending`",
-            "An acceptance finding is never parked with a ruling.",
-            "≤400 words total, not counting the `### Acceptance` table.",
-            "It is `Findings` whenever any Acceptance row is `unmet` or `unverified`.",
-            "| AC | Kind | Verdict | Citation |",
-            "`observed <value> at <sha7> vs threshold <literal>`",
-        ):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, fence)
-        self.assert_ordered(fence, "### Coverage", "### Acceptance (omit this section",
-                            "### Issues", "### Ledger Triage")
-        placeholders = prompt[prompt.index("**Placeholders:**"):]
-        self.assert_ordered(placeholders, "`[ACCEPTANCE_CRITERIA]`",
-                            "`AC<n>: <the issue's criterion line verbatim, without its checkbox>`",
-                            "`Declared verification: <each declared verification command, in order>`",
-                            "ship-issue's full review",
-                            "`### Acceptance` output section")
-        self.assertIn("omit the ledger-triage placeholder and `[ACCEPTANCE_CRITERIA]`",
-                      self.read(SHIP_ISSUE_REVIEW))
-
-    def test_final_review_never_parks_acceptance_findings(self):
-        text = self.read(SDD_DIR / "final-review.md")
-        self.assert_ordered(
-            text, "**Acceptance criteria.**",
-            "`<tracker-cli> issue view <num> --repo <repo_slug> --json body`",
-            "`## Acceptance criteria` heading", "`AC1`…`ACn`",
-            "`Declared verification:`", "`acceptance_state: not_applicable`",
-            "stops the final review before either axis is dispatched",
-            "Point the conformance dispatch")
-        self.assert_ordered(
-            text, "**Acceptance verdicts.**",
-            "An `evidence` `met` without the observed value or the threshold is "
-            "recorded as `unverified`.",
-            "On the first pass, a missing table, or a missing row, records every "
-            "missing `ACn` as `unverified`.",
-            "Every `unmet` or `unverified` row is an acceptance finding.",
-            "An acceptance finding is never parked with a ruling",
-            "forces the Residuals terminal state",
-            "id=sdd-final-review-fixer")
-        self.assert_ordered(
-            text, "Verdicts come back ≤400 words each, not counting the conformance "
-            "axis's `### Acceptance` table,", "id=sdd-final-conformance-rereview",
-            "every `ACn` it was not given keeps its first-pass verdict",
-            "a named acceptance finding it returns no verdict for stays `unverified`",
-            "`observed <value> at <sha7> vs threshold <literal>`; without it, "
-            "record `unverified`.",
-            "There is no second fix wave", "## Acceptance record",
-            "`<plans dir>/<plan stem>.acceptance.md`",
-            "| AC | Criterion | Kind | Check or command | Observed | Commit | "
-            "Conditions | Verdict |",
-            "Before writing, check freshness against each `evidence` row's own "
-            "`Commit`, not the head the conformance first pass graded.",
-            "touches that row's measured surface, that row becomes `unverified`.",
-            "Commit the acceptance record, then run the **Final verification** step.",
-            "`launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
-            "--worker-id <worker_id> -- <git commit arguments>`",
-            "--event returned", "## Final verification",
-            "after the acceptance record's commit",
-            "every `met` `evidence` row whose measured surface the repair's commits "
-            "touch becomes `unverified`, in a record commit made the same way",
-            "`correctness_verdict: findings`")
-        raw = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
-        self.assertIn("```markdown\n# Acceptance record — issue #<n>", raw)
-
-    def test_final_review_fix_wave_closes_freshness_and_record_gaps(self):
-        # #272 D17: freshness is measured from each evidence row's own Commit,
-        # and the repair round commits record updates before re-verifying.
-        text = self.read(SDD_DIR / "final-review.md")
-        record = text[text.index("## Acceptance record"):text.index("## Final verification")]
-        self.assertNotIn("When a commit after the head the conformance first pass "
-                         "graded touches", record)
-        self.assert_ordered(
-            record, "Before writing, check freshness against each `evidence` row's "
-            "own `Commit`, not the head the conformance first pass graded.",
-            "When a commit after the `Commit` of an `evidence` row recorded `met` "
-            "touches that row's measured surface, that row becomes `unverified`.",
-            "A fixer that changed the surface and then re-measured wrote a fresh "
-            "`Commit`, so only commits after that re-measurement count.")
-        repair = text[text.index("4. **Repair once.**"):]
-        self.assert_ordered(
-            repair, "through the final correctness re-review above and the same "
-            "fix-range package gate.",
-            "every `met` `evidence` row whose measured surface the repair's commits "
-            "touch becomes `unverified`, in a record commit made the same way",
-            "before steps 1–3 run again, so the tree they verify and record holds "
-            "the final record",
-            "Then run steps 1–3 once more.",
-            "If verification still does not pass",
-            "On that route, when there is an acceptance record, every `code` row "
-            "whose check still fails becomes `unmet` in one more record commit made "
-            "the same way.",
-            "No verified tree is recorded on that route, so this commit cannot "
-            "leave a recorded tree behind the final record.")
-        self.assertNotIn("in a second record commit", repair)
-        # #272 D14: ship's full review omits the criteria, so the bullet skips.
-        prompt = (SDD_DIR / "conformance-reviewer-prompt.md").read_text(encoding="utf-8")
-        self.assertIn("    - **Acceptance criteria:** skip this bullet when the dispatch "
-                      "has no Acceptance\n      criteria section. Otherwise grade every "
-                      "criterion", prompt)
-        self.assertIn("Standalone (`/ship-issue <num>`): `review_state` is `unknown` "
-                      "unless the user supplies validated evidence of a completed sdd "
-                      "two-axis review, and with `review_state: unknown` "
-                      "`acceptance_state` is `not_applicable`;", self.read(SHIP_ISSUE))
-
-    def test_pr_review_fixes_pin_numbering_and_code_run_freshness(self):
-        # #272 PR review: ACn numbering matches the Acceptance map's reader, a
-        # cited standalone code run goes stale like an evidence row, and the
-        # scoped re-review is asked for the evidence citation.
-        text = self.read(SDD_DIR / "final-review.md")
-        self.assertIn("A criterion line is a checkbox line (`- [ ]` or `- [x]`) or a "
-                      "numbered line (`<n>. `), the same lines writing-plans' "
-                      "`## Acceptance map` counts", text)
-        self.assertIn("`code` row recorded `met` on a cited run outside the Declared "
-                      "verification line follows the same rule from that run's commit",
-                      text)
-        self.assertIn("(an ADDRESSED `evidence` acceptance finding cites `observed "
-                      "<value> at <sha7> vs threshold <literal>`)", text)
-
-    def test_sdd_finish_reports_acceptance_state(self):
-        finish = self.read(SDD).split("## Finish", 1)[1]
-        self.assertIn("`head_sha`, `acceptance_state`, `detail_state`, `report_path`, "
-                      "and `notes`", finish)
-        self.assert_ordered(
-            finish, "`acceptance_state` derives from the final verdicts",
-            "`not_applicable` when", "`unmet` when any verdict is `unmet` or `unverified`",
-            "`human_pending` when any verdict is `human_pending`", "otherwise `met`",
-            "- **Clean** —", "(an acceptance finding never is)")
 
     def test_both_handoff_templates_carry_acceptance_state(self):
         raw = (FROM_ISSUE_DIR / "ship-handoff.md").read_text(encoding="utf-8")
@@ -5444,13 +4698,6 @@ class HeldReportContractsTest(unittest.TestCase):
             "verify the issue is `OPEN` with `needs-verification`",
             "leaving it open. In both cases, publish")
 
-    def test_final_review_lets_ship_attest_a_verdict(self):
-        final = normalized((SDD_DIR / "final-review.md").read_text(encoding="utf-8"))
-        self.assertNotIn("Only you, the controller, write `Verdict`", final)
-        self.assert_ordered(
-            final, "You, the controller, write `Verdict`, using the four grading tokens",
-            "ship-issue Phase 0 may later rewrite an attested row to `met (attested)`")
-
 
 class LaunchScopeWiringContractsTest(unittest.TestCase):
     """#276: owners and writing workers run long commands in a launch scope; owners self-reap."""
@@ -5471,10 +4718,6 @@ class LaunchScopeWiringContractsTest(unittest.TestCase):
                      "--action-id <action_id>` prints.")
     REAP = ("launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> "
             "--action-id <action_id>")
-    COMMIT = ("launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
-              "--worker-id <worker_id> -- ")
-    RELEASE = ("workflow-state release-worker --repo-root <ledger_repo_root> "
-               "--run-id <run-id> --now <utc> --worker-id <worker_id> --event returned")
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -5497,12 +4740,6 @@ class LaunchScopeWiringContractsTest(unittest.TestCase):
         self.assert_ordered(self.read(FROM_ISSUE), "**Writing workers.**", self.WORKER_LINE,
                             self.WORKER_EXEC, self.WORKER_SCRATCH, "launch-commit",
                             "**Self-reap.**")
-        self.assert_ordered(self.read(SDD), "### Lifecycle workers", self.WORKER_LINE,
-                            self.WORKER_EXEC, self.WORKER_SCRATCH, self.RELEASE)
-        self.assert_ordered(self.read(SDD_DIR / "implementer-prompt.md"),
-                            "## Lifecycle Worker", self.COMMIT, "never run `git commit` directly",
-                            self.WORKER_EXEC, self.WORKER_SCRATCH,
-                            "only the most recent one governs", "## Report Format")
         handoff = self.read(FROM_ISSUE_DIR / "ship-handoff.md")
         self.assert_ordered(handoff, "## Ship-owner subagent prompt", self.WORKER_LINE,
                             "never inside the handoff", self.WORKER_EXEC, self.WORKER_SCRATCH,
