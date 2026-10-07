@@ -5258,7 +5258,7 @@ class CheckpointVerificationContractsTest(unittest.TestCase):
             "Dispatch the final-review fixer above once",
             "`git status --porcelain`",
             "one scoped correctness re-review",
-            "then run steps 1–3 once more",
+            "run steps 1–3 once more",
             "load-bearing correctness finding",
             "the terminal state is Residuals",
             "`verification_state: failed`",
@@ -5457,19 +5457,59 @@ class AcceptanceGradingContractsTest(unittest.TestCase):
             "`<plans dir>/<plan stem>.acceptance.md`",
             "| AC | Criterion | Kind | Check or command | Observed | Commit | "
             "Conditions | Verdict |",
-            "Before writing, check freshness.",
-            "touches the measured surface of an `evidence` row recorded `met`, that "
-            "row becomes `unverified`.",
+            "Before writing, check freshness against each `evidence` row's own "
+            "`Commit`, not the head the conformance first pass graded.",
+            "touches that row's measured surface, that row becomes `unverified`.",
             "Commit the acceptance record, then run the **Final verification** step.",
             "`launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
             "--worker-id <worker_id> -- <git commit arguments>`",
             "--event returned", "## Final verification",
             "after the acceptance record's commit",
-            "`correctness_verdict: findings`",
             "every `met` `evidence` row whose measured surface the repair's commits "
-            "touch becomes `unverified`, in a second record commit")
+            "touch becomes `unverified`, in a record commit made the same way",
+            "`correctness_verdict: findings`")
         raw = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
         self.assertIn("```markdown\n# Acceptance record — issue #<n>", raw)
+
+    def test_final_review_fix_wave_closes_freshness_and_record_gaps(self):
+        # #272 D17: freshness is measured from each evidence row's own Commit,
+        # and the repair round commits record updates before re-verifying.
+        text = self.read(SDD_DIR / "final-review.md")
+        record = text[text.index("## Acceptance record"):text.index("## Final verification")]
+        self.assertNotIn("When a commit after the head the conformance first pass "
+                         "graded touches", record)
+        self.assert_ordered(
+            record, "Before writing, check freshness against each `evidence` row's "
+            "own `Commit`, not the head the conformance first pass graded.",
+            "When a commit after the `Commit` of an `evidence` row recorded `met` "
+            "touches that row's measured surface, that row becomes `unverified`.",
+            "A fixer that changed the surface and then re-measured wrote a fresh "
+            "`Commit`, so only commits after that re-measurement count.")
+        repair = text[text.index("4. **Repair once.**"):]
+        self.assert_ordered(
+            repair, "through the final correctness re-review above and the same "
+            "fix-range package gate.",
+            "every `met` `evidence` row whose measured surface the repair's commits "
+            "touch becomes `unverified`, in a record commit made the same way",
+            "before steps 1–3 run again, so the tree they verify and record holds "
+            "the final record",
+            "Then run steps 1–3 once more.",
+            "If verification still does not pass",
+            "On that route, when there is an acceptance record, every `code` row "
+            "whose check still fails becomes `unmet` in one more record commit made "
+            "the same way.",
+            "No verified tree is recorded on that route, so this commit cannot "
+            "leave a recorded tree behind the final record.")
+        self.assertNotIn("in a second record commit", repair)
+        # #272 D14: ship's full review omits the criteria, so the bullet skips.
+        prompt = (SDD_DIR / "conformance-reviewer-prompt.md").read_text(encoding="utf-8")
+        self.assertIn("    - **Acceptance criteria:** skip this bullet when the dispatch "
+                      "has no Acceptance\n      criteria section. Otherwise grade every "
+                      "criterion", prompt)
+        self.assertIn("Standalone (`/ship-issue <num>`): `review_state` is `unknown` "
+                      "unless the user supplies validated evidence of a completed sdd "
+                      "two-axis review, and with `review_state: unknown` "
+                      "`acceptance_state` is `not_applicable`;", self.read(SHIP_ISSUE))
 
     def test_sdd_finish_reports_acceptance_state(self):
         finish = self.read(SDD).split("## Finish", 1)[1]

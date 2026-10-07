@@ -34,7 +34,8 @@ review-package. Exit 2/3, stale metrics, a mismatch, or over-budget input stops
 before Phase 0. After any later writer changes either artifact, repeat the same
 checks before continuing. Standalone (`/ship-issue <num>`): `review_state` is
 `unknown` unless the user supplies validated evidence of a completed sdd
-two-axis review; derive the issue number and artifacts, then establish the same
+two-axis review, and with `review_state: unknown` `acceptance_state` is
+`not_applicable`; derive the issue number and artifacts, then establish the same
 checker-valid root/metric objects. The worktree state — not the handoff — is
 ground truth.
 

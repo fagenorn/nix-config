@@ -80,7 +80,8 @@ Subagent (reviewer, Opus/high as selected above):
     - **Message-format parity:** operator-facing strings, error messages,
       audit-trail formats, and labels the spec promises match the implementation
       byte-for-byte, or the deviation is explicitly justified.
-    - **Acceptance criteria:** grade every criterion in the Acceptance
+    - **Acceptance criteria:** skip this bullet when the dispatch has no Acceptance
+      criteria section. Otherwise grade every criterion in the Acceptance
       criteria section, `AC1`…`ACn` in order, as exactly one of `met`,
       `unmet`, `unverified` or `human_pending`. Take each criterion's kind
       (`code`, `evidence` or `human`) from the plan's `## Acceptance map`

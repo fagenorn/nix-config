@@ -151,10 +151,13 @@ so the plan's metrics do not change. Its schema:
   `met`, `unmet`, `unverified` and `human_pending`. No code parses the record:
   the gate is the report's `acceptance_state`.
 
-Before writing, check freshness. When a commit after the head the conformance
-first pass graded touches the measured surface of an `evidence` row recorded
-`met`, that row becomes `unverified`. It is an acceptance finding that survives
-the fix wave, because there is no second fix wave.
+Before writing, check freshness against each `evidence` row's own `Commit`, not
+the head the conformance first pass graded. When a commit after the `Commit` of
+an `evidence` row recorded `met` touches that row's measured surface, that row
+becomes `unverified`. A fixer that changed the surface and then re-measured
+wrote a fresh `Commit`, so only commits after that re-measurement count. A row
+made `unverified` here is an acceptance finding that survives the fix wave,
+because there is no second fix wave.
 
 Write each row's final verdict into `Verdict`. When the record has no rows yet,
 write the whole record. Commit the acceptance record, then run the **Final
@@ -202,11 +205,17 @@ as it did before this step existed.
    its log path, the `git status --porcelain` output for `tree_changed`, or the
    helper's stderr line for an exit 2. Run one scoped correctness re-review of
    that fix diff, through the final correctness re-review above and the same
-   fix-range package gate, then run steps 1–3 once more. If verification still
-   does not pass, record the failure as a load-bearing correctness finding in
-   the retained detail: the terminal state is Residuals and the report carries
-   `verification_state: failed` and `correctness_verdict: findings`.
-   When there is an acceptance record, every `code` row whose check failed
-   becomes `unmet`, and every `met` `evidence` row whose measured surface the
-   repair's commits touch becomes `unverified`, in a second record commit made
-   the same way; each one is an acceptance finding as above.
+   fix-range package gate. When there is an acceptance record, every `met`
+   `evidence` row whose measured surface the repair's commits touch becomes
+   `unverified`, in a record commit made the same way, and that commit lands
+   before steps 1–3 run again, so the tree they verify and record holds the
+   final record; each such row is an acceptance finding as above. Then run
+   steps 1–3 once more. If verification still does not pass, record the
+   failure as a load-bearing correctness finding in the retained detail: the
+   terminal state is Residuals and the report carries
+   `verification_state: failed` and `correctness_verdict: findings`. On that
+   route, when there is an acceptance record, every `code` row whose check
+   still fails becomes `unmet` in one more record commit made the same way.
+   No verified tree is recorded on that route, so this commit cannot leave a
+   recorded tree behind the final record. Each such row is an acceptance
+   finding as above.
