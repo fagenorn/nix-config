@@ -1,7 +1,7 @@
 # Task 2: `acceptance_state` on `ship-handoff/v2`
 
 Lane: full (a report-boundary schema, which is a public contract). Decisions:
-per D8, D9 and D11 of the spec's ledger. The delivery model only admits the
+per D8, D9, D11 and D16 of the spec's ledger. The delivery model only admits the
 key, and artifact-budget applies the one pairing to it. The delivery contract
 and its digest do not change.
 
@@ -34,7 +34,9 @@ and its digest do not change.
 - `artifact-budget validate-report --boundary ship-handoff` on a v2 handoff
   exits 2 with empty stdout when the pair (`review_state`,
   `acceptance_state`) is outside the table. That includes a `review_state`
-  outside `clean`, `residuals` and `unknown` (per D11).
+  outside `clean`, `residuals` and `unknown` (per D11). It also exits 2 for
+  `acceptance_state: unmet` with a null `report_path` (per D16). The accepted
+  residual fixtures carry a durable `report_path` named in `notes`.
 - `canonical_digest(contract)` of every fixture contract is unchanged.
 
 - [ ] **Step 1: Write the failing tests**
@@ -71,9 +73,12 @@ Then add to `ArtifactBudgetCliTest`:
         model = artifact_budget._delivery_model()
         contract, delivery = contract_and_delivery(model)
         handoff = ship_handoff(model, contract, delivery)
+        detail = ".superpowers/issue-delivery/151/run-1/sdd-a.json"
+        residual = {**handoff, "review_state": "residuals", "report_path": detail,
+                    "notes": f"details: {detail}"}
         accepted = [
             *({**handoff, "acceptance_state": v} for v in ("met", "human_pending", "not_applicable")),
-            *({**handoff, "review_state": "residuals", "acceptance_state": v}
+            *({**residual, "acceptance_state": v}
               for v in ("met", "unmet", "human_pending", "not_applicable")),
             {**handoff, "review_state": "unknown", "acceptance_state": "not_applicable"},
         ]
@@ -87,6 +92,8 @@ Then add to `ArtifactBudgetCliTest`:
             {**handoff, "acceptance_state": "partially_met"},
             {**handoff, "review_state": "unknown", "acceptance_state": "met"},
             {**handoff, "review_state": "partial", "acceptance_state": "met"},
+            {**residual, "acceptance_state": "unmet", "report_path": None,
+             "notes": "no durable detail"},
         ]
         for index, payload in enumerate(rejected):
             with self.subTest(rejected=index):
@@ -121,9 +128,11 @@ now fails on its unknown `acceptance_state` key, and so do the two new tests.
 `try`, after `model.validate_delivery_object(...)` returns, add:
 
 ```python
-        if boundary == "ship-handoff" and isinstance(value, dict) and not \
-                acceptance_pairs_with_review(value["review_state"], value["acceptance_state"]):
-            # The model only admits the key; the closed pairing is ours (#272 D9).
+        if boundary == "ship-handoff" and isinstance(value, dict) and (
+                not acceptance_pairs_with_review(value["review_state"], value["acceptance_state"])
+                or (value["acceptance_state"] == "unmet" and value["report_path"] is None)):
+            # The model only admits the key; the closed pairing is ours (#272 D9),
+            # and an unmet criterion travels only with its durable detail (#272 D16).
             raise ArtifactBudgetError("acceptance_state does not pair with review_state")
 ```
 

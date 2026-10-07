@@ -129,3 +129,7 @@ controller reads the criteria, and what happens on a tracker failure) and D14
 (ship's full review grades nothing).
 
 ---
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra/xhigh), isolated and read-only, no fallback. Base SHA 3b911376cfbb47f3480956daa571097d53f4715d. Findings: 2 Blocking, 2 Should fix, 0 Discussion; 4 accepted, 0 rejected, 0 deferred. Applied to Task 2 (per D16) and Task 5 (per D17).

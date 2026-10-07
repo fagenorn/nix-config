@@ -1,7 +1,7 @@
 # Task 5: Controller rules, the acceptance record and sdd's `acceptance_state`
 
 Lane: full (it changes the controller's review, commit and report behavior).
-Decisions: per D1, D3, D4, D5, D6, D7, D8, D13 and D15 of the spec's ledger,
+Decisions: per D1, D3, D4, D5, D6, D7, D8, D13, D15 and D17 of the spec's ledger,
 and parent D4 and D5. Read the spec's "Controller rules (`final-review.md`)"
 and "Acceptance record" sections first.
 
@@ -62,18 +62,24 @@ In `home/common/agent-skills/tests/test_workflow_skill_contracts.py`:
             text, "**Acceptance verdicts.**",
             "An `evidence` `met` without the observed value or the threshold is "
             "recorded as `unverified`.",
-            "A missing table, or a missing row, records every missing `ACn` as "
-            "`unverified`.",
+            "On the first pass, a missing table, or a missing row, records every "
+            "missing `ACn` as `unverified`.",
             "Every `unmet` or `unverified` row is an acceptance finding.",
             "An acceptance finding is never parked with a ruling",
             "forces the Residuals terminal state",
             "id=sdd-final-review-fixer")
         self.assert_ordered(
-            text, "id=sdd-final-conformance-rereview",
+            text, "Verdicts come back ≤400 words each, not counting the conformance "
+            "axis's `### Acceptance` table,", "id=sdd-final-conformance-rereview",
+            "every `ACn` it was not given keeps its first-pass verdict",
+            "a named acceptance finding it returns no verdict for stays `unverified`",
             "`observed <value> at <sha7> vs threshold <literal>`; without it, "
             "record `unverified`.",
             "There is no second fix wave", "## Acceptance record",
             "`<plans dir>/<plan stem>.acceptance.md`",
+            "Before writing, check freshness.",
+            "touches the measured surface of an `evidence` row recorded `met`, that "
+            "row becomes `unverified`.",
             "| AC | Criterion | Kind | Check or command | Observed | Commit | "
             "Conditions | Verdict |",
             "Commit the acceptance record, then run the **Final verification** step.",
@@ -82,7 +88,8 @@ In `home/common/agent-skills/tests/test_workflow_skill_contracts.py`:
             "--event returned", "## Final verification",
             "after the acceptance record's commit",
             "`correctness_verdict: findings`",
-            "becomes `unmet` in a second record commit")
+            "every `met` `evidence` row whose measured surface the repair's commits "
+            "touch becomes `unverified`, in a second record commit")
         raw = (SDD_DIR / "final-review.md").read_text(encoding="utf-8")
         self.assertIn("```markdown\n# Acceptance record — issue #<n>", raw)
 
@@ -121,11 +128,11 @@ B. Insert this block directly before the paragraph that begins
 `Findings → verify each against the live worktree first`:
 
 ```text
-**Acceptance verdicts.** When the conformance dispatch carried `[ACCEPTANCE_CRITERIA]`, check its `### Acceptance` table on the first pass and on every conformance re-review, before recording a verdict:
+**Acceptance verdicts.** When the conformance dispatch carried `[ACCEPTANCE_CRITERIA]`, check its `### Acceptance` table on the first pass, before recording a verdict:
 
 - An `evidence` `met` without the observed value or the threshold is recorded as `unverified`.
 - A `code` `met` whose check is not on the Declared verification line, and that has no cited run, is recorded as `unverified`.
-- A missing table, or a missing row, records every missing `ACn` as `unverified`. There is no re-dispatch.
+- On the first pass, a missing table, or a missing row, records every missing `ACn` as `unverified`. There is no re-dispatch.
 
 Every `unmet` or `unverified` row is an acceptance finding. It joins the fixer's list below as an Important finding labelled `conformance` and its `ACn`. For an `evidence` criterion, the fix is to re-measure and write that row's evidence columns in the acceptance record. An acceptance finding is never parked with a ruling, and the residual adjudication below never turns one into a parked line. One that survives the fix wave is load-bearing: it sets `conformance_verdict: findings` and forces the Residuals terminal state.
 ```
@@ -135,7 +142,7 @@ C. Insert this paragraph directly before the sentence that begins
 its own new line after the paragraph.
 
 ```text
-The conformance re-review re-verdicts acceptance findings like any other named finding. Its ADDRESSED on an `evidence` criterion must carry the citation that a first-pass `met` needs, `observed <value> at <sha7> vs threshold <literal>`; without it, record `unverified`.
+The conformance re-review re-verdicts acceptance findings like any other named finding, and only those: every `ACn` it was not given keeps its first-pass verdict, and a named acceptance finding it returns no verdict for stays `unverified`. Its ADDRESSED on an `evidence` criterion must carry the citation that a first-pass `met` needs, `observed <value> at <sha7> vs threshold <literal>`; without it, record `unverified`.
 ```
 
 D. Insert this section directly before `## Final verification`:
@@ -157,6 +164,8 @@ The record is one committed file per plan, beside the plan: `<plans dir>/<plan s
 - Whoever measured writes the evidence columns (`Observed`, `Commit`, `Conditions`): an implementer whose task brief names the measurement, or the final-review fixer. For a `code` row, `Observed` is `in final verification` or the cited run. For a `human` row the evidence columns hold `—`.
 - Only you, the controller, write `Verdict`, using the four grading tokens `met`, `unmet`, `unverified` and `human_pending`. No code parses the record: the gate is the report's `acceptance_state`.
 
+Before writing, check freshness. When a commit after the head the conformance first pass graded touches the measured surface of an `evidence` row recorded `met`, that row becomes `unverified`. It is an acceptance finding that survives the fix wave, because there is no second fix wave.
+
 Write each row's final verdict into `Verdict`. When the record has no rows yet, write the whole record. Commit the acceptance record, then run the **Final verification** step. Under a lifecycle identity, register yourself for that commit as SKILL.md's `### Lifecycle workers` describes: run `workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --action-id <action_id>`, commit with `launch-commit --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <git commit arguments>`, then run `workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --now <utc> --worker-id <worker_id> --event returned`. A `launch fence refused: <reason>` takes that section's refusal route. Without a lifecycle identity, commit with plain `git`.
 ````
 
@@ -169,7 +178,13 @@ F. At the end of step 4 (**Repair once.**), after
 `` `correctness_verdict: findings`. ``, append:
 
 ```text
-When there is an acceptance record, every `code` row whose check failed becomes `unmet` in a second record commit, made the same way, and each one is an acceptance finding as above.
+When there is an acceptance record, every `code` row whose check failed becomes `unmet`, and every `met` `evidence` row whose measured surface the repair's commits touch becomes `unverified`, in a second record commit made the same way; each one is an acceptance finding as above.
+```
+
+G. In the paragraph that begins `Point the conformance dispatch at the ledger's deferred-minor`, replace the text `Verdicts come back ≤400 words each,` with:
+
+```text
+Verdicts come back ≤400 words each, not counting the conformance axis's `### Acceptance` table,
 ```
 
 - [ ] **Step 4: Edit sdd `SKILL.md`'s `## Finish`**
