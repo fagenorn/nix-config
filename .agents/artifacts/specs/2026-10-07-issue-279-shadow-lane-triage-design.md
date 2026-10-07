@@ -29,6 +29,10 @@ acted on: every attempt still runs the full pipeline.
    runs `lane-triage`, and puts the record and verdict in the investigation note.
    The spec's `## Triage` section then commits them. Every attempt runs full (D6,
    D7).
+4. No instruction-load ceiling is raised: the added skill text is paid for by
+   compressing it and cutting existing always-loaded text, so the PR passes the
+   `Instruction Budget` check without the `instruction-budget-raise` label
+   (D12–D15).
 
 ## Decisions
 
@@ -143,8 +147,50 @@ declaration. The step runs in this order:
 read-only verdict and the public `resolve` seam. This is the same commit
 obligation as for every other package command.
 
-Interactive mode shows the verdict at the Phase-0 checkpoint as information
-only, because there is no lane to choose in this slice.
+The checkpoint gains no sentence: the posted note already shows the verdict,
+and there is no lane to choose in this slice (D12).
+
+## Instruction budget
+
+The user decided on 2026-10-07 that no ceiling is raised. The branch therefore
+drops ec089c67, and `home/common/agent-skills/instruction-load.json` ends
+byte-identical to `origin/main`'s (D15). The corpus counts every skill file, so
+moving text between skill files never pays for it; only a net cut does. The
+binding constraint is therefore: the summed byte delta of `from-issue/SKILL.md`,
+`AUTO.md` and `investigate.md` against `origin/main` is at most 0, with every cut
+made in `SKILL.md` or `AUTO.md`, which are hot in all three affected profiles.
+That one inequality clears the corpus and every hot profile at once (D12).
+
+The budget is met in two moves, both measured in a scratch probe (net −38
+bytes, `instruction_load check --base origin/main` passing on `origin/main`'s
+model):
+
+1. **Compress the additions** (about −1,000 bytes against ec089c67's text):
+   the **Lane triage** paragraph keeps every rule — the four signal names with
+   one-line meanings, the record shape, the inline `lane-triage evaluate` span,
+   the quoted heredoc and no input file, the `ran:` lines for shadow and
+   active, "every attempt runs full", the unsupported skip, and the exits
+   routed to the terminal return procedure — but drops restated prose. The
+   resolve-exception clause is appended inside the existing sentence, which
+   keeps the four-file pinned clause "only sanctioned exception is
+   `workflow-state build-delivery`, which performs its own sealed, read-only
+   resolution" verbatim. Phase 2, the `AUTO.md` bullet and the
+   `investigate.md` field shrink to one short clause each, and the checkpoint
+   sentence is dropped.
+2. **Cut existing text** (about −1,400 bytes): `SKILL.md`'s deadline-rejected
+   `progress` paragraph loses its expiry rationale (wall-clock expiry, the
+   unconsulted `last_progress_at`, consuming no attempt and the reserved fresh
+   retry), which restates the suspension procedure and the reaper, and its
+   remaining rule is rewritten tighter (D13). The rewrite keeps both helper
+   rejection strings, the suspension route, the no-`finish` rule, the
+   `stopped(stalled)` outcome, and the progress-marker test's anchor
+   "without a phase advance or a newly recorded progress marker" verbatim.
+
+The gate is the required `Instruction Budget` CI check on the PR. Its local
+proxy is `PYTHONPATH=python python3 -m agent_tools.instruction_load check --base
+origin/main`, which must exit 0 after the final merge of `origin/main`. If main
+grows `from-issue` text under its own raise before shipping, that changes
+nothing here, because main's raise brings its text with it.
 
 ## Test seams
 
@@ -171,10 +217,15 @@ is invented.
   - The run leaves the tree unchanged.
 - **`tests/test_agent_tools_launchers.py`**: the command list gains
   `lane-triage`.
-- **`test_workflow_skill_contracts.py`**: the `from-issue` Phase 0 section
-  names `lane-triage evaluate`, the triage record, the shadow rule that every
-  attempt runs full, and the unsupported skip. Phase 2 names the `## Triage`
-  section.
+- **`test_workflow_skill_contracts.py`** gains no lane-triage test. The
+  branch's `LaneTriageContractsTest` is deleted, because all five of its
+  tests, the `CLAUDE.md` one included, pin English phrases. The two
+  existing expiry phrase-pin tests,
+  `test_expiry_prose_describes_the_wall_clock_the_reaper_actually_reads` and
+  `test_from_issue_routes_a_deadline_rejected_progress_to_the_suspension_procedure`,
+  are deleted together with the prose they pin (D14). The skill text is then
+  guarded by `test_lane_triage.py` for behavior and by the instruction-budget
+  check for size.
 
 ## Out of scope
 
@@ -205,3 +256,7 @@ is invented.
 | D9 | `from-issue` names the call only as the inline span `lane-triage evaluate --repo-root <project.root> --input -` and describes the heredoc in prose. No shell fence, no `COMMAND_VOCABULARY` entry and no permission allowlist change | `test_shell_example_contracts.py` refuses a heredoc example unless its helper is allowlisted whole in `home/common/claude-code/default.nix`, and the allowlist is out of scope; precedent: `verified-tree` and `launch-scope` are not in the vocabulary either | A heredoc fence: the shell-example contract refuses it. Allowlisting `lane-triage`: it widens the guard's permission surface in a slice that only observes |
 | D10 | Phase-5 review edits: `from-issue` names `lane-triage evaluate` beside `build-delivery` as a helper that resolves on its own; the Phase-0 paragraph sends any non-zero exit outside the closed refusal set (traceback, missing command) to the terminal return procedure; the final gate also runs `just agent-installed-skill-tests` | Plan reviewer (Claude fallback): SKILL.md's "only sanctioned exception" sentence would become false; skill text must cover every exit; `LAUNCHER_FLOOR` is otherwise never exercised | Leave the sentence (stale prose pinned by a test); map every resolver fault to a refusal code inside lane-triage (hides internal faults behind a closed code) |
 | D11 | `validate_record` refuses a non-canonical `paths` entry (a backslash, an empty or `.` segment, a trailing `/`) as `invalid_input` at `/paths/<index>`, inside D8's fixed walk; `evaluate` matches the recorded string unchanged | Final-review correctness finding COR-001: the safe-relative rule admits `./tinytask/store.py` and `tinytask//store.py`, and `fnmatchcase` on the raw string misses the `risk_paths` glob, so an all-`no` record naming a risky file came back `light` | Normalizing paths before matching: it hides the record's error and diverges from the predicted-path list the owner records |
+| D12 | The no-raise budget is met by a net cut: the summed delta of `from-issue/{SKILL,AUTO,investigate}.md` is at most 0 against `origin/main`, and every cut lands in `SKILL.md` or `AUTO.md`. The triage paragraph stays in `SKILL.md` Phase 0 (D6 stands), compressed, and the checkpoint sentence is dropped | User decision 2026-10-07 (issue AC: no raise); `instruction_load.measure_corpus` counts every skill file; the check refuses any model change except lowering, so a new conditional file cannot be listed; `SKILL.md` and `AUTO.md` are hot in all three breached profiles | Moving the paragraph to `investigate.md`, or to a new conditional file, which only shifts hot bytes, still breaches the corpus, and a new file needs a refused model edit. Putting the signal definitions in `lane-triage --help`, which would redesign the command's surface (out of scope) |
+| D13 | The existing cut is the expiry rationale in `SKILL.md`'s deadline-rejected `progress` paragraph; the rewritten paragraph keeps every owner action and both helper rejection strings | That rationale restates the suspension procedure ("consumes no attempt", "re-entry resumes it in place") and the reaper's internals, and the owner's action is the same on either reading. The Bar: minimal, no restatement | Trimming the flow diagram, the Notes or the leaf-agent clauses: those are an overview, policy rules or a pinned carrier clause. Spreading small cuts over many sections: more pins touched for the same bytes |
+| D14 | Under agent-helpers rule 6 the branch's `LaneTriageContractsTest` is deleted outright, with no replacement pin, and the two expiry phrase-pin tests are deleted in the same slice that slims that prose. The pins kept verbatim are the cross-file build-delivery exception clause and the progress-marker anchor | Rule 6: no new English phrase pin, and existing phrase pins are deleted in the slice that slims their skill; the `lane-triage` argv is not on rule 6's allowed list; this resolves the prior attempt's unapplied Should-fix | Rewriting those pins to the new wording, which rule 6 forbids. Adding `lane-triage` to `COMMAND_VOCABULARY` to vet the span, which D9 rejects |
+| D15 | No ceiling is lowered: `instruction-load.json` ends byte-identical to `origin/main`'s (ec089c67 is reverted) | The roughly 38 bytes of slack sit far inside the check's 5% tightness band; lowering adds a gate-file edit that conflicts with concurrent PRs' ceiling notes, for no enforcement gain | Running `tighten` to the new measures: allowed, but it is churn on a contended file and leaves zero slack for the final merge with main |
