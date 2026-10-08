@@ -1,7 +1,5 @@
 # Scoped Re-Review Prompt Template
 
-Scoped to named prior findings and a `FIX_BASE_SHA..HEAD_SHA` fix diff; never a first pass or a whole-branch review.
-
 <!-- agent-dispatch: id=sdd-scoped-task-rereview role=reviewer-lite model=sonnet effort=medium -->
 Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") verifies the named prior findings against the bounded fix diff.
 

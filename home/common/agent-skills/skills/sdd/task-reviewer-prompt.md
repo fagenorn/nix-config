@@ -1,7 +1,5 @@
 # Task Reviewer Prompt Template
 
-A task-scoped reviewer: one diff read, two verdicts (spec compliance, code quality).
-
 <!-- agent-dispatch: id=sdd-first-pass-task-review role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") performs this first-pass task review.
 
@@ -55,8 +53,8 @@ Subagent (reviewer, Opus/high as selected above):
     when a hunk you must judge is cut off mid-function, and say so. Do not
     re-run git commands or crawl the codebase. Inspect code outside the diff
     only to evaluate a concrete risk you can name, one focused check per risk,
-    both named in your report. Cross-cutting changes (lock ordering, API
-    contracts, shared mutable state) are such risks: check the call sites.
+    both named in your report. Cross-cutting changes (lock ordering, a function or API
+    contract, shared mutable state) are such risks: check the call sites.
 
     Your review is read-only on this checkout. Do not mutate the working
     tree, the index, HEAD, or branch state.
@@ -117,9 +115,8 @@ Subagent (reviewer, Opus/high as selected above):
     behavior, a missed requirement, or maintainability damage you would block
     a merge over — verbatim duplication of a logic block, swallowed errors,
     tests that assert nothing. "Coverage could be broader" and polish are
-    Minor. If the plan or brief mandates something this rubric calls a defect,
-    report it as Important, labeled plan-mandated; the plan does not grade its
-    own work. Credit what was done well before listing issues.
+    Minor. If the plan or brief explicitly mandates something this rubric calls a defect,
+    report it as Important, labeled plan-mandated. Credit what was done well before listing issues.
 
     Launch any subagent by type only, never by name: a subagent cannot spawn a
     named teammate, and a named launch returns an error instead of work. Read an
@@ -165,7 +162,8 @@ Subagent (reviewer, Opus/high as selected above):
 **Placeholders:**
 - `[BRIEF_FILE]` — REQUIRED: the task brief file (`scripts/task-brief PLAN N`)
 - `[GLOBAL_CONSTRAINTS]` — the binding requirements copied verbatim from the
-  plan's Global Constraints or the spec (not process rules)
+  plan's Global Constraints or the spec: exact values, formats, and stated
+  relationships between components (not process rules)
 - `[REPORT_FILE]` — REQUIRED: the implementer's report file
 - `[BASE_SHA]` — commit before this task
 - `[HEAD_SHA]` — current commit

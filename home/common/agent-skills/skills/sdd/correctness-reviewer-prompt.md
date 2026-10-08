@@ -59,8 +59,7 @@ Subagent (reviewer, Opus/high for the native path selected above):
     lock ordering, shared mutable state), one focused check per named risk,
     named in your report. Your review is read-only on this checkout: do not
     mutate the working tree, the index, HEAD, or branch state in any way. Do not
-    re-run the full test suite; the implementers' reported runs are the
-    evidence, so run at most one focused test to resolve a specific doubt
+    re-run the full test suite; run at most one focused test to resolve a specific doubt
     reading the code raised.
 
     ## What to Check
@@ -111,6 +110,6 @@ Subagent (reviewer, Opus/high for the native path selected above):
 
 **Placeholders:** `[PLAN_FILE]`, `[VERIFY_COMMANDS]` (from the project bindings /
 manifest detection), `[MERGE_BASE_SHA]`, `[HEAD_SHA]`, `[MANIFEST_ROOT]`,
-`[ROOT_BYTES]`, `[TOTAL_BYTES]`, `[FILE_COUNT]`, `[LARGEST_MEMBER_BYTES]`. SDD and
-the Codex `diff-review` packet supply the manifest root and all four metrics; a
-dispatcher without the sdd scripts omits them and uses the non-SDD fallback.
+`[ROOT_BYTES]`, `[TOTAL_BYTES]`, `[FILE_COUNT]`, `[LARGEST_MEMBER_BYTES]`. A
+dispatcher without the sdd scripts omits the manifest root and metrics and uses
+the non-SDD fallback.

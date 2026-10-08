@@ -1,7 +1,5 @@
 # Conformance Reviewer Prompt Template (final review, conformance axis)
 
-The conformance axis of the final review: delivered-vs-promised, not the parallel correctness axis.
-
 <!-- agent-dispatch: id=sdd-final-conformance-review role=conformance-reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") performs the first-pass whole-branch conformance review.
 
@@ -51,8 +49,8 @@ Subagent (reviewer, Opus/high as selected above):
     Version 2, or version 3 with non-empty `generated_evidence`: also check
     each bounded auto-generated EF designer evidence entry against the
     companion migration and snapshot diff, and require the
-    no-pending-model-change, generated-SQL and provider-backed migration
-    evidence the plan promised; it is never a review waiver. A non-SDD
+    reported no-pending-model-change, generated-SQL and provider-backed migration
+    evidence the plan promised; the generated entry is never a review waiver. A non-SDD
     dispatcher that supplies no manifest may fetch the range itself:
     `git diff --stat [MERGE_BASE_SHA]..[HEAD_SHA]` then
     `git diff [MERGE_BASE_SHA]..[HEAD_SHA]`.
@@ -67,9 +65,9 @@ Subagent (reviewer, Opus/high as selected above):
       departures. Missing, extra, or misunderstood scope is a finding.
     - **Doc conformance:** the diff honors the ADRs and canonical area terms you
       grounded in; terminology it retires is purged from adjacent code and docs.
-    - **Stale-prose audit:** every context-doc sentence, ADR clause, docstring,
-      and comment adjacent to the diff's footprint that the diff falsifies must
-      have been updated with it.
+    - **Stale-prose audit:** re-read every context-doc sentence, ADR clause,
+      docstring, and comment adjacent to the diff's footprint; any the diff
+      falsifies must have been updated with it.
     - **Message-format parity:** operator-facing strings, error messages,
       audit-trail formats, and labels the spec promises match the implementation
       byte-for-byte, or the deviation is explicitly justified.
@@ -147,7 +145,7 @@ statement when there is no tracker; omit the line when neither exists),
 `[SPEC_FILE]` (omit when no spec exists), `[PLAN_FILE]`, `[MERGE_BASE_SHA]`, `[HEAD_SHA]`, `[MANIFEST_ROOT]`,
 `[ROOT_BYTES]`, `[TOTAL_BYTES]`, `[FILE_COUNT]`, `[LARGEST_MEMBER_BYTES]` (the
 manifest root and four metrics from SDD's validated producer report; a
-dispatcher without the sdd scripts, e.g. ship-issue's full path, omits them and
+dispatcher without the sdd scripts omits them and
 the reviewer uses the body's fallback), `[ACCEPTANCE_CRITERIA]` (written by
 sdd's controller per final-review.md: one line
 `AC<n>: <the issue's criterion line verbatim, without its checkbox>` per

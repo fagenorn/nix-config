@@ -13,7 +13,7 @@ retained `capabilities.review.code` first: `blocked` stops and authored
 
 Execute a plan with a fresh implementer per task, a lane-scoped task review after each, and one two-axis whole-branch review (conformance ∥ correctness) at the end.
 
-**Continuous execution:** don't pause between tasks. Stop only for BLOCKED you cannot resolve, ambiguity that genuinely prevents progress, all-tasks-complete, or the deadline headroom rule. Narrate at most one short line between tool calls — the ledger and tool results carry the record.
+**Continuous execution:** don't pause between tasks. Stop only for BLOCKED you cannot resolve, ambiguity that genuinely prevents progress, all-tasks-complete, or the deadline headroom rule. Narrate at most one short line between tool calls.
 
 ## Setup
 
@@ -36,9 +36,9 @@ Track progress in a ledger file:
 read the root and every indexed member once, in discovery order, and scan for
 conflicts — tasks that contradict each other or the constraints, or anything the
 package mandates that the review rubric treats as a defect. Present findings as
-one batched question, each beside the plan text mandating it, before execution
-begins; a clean scan proceeds without comment. A missing or unreadable member is a
-contract error. Afterwards hold only the plan root **header** (summary, Global
+one batched question, each beside the plan text mandating it and asking which
+governs, before execution begins; a clean scan proceeds without comment. A
+missing or unreadable member is a contract error. Afterwards hold only the plan root **header** (summary, Global
 Constraints, Test seams, Delivery estimate and boundaries, and the `## Task index`
 with ID, title, files touched, risk lane and member link per task), its checker
 metrics, and the current task's brief from `scripts/task-brief`. Build the todo
@@ -52,8 +52,7 @@ origin/<integration-branch>`. Never derive it from an independently advanced
 local integration branch. Before the first implementer, and after each completed
 task before any next dispatch, pin `DELIVERY_HEAD` to the full `git rev-parse
 HEAD` SHA and run `review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD`, then
-apply the review-package gate. This cumulative gate supplements the task-scoped
-package and review; it replaces neither.
+apply the review-package gate.
 
 A validated existing package satisfies a gate only when its manifest's full
 `range.base` and `range.head` equal the intended full SHAs, its retained producer
@@ -166,7 +165,7 @@ follow from-issue's expired-deadline route, with no retry.
 
 ### 1. Dispatch the implementer
 
-Record BASE (`git rev-parse HEAD`) first — the review package and fix-round diffs need it.
+Record BASE (`git rev-parse HEAD`) first.
 
 - `scripts/task-brief PLAN_FILE N` revalidates the package, copies exactly one
   convention-linked member byte-for-byte and prints the brief path. Checker exit
@@ -195,11 +194,11 @@ Template: [implementer-prompt.md](implementer-prompt.md)
 <!-- agent-dispatch: id=sdd-blocked-reasoning-escalation role=implementer model=opus effort=high -->
 Agent(subagent_type="implementer", model="opus", effort="high") takes over a task whose implementer reported BLOCKED on a reasoning problem.
 
-  Too large: split it. Plan wrong: escalate to the human. Never force an unchanged retry — if the implementer said it's stuck, something must change.
+  Too large: split it. Plan wrong: escalate to the human. Never force an unchanged retry.
 
 **Interim child results.** A child's return that the host marks interim — it stopped with background work of its own still running, or its result may be interim — is not a completion: the child is still running. Re-engage that same child by its recorded agent identity: message it to wait for its own job inside its turn and then return its final report, and wait for that report. You may end your own turn while it is live; the host wakes you with its next notification. Never answer with a text-only reply, never suspend for it (it is not an `external` wait), and never dispatch a replacement or stop the child. A registered worker stays registered under its worker id: an interim result is not its `returned` event, and re-engagement registers nothing new. If the message cannot be delivered, follow from-issue's **Writing workers** route (task-stop, then release `--event stopped`) and this skill's handling of a lost child: the one case that may lead to a fresh dispatch. Only the child's final hand-back counts as its result.
 
-If the implementer asks questions — before or during — answer completely; don't rush it.
+If the implementer asks questions — before or during — answer completely.
 
 ### 3. Review the task
 
@@ -233,11 +232,11 @@ Two routes exit before the loop starts:
 - **Minor findings** go to the ledger as they arrive (`Task <N>: minor (deferred): <one-liner>`); the final review triages them. They never enter the loop.
 - **Plan-mandated findings** — anything conflicting with the plan's own text — are the human's call: present finding and plan text, ask which governs.
 
-Never fix findings yourself in the controller session — controller fixes skip review.
+Never fix findings yourself in the controller session.
 
 ### 5. Complete the task
 
-Clean review — or everything parked-with-ruling at the cap — appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)`; mark the todo, run the cumulative delivery gate, then move on only when it passes. Never advance past open Critical/Important findings that are neither fixed nor parked. Under a lifecycle identity, record the progress marker right after that `complete` line.
+Clean review — or everything parked-with-ruling at the cap — appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)`; mark the todo, run the cumulative delivery gate, then move on only when it passes.
 
 ## Final review — two axes
 
@@ -249,8 +248,8 @@ Before any workspace can disappear, collect every parked or residual finding as
 the strict non-empty detail input and write the retained candidate to
 `<workspace>/retained-detail.json`. Invoke review-package in `delivery-detail`
 mode with issue/branch/run/head identity; the producer alone derives the
-destination beneath the primary checkout's `.superpowers/issue-delivery/` home
-(callers pass identity only). Independently run `artifact-budget check --kind
+destination beneath the primary checkout's `.superpowers/issue-delivery/` home.
+Independently run `artifact-budget check --kind
 review-package` on the published root and compare its metrics with the producer
 report.
 
@@ -292,7 +291,6 @@ Terminal states:
   verification** step recorded a pass on the branch tip or took its
   none-declared route: delete this plan's workspace (`rm -rf <workspace>`;
   sibling directories belong to other plans) and report `review_state: clean`.
-  Parked findings are already available through the one durable report.
 - **Residuals** — the breaker surfaced a load-bearing residual the caller must
   decide on: keep the workspace and ledger and report `review_state: residuals`;
   the retained or durable review package named by the single `report_path` is the

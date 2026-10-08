@@ -62,14 +62,12 @@ A `blocked` tracker capability, or a read that fails, stops the final review
 before either axis is dispatched: report `failed` with
 `conformance_verdict: not_run` and `acceptance_state: not_applicable`.
 
-Point the conformance dispatch at the ledger's deferred-minor and parked lines so
-it triages what must be fixed before merge. Verdicts come back ≤400 words each
+Point the conformance dispatch at the ledger's deferred-minor and parked lines. Verdicts come back ≤400 words each
 (not counting the `### Acceptance` table), findings Critical/Important/Minor
 anchored to file:line. **Never merge the two reports**: disposition each on its
 own, and ledger both verdicts plus the correctness reviewer identity
 (`Codex` | `native` | `fallback` + failure class). From `diff-review`, ledger its
-scope too (`full` | `scoped: <N> of <M> product files` | `unmeasured`); the
-direct native reviewer returns none.
+scope too (`full` | `scoped: <N> of <M> product files` | `unmeasured`).
 
 **Acceptance verdicts.** When the conformance dispatch carried
 `[ACCEPTANCE_CRITERIA]`, check its `### Acceptance` table on the first pass,
@@ -100,7 +98,7 @@ Agent(subagent_type="implementer", model="opus", effort="high") fixes the verifi
 
 The fixer runs the focused tests covering each fix, and the build check when a
 fix changes files the build evaluates, never the full declared verification
-(**Final verification** runs it after the fix wave). Where both axes flag the
+Where both axes flag the
 same lines, dedupe at dispatch and credit both axes in the ledger. Then run
 exactly one scoped re-review per axis that had findings, using that axis's
 unchanged rubric with the named findings and bounded fix-range package:
@@ -131,17 +129,15 @@ Record the escalation and selected full-review role in the SDD ledger.
 The conformance re-review re-verdicts acceptance findings like any other named
 finding, and only those: every `ACn` it was not given keeps its first-pass
 verdict, and a named one it returns no verdict for stays `unverified`. An
-ADDRESSED `evidence` criterion without the citation
-`observed <value> at <sha7> vs threshold <literal>` is recorded `unverified`.
+ADDRESSED `evidence` criterion without its citation
+is recorded `unverified`.
 
 Adjudicate residuals like the task-loop breaker. There is no second fix wave — residual load-bearing findings surface to the caller.
 
 ## Acceptance record
 
 Write the record after the scoped re-reviews, or right after the first pass when
-neither axis had findings, and before the **Final verification** step. That
-step's verified tree then already holds the record, so ship's
-`verified-tree check` still matches (#263). Skip this section when the
+neither axis had findings, and before the **Final verification** step. Skip this section when the
 conformance dispatch carried no `[ACCEPTANCE_CRITERIA]`.
 
 The record is one committed file per plan, beside the plan:
@@ -161,8 +157,7 @@ The record is one committed file per plan, beside the plan:
   the cited run. For a `human` row the evidence columns hold `—`.
 - You, the controller, write `Verdict`, using the four grading tokens
   `met`, `unmet`, `unverified` and `human_pending`; ship-issue Phase 0 may later
-  rewrite an attested row to `met (attested)`. No code parses the record:
-  the gate is the report's `acceptance_state`.
+  rewrite an attested row to `met (attested)`.
 
 Before writing, check freshness against each `evidence` row's own `Commit`, not
 the head the conformance first pass graded. When a commit after the `Commit` of
@@ -182,13 +177,12 @@ commit with
 `launch-commit --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <git commit arguments>`,
 then run
 `workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> --event returned`.
-A `launch fence refused: <reason>` takes that section's refusal route. Without a
-lifecycle identity, commit with plain `git`.
+A `launch fence refused: <reason>` takes that section's refusal route.
 
 ## Final verification
 
 Run this after the fix wave and its scoped re-reviews (or right after the first
-pass when neither axis had findings) and the acceptance record's commit, before
+pass when neither axis had findings) and the acceptance record's commit (when there is one), before
 you choose the terminal state. It is the plan's one run of the full declared
 verification: every retained `bindings.workflow.verification` id, in order, each
 dereferenced through `bindings.commands`.
@@ -218,11 +212,10 @@ to the SDD ledger, and `verification_state` reports the per-task focused tests.
    re-review of that fix diff (the final correctness re-review, same fix-range
    package gate). With an acceptance record, every `met` `evidence` row whose
    measured surface the repair's commits touch becomes `unverified` in a record
-   commit made the same way, landing before steps 1–3 run again so the verified
-   tree holds the final record. Then run steps 1–3 once more. If verification
+   commit made the same way, landing before steps 1–3 run again. Then run steps 1–3 once more. If verification
    still does not pass, record the failure as a load-bearing correctness finding
    in the retained detail: the terminal state is Residuals, with
    `verification_state: failed` and `correctness_verdict: findings`. On that
-   route every `code` row whose check still fails becomes `unmet` in one more
+   route, with a record, every `code` row whose check still fails becomes `unmet` in one more
    record commit made the same way, and no verified tree is recorded. Each
    `unverified` or `unmet` row here is an acceptance finding as above.
