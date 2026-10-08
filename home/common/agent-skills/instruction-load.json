@@ -1067,6 +1067,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 520028,
+  "corpus_ceiling_bytes": 517103,
   "description_ceiling_bytes": 3120
 }
