@@ -24,7 +24,7 @@ git log origin/<default>..origin/<integration> --first-parent --merges \
 
 Split fields on `%x1f`, records on `%x1e`.
 
-Single-branch (`<integration> == <default>`): the range is `<prev-tag>..origin/<default>` and `--merges` is dropped, since direct commits are the release units. Write the tag that `git describe --tags --abbrev=0 origin/<default>` prints into the command; a shell variable does not survive to a later call. With no tag yet that command exits non-zero and prints nothing, and the range is just `origin/<default>`.
+Single-branch (`<integration> == <default>`): the range is `<prev-tag>..origin/<default>` and `--merges` is dropped, since direct commits are the release units. Write the tag that `git describe --tags --abbrev=0 origin/<default>` prints into the command; a shell variable does not survive to a later call. With no tag yet that command exits non-zero and prints nothing, and the range is `origin/<default>`.
 
 For each merge, resolve the PR only when `capabilities.tracker` permits it:
 
@@ -56,7 +56,7 @@ Walk the table in order; stop at the first match.
 
 ## Step 3 — Write each entry
 
-**One short sentence, imperative voice, operator-facing meaning, PR link.** The project's worked examples arrive through passed `bindings.paths.hints` paths; read them now if present.
+**One short sentence, imperative voice, operator-facing meaning, PR link.** The project's worked examples arrive through passed `bindings.paths.hints` paths; read them if present.
 
 | Bad | Good |
 |---|---|
@@ -69,7 +69,7 @@ Walk the table in order; stop at the first match.
 
 ## Step 4 — Top-of-body synthesis
 
-Open with a 2–4 sentence prose summary of the release's 2–3 main threads. Shape:
+Open with a 2–4 sentence summary of the release's 2–3 main threads. Shape:
 
 > This release lands `<theme 1: the marquee capability, with its sub-parts named>`, retires `<theme 2: the concept removed, and how far it went>`, and tightens `<theme 3: the surface hardened>`. Plus the usual hardening across `<area>`.
 
@@ -118,20 +118,20 @@ Skip an empty section. When `deploy.adapter == none`, drop the Verification sect
 
 ## Quality check before opening the PR
 
-Re-read the body and ask:
+Re-read the body:
 
 - Could a teammate tell what landed in 90 seconds (synthesis + Highlights)?
 - Could an on-call engineer tell which PR to suspect for a regression?
 - Is everything in Deploy notes already reflected in the deploy env / schema state? If not, fix that *before* merging.
 - Does Highlights hold only what deserves it, with no internal churn such as a dependency bump?
-- Is any `Various` / `Misc` left, or a flat SHA dump?
+- Is any `Various` / `Misc` left, or a flat SHA dump? Only the raw list holds verbatim subjects.
 - Is any entry process rather than content? "ADR-NNNN implemented" is not one; what the ADR made the system do is.
 
 Any "no" or "not sure" means iterate before opening.
 
 ## Version bump signals
 
-Feeds [`SKILL.md` Phase 4.5d](./SKILL.md#45d-decide-major--minor--patch). **This table is the only copy of the rubric** — SKILL.md points here. Walk top-down, **stop at the first matching rule**.
+Feeds [`SKILL.md` Phase 4.5d](./SKILL.md#45d-decide-major--minor--patch). **This table is the only copy of the rubric**. Walk top-down, **stop at the first matching rule**.
 
 | Bucket evidence | Bump |
 |---|---|
