@@ -124,8 +124,8 @@ Re-read the body:
 - Could an on-call engineer tell which PR to suspect for a regression?
 - Is everything in Deploy notes already reflected in the deploy env / schema state? If not, fix that *before* merging.
 - Does Highlights hold only what deserves it, with no internal churn such as a dependency bump?
-- Is any `Various` / `Misc` left, or a flat SHA dump? Only the raw list holds verbatim subjects.
-- Is any entry process rather than content? "ADR-NNNN implemented" is not one; what the ADR made the system do is.
+- Is the body free of `Various` / `Misc` and flat SHA dumps? Only the raw list holds verbatim subjects.
+- Is every entry content, not process? "ADR-NNNN implemented" is not; what the ADR made the system do is.
 
 Any "no" or "not sure" means iterate before opening.
 

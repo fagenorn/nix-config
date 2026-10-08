@@ -1,6 +1,6 @@
 ---
 name: orchestrate-issues
-description: Dispatch a set of tracker issues through from-issue --auto as independent background agents, tracking only a ledger. Use for "orchestrate issues X, Y, Z".
+description: Dispatches tracker issues through from-issue --auto as independent background agents, tracking only a ledger. Use for "orchestrate issues X, Y, Z".
 ---
 
 # orchestrate-issues — a control adapter, not a manager
@@ -25,7 +25,7 @@ issue owners independently resolve at their own phase entries. Do not read raw
 policy, invoke another resolver, infer from Git, or supply defaults; the only
 sanctioned exception is `workflow-state build-delivery`, which performs its own
 sealed, read-only resolution when it builds a delivery contract, and this
-dispatcher still never resolves again itself.
+dispatcher never resolves again itself.
 
 Every lifecycle call reads its input from stdin through a quoted heredoc (`<<'EOF'`):
 `--request-file -` for `control`, `--input -` for `build-delivery`. No request file is written; the
@@ -122,8 +122,8 @@ none of these cases and keeps its wait-ID handling below:
 At start/resume and after each current owner notification, tracker change, or current wait-ID wake,
 refresh the external facts the next request needs.
 
-After a full dispatcher restart the two wait fields below are empty and cannot adopt an inherited
-handle; rearm only from a returned wait ID.
+After a full dispatcher restart, the host reaps or cancels inherited detached wait observers before
+any rearm from a returned wait ID; the wait fields below cannot adopt their handles.
 
 ## 3. Decide
 
@@ -382,8 +382,8 @@ that same control response's `admission.waiting` as queued for agent slots, with
 Below the table, under **Stop failures**, list each owner handle the final stop pass still left a
 candidate because its stop failed or its `check-launch` answer was unknown, with its `action_id` and
 the failure, and the pass's last sweep when it exited non-zero, with its exit code and, when it
-printed a report, its `skipped` launches; omit the list when there is none (these facts are local to
-this adapter). Do not perform a second ledger read or reconstruct omitted history.
+printed a report, its `skipped` launches; omit the list when there is none.
+Do not perform a second ledger read or reconstruct omitted history.
 
 An `expired` delta consumes no attempt and never advances the attempt number. Usually it is a
 `resumed` on the same attempt in this same sweep, or a `suspended` summary that a later eligible
