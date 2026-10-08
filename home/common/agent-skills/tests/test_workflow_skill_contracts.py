@@ -2070,7 +2070,7 @@ class CodebaseDesignSkillContractsTest(unittest.TestCase):
                         resolved.is_file(),
                         f"{name} links to {target}, which is not a file in the package",
                     )
-        self.assertGreaterEqual(checked, 9, "the link scan found nothing to check")
+        self.assertGreaterEqual(checked, 5, "the link scan found nothing to check")
 
     def test_package_carries_no_dispatch_site(self):
         for path in sorted(CODEBASE_DESIGN_DIR.rglob("*")):

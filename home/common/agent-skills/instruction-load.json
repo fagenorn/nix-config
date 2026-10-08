@@ -370,12 +370,12 @@
       ],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 12947,
-        "codex": 12947
+        "claude": 10104,
+        "codex": 10104
       },
       "conditional_ceiling_bytes": {
-        "claude": 10260,
-        "codex": 10260
+        "claude": 8265,
+        "codex": 8265
       },
       "note": "The read-only scan from improve-codebase-architecture's prompt. The codebase-design vocabulary and the grounding pass are ambiguous between caller and scan owner, so they count as hot. Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10)."
     },
@@ -1067,6 +1067,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 496296,
-  "description_ceiling_bytes": 2985
+  "corpus_ceiling_bytes": 491458,
+  "description_ceiling_bytes": 2876
 }

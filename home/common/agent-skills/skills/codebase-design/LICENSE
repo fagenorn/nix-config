@@ -9,8 +9,10 @@ Pocock's skills repository.
   Revision:  9c9f36ccd3995266cd675468af71639c8dde1ec5
   Inspected: 2026-08-17
 
-Upstream's prose, headings, diagrams, code examples and file names are
-preserved. Four things differ:
+Upstream's glossary, principles and file names are kept. Its prose was
+condensed to the skill best practices in fagenorn/nix-config#299, which
+dropped the deep/shallow diagrams, the testability code examples and the
+relationships list. Four further things differ:
 
   1. SKILL.md's `Seam` glossary entry gains a clause reconciling upstream's
      seam with the `test seam` this system's design and planning skills
