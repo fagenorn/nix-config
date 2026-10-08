@@ -21,9 +21,9 @@ Work in an isolated workspace: invoke the `worktrees` skill to create or verify 
 
 Before initial plan validation or brief extraction, run `artifact-budget check
 --kind implementation-plan --root PLAN_FILE --format json`. Exit 2 or 3 stops. On
-exit 0, require `status: within_budget` and the four integer metrics
-`root_bytes`, `total_bytes`, `file_count`, and `largest_member_bytes`; retain the
-root path and all four for dispatches.
+exit 0, require `status: within_budget` and the four non-boolean integer metrics
+`root_bytes`, `total_bytes`, `file_count`, and `largest_member_bytes`; any other
+shape stops as a contract error. Retain the root path and all four for dispatches.
 
 Track progress in a ledger file:
 
@@ -236,7 +236,7 @@ Never fix findings yourself in the controller session.
 
 ### 5. Complete the task
 
-Clean review — or everything parked-with-ruling at the cap — appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)`; mark the todo, run the cumulative delivery gate, then move on only when it passes.
+Clean review — or everything parked-with-ruling at the cap — appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)`; mark the todo, run the cumulative delivery gate, then move on only when it passes. Never advance past open Critical/Important findings that are neither fixed nor parked.
 
 ## Final review — two axes
 
