@@ -1,0 +1,28 @@
+{
+  "signals": {
+    "contract_change": {
+      "value": "hit",
+      "evidence": "Changes the issue criterion line format to-issues emits and adds a required Acceptance map section that the plan review contract blocks on, a cross-skill artifact contract"
+    },
+    "concurrency_or_persistence": {
+      "value": "no",
+      "evidence": "Skill templates, review contract prose, an eval fixture and tests; no concurrency, locking or persisted state"
+    },
+    "open_design_questions": {
+      "value": "no",
+      "evidence": "Format and map columns are specified in the body and decisions defer to named rows D2 and D9 of the linked design"
+    },
+    "criteria_shape": {
+      "value": "no",
+      "evidence": "Four criteria, all tagged [code] and each measured by a named contract test"
+    }
+  },
+  "paths": [
+    "home/common/agent-skills/skills/to-issues/SKILL.md",
+    "home/common/agent-skills/skills/writing-plans/SKILL.md",
+    "home/common/agent-skills/skills/from-issue/REVIEW-CONTRACT.md",
+    "home/common/agent-skills/evals/fixture-repo/issues/001-well-specified.md",
+    "home/common/agent-skills/skills/from-issue/evals/evals.json",
+    "home/common/agent-skills/tests/test_workflow_skill_contracts.py"
+  ]
+}

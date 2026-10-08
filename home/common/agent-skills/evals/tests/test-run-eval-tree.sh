@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Black-box test of run-eval.sh working-tree mode (#293 AC1). It copies evals/ to a
+# Black-box test of run-eval.sh working-tree mode (#293 AC1; project-skills layout). It copies evals/ to a
 # scratch dir and runs the copy with EVAL_TREE set to this checkout and a fake
 # `claude` first on PATH, so no model runs. Exit 0 only when every check passes.
 set -uo pipefail
@@ -35,29 +35,29 @@ FAKE_BIN="$SCRATCH/fakebin"
 mkdir -p "$FAKE_BIN"
 cat >"$FAKE_BIN/claude" <<'FAKE'
 #!/usr/bin/env bash
-# Fake claude. FAKE_AUTH_EXIT / FAKE_RUN_EXIT choose exit codes. FAKE_HOLD=1 makes a
-# -p run touch $FAKE_STATE/started and wait (bounded) for $FAKE_STATE/release.
-# FAKE_EMPTY=1 makes a -p run print nothing on stdout, as a timed-out run does.
-if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
-  printf 'auth_config_dir=%s\n' "${CLAUDE_CONFIG_DIR:-}" >>"$FAKE_STATE/record"
-  exit "${FAKE_AUTH_EXIT:-0}"
+# Fake claude, run with its cwd at the sandbox repo. FAKE_RUN_EXIT chooses the exit
+# code. FAKE_HOLD=1 makes a -p run touch $FAKE_STATE/started and wait (bounded) for
+# $FAKE_STATE/release. FAKE_EMPTY=1 makes a -p run print nothing on stdout, as a
+# timed-out run does. Any non -p invocation (an auth probe) is recorded as `other=`.
+if [ "${1:-}" != -p ]; then
+  printf 'other=%s\n' "$*" >>"$FAKE_STATE/record"
+  exit 0
 fi
-cfg=${CLAUDE_CONFIG_DIR:-}
 {
-  printf 'run_config_dir=%s\n' "$cfg"
+  printf 'run=1\n'
+  printf 'run_config_dir=%s\n' "${CLAUDE_CONFIG_DIR:-}"
   printf 'resolve_project=%s\n' "$(command -v resolve-project)"
+  printf 'cwd=%s\n' "$(pwd -P)"
   printf 'args=%s\n' "$(printf '%s' "$*" | tr '\n' ' ')"
 } >>"$FAKE_STATE/record"
-if [ -n "$cfg" ]; then
-  ls -A "$cfg" >"$FAKE_STATE/config-listing"
-  ( cd "$cfg/skills" && find . -type l | sed 's|^\./||' | sort | while IFS= read -r link; do
+if [ -d .claude ]; then
+  ( find .claude -type l | sed 's|^\./||' | sort | while IFS= read -r link; do
       printf '%s\t%s\n' "$link" "$(readlink "$link")"
-    done ) >"$FAKE_STATE/skill-links"
-  ( cd "$cfg/skills" && find . -type f | sed 's|^\./||' | sort ) >"$FAKE_STATE/skill-regular-files"
-  cp "$cfg/CLAUDE.md" "$FAKE_STATE/CLAUDE.md"
-  mkdir -p "$FAKE_STATE/agents"
-  cp "$cfg"/agents/*.md "$FAKE_STATE/agents/"
-  jq -c 'keys' "$cfg/settings.json" >"$FAKE_STATE/settings-keys"
+    done ) >"$FAKE_STATE/project-links"
+  ( find .claude/skills .claude/agents -type f 2>/dev/null | sort ) >"$FAKE_STATE/project-regular-files"
+  git status --porcelain --untracked-files=all >"$FAKE_STATE/git-status"
+  git ls-files .claude >"$FAKE_STATE/tracked-claude"
+  cp CLAUDE.md "$FAKE_STATE/root-CLAUDE.md"
 fi
 if [ "${FAKE_HOLD:-}" = 1 ]; then
   printf '%s\n' "$$" >"$FAKE_STATE/pid"
@@ -105,7 +105,10 @@ row_count() {
   fi
 }
 last_row() { tail -n 1 "$COPY/results/results.jsonl" 2>/dev/null; }
-root_gone() { [ -n "$1" ] && [ ! -e "$(dirname "$1")" ]; }
+# shim_root — the temp root holding the run's command shims: two levels above the
+# resolve-project the fake saw.
+shim_root() { local p; p=$(recorded resolve_project); [ -n "$p" ] && dirname "$(dirname "$p")"; }
+root_gone() { [ -n "$1" ] && [ ! -e "$1" ]; }
 tmp_is_empty() { [ -z "$(ls -A "$RUN_TMP")" ]; }
 tmp_holds_only_sandboxes() {
   local entry
@@ -117,41 +120,40 @@ tmp_holds_only_sandboxes() {
     esac
   done
 }
-config_lists_members() {
-  local member
-  for member in CLAUDE.md agents settings.json skills; do
-    grep -qx "$member" "$STATE/config-listing" || { echo "config dir lacks $member"; return 1; }
-  done
+# project_links_match_tree — the sandbox's .claude/ symlinks are exactly one per skill
+# directory in the two skill roots, one per agent file and CLAUDE.md, each pointing at
+# the tree's own path. The expected set is listed from the tree, not from the runner.
+project_links_match_tree() {
+  local root dir file
+  [ -s "$STATE/project-links" ] || { echo "no .claude/ links recorded"; return 1; }
+  {
+    for root in "$TREE/home/common/agent-skills/skills" "$TREE/home/common/claude-code/skills"; do
+      for dir in "$root"/*/; do
+        [ -d "$dir" ] || continue
+        printf '.claude/skills/%s\t%s\n' "$(basename "$dir")" "$root/$(basename "$dir")"
+      done
+    done
+    for file in "$TREE"/home/common/claude-code/agents/*.md; do
+      printf '.claude/agents/%s\t%s\n' "$(basename "$file")" "$file"
+    done
+    printf '.claude/CLAUDE.md\t%s\n' "$TREE/home/common/agent-guidance/AGENTS.md"
+  } | sort >"$STATE/expected-links"
+  diff "$STATE/expected-links" "$STATE/project-links" ||
+    { echo "the sandbox's .claude/ links differ from the tree's skills, agents and AGENTS.md"; return 1; }
+  [ ! -s "$STATE/project-regular-files" ] || { echo "regular files were written into .claude/skills or .claude/agents"; return 1; }
 }
-agents_match_tree() {
-  local file count=0
-  for file in "$TREE"/home/common/claude-code/agents/*.md; do
-    count=$((count + 1))
-    cmp -s "$file" "$STATE/agents/$(basename "$file")" ||
-      { echo "agents/$(basename "$file") differs from the tree"; return 1; }
-  done
-  [ "$(ls "$STATE/agents" | wc -l | tr -d ' ')" -eq "$count" ] || { echo "agent count differs"; return 1; }
+# the fixture's tracked .claude/ content, listed from the fixture itself.
+tracked_claude_is_fixtures_own() {
+  ( cd "$EVALS_SRC/fixture-repo" && find .claude -type f ! -path '*/__pycache__/*' | sort ) >"$STATE/expected-tracked"
+  sort "$STATE/tracked-claude" | diff "$STATE/expected-tracked" - >/dev/null ||
+    { echo "tracked .claude/ files differ from the fixture's own"; return 1; }
 }
-skill_links_match_tree() {
-  local link target root
-  [ -s "$STATE/skill-links" ] || { echo "no skill links recorded"; return 1; }
-  while IFS=$'\t' read -r link target; do
-    case "$target" in
-      "$TREE/home/common/agent-skills/skills/$link" | "$TREE/home/common/claude-code/skills/$link") ;;
-      *) echo "skills/$link -> $target is not the tree's file"; return 1 ;;
-    esac
-  done <"$STATE/skill-links"
-  for root in "$TREE/home/common/agent-skills/skills" "$TREE/home/common/claude-code/skills"; do
-    ( cd "$root" && find . -type f ! -path '*/__pycache__/*' | sed 's|^\./||' )
-  done | sort >"$STATE/expected-links"
-  cut -f1 "$STATE/skill-links" | diff - "$STATE/expected-links" >/dev/null ||
-    { echo "the linked set differs from the tree's skill files"; return 1; }
-  [ ! -s "$STATE/skill-regular-files" ] || { echo "regular files were copied into skills/"; return 1; }
-}
+args_have() { grep -q -- "^args=.*$1" "$STATE/record"; }
 row_has_tree_and_tokens() {
   last_row | jq -e --arg tree "$TREE" --arg rev "$(git -C "$TREE" rev-parse HEAD)" \
     --argjson exit "$1" '
       .tree == $tree and .tree_rev == $rev and (.tree_dirty | type) == "boolean"
+      and .tree_mode == "project-skills"
       and .input_tokens == 246 and .uncached_input_tokens == 11
       and .cache_read_input_tokens == 202 and .cache_creation_input_tokens == 33
       and .output_tokens == 44 and .cost_usd == 0.25 and .num_turns == 7
@@ -175,52 +177,47 @@ transcript_is_result_text() {
 scenario claude-exit-0
 run_env FAKE_RUN_EXIT=0
 status=$?
-CFG=$(recorded run_config_dir)
-check "the claude run saw a CLAUDE_CONFIG_DIR" test -n "$CFG"
-check "the auth probe used the same config dir" test "$(recorded auth_config_dir)" = "$CFG"
-check "config dir holds CLAUDE.md, agents, settings.json and skills" config_lists_members
-check "CLAUDE.md is the tree's AGENTS.md" cmp -s "$TREE/home/common/agent-guidance/AGENTS.md" "$STATE/CLAUDE.md"
-check "agents/ holds exactly the tree's agent files" agents_match_tree
-check "settings drop the plugin keys and keep the rest" test "$(cat "$STATE/settings-keys")" = '["env","hooks","permissions"]'
-check "every skills/ entry links the tree's file, for every skill" skill_links_match_tree
-check "resolve-project resolves to the temp root's shim" test "$(recorded resolve_project)" = "$(dirname "$CFG")/bin/resolve-project"
-check "claude ran with --output-format json" grep -q -- '^args=.*--output-format json' "$STATE/record"
-check "the row carries the tree and the canned token sums" row_has_tree_and_tokens 0
+ROOT=$(shim_root)
+check "the claude run happened" test "$(recorded run)" = 1
+check "the claude run saw no CLAUDE_CONFIG_DIR" test -z "$(recorded run_config_dir)"
+check "no auth probe or other claude call was made" test -z "$(recorded other)"
+check "claude ran in the sandbox repo" test "$(basename "$(recorded cwd)")" = repo
+check "the sandbox's .claude/ links the tree's skills, agents and AGENTS.md" project_links_match_tree
+check "the fixture's root CLAUDE.md is untouched" cmp -s "$EVALS_SRC/fixture-repo/CLAUDE.md" "$STATE/root-CLAUDE.md"
+check "the injected .claude/ entries never show in git status" test ! -s "$STATE/git-status"
+check "nothing injected is tracked; the fixture's .claude/ files still are" tracked_claude_is_fixtures_own
+check "claude ran with --setting-sources project,local" args_have '--setting-sources project,local'
+check "claude ran with --settings naming EVAL_SETTINGS" args_have "--settings $SETTINGS_FIXTURE"
+check "claude ran with --dangerously-skip-permissions" args_have '--dangerously-skip-permissions'
+check "claude ran with --output-format json" args_have '--output-format json'
+check "claude ran with --add-dir" args_have '--add-dir '
+shim_root_is_temp() { case "$(basename "$ROOT")" in run-eval-tree.*) [ "$(recorded resolve_project)" = "$ROOT/bin/resolve-project" ] ;; *) false ;; esac; }
+check "resolve-project resolves to a run-eval-tree temp root's shim" shim_root_is_temp
+check "the shim root sits in TMPDIR" test "$(dirname "$ROOT")" = "$(cd "$RUN_TMP" && pwd -P)"
+check "the row carries the tree, tree_mode and the canned token sums" row_has_tree_and_tokens 0
 check "the transcript is the result text and result.json is kept" transcript_is_result_text
-check "exit 0: the temp root is gone" root_gone "$CFG"
+check "exit 0: the shim root is gone" root_gone "$ROOT"
 check "exit 0: only the sandbox is left in TMPDIR" tmp_holds_only_sandboxes
 check "exit 0: the runner exits 1 because the fake did no work" test "$status" -eq 1
 
 # --- exit path 2: the claude run exits non-zero ------------------------------------
 scenario claude-exit-1
 run_env FAKE_RUN_EXIT=1
-CFG=$(recorded run_config_dir)
+ROOT=$(shim_root)
 check "non-zero: the row records claude_exit 1 and the token sums" row_has_tree_and_tokens 1
-check "non-zero: the temp root is gone" root_gone "$CFG"
+check "non-zero: the shim root is gone" root_gone "$ROOT"
 check "non-zero: only the sandbox is left in TMPDIR" tmp_holds_only_sandboxes
 
 # --- an empty result: the run printed nothing (a timeout) --------------------------
 scenario empty-result
 run_env FAKE_EMPTY=1 FAKE_RUN_EXIT=124
-CFG=$(recorded run_config_dir)
+ROOT=$(shim_root)
 check "empty result: exactly one row is still written" test "$(row_count)" -eq 1
 check "empty result: the row has claude_exit 124 and null usage" row_has_null_usage 124
-check "empty result: the temp root is gone" root_gone "$CFG"
-
-# --- exit path 3: the auth probe refuses -------------------------------------------
-scenario auth-refused
-run_env FAKE_AUTH_EXIT=1
-status=$?
-check "auth refusal: the runner exits 2" test "$status" -eq 2
-check "auth refusal: the message names claude setup-token" grep -q 'claude setup-token' "$S/log"
-check "auth refusal: the message names CLAUDE_CODE_OAUTH_TOKEN" grep -q 'CLAUDE_CODE_OAUTH_TOKEN' "$S/log"
-check "auth refusal: the probe ran against a temp config dir" test -n "$(recorded auth_config_dir)"
-check "auth refusal: claude -p never ran" test -z "$(recorded run_config_dir)"
-check "auth refusal: no row was written" test "$(row_count)" -eq 0
-check "auth refusal: no sandbox and no temp root remain" tmp_is_empty
+check "empty result: the shim root is gone" root_gone "$ROOT"
 
 # --- a preparation failure: the tree's agents/ holds no agent file -----------------
-# Every member the runner validates is present, so only the copy of agents/*.md fails.
+# Every member the runner validates is present, so only the agents/*.md check fails.
 scenario prep-failure
 BROKEN="$S/tree"
 mkdir -p "$BROKEN/home/common/agent-skills" "$BROKEN/home/common/claude-code/agents" \
@@ -237,11 +234,20 @@ git -C "$BROKEN" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsig
 run_env EVAL_TREE="$BROKEN"
 status=$?
 check "prep failure: the runner exits 2" test "$status" -eq 2
-check "prep failure: the message names the agent copy" grep -q 'run-eval: could not copy agents' "$S/log"
-check "prep failure: the auth probe never ran" test -z "$(recorded auth_config_dir)"
-check "prep failure: claude -p never ran" test -z "$(recorded run_config_dir)"
+check "prep failure: the message names the missing agent files" grep -q 'run-eval: no agent files in' "$S/log"
+check "prep failure: claude -p never ran" test -z "$(recorded run)"
 check "prep failure: no row was written" test "$(row_count)" -eq 0
 check "prep failure: no sandbox and no temp root remain" tmp_is_empty
+
+# --- a preparation failure: the settings file is not JSON --------------------------
+scenario bad-settings
+printf 'not json\n' >"$S/settings.json"
+run_env EVAL_SETTINGS="$S/settings.json"
+status=$?
+check "bad settings: the runner exits 2" test "$status" -eq 2
+check "bad settings: the message names the settings file" grep -q 'run-eval: settings file is not JSON' "$S/log"
+check "bad settings: claude -p never ran" test -z "$(recorded run)"
+check "bad settings: no sandbox and no temp root remain" tmp_is_empty
 
 # --- exit path 4: SIGTERM to the runner during the claude run ----------------------
 scenario sigterm
@@ -257,14 +263,14 @@ kill -TERM "$pid"
 # The fake is never released: the runner must stop it, not wait for it to finish.
 wait "$pid"
 status=$?
-CFG=$(recorded run_config_dir)
+ROOT=$(shim_root)
 check "SIGTERM: the runner exits 143" test "$status" -eq 143
 check "SIGTERM: the claude run was stopped, not left to finish" test ! -e "$STATE/finished"
 fake_pid=$(cat "$STATE/pid" 2>/dev/null)
 process_gone() { [ -n "$1" ] && ! kill -0 "$1" 2>/dev/null; }
 check "SIGTERM: the claude process is gone" process_gone "$fake_pid"
 : >"$STATE/release"
-check "SIGTERM: the temp root is gone" root_gone "$CFG"
+check "SIGTERM: the shim root is gone" root_gone "$ROOT"
 check "SIGTERM: no row was written" test "$(row_count)" -eq 0
 
 # --- setup kinds, smoke-tested in deployed mode (D15, D16) -------------------------
@@ -275,7 +281,8 @@ SHIM
 chmod +x "$FAKE_BIN/resolve-project"
 row_is_deployed_pass() {
   last_row | jq -e '.verdict == "PASS" and .failed == 0 and .tree == "deployed"
-    and .tree_rev == null and .tree_dirty == null and .input_tokens == 246' >/dev/null
+    and .tree_rev == null and .tree_dirty == null and .tree_mode == null
+    and .input_tokens == 246' >/dev/null
 }
 smoke_tmp_holds_only_its_sandbox() {
   local entry
@@ -297,6 +304,7 @@ for id in 1 2 3; do
   check "setup smoke $id: every setup assert passes" test "$status" -eq 0
   check "setup smoke $id: the row is a deployed-mode PASS" row_is_deployed_pass
   check "setup smoke $id: deployed mode makes no temp root" smoke_tmp_holds_only_its_sandbox "$id"
+  check "setup smoke $id: deployed mode passes no --setting-sources" test -z "$(grep -- '--setting-sources' "$STATE/record")"
 done
 
 if [ "$FAILURES" -ne 0 ]; then

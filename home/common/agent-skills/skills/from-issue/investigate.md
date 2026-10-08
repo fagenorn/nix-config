@@ -1,6 +1,6 @@
 # Phase 0 detail — pre-flight queries and the investigation note
 
-Loaded from `SKILL.md` at Phase 0. The stop rules live in `SKILL.md` § Phase 0.
+Loaded from `SKILL.md` at Phase 0. Build a shared mental model before the brainstorm; write no files yet. Run the PR pre-flight, then the worktree pre-flight, then investigate and post the note.
 
 ## PR pre-flight queries
 
@@ -33,6 +33,8 @@ Run `git worktree list` and keep the entries whose bracketed branch field starts
 2. Read the references in the body: file paths, ADR numbers, commit SHAs, linked issues.
 3. Skim the map's area files and their `adr/` dirs for terms and decisions the issue touches.
 4. Grep the codebase for the concepts it names.
-5. Post a short investigation note covering: **Restatement** in your own words; **Relevant existing code** (paths + one-line role each); **Documented constraints** (context terms, ADRs, standards that bind the work); **Open questions**; **Suggested scope boundary** (in vs. deliberately out); **Scope-size estimate** (rough files + lines, and whether the mechanical-only shortcut applies).
+5. Post a short investigation note covering: **Restatement** in your own words; **Relevant existing code** (paths + one-line role each); **Documented constraints** (context terms, ADRs, standards that bind the work); **Open questions**; **Suggested scope boundary** (in vs. deliberately out); **Scope-size estimate** (rough files + lines, and whether the mechanical-only shortcut applies); **Lane triage** (Phase 0's record, verdict and `ran:` line, or "light lane unsupported").
+
+**Stops:** several issues bundled → stop and suggest `to-issues`; a question or a duplicate → report and stop. **Open questions is mandatory even in `--auto`** — self-answering happens in the spec's `## Decision ledger`; with nothing open, write "None — Phase 2 will surface anything missed".
 
 **Size gates measure product changes:** a Phase-0 estimate covers the product change alone. Once the branch has a range, `diff-scope` is the accounting authority (ship-issue's Phase-5 gate carries the invocation and the thresholds): measure, never hand-count, and pass one `--artifact-path` per file this run wrote — never an entire retained artifact directory. Historical artifacts that are themselves the requested product still count.
