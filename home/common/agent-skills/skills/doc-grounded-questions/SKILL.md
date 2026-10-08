@@ -1,65 +1,41 @@
 ---
 name: doc-grounded-questions
-description: Invoke before asking a design question, presenting options, or opening a review pass — grounds questions and reviews in the project's docs (CONTEXT, ADRs, standards) first.
+description: Grounds questions and reviews in the project's context, ADRs and standards. Invoke before asking a design question, presenting options or opening a review.
 ---
 
 # Doc-Grounded Questions
 
-Before asking the user a design question or presenting options during a planning/brainstorming phase, ground the question in the project's docs and code. Rationale and worked examples live in [REFERENCE.md](./REFERENCE.md); load it when a step below points there.
+Before asking the user a design question or presenting options, ground the question in the project's docs and code. [REFERENCE.md](./REFERENCE.md) holds the cache format, the question shape and the decision-log and standards layouts.
 
 ## Project bindings (resolve first)
 
-Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.paths.context`, `bindings.paths.standards`, `bindings.paths.architecture`, and `bindings.paths.hints`; a required blocked capability stops, while authored unsupported takes its documented no-capability route.
-
-**Keys this skill uses:** `bindings.paths.{context,standards,architecture,hints}` and `capabilities.knowledge.*`.
+Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.paths.context`, `bindings.paths.standards`, `bindings.paths.architecture`, and `bindings.paths.hints`, as `capabilities.knowledge.*` allows; a required blocked capability stops, while authored unsupported takes its documented no-capability route.
 
 ## The grounding pass
 
-For every clarifying question or option set you're about to surface, do this pass first. Select context maps only from the retained `bindings.paths.context` list in authored order: filter entries whose basename is exactly `CONTEXT-MAP.md`; zero means no map and no linter invocation, one selects that absolute path, and multiple matches are an invalid caller contract that stops before invocation. Never probe the filesystem, sort the list, take a first match, or infer a location.
+Select the context map only from the retained `bindings.paths.context` list, in authored order: entries whose basename is exactly `CONTEXT-MAP.md`. None means no map and no linter run; one selects that absolute path; several is an invalid caller contract that stops before any invocation. Never probe the filesystem, sort the list, take a first match, or infer a location.
 
-1. **Read the selected context map, then only the areas you need.** Always read the selected map in full — it is capped at 150 lines. Then open an area's `CONTEXT.md` only when its `governs:` globs intersect the paths the issue touches, or one of its terms appears in the issue or your question. With no selected map, use only the retained `bindings.paths.context` entries passed by the owner.
-
-2. **Scan decision records.** Use only decision-record paths passed through the retained `bindings.paths.context` selection and allowed by `capabilities.knowledge.*`. List each passed directory, read titles, and open relevant records. A settled decision → state it and ask only whether anything has changed since.
-
-3. **Read the standards that apply.** Always read the machine-global layers, which are not project policy: `~/.agents/standards/the-bar.md` and its `stacks/*.md` shards matching the change's file extensions. Then read the project deltas from the retained `bindings.paths.standards` list, as `capabilities.knowledge.*` allows. If a proposed option violates a rule you found, drop it or say why you're surfacing it anyway.
-
-4. **Read architecture** from retained `bindings.paths.architecture` if the question touches more than one component. Past ~400 lines, read by governing section, never whole.
-
-5. **Grep the codebase** for the central concept. Keep a small direct grep inline; when the result set needs a sharply bounded read-only exploration pass, use the explicit explorer dispatch instead:
+1. **Read the selected map in full** (it is capped at 150 lines), then open an area's `CONTEXT.md` only when its `governs:` globs intersect the paths the issue touches or one of its terms appears in the issue or your question. Use the canonical terms you find. With no map, use only the retained context entries the owner passed.
+2. **Scan decision records** only at paths passed through the retained context selection and allowed by `capabilities.knowledge.*`: list each directory, read titles, open the relevant records. A settled decision is stated, and you ask only whether anything has changed.
+3. **Read the standards that apply**: always the machine-global `~/.agents/standards/the-bar.md` and its `stacks/*.md` shards matching the change's file extensions, then the project deltas in the retained `bindings.paths.standards`. Drop any option that violates a rule, or say why you surface it anyway.
+4. **Read architecture** from the retained `bindings.paths.architecture` when the question spans components. Past ~400 lines, grep a document's headings and read only the governing sections; this applies to every long document except the map.
+5. **Grep the codebase** for the central concept, inline when the lookup is small. When it needs a bounded read-only exploration pass, dispatch:
 
 <!-- agent-dispatch: id=doc-grounded-bounded-code-lookup role=explorer model=sonnet effort=medium -->
 Agent(subagent_type="Explore", model="sonnet", effort="medium") performs one sharply bounded read-only central-concept lookup without resolving the question.
 
-   If the codebase already commits to a pattern, the default option should be "match the existing pattern" and you must justify any divergence. If the lookup becomes open-ended, ambiguous, or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and selected role in the caller's existing ledger or fixed-schema report.
+   If the codebase already commits to a pattern, the default option is to match it, and any divergence needs a reason. If the lookup turns open-ended, ambiguous or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and the selected role in the caller's existing ledger or fixed-schema report.
 
-Use retained `bindings.paths.hints` only when the knowledge capability documents that route.
+Use the retained `bindings.paths.hints` only where the knowledge capability documents that route.
 
-## Ground once per phase, cache the result
+## Ground once per phase
 
-The pass above runs **once per phase**, not once per question. Write what it found to `"$(git rev-parse --git-dir)/GROUNDING.md"` — per-worktree and outside the working tree, so it can never be committed (a committed cache collides across parallel runs); outside a git repo, fall back to the platform temp dir. Format and example: REFERENCE.md.
+Run the pass **once per phase** and write its findings to `"$(git rev-parse --git-dir)/GROUNDING.md"`: per worktree and outside the working tree, so it is never committed (outside a git repo, use the platform temp dir). Later questions read the cache. When a decision reaches an area not in it, load that one area, append it, and continue. A new phase starts a new cache; never re-read a map or area file already cached in this phase.
 
-Read the cache instead of re-running the pass. Re-invoke only when a decision reaches into an area **not** in the cache — load that one area, append it, continue. A new phase starts a new cache. This is the single grounding read per phase the pipeline expects; never re-read the map or an area file already cached in this phase.
+## Asking
 
-## How to phrase the question
+Lead with the constraints you found (the context definition, the settled ADR, the standards rule), then ask only the open part. If the docs fully answer the question, don't ask: state the answer with its citation and continue.
 
-Lead with the constraints you found — the context doc's definition, the ADR's settled decision, the standards rule — then ask only the genuinely open part (full worked shape: REFERENCE.md). That shows the homework and frames the question precisely around what's unknown.
+Ground at the start of and during brainstorm, spec, grilling and standards-review phases; delivery escalations (merge conflict, failing lint, test or CI, a review blocker, cleanup) and reviewer dispatch; `writing-plans` before offering approaches; reviewer or audit subagents grading against the standards and decision log; and any ad-hoc design conversation. Where a sibling skill is not installed, apply the same pass to the current flow.
 
-If, after grounding, the docs fully answer the question, don't ask — state the answer with its citation and move on.
-
-## When this skill applies
-
-Invoke at the start of and during:
-
-- Brainstorm/spec, grilling/stress-test, and standards-review phases (`from-issue`, `grill-with-docs`, `design`)
-- Delivery escalations — merge conflict, lint/test/CI failure, review-blocker, cleanup — and reviewer dispatch (`ship-issue`)
-- `writing-plans`, before asking the user to choose between approaches
-- Reviewer / audit subagents grading a diff or plan against the standards doc and decision log
-- Any ad-hoc design conversation where you'd otherwise just ask
-
-Sibling skills are referenced opportunistically — where one is not installed, apply the same pass to whatever flow you are in.
-
-## When to skip
-
-- Pure preference questions ("feature A or feature B?") — the docs can't answer these
-- Questions about user intent or goals — the docs describe the system, not what the user wants next
-- Anything already in this phase's `GROUNDING.md` — read the cache, don't re-run the pass
+Skip it for pure preference questions, questions about the user's goals, and anything already in this phase's `GROUNDING.md`.

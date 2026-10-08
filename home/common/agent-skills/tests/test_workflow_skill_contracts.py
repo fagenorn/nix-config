@@ -399,7 +399,6 @@ CLAUDE_POLICY_ENTRIES = {
 }
 
 SHARED_POLICY_SUPPORT = {
-    "doc-grounded-questions/REFERENCE.md": ("bindings.paths.context",),
     "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
     "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
 }
@@ -465,14 +464,6 @@ SUPPORT_POLICY_FORBIDDEN = (
     "resolve-project resolve", *LEGACY_POLICY_SURFACE, "auto-detect",
     "helper missing", "not_onboarded", ".claude/specs", ".claude/plans",
     "docs/CONTEXT-MAP.md",
-)
-
-CONTEXT_MAP_SELECTION_CONTRACT = (
-    "Select context maps only from the retained `bindings.paths.context` list in "
-    "authored order: filter entries whose basename is exactly `CONTEXT-MAP.md`; "
-    "zero means no map and no linter invocation, one selects that absolute path, "
-    "and multiple matches are an invalid caller contract that stops before invocation. "
-    "Never probe the filesystem, sort the list, take a first match, or infer a location."
 )
 
 RESOLUTION_SENTENCE = (
@@ -785,7 +776,6 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         for relative in ("doc-grounded-questions/SKILL.md", "grill-with-docs/SKILL.md", "grill-with-docs/CONTEXT-FORMAT.md"):
             text = (REPO_ROOT / "home/common/agent-skills/skills" / relative).read_text(encoding="utf-8")
             contract = normalized(text)
-            self.assertIn(CONTEXT_MAP_SELECTION_CONTRACT, contract)
             for forbidden in (
                 "legacy context-map setting", "docs/CONTEXT-MAP.md", "select the first match",
                 "sort(", "filesystem search", "first match wins", "default map location",

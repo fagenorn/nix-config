@@ -2,7 +2,6 @@
   "debt": [
     "L2 home/common/agent-skills/skills/ship-release/SKILL.md",
     "L2 home/common/claude-code/skills/orchestrate-issues/SKILL.md",
-    "L3 home/common/agent-skills/skills/doc-grounded-questions/REFERENCE.md",
     "L3 home/common/agent-skills/skills/grill-with-docs/CONTEXT-FORMAT.md",
     "L3 home/common/agent-skills/skills/sdd/final-review.md",
     "L3 home/common/agent-skills/skills/sdd/fix-loop.md",

@@ -1,58 +1,10 @@
-# Doc-Grounded Questions — rationale, expanded guidance, examples
+# Doc-Grounded Questions — reference
 
-This included document receives values from the phase owner's retained `ResolvedProject`; use `bindings.paths.context` and never resolve, infer, or read project policy.
+## Decision-log and standards homes
 
-SKILL.md owns the pass itself; this file owns the why and worked examples.
+Each area in the map keeps its decisions in an `adr/` directory beside its `CONTEXT.md` (`docs/areas/<slug>/adr/`), and `docs/areas/system/adr/` holds decisions spanning areas. With no map, use only the relevant retained `bindings.paths.context` path; never infer a decision-log location.
 
-## Why this matters
-
-The user's time is the bottleneck. The cost of asking a question that's already
-answered in the project's context doc is not zero — it's:
-
-- Time spent re-explaining
-- Loss of trust that you've done the reading
-- Risk that the user briefly forgets a decision and answers inconsistently with
-  the existing doc
-
-Worse: proposing options where one of them violates the coding bar is asking the
-user to validate a wrong answer. Drop those options before asking.
-
-## Step 1 expanded — the context map
-
-Always read the map in full — it is capped at 150 lines and tells you what
-exists. Opening every area file defeats the point; the map exists so you can
-skip the ones that don't apply. If a term in your question is defined in an area
-you opened, use the canonical term and don't ask the user to disambiguate it
-again.
-
-**No map?** Use only the retained `bindings.paths.context` list. Do not probe
-for a conventional filename or a README section; an empty retained list means
-there is no context document for this phase.
-
-## Step 2 expanded — decision-log homes
-
-Areas own their decisions: each area in the map has an `adr/` directory beside
-its `CONTEXT.md` (`docs/areas/<slug>/adr/`), plus the reserved
-`docs/areas/system/adr/` for decisions spanning areas. With no map, use only
-the relevant retained context path; never infer a decision-log location.
-
-## Step 3 expanded — standards layers
-
-Load a stack shard only when the change's file extensions match it. Project
-deltas live at `bindings.paths.standards` (a `docs/standards/` directory with a README
-index carrying `governs:` globs, or a single `CONTRIBUTING.md` /
-`docs/coding-standards.md` in older repos). See `~/.agents/standards/README.md`
-for the precedence ladder.
-
-## Step 4 expanded — the long-doc rule
-
-Past ~400 lines, read a doc by governing section rather than whole: grep its
-headings first, then open only the sections covering the components in play. The
-same cap governs any other long doc this pass sends you to; the context map is
-the exception, and only because it is capped at 150 lines by design. A large
-architecture doc read end-to-end can cost more than every other step of this
-pass combined, and its two or three relevant sections answer the question just
-as well.
+Project standards deltas at `bindings.paths.standards` are a `docs/standards/` directory whose README index carries `governs:` globs, or in older repos a single `CONTRIBUTING.md` or `docs/coding-standards.md`. `~/.agents/standards/README.md` gives the precedence ladder.
 
 ## Cache example
 
@@ -72,13 +24,7 @@ as well.
 - Fulfilment, Identity — no path or term overlap with this issue.
 ```
 
-Never write the cache inside the working tree: a committed cache collides across
-parallel runs (observed: two `--auto` branches add/add-conflicted on a
-worktree grounding cache at merge).
-
 ## The question shape
-
-Substitute your project's real terms and decisions for the placeholders:
 
 > "`<CONTEXT-DOC>` defines '`<Domain Term>`' as `<the canonical definition>`.
 > `<ADR-NNN>` settled that `<the relevant decision>` happens in `<component A>`,
@@ -87,14 +33,4 @@ Substitute your project's real terms and decisions for the placeholders:
 > `<the existing abstraction>` or add a sibling abstraction for the new
 > `<edge case>` — what's your call?"
 
-When the docs fully answer it:
-"Per `<ADR-NNN>`, `<the decision>`, so this goes there. Continuing."
-
-## Cost note
-
-A grounded pass is the map (≤150 lines) plus the one or two area files that
-actually apply, plus a handful of greps — seconds, not minutes, and bounded no
-matter how large the project's docs have grown. If you're tempted to skip it
-because "it'll take too long," you're either about to ask a question that
-doesn't deserve to be asked, or you're loading area files the `governs:` globs
-told you to skip.
+When the docs fully answer it: "Per `<ADR-NNN>`, `<the decision>`, so this goes there. Continuing."
