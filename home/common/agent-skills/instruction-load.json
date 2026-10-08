@@ -430,8 +430,8 @@
         "codex": 19254
       },
       "conditional_ceiling_bytes": {
-        "claude": 40668,
-        "codex": 40668
+        "claude": 31760,
+        "codex": 31760
       },
       "note": "One decision session. Grilling is the default mode; research and prototype sessions are conditional. Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10)."
     },
@@ -1067,6 +1067,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 505204,
-  "description_ceiling_bytes": 3013
+  "corpus_ceiling_bytes": 496296,
+  "description_ceiling_bytes": 2985
 }
