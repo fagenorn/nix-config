@@ -1,12 +1,18 @@
 # Generating the release changelog
 
-Loaded by Phase 1 of [`SKILL.md`](./SKILL.md). This file owns the *content* of a release's PR body — the categorisation rubric, the output template, and the version-bump signals. SKILL.md owns the workflow around it.
+Loaded by Phase 1 of [`SKILL.md`](./SKILL.md). This file owns the PR body's content (rubric, template, bump signals); `SKILL.md` owns the workflow.
 
-This included document receives the phase owner's retained `ResolvedProject`; it uses `bindings.tracker`, `bindings.vcs`, and `bindings.workflow.release` without resolving or inferring policy.
+`<integration>` and `<default>` come from `bindings.vcs`; the repository slug comes from `bindings.tracker.repo_slug`. Build every PR/commit/ADR URL from it; never hardcode an owner/name.
 
-`<integration>` and `<default>` come from `bindings.vcs`; the repository slug comes from `bindings.tracker.repo_slug`. Build every PR/commit/ADR URL from that passed slug; never hardcode an owner/name.
+## Contents
 
-The audience is the operator debugging something three months from now — usually you. They don't care about the SHA of every cherry-pick; they care about *what landed and what they need to know to operate it*.
+- Step 1 — Mine the merges
+- Step 2 — Categorise each merge
+- Step 3 — Write each entry
+- Step 4 — Top-of-body synthesis
+- Step 5 — Assemble the PR body
+- Quality check before opening the PR
+- Version bump signals
 
 ## Step 1 — Mine the merges
 
@@ -16,9 +22,9 @@ git log origin/<default>..origin/<integration> --first-parent --merges \
   --pretty=format:'%h%x1f%s%x1f%cI%x1f%b%x1e'
 ```
 
-Field separator `%x1f` (US), record separator `%x1e` (RS) — neither collides with anything in commit messages. Parse into `{sha, subject, committed_at, body}`.
+Split fields on `%x1f`, records on `%x1e`.
 
-Single-branch (`<integration> == <default>`): the range is `<prev-tag>..origin/<default>`, with `<prev-tag>` the tag that `git describe --tags --abbrev=0 origin/<default>` prints written into the command, not carried in a shell variable a later call cannot see — with no tag yet that command exits non-zero and prints nothing, and the range is just `origin/<default>`, its whole history — and drop `--merges` — direct commits are the release units there.
+Single-branch (`<integration> == <default>`): the range is `<prev-tag>..origin/<default>` and `--merges` is dropped, since direct commits are the release units. Write the tag that `git describe --tags --abbrev=0 origin/<default>` prints into the command; a shell variable does not survive to a later call. With no tag yet that command exits non-zero and prints nothing, and the range is just `origin/<default>`.
 
 For each merge, resolve the PR only when `capabilities.tracker` permits it:
 
@@ -27,11 +33,11 @@ ${GH_PREFIX}gh pr list --search "<merge-sha>" --state merged \
   --json number,title,url,labels,body -q '.[0]'
 ```
 
-An empty result means the merge was done locally without a PR (rare — usually a resync or hotfix). Note it, use a commit URL instead of a PR URL, don't drop it. Read the PR body where it exists: it carries the *intent*, which beats the merge subject for writing operator-facing prose.
+An empty result means no PR: keep the merge and use a commit URL. Read the PR body: it carries the intent.
 
 ## Step 2 — Categorise each merge
 
-Walk the decision tree in order; stop at the first match.
+Walk the table in order; stop at the first match.
 
 | Question | Bucket |
 |---|---|
@@ -42,39 +48,32 @@ Walk the decision tree in order; stop at the first match.
 | Does it fix a defect or restore expected behaviour? | **Fixes** |
 | Is it operator-invisible — pure refactor, test hardening, internal docs, dependency bump? | **Internal** |
 
-Judgment notes:
-
-- **Highlights is a quality bar, not a quantity.** Five highlights means you're padding; demote to Features/Improvements.
-- A merge appears in two buckets only when one of them is Deploy notes. Otherwise pick the primary operator impact.
-- "Decommission X" / "retire Y" / "remove Z" is usually Deploy notes even when the user-visible message is just "fewer endpoints".
-- ADR commits and spec/plan docs are Internal, unless they encode a behaviour change operators need — then categorise by the behaviour, not the doc.
-- **Don't synthesise from the merge subject alone.** Subjects look like `merge: <slug> — <terse desc> (issue-N → <integration>)`; the operator-facing meaning lives in the PR body and the diff.
+- Five highlights means you're padding; demote to Features/Improvements.
+- A merge appears in two buckets only when one of them is Deploy notes.
+- "Decommission X" / "retire Y" / "remove Z" is usually Deploy notes.
+- ADR commits and spec/plan docs are Internal, unless they encode a behaviour change operators need; then categorise by the behaviour.
+- **Don't synthesise from the merge subject alone.** Subjects look like `merge: <slug> — <terse desc> (issue-N → <integration>)`.
 
 ## Step 3 — Write each entry
 
-**One short sentence, imperative voice, operator-facing meaning, PR link.** The project's worked
-examples (entry rewrites, synthesis, bump calls) arrive through passed
-`bindings.paths.hints` paths; read them now if present.
+**One short sentence, imperative voice, operator-facing meaning, PR link.** The project's worked examples (entry rewrites, synthesis, bump calls) arrive through passed `bindings.paths.hints` paths; read them now if present.
 
 | Bad | Good |
 |---|---|
 | `c7d3002a merge: <slug> — <terse desc> (issue-N → <integration>)` | `<What changed, in the words an operator would search for> — <the consequence they'd notice> ([#N](https://github.com/<passed-repo-slug>/pull/N))` |
 | `Various fixes and improvements` | (delete; if you're tempted to write this, you haven't read enough merges yet) |
 
-- Lead with the *change*, not the issue number.
-- Use the words an operator would search for — feature names, endpoint paths, env var names, table names. Not internal class names unless they're the user-facing surface.
-- Link the PR inline with the **full URL**, never a bare `#N` — many forges auto-link a bare `#N` against the wrong repo under cross-references.
+- Link the PR with the **full URL**, never a bare `#N` (forges auto-link it against the wrong repo).
 - Link ADRs only from the caller-passed context paths, cited by their full id. Skip when none were passed.
-- Don't include the SHA; the PR link is enough.
 - One PR that shipped two distinct operator-visible changes gets two entries linking the same PR.
 
 ## Step 4 — Top-of-body synthesis
 
-Open with a 2–4 sentence prose summary themed around the 2–3 threads that organise most of the release — the executive summary an operator reads before drilling into the categorised list. Shape:
+Open with a 2–4 sentence prose summary of the release's 2–3 main threads. Shape:
 
 > This release lands `<theme 1: the marquee capability, with its sub-parts named>`, retires `<theme 2: the concept removed, and how far it went>`, and tightens `<theme 3: the surface hardened>`. Plus the usual hardening across `<area>`.
 
-Tone: factual, not promotional. No "exciting new", no "we're thrilled" — operators want signal, not enthusiasm. `Merged 57 PRs from <integration> — see list below` is not a synthesis.
+Tone: factual, not promotional; `Merged 57 PRs from <integration> — see list below` is not a synthesis.
 
 ## Step 5 — Assemble the PR body
 
@@ -115,24 +114,22 @@ Tone: factual, not promotional. No "exciting new", no "we're thrilled" — opera
 - A health probe returning 200 is *not* proof — verify the running commit equals the merge SHA at a SUCCESS status (SKILL.md Phase 5).
 ```
 
-Skip an empty section rather than writing "## Fixes\n*none*" — absence reads fine. When `deploy.adapter == none`, drop the Verification section's deploy lines and keep only the merged+tagged record. The collapsible raw list preserves the exhaustive record for future debugging without cluttering the operator-facing read.
+Skip an empty section rather than writing "## Fixes\n*none*". When `deploy.adapter == none`, drop the Verification section's deploy lines and keep only the merged+tagged record.
 
 ## Quality check before opening the PR
 
-Re-read the assembled body and ask: could a teammate tell what landed in 90 seconds (top synthesis + Highlights)? Could an on-call engineer tell which PR to suspect for a given regression (category-by-impact structure)? Is everything in Deploy notes already reflected in the deploy env / schema state — and if not, fix that *before* merging? Is Highlights down to the things that deserve it? Any `Various` / `Misc` phrasing left, which means you haven't finished reading the merges?
+Re-read the assembled body; any "no" means iterate before opening.
 
-Any "no" or "not sure" → iterate before opening. The body becomes the merge commit's permanent record; cheaper to fix now than in `git log --grep`.
-
-## Anti-patterns
-
-- **The flat SHA dump.** Subject lines copied verbatim with their `issue-N → <integration>` suffix. The raw collapsible is the only place that format belongs.
-- **Headlining everything.** Ten highlights means none of them are highlighted.
-- **Confusing process with content.** "ADR-NNNN implemented" is not an entry; what the ADR *made the system do* is. The ADR is the why, not the what.
-- **Padding with internal churn.** A dependency bump in Highlights signals you're filling space.
+- Could a teammate tell what landed in 90 seconds (synthesis + Highlights)?
+- Could an on-call engineer tell which PR to suspect for a regression?
+- Is everything in Deploy notes reflected in the deploy env / schema state before merging?
+- Does Highlights hold only what deserves it, with no internal churn such as a dependency bump?
+- Is any `Various` / `Misc` left, or a flat SHA dump? Only the raw collapsible holds verbatim subjects.
+- Is any entry process rather than content? "ADR-NNNN implemented" is not one; what the ADR made the system do is.
 
 ## Version bump signals
 
-Feeds [`SKILL.md` Phase 4.5d](./SKILL.md#45d-decide-major--minor--patch): the same buckets that produced the changelog drive the semver bump. **This table is the only copy of the rubric** — SKILL.md points here. Walk top-down, **stop at the first matching rule**.
+Feeds [`SKILL.md` Phase 4.5d](./SKILL.md#45d-decide-major--minor--patch). **This table is the only copy of the rubric** — SKILL.md points here. Walk top-down, **stop at the first matching rule**.
 
 | Bucket evidence | Bump |
 |---|---|
@@ -140,22 +137,22 @@ Feeds [`SKILL.md` Phase 4.5d](./SKILL.md#45d-decide-major--minor--patch): the sa
 | `## Highlights` or `## Features` has at least one new operator-visible capability. | **MINOR** |
 | Only `## Improvements`, `## Fixes`, `## Internal`, or non-breaking `## Deploy notes` (additive env vars *with defaults*, additive migrations, telemetry-only changes). | **PATCH** |
 
-**Pre-1.0 caveat.** While `PREV_TAG` is `0.x.y`, the table shifts down one slot: MAJOR-class evidence yields a MINOR bump (`0.MINOR.0` → `0.MINOR+1.0`); MINOR and PATCH map to themselves. Per the [semver §4 unstable-release convention](https://semver.org/#spec-item-4) — pre-1.0 explicitly disclaims API stability. The 0.x → 1.0 promotion is a separate operator decision, not driven by this rubric.
+**Pre-1.0 caveat.** While `PREV_TAG` is `0.x.y`, the table shifts down one slot: MAJOR-class evidence yields a MINOR bump (`0.MINOR.0` → `0.MINOR+1.0`); MINOR and PATCH map to themselves. The 0.x → 1.0 promotion is a separate operator decision.
 
-Worked example (MAJOR on the 1.0+ track; the other buckets follow the same reading):
+Worked example (MAJOR on the 1.0+ track):
 
 ```
 ## Deploy notes
 - New required env var `<Key>` — the app refuses to start without it. Set it before deploying.
 - Migration drops `<table>.<column>` — no shim; downstream consumers must read `<replacement>`.
 ```
-→ A required env var with no default plus a schema drop with no shim: two entries needing operator action to upgrade, neither backward-compatible. Bump = **MAJOR**. On a `v0.x` predecessor the same evidence yields **MINOR**.
+→ Two entries needing operator action, neither backward-compatible: **MAJOR**. On a `v0.x` predecessor, **MINOR**.
 
 When the rubric is ambiguous:
 
-- **Both breaking-deploy and feature** → MAJOR wins. Operators needing to coordinate before the upgrade dominates "we also added a thing".
+- **Both breaking-deploy and feature** → MAJOR wins.
 - **A flipped feature-flag default** → the test is operator-visibility. Anyone on default config seeing a different shape after the upgrade = MAJOR. Behaviour that requires opting in = MINOR plus a Deploy notes mention.
-- **A NOT NULL column added with a backfill default** → MINOR, with the backfill timeline in Deploy notes. Compatible from the application's side, but downstream consumers querying the column directly see nothing pre-migration.
-- **In genuine doubt, propose the higher bump** and show the reasoning. Over-bumping costs one tag; under-bumping ships a break the operator wasn't warned about. The cost is asymmetric.
+- **A NOT NULL column added with a backfill default** → MINOR, with the backfill timeline in Deploy notes.
+- **In genuine doubt, propose the higher bump** and show the reasoning.
 
 Whether release notes carry an AI-assistance trailer follows `bindings.vcs`.

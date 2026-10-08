@@ -391,7 +391,6 @@ RETAINED_SUPPORT_CONTRACTS = {
     "ship-issue/CONSOLIDATE.md": ("bindings.paths", "bindings.vcs"),
     "ship-issue/HUMAN-GATE.md": ("bindings.vcs", "bindings.tracker"),
     "ship-issue/SYNC.md": ("bindings.vcs", "bindings.paths.hints"),
-    "ship-release/CHANGELOG.md": ("bindings.tracker", "bindings.vcs", "bindings.workflow.release"),
 }
 
 # These are deliberate test patterns, not permitted policy text. The tracked
