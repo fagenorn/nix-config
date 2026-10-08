@@ -505,7 +505,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 7797,
+        "claude": 7533,
         "codex": 6501
       },
       "conditional_ceiling_bytes": {
@@ -531,7 +531,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 960,
+        "claude": 760,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -556,7 +556,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 1296,
+        "claude": 1032,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -581,7 +581,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 1296,
+        "claude": 1032,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -698,7 +698,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 960,
+        "claude": 760,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -723,7 +723,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 1370,
+        "claude": 1285,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -748,7 +748,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 1296,
+        "claude": 1032,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -773,7 +773,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 1724,
+        "claude": 1562,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -798,7 +798,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 1724,
+        "claude": 1562,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -826,7 +826,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 1370,
+        "claude": 1285,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -851,7 +851,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 1370,
+        "claude": 1285,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -876,7 +876,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 1296,
+        "claude": 1032,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -901,7 +901,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 1296,
+        "claude": 1032,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -926,7 +926,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 1296,
+        "claude": 1032,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -951,7 +951,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 1370,
+        "claude": 1285,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -977,7 +977,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 1724,
+        "claude": 1562,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -1002,7 +1002,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 1296,
+        "claude": 1032,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -1029,7 +1029,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 1296,
+        "claude": 1032,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -1054,7 +1054,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 1724,
+        "claude": 1562,
         "codex": 0
       },
       "conditional_ceiling_bytes": {
@@ -1067,6 +1067,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 521615,
+  "corpus_ceiling_bytes": 520879,
   "description_ceiling_bytes": 3142
 }
