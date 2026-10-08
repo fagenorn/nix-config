@@ -379,12 +379,10 @@ CLAUDE_POLICY_ENTRIES = {
 SHARED_POLICY_SUPPORT = {
     "doc-grounded-questions/REFERENCE.md": ("bindings.paths.context",),
     "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
-    "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
 }
 
 RETAINED_SUPPORT_CONTRACTS = {
     "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
-    "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
     "ship-issue/CONSOLIDATE.md": ("bindings.paths", "bindings.vcs"),
     "ship-issue/HUMAN-GATE.md": ("bindings.vcs", "bindings.tracker"),
     "ship-issue/SYNC.md": ("bindings.vcs", "bindings.paths.hints"),
