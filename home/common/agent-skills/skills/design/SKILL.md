@@ -1,6 +1,6 @@
 ---
 name: design
-description: Turns an idea or issue into an approved design spec by grilling open questions in batched rounds. Use to design or spec work before planning.
+description: Turns an idea or issue into an approved design spec through batched question rounds. Use to design work before planning.
 ---
 
 # Design

@@ -1,6 +1,6 @@
 ---
 name: grill-with-docs
-description: Stress-tests a spec against the domain docs and updates the glossary and ADRs as decisions settle. Use to grill a drafted spec or design.
+description: Stress-tests a spec against the domain docs, updating the glossary and ADRs as decisions settle. Use to grill a drafted spec.
 ---
 
 # Grill With Docs

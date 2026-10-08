@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: Writes a handoff document so a fresh session or another agent can continue the work. Use to pause or hand off work.
+description: Writes a handoff document so a fresh session or agent can continue the work. Use to pause or hand off work.
 argument-hint: "What will the next session be used for?"
 ---
 

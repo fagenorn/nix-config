@@ -1,6 +1,6 @@
 ---
 name: writing-plans
-description: Turns a spec into a task-by-task implementation plan package. Use when multi-step work has requirements and needs a plan before code.
+description: Turns a spec into a task-by-task implementation plan. Use when multi-step work needs a plan before code.
 ---
 
 # Writing Plans
