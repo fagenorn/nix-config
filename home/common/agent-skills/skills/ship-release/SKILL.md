@@ -41,7 +41,7 @@ Write it atomically (temp file in the same dir, then `mv`) at every transition: 
 
 ## Standing authorization
 
-"Release" / "ship to prod" / "do the release" authorises the whole chain: opening the PR, waiting for CI, merging with `--merge`, tagging + publishing the Release (`git tag -a`, `git push origin v*`, `gh release create`), and polling the platform until each affected service is on the merge SHA. 4.5d's bump proposal is the one confirmation round; it does not extend to pushing `<default>` or `<integration>`. The `Co-Authored-By` trailer follows `bindings.vcs.commit.co_authored_by`. Pause only on Phase 0 failures, a CI check finishing `FAILURE` / `CANCELLED` / `TIMED_OUT` (Phase 3), a deployment finishing `FAILED` (Phase 5, *especially* a silent rollback), and genuinely new risks.
+"Release" / "ship to prod" / "do the release" authorises the whole chain: opening the PR, waiting for CI, merging with `--merge`, tagging + publishing the Release (`git tag -a`, `git push origin v*`, `gh release create`), and polling the platform until each affected service is on the merge SHA. 4.5d's bump proposal is the one confirmation round. This authorization does not extend to pushing `<default>` or `<integration>`. The `Co-Authored-By` trailer follows `bindings.vcs.commit.co_authored_by`. Pause only on Phase 0 failures, a CI check finishing `FAILURE` / `CANCELLED` / `TIMED_OUT` (Phase 3), a deployment finishing `FAILED` (Phase 5, *especially* a silent rollback), and genuinely new risks.
 
 ## Doc-grounded escalations
 
@@ -66,7 +66,7 @@ Before forming any user-facing question, invoke `doc-grounded-questions`, using 
 6. **Local `<integration>` in sync with origin.** Compare `git rev-parse <integration>` with `git rev-parse origin/<integration>`:
    - Equal, or no local branch → continue.
    - **Local ahead** → unpushed commits on the integration line. Surface with `git log --oneline --left-right LOCAL...REMOTE`, quoting its first 20 lines, and ask whether they belong. Don't auto-resolve.
-   - **Local behind** → stale local branch. Offer `git checkout <integration>` and, only if that succeeded, `git merge --ff-only origin/<integration>`.
+   - **Local behind** → stale local branch. Offer `git checkout <integration>` and, only if that succeeded, `git merge --ff-only origin/<integration>`, then proceed (the release reads `origin/<integration>`).
    - **Diverged** → surface the divergence; the user decides. Don't auto-rebase or reset.
 
 Any failure: ground, then surface.
@@ -80,7 +80,7 @@ Two outputs:
 1. **The PR body** — assembled per `CHANGELOG.md`'s template.
 2. **The PR title / merge-subject seed** — one line under 70 chars from the body's synthesis; it becomes `gh pr create --title` and, with `(<integration> → <default>)` appended, `gh pr merge --subject`.
 
-Also surface the number of first-parent merges in the range and — only when `deploy.adapter != none` — the **deploy expectations** from retained deploy-related documentation (they feed **Deploy notes**).
+Also surface the number of first-parent merges in the range and — only when `deploy.adapter != none` — the **deploy expectations** from retained deploy-related documentation.
 
 Do not create a tracked `CHANGELOG.md` in the repo root unless the user explicitly asks.
 
@@ -96,7 +96,7 @@ ${GH_PREFIX}gh pr create \
   --body-file <release-body-path>
 ```
 
-Title pattern: `merge: <integration> — <two or three comma-separated themes>`, under 70 chars (the merge subject minus its `(<integration> → <default>)` suffix). A user-supplied scope-hint argument seeds it — keep the user's intent. With no argument, the Phase 1 synthesis is the scope hint.
+Title pattern: `merge: <integration> — <two or three comma-separated themes>`, under 70 chars (the merge subject minus its `(<integration> → <default>)` suffix). A user-supplied scope-hint argument seeds it. With no argument, the Phase 1 synthesis is the scope hint.
 
 Persist `pr` + `prUrl` to the durable state file now.
 
@@ -138,7 +138,7 @@ ${GH_PREFIX}gh pr merge <pr-num> --repo <resolved-repository> --merge --subject 
 
 Verify: `${GH_PREFIX}gh pr view <pr-num> --json state,mergeCommit` → `MERGED` plus a non-null `mergeCommit.oid`. Capture that oid as `MERGE_SHA` and persist `mergeSha` to the durable state file **before doing anything else**.
 
-Then `git fetch origin` to refresh local refs. Don't `git push origin <default>`, and don't check out `<default>` to merge it locally.
+Then `git fetch origin`. Don't `git push origin <default>`, and don't check out `<default>` to merge it locally.
 
 ## Phase 4.5 — Tag + GitHub Release
 
@@ -162,7 +162,7 @@ The no-PR paths (single-branch and/or kind == none) resolve it AFTER any local m
 MERGE_SHA=$(git rev-parse <default>)
 ```
 
-On the no-PR paths the target is the **local** `<default>`, never `origin/<default>` (the stale pre-merge tip).
+On the no-PR paths the target is the **local** `<default>`, never `origin/<default>` (stale).
 
 ### 4.5b. Skip condition — before creating anything
 
