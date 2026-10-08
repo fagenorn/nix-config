@@ -388,12 +388,10 @@ CLAUDE_POLICY_ENTRIES = {
 }
 
 SHARED_POLICY_SUPPORT = {
-    "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
     "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
 }
 
 RETAINED_SUPPORT_CONTRACTS = {
-    "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
     "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
     "ship-release/CHANGELOG.md": ("bindings.tracker", "bindings.vcs", "bindings.workflow.release"),
 }
