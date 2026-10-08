@@ -97,9 +97,9 @@ by axis:
 Agent(subagent_type="implementer", model="opus", effort="high") fixes the verified whole-branch findings in one wave.
 
 The fixer runs the focused tests covering each fix, and the build check when a
-fix changes files the build evaluates, never the full declared verification
-Where both axes flag the
-same lines, dedupe at dispatch and credit both axes in the ledger. Then run
+fix changes files the build evaluates, never the full declared verification.
+Where both axes flag the same lines, dedupe at dispatch and credit both in the
+ledger. Then run
 exactly one scoped re-review per axis that had findings, using that axis's
 unchanged rubric with the named findings and bounded fix-range package:
 
