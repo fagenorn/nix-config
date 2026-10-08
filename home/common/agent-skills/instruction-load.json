@@ -124,7 +124,7 @@
         "ship-issue/REMAINDER.md": "from-issue's dispatch-gap fallback covers only the review-bearing ship launch; a delivery_remainder goes to a fresh ship owner"
       },
       "ceiling_bytes": {
-        "claude": 154871
+        "claude": 140767
       },
       "conditional_ceiling_bytes": {
         "claude": 129374
@@ -247,8 +247,8 @@
         "ship-issue/REMAINDER.md": "from-issue's dispatch-gap fallback covers only the review-bearing ship launch; a delivery_remainder goes to a fresh ship owner"
       },
       "ceiling_bytes": {
-        "claude": 149739,
-        "codex": 149739
+        "claude": 134638,
+        "codex": 134638
       },
       "conditional_ceiling_bytes": {
         "claude": 113749,
@@ -1067,6 +1067,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 521615,
+  "corpus_ceiling_bytes": 503456,
   "description_ceiling_bytes": 3142
 }
