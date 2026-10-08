@@ -13,7 +13,7 @@ Subagent (reviewer, Opus/high as selected above):
   prompt: |
     You are reviewing one task's implementation: first whether it matches its
     requirements, then whether it is well-built. This is a task-scoped gate,
-    not a merge review — a whole-branch review happens separately.
+    not a merge review.
 
     ## What Was Requested
 

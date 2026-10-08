@@ -20,8 +20,9 @@ Subagent (the explicitly selected implementer or mechanic above):
 
     Read your task brief first: [BRIEF_FILE]
     It holds the full task text, with the exact values to use verbatim. If
-    anything in it is unclear, **ask now**, or at any point mid-task. Don't
-    guess.
+    you have questions about the requirements, the approach or dependencies,
+    or anything in it is unclear, **ask now**, or at any point mid-task.
+    Don't guess.
 
     ## Context
 
@@ -55,13 +56,13 @@ Subagent (the explicitly selected implementer or mechanic above):
     ## Code Organization
 
     Follow the plan's file structure, one clear responsibility per file, and
-    existing patterns. A file you're creating growing beyond the plan's
-    intent: stop, report DONE_WITH_CONCERNS rather than splitting on your own.
-    Don't restructure outside your task.
+    existing patterns; improve code you're touching. A file you're creating
+    growing beyond the plan's intent: stop, report DONE_WITH_CONCERNS rather
+    than splitting on your own. Don't restructure outside your task.
 
     ## When You're in Over Your Head
 
-    Bad work is worse than no work. STOP and escalate (BLOCKED or
+    STOP and escalate (BLOCKED or
     NEEDS_CONTEXT: what you're stuck on, what you tried, what help you need)
     when the task needs architectural decisions with multiple valid
     approaches, you can't reach clarity on code beyond what was provided, the
@@ -80,7 +81,7 @@ Subagent (the explicitly selected implementer or mechanic above):
     re-run the focused tests covering the amended code (and the brief's build
     check when the fix changes files the build evaluates), and append a fix
     report to your report file: what changed, the covering tests, the command,
-    the output. Reviewers will not re-run tests; your report is the evidence.
+    the output.
 
     Launch any subagent by type only, never by name: a subagent cannot spawn a
     named teammate, and a named launch returns an error instead of work. Read an
