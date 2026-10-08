@@ -61,7 +61,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 29389
+        "claude": 25516
       },
       "conditional_ceiling_bytes": {
         "claude": 0
@@ -1058,6 +1058,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 533575,
+  "corpus_ceiling_bytes": 529702,
   "description_ceiling_bytes": 3120
 }

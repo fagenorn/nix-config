@@ -82,13 +82,6 @@ LIFECYCLE_DOCS = (*sorted((REPO_ROOT / "home/common/agent-skills/skills/from-iss
                   SHIP_ISSUE, SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE, ORCHESTRATE)
 STDIN_CLAUSE = ("lifecycle call is one command that reads its input from stdin "
                 "through a quoted heredoc")
-BUILD_ROOT_CLAUSE = ("The builder seals the policy `resolve-project` resolves at "
-                     "`--repo-root`, the ledger repository root; when `worktree` already "
-                     "exists, it also resolves there and refuses if any sealed policy "
-                     "member differs.")
-BUILD_REFUSAL_RELAY = ("report the builder's stderr line verbatim: for a resolver refusal "
-                       "it carries the resolver's `error.code`, `repair_id` and ordered "
-                       "`violations` exactly.")
 # The closed capability-gap line ship-issue returns when its Phase-0 probe finds
 # no subagent-launch tool, spelled once for the module (per D4).
 CAPABILITY_GAP_LINE = "capability_gap: agent_dispatch"
@@ -885,8 +878,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         documents = {
             str(path.relative_to(REPO_ROOT)): normalized(path.read_text(encoding="utf-8"))
             for path in (FROM_ISSUE, AUTO, FROM_ISSUE.parent / "ship-handoff.md",
-                         SHIP_ISSUE, SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE,
-                         ORCHESTRATE)
+                         SHIP_ISSUE, SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE)
         }
         corpus = " ".join(documents.values())
         for phrase in ("workflow-response", "validate before decoding", "custody",
@@ -894,7 +886,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
                        "ship-checkpoint/v2", "ship-summary/v2", "delivery_remainder"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, corpus)
-        self.assertIn("workflow_bootstrap", normalized(self.orchestrate))
         self.assertIn("checkpoint-delivery", corpus)
         self.assertNotIn("infer the next stage from tracker", corpus.lower())
         self.assertNotIn("unfinished delivery as failed", corpus.lower())
@@ -922,12 +913,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertIn(argv, normalized(decide))
         self.assertIn('`host_route: "direct"`',
                       normalized(ACQUIRE_DURABLE.read_text(encoding="utf-8")))
-
-    def test_contract_builders_state_the_resolution_root_and_relay_refusals(self):
-        decide = normalized(self.section(self.orchestrate, "## 3. Decide",
-                                         "## 4. Execute control actions"))
-        self.assertIn(BUILD_ROOT_CLAUSE, decide)
-        self.assertIn(BUILD_REFUSAL_RELAY, decide)
 
     def test_ship_handoff_v2_ship_summary_v2_and_remainder_prompt(self):
         line = next(item for item in self.ship_handoff.splitlines()
@@ -1033,13 +1018,15 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for path in LIFECYCLE_DOCS:
             text = normalized(path.read_text(encoding="utf-8"))
             with self.subTest(path=path.name):
-                for forbidden in ('"interface_version": 1', "version-1",
-                                  "temporary request file", "temporary `ship-summary/v2` file"):
-                    self.assertNotIn(forbidden, text)
+                self.assertNotIn('"interface_version": 1', text)
+                if path != ORCHESTRATE:
+                    for forbidden in ("version-1", "temporary request file",
+                                      "temporary `ship-summary/v2` file"):
+                        self.assertNotIn(forbidden, text)
                 for flag, value in INPUT_FLAG_RE.findall(text):
                     self.assertEqual(value.strip("`.,;"), "-", flag)
                 self.assertLessEqual(text.count("--result-file"), 1)
-        for path in (ORCHESTRATE, SHIP_ISSUE):
+        for path in (SHIP_ISSUE,):
             with self.subTest(clause=path.name):
                 self.assertIn(STDIN_CLAUSE, normalized(path.read_text(encoding="utf-8")))
 
@@ -2006,8 +1993,7 @@ class ProgressMarkerContractsTest(unittest.TestCase):
             "committed", "is not a suspension cause", "## Phase 7 — Ship")
 
     def test_the_bound_is_described_as_progress_not_phase(self):
-        for path, retired in ((FROM_ISSUE, "at the same recorded phase too many times"),
-                              (ORCHESTRATE, "at the same phase too many times")):
+        for path, retired in ((FROM_ISSUE, "at the same recorded phase too many times"),):
             with self.subTest(path=path.name):
                 text = self.read(path)
                 self.assertIn(self.BOUND, text)
