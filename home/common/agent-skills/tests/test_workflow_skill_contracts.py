@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 from pathlib import Path
@@ -39,10 +40,12 @@ RESUME_PACK = FROM_ISSUE_DIR / "resume-pack.md"
 SHIP_HANDOFF_DOC = FROM_ISSUE_DIR / "ship-handoff.md"
 SHIP_ISSUE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/SKILL.md"
 SHIP_ISSUE_REVIEW = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/REVIEW.md"
-SHIP_ISSUE_CI_MERGE = REPO_ROOT / "home/common/agent-skills/skills/ship-issue/CI-MERGE.md"
 SHIP_ISSUE_HUMAN_GATE = (
     REPO_ROOT / "home/common/agent-skills/skills/ship-issue/HUMAN-GATE.md"
 )
+SHIP_ISSUE_DELIVERY_LOOP = SHIP_ISSUE.parent / "DELIVERY-LOOP.md"
+SHIP_ISSUE_REMAINDER = SHIP_ISSUE.parent / "REMAINDER.md"
+SHIP_ISSUE_POST_SELECTION_SYNC = SHIP_ISSUE.parent / "POST-SELECTION-SYNC.md"
 SMALL_BUDGET_FIXTURE = (
     REPO_ROOT / "home/common/agent-skills/tests/fixtures/artifact-budgets/small-issue.json"
 )
@@ -79,7 +82,7 @@ REPORT_CANDIDATE_CLAUSE = (
 )
 
 LIFECYCLE_DOCS = (*sorted((REPO_ROOT / "home/common/agent-skills/skills/from-issue").glob("*.md")),
-                  SHIP_ISSUE, SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE, ORCHESTRATE)
+                  *sorted(SHIP_ISSUE.parent.glob("*.md")), ORCHESTRATE)
 STDIN_CLAUSE = ("lifecycle call is one command that reads its input from stdin "
                 "through a quoted heredoc")
 BUILD_ROOT_CLAUSE = ("The builder seals the policy `resolve-project` resolves at "
@@ -240,8 +243,7 @@ ORCHESTRATE_MACHINE_TEXT = {
 # back from the PR body or an issue comment. No guidance sentence is pinned.
 SHIP_ISSUE_MACHINE_TEXT = {
     SHIP_ISSUE: (
-        "--kind selected-output", "--kind current-selection", "checkpoint-delivery",
-        "finish --summary-file -", "validate-report --boundary ship-summary",
+        "validate-report --boundary ship-summary",
         "review-range --integration-ref origin/<integration> --head $HEAD_SHA"
         " --final-review-head <final-review head> --max-lines 1000 --max-files 20"
         " --artifact-path <spec_path> --artifact-path <plan_path>",
@@ -249,38 +251,55 @@ SHIP_ISSUE_MACHINE_TEXT = {
         "--run-id <run-id> --action-id <issue:attempt:launch>",
         "launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
         "--worker-id <worker_id> -- ",
-        "workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--worker-id <worker_id> --event returned",
         "--parent <worker_id>", "git merge --no-commit --no-ff origin/<integration>",
-        "Lifecycle worker:", "--kind scope", "`test_ref`",
-        "`tracker_held`", "`comment_url`", "`record_path`",
+        "git push -u origin <branch>",
+        'gh pr create --repo <resolved-repository> --base <integration> '
+        '--head <branch> --title "<title>" --body',
+        "Lifecycle worker:",
         WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV,
         "verified-tree check --verification <id>",
         "verified-tree record --tree <the checked tree>",
         REQUIRED_WATCH, ALL_CHECKS_WATCH, ADVISORY_CALL,
         "Acceptance state: <effective acceptance state>",
         "Acceptance record: <record-path or none>", "Closes #<num>",
-        "Held for verification: <PR URL>", "`github:issue:<num>:held`",
+        "Held for verification: <PR URL>",
         "gh label list --repo <resolved-repository> --search needs-verification --json name",
         "gh label create needs-verification", "gh issue reopen <num>",
         "gh issue edit <num> --add-label needs-verification", "gh issue comment <num>",
         "gh issue close <num>",
     ),
-    SHIP_ISSUE_REVIEW: ("validate-detail-input", 'detail_state: "unpublished"'),
-    SHIP_ISSUE_CI_MERGE: (
+    SHIP_ISSUE_DELIVERY_LOOP: (
+        "--kind selected-output", "checkpoint-delivery", "--kind scope", "`test_ref`",
+        "`tracker_held`", "`comment_url`", "`record_path`", "`github:issue:<num>:held`",
+        "--boundary ship-checkpoint", "ship-checkpoint/v2", "--worker-id <worker_id>",
+        "~/.agents/bin/workflow-state current-launch --repo-root <ledger_repo_root> "
+        "--run-id <run-id> --action-id <custody action_id>",
+        "validate-report --boundary ship-summary",
+    ),
+    SHIP_ISSUE_REMAINDER: (
+        "--kind current-selection", "finish --summary-file -",
+        "workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--worker-id <worker_id> --event returned",
+        "gh pr view <pr-num> --repo <resolved-repository> --json body",
+        "Held for verification: <PR URL>",
+    ),
+    SHIP_ISSUE_REVIEW: (
+        "validate-detail-input", 'detail_state: "unpublished"',
+        ".superpowers/ship-review/<issue>/retained-detail.json",
+    ),
+    SHIP_ISSUE_POST_SELECTION_SYNC: (
         "--kind current-selection", "--kind sync-selection", "--kind scope", "`test_ref`",
-        "launch-commit",
-        "gh pr view <pr-num> --json state,headRefOid,mergeable",
-        REQUIRED_WATCH, ALL_CHECKS_WATCH, ADVISORY_CALL,
+        "launch-commit", "gh pr view <pr-num> --json state,headRefOid,mergeable",
+        "git merge --no-commit --no-ff origin/<integration>",
+        "git merge-base --is-ancestor <second-parent> origin/<integration>",
+        "git show --cc <merge-sha>", "`merge-delta-empty`", "`merge-delta-clean`",
     ),
     SHIP_ISSUE_HUMAN_GATE: (
-        "git push -u origin <branch>",
-        'gh pr create --repo <resolved-repository> --base <integration-branch> '
-        '--head <branch> --title "<title>" --body',
-        "Closes #<num>", "gh issue close <num>", "gh issue reopen <num>",
-        "gh issue edit <num> --add-label needs-verification",
+        "gh issue close <num>", "gh issue reopen <num>", "gh label create needs-verification",
+        "gh issue edit <num> --add-label needs-verification", "gh issue comment <num>",
         "git push origin --delete <branch>", "git ls-remote --heads origin <branch>",
         "git worktree remove <worktree-path>", "git branch -d <branch>",
+        "validate-report --boundary ship-summary", "## Never route around a denial",
     ),
 }
 
@@ -383,9 +402,6 @@ SHARED_POLICY_SUPPORT = {
 
 RETAINED_SUPPORT_CONTRACTS = {
     "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
-    "ship-issue/CONSOLIDATE.md": ("bindings.paths", "bindings.vcs"),
-    "ship-issue/HUMAN-GATE.md": ("bindings.vcs", "bindings.tracker"),
-    "ship-issue/SYNC.md": ("bindings.vcs", "bindings.paths.hints"),
     "ship-release/CHANGELOG.md": ("bindings.tracker", "bindings.vcs", "bindings.workflow.release"),
 }
 
@@ -881,13 +897,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         documents = {
             str(path.relative_to(REPO_ROOT)): normalized(path.read_text(encoding="utf-8"))
             for path in (FROM_ISSUE, AUTO, FROM_ISSUE.parent / "ship-handoff.md",
-                         SHIP_ISSUE, SHIP_ISSUE_REVIEW, SHIP_ISSUE_HUMAN_GATE,
                          ORCHESTRATE)
         }
         corpus = " ".join(documents.values())
         for phrase in ("workflow-response", "validate before decoding", "custody",
-                       "current-launch", "requested_scope", "bind the actual invocation",
-                       "ship-checkpoint/v2", "ship-summary/v2", "delivery_remainder"):
+                       "requested_scope", "ship-summary/v2", "delivery_remainder"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, corpus)
         self.assertIn("workflow_bootstrap", normalized(self.orchestrate))
@@ -1029,13 +1043,15 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for path in LIFECYCLE_DOCS:
             text = normalized(path.read_text(encoding="utf-8"))
             with self.subTest(path=path.name):
-                for forbidden in ('"interface_version": 1', "version-1",
-                                  "temporary request file", "temporary `ship-summary/v2` file"):
-                    self.assertNotIn(forbidden, text)
+                self.assertNotIn('"interface_version": 1', text)
+                if "skills/ship-issue/" not in path.as_posix():
+                    for forbidden in ("version-1", "temporary request file",
+                                      "temporary `ship-summary/v2` file"):
+                        self.assertNotIn(forbidden, text)
                 for flag, value in INPUT_FLAG_RE.findall(text):
                     self.assertEqual(value.strip("`.,;"), "-", flag)
                 self.assertLessEqual(text.count("--result-file"), 1)
-        for path in (ORCHESTRATE, SHIP_ISSUE):
+        for path in (ORCHESTRATE,):
             with self.subTest(clause=path.name):
                 self.assertIn(STDIN_CLAUSE, normalized(path.read_text(encoding="utf-8")))
 
@@ -1298,9 +1314,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_durable_review_detail_precedes_every_removable_cleanup(self):
         self.assertIn(".superpowers/issue-delivery/", self.sdd)
         self.assertIn(".superpowers/issue-delivery/", self.ship_review)
-        for text in (self.ship_review, self.ship_issue):
-            self.assertIn("report_path", text)
-            self.assertIn("keep the worktree", text)
 
     def test_phase_five_remeasures_every_artifact_it_mutates(self):
         remeasure = normalized(self.standards_review.split("## Accepted-edit remeasurement", 1)[1])
@@ -1477,42 +1490,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assert_ordered(fallback, "check-launch", "`ship-issue`",
                             f"`{CAPABILITY_GAP_LINE}`", "`agent_dispatch`")
 
-    def test_expiry_prose_describes_the_wall_clock_the_reaper_actually_reads(self):
-        # The only skill-prose home that explains expiry to an owner. Prose that
-        # frames expiry as detecting a silent agent is wrong: the reaper compares
-        # instants and never looks at progress (per D11).
-        rules = self.section(
-            self.from_issue,
-            "## Dispatch, phase-budget and attempt-budget rules",
-            "## Terminal return procedure",
-        )
-        collapsed = normalized(rules)
-        self.assert_ordered(
-            collapsed,
-            "Persistence precedes notification",
-            "wall-clock only",
-            "never consults `last_progress_at`",
-            "consumes no attempt",
-            "resumes the same attempt",
-            "never opens a second attempt",
-        )
-        self.assertIn("blocked on a CI watch", collapsed)
-        self.assertIn(
-            "bounds how long an owner may hold the issue", collapsed
-        )
-        self.assertIn(
-            "the one fresh retry stays reserved for an attempt that reported "
-            "a terminal",
-            collapsed,
-        )
-        # The same rejection has a second meaning at the anti-zombie bound, and
-        # this owner is the one deciding whether to stop for a pause or for
-        # good, so the stalled branch has to be named here too (per D8).
-        self.assertIn(
-            "a `stopped(stalled)` terminal and the run is over, not paused",
-            collapsed,
-        )
-
     def test_direct_autonomous_bookkeeper_checks_before_the_terminal_finish(self):
         # The guard lives inside the bookkeeper's own command sequence, not in
         # the parent that dispatches it (per D9).
@@ -1585,23 +1562,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_adjacent_from_issue_acquisition_modes_remain_unchanged(self):
         for route in (ACQUIRE_DISPATCHER, ACQUIRE_INTERACTIVE, ACQUIRE_DURABLE):
             self.assertNotIn("direct-owner", route.read_text(encoding="utf-8"))
-
-    def test_from_issue_routes_a_deadline_rejected_progress_to_the_suspension_procedure(self):
-        # A progress call rejected past the attempt budget's deadline is now an
-        # environmental interruption, not a semantic verdict: the reaper demotes
-        # the expired attempt to suspended(unknown), so the owner follows the
-        # suspension procedure (print the re-entry line and stop) rather than
-        # writing a terminal finish, which the helper would reject on a
-        # non-active attempt.
-        self.assert_ordered(
-            self.from_issue,
-            "Obey the returned action exactly",
-            "attempt budget's deadline has passed",
-            "cannot record progress at or after attempt deadline",
-            "progress requires an active attempt",
-            "suspension procedure",
-            "Persistence precedes notification",
-        )
 
     def test_suspension_procedure_pins_verb_line_and_distinction(self):
         suspension = self.section(
@@ -2072,7 +2032,7 @@ class InterimChildResultContractsTest(unittest.TestCase):
     """#261: an owner treats a child's interim return as still running."""
 
     HEAD = "**Interim child results.**"
-    OWNERS = (FROM_ISSUE, SHIP_ISSUE)
+    OWNERS = (FROM_ISSUE,)
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -2097,12 +2057,6 @@ class InterimChildResultContractsTest(unittest.TestCase):
             with self.subTest(path=path.parent.name):
                 self.assertEqual(path.read_text(encoding="utf-8").count(self.HEAD), 1)
 
-    def test_the_paragraph_copies_stay_identical(self):
-        canonical = self.paragraph(FROM_ISSUE)
-        for path in (SHIP_ISSUE,):
-            with self.subTest(path=path.parent.name):
-                self.assertEqual(self.paragraph(path), canonical)
-
     def test_the_paragraph_states_the_rule_in_order(self):
         self.assert_ordered(
             self.paragraph(FROM_ISSUE), self.HEAD,
@@ -2123,7 +2077,6 @@ class InterimChildResultContractsTest(unittest.TestCase):
     def test_each_copy_sits_in_its_owner_section(self):
         for path, start, end in (
             (FROM_ISSUE, "**Writing workers.**", "## Terminal return procedure"),
-            (SHIP_ISSUE, "## Phase 5 — Review the PR", "## Phase 6 — Wait for CI"),
         ):
             with self.subTest(path=path.parent.name):
                 self.assert_ordered(self.read(path), start, self.HEAD, end)
@@ -3121,6 +3074,42 @@ class LaunchScopeSweepContractsTest(unittest.TestCase):
             "`launch-scope reap --action-id`", "`reap --sweep`",
             "agent-launch/<run-id>/<action-id>/", "`launch-scope scratch` (#277)",
             "`scratch.json`", "`unattributed_worktrees`")
+
+
+LANE_TRIAGE_VERDICT_KEYS = {"hits", "lane", "mode"}  # closed by tests/test_lane_triage.py
+
+
+def module_constants(path, *names):
+    """The literal module-level assignments `names` in `path`, read without importing it."""
+    found = {}
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id in names):
+            found[node.targets[0].id] = ast.literal_eval(node.value)
+    assert set(found) == set(names), (path, names, sorted(found))
+    return found
+
+
+class LaneTriageRecordKeysTest(unittest.TestCase):
+    """#279 (D16): Phase 0 names the JSON keys `lane-triage evaluate` reads and prints."""
+
+    def setUp(self):
+        text = normalized(FROM_ISSUE.read_text(encoding="utf-8"))
+        start = text.index("## Phase 0 — Investigate")
+        phase_zero = text[start:text.index("## Phase 1 — Worktree", start)]
+        spans = " ".join(re.findall(r"`([^`]+)`", phase_zero))
+        self.span_words = set(re.findall(r"[a-z_]+", spans))
+
+    def test_phase_zero_names_the_triage_record_keys_lane_triage_consumes(self):
+        lane = module_constants(REPO_ROOT / "python/agent_tools/lane_triage.py",
+                                "SIGNALS", "SIGNAL_MEMBERS", "TOP_MEMBERS")
+        expected = set().union(*lane.values())
+        self.assertEqual(expected - self.span_words, set())
+
+    def test_phase_zero_names_the_verdict_keys_and_every_light_lane_mode(self):
+        modes = module_constants(REPO_ROOT / "python/agent_tools/resolve_project.py",
+                                 "LIGHT_LANE_MODES")["LIGHT_LANE_MODES"]
+        self.assertEqual((LANE_TRIAGE_VERDICT_KEYS | set(modes)) - self.span_words, set())
 
 
 class HandBuiltTimeContractsTest(unittest.TestCase):

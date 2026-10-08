@@ -45,6 +45,7 @@ let
     "context-map-lint"
     "derive-review-feasibility-fixtures"
     "diff-scope"
+    "lane-triage"
     "launch-commit"
     "launch-scope"
     "promotion"
