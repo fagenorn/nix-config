@@ -901,8 +901,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_delivery_interface_two_is_one_atomic_production_caller_contract(self):
         documents = {
             str(path.relative_to(REPO_ROOT)): normalized(path.read_text(encoding="utf-8"))
-            for path in (
-                         ORCHESTRATE)
+            for path in (FROM_ISSUE.parent / "ship-handoff.md", ORCHESTRATE)
         }
         corpus = " ".join(documents.values())
         for phrase in ("workflow-response", "validate before decoding", "custody",
