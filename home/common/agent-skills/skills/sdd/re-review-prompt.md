@@ -1,16 +1,5 @@
 # Scoped Re-Review Prompt Template
 
-Use this template when dispatching a re-review after a fix round. The
-re-reviewer verifies the findings were addressed and checks the fix diff for
-new breakage. It is not a fresh review — the full review already happened.
-
-**Purpose:** Verify each finding from the previous review was addressed, and
-that the fix itself broke nothing.
-
-This role is legal only because the call supplies named prior findings and a
-`FIX_BASE_SHA..HEAD_SHA` diff package. It never performs a first pass or expands
-its scope to the whole branch.
-
 <!-- agent-dispatch: id=sdd-scoped-task-rereview role=reviewer-lite model=sonnet effort=medium -->
 Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") verifies the named prior findings against the bounded fix diff.
 
@@ -20,9 +9,9 @@ Subagent (reviewer-lite, Sonnet/medium as selected above):
   model: sonnet
   effort: medium
   prompt: |
-    You are re-reviewing one task's fix round. A previous review produced
-    findings; an implementer has attempted to fix them. Your job is to
-    verdict each finding and inspect the fix diff — nothing else.
+    You are re-reviewing one task's fix round: a previous review produced
+    findings and an implementer has attempted to fix them. Verdict each
+    finding and inspect the fix diff — nothing else.
 
     ## The Task
 
@@ -42,44 +31,38 @@ Subagent (reviewer-lite, Sonnet/medium as selected above):
     **Manifest:** [MANIFEST_ROOT]
     **Metrics:** [ROOT_BYTES], [TOTAL_BYTES], [FILE_COUNT], [LARGEST_MEMBER_BYTES]
 
-    The dispatch supplies the manifest root path and all four metrics:
-    `root_bytes`, `total_bytes`, `file_count`, and
+    The four metrics are `root_bytes`, `total_bytes`, `file_count` and
     `largest_member_bytes`. Read the strict manifest first, validate complete
-    coverage and declared bytes against the checker metrics, then read every
-    shard exactly once in manifest order. A version-2 manifest may replace only
-    an individually oversized auto-generated EF migration designer with its
-    bounded `generated_evidence`; verify that entry against the companion
+    coverage and declared bytes against them, then read every shard exactly
+    once, in manifest order. Report an unreadable, mismatched or
+    uncorroborated item as unreadable review evidence; never fetch a fallback
+    diff or approve the fix. Version 3 keeps every whole handwritten file
+    diff, declares the adaptive unchanged context and packs with
+    `stable-first-fit-whole-file`: validate those fields, and read the live
+    file when that context is insufficient. Version 2, and version 3 with
+    `generated_evidence`, may replace an oversized auto-generated EF migration
+    designer with a bounded entry: verify it against the companion
     migration/snapshot diff and the report's no-pending-model-change,
-    generated-SQL, and provider-backed migration evidence. Explicitly report an
-    unreadable, mismatched, or uncorroborated item as unreadable review evidence;
-    do not fetch a fallback diff or approve the fix. The shards contain the fix
-    commits and stat. A version-3 manifest preserves every whole handwritten
-    file diff and every changed line with the declared adaptive unchanged
-    context and `stable-first-fit-whole-file` packing; validate those fields and
-    read the live file when that bounded context is insufficient. Version 3 may
-    also carry version 2's generated evidence. Do not re-run git commands.
+    generated-SQL and provider-backed migration evidence; that evidence is
+    never a waiver. Do not re-run git commands.
 
     Your review is read-only on this checkout. Do not mutate the working
-    tree, the index, HEAD, or branch state in any way.
+    tree, the index, HEAD, or branch state.
 
     ## Scope
 
-    Your scope is the findings list and the fix diff. Verdict every finding.
-    Inspect the fix diff for new problems the fix itself introduced. Do NOT
-    re-review code the fix did not touch: if you notice an issue entirely
-    outside the fix diff, report it under Out-of-Scope Observations — it
-    does not block this task and does not extend the loop. A broad
-    whole-branch review happens after all tasks are complete.
+    Your scope is the findings list and the fix diff: verdict every finding
+    and look for new problems the fix introduced. Do NOT re-review code the
+    fix did not touch; an issue entirely outside the fix diff goes under
+    Out-of-Scope Observations and does not block this task or extend the loop.
 
     ## Tests
 
-    The implementer re-ran the tests covering the amended code and appended
-    the results to the report file. Treat the report as unverified claims:
-    confirm the fix report names the covering tests and shows their output,
-    and verify the claims against the diff. Do not re-run the suite to
-    confirm their report. Run a test only when reading the code raises a
-    specific doubt that no existing run answers — and then a focused test,
-    never a package-wide suite.
+    The report's fix section is unverified claims: confirm it names the
+    covering tests and shows their output, and verify the claims against the
+    diff. Do not re-run the suite to confirm them. Run a test only when
+    reading the code raises a specific doubt no existing run answers, and then
+    a focused test, never a package-wide suite.
 
     Launch any subagent by type only, never by name: a subagent cannot spawn a
     named teammate, and a named launch returns an error instead of work. Read an
@@ -96,8 +79,8 @@ Subagent (reviewer-lite, Sonnet/medium as selected above):
     ## Output Format
 
     Your final message is the report itself: begin directly with the first
-    finding's verdict. Every line is a verdict, a finding with file:line,
-    or a check you ran — no preamble, no process narration.
+    finding's verdict. Every line is a verdict, a finding with file:line, or
+    a check you ran — no preamble, no process narration.
 
     ### Finding Verdicts
 
@@ -113,11 +96,11 @@ Subagent (reviewer-lite, Sonnet/medium as selected above):
 
     ### Out-of-Scope Observations
 
-    Issues you noticed entirely outside the fix diff. Non-blocking; the
-    controller ledgers these for the final review. "None" if none.
-    If a finding needs ambiguous adjudication or branch-wide review, do not
-    decide it: report it here so the controller can escalate explicitly to a
-    full `reviewer` on Opus/high and record the escalation in the SDD ledger.
+    Issues entirely outside the fix diff; non-blocking, ledgered for the
+    final review. "None" if none. If a finding needs ambiguous adjudication
+    or branch-wide review, do not decide it: report it here so the controller
+    can escalate explicitly to a full `reviewer` on Opus/high and record the
+    escalation in the SDD ledger.
 
     ### Verdict
 
@@ -126,7 +109,7 @@ Subagent (reviewer-lite, Sonnet/medium as selected above):
 ```
 
 **Placeholders:**
-- `[BRIEF_FILE]` — the task brief file (same file the implementer worked from)
+- `[BRIEF_FILE]` — the task brief file
 - `[FINDINGS]` — the Critical/Important findings and spec gaps from the
   previous review, copied verbatim, one per bullet
 - `[REPORT_FILE]` — the implementer's report file (fix reports appended)
@@ -135,6 +118,3 @@ Subagent (reviewer-lite, Sonnet/medium as selected above):
 - `[MANIFEST_ROOT]` and `[ROOT_BYTES]`, `[TOTAL_BYTES]`,
   `[FILE_COUNT]`, `[LARGEST_MEMBER_BYTES]` — the manifest root path and all
   four metrics from the validated producer report
-
-**Re-reviewer returns:** per-finding verdicts (ADDRESSED / NOT ADDRESSED),
-new breakage in the fix diff, out-of-scope observations, and a round verdict.

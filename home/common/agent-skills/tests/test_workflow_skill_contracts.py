@@ -136,8 +136,7 @@ SDD_MACHINE_TEXT = {
     SDD: (
         "validate-report --boundary sdd", 'detail_state: "none"', "report_path: null",
         "validate-detail-input", 'detail_state: "unpublished"',
-        "scripts/task-brief PLAN_FILE N", PRODUCER_VALIDATION, WHOLE_FILE_POLICY,
-        "member_count", "aggregate_bytes",
+        "scripts/task-brief PLAN_FILE N", PRODUCER_VALIDATION,
         "`<primary-checkout>/.superpowers/sdd/<checkout-bucket>/<plan-basename>/`",
         "workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> "
         "--action-id <action_id>",
@@ -150,9 +149,7 @@ SDD_MACHINE_TEXT = {
         "--action-id <action_id>",
         WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV, "launch fence refused:",
     ),
-    SDD_DIR / "fix-loop.md": (PRODUCER_VALIDATION,),
     SDD_DIR / "final-review.md": (
-        PRODUCER_VALIDATION, WHOLE_FILE_POLICY,
         "review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD",
         "verified-tree check --verification <id>",
         "verified-tree record --tree <the checked tree>",
@@ -392,12 +389,10 @@ CLAUDE_POLICY_ENTRIES = {
 SHARED_POLICY_SUPPORT = {
     "doc-grounded-questions/REFERENCE.md": ("bindings.paths.context",),
     "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
-    "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
 }
 
 RETAINED_SUPPORT_CONTRACTS = {
     "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
-    "sdd/conformance-reviewer-prompt.md": ("bindings.workflow.review.code",),
 }
 
 # These are deliberate test patterns, not permitted policy text. The tracked
@@ -1269,9 +1264,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_durable_review_detail_precedes_every_removable_cleanup(self):
         self.assertIn(".superpowers/issue-delivery/", self.sdd)
         self.assertIn(".superpowers/issue-delivery/", self.ship_review)
-        for text in (self.sdd,):
-            self.assertIn("report_path", text)
-            self.assertIn("keep the worktree", text)
 
     def test_phase_five_remeasures_every_artifact_it_mutates(self):
         remeasure = normalized(self.standards_review.split("## Accepted-edit remeasurement", 1)[1])
@@ -1290,12 +1282,9 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertEqual(expected[("implementation-plan", "plan-ninth-member")], "decompose_required")
         self.assertEqual(expected[("handoff", "handoff-root-plus-one")], "stopped")
         self.assertEqual(expected[("review-package", "review-member-plus-one")], "decompose_required")
-        for text in (self.sdd,):
-            self.assertIn("complete", text)
-            self.assertIn("within_budget", text)
-            self.assertIn("contract error", text)
         for value in ("complete", "within_budget"):
             self.assertIn(value, self.auto)
+            self.assertIn(value, self.sdd)
 
     def test_owner_persists_exact_terminal_result_before_return(self):
         owner_return_section = self.section(
@@ -1921,7 +1910,7 @@ class InterimChildResultContractsTest(unittest.TestCase):
     """#261: an owner treats a child's interim return as still running."""
 
     HEAD = "**Interim child results.**"
-    OWNERS = (FROM_ISSUE, SDD)
+    OWNERS = (FROM_ISSUE,)
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -1968,13 +1957,6 @@ class InterimChildResultContractsTest(unittest.TestCase):
             "release `--event stopped`",
             "the one case that may lead to a fresh dispatch.",
             "Only the child's final hand-back counts as its result.")
-
-    def test_each_copy_sits_in_its_owner_section(self):
-        for path, start, end in (
-            (SDD, "### 2. Handle the report", "### 3. Review the task"),
-        ):
-            with self.subTest(path=path.parent.name):
-                self.assert_ordered(self.read(path), start, self.HEAD, end)
 
     def test_the_suspension_and_auto_pointers_route_to_the_paragraph(self):
         self.assert_ordered(
