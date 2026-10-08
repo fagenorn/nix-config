@@ -1,7 +1,5 @@
 {
   "debt": [
-    "L2 home/common/agent-skills/skills/ship-release/SKILL.md",
-    "L2 home/common/claude-code/skills/orchestrate-issues/SKILL.md",
     "L3 home/common/agent-skills/skills/doc-grounded-questions/REFERENCE.md",
     "L3 home/common/agent-skills/skills/grill-with-docs/CONTEXT-FORMAT.md",
     "L3 home/common/agent-skills/skills/improve-codebase-architecture/HTML-REPORT.md",
@@ -9,7 +7,6 @@
     "L3 home/common/agent-skills/skills/prototype/UI.md",
     "L3 home/common/agent-skills/skills/sdd/final-review.md",
     "L3 home/common/agent-skills/skills/sdd/fix-loop.md",
-    "L3 home/common/agent-skills/skills/ship-release/CHANGELOG.md",
     "L3 home/common/claude-code/skills/codex-collaboration/DIFF-REVIEW.md",
     "L3 home/common/claude-code/skills/codex-collaboration/PLAN-REVIEW.md",
     "L4b home/common/agent-skills/skills/codebase-design/DESIGN-IT-TWICE.md names DEEPENING.md",
@@ -20,7 +17,6 @@
     "L5 home/common/agent-skills/skills/grill-with-docs/SKILL.md",
     "L5 home/common/agent-skills/skills/handoff/SKILL.md",
     "L5 home/common/agent-skills/skills/improve-codebase-architecture/SKILL.md",
-    "L5 home/common/claude-code/skills/codex-collaboration/SKILL.md",
-    "L5 home/common/codex/skills/orchestrate-issues/SKILL.md"
+    "L5 home/common/claude-code/skills/codex-collaboration/SKILL.md"
   ]
 }
