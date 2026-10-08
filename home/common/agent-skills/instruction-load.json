@@ -39,8 +39,8 @@
         "from-issue/acquire-dispatcher.md": "a controller invocation carries no dispatcher envelope"
       },
       "ceiling_bytes": {
-        "claude": 74673,
-        "codex": 74673
+        "claude": 72548,
+        "codex": 72548
       },
       "conditional_ceiling_bytes": {
         "claude": 53664,
@@ -124,7 +124,7 @@
         "ship-issue/REMAINDER.md": "from-issue's dispatch-gap fallback covers only the review-bearing ship launch; a delivery_remainder goes to a fresh ship owner"
       },
       "ceiling_bytes": {
-        "claude": 154871
+        "claude": 152746
       },
       "conditional_ceiling_bytes": {
         "claude": 130979
@@ -247,8 +247,8 @@
         "ship-issue/REMAINDER.md": "from-issue's dispatch-gap fallback covers only the review-bearing ship launch; a delivery_remainder goes to a fresh ship owner"
       },
       "ceiling_bytes": {
-        "claude": 149739,
-        "codex": 149739
+        "claude": 147614,
+        "codex": 147614
       },
       "conditional_ceiling_bytes": {
         "claude": 114357,
@@ -321,8 +321,8 @@
         "codex": 41929
       },
       "conditional_ceiling_bytes": {
-        "claude": 17655,
-        "codex": 17655
+        "claude": 15530,
+        "codex": 15530
       },
       "note": "One delegated release through ship-release and its changelog rubric."
     },
@@ -430,8 +430,8 @@
         "codex": 20358
       },
       "conditional_ceiling_bytes": {
-        "claude": 44492,
-        "codex": 44492
+        "claude": 42367,
+        "codex": 42367
       },
       "note": "One decision session. Grilling is the default mode; research and prototype sessions are conditional. Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10)."
     },
@@ -483,8 +483,8 @@
         "codex": 41929
       },
       "conditional_ceiling_bytes": {
-        "claude": 17655,
-        "codex": 17655
+        "claude": 15530,
+        "codex": 15530
       },
       "note": "A direct interactive release, with the current session as owner."
     },
@@ -1067,6 +1067,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 514653,
-  "description_ceiling_bytes": 3120
+  "corpus_ceiling_bytes": 512528,
+  "description_ceiling_bytes": 3090
 }
