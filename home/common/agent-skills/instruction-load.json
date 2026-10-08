@@ -451,12 +451,12 @@
       ],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 10621,
-        "codex": 10621
+        "claude": 6376,
+        "codex": 6376
       },
       "conditional_ceiling_bytes": {
-        "claude": 1053,
-        "codex": 1053
+        "claude": 777,
+        "codex": 777
       },
       "note": "One slicing run. The wide-refactor exception is conditional. Ceiling raised for #274: to-issues/SKILL.md types and locates every acceptance criterion with a `[code|evidence|human]` kind and a `measured:` clause (#155 D10, #274 D12)."
     },
@@ -1067,6 +1067,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 512528,
-  "description_ceiling_bytes": 3090
+  "corpus_ceiling_bytes": 508007,
+  "description_ceiling_bytes": 3051
 }
