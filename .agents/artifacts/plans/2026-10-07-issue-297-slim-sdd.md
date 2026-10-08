@@ -59,17 +59,18 @@ Task 2 — Cut fix-loop.md under 100 lines — home/common/agent-skills/skills/s
 Task 3 — Cut final-review.md and give it a Contents list — home/common/agent-skills/skills/sdd/final-review.md, home/common/agent-skills/tests/test_workflow_skill_contracts.py, home/common/agent-skills/instruction-load.json, home/common/agent-skills/skill-lint-debt.json — full — [task-3.md](2026-10-07-issue-297-slim-sdd.tasks/task-3.md)
 Task 4 — Cut the task-loop payloads — home/common/agent-skills/skills/sdd/{implementer-prompt.md, task-reviewer-prompt.md, re-review-prompt.md}, home/common/agent-skills/instruction-load.json — full — [task-4.md](2026-10-07-issue-297-slim-sdd.tasks/task-4.md)
 Task 5 — Cut the final-review payloads and drop the conformance policy-support rows — home/common/agent-skills/skills/sdd/{conformance-reviewer-prompt.md, correctness-reviewer-prompt.md}, home/common/agent-skills/tests/test_workflow_skill_contracts.py, home/common/agent-skills/instruction-load.json — full — [task-5.md](2026-10-07-issue-297-slim-sdd.tasks/task-5.md)
-Task 6 — Measure the slice and record acceptance evidence — .agents/artifacts/plans/2026-10-07-issue-297-slim-sdd.acceptance.md, home/common/agent-skills/instruction-load.json, home/common/agent-skills/evals/results/results.jsonl (token-gated) — full — [task-6.md](2026-10-07-issue-297-slim-sdd.tasks/task-6.md)
+Task 6 — Close the AC3 share gap with semantics-preserving cuts — home/common/agent-skills/skills/sdd/*.md, home/common/agent-skills/instruction-load.json — full — [task-6.md](2026-10-07-issue-297-slim-sdd.tasks/task-6.md)
+Task 7 — Measure the slice and record acceptance evidence — .agents/artifacts/plans/2026-10-07-issue-297-slim-sdd.acceptance.md, home/common/agent-skills/instruction-load.json, home/common/agent-skills/evals/results/results.jsonl (token-gated) — full — [task-7.md](2026-10-07-issue-297-slim-sdd.tasks/task-7.md)
 
 ## Acceptance map
 
 | AC | Kind | Task | Check |
 |----|------|------|-------|
-| AC1 | code | Task 6 | `PYTHONPATH=python python3 -m agent_tools.skill_lint check` exits 0, `skill-lint-debt.json` holds no `skills/sdd/` key, and `just agent-instruction-budget` exits 0 with no `lint:` or `raise:` line (the `Instruction Budget` job's checks; per D2) |
-| AC2 | code | Task 6 | The Task 6 Step 1 command: `skill_lint.reflowed_lines` over `parse_frontmatter(SKILL.md)[1]` prints ≤ 500 (plan target ≤ 230), and `skill-lint check` (L2) passes with no scoped allowlist entry (per D19) |
-| AC3 | evidence | Task 6 | Command: the Task 6 Step 2 share script over `instruction_load report --format json`, run at base `baac2897f15daab46a4f25ec625b40d384d3573c` and at the Task 6 head. Conditions: profiles `orchestrated-issue-owner` and `implementation-owner` over all hosts, `sdd/` members listed hot or conditional (per D1). Threshold: head share ≤ 223,960 (0.80 × 279,951, per D19), with the synced-base share (per D18) and the whole-profile total reported beside it. Implementer fills acceptance-record row `AC3` |
-| AC4 | evidence | Task 6 | Command: `EVAL_TREE=. EVAL_MODEL=<sonnet|opus> just evals sdd 4` (two runs). Conditions: run only when `CLAUDE_CODE_OAUTH_TOKEN` is non-empty (per D14). Threshold: `passed` ≥ 6 on each model (S3 baseline 6/6 sonnet, 6/6 opus). Without the token, row `AC4` records `not run — CLAUDE_CODE_OAUTH_TOKEN unset` and both commands, and grades `human_pending`. Implementer fills acceptance-record row `AC4` |
-| AC5 | code | Task 6 | `just agent-workflow-tests` on the final head, plus the Task 6 Step 4 inventory with the reviewer's attestation that every remaining assertion over an sdd document pins machine-read text only |
+| AC1 | code | Task 7 | `PYTHONPATH=python python3 -m agent_tools.skill_lint check` exits 0, `skill-lint-debt.json` holds no `skills/sdd/` key, and `just agent-instruction-budget` exits 0 with no `lint:` or `raise:` line (the `Instruction Budget` job's checks; per D2) |
+| AC2 | code | Task 7 | The Task 7 Step 1 command: `skill_lint.reflowed_lines` over `parse_frontmatter(SKILL.md)[1]` prints ≤ 500 (plan target ≤ 230), and `skill-lint check` (L2) passes with no scoped allowlist entry (per D19) |
+| AC3 | evidence | Task 7 | Command: the Task 7 Step 2 share script over `instruction_load report --format json`, run at base `baac2897f15daab46a4f25ec625b40d384d3573c` and at the Task 7 head. Conditions: profiles `orchestrated-issue-owner` and `implementation-owner` over all hosts, `sdd/` members listed hot or conditional (per D1). Threshold: head share ≤ 223,960 (0.80 × 279,951, per D19), with the synced-base share (per D18) and the whole-profile total reported beside it. Implementer fills acceptance-record row `AC3` |
+| AC4 | evidence | Task 7 | Command: `EVAL_TREE=. EVAL_MODEL=<sonnet|opus> just evals sdd 4` (two runs). Conditions: run only when `CLAUDE_CODE_OAUTH_TOKEN` is non-empty (per D14). Threshold: `passed` ≥ 6 on each model (S3 baseline 6/6 sonnet, 6/6 opus). Without the token, row `AC4` records `not run — CLAUDE_CODE_OAUTH_TOKEN unset` and both commands, and grades `human_pending`. Implementer fills acceptance-record row `AC4` |
+| AC5 | code | Task 7 | `just agent-workflow-tests` on the final head, plus the Task 7 Step 4 inventory with the reviewer's attestation that every remaining assertion over an sdd document pins machine-read text only |
 
 ## Decisions
 
@@ -80,5 +81,6 @@ The spec owns the ledger. This plan cites D1–D16 and adds D17 (`fix-loop.md` l
 ## Standards review provenance
 
 - Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only, against live HEAD `097325bd` (slice base `baac2897`, after the D18 merge of `origin/main`).
-- Findings: 0 Blocking, 2 Should fix, 0 Discussion. Accepted 2 (R1: Task 6 unsets only the tracker binding's credential names; R2: Task 6 checks sync before reading budget lines, per D20), rejected 0, deferred 0. No fallback.
+- Findings: 0 Blocking, 2 Should fix, 0 Discussion. Accepted 2 (R1: Task 7 (then Task 6) unsets only the tracker binding's credential names; R2: Task 7 (then Task 6) checks sync before reading budget lines, per D20), rejected 0, deferred 0. No fallback.
 - Scope amendment applied in the same pass: the issue's acceptance lines changed to ≤ 500 reflowed lines and head ≤ 0.80 × base (per D19).
+- Execution amendment (per D21): after Task 5 the eight files totalled 76,075 B against the 74,653 B the amended AC3 line needs, so Task 6 was inserted to close the gap with semantics-preserving cuts and the old Task 6 became Task 7.
