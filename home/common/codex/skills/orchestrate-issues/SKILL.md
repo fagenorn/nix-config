@@ -1,6 +1,6 @@
 ---
 name: orchestrate-issues
-description: Codex answer for "orchestrate issues X, Y, Z" — reports that multi-owner orchestration is unsupported on Codex and names the sequential /from-issue route. Never launches owners.
+description: Reports that multi-owner orchestration is unsupported on Codex and names the sequential /from-issue route. Use for "orchestrate issues X, Y, Z" on Codex.
 ---
 
 # orchestrate-issues — unsupported on Codex

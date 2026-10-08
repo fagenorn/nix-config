@@ -1,11 +1,5 @@
 # Conformance Reviewer Prompt Template (final review, conformance axis)
 
-This included document receives values from the phase owner's retained `ResolvedProject`; use `bindings.workflow.review.code` and never resolve, infer, or read project policy.
-
-One of the two isolated axis reviewers in the final review. This axis grades
-delivered-vs-promised; the parallel correctness axis grades bugs and build quality —
-this prompt tells its reviewer not to duplicate that job.
-
 <!-- agent-dispatch: id=sdd-final-conformance-review role=conformance-reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") performs the first-pass whole-branch conformance review.
 
@@ -16,7 +10,7 @@ Subagent (reviewer, Opus/high as selected above):
     You are reviewing a completed feature branch for CONFORMANCE: did the diff
     deliver what the issue, spec, and plan promised, honoring the project's
     documented decisions and standards? A parallel reviewer grades code
-    correctness (bugs, tests, integration) — do not grade that here.
+    correctness (bugs, tests, integration); do not grade that here.
 
     ## Ground first
 
@@ -43,23 +37,21 @@ Subagent (reviewer, Opus/high as selected above):
     **Manifest:** [MANIFEST_ROOT]
     **Metrics:** [ROOT_BYTES], [TOTAL_BYTES], [FILE_COUNT], [LARGEST_MEMBER_BYTES]
 
-    For an SDD dispatch, the packet supplies the manifest root path and all four
-    metrics: `root_bytes`, `total_bytes`, `file_count`, and
-    `largest_member_bytes`. Read the strict manifest first, validate complete
-    coverage and declared bytes against those checker metrics, then read every
-    shard exactly once in manifest order. Explicitly report an unreadable or
-    mismatched shard as unreadable review evidence; do not fetch a fallback diff
-    or report a clean axis. For a version-3 manifest, validate its declared
-    adaptive context and `stable-first-fit-whole-file` packaging, treat every
-    changed line as covered, and read the live file when the bounded unchanged
-    context is insufficient. For a version-2 manifest, or version 3 with
-    non-empty generated evidence, also inspect each bounded auto-generated EF
-    designer evidence entry against the companion migration and snapshot diff
-    and require the reported no-pending-model-change,
-    generated-SQL, and provider-backed migration evidence promised by the plan;
-    the generated entry is not a review waiver. A non-SDD dispatcher that
-    supplies no manifest may
-    fetch the range itself:
+    An SDD dispatch supplies the manifest root and the four metrics
+    (`root_bytes`, `total_bytes`, `file_count`, `largest_member_bytes`).
+    Read the strict manifest first, validate complete coverage and declared
+    bytes against those metrics, then read every shard exactly once in
+    manifest order. Report an unreadable or mismatched shard as unreadable
+    review evidence; do not fetch a fallback diff or report a clean axis.
+    Version 3: honor the declared `packaging.context_lines` and
+    `stable-first-fit-whole-file` packaging, treat every changed line as
+    covered, and read the live file when the bounded context is short.
+    Version 2, or version 3 with non-empty `generated_evidence`: also check
+    each bounded auto-generated EF designer evidence entry against the
+    companion migration and snapshot diff, and require the
+    reported no-pending-model-change, generated-SQL and provider-backed migration
+    evidence the plan promised; the generated entry is never a review waiver. A non-SDD
+    dispatcher that supplies no manifest may fetch the range itself:
     `git diff --stat [MERGE_BASE_SHA]..[HEAD_SHA]` then
     `git diff [MERGE_BASE_SHA]..[HEAD_SHA]`.
     When checking a finding, read the live file at HEAD, not a snapshot. Your
@@ -69,13 +61,12 @@ Subagent (reviewer, Opus/high as selected above):
     ## What to Check
 
     - **Delivered vs promised:** every spec requirement and plan-task deliverable
-      present in the diff; deviations are justified improvements, not silent
+      is in the diff; deviations are justified improvements, not silent
       departures. Missing, extra, or misunderstood scope is a finding.
     - **Doc conformance:** the diff honors the ADRs and canonical area terms you
-      grounded in; terminology the change retires is purged from adjacent code
-      and docs.
+      grounded in; terminology it retires is purged from adjacent code and docs.
     - **Stale-prose audit:** re-read every context-doc sentence, ADR clause,
-      docstring, and comment adjacent to the diff's footprint — prose the diff
+      docstring, and comment adjacent to the diff's footprint; any the diff
       falsifies must have been updated with it.
     - **Message-format parity:** operator-facing strings, error messages,
       audit-trail formats, and labels the spec promises match the implementation
@@ -85,8 +76,8 @@ Subagent (reviewer, Opus/high as selected above):
       criteria section, `AC1`…`ACn` in order, as exactly one of `met`,
       `unmet`, `unverified` or `human_pending`. Take each criterion's kind
       (`code`, `evidence` or `human`) from the plan's `## Acceptance map`
-      when the plan has one, else from the criterion's inline tag. Classify
-      an untagged line yourself; a line you cannot classify is `unverified`.
+      when it has one, else from the inline tag. Classify an untagged line
+      yourself; one you cannot classify is `unverified`.
       - `code`: `met` when its named check exists at HEAD and is part of the
         Declared verification line, which the final verification runs. A
         named check outside that line is `met` only when you ran it at HEAD
@@ -133,12 +124,10 @@ Subagent (reviewer, Opus/high as selected above):
 
     ### Acceptance (omit this section when the dispatch supplied no acceptance criteria)
     | AC | Kind | Verdict | Citation |
-    One row per `ACn`, in order. `Verdict` is exactly one of `met`, `unmet`,
-    `unverified` or `human_pending`. `Citation` for a `code` row is the
-    check name and either `in final verification` or the command you ran
-    with its result; for an `evidence` row it is
-    `observed <value> at <sha7> vs threshold <literal>`; for an `unmet` or
-    `unverified` row it names what is missing or failing.
+    One row per `ACn`, in order. `Citation` for a `code` row is the check name
+    and either `in final verification` or the command you ran with its result;
+    for an `evidence` row it is `observed <value> at <sha7> vs threshold <literal>`;
+    for an `unmet` or `unverified` row it names what is missing or failing.
 
     ### Issues
     #### Critical (Must Fix)
@@ -153,21 +142,18 @@ Subagent (reviewer, Opus/high as selected above):
 
 **Placeholders:** `[ISSUE_REF]` (issue number/URL, or the caller's one-line intent
 statement when there is no tracker; omit the line when neither exists),
-`[SPEC_FILE]` (omit when no spec exists — standalone plans are graded against the
-plan alone), `[PLAN_FILE]`, `[MERGE_BASE_SHA]`, `[HEAD_SHA]`,
-`[MANIFEST_ROOT]` plus `[ROOT_BYTES]`, `[TOTAL_BYTES]`, `[FILE_COUNT]`,
-`[LARGEST_MEMBER_BYTES]` (the manifest root path and all four metrics from
-SDD's validated producer report; a dispatcher without the sdd scripts — e.g.
-ship-issue's full path — omits them and the reviewer uses the body's fallback),
-`[ACCEPTANCE_CRITERIA]` (written by sdd's controller per final-review.md:
-one line `AC<n>: <the issue's criterion line verbatim, without its checkbox>`
-per criterion, in issue order, then one line
-`Declared verification: <each declared verification command, in order>`,
-or `Declared verification: none`. When the dispatch has no criterion
-source, which means no issue, an intent-statement `[ISSUE_REF]`, an issue
-without acceptance-criteria lines, or ship-issue's full review, omit the
-`## Acceptance criteria` heading, this placeholder AND the
-`### Acceptance` output section),
-`[DEFERRED_AND_PARKED_LINES]` (copied verbatim from the ledger; when the
-dispatch supplies no ledger lines — no ledger exists at ship — omit the line AND the
-Ledger Triage section).
+`[SPEC_FILE]` (omit when no spec exists), `[PLAN_FILE]`, `[MERGE_BASE_SHA]`, `[HEAD_SHA]`, `[MANIFEST_ROOT]`,
+`[ROOT_BYTES]`, `[TOTAL_BYTES]`, `[FILE_COUNT]`, `[LARGEST_MEMBER_BYTES]` (the
+manifest root and four metrics from SDD's validated producer report; a
+dispatcher without the sdd scripts omits them and
+the reviewer uses the body's fallback), `[ACCEPTANCE_CRITERIA]` (written by
+sdd's controller per final-review.md: one line
+`AC<n>: <the issue's criterion line verbatim, without its checkbox>` per
+criterion, in issue order, then one line
+`Declared verification: <each declared verification command, in order>`, or
+`Declared verification: none`. With no criterion source (no issue, an
+intent-statement `[ISSUE_REF]`, an issue without acceptance-criteria lines, or
+ship-issue's full review) omit the `## Acceptance criteria` heading, this
+placeholder AND the `### Acceptance` output section),
+`[DEFERRED_AND_PARKED_LINES]` (copied verbatim from the ledger; with no ledger
+lines, as at ship, omit the line AND the Ledger Triage section).
