@@ -61,7 +61,7 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 25507
+        "claude": 25605
       },
       "conditional_ceiling_bytes": {
         "claude": 0
@@ -317,8 +317,8 @@
       ],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 29351,
-        "codex": 29351
+        "claude": 29507,
+        "codex": 29507
       },
       "conditional_ceiling_bytes": {
         "claude": 17655,
@@ -479,8 +479,8 @@
       ],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 29351,
-        "codex": 29351
+        "claude": 29507,
+        "codex": 29507
       },
       "conditional_ceiling_bytes": {
         "claude": 17655,
@@ -1067,6 +1067,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 505129,
+  "corpus_ceiling_bytes": 505383,
   "description_ceiling_bytes": 3110
 }

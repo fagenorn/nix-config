@@ -63,6 +63,7 @@ Walk the table in order; stop at the first match.
 | `c7d3002a merge: <slug> — <terse desc> (issue-N → <integration>)` | `<What changed, in the words an operator would search for> — <the consequence they'd notice> ([#N](https://github.com/<passed-repo-slug>/pull/N))` |
 | `Various fixes and improvements` | (delete; if you're tempted to write this, you haven't read enough merges yet) |
 
+- Lead with the change, not the issue number; no SHA — the PR link is enough.
 - Link the PR inline with the **full URL**, never a bare `#N`.
 - Link ADRs only from the caller-passed context paths, cited by their full id. Skip when none were passed.
 - One PR that shipped two distinct operator-visible changes gets two entries linking the same PR.

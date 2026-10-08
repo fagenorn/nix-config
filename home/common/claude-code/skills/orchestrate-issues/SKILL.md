@@ -106,7 +106,8 @@ against the handles recorded beside returned owner launches; a wake of the curre
 none of these cases and keeps its wait-ID handling below:
 
 - (a) **Interim owner notification.** The handle is an owner launch's and the host marks the
-  notification interim: the owner is still running, so send no observation, run no `check-launch`,
+  notification interim (the owner stopped with background work of its own still running, or its
+  result may be interim): the owner is still running, so send no observation, run no `check-launch`,
   write nothing, stop no task and relaunch nothing; the same handle notifies again with the owner's
   real return.
 - (b) **Owner return without a terminal write.** The handle is an owner launch's, and its return is

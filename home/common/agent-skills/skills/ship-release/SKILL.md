@@ -230,7 +230,7 @@ ${GH_PREFIX}gh release create "$NEXT_VERSION" \
 rm <release-notes-path>
 ```
 
-Between the two: write the body the first command printed to `<release-notes-path>` (outside the working tree) with the file-writing tool, pass that path to the second, and remove it once the Release exists. No PR (single-branch): write the Phase 1 body there. Skip `--prerelease` and `--draft`.
+Between the two: write the body the first command printed to `<release-notes-path>` (outside the working tree) with the file-writing tool, pass that path to the second (never inline `--notes`: the shell mangles the body's fences and backticks), and remove it once the Release exists. No PR (single-branch): write the Phase 1 body there. Skip `--prerelease` and `--draft`.
 
 ### 4.5g. Verify
 
