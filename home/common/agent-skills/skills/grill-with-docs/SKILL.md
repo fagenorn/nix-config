@@ -34,8 +34,7 @@ During the session:
 - **Cross-reference the code**: surface any contradiction between what the user states and what the code does.
 - **Update the glossary inline**: when a term resolves, write it into the owning area's glossary and add its row to the map's Terms table, in CONTEXT-FORMAT.md's format. Only terms meaningful to a domain expert.
 
-Two same-commit obligations keep the glossary sustainable: **delete on resolve** (an ambiguity marker goes the moment the ambiguity closes; the resolution lives in the winning definition and its `_Avoid_:` line, or in an ADR) and **net-neutral writes** (a file pushed past its budget, 150 lines for the map or the front-matter `budget:` for an area, is consolidated or split before you finish: consolidate first, tightening entries past two
-sentences and merging near-duplicate terms; split only when the area covers two things).
+Two same-commit obligations keep the glossary sustainable: **delete on resolve** (an ambiguity marker goes the moment the ambiguity closes; the resolution lives in the winning definition and its `_Avoid_:` line, or in an ADR) and **net-neutral writes** (a file pushed past its budget, 150 lines for the map or the front-matter `budget:` for an area, is consolidated or split before you finish: consolidate first, tightening entries past two sentences and merging near-duplicate terms; split only when the area covers two things).
 
 **Splitting an area** is four edits in one commit:
 

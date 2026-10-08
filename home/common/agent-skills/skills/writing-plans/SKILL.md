@@ -1,6 +1,6 @@
 ---
 name: writing-plans
-description: Turns a spec into a task-by-task implementation plan. Use when multi-step work needs a plan before code.
+description: Turns a spec into a task-by-task implementation plan. Use when requirements for multi-step work need a plan before code.
 ---
 
 # Writing Plans
@@ -166,7 +166,7 @@ git commit -m "feat: add specific feature"
 ```
 ````
 
-**Every task has a verification line that can fail**: a command and the observation that would show the task incomplete, which must hold at the commit the implementer starts from. A shell gate needs care: `set -e` exempts a `!`-inverted command, so `! grep <forbidden> <file>` never aborts; write `if grep -q <forbidden> <file>; then exit 1; fi`. A terminal `grep -c` inverts the sense too: zero matches, the passing case, exits 1.
+**Every task has a verification line that can fail**: a command and the observation that would show the task incomplete; confirm by hand that the observation holds at the commit the implementer starts from. A shell gate needs care: `set -e` exempts a `!`-inverted command, so `! grep <forbidden> <file>` never aborts; write `if grep -q <forbidden> <file>; then exit 1; fi`. A terminal `grep -c` inverts the sense too: zero matches, the passing case, exits 1.
 
 **Each task names its focused test commands**, red then green, plus the project's build check only when the task changes files that check evaluates (add it when unsure). No task runs the full declared verification as a per-task gate; sdd's final gate runs it once on the final head. Global Constraints may still name those commands with their timeouts.
 

@@ -1,6 +1,6 @@
 ---
 name: codebase-design
-description: Deep-module vocabulary for interfaces and seams. Use to design a module or seam, or when another skill needs the deep-module vocabulary.
+description: Deep-module vocabulary for interfaces and seams. Use to design or improve a module's interface or seam, find deepening opportunities, or make code more testable or AI-navigable, or when another skill needs the deep-module vocabulary.
 ---
 
 # Codebase Design

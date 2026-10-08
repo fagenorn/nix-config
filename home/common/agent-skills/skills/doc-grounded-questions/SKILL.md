@@ -1,6 +1,6 @@
 ---
 name: doc-grounded-questions
-description: Grounds questions and reviews in the project's docs and standards. Invoke before asking a design question, offering options or reviewing.
+description: Grounds questions and reviews in the project's docs (CONTEXT, ADRs, standards). Invoke before asking a design question, presenting options or opening a review pass.
 ---
 
 # Doc-Grounded Questions

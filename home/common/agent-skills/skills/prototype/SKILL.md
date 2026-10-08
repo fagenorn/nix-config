@@ -1,6 +1,6 @@
 ---
 name: prototype
-description: Builds throwaway code answering one design question, as a logic TUI or UI variants. Use for "prototype this".
+description: Builds throwaway code answering one design question, as a terminal app for logic or several UI variations on one route. Use for "prototype this".
 ---
 
 # Prototype

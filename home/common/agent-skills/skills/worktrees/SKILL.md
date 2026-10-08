@@ -1,6 +1,6 @@
 ---
 name: worktrees
-description: Creates or confirms an isolated git worktree and leaves it safely. Use before work that must not touch the current branch.
+description: Creates or confirms an isolated git worktree and leaves it safely. Use before feature work, plan execution, or prototypes that must not touch the current branch.
 ---
 
 # Worktrees

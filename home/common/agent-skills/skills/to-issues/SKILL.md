@@ -1,6 +1,6 @@
 ---
 name: to-issues
-description: Splits a plan or spec into independently grabbable tracker issues as vertical slices. Use to turn a plan into tickets.
+description: Splits a plan, spec or PRD into independently grabbable tracker issues as tracer-bullet vertical slices. Use to turn a plan into implementation tickets.
 ---
 
 # To Issues
@@ -93,6 +93,6 @@ Prefer `code`, then `evidence`. The `measured:` clause is the only place the bod
 
 The body is the contract, read weeks later in a fresh context: behavior and outcomes, no file paths outside `measured:`, no line numbers, no "as discussed above"; what an implementer needs lives in the body or a linked artifact, never only in a comment.
 
-Every criterion must be falsifiable: its `measured:` observation must fail at the commit the implementer starts from, or the issue can be "completed" as a no-op. Also reject a criterion only another slice's work can satisfy, and one that restates the request instead of deriving from the artifact.
+Every criterion must be falsifiable: name the `measured:` observation that would show it false, and confirm by hand that it fails at the commit the implementer starts from; a criterion already true there lets the issue be "completed" as a no-op. Also reject a criterion only another slice's work can satisfy, and one that restates the request instead of deriving from the artifact.
 
 Do NOT close or modify any parent issue.
