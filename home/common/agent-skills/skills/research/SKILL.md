@@ -1,46 +1,29 @@
 ---
 name: research
-description: Investigate a question against primary sources in a background agent and capture cited findings as a Markdown file. Use to delegate reading legwork.
+description: Researches a question against primary sources in a background agent and files cited findings. Use to delegate reading legwork.
 ---
 
 # Research
 
 Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.paths.artifacts.specs` for the findings artifact.
 
+Bound the question sharply, then launch:
+
 <!-- agent-dispatch: id=research-background-researcher role=researcher model=sonnet effort=medium -->
 Agent(subagent_type="general-purpose", model="sonnet", effort="medium", run_in_background=true) performs the bounded primary-source synthesis and writes exactly one cited findings artifact while the caller keeps working.
 
-The research question must be sharply bounded before launch. If it becomes open-ended, ambiguous, or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and selected role in the caller's existing ledger or fixed-schema report.
+If the question turns open-ended, ambiguous or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and the selected role in the caller's existing ledger or fixed-schema report.
 
-Its job:
+The researcher:
 
-1. Investigate the question against **primary sources** — official docs, source code, specs, first-party APIs — not a secondary write-up of them. Follow every claim back to the source that owns it.
-2. Write the findings to exactly one Markdown file under `bindings.paths.artifacts.specs`, citing the source for each claim. Create no other artifact. State the artifact's durability explicitly at the top of the file — **committed** (the caller commits it with the work), **attached** (linked from the ticket/issue that asked), or **intentionally temporary** (deleted once the decision that needed it is recorded) — chosen deliberately from the caller's intent, never left implicit.
-3. Report back exactly `{file_path, key_facts[]}` — the path it wrote, and only the facts the caller asked for. Everything else stays in the file.
+1. Traces every claim to its **primary source**: official docs, source code, specs, first-party APIs.
+2. Writes exactly one Markdown file under `bindings.paths.artifacts.specs`, citing a source per claim, and creates no other artifact. The file's first line states its durability, chosen from the caller's intent: **committed**, **attached** (linked from the asking ticket), or **intentionally temporary** (deleted once the decision is recorded).
+3. Returns exactly `{file_path, key_facts[]}`: the path and only the facts the caller asked for.
 
 ## Live availability and blocking evidence
 
-When the question includes a live availability or blocking conclusion, keep the
-one-artifact contract above: put the evidence and its validation result in the
-same Markdown findings file, retain no second project artifact, and keep the
-exact `{file_path, key_facts[]}` return shape.
+A live availability or blocking conclusion keeps the one-file contract and return shape: the evidence and its validation result go in the same findings file.
 
-Represent the live evidence as schema version 1 with `kind` set to
-`research-observations`. Every observation must have a unique observation ID in
-`id`, an independent execution ID in `execution_id`, an `observed_at` timestamp
-with an explicit UTC offset, a non-empty source identity in `source`, and a
-non-empty `outcome`.
+Record the evidence as a schema-1 object of `kind` `research-observations`. Each observation has a unique `id`, an independent `execution_id`, an `observed_at` with an explicit UTC offset, a `source` and an `outcome`. A `transient` conclusion cites exactly one observation in `observation_ids` and names an independent `follow_up`; a `standing` conclusion needs at least two observations with distinct `execution_id` and `observed_at` values.
 
-A `transient` conclusion based on one observation must reference exactly one
-observation ID in `observation_ids`, stay scoped to that observation, and include
-a non-empty independent follow-up in `follow_up`. A `standing` conclusion
-requires at least two observations with distinct `execution_id` values and
-distinct normalized `observed_at` timestamps — two independent timepoints.
-
-Materialize the embedded evidence object as a temporary validation input and run
-`agent-evidence research <artifact.json>` (the helper at
-`~/.agents/bin/agent-evidence`; use the full path if the bare name does not
-resolve on PATH). Only after the command exits 0 may the
-agent return a standing conclusion. On failure, preserve the observations and
-diagnostics in the sole Markdown findings file, return no standing conclusion,
-and retain no temporary input as a second artifact.
+Write the object to a temporary file and run `agent-evidence research <artifact.json>` (`~/.agents/bin/agent-evidence` if the bare name does not resolve). Return a standing conclusion only after exit 0. On failure, keep the observations and diagnostics in the findings file, return no standing conclusion, and delete the temporary input.

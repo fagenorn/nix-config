@@ -158,8 +158,8 @@
         "codex": 28262
       },
       "conditional_ceiling_bytes": {
-        "claude": 22428,
-        "codex": 22428
+        "claude": 21577,
+        "codex": 21577
       },
       "note": "Phases 2–3 from AUTO.md's prompt: design, grill-with-docs and doc-grounded-questions. Their producer-report and explorer-escalation blocks stay per skill (#155 D5). Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10)."
     },
@@ -393,8 +393,8 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 3617,
-        "codex": 3617
+        "claude": 2766,
+        "codex": 2766
       },
       "conditional_ceiling_bytes": {
         "claude": 0,
@@ -430,8 +430,8 @@
         "codex": 20358
       },
       "conditional_ceiling_bytes": {
-        "claude": 45343,
-        "codex": 45343
+        "claude": 44492,
+        "codex": 44492
       },
       "note": "One decision session. Grilling is the default mode; research and prototype sessions are conditional. Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10)."
     },
@@ -1067,6 +1067,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 520879,
-  "description_ceiling_bytes": 3142
+  "corpus_ceiling_bytes": 520028,
+  "description_ceiling_bytes": 3120
 }
