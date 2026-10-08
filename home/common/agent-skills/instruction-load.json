@@ -121,7 +121,7 @@
         "from-issue/acquire-durable.md": "an orchestrated owner acquires only through its dispatcher envelope"
       },
       "ceiling_bytes": {
-        "claude": 147563
+        "claude": 147522
       },
       "conditional_ceiling_bytes": {
         "claude": 151911
@@ -241,8 +241,8 @@
         "from-issue/acquire-durable.md": "a delegated owner adopts its delegator's identity and performs no acquisition"
       },
       "ceiling_bytes": {
-        "claude": 142058,
-        "codex": 142058
+        "claude": 142017,
+        "codex": 142017
       },
       "conditional_ceiling_bytes": {
         "claude": 136168,
@@ -1058,6 +1058,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 529321,
+  "corpus_ceiling_bytes": 529280,
   "description_ceiling_bytes": 3145
 }

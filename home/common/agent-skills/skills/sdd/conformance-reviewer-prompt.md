@@ -72,7 +72,7 @@ Subagent (reviewer, Opus/high as selected above):
       have been updated with it.
     - **Message-format parity:** operator-facing strings, error messages,
       audit-trail formats, and labels the spec promises match the implementation
-      byte-for-byte, or the deviation is justified.
+      byte-for-byte, or the deviation is explicitly justified.
     - **Acceptance criteria:** skip this bullet when the dispatch has no Acceptance
       criteria section. Otherwise grade every criterion in the Acceptance
       criteria section, `AC1`…`ACn` in order, as exactly one of `met`,
@@ -144,16 +144,16 @@ Subagent (reviewer, Opus/high as selected above):
 
 **Placeholders:** `[ISSUE_REF]` (issue number/URL, or the caller's one-line intent
 statement when there is no tracker; omit the line when neither exists),
-`[SPEC_FILE]` (omit when no spec exists; a standalone plan is graded against the
-plan alone), `[PLAN_FILE]`, `[MERGE_BASE_SHA]`, `[HEAD_SHA]`, `[MANIFEST_ROOT]`,
+`[SPEC_FILE]` (omit when no spec exists), `[PLAN_FILE]`, `[MERGE_BASE_SHA]`, `[HEAD_SHA]`, `[MANIFEST_ROOT]`,
 `[ROOT_BYTES]`, `[TOTAL_BYTES]`, `[FILE_COUNT]`, `[LARGEST_MEMBER_BYTES]` (the
 manifest root and four metrics from SDD's validated producer report; a
 dispatcher without the sdd scripts, e.g. ship-issue's full path, omits them and
 the reviewer uses the body's fallback), `[ACCEPTANCE_CRITERIA]` (written by
-sdd's controller per final-review.md: one line `AC<n>: <the issue's criterion
-line verbatim, without its checkbox>` per criterion, in issue order, then one
-line `Declared verification: <each declared verification command, in order>`,
-or `Declared verification: none`. With no criterion source (no issue, an
+sdd's controller per final-review.md: one line
+`AC<n>: <the issue's criterion line verbatim, without its checkbox>` per
+criterion, in issue order, then one line
+`Declared verification: <each declared verification command, in order>`, or
+`Declared verification: none`. With no criterion source (no issue, an
 intent-statement `[ISSUE_REF]`, an issue without acceptance-criteria lines, or
 ship-issue's full review) omit the `## Acceptance criteria` heading, this
 placeholder AND the `### Acceptance` output section),
