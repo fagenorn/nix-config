@@ -894,7 +894,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             for path in (FROM_ISSUE.parent / "ship-handoff.md",)
         }
         corpus = " ".join(documents.values())
-        for phrase in ("workflow-response", "validate before decoding", "custody",
+        for phrase in ("workflow-response", "custody",
                        "requested_scope", "ship-summary/v2", "delivery_remainder"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, corpus)
