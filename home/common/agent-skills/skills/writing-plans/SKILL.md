@@ -191,13 +191,10 @@ Measure after the final mutation, and check the amended spec too when planning a
 Reread the finished plan against the spec yourself (no dispatch) and fix inline:
 
 1. **Spec coverage**: every requirement maps to a task.
-2. **Placeholders**: none of the patterns above.
-3. **Type consistency**: later tasks use the names earlier tasks define (`clearLayers()` vs `clearFullLayers()` is a bug).
-4. **Falsifiability and scope**: every task has a gate that can fail, and none asserts over an unscoped range.
-5. **Task index**: one row per member, contiguous, each ending in its link, files and lane matching the body; a `mechanical` or `low-risk` lane for excluded work is a bug. The root holds no numbered task body.
-6. **Members**: exact files, consumed and produced interfaces, invariants, complete failing tests, implementation actions, a scoped falsifiable gate, decision IDs and commit scope.
-7. **Acceptance map**: one row per issue criterion in order, kinds copied or `<kind> (classified)`, owners in the index, `evidence` rows with command, conditions and threshold.
-8. **Remeasure** the package after the last edit, and the spec if a ledger row was appended.
+2. **Type consistency**: later tasks use the names earlier tasks define (`clearLayers()` vs `clearFullLayers()` is a bug).
+3. **Members**: exact files, consumed and produced interfaces, invariants, complete failing tests, implementation actions, a scoped falsifiable gate, decision IDs and commit scope.
+4. **The rules above**: no placeholders; an index row per member with matching files and lane (a `mechanical` or `low-risk` lane for excluded work is a bug); a complete acceptance map; no numbered task body in the root.
+5. **Remeasure** the package after the last edit, and the spec if a ledger row was appended.
 
 ## Return control
 

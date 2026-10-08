@@ -73,15 +73,7 @@ Mermaid shares the trust boundary: opaque generated node IDs (`node_1`), reposit
 
 ## Diagrams
 
-Pick the pattern that fits each candidate and vary them:
-
-- **Mermaid graph** for call flow ("X calls Y calls Z"), in a Tailwind card, with `classDef` colouring leaks red and the deep module dark; a sequence diagram for "6 round-trips before, 1 after".
-- **Hand-built boxes and arrows** (divs plus absolutely positioned SVG) when the "after" should read as one thick-bordered module with faded internals.
-- **Cross-section**: stacked bands for the layers a call passes through, thin before and one thick band after.
-- **Mass diagram**: an interface rectangle and an implementation rectangle per module, nearly equal before (shallow), short over tall after (deep).
-- **Call-graph collapse**: nested call boxes before, one box with faded internal calls after.
-
-Keep diagrams about 320px tall so before and after sit side by side.
+Vary the pattern per candidate, about 320px tall so before and after sit side by side: a Mermaid graph or sequence diagram for call flow, with `classDef` colouring leaks red and the deep module dark; hand-built boxes with SVG arrows when the "after" should read as one thick module with faded internals; a cross-section of the layers a call passes through; a mass diagram of interface versus implementation area; or a call-graph collapse into one box.
 
 ## Accessibility
 
