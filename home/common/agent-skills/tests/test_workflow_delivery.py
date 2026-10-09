@@ -97,6 +97,26 @@ class WorkflowDeliveryRuntimeTest(unittest.TestCase):
                 preview={"next_stage_id": "worktree"}, **common)
         self.assertEqual(state, before)
 
+    def test_an_unavailable_owner_past_the_remainder_deadline_yields_to_expiry(self):
+        """#310 D18: the reap supersedes the observation; a plain suspension still refuses it."""
+        runtime = self.runtime
+        _, delivery = cleanup_contract_and_delivery(runtime.model)
+        common = dict(
+            now="2026-09-21T00:01:00Z", owner_unavailable=True,
+            dispatch_permitted=True, remainder_deadline="2026-09-21T03:01:00Z",
+            tracker_halted=False, recorded_worktree=None,
+            preview={"next_stage_id": "close"})
+        state = suspended_remainder(delivery)
+        record = state["delivery_remainders"][0]
+        record.update(state="active", deadline_at="2026-09-21T00:00:30Z")
+        result = runtime.remainder_policy(state, **common)
+        self.assertEqual((result["operation"], result["expired"], record["state"]),
+                         ("resume", True, "active"))
+
+        state = suspended_remainder(delivery)
+        with self.assertRaisesRegex(ValueError, "owner_unavailable is not applicable"):
+            runtime.remainder_policy(state, **common)
+
     def test_resume_preview_never_replaces_current_custody_reduction(self):
         runtime = self.runtime
         contract, delivery, _ = contract_and_delivery_for_stage(
