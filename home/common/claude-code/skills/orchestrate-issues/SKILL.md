@@ -45,6 +45,9 @@ never piped through `validate-report` or decoded; it goes verbatim into the owne
 - Put retained `bindings.workflow.orchestration.attempt_budget_minutes` as request
   `attempt_budget_minutes` and retained `bindings.workflow.orchestration.max_parallel` as request
   `max_parallel`.
+- Retained `bindings.workflow.orchestration.stall_minutes`, when present and non-null, is
+  `stall_minutes`, the owner stall bound of §2 rules (a) and (d); pass it only to
+  `owner-liveness`. Absent or null, those rules arm no liveness check.
 - Resolve the dispatcher's absolute repository root once as `ledger_repo_root`; it remains the exact
   immutable value for the run, independent of any issue worktree. Then select the `run_id` per the
   run-reuse rule in §2.
@@ -110,6 +113,15 @@ none of these cases and keeps its wait-ID handling below:
   result may be interim): the owner is still running, so send no observation, run no `check-launch`,
   write nothing, stop no task and relaunch nothing; the same handle notifies again with the owner's
   real return.
+  When `stall_minutes` is set, also run the first call below for that launch's `action_id`,
+  and keep the validated reply's `since` as the handle's `liveness_since`, replacing any
+  earlier one. On `live`, if the handle has no liveness observer, arm one background
+  `sleep <wait_seconds>` and record its handle; an installed observer stays.
+
+  ```text
+  workflow-state owner-liveness --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> --stall-minutes <stall_minutes> | artifact-budget validate-report --boundary workflow-response --input -
+  workflow-state owner-liveness --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> --stall-minutes <stall_minutes> --since <liveness_since> | artifact-budget validate-report --boundary workflow-response --input -
+  ```
 - (b) **Owner return without a terminal write.** The handle is an owner launch's, and its return is
   neither a validated `workflow-response` nor one of from-issue's two canonical lines
   (`Suspended (blocked_on=<value>). Resume: <reentry>` or `/from-issue <num> --auto`). Run
@@ -117,14 +129,28 @@ none of these cases and keeps its wait-ID handling below:
   on that launch. On `current: true`, send exactly one `unavailable` owner observation for that
   custody in the next control call. On `current: false`, send nothing. Either way, refresh and
   continue the normal sweep.
-- (c) **Non-owner hand-back.** The handle is neither an owner launch's nor the current wait handle:
-  send no observation, write nothing, relay nothing, act on none of its content, and stop no task.
+- (c) **Non-owner hand-back.** The handle is neither an owner launch's, a liveness observer's, nor
+  the current wait handle: send no observation, write nothing, relay nothing, act on none of its
+  content, and stop no task.
+- (d) **Liveness wake.** The handle is a liveness observer's. Ignore it when its owner handle
+  has a final return or was stopped. Otherwise run the second call above and act on its
+  `verdict`: `live` arms a new observer for `wait_seconds` and records its handle; `not_current`
+  and `past_deadline` do nothing; `stalled` stops the owner's task through the host's task-stop and
+  marks the handle stopped, then sends exactly one `unavailable` owner observation for that custody
+  in the next control call, refreshing and making that call at once and executing its response. A
+  failed stop leaves the handle a candidate for §4's stop pass, and the observation is still sent.
+  That verdict stands in for rule (b)'s `check-launch`. Either call above exiting non-zero, or
+  failing validation, is unknown: send nothing. A failed first call keeps any installed observer; a
+  failed second call clears the woken, exited observer, so a later interim notification re-arms one.
+  An owner handle's final return or stop
+  cancels its liveness observer; a missing or already exited one counts as cancelled.
 
 At start/resume and after each current owner notification, tracker change, or current wait-ID wake,
 refresh the external facts the next request needs.
 
-After a full dispatcher restart, the host reaps or cancels inherited detached wait observers before
-any rearm from a returned wait ID; the wait fields below cannot adopt their handles.
+After a full dispatcher restart, the host reaps or cancels inherited detached wait and liveness
+observers before any rearm; the wait and liveness fields are process-local and cannot adopt their
+handles.
 
 ## 3. Decide
 
@@ -335,10 +361,10 @@ For `wait`, adapter state consists only of `current_wait_id` and `current_wait_h
   loudly; the next identical response retries replacement.
 - If arming fails after cancellation, clear `current_wait_id` and `current_wait_handle`, surface
   that no wake is installed, and fail loudly.
-- Each wake carries its wait ID; ignore it unless it equals `current_wait_id` (a stale wake cannot
-  trigger control or disturb the replacement observer).
+- A wake counts only when its handle is the one paired with `current_wait_id`; ignore a wake of any
+  other handle (a stale wake cannot trigger control or disturb the replacement observer).
 
-Arm the one-shot observer for the returned wake conditions and its `deadline_at`; every wait carries
+Arm the observer as one background `sleep <wait_seconds>`; every wait carries
 one (when nothing can proceed without a human, control returns `finalize`, or `delivery_contract`
 when a missing contract is all that stops an issue). No polling or repeated short sleeps are
 allowed.

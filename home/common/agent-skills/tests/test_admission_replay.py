@@ -7,10 +7,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 from .test_delivery_workflow import (ARTIFACT_BUDGET, MODEL, NOW, POLICY, SOURCES,
                                      BuilderHarness, load)
@@ -20,6 +22,9 @@ ISSUES = (12, 14)
 OWNER_MINUTES = 60
 PROPOSED = {"merge_pr", "close_tracker", "remove_worktree", "delete_local_branch"}
 DISPATCH = {"spawn", "resume", "retry", "delivery_remainder"}
+# The stall bound D1 chose for bindings.workflow.orchestration.stall_minutes (#310 D1, D15).
+STALL_MINUTES = 90
+STALL_ISSUES_SOURCE = "invocation:/orchestrate-issues 12 14"
 
 
 def at(minute):
@@ -295,6 +300,104 @@ class AdmissionReplayTest(BuilderHarness, unittest.TestCase):
         admitted = json.loads(self.cli("control", *run, "--request-file", "-",
                                        stdin=request).stdout)
         self.assertEqual([a["kind"] for a in admitted["actions"]], ["spawn", "wait"])
+
+    def test_a_silent_owner_is_freed_and_a_progressing_owner_is_left_alone(self):
+        """#310 AC1: rule (a) arms a liveness check and rule (d) frees a stalled owner."""
+        self.project()
+        self.declare(7)
+        run = ("--repo-root", self.root, "--run-id", "replay")
+        self.cli("init-run", *run, "--now", at(0))
+        worktrees = {n: str(self.root / ".worktrees" / f"worktree-issue-{n}-stall")
+                     for n in ISSUES}
+        built = {n: self.build("contract", self.contract_input(
+            issue=n, worktree=worktrees[n], now=at(0),
+            source_reference=STALL_ISSUES_SOURCE)) for n in ISSUES}
+
+        def control(minute, owners=(), *, first=False):
+            def fact(n):
+                if first:
+                    return {"issue": n, "recorded": None,
+                            "candidate": {"path": worktrees[n], "state": "absent"}}
+                return {"issue": n, "candidate": None, "recorded": {
+                    "path": worktrees[n], "state": "matching_issue_branch"}}
+            request = self.control_request(list(ISSUES), now=at(minute),
+                contracts={str(n): built[n]["contract"] if first else None for n in ISSUES},
+                intents={str(n): [built[n]["initial_intent"]] if first else []
+                         for n in ISSUES},
+                worktrees=[fact(n) for n in ISSUES])
+            request.update(attempt_budget_minutes=180, owners=list(owners))
+            return json.loads(self.validated("workflow-response", self.cli(
+                "control", *run, "--request-file", "-",
+                stdin=json.dumps(request).encode()).stdout))
+
+        def liveness(minute, action_id, since=None):
+            argv = ["owner-liveness", *run, "--action-id", action_id,
+                    "--stall-minutes", str(STALL_MINUTES)]
+            if since is not None:
+                argv += ["--since", since]
+            with mock.patch.dict(os.environ, {"WORKFLOW_STATE_TEST_CLOCK": at(minute)}):
+                return json.loads(self.validated("workflow-response", self.cli(*argv).stdout))
+
+        first = control(0, first=True)
+        custody = {a["issue"]: a["custody"] for a in first["actions"] if a["kind"] in DISPATCH}
+        self.assertEqual(sorted(custody), list(ISSUES))
+        deadline = {a["issue"]: a["deadline_at"] for a in first["actions"]
+                    if a["kind"] in DISPATCH}
+        self.assertEqual(deadline[12], at(180))
+
+        # Rule (a): both owners notify interim at minute 5; each arms one observer.
+        since, observers, stopped, observations = {}, {}, set(), []
+        for issue in ISSUES:
+            reply = liveness(5, custody[issue]["action_id"])
+            self.assertEqual((reply["verdict"], reply["since"], reply["wait_seconds"]),
+                             ("live", at(5), STALL_MINUTES * 60))
+            since[issue] = reply["since"]
+            observers[issue] = 5 + reply["wait_seconds"] // 60
+        # B's owner records progress: a registered worker on its launch at minute 30.
+        self.cli("register-worker", *run, "--now", at(30), "--action-id",
+                 custody[14]["action_id"])
+
+        # Rule (d): each observer wakes once, in time order (A first at a tie).
+        wakes = sorted((minute, issue) for issue, minute in observers.items())
+        self.assertEqual(wakes, [(95, 12), (95, 14)])
+        for minute, issue in wakes:
+            reply = liveness(minute, custody[issue]["action_id"], since=since[issue])
+            if reply["verdict"] == "stalled":
+                stopped.add(issue)  # the host's task-stop, then one observation
+                event = {"event_id": f"{issue}-stalled", "issue": issue,
+                         "custody": custody[issue], "state": "unavailable"}
+                observations.append(event)
+                response = control(minute, [event])
+                relaunched = [a for a in response["actions"]
+                              if a["kind"] in {"resume", "retry"} and a["issue"] == issue]
+                self.assertEqual(len(relaunched), 1)
+                self.assertNotEqual(relaunched[0]["custody"]["action_id"],
+                                    custody[issue]["action_id"])
+            else:
+                self.assertEqual(reply["verdict"], "live")
+                observers[issue] = minute + reply["wait_seconds"] // 60
+                self.assertEqual((reply["progress_at"], reply["stall_at"],
+                                  reply["wait_seconds"]), (at(30), at(120), 1500))
+
+        self.assertEqual(stopped, {12})
+        self.assertEqual([event["issue"] for event in observations], [12])
+
+        # PR310-04: "exactly once" survives a stale liveness wake and a late
+        # return from the stopped owner after its replacement was dispatched.
+        # The stale wake is answered `not_current` (no observation, per rule (a));
+        # the late return falls under rule (b), whose `check-launch` reads
+        # `current: false`, so it sends nothing either.
+        stale = liveness(100, custody[12]["action_id"], since=since[12])
+        self.assertEqual(stale["verdict"], "not_current")
+        late = json.loads(self.cli("check-launch", *run, "--action-id",
+                                   custody[12]["action_id"]).stdout)
+        self.assertIs(late["current"], False)
+        self.assertEqual([event["issue"] for event in observations], [12])
+        claims = self.claims()
+        self.assertEqual((claims["12:1:1"]["release_event"], claims["12:1:1"]["released_at"]),
+                         ("owner_unavailable", at(95)))
+        self.assertLess(at(95), deadline[12])
+        self.assertIsNone(claims["14:1:1"]["released_at"])
 
 
 if __name__ == "__main__":

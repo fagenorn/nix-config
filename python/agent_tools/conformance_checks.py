@@ -448,7 +448,9 @@ CANONICAL_AGENTS_PREFIXES = (
 RUNTIME_PREFIX = "runtime/"
 ARTIFACTS_PREFIX = "artifacts/"
 # The buckets `artifacts/` admits; any other second segment is unclassified.
-ARTIFACTS_BUCKETS = ("specs", "plans", "evidence", "handoffs", "notes")
+# `replays` holds committed replay records (#283's light-lane triage replay).
+ARTIFACTS_BUCKETS = ("specs", "plans", "evidence", "handoffs", "notes",
+                     "replays")
 # Closed and empty in v1: nothing outside .agents/ is admitted as
 # non-behavioral bookkeeping yet.
 BOOKKEEPING_ALLOWLIST: tuple[str, ...] = ()

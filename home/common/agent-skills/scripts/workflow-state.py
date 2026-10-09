@@ -275,7 +275,7 @@ CONTROL_DISPATCH_FIELDS = frozenset(
     }
 )
 CONTROL_DISPATCH_KINDS = frozenset({"spawn", "resume", "retry", "recover"})
-CONTROL_WAIT_FIELDS = frozenset({"id", "kind", "wake_on", "deadline_at"})
+CONTROL_WAIT_FIELDS = frozenset({"id", "kind", "wake_on", "deadline_at", "wait_seconds"})
 CONTROL_WAKE_EVENTS = frozenset(
     {"owner_notification", "tracker_change", "deadline"}
 )
@@ -386,16 +386,19 @@ def ledger_clock() -> datetime:
     return value
 
 
-def supplied_time(value: str | None, label: str) -> datetime | None:
+def supplied_time(value: str | None, label: str, *,
+                  clock: datetime | None = None) -> datetime | None:
     """A caller-supplied time, refused when it leads the clock by more than 60 s (#309 D6).
 
     ``None`` when the caller omitted it. The command then reads the clock
-    under its ledger lock (D7). A past time of any age is accepted.
+    under its ledger lock (D7). A past time of any age is accepted. A caller
+    that already holds its one clock reading passes it as ``clock`` and the
+    check uses that value rather than reading the clock again (#310 D11).
     """
     if value is None:
         return None
     parsed = parse_utc(value, label)
-    clock = ledger_clock()
+    clock = ledger_clock() if clock is None else clock
     lead = math.ceil((parsed - clock).total_seconds())
     if lead > SUPPLIED_TIME_MAX_LEAD_SECONDS:
         raise WorkflowError(
@@ -2362,7 +2365,12 @@ def _apply_one_issue_policy(
         return [{"kind": "forge_pr", "path": issue_branch_prefix(issue)}]
 
     if current_owner_unavailable and not active_unexpired:
-        raise WorkflowError("owner_unavailable is not applicable")
+        if not expired:
+            raise WorkflowError("owner_unavailable is not applicable")
+        # The deadline passed between the dispatcher's liveness or check-launch
+        # read and this call: the expiry reaper below recovers the attempt, so
+        # the observation is superseded rather than refused (#310 D18).
+        current_owner_unavailable = False
 
     live_custody = active_unexpired and not current_owner_unavailable
     reconcilable = bool(
@@ -3194,6 +3202,9 @@ def command_control(args: argparse.Namespace) -> int:
                 "id": f"wait:{next_deadline}", "kind": "wait",
                 "wake_on": sorted(CONTROL_WAKE_EVENTS),
                 "deadline_at": next_deadline,
+                "wait_seconds": max(0, math.ceil((
+                    parse_utc(next_deadline, "next deadline")
+                    - parse_utc(now, "control now")).total_seconds())),
             })
         elif contract_requests:
             actions.append({"id": "delivery_contract", "kind": "delivery_contract",
@@ -4108,6 +4119,103 @@ def launch_verdict(runtime: Any, state: dict[str, Any] | None,
         else:
             reason = "current"
     return current_action_id, reason
+
+
+OWNER_LIVENESS_STALL_PATTERN = re.compile(r"[1-9][0-9]{0,8}")
+OWNER_LIVENESS_SINCE_PATTERN = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+
+
+def launch_progress_at(record: dict[str, Any], workers: list[dict[str, Any]],
+                       action_id: str) -> datetime:
+    """The latest ledger-recorded progress of one launch, in whole seconds (#310 D3, D14).
+
+    The latest of the record's ``last_progress_at`` (a remainder has none), its
+    newest launch event, and every registration and release of a worker
+    registered under this launch. A stored time may carry fractional seconds
+    (a supplied ``--now`` is kept as given), so each is truncated to whole
+    seconds here; the stored bytes are never rewritten.
+    """
+    times = [record["launches"][-1]["at"]]
+    if record.get("last_progress_at") is not None:
+        times.append(record["last_progress_at"])
+    for worker in workers:
+        if worker.get("launch") != action_id:
+            continue
+        times.extend(value for value in (worker.get("registered_at"), worker.get("released_at"))
+                     if value is not None)
+    return max(parse_utc(value, "launch progress time").replace(microsecond=0)
+               for value in times)
+
+
+def owner_liveness_reply(state: dict[str, Any] | None, action_id: str, reason: str, *,
+                         stall_minutes: int, since: datetime,
+                         clock: datetime) -> dict[str, Any]:
+    """The closed ``owner_liveness`` reply for one launch (#310 D3, D4, D10).
+
+    Pure: ``state`` is a ledger as `read_state_unlocked` hands it over (or
+    ``None``), ``reason`` is `launch_verdict`'s answer, and ``since`` and
+    ``clock`` are whole-second times. Only a ``current`` launch is measured;
+    the past-deadline check wins over the stall check.
+    """
+    reply: dict[str, Any] = {
+        "interface_version": 1,
+        "kind": "owner_liveness",
+        "action_id": action_id,
+        "reason": reason,
+        "verdict": "not_current",
+        "since": format_utc(since),
+        "progress_at": None,
+        "stall_at": None,
+        "wait_seconds": None,
+    }
+    if reason != "current":
+        return reply
+    assert state is not None
+    issue, _, _ = parse_action_id(action_id)
+    issue_state = state["issues"][str(issue)]
+    record = (issue_state["delivery_remainders"][-1] if ":r" in action_id
+              else issue_state["attempts"][-1])
+    progress_at = launch_progress_at(record, state.get("workers", []), action_id)
+    stall_at = max(progress_at, since) + timedelta(minutes=stall_minutes)
+    reply["progress_at"] = format_utc(progress_at)
+    reply["stall_at"] = format_utc(stall_at)
+    if clock >= parse_utc(record["deadline_at"], "attempt deadline"):
+        reply["verdict"] = "past_deadline"
+    elif clock < stall_at:
+        reply["verdict"] = "live"
+        reply["wait_seconds"] = math.ceil((stall_at - clock).total_seconds())
+    else:
+        reply["verdict"] = "stalled"
+    return reply
+
+
+def command_owner_liveness(args: argparse.Namespace) -> int:
+    """Answer whether one owner launch has recorded progress within a bound (#310 D2-D5).
+
+    Read-only like ``check-launch`` (no lock, no write, neither ``transact`` nor
+    ``workflow_paths``), but unlike it, it reads the clock, exactly once.
+    A supplied ``--since`` is skew-checked against that same reading.
+    """
+    runtime = _delivery()
+    if not RUN_ID_PATTERN.fullmatch(args.run_id):
+        raise WorkflowError("invalid run_id")
+    parse_action_id(args.action_id)
+    if not OWNER_LIVENESS_STALL_PATTERN.fullmatch(args.stall_minutes):
+        raise WorkflowError("invalid --stall-minutes: expected a positive integer")
+    if args.since is not None and not OWNER_LIVENESS_SINCE_PATTERN.fullmatch(args.since):
+        raise WorkflowError("invalid --since: expected an RFC3339 UTC timestamp")
+    clock = ledger_clock()
+    since = supplied_time(args.since, "--since", clock=clock) or clock
+    repo_root = resolve_repo_root(args.repo_root)
+    state_path = repo_root / ".superpowers" / "workflows" / args.run_id / "state.json"
+    state = (read_state_unlocked(state_path, args.run_id)
+             if require_regular_path(state_path, "workflow state", allow_missing=True)
+             else None)
+    _, reason = launch_verdict(runtime, state, args.action_id)
+    print_json(owner_liveness_reply(
+        state, args.action_id, reason, stall_minutes=int(args.stall_minutes),
+        since=since, clock=clock))
+    return 0
 
 
 def resume_pack_attempt(runtime: Any, state: dict[str, Any] | None,
@@ -5098,6 +5206,18 @@ def build_parser() -> argparse.ArgumentParser:
     current_launch.add_argument("--run-id", required=True)
     current_launch.add_argument("--action-id", required=True)
     current_launch.set_defaults(handler=command_check_launch)
+
+    owner_liveness = subparsers.add_parser("owner-liveness", description=(
+        "Answer whether one owner launch has recorded ledger progress within "
+        "--stall-minutes, measured from the later of its last progress and --since "
+        "(default: the clock). It takes no lock and writes nothing, and it reads the "
+        "clock exactly once; a supplied --since may lead it by at most 60 seconds."))
+    owner_liveness.add_argument("--repo-root", required=True)
+    owner_liveness.add_argument("--run-id", required=True)
+    owner_liveness.add_argument("--action-id", required=True)
+    owner_liveness.add_argument("--stall-minutes", required=True)
+    owner_liveness.add_argument("--since", default=None)
+    owner_liveness.set_defaults(handler=command_owner_liveness)
 
     register_worker = subparsers.add_parser("register-worker")
     add_run_arguments(register_worker)
