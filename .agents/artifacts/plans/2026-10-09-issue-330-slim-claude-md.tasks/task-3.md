@@ -59,6 +59,7 @@ Destination for every row: `home/common/agent-skills/README.md`, under the headi
 | F75 | L71 | "`sdd` records a marker before its first task" | Lifecycle helpers › Anti-zombie bound and progress markers | `a long Phase 6 that suspends between tasks is not discarded` |
 | F76 | L72 | "A relaunched owner's prompt carries a resume pack" | Lifecycle helpers › Resume pack | `A relaunched owner's prompt carries a resume pack` |
 | F77 | L72 | "It is served for the current launch of an active attempt" | Lifecycle helpers › Resume pack | `` `current: false` preview `` |
+| F100 | L72 | "orchestrate-issues §4 adds it to `resume` prompts, and from-issue to direct re-entry, `delegate` and the Phase-5 rollover; the pack is not a workflow response …" (the whole third sentence, through "(#265).") | Lifecycle helpers › Resume pack | `orchestrate-issues §4 adds it to `` `resume` `` prompts` |
 
 Kept in `CLAUDE.md`, verbatim: L67's first two sentences ("Global guidance has one source at `home/common/agent-guidance/AGENTS.md`…" and "Global skills likewise have one source at `home/common/agent-skills/skills/`…").
 
@@ -93,6 +94,7 @@ anchors = [
     "(ledger schema 6; `null` until first recorded)", "(`diverged`) write nothing",
     "a long Phase 6 that suspends between tasks is not discarded",
     "A relaunched owner's prompt carries a resume pack", "`current: false` preview",
+    "orchestrate-issues §4 adds it to `resume` prompts", "still decides the task to resume (#265)",
 ]
 kept = [
     "Global guidance has one source at `home/common/agent-guidance/AGENTS.md`",
@@ -120,7 +122,7 @@ Expected: exit 1, every anchor reported `missing from README`, and three `pin st
 
 - [ ] **Step 3: Move the text**
 
-1. Append to `home/common/agent-skills/README.md`: `## Global guidance and skill sources` (F41), `## Impeccable` (F42–F52), `## Retired skills` (F53, F54), `## Claude-only skills and the Codex stub` (F55, F56), `## .superpowers paths and launch-fenced writers` (F57–F64), then `## Lifecycle helpers` with subsections `### workflow-state build-delivery` (F65–F68), `### Host admission` (F69–F71), `### Anti-zombie bound and progress markers` (F72–F75), `### Resume pack` (F76, F77). Copy each sentence from `git show 8e2bfb72:CLAUDE.md`, not from memory.
+1. Append to `home/common/agent-skills/README.md`: `## Global guidance and skill sources` (F41), `## Impeccable` (F42–F52), `## Retired skills` (F53, F54), `## Claude-only skills and the Codex stub` (F55, F56), `## .superpowers paths and launch-fenced writers` (F57–F64), then `## Lifecycle helpers` with subsections `### workflow-state build-delivery` (F65–F68), `### Host admission` (F69–F71), `### Anti-zombie bound and progress markers` (F72–F75), `### Resume pack` (F76, F77, F100). Copy each sentence from `git show 8e2bfb72:CLAUDE.md`, not from memory.
 2. In `CLAUDE.md`:
    - L67 bullet: keep its first two sentences, delete F41–F54, and append this dictated sentence (D1, D7):
      "Skill packaging (Codex's `~/.codex/skills/` runtime state, Impeccable, retired skills, the Claude-only `codex-collaboration` and `orchestrate-issues` skills and Codex's stub), the `.superpowers/` path homes and launch-fenced writers are in [`home/common/agent-skills/README.md`](home/common/agent-skills/README.md); new detail of that kind goes there, not here."

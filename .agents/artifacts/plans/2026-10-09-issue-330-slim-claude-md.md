@@ -47,7 +47,7 @@ Task 5 — Condense CI and Homebrew, measure, record AC1 — `CLAUDE.md`, `.agen
 | AC | Kind | Task | Check |
 |----|------|------|-------|
 | AC1 | evidence | Task 5 | Command: `wc -w < CLAUDE.md` at the task's head, against `git show 8e2bfb72:CLAUDE.md \| wc -w` (5342). Conditions: the worktree head after Task 5. Threshold: head ≤ 2136 (0.40 × 5342, rounded down). Task 5's implementer fills acceptance-record row AC1. |
-| AC2 | code | Task 5 | Reviewer audit of the diff against the fact-to-home rows in Tasks 1–5 (F1–F99), both directions: every deleted base sentence maps to a row, and every row's destination holds the fact at HEAD (D4, D8). Task 5 owns the row because it lands the last deletion; its gate checks that the kept skeleton and kept sentences are still present and that no base prose line survives unlisted. |
+| AC2 | code | Task 5 | Reviewer audit of the diff against the fact-to-home rows in Tasks 1–5 (F1–F100), both directions: every deleted base sentence maps to a row, and every row's destination holds the fact at HEAD (D4, D8). Task 5 owns the row because it lands the last deletion; its gate checks that the kept skeleton and kept sentences are still present and that no base prose line survives unlisted. |
 | AC3 | code | Task 5 | `CommittedProjectionTest` and the `check-projections` tests, run by `just agent-workflow-tests`, plus `resolve-project check-projections --repo-root .` |
 
 ## Decisions
@@ -56,3 +56,7 @@ Task 5 — Condense CI and Homebrew, measure, record AC1 — `CLAUDE.md`, `.agen
 - Link rebasing, no duplication of kept sentences, dictated summaries: D7 (appended by this plan). Table split into task members with anchor gates: D8 (appended by this plan).
 
 ---
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only mode, base `b5246e50`, no fallback. Findings: 1 accepted (B1, Blocking: L72's third sentence was unmapped; added row F100 to Task 3 with its anchors and widened AC2 to F1–F100), 0 rejected, 0 deferred. The reviewer reconstructed the dictated final `CLAUDE.md` at 1,492 words with the managed import once, and confirmed the four test-pin deletions against live tests.

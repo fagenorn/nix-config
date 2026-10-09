@@ -87,7 +87,7 @@ Expected: exit 1, with `still in CLAUDE.md` lines for the five removed clauses a
 2. Re-run the gate. If the only failure is the word count (not expected: the estimate is about 1,500 words), stop and report the count; do not cut further on your own.
 3. After the first commit of Step 5, create `.agents/artifacts/plans/2026-10-09-issue-330-slim-claude-md.acceptance.md` with the header `# Acceptance record — issue #330`, the column row `| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |`, and one row per criterion, `Criterion` copied verbatim from issue #330 without its checkbox (`gh issue view 330 --repo fagenorn/nix-config --json body -q .body`):
    - AC1, `evidence`: Check `wc -w < CLAUDE.md` vs `git show 8e2bfb72:CLAUDE.md | wc -w`, threshold head ≤ 2136; Observed `<head words> / 5342 = <ratio to 3 decimals>`; Commit = the short hash of the first commit in Step 5; Conditions `worktree head after Task 5`; Verdict `—`.
-   - AC2, `code`: Check `reviewer audit of the fact-to-home rows F1–F99`; Observed `in final verification`; Commit, Conditions, Verdict `—`.
+   - AC2, `code`: Check `reviewer audit of the fact-to-home rows F1–F100`; Observed `in final verification`; Commit, Conditions, Verdict `—`.
    - AC3, `code`: Check `just agent-workflow-tests` (`CommittedProjectionTest`, `check-projections`); Observed `in final verification`; Commit, Conditions, Verdict `—`.
 
 - [ ] **Step 4: Verify**
