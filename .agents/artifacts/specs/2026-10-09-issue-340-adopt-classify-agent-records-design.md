@@ -64,7 +64,7 @@ when a planned destination exists on disk **or** is the destination of more than
 one planned move. Its id, repair id (`adopt.destination.occupied`) and message
 stay; `READY_GATES` does not grow.
 
-### The `candidate-class` question (per D3, D4)
+### The `candidate-class` question (per D3, D4, D7)
 
 `QUESTION_IDS` becomes `("project-id", "candidate-class")`, both literals.
 `question_impact` and `question_recommendation` gain the second branch and keep
@@ -86,6 +86,12 @@ fixed by its provenance:
 |---|---|---|
 | `tracked` | `archive-history` | action `archive-history`, target `.agents/knowledge/archive/adopted/<path>`, one `git-mv` |
 | `targeted-ignored` | `retain-product` | action `retain-product`, no operation |
+| `tracked`, secret-shaped path | none (`value: null`) | every answer refuses `adopt.decisions.invalid_answer` |
+
+A secret-shaped tracked candidate can be neither moved (`no-secret-path-in-moves`)
+nor retained (the commit gate), so it keeps its open question with no answer, and
+the fixed recommendation names the two real routes: a central classification row,
+or removing the file from the target in its own commit before planning again.
 
 A tracked candidate cannot be retained in place: `apply`'s
 `no-unclassified-agent-path` commit gate and `verify`'s check of the same name
@@ -95,10 +101,13 @@ member set; only `candidate-class` entries carry `subject`. `decisions.open` is
 sorted by `(id, subject)`, with `project-id` first. `basis`, `impact` and
 `recommendation` are fixed prose, never formatted from the path, like `NOTES`.
 
-`action_relocates("archive-history")` becomes true, which makes
-`overlap_targets` cover the archived source and its destination through the
-same path the classified groups use. No classification row emits
-`archive-history`, so nothing else changes behaviour.
+`action_relocates("archive-history")` becomes true. An answered tracked candidate
+is registered as a one-member group with its archive target and one planned move,
+and `overlap_targets` admits a group's source when its action relocates or
+regenerates (today it names `move-canonical` literally), so the untracked-overlap
+and dirty-worktree checks cover the archived source as well as its destination.
+`amended_contract` still rewrites bindings only for `move-canonical` groups. No
+classification row emits `archive-history`, so nothing else changes behaviour.
 
 ### The answer input (per D4, D5)
 
@@ -109,7 +118,8 @@ verbs call it through `compose_plan(root, manifest, answered)`. It refuses with
 `adopt_failure` when:
 
 - `adopt.decisions.invalid_answer`: the id is not `candidate-class`, the value is
-  not the provenance's one answer, or one subject is answered twice;
+  not the candidate's one answer (or the candidate has none), or one subject
+  is answered twice;
 - `adopt.decisions.unmatched_answer`: the subject is not a `needs-decision`
   candidate of this inspection.
 
@@ -154,7 +164,8 @@ under the recipe's `PYTHONPATH`:
   a fixture with tracked files under all three trees reaches `ready` with the
   expected `git-mv` targets (AC1). A fixture with an unrecognised `.claude/` file
   shows one `candidate-class` open entry. Answering it changes `plan_id`, empties
-  `open` and reaches `ready`; the refusals and the duplicate-destination gate each
+  `open` and reaches `ready`; the refusals, a secret-shaped candidate's null answer
+  and the duplicate-destination gate each
   get a test (AC2).
 - **`apply` by plan id** (`test_adopt_apply.py`, `ApplyTestCase`): an answered
   plan applies, the archived file lands at its target, and the commit gates pass.
@@ -189,3 +200,4 @@ The existing `project-id` key-set pins stay green unchanged. AC3 is
 | D4 | The answer set is fixed by provenance: a tracked candidate takes only `archive-history` (git-mv to `.agents/knowledge/archive/adopted/<path>`), an ignored one only `retain-product`; the open entry's `value` names that answer | `apply`'s `no-unclassified-agent-path` gate and `verify`'s check classify tracked paths with the rules alone; #72 puts history under `.agents/knowledge/archive/`; YAGNI | Retaining a tracked candidate in place, which needs a persisted per-repository classification that both checks read; a delete answer, which nothing has asked for and which needs `--acknowledge-deletions` |
 | D5 | `plan --answer QUESTION SUBJECT VALUE` (repeatable); `apply` reads the answers back from the stored document, and the recomputed `plan_id` authenticates them | D15 puts `decisions.answered` in the digest; D16 makes the id the approval and keeps `apply` to two flags; D33's one shared derivation | An answers file in the target repo, which is a Nodo-local workaround #210 forbids; an `--answer` flag on `apply`, which breaks D16 |
 | D6 | References to moved paths outside `LEGACY_BINDING_CONFIGS` are neither rewritten nor reported here; the recorded future direction is report-only | D30's closed sweep; the bar's "moves keep their history" (point-in-time records keep original paths); the migration map resolves old paths | Rewriting all ~283 Nodo mentions, which edits point-in-time records and is not mechanically decidable (D30) |
+| D7 | A secret-shaped tracked candidate keeps an open `candidate-class` question with `value: null`, and every answer to it refuses | AC2 ("any candidate ... carries a stable question id"); the `no-secret-path-in-moves` gate; the commit gate of D4 | Offering `archive-history` for it, which yields a plan that can never reach `ready`; dropping its question, which leaves a `needs-decision` candidate with no question and breaks AC2 |
