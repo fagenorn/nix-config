@@ -1863,14 +1863,14 @@ class InterimChildResultContractsTest(unittest.TestCase):
             self.paragraph(SDD), self.HEAD,
             "is not a completion: the child is still running.",
             "Re-engage that same child by its recorded agent identity",
-            "and wait for that report.",
-            "You may end your own turn while the re-engaged child is live",
+            "and wait for that report within your turn.",
             "Never answer an interim result with a text-only reply",
             "never suspend for it (it is not an `external` wait)",
             "never dispatch a replacement or stop the child.",
             "stays registered under its existing worker id",
             "so it registers nothing new.",
-            "If the message cannot be delivered",
+            "If the message cannot be delivered or its reply cannot be awaited "
+            "in your turn, the child is one you cannot wait for",
             "release `--event stopped`",
             "the one case that may lead to a fresh dispatch.",
             "Only the child's final hand-back counts as its result.")
