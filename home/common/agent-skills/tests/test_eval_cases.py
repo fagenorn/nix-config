@@ -454,6 +454,28 @@ class WritingPlansPipelineAssertsTest(unittest.TestCase):
         self.assertNotIn("decision heading vanished", done.stdout)
         self.assertEqual(offset, 0, "the assert read the stream it was handed")
 
+    def run_decision_on_ledger(self, ledger):
+        """Grade the decision assert over the fixture plan with its ledger section replaced."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = writing_plans_fixture(Path(tmp).resolve())
+            plan = Path(env["PLAN_DIR"]) / "p.md"
+            head = plan.read_text(encoding="utf-8").split("## Decision ledger", 1)[0]
+            plan.write_text(head + ledger, encoding="utf-8")
+            return run_assert(case_assert("writing-plans", 1, self.DECISION), repo, **env)
+
+    def test_a_header_only_ledger_fails(self):
+        done = self.run_decision_on_ledger(
+            "## Decision ledger\n\n| ID | Choice | Grounding | Rejected alternative |\n"
+            "|----|--------|-----------|----------------------|\n")
+        self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("no entries", done.stdout)
+
+    def test_a_ledger_of_legacy_entries_passes(self):
+        done = self.run_decision_on_ledger(
+            "## Decision ledger\n\n### D1 — One task\n\n"
+            "Choice: one task. Grounding: the task-size rule.\n")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,7 +24,7 @@
         },
         {
           "name": "self-answered decisions are logged as ledger rows (spec- or plan-hosted; legacy ### accepted)",
-          "shell": "f=$(grep -rliE '^#+ .*(decision|auto-resolved)' \"$SPEC_DIR\" \"$PLAN_DIR\" 2>/dev/null | head -1); [ -n \"$f\" ] || { fail \"no decision section under $SPEC_DIR or $PLAN_DIR\"; exit 1; }; awk 'BEGIN{found=0;entries=0} tolower($0) ~ /^#+ .*(decision|auto-resolved)/ {inside=1;found=1;next} inside && /^#+ / {inside=0} inside && (/^### / || (split($0,t,\"|\")>=4 && $0 ~ /[A-Za-z]/ && $0 !~ /^[|: -]+$/)) {entries++} END{if(!found){print \"decision heading vanished\"; exit 1} if(entries<1){print \"decision section has no entries (### or ledger rows)\"; exit 1}}' \"$f\""
+          "shell": "f=$(grep -rliE '^#+ .*(decision|auto-resolved)' \"$SPEC_DIR\" \"$PLAN_DIR\" 2>/dev/null | head -1); [ -n \"$f\" ] || { fail \"no decision section under $SPEC_DIR or $PLAN_DIR\"; exit 1; }; h=$(grep -iE -m1 '^#+ .*(decision|auto-resolved)' \"$f\"); [ -n \"$h\" ] || { fail \"decision heading vanished from $f\"; exit 1; }; ledger_has_rows \"$f\" \"$h\" || { fail \"decision section has no entries (### or ledger rows) in $f\"; exit 1; }"
         },
         {
           "name": "the plan artifacts are committed",
