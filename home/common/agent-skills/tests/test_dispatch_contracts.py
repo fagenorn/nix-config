@@ -39,9 +39,9 @@ CONTRACTS = {
     "own-commands": (
         "Run each long command, every verification command included, in the "
         "foreground with an explicit timeout above its expected duration. If "
-        "the host moves one to the background anyway, wait for it within the "
-        "same turn: never end your turn while a command you started is still "
-        "running."
+        "the host moves one to the background anyway, wait for it in the "
+        "same turn: never end your turn while a command or agent you started "
+        "still runs."
     ),
     "no-wait-loops": (
         "Never write an `until` or `while` loop around `sleep` to wait for "
@@ -100,6 +100,13 @@ CARRIERS = (
 # clauses through a placeholder line rather than a copy (per D13).
 REMAINDER_PLACEHOLDER = "<the four leaf-agent clauses of the ship-owner prompt above, verbatim>"
 STALE_REMAINDER_WORDING = "two leaf-agent sentences"
+
+# Wording #317 retired: the commands-only turn-end tail and the false premise
+# that the host wakes a dispatched owner (per D1, D2, D6).
+STALE_TURN_END_WORDING = (
+    "never end your turn while a command you started",
+    "host wakes you",
+)
 
 # Documents under these skills whose body holds exactly one unlabeled fence are
 # dispatch templates and must be enrolled as fence carriers, except the
@@ -306,6 +313,17 @@ class StrayCopyGuardTest(unittest.TestCase):
         documents = guarded_documents()
         documents[label] = documents[label] + "\n" + CONTRACTS["launch-by-type"] + "\n"
         self.assertEqual(stray_copies(documents), [f"{label}: launch-by-type"])
+
+
+class StaleTurnEndWordingTest(unittest.TestCase):
+    def test_no_document_keeps_the_commands_only_or_host_wakes_wording(self):
+        found = [
+            f"{label}: {phrase}"
+            for label, text in sorted(guarded_documents().items())
+            for phrase in STALE_TURN_END_WORDING
+            if _clause_pattern(phrase).search(text)
+        ]
+        self.assertEqual(found, [])
 
 
 class SourceTreeContractsTest(unittest.TestCase):
