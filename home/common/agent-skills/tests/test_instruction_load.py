@@ -707,6 +707,42 @@ class CheckTest(unittest.TestCase):
                 self.assertEqual(self.check(head, gate_files()), [expected])
                 self.assertEqual(self.check(head, gate_files(), label=True), [])
 
+    def test_a_note_only_change_passes_unlabelled(self):
+        model = gate_model()
+        model["profiles"][0]["note"] = "gate fixture, reworded"
+        self.assertEqual(self.check(gate_files(model), gate_files()), [])
+
+    def test_a_note_change_beside_any_other_change_still_needs_the_label(self):
+        def moved(m):
+            profile = m["profiles"][0]
+            profile["hot"], profile["conditional"] = [], ["demo/SKILL.md", "solo/SKILL.md"]
+            profile["ceiling_bytes"] = {"claude": 0, "codex": 0}
+            profile["conditional_ceiling_bytes"] = {"claude": 149, "codex": 75}
+
+        model_line = (f"raise: {instruction_load.MODEL_PATH} changes more than lowering a "
+                      f"ceiling; {WAIVER}")
+        cases = (
+            ("membership", moved),
+            ("raised ceiling", lambda m: m["profiles"][0]["ceiling_bytes"].update(claude=76)),
+            ("excluded_sites", lambda m: m["excluded_sites"].update({"demo-plugin": "reworded"})),
+        )
+        for label, change in cases:
+            with self.subTest(case=label):
+                model = gate_model()
+                model["profiles"][0]["note"] = "gate fixture, reworded"
+                change(model)
+                self.assertEqual(self.check(gate_files(model), gate_files()), [model_line])
+                self.assertEqual(self.check(gate_files(model), gate_files(), label=True), [])
+
+    def test_a_note_on_a_new_profile_does_not_excuse_it(self):
+        model = gate_model()
+        renamed = gate_model()["profiles"][0]
+        renamed["id"] = "demo-renamed"
+        model["profiles"] = [renamed]
+        model_line = (f"raise: {instruction_load.MODEL_PATH} changes more than lowering a "
+                      f"ceiling; {WAIVER}")
+        self.assertEqual(self.check(gate_files(model), gate_files()), [model_line])
+
     def test_a_lowering_only_change_passes_unlabelled(self):
         base_model = gate_model()
         base_model["profiles"][0]["ceiling_bytes"]["claude"] = 78
