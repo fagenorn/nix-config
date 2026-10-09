@@ -46,7 +46,7 @@ and inside the `for id in 1 2 3` loop, after the `row is a deployed-mode PASS` c
 - [ ] **Step 2: Run the smoke test and watch it fail**
 
 Run: `bash home/common/agent-skills/evals/tests/test-run-eval-tree.sh 2>&1 | grep -E '^(FAIL|ok    setup smoke 3)|test-run-eval-tree:'`
-Expected: FAIL lines for `setup smoke 3: every setup assert passes`, `setup smoke 3: the row is a deployed-mode PASS` and `setup smoke 3: the row reports every fixture assert` (the stdin reader swallows the last assert: `total` 4, `failed` 1); cases 1 and 2 pass; final line `test-run-eval-tree: 3 check(s) failed`.
+Expected: FAIL lines for `setup smoke 3: every setup assert passes`, `setup smoke 3: the row is a deployed-mode PASS` and `setup smoke 3: the row reports every fixture assert` (the stdin reader swallows the last assert: `total` 4, `failed` 1); cases 1 and 2 pass; final line `test-run-eval-tree: 3 check(s) failed`. The failure dump's scenario-log tails add runner-level `FAIL  <assert name>` lines; the three check-level lines and the count are the signal.
 
 - [ ] **Step 3: Redirect each assert's stdin (per D2)**
 

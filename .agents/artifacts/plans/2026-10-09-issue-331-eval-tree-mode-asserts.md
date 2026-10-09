@@ -38,7 +38,7 @@ Estimates: 13 changed files — runner, assert-lib, smoke fixture and smoke test
 
 Task 1 — Runner reads asserts' stdin from /dev/null, smoke grades the row total — `home/common/agent-skills/evals/run-eval.sh`, `home/common/agent-skills/evals/assert-lib.sh`, `home/common/agent-skills/evals/tests/fixtures/setup-smoke-evals.json`, `home/common/agent-skills/evals/tests/test-run-eval-tree.sh` — low-risk — [task-1.md](2026-10-09-issue-331-eval-tree-mode-asserts.tasks/task-1.md)
 Task 2 — writing-plans eval 1 grades the absolute plan dir and exits on a failed precondition — `home/common/agent-skills/skills/writing-plans/evals/evals.json`, `home/common/agent-skills/tests/test_eval_cases.py` — low-risk — [task-2.md](2026-10-09-issue-331-eval-tree-mode-asserts.tasks/task-2.md)
-Task 3 — No eval prefixes an absolute artifact dir — `home/common/agent-skills/skills/improve-codebase-architecture/evals/evals.json`, `home/common/agent-skills/tests/test_eval_cases.py`, `home/common/agent-skills/evals/assert-lib.sh` — low-risk — [task-3.md](2026-10-09-issue-331-eval-tree-mode-asserts.tasks/task-3.md)
+Task 3 — No eval prefixes an absolute artifact dir — `home/common/agent-skills/skills/improve-codebase-architecture/evals/evals.json`, `home/common/agent-skills/tests/test_eval_cases.py`, `home/common/agent-skills/tests/test_workflow_skill_contracts.py`, `home/common/agent-skills/evals/assert-lib.sh` — low-risk — [task-3.md](2026-10-09-issue-331-eval-tree-mode-asserts.tasks/task-3.md)
 Task 4 — One canonical Interim child results paragraph — `home/common/agent-skills/skills/sdd/SKILL.md`, `home/common/agent-skills/skills/from-issue/SKILL.md`, `home/common/agent-skills/tests/test_workflow_skill_contracts.py` — full — [task-4.md](2026-10-09-issue-331-eval-tree-mode-asserts.tasks/task-4.md)
 Task 5 — Measure AC1: writing-plans eval 1 in tree mode — `home/common/agent-skills/evals/results/results.jsonl`, `.agents/artifacts/plans/2026-10-09-issue-331-eval-tree-mode-asserts.acceptance.md` — full — [task-5.md](2026-10-09-issue-331-eval-tree-mode-asserts.tasks/task-5.md)
 
@@ -58,3 +58,7 @@ Task 5 — Measure AC1: writing-plans eval 1 in tree mode — `home/common/agent
 - `run_assert` stdin default and the offset proof; the smoke's stdin reader: D10 (appended by this plan).
 
 ---
+
+## Standards review provenance
+
+Reviewer: Claude fallback (the configured Codex `plan-review` job timed out after 1680 s with no output, a completed runtime failure, so one native fallback ran with the same packet). Base SHA 13cb52971064b0b5c10b2991e5771b5405df92c5; isolated read-only mode; no focus. Findings: 4 accepted (B1 Task 3 updates the improve-codebase-architecture shell pins, D11; S1 Task 4 commits a tightened `instruction-load.json`; X1 Task 1's failing-output note; X2 D5's grounding names the slimming clause), 0 rejected, 0 deferred.

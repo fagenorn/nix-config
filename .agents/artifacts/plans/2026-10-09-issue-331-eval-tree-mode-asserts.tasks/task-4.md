@@ -68,5 +68,7 @@ Expected: `check: pass` (measured at planning with this edit applied). If it ins
 
 ```bash
 git add home/common/agent-skills/skills/sdd/SKILL.md home/common/agent-skills/skills/from-issue/SKILL.md home/common/agent-skills/tests/test_workflow_skill_contracts.py
+# only when Step 4 ran tighten:
+git add home/common/agent-skills/instruction-load.json
 launch-commit … -- -m "docs(skills): one canonical interim child results paragraph (#331)" -m "<trailers>"
 ```

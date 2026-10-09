@@ -3,6 +3,7 @@
 **Files:**
 - Modify: `home/common/agent-skills/skills/improve-codebase-architecture/evals/evals.json` (three asserts in cases 2 and 3)
 - Modify: `home/common/agent-skills/evals/assert-lib.sh` (the `SPEC_DIR / PLAN_DIR` line of the header's environment list only)
+- Modify: `home/common/agent-skills/tests/test_workflow_skill_contracts.py` (the three `required_shells` fragments in `ImproveCodebaseArchitectureSkillContractsTest.test_eval_assertion_shells_are_unique_and_behavioral`, per D11)
 - Test: `home/common/agent-skills/tests/test_eval_cases.py`
 
 **Interfaces:**
@@ -73,10 +74,19 @@ with
 #             checkout, never "$REPO/$SPEC_DIR"
 ```
 
+In `test_workflow_skill_contracts.py`, `ImproveCodebaseArchitectureSkillContractsTest.test_eval_assertion_shells_are_unique_and_behavioral` pins the old text of these three asserts in `required_shells` (per D11, edit the existing fragments in place, add none):
+
+- case 2 `design spec was committed`: `('commits_touch "$WT" "$SPEC_DIR"',)` becomes `('commits_touch "$WT" "${SPEC_DIR#"$REPO"/}"',)`
+- case 2 `no plan was created`: `'if has_file "$REPO/$PLAN_DIR"/*.md "$WT/$PLAN_DIR"/*.md; then'` becomes `'if has_file "$PLAN_DIR"/*.md "$WT/${PLAN_DIR#"$REPO"/}"/*.md; then'`
+- case 3 `no spec or plan was created`: `'if has_file "$REPO/$SPEC_DIR"/*.md "$REPO/$PLAN_DIR"/*.md; then'` becomes `'if has_file "$SPEC_DIR"/*.md "$PLAN_DIR"/*.md; then'`
+
 - [ ] **Step 4: Verify**
 
 Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_eval_cases.py 2>&1 | tail -n 1`
 Expected: `OK`.
+
+Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k ImproveCodebaseArchitectureSkillContractsTest 2>&1 | tail -n 1`
+Expected: `OK` (fails at the Step 3 eval edit until the three pins are updated).
 
 Run: `if grep -n 'test_from_issue_asserts_never_prefix' home/common/agent-skills/tests/test_eval_cases.py; then exit 1; fi`
 Expected: exit 0 (the from-issue-only test is gone; it exits 1 at the starting commit).
@@ -84,6 +94,6 @@ Expected: exit 0 (the from-issue-only test is gone; it exits 1 at the starting c
 - [ ] **Step 5: Commit**
 
 ```bash
-git add home/common/agent-skills/skills/improve-codebase-architecture/evals/evals.json home/common/agent-skills/evals/assert-lib.sh home/common/agent-skills/tests/test_eval_cases.py
+git add home/common/agent-skills/skills/improve-codebase-architecture/evals/evals.json home/common/agent-skills/evals/assert-lib.sh home/common/agent-skills/tests/test_eval_cases.py home/common/agent-skills/tests/test_workflow_skill_contracts.py
 launch-commit … -- -m "fix(evals): no assert prefixes an absolute artifact dir (#331)" -m "<trailers>"
 ```
