@@ -1725,6 +1725,47 @@ class LightLaneTest(ResolverTestCase):
                          ["/bindings/workflow/heavy_lane"])
 
 
+class StallMinutesTest(ResolverTestCase):
+    """#310 D1: the optional `bindings.workflow.orchestration.stall_minutes` member."""
+
+    POINTER = "/bindings/workflow/orchestration/stall_minutes"
+
+    def contract_with(self, **members):
+        contract = source_contract()
+        orchestration = contract["bindings"]["workflow"]["orchestration"]
+        orchestration.pop("stall_minutes", None)
+        orchestration.update(members)
+        return contract
+
+    def test_absent_null_and_positive_values_round_trip(self):
+        for members in ({}, {"stall_minutes": None}, {"stall_minutes": 1},
+                        {"stall_minutes": 90}):
+            with self.subTest(members=members):
+                code, snap, err = self.resolve(self.make_root(self.contract_with(**members)))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(snap["bindings"]["workflow"]["orchestration"],
+                                 {"max_parallel": 2, "attempt_budget_minutes": 240, **members})
+
+    def test_each_malformed_value_is_refused_with_its_pointer(self):
+        for value in (0, -5, True, False, "90", 1.5, [90]):
+            with self.subTest(value=value):
+                code, payload, _ = self.resolve(
+                    self.make_root(self.contract_with(stall_minutes=value)))
+                self.assertEqual(code, 2)
+                error = payload["error"]
+                self.assertEqual((error["code"], error["repair_id"]),
+                                 ("invalid_contract", "contract.workflow.not_positive_int"))
+                self.assertEqual([v["pointer"] for v in error["violations"]], [self.POINTER])
+
+    def test_any_other_orchestration_member_is_still_unexpected(self):
+        code, payload, _ = self.resolve(
+            self.make_root(self.contract_with(stall_seconds=60)))
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["error"]["repair_id"], "contract.workflow.member_unexpected")
+        self.assertEqual([v["pointer"] for v in payload["error"]["violations"]],
+                         ["/bindings/workflow/orchestration/stall_seconds"])
+
+
 class PublicResolveTest(InProcessTestCase):
     """#279 D1: `resolve()` is `command_resolve`'s composition, importable.
 

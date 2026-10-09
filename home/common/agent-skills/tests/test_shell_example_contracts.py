@@ -960,5 +960,34 @@ class InstalledTreeSweepTest(unittest.TestCase):
                     self.assertEqual(findings, (), findings_report(str(path), findings))
 
 
+ORCHESTRATE_SKILL = SOURCE_TREES["claude-only"] / "orchestrate-issues/SKILL.md"
+# A `date` invocation: at a line start or after a shell operator, `$(` or a
+# backtick, followed by an option, a closing backtick or parenthesis, or the end.
+DATE_INVOCATION = re.compile(r"(?:^|[;&|(`]|\$\()\s*date(?:\s+[-+]|\s*[`)]|\s*$)", re.M)
+
+
+class ObserverSleepExampleTest(unittest.TestCase):
+    """#310 D9, D13: observers sleep for a helper-computed time; no skill text runs `date`."""
+
+    def test_the_date_pattern_finds_invocations_and_spares_prose(self):
+        for text in ("date -j -f %s 1", "x=$(date -u +%s)", "`date`", "sleep 1; date -d now",
+                     "  date +%s"):
+            with self.subTest(text=text):
+                self.assertIsNotNone(DATE_INVOCATION.search(text))
+        for text in ("update the date arithmetic", "a deadline date", "`deadline_at`",
+                     "validate -- date-time", "candidate"):
+            with self.subTest(text=text):
+                self.assertIsNone(DATE_INVOCATION.search(text))
+
+    def test_the_skill_runs_no_date(self):
+        self.assertIsNone(DATE_INVOCATION.search(ORCHESTRATE_SKILL.read_text(encoding="utf-8")))
+
+    def test_the_observer_example_sleeps_for_wait_seconds(self):
+        examples = [payload[0].text for _, kind, payload
+                    in _examples(ORCHESTRATE_SKILL.read_text(encoding="utf-8"))
+                    if kind == "call"]
+        self.assertIn("sleep <wait_seconds>", examples)
+
+
 if __name__ == "__main__":
     unittest.main()

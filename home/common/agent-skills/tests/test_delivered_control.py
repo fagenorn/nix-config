@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from .test_delivery_workflow import (ARTIFACT_BUDGET, HELD_COMMENT, HELD_RECORD, MODEL,
                                      NOW, POLICY, SCRIPTS, SOURCES, BuilderHarness, load)
@@ -400,6 +401,41 @@ class DeliveredControlTest(DeliveredControlHarness, unittest.TestCase):
         self.assertEqual([a["kind"] for a in json.loads(admitted.stdout)["actions"]],
                          ["spawn", "wait"])
         self.assertNotEqual(state.read_bytes(), before)
+
+
+class OwnerLivenessRemainderTest(DeliveredControlHarness, unittest.TestCase):
+    """#310 D3, D12: owner-liveness serves a delivery-remainder launch."""
+
+    def liveness(self, minute, action_id, since=None):
+        argv = ["owner-liveness", *self.run_args, "--action-id", action_id,
+                "--stall-minutes", "90"]
+        if since is not None:
+            argv += ["--since", since]
+        before = self.ledger.read_bytes()
+        with mock.patch.dict(os.environ, {"WORKFLOW_STATE_TEST_CLOCK": at(minute)}):
+            completed = self.cli(*argv)
+        self.assertEqual(self.ledger.read_bytes(), before)
+        return json.loads(self.validated("workflow-response", completed.stdout))
+
+    def test_a_remainder_launch_is_measured_from_its_own_launch(self):
+        self.setup_run()
+        spawned = self.control(0, recorded={DELIVERED: None}, contracts=True)
+        launched = [a["custody"] for a in spawned["actions"] if a["kind"] in DISPATCH]
+        for minute in (31, 62, 93):
+            response = self.control(minute, recorded={DELIVERED: "matching_issue_branch"})
+            launched = [a["custody"] for a in response["actions"] if a["kind"] in DISPATCH]
+        remainder = self.fail_after_selection(launched[0], at(94))
+        action_id = remainder["custody"]["action_id"]
+        self.assertEqual(action_id, f"{DELIVERED}:r1:1")
+        self.assertEqual(self.liveness(100, action_id), {
+            "interface_version": 1, "kind": "owner_liveness", "action_id": action_id,
+            "reason": "current", "verdict": "live", "since": at(100),
+            "progress_at": at(94), "stall_at": at(190), "wait_seconds": 5400})
+        self.assertEqual(self.liveness(190, action_id, since=at(100))["verdict"], "stalled")
+        self.assertEqual(self.liveness(274, action_id, since=at(100))["verdict"],
+                         "past_deadline")
+        self.assertEqual(self.liveness(100, launched[0]["action_id"])["verdict"],
+                         "not_current")
 
 
 if __name__ == "__main__":

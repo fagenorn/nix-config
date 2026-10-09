@@ -442,7 +442,9 @@ class DeliveryRuntime:
             preview = self.apply_transition(
                 preview_state, issue=issue, request=candidate,
                 source_kind=source_kind, at_time=now)
-        if owner_unavailable and remainder["state"] != "active":
+        if owner_unavailable and remainder["state"] != "active" and not reaped:
+            # A reaped remainder's deadline passed after the dispatcher read the
+            # owner's liveness: the expiry supersedes the observation (#310 D18).
             raise ValueError("owner_unavailable is not applicable")
         if remainder["state"] == "active" and not owner_unavailable:
             # Live custody: control's lanes skip it, as they skip a live attempt (D2).
