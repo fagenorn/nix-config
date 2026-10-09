@@ -50,7 +50,6 @@ def clean_files():
         f"{CODEX}/gamma/SKILL.md": skill("gamma"),
         "home/common/claude-code/agents/reviewer.md": b"reviewer body\n",
         "home/common/agent-guidance/AGENTS.md": b"frame text\n",
-        "home/common/agent-skills/skill-lint-debt.json": b'{"debt": []}\n',
     }
 
 
@@ -164,7 +163,7 @@ class FoundationTest(unittest.TestCase):
         self.assertIsNone(skill_lint.split_member("demo/sub/EXTRA.md"))
 
 
-DEBT = "home/common/agent-skills/skill-lint-debt.json"
+RETIRED_DEBT = "home/common/agent-skills/skill-lint-debt.json"
 ALPHA_BODY = "Read GUIDE.md first.\nHand alpha-prompt.md and CONTRACT.md to the reviewer.\n"
 
 
@@ -278,41 +277,32 @@ class RuleTest(unittest.TestCase):
                 self.assertEqual(self.keys(files), expected)
 
 
-class DebtTest(unittest.TestCase):
-    def setUp(self):
-        self.files = clean_files()
+class NoExemptionTest(unittest.TestCase):
+    """skill-lint has no exemption mechanism: every violation is a failure line (#300)."""
 
-    def debt(self, keys):
-        self.files[DEBT] = json.dumps({"debt": keys}).encode()
+    def test_every_violation_is_a_failure_line(self):
+        files = clean_files()
+        files[f"{ALPHA}/ORPHAN.md"] = b"orphan\n"
+        files[f"{SHARED}/orphan/NOTES.md"] = b"notes\n"
+        files[f"{CODEX}/gamma/SKILL.md"] = skill("gamma", "Gammas things.")
+        snapshot = dict_snapshot(files)
+        found = skill_lint.violations(snapshot)
+        self.assertEqual(len(found), 3)
+        self.assertEqual(skill_lint.lint(snapshot), [f"{v.key}: {v.text}" for v in found])
 
-    def test_a_listed_violation_is_suppressed(self):
-        self.files[f"{ALPHA}/ORPHAN.md"] = b"orphan\n"
-        self.debt([f"L4a {ALPHA}/ORPHAN.md"])
-        self.assertEqual(skill_lint.lint(dict_snapshot(self.files)), [])
-
-    def test_an_unlisted_violation_is_one_failure_line(self):
-        self.files[f"{ALPHA}/ORPHAN.md"] = b"orphan\n"
-        self.assertEqual(skill_lint.lint(dict_snapshot(self.files)),
-                         [f"L4a {ALPHA}/ORPHAN.md: not named in its SKILL.md"])
-
-    def test_a_stale_entry_fails(self):
-        self.debt(["L4a gone.md"])
-        self.assertEqual(skill_lint.lint(dict_snapshot(self.files)), [
-            "L4a gone.md: stale debt entry; delete it from "
-            "home/common/agent-skills/skill-lint-debt.json"])
-
-    def test_a_malformed_debt_file_cannot_run(self):
-        for raw in (b'{"debt": ["b", "a"]}', b'{"debt": ["a", "a"]}', b'{"debt": "a"}',
-                    b'{"debt": [], "extra": 1}', b'{"debt": [1]}', b"[]",
-                    b'{"debt": [], "debt": []}', b"\xff", None):
+    def test_the_retired_debt_file_exempts_nothing(self):
+        key = f"L4a {ALPHA}/ORPHAN.md"
+        for raw in (json.dumps({"debt": [key]}).encode(), b"{"):
             with self.subTest(raw=raw):
-                files = clean_files()
-                if raw is None:
-                    del files[DEBT]
-                else:
-                    files[DEBT] = raw
-                with self.assertRaises(ValueError):
-                    skill_lint.lint(dict_snapshot(files))
+                files = {**clean_files(), f"{ALPHA}/ORPHAN.md": b"orphan\n", RETIRED_DEBT: raw}
+                self.assertEqual(skill_lint.lint(dict_snapshot(files)),
+                                 [f"{key}: not named in its SKILL.md"])
+
+    def test_the_module_carries_no_exemption_loader(self):
+        for name in ("DEBT_PATH", "load_debt"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(skill_lint, name))
+                self.assertFalse(hasattr(instruction_load, name))
 
 
 class CommandTest(unittest.TestCase):
@@ -333,22 +323,18 @@ class CommandTest(unittest.TestCase):
         self.assertEqual((orphaned.returncode, orphaned.stdout),
                          (1, f"L4a {ALPHA}/ORPHAN.md: not named in its SKILL.md\n"))
         no_codex = {p: d for p, d in clean_files().items() if not p.startswith(CODEX)}
-        for files in ({**clean_files(), DEBT: b"{"}, no_codex):
-            broken = self.run_lint(files)
-            self.assertEqual((broken.returncode, broken.stdout), (2, ""))
-            self.assertEqual(len(broken.stderr.splitlines()), 1, broken.stderr)
-            self.assertTrue(broken.stderr.startswith("skill-lint: "))
+        broken = self.run_lint(no_codex)
+        self.assertEqual((broken.returncode, broken.stdout), (2, ""))
+        self.assertEqual(len(broken.stderr.splitlines()), 1, broken.stderr)
+        self.assertTrue(broken.stderr.startswith("skill-lint: "))
 
 
 class LiveTreeTest(unittest.TestCase):
-    def test_the_live_tree_lints_clean_against_its_debt_file(self):
+    def test_the_live_tree_lints_clean(self):
         self.assertEqual(skill_lint.lint(skill_lint.working_tree(REPO_ROOT)), [])
 
-    def test_every_live_debt_key_names_a_known_rule(self):
-        raw = (REPO_ROOT / DEBT).read_bytes()
-        for key in skill_lint.load_debt(raw):
-            with self.subTest(key=key):
-                self.assertIn(key.split(" ", 1)[0], {"L1", "L2", "L3", "L4a", "L4b", "L5"})
+    def test_the_live_tree_has_no_debt_file(self):
+        self.assertFalse((REPO_ROOT / RETIRED_DEBT).exists())
 
 
 if __name__ == "__main__":
