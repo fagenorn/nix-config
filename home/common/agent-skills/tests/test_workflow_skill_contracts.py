@@ -1806,7 +1806,7 @@ class InterimChildResultContractsTest(unittest.TestCase):
     """#261: an owner treats a child's interim return as still running."""
 
     HEAD = "**Interim child results.**"
-    OWNERS = (FROM_ISSUE,)
+    OWNERS = (SDD, FROM_ISSUE, SHIP_ISSUE)
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -1833,23 +1833,24 @@ class InterimChildResultContractsTest(unittest.TestCase):
 
     def test_the_paragraph_copies_stay_identical(self):
         canonical = self.paragraph(SDD)
-        for path in (FROM_ISSUE,):
+        for path in (FROM_ISSUE, SHIP_ISSUE):
             with self.subTest(path=path.parent.name):
                 self.assertEqual(self.paragraph(path), canonical)
 
     def test_the_paragraph_states_the_rule_in_order(self):
         self.assert_ordered(
             self.paragraph(SDD), self.HEAD,
-            "is not a completion: the child is still running.",
+            "(its own background work still running, or a result that may be interim) "
+            "is not a completion.",
             "Re-engage that same child by its recorded agent identity",
             "and wait for that report within your turn.",
             "Never answer an interim result with a text-only reply",
             "never suspend for it (it is not an `external` wait)",
             "never dispatch a replacement or stop the child.",
-            "stays registered under its existing worker id",
-            "so it registers nothing new.",
+            "stays registered under its existing worker id and registers nothing new",
+            "an interim result is not its `returned` event.",
             "If the message cannot be delivered or its reply cannot be awaited "
-            "in your turn, the child is one you cannot wait for",
+            "in your turn, follow from-issue's **Writing workers** route",
             "release `--event stopped`",
             "the one case that may lead to a fresh dispatch.",
             "Only the child's final hand-back counts as its result.")
