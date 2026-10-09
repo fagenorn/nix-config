@@ -24,7 +24,7 @@
     },
     "workflow": {
       "verification": ["test"],
-      "orchestration": { "max_parallel": 2, "attempt_budget_minutes": 180, "stall_minutes": 90 },
+      "orchestration": { "max_parallel": 2, "attempt_budget_minutes": 180 },
       "review": { "plan": null, "code": null }, "release": null
     },
     "deploy": { "adapter": "none", "command": null, "config": {} }

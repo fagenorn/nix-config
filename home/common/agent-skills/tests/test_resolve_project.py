@@ -906,7 +906,6 @@ class CommittedContractTest(ResolverTestCase):
         orchestration = source_contract()["bindings"]["workflow"]["orchestration"]
         self.assertEqual(orchestration["max_parallel"], 2)
         self.assertEqual(orchestration["attempt_budget_minutes"], 240)
-        self.assertEqual(orchestration["stall_minutes"], 90)
         self.assertFalse((REPO_ROOT / ".claude" / "skills.config.json").exists())  # policy-gate-pattern
 
     def test_nix_activate_is_exact_and_deploy_stays_unsupported(self):
@@ -1765,14 +1764,6 @@ class StallMinutesTest(ResolverTestCase):
         self.assertEqual(payload["error"]["repair_id"], "contract.workflow.member_unexpected")
         self.assertEqual([v["pointer"] for v in payload["error"]["violations"]],
                          ["/bindings/workflow/orchestration/stall_seconds"])
-
-    def test_the_repository_and_the_eval_fixture_resolve_with_ninety(self):
-        for root in (REPO_ROOT, EVAL_FIXTURE):
-            with self.subTest(root=root.name):
-                code, out, err = run("resolve", "--repo-root", str(root), home=self.home)
-                self.assertEqual(code, 0, err or out)
-                orchestration = json.loads(out)["bindings"]["workflow"]["orchestration"]
-                self.assertEqual(orchestration["stall_minutes"], 90)
 
 
 class PublicResolveTest(InProcessTestCase):

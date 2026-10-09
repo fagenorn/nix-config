@@ -142,6 +142,7 @@ WORKFLOW_MEMBERS = ("verification", "orchestration", "review", "release")
 # #279: the one workflow member an author may leave out. `null` and absent both
 # mean no light lane; the resolver never inserts the member itself.
 WORKFLOW_OPTIONAL_MEMBERS = ("light_lane",)
+# #310: the one orchestration member an author may leave out; never defaulted.
 ORCHESTRATION_OPTIONAL_MEMBERS = ("stall_minutes",)
 LIGHT_LANE_MEMBERS = ("mode", "budget_minutes", "risk_paths")
 LIGHT_LANE_MODES = ("shadow", "active")
