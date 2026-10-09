@@ -1,6 +1,6 @@
 ---
 name: sdd
-description: Execute an implementation plan with a fresh subagent per task, reviewed between tasks. Use when a written plan with independent tasks is ready to build.
+description: Executes an implementation plan with a fresh subagent per task, reviewed between tasks. Use when a written plan of independent tasks is ready to build.
 ---
 
 # Subagent-Driven Development
