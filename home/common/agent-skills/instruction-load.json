@@ -61,12 +61,12 @@
       "conditional": [],
       "unread": {},
       "ceiling_bytes": {
-        "claude": 27568
+        "claude": 27743
       },
       "conditional_ceiling_bytes": {
         "claude": 0
       },
-      "note": "One control-adapter run. It loads only its entry, whose resolver paragraph and lifecycle-call rule stay per entry (#155 D5). Ceiling re-measured after merging origin/main at 382b59c (#155 D19). Ceiling raised for #198: the finalize report routes an `agent_dispatch` suspension to its re-entry line (#155 D10). Ceiling raised for #221: §4's `delivery_contract` rule (#221 D10). Ceiling raised for #222: §2's dispatcher rules for an owner return without a terminal write and a non-owner hand-back (#155 D10). Ceiling raised for #220: §5's final report names a delivered issue's stale custody (#155 D10). Ceiling raised for #222: ship review fixes (handoff release step, current wait-handle carve-out) (#155 D10). Ceiling raised for #250: the anti-zombie sentence names the progress marker (#155 D10). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10). Ceiling raised for #261: §2's interim owner notification case (#155 D10). Ceiling raised for #265: relaunchers carry a resume pack and the owner's resume-pack guidance (#155 D10). Ceiling raised for #275: §4's stop pass and §5's stop-failure list (#155 D10). Ceiling raised for #276: the stop pass ends with a launch-scope sweep, and §5 lists a failed sweep (#155 D10). Ceiling raised for #276's final-review fixes: the stop pass and §5 keep a failed sweep's `skipped` launches only when it printed a report (#155 D10). Ceiling raised for #273: orchestrate-issues reports held issues and the ship handoff closes or holds on acceptance_state (#155 D10). Ceiling re-measured after merging origin/main at 2d3ba38 (#155 D19). Ceiling re-measured after merging origin/main at e63f626 (#155 D19). Ceiling raised for #309: the leaf-agent clauses gained a fourth, no-wait-loops, in their carriers (#155 D10). Ceiling raised for #310: §2's liveness check after an interim notification and its wake rule (#155 D10)."
+      "note": "One control-adapter run. It loads only its entry, whose resolver paragraph and lifecycle-call rule stay per entry (#155 D5). Ceiling re-measured after merging origin/main at 382b59c (#155 D19). Ceiling raised for #198: the finalize report routes an `agent_dispatch` suspension to its re-entry line (#155 D10). Ceiling raised for #221: §4's `delivery_contract` rule (#221 D10). Ceiling raised for #222: §2's dispatcher rules for an owner return without a terminal write and a non-owner hand-back (#155 D10). Ceiling raised for #220: §5's final report names a delivered issue's stale custody (#155 D10). Ceiling raised for #222: ship review fixes (handoff release step, current wait-handle carve-out) (#155 D10). Ceiling raised for #250: the anti-zombie sentence names the progress marker (#155 D10). Ceiling raised for #261: the leaf-agent clauses gained a third, own-commands, in their carriers and agent definitions (#155 D10). Ceiling raised for #261: §2's interim owner notification case (#155 D10). Ceiling raised for #265: relaunchers carry a resume pack and the owner's resume-pack guidance (#155 D10). Ceiling raised for #275: §4's stop pass and §5's stop-failure list (#155 D10). Ceiling raised for #276: the stop pass ends with a launch-scope sweep, and §5 lists a failed sweep (#155 D10). Ceiling raised for #276's final-review fixes: the stop pass and §5 keep a failed sweep's `skipped` launches only when it printed a report (#155 D10). Ceiling raised for #273: orchestrate-issues reports held issues and the ship handoff closes or holds on acceptance_state (#155 D10). Ceiling re-measured after merging origin/main at 2d3ba38 (#155 D19). Ceiling re-measured after merging origin/main at e63f626 (#155 D19). Ceiling raised for #309: the leaf-agent clauses gained a fourth, no-wait-loops, in their carriers (#155 D10). Ceiling raised for #310: §2's liveness check after an interim notification, its wake rule and its failed-call rule (#155 D10)."
     },
     {
       "id": "orchestrated-issue-owner",
@@ -1067,6 +1067,6 @@
   "excluded_sites": {
     "sdd-codex-rescue-transport": "the codex:rescue plugin agent reads plugin documents outside both source trees"
   },
-  "corpus_ceiling_bytes": 423015,
+  "corpus_ceiling_bytes": 423190,
   "description_ceiling_bytes": 2925
 }
