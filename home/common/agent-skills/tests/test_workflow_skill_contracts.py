@@ -211,6 +211,12 @@ ORCHESTRATE_MACHINE_TEXT = {
         "run_in_background=true",
         "rename `id` to `action_id`", "`kind` to `launch_kind`", "`kind: owner`",
         "`interface_version: 2`", "`launch_refused`", "`unavailable`",
+        "workflow-state owner-liveness --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--action-id <action_id> --stall-minutes <stall_minutes>",
+        "workflow-state owner-liveness --repo-root <ledger_repo_root> --run-id <run-id> "
+        "--action-id <action_id> --stall-minutes <stall_minutes> --since <liveness_since>",
+        "`wait_seconds`", "`liveness_since`", "`stalled`", "`past_deadline`",
+        "`not_current`",
     ),
     CODEX_ORCHESTRATE: (
         "workflow-state host-route --route codex", "--boundary workflow-response",
@@ -372,6 +378,7 @@ CLAUDE_POLICY_ENTRIES = {
         "bindings.tracker", "bindings.vcs",
         "bindings.workflow.orchestration.attempt_budget_minutes",
         "bindings.workflow.orchestration.max_parallel",
+        "bindings.workflow.orchestration.stall_minutes",
     ),
 }
 
