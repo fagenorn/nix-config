@@ -142,6 +142,7 @@ WORKFLOW_MEMBERS = ("verification", "orchestration", "review", "release")
 # #279: the one workflow member an author may leave out. `null` and absent both
 # mean no light lane; the resolver never inserts the member itself.
 WORKFLOW_OPTIONAL_MEMBERS = ("light_lane",)
+ORCHESTRATION_OPTIONAL_MEMBERS = ("stall_minutes",)
 LIGHT_LANE_MEMBERS = ("mode", "budget_minutes", "risk_paths")
 LIGHT_LANE_MODES = ("shadow", "active")
 DEPLOY_MEMBERS = ("adapter", "command", "config")
@@ -719,11 +720,15 @@ def validate_workflow(workflow: dict, commands: dict | None,
         orchestration = workflow["orchestration"]
         check_exact_members(
             orchestration, pointer, ("max_parallel", "attempt_budget_minutes"),
-            "workflow", violations)
+            "workflow", violations, optional=ORCHESTRATION_OPTIONAL_MEMBERS)
         for name in ("max_parallel", "attempt_budget_minutes"):
             if name in orchestration:
                 check_positive_int(
                     orchestration[name], f"{pointer}/{name}", "workflow", violations)
+        if orchestration.get("stall_minutes") is not None:
+            check_positive_int(
+                orchestration["stall_minutes"], f"{pointer}/stall_minutes",
+                "workflow", violations)
     pointer = "/bindings/workflow/review"
     if "review" in workflow and check_object(
             workflow["review"], pointer, "workflow", violations):

@@ -105,7 +105,8 @@
       ],
       "orchestration": {
         "max_parallel": 2,
-        "attempt_budget_minutes": 240
+        "attempt_budget_minutes": 240,
+        "stall_minutes": 90
       },
       "review": {
         "plan": "codex-plan-review",
