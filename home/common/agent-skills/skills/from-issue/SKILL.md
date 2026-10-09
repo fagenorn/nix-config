@@ -1,6 +1,6 @@
 ---
 name: from-issue
-description: Drive one tracker issue through investigate → spec → plan → review → execute in a worktree. Use for "work on issue #X"; pass --auto for autonomous mode.
+description: Drives one tracker issue through investigate → spec → plan → review → execute in a worktree. Use for "work on issue #X"; --auto selects autonomous mode.
 ---
 
 # From Issue

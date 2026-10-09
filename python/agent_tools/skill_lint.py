@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-import json
 import math
 import os
 from pathlib import Path
@@ -13,7 +12,6 @@ import sys
 from typing import Callable, Optional
 
 from agent_tools.agent_model_matrix import AGENTS_PATH, MATRIX_PATH, parse_matrix
-from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 
 
 SHARED_TREE = "home/common/agent-skills/skills"
@@ -23,7 +21,6 @@ TREE_ROOTS = (SHARED_TREE, CLAUDE_TREE, CODEX_TREE)
 AGENTS_DIR = AGENTS_PATH.as_posix()
 EXCLUDED_DIRS = ("evals", "scripts")
 REFLOW_WIDTH = 100
-DEBT_PATH = "home/common/agent-skills/skill-lint-debt.json"
 TRIGGERS = ("Use when", "Use for", "Use to", "Use before", "Use after", "Invoke before")
 XML = re.compile(r"<[A-Za-z/]")
 
@@ -337,49 +334,15 @@ def violations(snapshot: Snapshot) -> list[Violation]:
     return sorted(set(found))
 
 
-def load_debt(raw: bytes) -> list[str]:
-    """The debt keys of the committed debt file, which must be sorted and unique."""
-    try:
-        document = json.loads(
-            raw.decode("utf-8"),
-            object_pairs_hook=reject_duplicate_keys,
-            parse_constant=reject_nonfinite_literal,
-        )
-    except ValueError as error:
-        raise ValueError(f"cannot load {DEBT_PATH}: {error}") from error
-    debt = document.get("debt") if isinstance(document, dict) else None
-    if (
-        not isinstance(document, dict)
-        or set(document) != {"debt"}
-        or not isinstance(debt, list)
-        or not all(isinstance(key, str) for key in debt)
-        or debt != sorted(set(debt))
-    ):
-        raise ValueError(f'{DEBT_PATH}: must be {{"debt": [sorted unique keys]}}')
-    return debt
-
-
 def lint(snapshot: Snapshot) -> list[str]:
-    """One failure line per unlisted violation, then one per stale debt key."""
-    raw = snapshot.read(DEBT_PATH)
-    if raw is None:
-        raise ValueError(f"{DEBT_PATH} is absent")
-    debt = load_debt(raw)
-    found = violations(snapshot)
-    listed = set(debt)
-    produced = {violation.key for violation in found}
-    lines = [f"{v.key}: {v.text}" for v in found if v.key not in listed]
-    lines.extend(
-        f"{key}: stale debt entry; delete it from {DEBT_PATH}"
-        for key in debt if key not in produced
-    )
-    return lines
+    """One failure line per violation; no rule has an exemption."""
+    return [f"{v.key}: {v.text}" for v in violations(snapshot)]
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="skill-lint")
     commands = parser.add_subparsers(dest="command", required=True)
-    check = commands.add_parser("check", help="lint the skill trees against the debt file")
+    check = commands.add_parser("check", help="lint the skill trees")
     check.add_argument("--root", type=Path, default=Path("."))
     args = parser.parse_args(argv)
     try:

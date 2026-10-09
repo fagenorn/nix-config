@@ -138,10 +138,12 @@ agent-instruction-budget` runs steps 1–4 locally against `origin/main`.
   - Rationale and history move to specs and ADRs.
   - Everything else is cut unless an agent without it would get the step
     wrong.
-- **Targets for each heavy-skill slice:** `SKILL.md` ≤ 300 reflowed lines, and
-  hot plus conditional bytes of its profiles −35% or better against the
-  2026-10-07 measurement. Moving a document between hot and conditional does
-  not count toward the target, and it needs the label anyway.
+- **Targets for each heavy-skill slice:** `SKILL.md` ≤ 500 reflowed lines (L2),
+  cut as far as its content allows without moving a cited machine-read anchor,
+  and hot plus conditional bytes of its profiles −20% or better against the
+  2026-10-07 measurement (amended at close-out, D12). Moving a document between
+  hot and conditional does not count toward the target, and it needs the label
+  anyway.
 
 ## Test seams
 
@@ -210,3 +212,5 @@ agent-instruction-budget` runs steps 1–4 locally against `origin/main`.
 | D9 | Skill names are kept; descriptions are rewritten to third person with a trigger clause | The guide accepts action names; the collection is consistent | Gerund renames: churn with no discovery gain |
 | D10 | Upstream-pinned skills are outside `skill-lint` and the corpus ceiling | Nix does not author them; they bump via inputs | Patching upstream skills: a maintenance burden |
 | D11 | Evals run on both Sonnet and Opus for heavy-skill owners | Best practices: test every model you use; `model-matrix.json` routes both | Opus only: hides a skill that over-relies on model strength |
+| D12 | Amended at close-out (#300): a heavy-skill slice targets `SKILL.md` ≤ 500 reflowed lines (L2), cut as far as content allows without moving cited machine-read anchors, and a load drop of 20% or more | #296 showed the original 300-line and −35% targets conflicted with keeping cited machine-read anchors in place and making no semantic change | Holding 300 lines and −35%: forces moving anchors that helpers and tests cite, or changing behaviour, to hit a number |
+| D13 | At close-out (#300) the `skill-lint` debt allowlist and its loader were deleted, so every rule applies with no exemption; and raise control lets a profile's free-text `note` change without the `instruction-budget-raise` label, while every other `instruction-load.json` change of D2 still needs it | The allowlist was empty, so the mechanism only invited new debt; #326 had to ask for the label to reword a note that no gate step reads | Keeping an empty allowlist: an exemption path with no use. Exempting notes by excluding them from the model: they belong beside the profile they explain |

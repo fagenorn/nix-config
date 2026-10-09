@@ -599,7 +599,6 @@ class LiveModelTest(unittest.TestCase):
                 self.assertEqual({BREACH.match(b).groups() for b in breaches}, counting)
 
 
-DEBT = "home/common/agent-skills/skill-lint-debt.json"
 WORKFLOW = ".github/workflows/instruction-budget.yaml"
 DEMO = "home/common/agent-skills/skills/demo/SKILL.md"
 LOOSE = "home/common/agent-skills/skills/demo/LOOSE.md"
@@ -617,7 +616,6 @@ GATE_TREE = {
     "home/common/codex/skills/stub/SKILL.md":
         b"---\nname: stub\ndescription: Stubs things. Use when testing.\n---\nstub body\n",
     "home/common/agent-guidance/AGENTS.md": b"frame text\n",
-    DEBT: b'{"debt": []}\n',
     WORKFLOW: b"name: Instruction Budget\n",
 }
 TIGHTEN = "run `just agent-instruction-load tighten`"
@@ -645,11 +643,6 @@ def gate_files(model=None, extra=None, drop=()):
     for path in drop:
         files.pop(path)
     return files
-
-
-def debt_line(key):
-    return (f"debt: {key} is not in the base's {DEBT}; the debt file may only shrink, "
-            f"so fix the violation instead")
 
 
 class CheckTest(unittest.TestCase):
@@ -714,16 +707,41 @@ class CheckTest(unittest.TestCase):
                 self.assertEqual(self.check(head, gate_files()), [expected])
                 self.assertEqual(self.check(head, gate_files(), label=True), [])
 
-    def test_a_grown_debt_file_fails_with_and_without_the_label(self):
-        key = f"L4a {LOOSE}"
-        head = gate_files(extra={LOOSE: b"", DEBT: json.dumps({"debt": [key]}).encode()})
-        self.assertEqual(self.check(head, gate_files()), [debt_line(key)])
-        self.assertEqual(self.check(head, gate_files(), label=True), [debt_line(key)])
+    def test_a_note_only_change_passes_unlabelled(self):
+        model = gate_model()
+        model["profiles"][0]["note"] = "gate fixture, reworded"
+        self.assertEqual(self.check(gate_files(model), gate_files()), [])
 
-    def test_paying_debt_passes_unlabelled(self):
-        key = f"L4a {LOOSE}"
-        base = gate_files(extra={LOOSE: b"", DEBT: json.dumps({"debt": [key]}).encode()})
-        self.assertEqual(self.check(gate_files(), base), [])
+    def test_a_note_change_beside_any_other_change_still_needs_the_label(self):
+        def moved(m):
+            profile = m["profiles"][0]
+            profile["hot"], profile["conditional"] = [], ["demo/SKILL.md", "solo/SKILL.md"]
+            profile["ceiling_bytes"] = {"claude": 0, "codex": 0}
+            profile["conditional_ceiling_bytes"] = {"claude": 149, "codex": 75}
+
+        model_line = (f"raise: {instruction_load.MODEL_PATH} changes more than lowering a "
+                      f"ceiling; {WAIVER}")
+        cases = (
+            ("membership", moved),
+            ("raised ceiling", lambda m: m["profiles"][0]["ceiling_bytes"].update(claude=76)),
+            ("excluded_sites", lambda m: m["excluded_sites"].update({"demo-plugin": "reworded"})),
+        )
+        for label, change in cases:
+            with self.subTest(case=label):
+                model = gate_model()
+                model["profiles"][0]["note"] = "gate fixture, reworded"
+                change(model)
+                self.assertEqual(self.check(gate_files(model), gate_files()), [model_line])
+                self.assertEqual(self.check(gate_files(model), gate_files(), label=True), [])
+
+    def test_a_note_on_a_new_profile_does_not_excuse_it(self):
+        model = gate_model()
+        renamed = gate_model()["profiles"][0]
+        renamed["id"] = "demo-renamed"
+        model["profiles"] = [renamed]
+        model_line = (f"raise: {instruction_load.MODEL_PATH} changes more than lowering a "
+                      f"ceiling; {WAIVER}")
+        self.assertEqual(self.check(gate_files(model), gate_files()), [model_line])
 
     def test_a_lowering_only_change_passes_unlabelled(self):
         base_model = gate_model()
@@ -734,9 +752,7 @@ class CheckTest(unittest.TestCase):
     def test_a_base_without_the_gate_workflow_skips_raise_control(self):
         raised = gate_model()
         raised["profiles"][0]["ceiling_bytes"]["claude"] = 76
-        head = gate_files(raised, extra={LOOSE: b"",
-                                         DEBT: json.dumps({"debt": [f"L4a {LOOSE}"]}).encode()})
-        self.assertEqual(self.check(head, gate_files(drop=(WORKFLOW,))), [])
+        self.assertEqual(self.check(gate_files(raised), gate_files(drop=(WORKFLOW,))), [])
 
     def test_a_loose_ceiling_fails_and_tighten_fixes_it_without_raising(self):
         within = gate_model()
@@ -779,8 +795,7 @@ class CheckTest(unittest.TestCase):
         for head, base in ((gate_files(drop=(instruction_load.MODEL_PATH,)), None),
                            (gate_files(extra={instruction_load.MODEL_PATH: b"{"}), None),
                            (gate_files(), gate_files(drop=(instruction_load.MODEL_PATH,))),
-                           (gate_files(), gate_files(extra={instruction_load.MODEL_PATH: b"{"})),
-                           (gate_files(extra={DEBT: b"{"}), None)):
+                           (gate_files(), gate_files(extra={instruction_load.MODEL_PATH: b"{"}))):
             with self.subTest(head=sorted(head)[:1], base=base is not None):
                 with self.assertRaises(ValueError):
                     self.check(head, base)

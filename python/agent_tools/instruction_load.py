@@ -23,12 +23,10 @@ from agent_tools import skill_lint
 from agent_tools.skill_lint import (
     AGENTS_DIR,
     CLAUDE_TREE,
-    DEBT_PATH,
     MD_TOKEN,
     SHARED_TREE,
     Reader,
     Snapshot,
-    load_debt,
     names,
     parse_frontmatter,
     read_listed,
@@ -594,6 +592,31 @@ def lowered_to(model: dict, base: dict) -> dict:
     return result
 
 
+def renoted_to(model: dict, base: dict) -> dict:
+    """`model` with each profile's `note` set to the note of the base profile with its id.
+
+    A note is prose no gate step reads, so raise control lets it change unlabelled (#300).
+    Only a profile whose id names exactly one profile on each side, both carrying a
+    `note`, is renoted; a new, removed or renamed profile stays a change.
+    """
+    def by_id(document: dict) -> dict:
+        profiles = document.get("profiles") if isinstance(document.get("profiles"), list) else []
+        found: dict = {}
+        for profile in profiles:
+            if isinstance(profile, dict) and isinstance(profile.get("id"), str):
+                found.setdefault(profile["id"], []).append(profile)
+        return found
+
+    result = copy.deepcopy(model)
+    sources = by_id(base)
+    for profile_id, targets in by_id(result).items():
+        matches = sources.get(profile_id, [])
+        if len(targets) == 1 and len(matches) == 1 \
+                and "note" in targets[0] and "note" in matches[0]:
+            targets[0]["note"] = copy.deepcopy(matches[0]["note"])
+    return result
+
+
 def tightened(model: dict, found: list[Ceiling]) -> tuple[dict, list[str]]:
     """`model` with every ceiling above its measure lowered to it, and the lines saying so."""
     result = copy.deepcopy(model)
@@ -633,7 +656,7 @@ def run_check(head: Snapshot, base: Optional[Snapshot], raise_label: bool) -> li
             raise ValueError(f"no {MODEL_PATH} at the base")
         base_model = load_model(base_raw)
         if not raise_label:
-            if lowered_to(model, base_model) != base_model:
+            if lowered_to(renoted_to(model, base_model), base_model) != base_model:
                 lines.append(f"raise: {MODEL_PATH} changes more than lowering a ceiling; "
                              f"revert it, or have a human apply the {RAISE_LABEL} label")
             lines += [
@@ -641,14 +664,6 @@ def run_check(head: Snapshot, base: Optional[Snapshot], raise_label: bool) -> li
                 f"revert it, or have a human apply the {RAISE_LABEL} label"
                 for path in GATE_FILES if head.read(path) != base.read(path)
             ]
-        head_keys = set(load_debt(head.read(DEBT_PATH)))
-        base_debt = base.read(DEBT_PATH)
-        base_keys = set() if base_debt is None else set(load_debt(base_debt))
-        lines += [
-            f"debt: {key} is not in the base's {DEBT_PATH}; "
-            f"the debt file may only shrink, so fix the violation instead"
-            for key in sorted(head_keys - base_keys)
-        ]
     return lines
 
 
@@ -825,7 +840,7 @@ def _parser() -> argparse.ArgumentParser:
     report.add_argument("--format", choices=("markdown", "json"), default="markdown")
     report.add_argument("--root", type=Path, default=Path("."), help="the repository")
     check = commands.add_parser("check", help="run the growth gate on the working tree")
-    check.add_argument("--base", help="the base revision for raise control and debt shrink")
+    check.add_argument("--base", help="the base revision for raise control")
     check.add_argument("--raise-label", action="store_true",
                        help="the pull request carries the raise label")
     check.add_argument("--root", type=Path, default=Path("."), help="the repository")
@@ -863,7 +878,7 @@ def _check(args: argparse.Namespace) -> int:
     base = None if args.base is None else revision_snapshot(args.root, args.base)[1]
     if base is not None and base.read(WORKFLOW_PATH) is None:
         print(f"agent-instruction-load: the base has no {WORKFLOW_PATH}; "
-              f"raise control and debt shrink skipped", file=sys.stderr)
+              f"raise control skipped", file=sys.stderr)
     lines = run_check(head, base, args.raise_label)
     print("\n".join(lines) if lines else "check: pass")
     return 1 if lines else 0
