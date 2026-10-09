@@ -34,6 +34,9 @@ manifest are preserved. Nine things differ:
   9. Package extensions — add this provenance LICENSE and deployed-behaviour
      evals/evals.json, neither of which exists in the upstream skill directory.
 
+The prose of SKILL.md and HTML-REPORT.md was condensed to the skill best
+practices in fagenorn/nix-config#299; no adaptation above changed.
+
 There is no automatic synchronisation with upstream: refreshing this package
 means comparing against a newer revision by hand, re-applying the nine
 adaptations, and moving the revision recorded above.

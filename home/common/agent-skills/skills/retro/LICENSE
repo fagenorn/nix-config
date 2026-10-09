@@ -28,6 +28,9 @@ reasoning are kept. Five things differ:
   5. Presenting is followed by an explicit stop: the skill changes nothing
      until the user picks the findings to act on.
 
+The prose was condensed to the skill best practices in
+fagenorn/nix-config#299; no adaptation above changed.
+
 There is no automatic synchronisation with upstream: refreshing this package
 means comparing against a newer revision by hand, re-applying the five
 adaptations, and moving the revision recorded above.

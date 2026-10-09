@@ -415,18 +415,6 @@ class AgentModelMatrixTest(unittest.TestCase):
             )
             self.assertIn("Agent(", site["call"], site_id)
 
-    def test_cheap_tier_escalation_names_opus_role_and_durable_destination(self):
-        for relative in (
-            "home/common/agent-skills/skills/design/SKILL.md",
-            "home/common/agent-skills/skills/grill-with-docs/SKILL.md",
-            "home/common/agent-skills/skills/writing-plans/SKILL.md",
-            "home/common/agent-skills/skills/doc-grounded-questions/SKILL.md",
-            "home/common/agent-skills/skills/research/SKILL.md",
-        ):
-            text = (REPO_ROOT / relative).read_text(encoding="utf-8")
-            self.assertIn("issue-owner` on Opus/high", text, relative)
-            self.assertRegex(text, r"ledger|fixed-schema report", relative)
-
     def test_sdd_dispatches_select_exact_tiers(self):
         data = json.loads(MATRIX.read_text(encoding="utf-8"))
         sites = {site["id"]: site for site in data["dispatch_sites"]}

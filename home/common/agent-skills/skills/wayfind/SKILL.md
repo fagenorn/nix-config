@@ -1,25 +1,21 @@
 ---
 name: wayfind
-description: Chart a big fuzzy effort as a map issue with decision tickets, then resolve one decision per session until the way is clear. Use for ideas too foggy to spec or slice.
+description: Charts a foggy effort as a map issue of decision tickets and resolves one per session. Use for ideas too foggy to spec or slice.
 ---
 
 # Wayfind
 
-A loose idea too big for one session, wrapped in fog: the **destination** isn't visible yet. Wayfind charts the way as a **shared map** on the tracker and works its **decision tickets** — questions resolved by decisions, not build slices — one at a time until nothing is left to decide. Then the effort leaves this skill: specs go to `to-issues`, builds to `from-issue`; their slices cite **Decisions so far** in `## Decisions`, so implementing agents inherit the answers.
+For a loose idea too big for one session whose **destination** isn't visible yet. Wayfind charts the way as a **shared map** on the tracker and works its **decision tickets** (questions resolved by decisions, not build slices) one at a time until nothing is left to decide. Then specs go to `to-issues` and builds to `from-issue`, whose slices cite **Decisions so far** in `## Decisions`.
 
-This is **planning, not doing** — the pull to just do the work usually signals the map is done. Sits between `prototype` and `to-issues`; replaces `prototype` when the open question isn't UI- or state-shaped.
+This is **planning, not doing**: the pull to just do the work usually means the map is done. It replaces `prototype` when the open question isn't UI- or state-shaped. Read [DISCIPLINE.md](./DISCIPLINE.md) when a rule below feels skippable.
 
-Each discipline's rationale — and the trap it prevents — is in [DISCIPLINE.md](./DISCIPLINE.md); read it when a rule feels skippable.
-
-Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.tracker` and `capabilities.tracker`; authored unsupported uses the documented local map route, while blocked stops. The local map uses `map.md` with `state: open|complete` front-matter; tickets use `tickets/NNN-<slug>.md` with `type: wayfinder:<type>`, `state`, `assignee`, `blocked_by: [NNN, …]` above `## Question`; resolving appends `## Resolution` and flips `state`.
+Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.tracker` and `capabilities.tracker`; authored unsupported uses the local map route, while blocked stops. The local map is `map.md` with `state: open|complete` front-matter; tickets are `tickets/NNN-<slug>.md` with `type: wayfinder:<type>`, `state`, `assignee` and `blocked_by: [NNN, …]` above `## Question`; resolving appends `## Resolution` and flips `state`.
 
 ## The map
 
-One issue labelled `wayfinder:map`; tickets are its children. The map is an **index, not a store** — a decision lives only in its ticket; the map gists and links. Refer to tickets by **name** (title wrapping the link), never bare numbers.
+One issue labelled `wayfinder:map`, with the tickets as its children. The map is an **index, not a store**: a decision lives only in its ticket. Name tickets by title wrapping the link, never by bare number.
 
-**Low-res** = title and body only (GitHub: `gh issue view <n> --json title,body`; `kind: none`: the `map.md` file); ticket bodies open on demand, one at a time, never as a set.
-
-Map body, loaded low-res once per session:
+**Low-res** means title and body only (GitHub: `gh issue view <n> --json title,body`; `kind: none`: `map.md`). Ticket bodies open on demand, one at a time. The map body, loaded low-res once per session:
 
 ```markdown
 ## Destination
@@ -38,54 +34,47 @@ Map body, loaded low-res once per session:
 <work consciously ruled beyond the destination — gist + why + closed-ticket link. Never graduates.>
 ```
 
-Every line of the body is a **gist**: one line, ≤160 characters of operative values, links exempt — enough to decide whether to open the ticket, never enough to stand in for it (why: DISCIPLINE.md).
-
-The body's budget is **~6k characters**. A session that pushes past it compresses back under before finishing — same session, never a follow-up: fold subsumed gists into their superseder, cut grown explanations back to links. Compression rewrites the index, never deletes from it — every closed ticket keeps its link. It is also an exception to the once-per-session low-res load: the whole-body rewrite starts from a fresh read (why: DISCIPLINE.md).
+Every body line is a **gist**: one line of at most 160 characters of operative values, links exempt. The body's budget is **~6k characters**; a session that pushes past it compresses back under before it finishes, folding subsumed gists into their superseder and cutting grown explanations back to links. Compression never deletes a closed ticket's link, and it rewrites from a fresh read of the body, the one exception to loading it once.
 
 ## Tickets
 
-A ticket's body is its `## Question`, sized to one fresh-context session. Label `wayfinder:<type>`; each type is **HITL** (worked with a human who speaks for themselves — the agent never answers the human's side) or **AFK** (agent alone):
+A ticket's body is its `## Question`, sized to one fresh-context session. Label it `wayfinder:<type>`; **HITL** types are worked with a human who speaks for themselves (the agent never answers the human's side), **AFK** types by the agent alone:
 
-- **research** (AFK) — a fact a decision waits on; dispatch the `research` skill's background agent, findings file linked from the ticket.
-- **prototype** (HITL) — raise the discussion's fidelity with a cheap concrete artifact via the `prototype` skill; link the artifact.
-- **grilling** (HITL) — conversation; the default. Invoke `grill-with-docs`.
-- **task** (HITL or AFK) — manual work needed before a decision *can* be made (provision access, move data so its shape is visible); the one type that does rather than decides. Resolution records what was done and the facts later tickets depend on.
+- **research** (AFK): a fact a decision waits on; dispatch the `research` skill and link its findings file.
+- **prototype** (HITL): a cheap concrete artifact via the `prototype` skill, linked.
+- **grilling** (HITL, the default): a conversation; invoke `grill-with-docs`.
+- **task** (HITL or AFK): manual work needed before a decision can be made; the resolution records what was done and the facts later tickets need.
 
-Whatever a session makes — findings file, prototype, checklist — is **linked** from the ticket, never pasted; likewise between tickets: cite a sibling by **link plus one line**, never paste its resolution (why: DISCIPLINE.md).
+Link what a session makes from the ticket, never paste it. Cite a sibling ticket by link plus one line, never by pasting its resolution.
 
-**Claim before work**: assign the ticket to yourself; open unassigned = unclaimed. Blocking uses the tracker's **native** dependency relationship (mechanism + database-id trap: DISCIPLINE.md). **Frontier** = open, unblocked, unclaimed children.
+**Claim before work**: assign the ticket to yourself; open and unassigned means unclaimed. Blocking uses the tracker's native dependency relationship; on GitHub that is the same `blocked_by` call as `to-issues`, whose `issue_id` is the blocker's **numeric database id** (`--jq .id`), never its `#number`. **Frontier** = open, unblocked, unclaimed children.
 
 ## Fog of war
 
-Chart only what you can see. The ticket-vs-fog test: **can you state the question precisely now** (not: answer it now)?
+Chart only what you can see. A question you **can state precisely now** (not answer) becomes a ticket, even if blocked. One you can't phrase sharply yet is one loose entry in **Not yet specified**; never pre-slice fog. That section holds only fog: not decisions, live tickets or out-of-scope work.
 
-- Sharp question → ticket, even if blocked.
-- Can't phrase it sharply yet → one loose entry in **Not yet specified**; don't pre-slice fog — a patch may graduate into several tickets, or none.
-
-**Not yet specified** carries only fog: not the decided, not live tickets, not out-of-scope.
-
-Resolving a ticket clears fog: graduate the newly-phrasable into fresh tickets, delete the graduated entries. Work past the destination is not fog — rule it **Out of scope** (close mis-scoped tickets, one gist line); it returns only via a redrawn destination, as a fresh effort.
+Resolving a ticket clears fog: graduate newly phrasable entries into tickets and delete them. Work past the destination is not fog: rule it **Out of scope** (close mis-scoped tickets with one gist line); it returns only through a redrawn destination, as a fresh effort.
 
 ## Chart the map (first invocation, from a loose idea)
 
-1. **Name the destination** — a `grill-with-docs` session pins it; destination fixes scope, so it's settled first.
-2. **Map the frontier** — grill again, breadth-first. **No fog surfaced?** The journey fits one session — no map; route to `design`/`to-issues` instead.
-3. **Create the map** (Destination + Notes filled, fog into Not yet specified).
+1. **Name the destination** in a `grill-with-docs` session; it fixes scope, so it comes first.
+2. **Map the frontier**: grill again, breadth-first. No fog surfaced means the journey fits one session: no map; route to `design` or `to-issues`.
+3. **Create the map** with Destination and Notes filled and fog under Not yet specified.
 4. **Create the specifiable tickets** as children, then wire blocking edges in a second pass (issues need ids first).
-5. **Fire the research tickets** — one `research` agent per ticket, in parallel.
-6. Stop. Charting is one session's work; it resolves nothing by hand.
+5. **Fire the research tickets**: one `research` agent each, in parallel.
+6. Stop. Charting resolves nothing by hand.
 
 ## Work the map (later invocations, with the map's URL or number)
 
-**One sitting per ticket**; stopping mid-resolution parks state in the ticket first — settled, open, next action (why: DISCIPLINE.md).
+**One sitting per ticket**: if you stop mid-resolution, park the state in the ticket first (settled, open, next action).
 
-1. Load the map low-res. Under `kind: none`, that is the session's only read (compression's rewrite excepted): record into the loaded copy, anchored under its section heading so concurrent lines survive; on a shared tracker, re-read just before updating.
-2. Choose: the user's named ticket, else the first frontier ticket. **Claim it.**
-3. Resolve it, zooming into related/closed tickets on demand; use the skills the ticket type and Notes name. Never resolve more than one per session (research dispatches excepted).
-4. Record: resolution comment, close the ticket, append its gist to Decisions so far — one line, ≤160 characters, links exempt. Over the ~6k budget → compress back under now, before finishing.
-5. Maintain — part of resolving, not optional cleanup: graduate newly-phrasable fog (create-then-wire, delete the entry), rule out-of-scope discoveries out, update or delete invalidated tickets. One-per-session bounds what you *resolve*, never this bookkeeping. Expect concurrent sessions.
-6. **Complete the map** when the decision frontier and **Not yet specified** are both empty. Anything still open gets an explicit re-disposition: resolved, out of scope, or a named **standing verification hook** with its reopen condition written down. Then close the map (`kind: none`: `state` → `complete`) with a closing note under **Destination**: what was reached, a link (the spec, or Decisions so far), and the next command — `/to-issues` (multi-slice spec) or `/from-issue` (single-session build). If the user's existing authorization covers committing or otherwise delivering this decision record, finish that delivery and report it. Stop on an actual permission denial. Never start a second decision, issue slicing, or implementation without separate authorization.
+1. Load the map low-res. Under `kind: none` that is the session's only read (compression excepted): record into the loaded copy, anchored under its section heading so concurrent lines survive; on a shared tracker, re-read just before updating.
+2. Choose the user's named ticket, else the first frontier ticket. **Claim it.**
+3. Resolve it, opening related or closed tickets on demand and using the skills its type and the Notes name. Resolve at most one per session (research dispatches excepted).
+4. Record: a resolution comment, close the ticket, and append its gist to Decisions so far. Over the ~6k budget, compress now.
+5. Maintain, as part of resolving: graduate newly phrasable fog (create, then wire, then delete the entry), rule out-of-scope discoveries out, update or delete invalidated tickets. The one-per-session bound limits resolving, never this bookkeeping. Expect concurrent sessions.
+6. **Complete the map** when the frontier and Not yet specified are both empty. Re-dispose anything still open explicitly: resolved, out of scope, or a named **standing verification hook** with its reopen condition. Close the map (`kind: none`: `state` → `complete`) with a closing note under Destination: what was reached, a link (the spec, or Decisions so far), and the next command, `/to-issues` (multi-slice spec) or `/from-issue` (single-session build). If existing authorization covers delivering this decision record, deliver it and report; stop on an actual permission denial. Never start a second decision, issue slicing or implementation without separate authorization.
 
 ## Inflow from the fog gate
 
-`from-issue --auto`'s Phase-0 fog gate emits one decision ticket per unphrasable question. File each under the effort's existing map when one covers the area; otherwise create a minimal map (destination = the aborted issue's intent). The aborted issue gets a comment linking the tickets and is blocked by them natively.
+`from-issue --auto`'s Phase-0 fog gate emits one decision ticket per unphrasable question. File each under the existing map that covers the area, else create a minimal map (destination: the aborted issue's intent). The aborted issue gets a comment linking the tickets and is natively blocked by them.

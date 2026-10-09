@@ -68,19 +68,6 @@ SKILL_ROOTS = (
     REPO_ROOT / "home/common/claude-code/skills",
 )
 
-# The producer-report candidate contract, spelled once for the whole corpus so
-# design and grill-with-docs cannot drift apart (D1). writing-plans and handoff
-# keep only its commands, in SHARED_SKILL_MACHINE_TEXT (#291 D6).
-REPORT_CANDIDATE_CLAUSE = (
-    "a report candidate outside every working tree — create it with `mktemp "
-    '"${TMPDIR:-/tmp}/producer-report-XXXXXX.json"` (the explicit `XXXXXX` '
-    "template works on both macOS/BSD and Linux) — invoke `artifact-budget "
-    "validate-report --boundary producer --input <report-candidate>`, and "
-    "remove that candidate under an unconditional cleanup that runs on every "
-    "outcome, including validation rejection and failure: a shell `trap` on "
-    "`EXIT HUP INT TERM`, or the equivalent `finally`"
-)
-
 LIFECYCLE_DOCS = (*sorted((REPO_ROOT / "home/common/agent-skills/skills/from-issue").glob("*.md")),
                   *sorted(SHIP_ISSUE.parent.glob("*.md")), ORCHESTRATE)
 # The closed capability-gap line ship-issue returns when its Phase-0 probe finds
@@ -177,6 +164,8 @@ REPORT_CANDIDATE_VALIDATION = (
 # Machine-consumed text the remaining in-scope shared skills must carry
 # (#291 D6): helper argv, durable paths and the artifact fields a helper reads.
 SHARED_SKILL_MACHINE_TEXT = {
+    DESIGN: (REPORT_CANDIDATE_MKTEMP, REPORT_CANDIDATE_VALIDATION),
+    GRILL: (REPORT_CANDIDATE_MKTEMP, REPORT_CANDIDATE_VALIDATION),
     WRITING_PLANS: (REPORT_CANDIDATE_MKTEMP, REPORT_CANDIDATE_VALIDATION),
     HANDOFF: (REPORT_CANDIDATE_MKTEMP, REPORT_CANDIDATE_VALIDATION,
               ".superpowers/workflows/<run-id>/handoffs/"),
@@ -386,14 +375,9 @@ CLAUDE_POLICY_ENTRIES = {
     ),
 }
 
-SHARED_POLICY_SUPPORT = {
-    "doc-grounded-questions/REFERENCE.md": ("bindings.paths.context",),
-    "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
-}
+SHARED_POLICY_SUPPORT = {}
 
-RETAINED_SUPPORT_CONTRACTS = {
-    "grill-with-docs/ADR-FORMAT.md": ("bindings.paths.context",),
-}
+RETAINED_SUPPORT_CONTRACTS = {}
 
 # These are deliberate test patterns, not permitted policy text. The tracked
 # source scan below honors the `# policy-gate-pattern` line marker only in the
@@ -450,14 +434,6 @@ SUPPORT_POLICY_FORBIDDEN = (
     "resolve-project resolve", *LEGACY_POLICY_SURFACE, "auto-detect",
     "helper missing", "not_onboarded", ".claude/specs", ".claude/plans",
     "docs/CONTEXT-MAP.md",
-)
-
-CONTEXT_MAP_SELECTION_CONTRACT = (
-    "Select context maps only from the retained `bindings.paths.context` list in "
-    "authored order: filter entries whose basename is exactly `CONTEXT-MAP.md`; "
-    "zero means no map and no linter invocation, one selects that absolute path, "
-    "and multiple matches are an invalid caller contract that stops before invocation. "
-    "Never probe the filesystem, sort the list, take a first match, or infer a location."
 )
 
 RESOLUTION_SENTENCE = (
@@ -770,7 +746,6 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         for relative in ("doc-grounded-questions/SKILL.md", "grill-with-docs/SKILL.md", "grill-with-docs/CONTEXT-FORMAT.md"):
             text = (REPO_ROOT / "home/common/agent-skills/skills" / relative).read_text(encoding="utf-8")
             contract = normalized(text)
-            self.assertIn(CONTEXT_MAP_SELECTION_CONTRACT, contract)
             for forbidden in (
                 "legacy context-map setting", "docs/CONTEXT-MAP.md", "select the first match",
                 "sort(", "filesystem search", "first match wins", "default map location",
@@ -1114,52 +1089,12 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(skill=name):
                 self.assertIn("resolve-project resolve", path.read_text(encoding="utf-8"))
 
-    def test_design_and_grill_measure_after_last_write_and_stop_truthfully(self):
+    def test_design_and_grill_measure_with_the_checker_and_report_closed_states(self):
+        check = "artifact-budget check --kind design-spec --root <spec-root> --format json"
         for producer in (self.design, self.grill):
-            self.assert_ordered(producer, "final mutation", "artifact-budget check",
-                                "compact repetition", "artifact-budget check",
-                                "decompose_required")
-            self.assertIn("budget_status: within_budget", producer)
-            for metric in ("root_bytes", "total_bytes", "file_count",
-                           "largest_member_bytes"):
-                self.assertIn(metric, producer)
-            self.assert_ordered(producer, "decompose_required",
-                                "independently deliverable",
-                                "proposed decomposition")
+            self.assertIn(check, normalized(producer))
+            self.assertRegex(producer, r"state: complete \| decompose_required \| failed")
             self.assertNotIn("wc -c", producer)
-            self.assertRegex(producer, r"state:.*complete.*decompose_required.*failed")
-
-    def test_design_persists_the_final_measured_spec_before_reporting_complete(self):
-        design = " ".join(self.design.split())
-        self.assert_ordered(
-            design,
-            "final content mutation",
-            "run and, if needed, remediate the budget checks",
-            "final `within_budget` result",
-            "commit the completed spec in the worktree",
-            "construct, validate, and emit the `complete` producer report",
-            "report candidate outside every working tree",
-            "validate-report --boundary producer",
-            "validated stdout bytes",
-        )
-        self.assertIn(
-            "If committing or signing fails, return `failed`; never emit `complete`",
-            design,
-        )
-        self.assertIn(
-            "Never commit an over-budget or `decompose_required` draft as a completed design",
-            design,
-        )
-
-        hook_boundary = design[design.index("If any commit hook changes"):]
-        self.assert_ordered(
-            hook_boundary,
-            "prior metrics are stale",
-            "artifact-budget check --kind design-spec",
-            "succeeding commit",
-            "newly measured, final within-budget content",
-            "before emitting `complete`",
-        )
 
     def test_artifact_reports_are_bounded_root_only_shapes(self):
         for producer in (self.design, self.grill, self.handoff):
@@ -1172,24 +1107,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             self.assertIn("validate-report --boundary producer", normalized(producer))
             for forbidden in ("spec_path:", "adr_paths:", "decisions:", "open_items:", "summary:"):
                 self.assertNotRegex(producer, rf"(?m)^\s*{re.escape(forbidden)}")
-        # design and grill-with-docs are outside #313's scope and keep their pins.
-        for producer in (self.design, self.grill):
-            for decision in ("(D5)", "(D11, D14)"):
-                self.assertIn(decision, producer)
-            self.assert_ordered(normalized(producer),
-                                "report candidate outside every working tree",
-                                "validate-report --boundary producer",
-                                "validated stdout")
-            self.assertIn("never inline artifact contents", producer)
-
-    def test_design_and_grill_share_one_report_candidate_clause(self):
-        clause = normalized(REPORT_CANDIDATE_CLAUSE)
-        for name, text in (
-            ("design", self.design),
-            ("grill-with-docs", self.grill),
-        ):
-            with self.subTest(skill=name):
-                self.assertIn(clause, normalized(text))
 
     def test_shared_skills_carry_their_machine_text(self):
         for path, items in SHARED_SKILL_MACHINE_TEXT.items():
@@ -2020,7 +1937,7 @@ class CodebaseDesignSkillContractsTest(unittest.TestCase):
                         resolved.is_file(),
                         f"{name} links to {target}, which is not a file in the package",
                     )
-        self.assertGreaterEqual(checked, 9, "the link scan found nothing to check")
+        self.assertGreaterEqual(checked, 5, "the link scan found nothing to check")
 
     def test_package_carries_no_dispatch_site(self):
         for path in sorted(CODEBASE_DESIGN_DIR.rglob("*")):

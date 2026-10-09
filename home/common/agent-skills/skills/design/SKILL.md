@@ -1,19 +1,17 @@
 ---
 name: design
-description: Turn an idea or issue into an approved design doc by grilling the open questions in batched rounds. Use to brainstorm, design, or spec before planning.
+description: Turns an idea or issue into an approved design spec through batched question rounds. Use to brainstorm, design or spec work before planning.
 ---
 
 # Design
 
 Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.paths.artifacts.specs` for the design artifact path.
 
-Turn an idea into a design doc the plan phase can execute from. You own the interview and the spec; the caller owns planning, review, and execution.
+Turn an idea into a design spec the plan phase can execute from. You own the interview and the spec; the caller owns planning, review and execution.
 
-## The interview — round-batched frontier
+## The interview: round-batched frontier
 
-Model the design as a tree: every decision branches into the decisions hanging off it. The **frontier** is every question whose prerequisites are already settled — the ones you can ask *now* without guessing at an answer you haven't heard yet.
-
-Ask the whole frontier in one numbered round:
+Model the design as a tree of decisions. The **frontier** is every question whose prerequisites are settled. Ask the whole frontier as one numbered round:
 
 ```
 ❓ **Q1** — **<short title>**: <the question, with the choices when there are choices>
@@ -21,46 +19,35 @@ Ask the whole frontier in one numbered round:
 ➡️ <your recommended answer>
 ```
 
-- One round carries every askable question. A question whose answer depends on another question still open in this round belongs to a *later* round.
-- Every question carries a `➡️` recommendation. Committing to a defensible default before you hear the user's lean is the discipline, not decoration.
-- The round's answers reshape the tree — settled decisions push the frontier outward. Recompute it and ask the next round.
-- Done when the frontier is empty: every branch visited, nothing silently assumed.
+- A question that depends on another question open in the same round waits for a later round.
+- Every question carries a `➡️` recommendation: commit to a defensible default before hearing the user's lean.
+- Answers reshape the tree; recompute the frontier and ask the next round. Done when the frontier is empty and nothing was silently assumed.
 
-**Facts are your job, never the user's.** When a frontier question needs a sharply bounded fact from the environment — filesystem, tooling, library behavior, prior art in the codebase — resolve it yourself. Keep a small direct grep or file check inline: a trivial repository fact (does the file exist, what is the symbol's signature) is answered locally, not delegated. Only when the result set needs a sharply bounded read-only exploration pass, use the explorer below. When the answer needs cited primary sources, invoke `research`; that skill owns its own marked background launch.
+**Ground before round 1**: invoke `doc-grounded-questions`, or read this phase's `GROUNDING.md` cache when the caller built one. A question the docs answer is stated with its citation, not asked.
+
+**Facts are your job; decisions are the user's.** Answer a trivial repository fact inline (does the file exist, what is the signature). When a fact needs a bounded read-only exploration pass, dispatch the explorer; when it needs cited primary sources, invoke `research`, which owns its own background launch.
 
 <!-- agent-dispatch: id=design-bounded-fact-lookup role=explorer model=sonnet effort=medium -->
 Agent(subagent_type="Explore", model="sonnet", effort="medium") performs one sharply bounded read-only fact lookup without making the design decision.
 
-Don't block on it: an in-flight lookup is an unsettled prerequisite, so only the questions downstream of it wait; ask the rest of the frontier now. The *decisions* are the user's. If the lookup becomes open-ended, ambiguous, or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and selected role in the phase's existing fixed-schema report.
-
-**Ground before round 1.** Invoke `doc-grounded-questions`, or read this phase's `GROUNDING.md` cache when the caller already built one. A question the project's docs already answer is not a question — state the answer, cite it, move on.
+An in-flight lookup blocks only the questions downstream of it; ask the rest now. If the lookup turns open-ended, ambiguous or judgment-bearing, stop the cheap-tier run and re-dispatch the `issue-owner` on Opus/high; record that escalation and the selected role in the phase's existing fixed-schema report.
 
 ## Authorized autonomous decisions
 
-When the caller has already authorized autonomous decisions within a stated scope
-(including, but not limited to, literal `from-issue --auto`), **the `➡️`
-recommendation is the answer within that scope.** Don't post the round and don't
-wait: resolve each question with its recommendation and record it in the spec's
-`## Decision ledger` (see Output). Log only non-obvious decisions — scope,
-interface, behavioral, test-seam, irreversible, user-preference; skip routine
-task splits, commit boundaries, obvious verification commands, and mechanical
-pattern-following. Consolidation is permitted and encouraged: related decisions
-merge into one row. Rounds still run in order; the frontier is what keeps
-dependent decisions from being settled out of sequence. A decision that expands
-the approved scope still returns to the caller.
+When the caller has authorized autonomous decisions within a stated scope (literal `from-issue --auto` among others), **the `➡️` recommendation is the answer** within that scope: post no round and wait for nothing. Rounds still run in frontier order. Record each non-obvious decision in the spec's `## Decision ledger`; a decision that expands the approved scope returns to the caller.
 
 ## Guards
 
-- **Synthesize, never re-interview.** Everything the rounds and the caller's earlier phases settled goes into the spec as a decision. Re-asking a settled question is the failure this skill exists to prevent.
-- **Agree the test seams before the spec is written.** Name the public boundaries this work will be tested at. Prefer existing seams, prefer the highest seam, keep them few. The plan and every implementer inherit these seams and may not invent others.
-- **YAGNI.** Strip from every option the configuration, abstraction and future-proofing nobody asked for.
-- **Scope check first.** If the request is several independent subsystems, say so before spending questions on detail: decompose it, design the first piece, hand the rest to `to-issues`.
+- **Synthesize, never re-interview.** Everything the rounds and the caller's earlier phases settled enters the spec as a decision.
+- **Agree the test seams before writing the spec**: the public boundaries this work is tested at, preferring existing and higher seams, kept few. The plan and every implementer inherit them and invent no others.
+- **YAGNI**: strip unrequested configuration, abstraction and future-proofing from every option.
+- **Scope check first**: a request spanning several independent subsystems is decomposed before detail; design the first piece and hand the rest to `to-issues`.
 
 ## Output
 
-Write the design to `<bindings.paths.artifacts.specs>/<YYYY-MM-DD>-<topic>-design.md` in the worktree you were called in — never on the integration branch.
+Write the spec to `<bindings.paths.artifacts.specs>/<YYYY-MM-DD>-<topic>-design.md` in the worktree you were called in, never on the integration branch.
 
-Sections: **Problem** (from the user's perspective) · **Solution** · **Decisions** (modules and interfaces touched, schema and API contracts, behavior — no file paths or line numbers; they rot) · **Test seams** (the agreed seams and the prior art they follow) · **Out of scope** (mandatory, and real) · **Decision ledger** — the issue's single decision store, a table later phases cite by row ID instead of restating rationale:
+Sections: **Problem** (from the user's perspective) · **Solution** · **Decisions** (modules, interfaces, schema and API contracts, behavior; no file paths or line numbers) · **Test seams** (the agreed seams and the prior art they follow) · **Out of scope** (mandatory and real) · **Decision ledger**, the issue's single decision store, which later phases cite by row ID ("per D3") instead of restating:
 
 ```markdown
 | ID | Choice | Grounding | Rejected alternative |
@@ -68,75 +55,30 @@ Sections: **Problem** (from the user's perspective) · **Solution** · **Decisio
 | D1 | <what was decided, one line> | <doc/standard/user statement it rests on> | <the alternative and why not, one line> |
 ```
 
-Only non-obvious decisions earn a row (scope, interface, behavioral, test-seam, irreversible, user-preference — self-answered or user-answered); plans and task briefs cite "per D3" rather than duplicating the row.
+Only non-obvious decisions earn a row (scope, interface, behavioral, test-seam, irreversible, user-preference), whoever answered them; skip routine task splits, commit boundaries, obvious verification and mechanical pattern-following, and merge related decisions into one row.
 
-Then read the file once with fresh eyes and fix inline: placeholders (`TBD`, "handle edge cases"), sections that contradict each other, requirements that can be read two ways, scope that needs decomposing. No reviewer dispatch — this is your own pass. The last such edit is the final mutation before measurement.
+Then reread the spec once with fresh eyes and fix placeholders (`TBD`, "handle edge cases"), contradictions, ambiguous requirements and scope that needs decomposing. No reviewer dispatch. That last edit is the final mutation before measurement.
 
-## Artifact budget boundary
+## Artifact budget
 
-Measurement and remediation follow the authoritative final-writer rule (D5).
-After the fresh-eyes fixes, run the stable command `artifact-budget check --kind
-design-spec --root <spec-root> --format json`. Do not embed thresholds or substitute
-an ad-hoc byte counter. Exit 2 is `failed`; when the root is known, preserve its path but attach no
-fabricated metrics or status. Exit 0 is acceptable only when the checker says
-`within_budget` and returns exactly `root_bytes`, `total_bytes`, `file_count`, and
-`largest_member_bytes`.
+Measurement follows the final-writer rule (D5). Run `artifact-budget check --kind design-spec --root <spec-root> --format json`; the checker owns the thresholds and the metrics.
 
-On the first exit 3, compact repetition, examples, and evidence references without
-weakening any required section or changing the decision ledger's meaning. That edit
-invalidates the first measurement, so run `artifact-budget check --kind design-spec
---root <spec-root> --format json` once more. If the second result is still over
-budget, retain the draft and return `decompose_required` with the checker's sorted,
-closed `violations`; never call the design approved or complete. There is no second
-compaction strategy. A second-check exit 2 is `failed`.
+- Exit 0 with `within_budget`: measured.
+- Exit 2: `failed`.
+- First exit 3: compact repetition, examples and evidence references without weakening a required section or the ledger's meaning, then check again. Still over budget: keep the draft and return `decompose_required` with the checker's `violations`, its `notes` naming the independently deliverable parts as a proposed decomposition. A second-check exit 2 is `failed`.
 
-For `decompose_required`, use the bounded `notes` string to identify the
-independently deliverable parts as a concise proposed decomposition. Never add a
-list-valued report field; the retained draft root carries the detailed boundaries.
+The design is complete only in this order: final mutation, a `within_budget` check, a commit of the spec in the worktree, then the `complete` report. A failed commit or signature is `failed`. Never commit an over-budget or `decompose_required` draft as a completed design. If a commit hook changes the spec, check it again and commit exactly the newly measured within-budget content before reporting `complete`.
 
-A design becomes complete only through this required sequence: make the final
-content mutation; run and, if needed, remediate the budget checks above; obtain a
-final `within_budget` result; commit the completed spec in the worktree; then
-construct, validate, and emit the `complete` producer report. If committing or
-signing fails, return `failed`; never emit `complete`. Never commit an over-budget
-or `decompose_required` draft as a completed design.
-
-If any commit hook changes the artifact, the prior metrics are stale. Run
-`artifact-budget check --kind design-spec --root <spec-root> --format json` again
-against the resulting artifact and require a succeeding commit that persists
-exactly the newly measured, final within-budget content before emitting
-`complete`. A hook-induced over-budget result follows the remediation boundary
-above and must not be committed or reported as a completed design.
-
-Any later writer owns remeasurement: in particular, a grill edit or a
-planning-phase decision-ledger append invalidates these metrics and must check the
-complete spec again before its phase advances.
+Any later writer (a grill edit, a planning-phase ledger append) voids these metrics and checks the whole spec again before its phase advances.
 
 ## Return control
 
-Return exactly one producer report (D11, D14). Its closed state row is `state: complete | decompose_required | failed`:
+Return one producer report `{state, artifact, notes}` (D11, D14) with `state: complete | decompose_required | failed`:
 
-- `complete` has one artifact with `kind: design-spec`, the root `path`, `metrics`
-  containing exactly `root_bytes`, `total_bytes`, `file_count`, and
-  `largest_member_bytes`, and `budget_status: within_budget`.
-- `decompose_required` has the same artifact shape with `budget_status:
-  over_budget` and the checker's sorted closed `violations`.
-- `failed` has a null artifact before a root is known, or only `kind` and `path`
-  when it is known. Include no fabricated metrics or budget status.
+- `complete`: `kind: design-spec`, the root `path`, the checker's `metrics` (`root_bytes`, `total_bytes`, `file_count`, `largest_member_bytes`) and `budget_status: within_budget`.
+- `decompose_required`: the same with `budget_status: over_budget` and the checker's `violations`.
+- `failed`: a null artifact, or only `kind` and `path` once the root is known.
 
-`notes` is a string bounded by the shared policy's
-`phase_reports.notes_max_characters`; the skill contains no copied limit. The
-report must never inline artifact contents, decision-ledger rows, policy, logs, or
-member lists. The committed root carries all detail.
+`notes` stays within the shared policy's `phase_reports.notes_max_characters` and never inlines artifact contents, ledger rows, policy, logs or member lists; the committed spec carries the detail.
 
-Only after the last artifact check, write the object as UTF-8 to a report
-candidate outside every working tree — create it with `mktemp
-"${TMPDIR:-/tmp}/producer-report-XXXXXX.json"` (the explicit `XXXXXX` template
-works on both macOS/BSD and Linux) — invoke `artifact-budget validate-report
---boundary producer --input <report-candidate>`, and remove that candidate under
-an unconditional cleanup that runs on every outcome, including validation
-rejection and failure: a shell `trap` on `EXIT HUP INT TERM`, or the equivalent
-`finally`. Return only the exact validated stdout bytes. Validation exit 2 is
-`failed`: emit no Markdown, YAML, candidate JSON, truncated text, or prose
-fallback. Do not invoke `writing-plans`, start implementing, or offer to — the
-caller owns the next phase.
+After the last check, write the report to a candidate from `mktemp "${TMPDIR:-/tmp}/producer-report-XXXXXX.json"`, run `artifact-budget validate-report --boundary producer --input <report-candidate>`, and remove the candidate in a cleanup that runs on every outcome (a `trap` on `EXIT HUP INT TERM`, or `finally`). Return only the validated stdout; validation exit 2 is `failed`, with no fallback text. Do not invoke `writing-plans` or start implementing: the caller owns the next phase.

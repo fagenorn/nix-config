@@ -1,115 +1,73 @@
 ---
 name: to-issues
-description: Break a plan, spec, or PRD into independently-grabbable tracker issues using tracer-bullet vertical slices. Use to convert plans into implementation tickets.
+description: Splits a plan, spec or PRD into independently grabbable tracker issues as tracer-bullet vertical slices. Use to turn a plan into implementation tickets.
 ---
 
 # To Issues
-
-Break a plan into independently-grabbable issues using vertical slices (tracer bullets).
 
 ## Project bindings (resolve first)
 
 Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.tracker` and `bindings.paths`; required blocked capabilities stop, and authored unsupported takes its documented tracker-free route.
 
-Keys this skill uses: `bindings.tracker.{kind,cli,repo_slug,credential_env.unset_before_invocation}` and `bindings.paths`.
-
-### Resolve the issue tracker
-
-`bindings.tracker.kind` and `bindings.tracker.cli` say where issues live. An authored unsupported tracker means there is no tracker: present the breakdown but do not publish (output the slices as a markdown list / file for the user to file manually). A blocked tracker stops the dependent forge operation.
+`bindings.tracker.{kind,cli,repo_slug,credential_env.unset_before_invocation}` say where and how issues are filed. An authored unsupported tracker, or `kind: none`, means no publishing: emit the slices as a Markdown list, one template block each, for the user to file. A blocked tracker stops the forge operation.
 
 ## Process
 
 ### 1. Gather context
 
-Work from whatever is already in the conversation context. If the user passes an issue reference (issue number, URL, or path) as an argument, fetch it from the issue tracker and read its full body. Load the comment thread only when it is likely to matter — the body references a discussion, the issue shows review activity, or the body alone leaves an open question; otherwise skip it.
+Work from the conversation. Given an issue reference, fetch and read its full body; load the comment thread only when the body points to a discussion, shows review activity, or leaves a question open.
 
-### 2. Explore the codebase (optional)
+### 2. Explore the codebase
 
-If you have not already explored the codebase, do so to understand the current state of the code. Issue titles and descriptions should use terminology from retained `bindings.paths.context` and the knowledge capability's passed records. An authored unsupported knowledge capability takes its documented no-knowledge route.
-
-Look for opportunities to prefactor the code to make the implementation easier — "make the change easy, then make the easy change." Prefactoring is its own leading slice, not a preamble folded into the first feature slice.
+Explore if you haven't. Titles and descriptions use the terms of the retained `bindings.paths.context` and the knowledge capability's passed records (an authored unsupported knowledge capability takes its no-knowledge route). Look for prefactoring that makes the change easy; it is its own leading slice.
 
 ### 3. Draft vertical slices
 
-**Check the rejection KB first.** Read the retained
-`bindings.paths.rejections` entries in authored order before drafting; each entry
-records a consciously rejected idea. Never propose a slice that re-litigates a
-rejected direction — mention the retained rejection path instead; only the user
-can revive one.
+First read the retained `bindings.paths.rejections` entries in authored order. Never propose a slice that re-litigates a rejected direction; cite the rejection path instead. Only the user revives one.
 
-Break the plan into **tracer bullet** issues. Each issue is a thin vertical slice that cuts through ALL integration layers end-to-end, NOT a horizontal slice of one layer.
-
-Slices may be human-required or autonomous/agent-executable. Human-required slices need a person in the loop — an architectural decision, a design review, a credential or approval only a human can grant. Autonomous slices can be implemented and merged without human interaction. Prefer autonomous over human-required where possible.
+Each issue is a **tracer bullet**: a thin vertical slice through every integration layer, never a horizontal slice of one layer. Mark each slice human-required (needs a person's decision, review, credential or approval) or autonomous, preferring autonomous.
 
 <vertical-slice-rules>
 - Each slice delivers a narrow but COMPLETE path through every layer (schema, API, UI, tests)
 - A completed slice is demoable or verifiable on its own
-- Each slice is sized to fit one fresh context window — oversized slices are the root cause of ultra-long implementation sessions
+- Each slice fits one fresh context window
 - Any prefactoring is its own slice, and comes first
 - Prefer many thin slices over few thick ones
 </vertical-slice-rules>
 
-**Wide refactors are the exception to vertical slicing.** One mechanical change with codebase-wide blast radius (rename a column, retype a shared symbol) can't land green as a tracer bullet — sequence it as expand–contract per [WIDE-REFACTORS.md](./WIDE-REFACTORS.md); read that file when such a slice candidate appears.
+A wide refactor (one mechanical change with codebase-wide blast radius) cannot land green as a tracer bullet: sequence it per [WIDE-REFACTORS.md](./WIDE-REFACTORS.md) when such a candidate appears.
 
 ### 4. Quiz the user
 
-Present the proposed breakdown as a numbered list. For each slice, show:
+Present the breakdown as a numbered list with each slice's **title**, **type** (human-required / autonomous), **blocked by**, and **user stories covered** when the source has them. Ask whether the granularity, dependencies, merges or splits, and human/autonomous marks are right. Iterate until the user approves.
 
-- **Title**: short descriptive name
-- **Type**: human-required / autonomous
-- **Blocked by**: which other slices (if any) must complete first
-- **User stories covered**: which user stories this addresses (if the source material has them)
+When the user rules a direction out (not merely defers it), write one short file per rejection to an authored `bindings.paths.rejections` location (the idea in a line, why, the date, any link) and commit it with the breakdown. An empty or unsupported list has no write route.
 
-Ask the user:
+### 5. Publish
 
-- Does the granularity feel right? (too coarse / too fine)
-- Are the dependency relationships correct?
-- Should any slices be merged or split further?
-- Are the correct slices marked human-required vs autonomous?
+Publish each approved slice with the template below, blockers first so "Blocked by" cites real identifiers. Apply a triage label only when a label taxonomy was given or configured; otherwise skip it and say so.
 
-Iterate until the user approves the breakdown.
+Record blocking edges natively where the tracker supports it:
 
-**Record conscious rejections.** When the user rules a proposed direction out during this quiz (not
-merely deferring it), write one short file per rejection only to an authored
-`bindings.paths.rejections` location — the idea in a line, why it was rejected,
-the date, and any link (spec section, wayfind ticket) — and commit them with the
-breakdown. An empty or unsupported retained list has no rejection write route.
+- **GitHub**: `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`. **`issue_id` is the blocker's numeric database id** (`gh api repos/<owner>/<repo>/issues/<n> --jq .id`), not its `#number` or `node_id`: a number silently links the wrong issue or fails. Read open blockers back from `issue_dependencies_summary.blocked_by`.
+- **GitLab**: `glab issue note <child> --message "/blocked_by #<blocker>"`; the free tier lacks native links, so the body section is the record.
 
-### 5. Publish the issues to the issue tracker
-
-For each approved slice, publish a new issue to the resolved issue tracker. Use the issue body template below. These issues are considered ready for autonomous agents.
-
-**Triage labels are conditional.** Apply a triage/ready-for-agent label ONLY if a label taxonomy was provided by the user or detected for the project (for example, a project label config or labels the user named when answering the tracker question). If no label taxonomy is available, skip labeling and say so explicitly (e.g. "Published without a triage label — no label taxonomy was configured.").
-
-Publish issues in dependency order (blockers first) so you can reference real issue identifiers in the "Blocked by" field.
-
-**Record blocking edges natively where the tracker has a native relationship** — it renders the frontier in the tracker's own UI, so whoever picks up work next can query what is takeable without re-reading the plan.
-
-- **GitHub** — issue dependencies: `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`. **IMPORTANT: `issue_id` is the blocker's numeric database id, not the `#number` and not the `node_id`.** Get it with `gh api repos/<owner>/<repo>/issues/<n> --jq .id`. Passing the issue number here is the standard trap — it silently links an unrelated issue or fails. Read open blockers back from `issue_dependencies_summary.blocked_by`.
-- **GitLab** — post the `/blocked_by #<blocker>` quick action as a note (`glab issue note <child> --message "/blocked_by #<blocker>"`). Native blocking links are a Premium/Ultimate feature; on the free tier fall back to the body's "Blocked by" section.
-
-Where the tracker has no native relationship (or the API call is unavailable), the template's "Blocked by" section is the record. A slice is unblocked when every slice blocking it is closed.
-
-If the resolved tracker is `kind: none`, do not publish — emit the breakdown as a markdown list (one block per slice using the template below) for the user to file manually.
+Without a native relationship the template's "Blocked by" section is the record. A slice is unblocked when all its blockers are closed.
 
 <issue-template>
 ## Parent
 
-A reference to the parent issue on the issue tracker (if the source was an existing issue, otherwise omit this section).
+A reference to the parent issue (omit when the source was not an issue).
 
 ## What to build
 
-A concise description of this vertical slice. Describe the end-to-end behavior, not layer-by-layer implementation.
+The slice's end-to-end behavior, not layer-by-layer steps. No file paths or code, except a prototype snippet that pins a decision better than prose (state machine, reducer, schema), trimmed to its decision and marked as from a prototype.
 
-Avoid specific file paths or code snippets — they go stale fast. Exception: if a prototype produced a snippet that encodes a decision more precisely than prose can (state machine, reducer, schema, type shape), inline it here and note briefly that it came from a prototype. Trim to the decision-rich parts — not a working demo, just the important bits.
-
-**Demo:** one line — what a reviewer can run, see, or click when this slice lands.
+**Demo:** one line: what a reviewer can run, see, or click when this slice lands.
 
 ## Decisions
 
-Links to the decisions this slice depends on — ADRs, wayfind decision tickets, spec sections — one
-line each with the answer's gist. This is pre-resolved uncertainty: an implementing agent grounds in
-these instead of re-deriving (or re-asking) them. Omit the section when nothing applies.
+One line per decision this slice depends on (ADR, wayfind ticket, spec section) with the answer's gist. Omit when none apply.
 
 ## Acceptance criteria
 
@@ -125,26 +83,16 @@ Or "None - can start immediately" if no blockers.
 
 </issue-template>
 
-**Every acceptance criterion is typed and located.** Write each one as
-`- [ ] [code|evidence|human] <observable outcome> — measured: <where>`, with exactly one kind from
-that closed set:
+Write each criterion as `- [ ] [code|evidence|human] <observable outcome> — measured: <where>`:
 
-- `code` — a check any reviewer reproduces at the head: a test, the build or a CI job. `measured:`
-  names that test, check or CI job.
-- `evidence` — a measurement taken outside the gating suite. `measured:` names the command, the
-  conditions it runs under and a literal threshold, such as `≤ 90 s per module, serial, idle mbp`.
-- `human` — needs a person's judgment or an environment the agent cannot control. `measured:` names
-  who judges and in what environment.
+- `code`: a test, the build or a CI job any reviewer reruns at the head.
+- `evidence`: a measurement outside the gating suite: the command, its conditions and a literal threshold, such as `≤ 90 s per module, serial, idle mbp`, never "faster".
+- `human`: who judges, in what environment; only when no agent can observe it.
 
-Prefer `code`, then `evidence`; use `human` only when no agent can produce the observation. The
-`measured:` clause is the one place the body names a test, file or command, because that name is
-what a grader reruns.
+Prefer `code`, then `evidence`. The `measured:` clause is the only place the body names a test, file or command.
 
-**The body is the contract; the discussion is context.** Issue bodies are read weeks later in fresh
-contexts: state behavior and outcomes, not procedures; no file paths outside a `measured:` clause, no line
-numbers, no "as discussed above". Anything an implementer must know goes in the body or a linked
-durable artifact, never only in a comment thread.
+The body is the contract, read weeks later in a fresh context: behavior and outcomes, no file paths outside `measured:`, no line numbers, no "as discussed above"; what an implementer needs lives in the body or a linked artifact, never only in a comment.
 
-**Every acceptance criterion must be falsifiable.** For each one, name the observation that would show it false, and confirm that observation actually fails at the commit the implementer starts from. A criterion already true at the base commit grades nothing — it is how an implementer "completes" an issue as a no-op. Vertical slicing prevents most of this by construction (a slice delivering behaviour that did not exist before is red at base), but check by hand. Reject two other recurring shapes: a criterion that can only be satisfied by work another slice owns, and one that restates the request instead of deriving from the artifact. The `measured:` clause must name an observation that fails at the base commit, and an evidence threshold is a literal number or string, never "faster" or "reasonable".
+Every criterion must be falsifiable: name the `measured:` observation that would show it false, and confirm by hand that it fails at the commit the implementer starts from; a criterion already true there lets the issue be "completed" as a no-op. Also reject a criterion only another slice's work can satisfy, and one that restates the request instead of deriving from the artifact.
 
 Do NOT close or modify any parent issue.

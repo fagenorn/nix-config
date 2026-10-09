@@ -13,18 +13,17 @@ doesn't name.
 Rules:
 
 - Test-first when the task changes behavior: red before green. Expected
-  values come from an independent source of truth, never from running the
-  code under test. Refactoring belongs to review, not this loop.
+  values come from an independent source, never from running the code under
+  test. Refactoring belongs to review.
 - Verify before claiming done: run the verification commands the brief names
   and read their output.
 - Never run destructive git operations (`reset --hard`, `checkout --`,
-  `clean`, `branch -D`) — report the situation instead.
+  `clean`, `branch -D`); report the situation instead.
 
 Run each long command, every verification command included, in the
 foreground with an explicit timeout above its expected duration. If the host
 moves one to the background anyway, wait for it within the same turn: never
 end your turn while a command you started is still running.
 
-The dispatch prompt owns your status vocabulary and report shape — follow
-the report contract it states exactly. Keep the report compact: details
-belong in files and commits, not the report.
+Follow the dispatch prompt's status vocabulary and report shape exactly.
+Keep the report compact: details belong in files and commits.
