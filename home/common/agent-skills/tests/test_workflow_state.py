@@ -8258,5 +8258,174 @@ class LedgerClockSeamTest(LifecycleHarness, unittest.TestCase):
                 self.assertEqual(self.sites(path), [])
 
 
+class OwnerLivenessTest(LifecycleHarness, unittest.TestCase):
+    """#310 D2-D5, D10, D11: workflow-state owner-liveness."""
+
+    SKEW = ("workflow-state: --since {s} is {n} seconds ahead of the clock {c}; a supplied "
+            "time may lead it by at most 60 seconds — omit it to use the clock\n")
+
+    def setUp(self):
+        super().setUp()
+        self.init_run()
+        self.worktrees = {n: str(self.root / f"wt-{n}") for n in (14, 16)}
+        response = self.control(
+            now=DEFAULT_NOW, issues=[14, 16], max_parallel=2, attempt_budget_minutes=180,
+            tracker=[self.tracker_fact(n) for n in (14, 16)],
+            worktrees=[self.worktree_fact(n, candidate={"path": self.worktrees[n],
+                                                         "state": "absent"})
+                       for n in (14, 16)])
+        self.assertEqual([a["id"] for a in response["actions"] if a["kind"] == "spawn"],
+                         ["14:1:1", "16:1:1"])
+
+    def inventory(self):
+        return (self.state_path.read_bytes(),
+                sorted(p.relative_to(self.root) for p in self.root.rglob("*")))
+
+    def call(self, clock, *, action_id="14:1:1", stall="30", since=None, run_id=None):
+        # The pinned clock is scoped to this one call, so later ledger writes in
+        # the same test are skew-checked against the real clock (PR310-02).
+        previous = self.cli_env.get("WORKFLOW_STATE_TEST_CLOCK")
+        self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = clock
+        args = ["owner-liveness", "--repo-root", self.root,
+                "--run-id", self.run_id if run_id is None else run_id,
+                "--action-id", action_id, "--stall-minutes", stall]
+        if since is not None:
+            args += ["--since", since]
+        try:
+            before = self.inventory()
+            completed = self.run_cli(*args, ok=False)
+            self.assertEqual(self.inventory(), before)
+        finally:
+            if previous is None:
+                self.cli_env.pop("WORKFLOW_STATE_TEST_CLOCK", None)
+            else:
+                self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = previous
+        return completed
+
+    def liveness(self, clock, **kwargs):
+        completed = self.call(clock, **kwargs)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return self.validated_response(completed.stdout)
+
+    def reply(self, verdict, since, progress_at, stall_at, wait, *, action_id="14:1:1",
+              reason="current"):
+        return {"interface_version": 1, "kind": "owner_liveness", "action_id": action_id,
+                "reason": reason, "verdict": verdict, "since": since,
+                "progress_at": progress_at, "stall_at": stall_at, "wait_seconds": wait}
+
+    def assert_refused(self, completed, stderr):
+        self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
+                         (2, "", stderr))
+
+    def test_live_names_the_seconds_left_from_the_clock(self):
+        self.assertEqual(self.liveness("2026-08-13T20:10:07Z"), self.reply(
+            "live", "2026-08-13T20:10:07Z", "2026-08-13T20:00:00Z",
+            "2026-08-13T20:40:07Z", 1800))
+        # A since ahead of the clock (within the skew) lengthens the wait past the bound.
+        self.assertEqual(
+            self.liveness("2026-08-13T20:10:07Z", since="2026-08-13T20:10:37Z"),
+            self.reply("live", "2026-08-13T20:10:37Z", "2026-08-13T20:00:00Z",
+                       "2026-08-13T20:40:37Z", 1830))
+
+    def test_stalled_exactly_at_stall_at(self):
+        since = "2026-08-13T20:10:00Z"
+        self.assertEqual(self.liveness("2026-08-13T20:39:59Z", since=since), self.reply(
+            "live", since, "2026-08-13T20:00:00Z", "2026-08-13T20:40:00Z", 1))
+        self.assertEqual(self.liveness("2026-08-13T20:40:00Z", since=since), self.reply(
+            "stalled", since, "2026-08-13T20:00:00Z", "2026-08-13T20:40:00Z", None))
+
+    def test_past_deadline_wins_over_stalled(self):
+        since = "2026-08-13T20:10:00Z"
+        self.assertEqual(self.liveness("2026-08-13T22:59:59Z", since=since)["verdict"],
+                         "stalled")
+        self.assertEqual(self.liveness("2026-08-13T23:00:00Z", since=since), self.reply(
+            "past_deadline", since, "2026-08-13T20:00:00Z", "2026-08-13T20:40:00Z", None))
+
+    def test_a_since_later_than_progress_moves_stall_at(self):
+        self.assertEqual(
+            self.liveness("2026-08-13T20:30:00Z", since="2026-08-13T20:20:00Z")["stall_at"],
+            "2026-08-13T20:50:00Z")
+        self.assertEqual(self.liveness("2026-08-13T20:30:00Z")["stall_at"],
+                         "2026-08-13T21:00:00Z")
+
+    def test_only_this_launchs_workers_move_progress(self):
+        worker = self.register_worker(action_id="14:1:1", now="2026-08-13T20:20:00Z")
+        self.assertEqual(self.liveness("2026-08-13T20:21:00Z", since=DEFAULT_NOW)
+                         ["progress_at"], "2026-08-13T20:20:00Z")
+        self.release_worker(worker_id=worker["worker_id"], event="returned",
+                            now="2026-08-13T20:25:00Z")
+        self.register_worker(action_id="16:1:1", now="2026-08-13T20:30:00Z")
+        ours = self.liveness("2026-08-13T20:31:00Z", since=DEFAULT_NOW)
+        self.assertEqual((ours["progress_at"], ours["stall_at"]),
+                         ("2026-08-13T20:25:00Z", "2026-08-13T20:55:00Z"))
+        theirs = self.liveness("2026-08-13T20:31:00Z", action_id="16:1:1", since=DEFAULT_NOW)
+        self.assertEqual(theirs["progress_at"], "2026-08-13T20:30:00Z")
+
+    def test_fractional_stored_progress_is_truncated_and_never_rewritten(self):
+        # PR310-01: a supplied fractional --now is stored as given; the reply
+        # truncates it to whole seconds and passes the boundary unchanged.
+        self.progress(issue=14, phase=1, now="2026-08-13T20:15:00.750000Z")
+        stored = self.state_path.read_bytes()
+        reply = self.liveness("2026-08-13T20:16:00Z", since=DEFAULT_NOW)
+        self.assertEqual((reply["progress_at"], reply["stall_at"], reply["wait_seconds"]),
+                         ("2026-08-13T20:15:00Z", "2026-08-13T20:45:00Z", 1740))
+        self.assertEqual(self.state_path.read_bytes(), stored)
+
+    def test_recorded_progress_moves_progress(self):
+        self.progress(issue=14, phase=1, now="2026-08-13T20:15:00Z")
+        self.assertEqual(self.read_state()["issues"]["14"]["attempts"][-1]["last_progress_at"],
+                         "2026-08-13T20:15:00Z")
+        self.assertEqual(self.liveness("2026-08-13T20:16:00Z", since=DEFAULT_NOW)
+                         ["progress_at"], "2026-08-13T20:15:00Z")
+
+    def test_a_launch_that_is_not_current_is_not_current(self):
+        self.assertEqual(
+            self.liveness("2026-08-13T20:10:00Z", run_id="no-such-run"),
+            self.reply("not_current", "2026-08-13T20:10:00Z", None, None, None,
+                       reason="unknown_run"))
+        self.suspend(issue=14, attempt=1, blocked_on="transport", now="2026-08-13T20:05:00Z")
+        self.resume(issue=14, worktree=self.worktrees[14], now="2026-08-13T20:06:00Z")
+        self.assertEqual(self.liveness("2026-08-13T20:10:00Z")["reason"], "superseded_launch")
+        self.assertEqual(self.liveness("2026-08-13T20:10:00Z")["verdict"], "not_current")
+        resumed = self.liveness("2026-08-13T20:10:00Z", action_id="14:1:2")
+        self.assertEqual((resumed["verdict"], resumed["progress_at"]),
+                         ("live", "2026-08-13T20:06:00Z"))
+
+    def test_malformed_arguments_are_refused_without_a_write(self):
+        clock = "2026-08-13T20:10:00Z"
+        for stall in ("0", "-1", "01", "1.5", "abc", "", "1234567890"):
+            with self.subTest(stall=stall):
+                self.assert_refused(self.call(clock, stall=stall), "workflow-state: invalid "
+                                    "--stall-minutes: expected a positive integer\n")
+        for since in ("yesterday", "2026-08-13T20:10:00.5Z", "2026-08-13T20:10:00+00:00"):
+            with self.subTest(since=since):
+                self.assert_refused(self.call(clock, since=since), "workflow-state: invalid "
+                                    "--since: expected an RFC3339 UTC timestamp\n")
+        self.assert_refused(self.call(clock, action_id="14:1"),
+                            "workflow-state: invalid action_id\n")
+        self.assert_refused(self.call(clock, run_id="bad/run"),
+                            "workflow-state: invalid run_id\n")
+
+    def test_a_since_over_the_skew_bound_is_refused(self):
+        clock = "2026-08-13T20:10:00Z"
+        self.assertEqual(self.liveness(clock, since="2026-08-13T20:11:00Z")["since"],
+                         "2026-08-13T20:11:00Z")
+        self.assert_refused(self.call(clock, since="2026-08-13T20:11:01Z"), self.SKEW.format(
+            s="2026-08-13T20:11:01Z", n=61, c=clock))
+
+    def test_the_boundary_refuses_a_mutated_reply(self):
+        live = self.liveness("2026-08-13T20:10:00Z")
+        stalled = self.liveness("2026-08-13T20:40:00Z", since="2026-08-13T20:10:00Z")
+        for name, value in (("stall_at_off_minute", {**live, "stall_at": "2026-08-13T20:40:30Z"}),
+                            ("wait_on_stalled", {**stalled, "wait_seconds": 60})):
+            with self.subTest(name=name):
+                checked = subprocess.run(
+                    [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
+                     "workflow-response", "--input", "-", "--policy", str(BUDGET_POLICY)],
+                    input=json.dumps(value), capture_output=True, text=True, check=False,
+                    env=self.cli_env)
+                self.assertEqual(checked.returncode, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
