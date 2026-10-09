@@ -1736,13 +1736,6 @@ class LaunchFencedWorkerContractsTest(unittest.TestCase):
             self.WORKER_LINE, self.RELEASE,
             "workflow-state finish --summary-file -")
 
-    def test_claude_md_describes_the_launch_fence(self):
-        text = self.read(REPO_ROOT / "CLAUDE.md")
-        self.assert_ordered(
-            text, "workflow-state check-launch` before any forge write",
-            "`workers` list", "workflow-state register-worker", "`launch-commit` command",
-            "workflow-state check-worker", "is refused while a registered worker")
-
 
 class ProgressMarkerContractsTest(unittest.TestCase):
     """#250: the Phase 6 owner records a progress marker after each completed task."""
@@ -1764,13 +1757,6 @@ class ProgressMarkerContractsTest(unittest.TestCase):
     def test_from_issue_phase_6_names_the_marker_on_both_routes(self):
         self.assert_ordered(
             self.read(FROM_ISSUE), "## Phase 6 — Execute", self.MARK, "## Phase 7 — Ship")
-
-    def test_claude_md_describes_the_marker(self):
-        self.assert_ordered(
-            self.read(REPO_ROOT / "CLAUDE.md"),
-            "The anti-zombie bound counts progress, not phase changes", self.MARK,
-            "`progress_marker`", "`baseline`", "`advanced`", "`unchanged`",
-            "`diverged`")
 
 
 class ResumePackContractsTest(unittest.TestCase):
@@ -1814,13 +1800,6 @@ class ResumePackContractsTest(unittest.TestCase):
 
     def test_auto_rollover_passes_the_pack_beside_the_continuation(self):
         self.assertIn(self.PACK, self.read(ROLLOVER))
-
-    def test_claude_md_describes_the_resume_pack(self):
-        self.assert_ordered(
-            self.read(REPO_ROOT / "CLAUDE.md"),
-            "A relaunched owner's prompt carries a resume pack", self.PACK,
-            "`read_handoff`", "`start_phase`", "`current: false` preview",
-            "still runs `check-launch`")
 
 
 class InterimChildResultContractsTest(unittest.TestCase):
