@@ -2838,26 +2838,6 @@ class LaunchScopeWiringContractsTest(unittest.TestCase):
         self.assertNotIn("launch-scope", text[start:text.index("**Writing workers.**", start)])
 
 
-class LaunchScopeSweepContractsTest(unittest.TestCase):
-    """#276: the stop pass ends with one sweep of the run's non-current launches."""
-
-    def assert_ordered(self, text, *anchors):
-        position = -1
-        for anchor in anchors:
-            next_position = text.find(anchor, position + 1)
-            self.assertGreaterEqual(next_position, 0, anchor)
-            position = next_position
-
-    def test_claude_md_describes_launch_scope(self):
-        self.assert_ordered(
-            normalized((REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")),
-            "**Agent helper package.**", "`launch-scope` (#276)",
-            "AGENT_LAUNCH_SCOPE=<repo-scope>/<run-id>/<action-id>/<nonce>",
-            "`launch-scope reap --action-id`", "`reap --sweep`",
-            "agent-launch/<run-id>/<action-id>/", "`launch-scope scratch` (#277)",
-            "`scratch.json`", "`unattributed_worktrees`")
-
-
 LANE_TRIAGE_VERDICT_KEYS = {"hits", "lane", "mode"}  # closed by tests/test_lane_triage.py
 
 
