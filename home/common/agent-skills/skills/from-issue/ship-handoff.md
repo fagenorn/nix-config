@@ -90,8 +90,8 @@ teammate, and a named launch returns an error instead of work. Read an existing
 file before writing to it: overwriting content you have not read destroys work
 you cannot see. Run each long command, every verification command included, in
 the foreground with an explicit timeout above its expected duration. If the host
-moves one to the background anyway, wait for it within the same turn: never end
-your turn while a command you started is still running.
+moves one to the background anyway, wait for it in the same turn: never end
+your turn while a command or agent you started still runs.
 Never write an `until` or `while` loop around `sleep` to wait for something: if a
 wait is truly needed, run one bounded foreground `sleep N`, then check once.
 
