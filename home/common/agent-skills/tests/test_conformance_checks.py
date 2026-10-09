@@ -95,6 +95,21 @@ class PathClassificationTest(ReportAssertions, unittest.TestCase):
             self.assertEqual([check["status"], check["facts"]], ["passed", {}])
             self.assert_validates(report)
 
+    def test_every_admitted_artifacts_bucket_is_canonical_tracked(self):
+        """The bucket list is the admitting mechanism: `replays` holds #283's
+        committed light-lane replay records beside specs, plans and evidence."""
+        for bucket in ("specs", "plans", "evidence", "handoffs", "notes",
+                       "replays"):
+            relative = f".agents/artifacts/{bucket}/2026-10-08-x/records/1.json"
+            with self.subTest(bucket=bucket), fixture() as tmp:
+                root = make_root(tmp)
+                write_file(root, relative, "{}\n")
+                report, by_id = doctor(self, root)
+                check = by_id[self.CHECK_ID]
+                self.assertEqual([check["status"], check["facts"]],
+                                 ["passed", {}])
+                self.assert_validates(report)
+
     def test_many_long_offending_paths_are_capped_bounded_and_distinct(self):
         """D30: a repository-relative path has no length ceiling, so an
         unbounded fact would fail the engine's own report validation and turn a
