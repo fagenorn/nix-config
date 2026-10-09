@@ -1814,7 +1814,7 @@ class InterimChildResultContractsTest(unittest.TestCase):
     """#261: an owner treats a child's interim return as still running."""
 
     HEAD = "**Interim child results.**"
-    OWNERS = (FROM_ISSUE,)
+    OWNERS = (SDD, FROM_ISSUE, SHIP_ISSUE)
 
     def assert_ordered(self, text, *anchors):
         position = -1
@@ -1841,23 +1841,24 @@ class InterimChildResultContractsTest(unittest.TestCase):
 
     def test_the_paragraph_copies_stay_identical(self):
         canonical = self.paragraph(SDD)
-        for path in (FROM_ISSUE,):
+        for path in (FROM_ISSUE, SHIP_ISSUE):
             with self.subTest(path=path.parent.name):
                 self.assertEqual(self.paragraph(path), canonical)
 
     def test_the_paragraph_states_the_rule_in_order(self):
         self.assert_ordered(
             self.paragraph(SDD), self.HEAD,
-            "is not a completion: the child is still running.",
+            "(its own background work still running, or a result that may be interim) "
+            "is not a completion.",
             "Re-engage that same child by its recorded agent identity",
             "and wait for that report within your turn.",
             "Never answer an interim result with a text-only reply",
             "never suspend for it (it is not an `external` wait)",
             "never dispatch a replacement or stop the child.",
-            "stays registered under its existing worker id",
-            "so it registers nothing new.",
+            "stays registered under its existing worker id and registers nothing new",
+            "an interim result is not its `returned` event.",
             "If the message cannot be delivered or its reply cannot be awaited "
-            "in your turn, the child is one you cannot wait for",
+            "in your turn, follow from-issue's **Writing workers** route",
             "release `--event stopped`",
             "the one case that may lead to a fresh dispatch.",
             "Only the child's final hand-back counts as its result.")
@@ -2114,8 +2115,8 @@ path_unchanged_since() { return 0; }
         self.assertEqual({i: (c["name"], c["mode"]) for i, c in cases.items()}, {1: ("scan-only-renders-a-temporary-report", "pipeline"), 2: ("clear-selection-reaches-a-design-worktree", "pipeline"), 3: ("foggy-selection-routes-to-wayfind", "pipeline")})
         required_shells = {
             1: {"temporary report exists outside repository": ('architecture-review-', '"$OUT"', '[ -f "$report" ]', '$REPO'), "report is evidence-backed or truthful": ('"$OUT"', 'python3 - "$report"', "HTMLParser", "data-architecture-candidate", 'data-evidence', "module-callers", "caller-interface-knowledge", "locality-leverage", "deletion-test", "dependency-adapters", "tests-interface-surface", "context-decision-conflict", "data-diagram-text", "before", "after", "no-candidates", "top-recommendation", "expected_candidate_ids", "zero_text !=", "1 <= candidate_count <= 5"), "history miss widened the scan": ("out_matches", "widen"), "repository and branches stayed unchanged": ('test "$WT_COUNT" -eq 0', 'status=$(git -C "$REPO" status --porcelain)', 'test -z "$status"', 'test "$(git -C "$REPO" rev-parse HEAD)" = "$(git -C "$REPO" rev-parse origin/main)"', "branches=$(git -C \"$REPO\" for-each-ref --format='%(refname:short)' refs/heads)", 'test "$branches" = "main"')},
-            2: {"one isolated design worktree exists": ('test "$WT_COUNT" -eq 1', 'test -n "$WT"'), "design spec was committed": ('commits_touch "$WT" "$SPEC_DIR"',), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests', 'path_unchanged_since "$WT" origin/main tinytask tests'), "no plan was created": ('if has_file "$REPO/$PLAN_DIR"/*.md "$WT/$PLAN_DIR"/*.md; then', "fail"), "domain review was reached": ("out_matches", "grill-with-docs"), "scope workflow was recommended": ("out_matches", "recommend", "&&", "writing-plans|to-issues"), "design returned control without continuation": ('sed \'/^[[:space:]]*$/d\' "$OUT"', DESIGN_COMPLETE)},
-            3: {"new wayfind map exists and prior map stayed unchanged": ('new_map_count=0', 'for map in "$REPO"/.claude/wayfind/*/map.md; do', "*/concurrent-shells/map.md) continue", '[ -f "$map" ] || continue', 'relative_map=${map#"$REPO"/}', 'if git -C "$REPO" cat-file -e "origin/main:$relative_map" 2>/dev/null; then', 'new_map_count=$((new_map_count + 1))', 'test "$new_map_count" -eq 1', 'path_unchanged_since "$REPO" origin/main .claude/wayfind/concurrent-shells'), "no worktree was created": ('test "$WT_COUNT" -eq 0',), "no spec or plan was created": ('if has_file "$REPO/$SPEC_DIR"/*.md "$REPO/$PLAN_DIR"/*.md; then', "fail"), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests',), "wayfind returned control without continuation": ('sed \'/^[[:space:]]*$/d\' "$OUT"', "WAYFIND_COMPLETE: map created; control returned before issue creation, planning, or implementation.")},
+            2: {"one isolated design worktree exists": ('test "$WT_COUNT" -eq 1', 'test -n "$WT"'), "design spec was committed": ('commits_touch "$WT" "${SPEC_DIR#"$REPO"/}"',), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests', 'path_unchanged_since "$WT" origin/main tinytask tests'), "no plan was created": ('if has_file "$PLAN_DIR"/*.md "$WT/${PLAN_DIR#"$REPO"/}"/*.md; then', "fail"), "domain review was reached": ("out_matches", "grill-with-docs"), "scope workflow was recommended": ("out_matches", "recommend", "&&", "writing-plans|to-issues"), "design returned control without continuation": ('sed \'/^[[:space:]]*$/d\' "$OUT"', DESIGN_COMPLETE)},
+            3: {"new wayfind map exists and prior map stayed unchanged": ('new_map_count=0', 'for map in "$REPO"/.claude/wayfind/*/map.md; do', "*/concurrent-shells/map.md) continue", '[ -f "$map" ] || continue', 'relative_map=${map#"$REPO"/}', 'if git -C "$REPO" cat-file -e "origin/main:$relative_map" 2>/dev/null; then', 'new_map_count=$((new_map_count + 1))', 'test "$new_map_count" -eq 1', 'path_unchanged_since "$REPO" origin/main .claude/wayfind/concurrent-shells'), "no worktree was created": ('test "$WT_COUNT" -eq 0',), "no spec or plan was created": ('if has_file "$SPEC_DIR"/*.md "$PLAN_DIR"/*.md; then', "fail"), "source and tests stayed unchanged": ('path_unchanged_since "$REPO" origin/main tinytask tests',), "wayfind returned control without continuation": ('sed \'/^[[:space:]]*$/d\' "$OUT"', "WAYFIND_COMPLETE: map created; control returned before issue creation, planning, or implementation.")},
         }
         for case_id, case in cases.items():
             self.assertNotIn("expected_today", case)

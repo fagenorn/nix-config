@@ -53,11 +53,11 @@ def plan_tasks_verifiable(root):
         capture_output=True, text=True, timeout=60)
 
 
-def run_assert(shell, cwd, **env):
-    """Run one assert snippet the way run-eval.sh grades it."""
+def run_assert(shell, cwd, *, stdin=subprocess.DEVNULL, **env):
+    """Run one assert snippet the way run-eval.sh grades it, stdin from /dev/null."""
     return subprocess.run(
         ["bash", "-c", f'source "$0"; {shell}', str(ASSERT_LIB)],
-        cwd=cwd, env={"PATH": os.environ["PATH"], **env},
+        cwd=cwd, env={"PATH": os.environ["PATH"], **env}, stdin=stdin,
         capture_output=True, text=True, timeout=60)
 
 
@@ -72,6 +72,47 @@ def case_assert(skill, case_id, name):
 
 def find_case(skill, case_id):
     return next(case for case in skill_cases(skill) if case["id"] == case_id)
+
+
+FAIL_THEN_CONTINUE = re.compile(
+    r'\|\|\s*fail\b(?:"(?:[^"\\]|\\.)*"|[^;{}"])*;\s*(?!(?:fi|done|esac)\b|[};])\S')
+
+
+def writing_plans_fixture(tmp, *, with_plan=True):
+    """A repo shaped like writing-plans eval 1's sandbox after a good run (D7)."""
+    repo = Path(tmp) / "repo"
+    (repo / "issues").mkdir(parents=True)
+    shutil.copy(EVALS_DIR / "fixture-repo/issues/001-well-specified.md", repo / "issues")
+    git = ["git", "-C", str(repo), "-c", "user.name=eval", "-c", "user.email=eval@example.invalid",
+           "-c", "commit.gpgsign=false"]
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(git + ["add", "-A"], check=True)
+    subprocess.run(git + ["commit", "-q", "-m", "base"], check=True)
+    subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+    spec_dir, plan_dir = repo / ".claude/specs", repo / ".claude/plans"
+    if with_plan:
+        issue = (repo / "issues/001-well-specified.md").read_text(encoding="utf-8")
+        criteria = issue.split("## Acceptance criteria", 1)[1].split("\n## ", 1)[0]
+        kinds = re.findall(r"^- \[[ xX]\] \[(code|evidence|human)\] ", criteria, re.M)
+        rows = "".join(f"| AC{n} | {kind} | Task 1 | `tests/test_cli.py` |\n"
+                       for n, kind in enumerate(kinds, 1))
+        (plan_dir / "p.tasks").mkdir(parents=True)
+        (plan_dir / "p.md").write_text(
+            "# Plan\n\n## Task index\n\n"
+            "Task 1 — Add the filter — tinytask/cli.py — full — "
+            "[task-1.md](p.tasks/task-1.md)\n\n"
+            "## Acceptance map\n\n| AC | Kind | Task | Check |\n|----|------|------|-------|\n" + rows +
+            "\n## Decision ledger\n\n| ID | Choice | Grounding | Rejected alternative |\n"
+            "|----|--------|-----------|----------------------|\n"
+            "| P1 | One task | the task-size rule | Two tasks: one file changes |\n",
+            encoding="utf-8")
+        (plan_dir / "p.tasks/task-1.md").write_text(
+            "# Task 1: Add the filter\n\nRun: `python3 -m unittest tests.test_cli`\nExpected: PASS.\n",
+            encoding="utf-8")
+        subprocess.run(git + ["add", "-A"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "docs: plan"], check=True)
+    env = {"REPO": str(repo), "SPEC_DIR": str(spec_dir), "PLAN_DIR": str(plan_dir), "WT_COUNT": "0"}
+    return repo, env
 
 
 class EvalCasesTest(unittest.TestCase):
@@ -145,12 +186,50 @@ class EvalCasesTest(unittest.TestCase):
                     self.assertIn("ResolvedProject", case["prompt"])
                     self.assertRegex(case["prompt"].lower(), r"\bstop\b")
 
-    def test_from_issue_asserts_never_prefix_an_absolute_artifact_dir(self):
-        for case in skill_cases("from-issue"):
-            for check in case.get("asserts") or []:
-                with self.subTest(case=case["id"], name=check["name"]):
-                    self.assertNotRegex(check["shell"], r'\$(WT|REPO|PRE_WT)/\$(SPEC|PLAN)_DIR')
-                    self.assertNotRegex(check["shell"], r'commits_touch "\$WT" "\$(SPEC|PLAN)_DIR"')
+    def test_no_assert_runs_on_after_a_guarding_fail(self):
+        samples = (
+            ('[ -n "$f" ] || fail "x"; awk 1 "$f"', True),
+            ('x || fail no dir; for f in a; do b; done', True),
+            ('[ -n "$f" ] || { fail "x"; exit 1; }; awk 1 "$f"', False),
+            ('a || fail "x; y"', False),
+            ('a || fail "x"', False),
+            ('if a; then b || fail "x"; fi', False),
+        )
+        for sample, flagged in samples:
+            with self.subTest(sample=sample):
+                self.assertEqual(bool(FAIL_THEN_CONTINUE.search(sample)), flagged)
+        for path in case_files():
+            for case in json.loads(path.read_text(encoding="utf-8"))["evals"]:
+                for check in case.get("asserts") or []:
+                    with self.subTest(path=str(path.relative_to(REPO_ROOT)), case=case["id"],
+                                      name=check["name"]):
+                        self.assertNotRegex(check["shell"], FAIL_THEN_CONTINUE)
+
+    ARTIFACT_DIR = r'\$(?:(?:SPEC|PLAN)_DIR\b|\{(?:SPEC|PLAN)_DIR\})'
+
+    def test_no_assert_prefixes_an_absolute_artifact_dir(self):
+        prefixed = re.compile(r'\$\{?(?:WT|REPO|PRE_WT)\}?/' + self.ARTIFACT_DIR)
+        touched = re.compile(
+            r'commits_touch\s+"\$\{?(?:WT|PRE_WT)\}?"[^;&|]*"' + self.ARTIFACT_DIR + '"')
+        samples = (
+            ('has_file "$REPO/$PLAN_DIR"/*.md', True),
+            ('has_file "$WT/${SPEC_DIR}"/*.md', True),
+            ('commits_touch "$WT" "$SPEC_DIR"', True),
+            ('has_file "$PLAN_DIR"/*.md', False),
+            ('has_file "$WT/${PLAN_DIR#"$REPO"/}"/*.md', False),
+            ('commits_touch "$WT" "${SPEC_DIR#"$REPO"/}"', False),
+            ('git -C "$REPO" log main -- "$SPEC_DIR"', False),
+        )
+        for sample, flagged in samples:
+            with self.subTest(sample=sample):
+                self.assertEqual(bool(prefixed.search(sample) or touched.search(sample)), flagged)
+        for path in case_files():
+            for case in json.loads(path.read_text(encoding="utf-8"))["evals"]:
+                for check in case.get("asserts") or []:
+                    with self.subTest(path=str(path.relative_to(REPO_ROOT)), case=case["id"],
+                                      name=check["name"]):
+                        self.assertNotRegex(check["shell"], prefixed)
+                        self.assertNotRegex(check["shell"], touched)
 
     def test_plan_tasks_verifiable_reads_indexed_members(self):
         index = ("# Plan\n\n## Task index\n\n"
@@ -332,6 +411,70 @@ class EvalCasesTest(unittest.TestCase):
                 self.assertNotIn("--auto", prompt)
                 self.assertIn("I authorize you to make every design and plan decision yourself", prompt)
                 self.assertIn("**Stop after Phase 5.**", prompt)
+
+
+class WritingPlansPipelineAssertsTest(unittest.TestCase):
+    """#331: writing-plans eval 1 grades the plan at the absolute retained dirs."""
+
+    DECISION = "self-answered decisions are logged as ledger rows (spec- or plan-hosted; legacy ### accepted)"
+
+    def test_every_assert_passes_on_a_good_plan(self):
+        case = find_case("writing-plans", 1)
+        self.assertEqual(len(case["asserts"]), 8)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = writing_plans_fixture(Path(tmp).resolve())
+            for check in case["asserts"]:
+                with self.subTest(name=check["name"]):
+                    done = run_assert(check["shell"], repo, **env)
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_plan_asserts_fail_when_no_plan_was_written(self):
+        names = ("a plan artifact exists under the retained plans directory",
+                 "every task section (inline or per-task brief) has a falsifiable verification line",
+                 self.DECISION)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = writing_plans_fixture(Path(tmp).resolve(), with_plan=False)
+            for name in names:
+                with self.subTest(name=name):
+                    done = run_assert(case_assert("writing-plans", 1, name), repo, **env)
+                    self.assertNotEqual(done.returncode, 0, done.stdout)
+
+    def test_a_failed_precondition_reads_no_stdin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp).resolve()
+            repo, env = writing_plans_fixture(tmp, with_plan=False)
+            feed = tmp / "stdin"
+            feed.write_text('{"name":"the next assert","shell":"true"}\n', encoding="utf-8")
+            with feed.open("rb") as stdin:
+                done = run_assert(case_assert("writing-plans", 1, self.DECISION), repo,
+                                  stdin=stdin, **env)
+                offset = os.lseek(stdin.fileno(), 0, os.SEEK_CUR)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("no decision section", done.stdout)
+        self.assertNotIn("decision heading vanished", done.stdout)
+        self.assertEqual(offset, 0, "the assert read the stream it was handed")
+
+    def run_decision_on_ledger(self, ledger):
+        """Grade the decision assert over the fixture plan with its ledger section replaced."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = writing_plans_fixture(Path(tmp).resolve())
+            plan = Path(env["PLAN_DIR"]) / "p.md"
+            head = plan.read_text(encoding="utf-8").split("## Decision ledger", 1)[0]
+            plan.write_text(head + ledger, encoding="utf-8")
+            return run_assert(case_assert("writing-plans", 1, self.DECISION), repo, **env)
+
+    def test_a_header_only_ledger_fails(self):
+        done = self.run_decision_on_ledger(
+            "## Decision ledger\n\n| ID | Choice | Grounding | Rejected alternative |\n"
+            "|----|--------|-----------|----------------------|\n")
+        self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("no entries", done.stdout)
+
+    def test_a_ledger_of_legacy_entries_passes(self):
+        done = self.run_decision_on_ledger(
+            "## Decision ledger\n\n### D1 — One task\n\n"
+            "Choice: one task. Grounding: the task-size rule.\n")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
 
 if __name__ == "__main__":

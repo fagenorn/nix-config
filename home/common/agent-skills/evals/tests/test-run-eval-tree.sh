@@ -284,6 +284,12 @@ row_is_deployed_pass() {
     and .tree_rev == null and .tree_dirty == null and .tree_mode == null
     and .input_tokens == 246' >/dev/null
 }
+row_total_is_fixture_count() {
+  local want
+  want=$(jq --argjson id "$1" '.evals[] | select(.id == $id) | .asserts | length' \
+    "$EVALS_SRC/tests/fixtures/setup-smoke-evals.json") || return 1
+  last_row | jq -e --argjson want "$want" '.total == $want and .failed == 0' >/dev/null
+}
 smoke_tmp_holds_only_its_sandbox() {
   local entry
   for entry in "$RUN_TMP"/* "$RUN_TMP"/.[!.]*; do
@@ -303,6 +309,7 @@ for id in 1 2 3; do
   status=$?
   check "setup smoke $id: every setup assert passes" test "$status" -eq 0
   check "setup smoke $id: the row is a deployed-mode PASS" row_is_deployed_pass
+  check "setup smoke $id: the row reports every fixture assert" row_total_is_fixture_count "$id"
   check "setup smoke $id: deployed mode makes no temp root" smoke_tmp_holds_only_its_sandbox "$id"
   check "setup smoke $id: deployed mode passes no --setting-sources" test -z "$(grep -- '--setting-sources' "$STATE/record")"
 done

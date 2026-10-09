@@ -33,6 +33,7 @@
         { "name": "v0.1.0 annotated on the root commit", "shell": "[ \"$(git -C \"$REPO\" cat-file -t v0.1.0)\" = tag ] && [ \"$(git -C \"$REPO\" rev-parse 'v0.1.0^{commit}')\" = \"$(git -C \"$REPO\" rev-list --max-parents=0 main)\" ]" },
         { "name": "main ends in a --no-ff merge of a feat: commit", "shell": "[ \"$(git -C \"$REPO\" rev-list --merges --count main)\" -eq 1 ] && git -C \"$REPO\" log -1 --format=%s 'main^2' | grep -q '^feat'" },
         { "name": "origin carries main and only v0.1.0", "shell": "[ \"$(git -C \"$ORIGIN\" rev-parse main)\" = \"$BASE_MAIN\" ] && [ \"$(git -C \"$ORIGIN\" tag -l)\" = v0.1.0 ]" },
+        { "name": "an assert reads no input on stdin", "shell": "[ -z \"$(cat)\" ] || fail \"stdin carried input: the assert stream leaked into an assert\"" },
         { "name": "clean main checkout and no worktree", "shell": "[ -z \"$PRE_WT\" ] && [ \"$WT_COUNT\" -eq 0 ] && [ -z \"$(git -C \"$REPO\" status --porcelain)\" ] && [ \"$(git -C \"$REPO\" rev-parse --abbrev-ref HEAD)\" = main ] && [ -z \"$(git -C \"$REPO\" branch --list 'feat/*')\" ]" }
       ]
     }
