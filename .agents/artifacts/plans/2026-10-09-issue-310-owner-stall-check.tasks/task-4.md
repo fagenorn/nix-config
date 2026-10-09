@@ -19,7 +19,7 @@
 
 - [ ] **Step 1: Write the failing tests**
 
-In `test_workflow_state.py`, in `test_control_starts_ready_issues_persists_before_emission_and_bounds_output`, add `"wait_seconds": 10800,` to the expected wait action (its `now` is `2026-08-19T12:00:00Z` and its deadline `2026-08-19T15:00:00Z`). Then append:
+In `test_workflow_state.py`, in `test_control_starts_ready_issues_persists_before_emission_and_bounds_output`, add `"wait_seconds": 10800,` to the expected wait action (its `now` is `2026-08-19T12:00:00Z` and its deadline `2026-08-19T15:00:00Z`). Also update the shared `assert_control_response_shape` helper's wait branch (today `self.assertEqual(set(action), {"id", "kind", "wake_on", "deadline_at"})`) to the five-member set including `"wait_seconds"`, and add `self.assertIs(type(action["wait_seconds"]), int)` and `self.assertGreaterEqual(action["wait_seconds"], 0)`, so every existing caller of that helper accepts and checks the new member (Phase-5 PR310-03). Then append:
 
 ```python
 class ControlWaitSecondsTest(LifecycleHarness, unittest.TestCase):

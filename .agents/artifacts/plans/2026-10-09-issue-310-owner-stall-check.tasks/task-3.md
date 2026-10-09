@@ -22,7 +22,7 @@
 - `since` is the supplied value, else the clock. The reply echoes it in canonical form (D4).
 - The launch verdict comes from `launch_verdict(runtime, state, action_id)`, with `state` `None` for a missing ledger, exactly as `check-launch` reads it (`unknown_run`). An unreadable or invalid ledger exits 2.
 - For `reason == "current"`, the record is `issues[<issue>]["delivery_remainders"][-1]` for an action id containing `:r`, else `issues[<issue>]["attempts"][-1]`. `progress_at` is the latest of: the record's `last_progress_at` when present and not null (remainders have none); `record["launches"][-1]["at"]`; and every non-null `registered_at` and `released_at` of a worker in `state.get("workers", [])` whose `launch` equals the action id. Nothing else counts (D3).
-- `stall_at = max(progress_at, since) + stall_minutes minutes`. Verdict: `past_deadline` when `clock >= record["deadline_at"]` (checked first, D10); else `live` when `clock < stall_at`, with `wait_seconds = math.ceil((stall_at - clock).total_seconds())`, which is at least 1; else `stalled`. All inputs are whole seconds, so `wait_seconds` is exact.
+- `stall_at = max(progress_at, since) + stall_minutes minutes`. Verdict: `past_deadline` when `clock >= record["deadline_at"]` (checked first, D10); else `live` when `clock < stall_at`, with `wait_seconds = math.ceil((stall_at - clock).total_seconds())`, which is at least 1; else `stalled`. Stored ledger times may carry fractional seconds (a supplied `--now` on `progress`, `register-worker` or `release-worker` is kept as given), so every stored time that feeds `progress_at` is truncated to whole seconds (`.replace(microsecond=0)`, the same truncation `ledger_clock()` applies) before the comparison; `since` and the clock are already whole seconds, so `progress_at`, `stall_at` and `wait_seconds` are whole seconds and the reply always passes the boundary's whole-second check. The ledger's stored bytes are never rewritten (Phase-5 PR310-01, D14).
 - For any other reason: `verdict` `not_current`, and `progress_at`, `stall_at` and `wait_seconds` are `null`.
 - The reply is printed with `print_json` (sorted keys, compact) and passes the workflow-response boundary unchanged. The verb does not run that validator itself (D11).
 
@@ -55,15 +55,24 @@ class OwnerLivenessTest(LifecycleHarness, unittest.TestCase):
                 sorted(p.relative_to(self.root) for p in self.root.rglob("*")))
 
     def call(self, clock, *, action_id="14:1:1", stall="30", since=None, run_id=None):
+        # The pinned clock is scoped to this one call, so later ledger writes in
+        # the same test are skew-checked against the real clock (PR310-02).
+        previous = self.cli_env.get("WORKFLOW_STATE_TEST_CLOCK")
         self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = clock
         args = ["owner-liveness", "--repo-root", self.root,
                 "--run-id", self.run_id if run_id is None else run_id,
                 "--action-id", action_id, "--stall-minutes", stall]
         if since is not None:
             args += ["--since", since]
-        before = self.inventory()
-        completed = self.run_cli(*args, ok=False)
-        self.assertEqual(self.inventory(), before)
+        try:
+            before = self.inventory()
+            completed = self.run_cli(*args, ok=False)
+            self.assertEqual(self.inventory(), before)
+        finally:
+            if previous is None:
+                self.cli_env.pop("WORKFLOW_STATE_TEST_CLOCK", None)
+            else:
+                self.cli_env["WORKFLOW_STATE_TEST_CLOCK"] = previous
         return completed
 
     def liveness(self, clock, **kwargs):
@@ -124,6 +133,16 @@ class OwnerLivenessTest(LifecycleHarness, unittest.TestCase):
                          ("2026-08-13T20:25:00Z", "2026-08-13T20:55:00Z"))
         theirs = self.liveness("2026-08-13T20:31:00Z", action_id="16:1:1", since=DEFAULT_NOW)
         self.assertEqual(theirs["progress_at"], "2026-08-13T20:30:00Z")
+
+    def test_fractional_stored_progress_is_truncated_and_never_rewritten(self):
+        # PR310-01: a supplied fractional --now is stored as given; the reply
+        # truncates it to whole seconds and passes the boundary unchanged.
+        self.progress(issue=14, phase=1, now="2026-08-13T20:15:00.750000Z")
+        stored = self.state_path.read_bytes()
+        reply = self.liveness("2026-08-13T20:16:00Z", since=DEFAULT_NOW)
+        self.assertEqual((reply["progress_at"], reply["stall_at"], reply["wait_seconds"]),
+                         ("2026-08-13T20:15:00Z", "2026-08-13T20:45:00Z", 1740))
+        self.assertEqual(self.state_path.read_bytes(), stored)
 
     def test_recorded_progress_moves_progress(self):
         self.progress(issue=14, phase=1, now="2026-08-13T20:15:00Z")

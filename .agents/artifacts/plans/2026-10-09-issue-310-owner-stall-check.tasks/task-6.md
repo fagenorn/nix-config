@@ -109,6 +109,18 @@ Add this method to `AdmissionReplayTest`, after `test_a_three_slot_declaration_i
 
         self.assertEqual(stopped, {12})
         self.assertEqual([event["issue"] for event in observations], [12])
+
+        # PR310-04: "exactly once" survives a stale liveness wake and a late
+        # return from the stopped owner after its replacement was dispatched.
+        # The stale wake is answered `not_current` (no observation, per rule (a));
+        # the late return falls under rule (b), whose `check-launch` reads
+        # `current: false`, so it sends nothing either.
+        stale = liveness(100, custody[12]["action_id"], since=since[12])
+        self.assertEqual(stale["verdict"], "not_current")
+        late = json.loads(self.cli("check-launch", *run, "--action-id",
+                                   custody[12]["action_id"]).stdout)
+        self.assertIs(late["current"], False)
+        self.assertEqual([event["issue"] for event in observations], [12])
         claims = self.claims()
         self.assertEqual((claims["12:1:1"]["release_event"], claims["12:1:1"]["released_at"]),
                          ("owner_unavailable", at(95)))

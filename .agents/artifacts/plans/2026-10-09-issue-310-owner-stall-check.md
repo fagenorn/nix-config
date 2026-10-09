@@ -59,3 +59,12 @@ Task 6 — Stall replay over the real CLI — home/common/agent-skills/tests/tes
 The tasks rest on spec rows D1–D10 and on the plan rows D11 (one clock read, whole-second `--since`, handler-parsed `--stall-minutes`, no self-validation), D12 (the replay's own driver and clock route; the remainder case's home) and D13 (the regex `date` pin). Each member cites the rows it uses.
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no focus; base SHA ef7eab96, plan commit abff1866; no fallback.
+- Findings: 4 accepted (3 Blocking, 1 Should fix), 0 rejected, 0 deferred.
+  - PR310-01 (Blocking, Task 3): fractional stored times truncated to whole seconds before comparison, plus a regression test (per D14).
+  - PR310-02 (Blocking, Task 3): the test's pinned clock is scoped to each `owner-liveness` call.
+  - PR310-03 (Blocking, Task 4): the shared `assert_control_response_shape` wait branch moves to the five-member set.
+  - PR310-04 (Should fix, Task 6): the replay adds a stale liveness wake and a late return from the stopped owner, asserting the observation count stays one.
