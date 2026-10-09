@@ -212,7 +212,8 @@ ORCHESTRATE_MACHINE_TEXT = {
         "rename `id` to `action_id`", "`kind` to `launch_kind`", "`kind: owner`",
         "`interface_version: 2`", "`launch_refused`", "`unavailable`",
         "workflow-state owner-liveness --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--action-id <action_id> --stall-minutes <stall_minutes>",
+        "--action-id <action_id> --stall-minutes <stall_minutes> "
+        "| artifact-budget validate-report --boundary workflow-response --input -",
         "workflow-state owner-liveness --repo-root <ledger_repo_root> --run-id <run-id> "
         "--action-id <action_id> --stall-minutes <stall_minutes> --since <liveness_since>",
         "`wait_seconds`", "`liveness_since`", "`stalled`", "`past_deadline`",

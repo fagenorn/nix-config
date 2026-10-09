@@ -134,18 +134,20 @@ none of these cases and keeps its wait-ID handling below:
   content, and stop no task.
 - (d) **Liveness wake.** The handle is a liveness observer's. Ignore it when its owner handle
   has a final return or was stopped. Otherwise run the second call above and act on its
-  `verdict`: `live` arms a new observer for `wait_seconds`; `not_current` and `past_deadline`
-  do nothing; `stalled` stops the owner's task through the host's task-stop, marks the handle
-  stopped and sends exactly one `unavailable` owner observation for that custody in the next
-  control call, even when the stop failed, and that verdict stands in for rule (b)'s
-  `check-launch`. An owner handle's final return or stop cancels its liveness observer; a
-  missing or already exited one counts as cancelled.
+  `verdict`: `live` arms a new observer for `wait_seconds` and records its handle; `not_current`
+  and `past_deadline` do nothing; `stalled` stops the owner's task through the host's task-stop and
+  marks the handle stopped, then sends exactly one `unavailable` owner observation for that custody
+  in the next control call, refreshing and making that call at once and executing its response. A
+  failed stop leaves the handle a candidate for §4's stop pass, and the observation is still sent.
+  That verdict stands in for rule (b)'s `check-launch`. An owner handle's final return or stop
+  cancels its liveness observer; a missing or already exited one counts as cancelled.
 
 At start/resume and after each current owner notification, tracker change, or current wait-ID wake,
 refresh the external facts the next request needs.
 
-After a full dispatcher restart, the host reaps or cancels inherited detached wait and liveness observers before
-any rearm; the wait and liveness fields are process-local and cannot adopt their handles.
+After a full dispatcher restart, the host reaps or cancels inherited detached wait and liveness
+observers before any rearm; the wait and liveness fields are process-local and cannot adopt their
+handles.
 
 ## 3. Decide
 
@@ -356,8 +358,8 @@ For `wait`, adapter state consists only of `current_wait_id` and `current_wait_h
   loudly; the next identical response retries replacement.
 - If arming fails after cancellation, clear `current_wait_id` and `current_wait_handle`, surface
   that no wake is installed, and fail loudly.
-- Each wake carries its wait ID; ignore it unless it equals `current_wait_id` (a stale wake cannot
-  trigger control or disturb the replacement observer).
+- A wake counts only when its handle is the one paired with `current_wait_id`; ignore a wake of any
+  other handle (a stale wake cannot trigger control or disturb the replacement observer).
 
 Arm the observer as one background `sleep <wait_seconds>`; every wait carries
 one (when nothing can proceed without a human, control returns `finalize`, or `delivery_contract`
