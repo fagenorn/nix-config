@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime
 from typing import Any
 
 from ._canonical import (canonical_bytes, canonical_digest, _boolean, _digest,
@@ -261,12 +262,32 @@ def _host_route(value: Any) -> dict[str, Any]:
     else: _reject()
     return value
 
+_LAUNCH_REASONS = frozenset({"unknown_run", "unknown_issue", "unknown_attempt", "superseded_attempt", "inactive_attempt", "superseded_launch", "current"})
+
+def _owner_liveness(value: dict[str, Any]) -> dict[str, Any]:
+    _object(value, _members("interface_version kind action_id reason verdict since progress_at stall_at wait_seconds"), "owner liveness")
+    if type(value["interface_version"]) is not int or value["interface_version"] != 1: _reject()
+    _string(value["action_id"], "action id")
+    if value["reason"] not in _LAUNCH_REASONS: _reject()
+    if value["verdict"] not in {"live", "stalled", "past_deadline", "not_current"}: _reject()
+    _utc(value["since"], "since")
+    if (value["verdict"] == "not_current") != (value["reason"] != "current"): _reject()
+    if value["verdict"] == "not_current":
+        if value["progress_at"] is not None or value["stall_at"] is not None or value["wait_seconds"] is not None: _reject()
+        return value
+    moments = [datetime.strptime(_utc(value[name], name), "%Y-%m-%dT%H:%M:%SZ") for name in ("progress_at", "stall_at", "since")]
+    seconds = (moments[1] - max(moments[0], moments[2])).total_seconds()
+    if seconds <= 0 or seconds % 60: _reject()
+    if value["verdict"] == "live": _integer(value["wait_seconds"], "wait seconds", minimum=1)
+    elif value["wait_seconds"] is not None: _reject()
+    return value
+
 def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
     if not isinstance(value, dict): _reject()
     if set(value) == {"action_id", "current", "current_action_id", "reason"}:
         _string(value["action_id"], "action id"); _boolean(value["current"], "current")
         if value["current_action_id"] is not None: _string(value["current_action_id"], "current action")
-        if value["reason"] not in {"unknown_run", "unknown_issue", "unknown_attempt", "superseded_attempt", "inactive_attempt", "superseded_launch", "current"}: _reject()
+        if value["reason"] not in _LAUNCH_REASONS: _reject()
         if value["current"] != (value["reason"] == "current") or (value["current"] and value["current_action_id"] != value["action_id"]): _reject()
         if value["reason"] in {"unknown_run", "unknown_issue"} and value["current_action_id"] is not None: _reject()
         if value["reason"] == "inactive_attempt" and value["current_action_id"] not in {None, value["action_id"]}: _reject()
@@ -307,6 +328,7 @@ def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
     if value.get("kind") == "delivery_remainder": return _remainder(value, notes_max)
     if value.get("kind") in {"delivery_checkpointed", "delivery_stalled"}: return _checkpoint_response(value, notes_max)
     if value.get("kind") in {"delivery_complete", "terminal_failed"}: return _finish_response(value)
+    if value.get("kind") == "owner_liveness": return _owner_liveness(value)
     if "kind" not in value: return _control_response(value, notes_max)
     if value.get("kind") == "host_route": return _host_route(value)
     _reject()
