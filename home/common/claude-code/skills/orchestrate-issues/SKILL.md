@@ -140,8 +140,9 @@ none of these cases and keeps its wait-ID handling below:
   in the next control call, refreshing and making that call at once and executing its response. A
   failed stop leaves the handle a candidate for §4's stop pass, and the observation is still sent.
   That verdict stands in for rule (b)'s `check-launch`. Either call above exiting non-zero, or
-  failing validation, is unknown: send nothing and clear the handle's liveness observer, so a later
-  interim notification re-arms one. An owner handle's final return or stop
+  failing validation, is unknown: send nothing. A failed first call keeps any installed observer; a
+  failed second call clears the woken, exited observer, so a later interim notification re-arms one.
+  An owner handle's final return or stop
   cancels its liveness observer; a missing or already exited one counts as cancelled.
 
 At start/resume and after each current owner notification, tracker change, or current wait-ID wake,

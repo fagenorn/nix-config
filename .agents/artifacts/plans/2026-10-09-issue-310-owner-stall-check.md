@@ -56,7 +56,7 @@ Task 6 — Stall replay over the real CLI — home/common/agent-skills/tests/tes
 
 ## Decisions
 
-The tasks rest on spec rows D1–D10 and on the plan rows D11 (one clock read, whole-second `--since`, handler-parsed `--stall-minutes`, no self-validation), D12 (the replay's own driver and clock route; the remainder case's home) and D13 (the regex `date` pin). Each member cites the rows it uses.
+The tasks rest on spec rows D1–D10 and on the plan rows D11 (one clock read, whole-second `--since`, handler-parsed `--stall-minutes`, no self-validation), D12 (the replay's own driver and clock route; the remainder case's home) and D13 (the regex `date` pin). Two ship-time deviations are recorded as spec rows: D16 (a failed liveness call keeps or clears the observer by which call failed) and D17 (the out-of-scope `replays` artifacts bucket, which amends #122's bucket list). Each member cites the rows it uses.
 
 ---
 
