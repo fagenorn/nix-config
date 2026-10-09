@@ -449,7 +449,7 @@ run_trial() {
     aname=$(jq -r '.name' <<<"$assert")
     snippet=$(jq -r '.shell' <<<"$assert")
     ok=true
-    if reason=$(cd "$REPO" && bash -c "source '$ASSERT_LIB'; $snippet" 2>&1); then
+    if reason=$(cd "$REPO" && bash -c "source '$ASSERT_LIB'; $snippet" </dev/null 2>&1); then
       printf 'PASS  %s\n' "$aname"
     else
       ok=false

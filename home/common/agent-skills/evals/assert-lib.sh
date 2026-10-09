@@ -1,8 +1,10 @@
 # Helpers available to every assert snippet in an evals.json.
 #
-# Sourced by run-eval.sh into a fresh `bash -c` per assert, so an assert is just a
-# one-liner calling one of these. Every helper prints its reason to stdout on failure
-# (the runner captures and indents it) and returns non-zero.
+# Sourced by run-eval.sh into a fresh `bash -c` per assert, whose stdin is /dev/null,
+# so an assert is just a one-liner calling one of these. Every helper prints its
+# reason to stdout on failure (the runner captures and indents it) and returns
+# non-zero; `fail` does not exit, so a `fail` that guards later commands is written
+# `|| { fail "…"; exit 1; }`.
 #
 # Environment an assert can rely on:
 #   WORK      the eval's temp dir
