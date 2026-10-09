@@ -4,7 +4,7 @@
 - Test: `home/common/agent-skills/tests/test_admission_replay.py` (one new test method and two module constants)
 
 **Interfaces:**
-- Consumes: Task 3's `workflow-state owner-liveness` (verdicts `live` and `stalled`, members `since`, `progress_at`, `stall_at`, `wait_seconds`); Task 4's control `wait_seconds` (the replay does not depend on its value); Task 5's rules (a) and (d), which the simulated adapter follows; the committed `stall_minutes` 90 from Task 1.
+- Consumes: Task 3's `workflow-state owner-liveness` (verdicts `live` and `stalled`, members `since`, `progress_at`, `stall_at`, `wait_seconds`); Task 4's control `wait_seconds` (the replay does not depend on its value); Task 5's rules (a) and (d), which the simulated adapter follows; a `stall_minutes` of 90, the value D1 chose (not yet authored in the repository contract, per D15).
 - Consumes, already in this module: `AdmissionReplayTest` and its `project`, `declare`, `validated`, `cli`, `build`, `contract_input`, `control_request` and `claims` helpers, `at(minute)`, `ISSUES = (12, 14)` and `DISPATCH`.
 - Produces: the AC 1 check, `AdmissionReplayTest.test_a_silent_owner_is_freed_and_a_progressing_owner_is_left_alone`.
 
@@ -21,7 +21,7 @@
 In `test_admission_replay.py`, add `import os` and `from unittest import mock` to the imports, and these constants after `DISPATCH`:
 
 ```python
-# The committed bindings.workflow.orchestration.stall_minutes (#310 D1).
+# The stall bound D1 chose for bindings.workflow.orchestration.stall_minutes (#310 D1, D15).
 STALL_MINUTES = 90
 STALL_ISSUES_SOURCE = "invocation:/orchestrate-issues 12 14"
 ```

@@ -1,5 +1,7 @@
 # Task 1: Optional `stall_minutes` orchestration binding
 
+> **Phase 6 amendment (D15):** author no `stall_minutes` value in `.agents/project.json` or the eval fixture's `project.json`, and drop the `CommittedContractTest` assertion of 90. The installed resolver refuses the unknown member until this change is deployed; authoring the value is a follow-up. Every bullet and step below that edits either `project.json` or asserts the committed 90 is superseded.
+
 **Files:**
 - Modify: `python/agent_tools/resolve_project.py`
 - Modify: `.agents/project.json`

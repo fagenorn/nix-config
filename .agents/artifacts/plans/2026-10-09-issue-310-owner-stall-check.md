@@ -39,7 +39,7 @@ These are estimates. About 14 changed files: `workflow-state.py` (about +110 lin
 
 ## Task index
 
-Task 1 — Optional `stall_minutes` orchestration binding — python/agent_tools/resolve_project.py, .agents/project.json, home/common/agent-skills/evals/fixture-repo/.agents/project.json, home/common/agent-skills/tests/test_resolve_project.py — full — [task-1.md](2026-10-09-issue-310-owner-stall-check.tasks/task-1.md)
+Task 1 — Optional `stall_minutes` orchestration binding — python/agent_tools/resolve_project.py, home/common/agent-skills/tests/test_resolve_project.py (no contract value authored, per D15) — full — [task-1.md](2026-10-09-issue-310-owner-stall-check.tasks/task-1.md)
 Task 2 — `owner_liveness` reply at the workflow-response boundary — home/common/agent-skills/scripts/delivery_model/_wire.py, home/common/agent-skills/tests/test_delivery_model.py — full — [task-2.md](2026-10-09-issue-310-owner-stall-check.tasks/task-2.md)
 Task 3 — The read-only `owner-liveness` verb — home/common/agent-skills/scripts/workflow-state.py, home/common/agent-skills/tests/test_workflow_state.py, home/common/agent-skills/tests/test_delivered_control.py — full — [task-3.md](2026-10-09-issue-310-owner-stall-check.tasks/task-3.md)
 Task 4 — Control `wait` carries a validated `wait_seconds` — home/common/agent-skills/scripts/workflow-state.py, home/common/agent-skills/scripts/delivery_model/_wire.py, home/common/agent-skills/tests/test_workflow_state.py, home/common/agent-skills/tests/test_delivery_model.py — full — [task-4.md](2026-10-09-issue-310-owner-stall-check.tasks/task-4.md)
@@ -52,7 +52,7 @@ Task 6 — Stall replay over the real CLI — home/common/agent-skills/tests/tes
 |----|------|------|-------|
 | AC1 | code | Task 6 | `AdmissionReplayTest.test_a_silent_owner_is_freed_and_a_progressing_owner_is_left_alone` in `test_admission_replay.py` (one `unavailable` across the run, A's claim released as `owner_unavailable` before A's `deadline_at`, B re-armed with no observation), under `just agent-workflow-tests` |
 | AC2 | code | Task 5 | `WorkflowSkillContractsTest.test_orchestrate_documents_carry_their_machine_text` with the `owner-liveness` argv and `` `wait_seconds` `` pins, and `ObserverSleepExampleTest` in `test_shell_example_contracts.py` (the `sleep <wait_seconds>` example, and no `date` invocation in the skill); the helper unit test for the computed wait is Task 4's `ControlWaitSecondsTest` in `test_workflow_state.py` and `ControlWaitResponseTest` in `test_delivery_model.py`. All run under `just agent-workflow-tests` |
-| AC3 | code | Task 1 | `StallMinutesTest` and `CommittedContractTest.test_orchestration_values_are_committed_contract_values` in `test_resolve_project.py`, under `just agent-workflow-tests`; the documentation half is the `bindings.workflow.orchestration.stall_minutes` entry Task 5 adds to `CLAUDE_POLICY_ENTRIES` for orchestrate-issues §1 |
+| AC3 | code | Task 1 | `StallMinutesTest` in `test_resolve_project.py` (no committed value, per D15), under `just agent-workflow-tests`; the documentation half is the `bindings.workflow.orchestration.stall_minutes` entry Task 5 adds to `CLAUDE_POLICY_ENTRIES` for orchestrate-issues §1 |
 
 ## Decisions
 
@@ -68,3 +68,4 @@ The tasks rest on spec rows D1–D10 and on the plan rows D11 (one clock read, w
   - PR310-02 (Blocking, Task 3): the test's pinned clock is scoped to each `owner-liveness` call.
   - PR310-03 (Blocking, Task 4): the shared `assert_control_response_shape` wait branch moves to the five-member set.
   - PR310-04 (Should fix, Task 6): the replay adds a stale liveness wake and a late return from the stopped owner, asserting the observation count stays one.
+- Phase 6 amendment (D15): Task 1 authors no `stall_minutes` value in `.agents/project.json` or the eval fixture, because the installed resolver refuses the unknown member until deployed.
