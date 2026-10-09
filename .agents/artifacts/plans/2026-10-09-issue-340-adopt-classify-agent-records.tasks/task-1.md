@@ -1,4 +1,4 @@
-# Task 1: Record trees relocate centrally; one destination per move
+# Task 1: Record trees relocate centrally; destinations never collide
 
 **Files:**
 - Modify: `python/agent_tools/adopt_inspection.py` (`CLASSIFICATION_RULES`)
@@ -7,11 +7,11 @@
 
 **Interfaces:**
 - Consumes: nothing from other tasks.
-- Produces: three `CLASSIFICATION_RULES` rows (per D1); `no-existing-destination` fails on a shared destination (per D2). Later tasks rely on `found.moves` being the single list the gate reads.
+- Produces: three `CLASSIFICATION_RULES` rows (per D1); `no-existing-destination` fails on a shared or nested destination (per D2, D10). Later tasks rely on `found.moves` being the single list the gate reads.
 
 **Invariants:**
 - Each new row is `(group, "prefix", "durable-artifact", "move-canonical", target)` with exactly: `.claude/handoffs` → `.agents/artifacts/handoffs`, `.claude/notes` → `.agents/artifacts/notes`, `.claude/research` → `.agents/artifacts/specs`. Insert them directly after the `.claude/plans` row, in that order.
-- `no-existing-destination` keeps its id, its repair id `adopt.destination.occupied` and its `GATE_MESSAGES` text; it fails when any planned destination exists on disk **or** names the destination of more than one entry in `found.moves`. `READY_GATES` is unchanged.
+- `no-existing-destination` keeps its id, its repair id `adopt.destination.occupied` and its `GATE_MESSAGES` text; it fails when any planned destination exists on disk, **or** has an existing non-directory among its ancestors under `root`, **or** names the destination of more than one entry in `found.moves`, **or** is a proper ancestor of another planned destination (one path would have to be both a file and a directory; `adopt_apply.execute_operation` would fail creating the parent) (D2, D10). `READY_GATES` is unchanged.
 - No Nodo-specific path, no new conformance bucket, no `resolve_project` edit.
 
 - [ ] **Step 1: Write the failing tests**
@@ -75,17 +75,39 @@ class RecordTreeClassificationTest(AdoptTestCase):
         self.assertEqual(doc["plan"]["state"], "draft")
         self.assertIn("no-existing-destination",
                       [blocker["id"] for blocker in doc["plan"]["blockers"]])
+
+    def test_a_destination_inside_another_fails_the_destination_gate(self):
+        root = nix_config_shape_repo(self.home)
+        # `.agents/artifacts/specs/x.md` is `.claude/specs/x.md`'s destination
+        # and this record's destination's parent: distinct paths, one of
+        # which would have to be both a file and a directory.
+        write(root, ".claude/research/x.md/r.md", "# research r\n")
+        commit(root, "nest a destination inside another")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
+    def test_a_destination_under_an_existing_file_fails_the_gate(self):
+        root = nix_config_shape_repo(self.home)
+        write(root, ".agents/artifacts/notes", "a file, not a directory\n")
+        write(root, ".claude/notes/n.md", "# note n\n")
+        commit(root, "put a file where a destination's parent goes")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
+    def assert_destination_gate_fails(self, doc: object) -> None:
+        gate = next(gate for gate in doc["verification"]["ready_gates"]
+                    if gate["id"] == "no-existing-destination")
+        self.assertEqual(gate["status"], "failed", gate)
+        self.assertEqual(doc["plan"]["state"], "draft")
 ```
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run: `env PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_adopt_project.py -k RecordTreeClassificationTest`
-Expected: FAIL, 2 tests — the first plan is `draft` (the three records are `needs-decision`), and the collision fixture's destination gate is `passed` (`.claude/research/x.md` has no move yet).
+Expected: FAIL, 4 tests — the first plan is `draft` (the three records are `needs-decision`), and each collision fixture's destination gate is `passed` (its record has no move yet). An implementation that only counts exact duplicates still fails the last two.
 
 - [ ] **Step 3: Write the minimal implementation**
 
 1. `adopt_inspection.CLASSIFICATION_RULES`: insert the three rows of the invariants.
-2. `adopt_planning.evaluate_ready_gates`: replace the `occupied` computation with one that collects every destination in `found.moves` and fails when a destination exists under `root` or occurs more than once (e.g. a `collections.Counter` over the destinations). Extend the function's comment, if any is added, only with what the code does: "a planned destination that already exists, or that two planned moves share".
+2. `adopt_planning.evaluate_ready_gates`: replace the `occupied` computation with one over every destination in `found.moves` that fails when a destination exists under `root`, when an ancestor of it under `root` exists and is not a directory, when it occurs more than once (e.g. a `collections.Counter`), or when one of its `PurePosixPath(...).parents` is itself a planned destination. Any comment added says only what the code does: "a planned destination that already exists or sits under an existing file, or that collides with another: the same path, or one inside the other".
 
 - [ ] **Step 4: Verify**
 

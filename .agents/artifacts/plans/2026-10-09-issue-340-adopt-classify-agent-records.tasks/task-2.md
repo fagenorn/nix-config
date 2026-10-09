@@ -23,7 +23,7 @@
 - Fixed strings, dictated verbatim (D8):
   - `CANDIDATE_BASIS = "no classification row covers this agent path"`
   - impact: `"the candidate keeps the needs-decision action, so the no-needs-decision and no-open-decisions gates fail and the plan stays draft"`
-  - recommendation: `"answer it with plan --answer candidate-class <subject> <value>, using this entry's subject and value, and apply the plan id that run prints; a null value marks a secret-shaped path with no answer: add a central classification row for it, or remove it from the repository in its own commit, then plan again"`. The `--answer` flag lands in Task 3; this branch's head reaches review only after Task 3, so the sentence is true of the delivered code.
+  - recommendation, interim and true at this task's commit (no answer is accepted yet): `"add a central classification row for this path, or remove it from the repository in its own commit, then plan again"`. Task 3, which lands `--answer` and `apply`'s replay together, replaces it with D8's final sentence; nothing in this task names `--answer`.
 - `emit_human` prints a `candidate-class` open entry as `open candidate-class <subject> (answer: <value>): <recommendation>`, with `none` for a null value; a `project-id` line is unchanged (`open project-id: <recommendation>`) (D8).
 - No change to `plan_id` inputs in this task: `decisions.answered` stays `[]`.
 
