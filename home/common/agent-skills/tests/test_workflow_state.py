@@ -2389,6 +2389,31 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             os.path.abspath(worktree),
         )
 
+    def test_owner_unavailable_after_the_deadline_is_superseded_by_expiry(self):
+        """A stalled verdict read just before the deadline still recovers (#310 D18)."""
+        self.init_run()
+        worktree = self.root / "stalled-owner"
+        self.spawn(issue=14, worktree=worktree, budget_minutes=10)
+        attempt = self.read_state()["issues"]["14"]["attempts"][-1]
+        response = self.control(
+            now="2026-08-13T20:10:00Z",
+            issues=[14],
+            tracker=[self.tracker_fact(14)],
+            owners=[self.owner_fact(
+                event_id="14-owner-unavailable", issue=14,
+                attempt=attempt["attempt"], launch=len(attempt["launches"]),
+            )],
+            worktrees=[self.worktree_fact(14, recorded={
+                "path": attempt["worktree"], "state": "matching_issue_branch",
+            })],
+            max_parallel=100,
+        )
+        self.assert_control_response_shape(response)
+        self.assertEqual(
+            [(d["kind"], d["attempt"]) for d in response["deltas"]],
+            [("expired", 1), ("resumed", 1)],
+        )
+
     def test_owner_failed_retry_and_refusal_stamp_their_result_source(self):
         self.init_run()
         self.spawn(issue=14, worktree=self.root / "wt-a")

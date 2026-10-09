@@ -2365,7 +2365,12 @@ def _apply_one_issue_policy(
         return [{"kind": "forge_pr", "path": issue_branch_prefix(issue)}]
 
     if current_owner_unavailable and not active_unexpired:
-        raise WorkflowError("owner_unavailable is not applicable")
+        if not expired:
+            raise WorkflowError("owner_unavailable is not applicable")
+        # The deadline passed between the dispatcher's liveness or check-launch
+        # read and this call: the expiry reaper below recovers the attempt, so
+        # the observation is superseded rather than refused (#310 D18).
+        current_owner_unavailable = False
 
     live_custody = active_unexpired and not current_owner_unavailable
     reconcilable = bool(
