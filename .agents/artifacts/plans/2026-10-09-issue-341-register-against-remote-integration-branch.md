@@ -43,9 +43,16 @@ Task 3 — Follow the contract's integration branch, and rewrite the docs — `p
 |----|------|------|-------|
 | AC1 | code (classified) | Task 2 | `test_adopt_verify.py::RemoteRegistrationTest::test_a_diverged_local_branch_registers_from_the_remote` |
 | AC2 | code (classified) | Task 2 | `test_adopt_verify.py::RemoteRegistrationTest::test_an_unpushed_adoption_refuses_not_integrated` and `::test_an_adoption_only_on_its_apply_branch_refuses_not_integrated` |
-| AC3 | code (classified) | Task 3 | `just agent-workflow-tests` on the final head (sdd's final gate) |
+| AC3 | evidence | Task 3 | `just agent-workflow-tests` run on the final head (sdd's final gate); threshold: exit status 0 |
 
 ## Decisions
 
 - Only `--register` moves to the remote: D1. Remote is `origin`: D2. Integration branch from the remote contract, one hop: D3. Explicit-refspec fetch and pinned id: D4, with its flags per D11. Export-and-check: D5. Closed codes, repair ids carry the cause: D6. Integration gate and inner checks: D7. `revision` member and schema 2: D8. Test seams: D9.
+- Fetch disables configured refmaps with `--refmap=`: D12 (Phase-5 review).
 - Revision readers in place of the `HEAD` helpers, `HEAD` pinned in plain `verify`: D10 (appended by this plan). Fetch flags and the `FETCH_HEAD` witness: D11 (appended by this plan).
+
+## Standards review provenance
+
+- Reviewer: Codex (gpt-6-astra, xhigh), isolated read-only mode via `codex-companion task --fresh --reviewer plan-review`; no fallback.
+- Base SHA: eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7. Focus: none.
+- Findings: 5 accepted (PR-01 blocking: `--refmap=` plus a mapping fixture, D12; PR-02 fixture makes `refs/remotes/origin/main` stale before registration; PR-03 AC3 is evidence; PR-04 read-only claims in `adopt_inspection` corrected; PR-05 `require_manifest()` kept first), 0 rejected, 0 deferred.

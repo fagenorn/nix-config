@@ -17,7 +17,7 @@ Spec: `.agents/artifacts/specs/2026-10-09-issue-341-register-against-remote-inte
   - `has_remote(root: Path) -> bool` — `REMOTE in git_or_fail(root, "remote").decode("utf-8", "surrogateescape").split()`.
   - `@dataclass(frozen=True) class RemoteHeads` with `default: str | None` and `branches: frozenset[str]`.
   - `remote_heads(root: Path) -> RemoteHeads` — one `run_git(root, "ls-remote", "--symref", REMOTE, "HEAD", "refs/heads/*", network=True)`. Non-zero exit refuses `adopt_failure`/`adopt.git.remote_unreachable`. Parse each line by its first tab: `ref: refs/heads/X` with name `HEAD` gives the symref target `X`; a name starting `refs/heads/` adds its suffix to `branches`. `default` is `X` only when `X` is in `branches`, else `None`.
-  - `fetch_pinned(root: Path, branch: str) -> str` — `run_git(root, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance", "--no-recurse-submodules", REMOTE, f"+refs/heads/{branch}:refs/remotes/{REMOTE}/{branch}", network=True)` (D4, D11), then `run_git(root, "rev-parse", "--verify", "--quiet", f"refs/remotes/{REMOTE}/{branch}^{{commit}}")`. Either non-zero refuses `adopt_failure`/`adopt.git.fetch_failed`. Returns the stripped 40-hex id.
+  - `fetch_pinned(root: Path, branch: str) -> str` — `run_git(root, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-auto-maintenance", "--no-recurse-submodules", "--refmap=", REMOTE, f"+refs/heads/{branch}:refs/remotes/{REMOTE}/{branch}", network=True)` (D4, D11), then `run_git(root, "rev-parse", "--verify", "--quiet", f"refs/remotes/{REMOTE}/{branch}^{{commit}}")`. Either non-zero refuses `adopt_failure`/`adopt.git.fetch_failed`. Returns the stripped 40-hex id.
   - `export_commit(root: Path, commit: str, destination: Path) -> None` — `destination` must not exist. `git archive -o <destination>.tar <commit>`, then `destination.mkdir()` and `tarfile.open(...).extractall(destination, filter="data")`, the `adopt_apply.gate_cold_clone_resolves` precedent (D5). A non-zero archive, `tarfile.TarError` or `OSError` refuses `adopt_failure`/`adopt.git.export_failed`.
 - Produces, in `adopt_verify`:
   - `remote_source(root: Path, run_resolver: Resolver) -> contextlib.AbstractContextManager[VerificationSource]` (a `@contextlib.contextmanager` generator).
@@ -31,7 +31,7 @@ Spec: `.agents/artifacts/specs/2026-10-09-issue-341-register-against-remote-inte
 - `register_project` inner checks, in this order, before the registry transaction (which is unchanged): missing project id, adoption commit or contract branch → existing `adopt.registration.incomplete`; `verification.source.branch is None` or the contract's `integration_branch(verification.resolve_payload) != verification.source.branch` → `not_integrated`/`adopt.registration.integration_branch_unresolved`; `not commit_is_ancestor(root, adoption_commit, verification.source.commit)` → `not_integrated`/`adopt.registration.not_integrated` (D7: the pinned id, never a branch name).
 - The only repository writes under `--register` are `refs/remotes/origin/<branch>` and fetched objects: local branches, index, working tree, untracked files and `.git/FETCH_HEAD` are untouched (spec Out of scope, D11).
 - Plain `verify` is unchanged by this task.
-- `adopt_inspection`'s module docstring sentence "and nothing that writes" becomes true again: say that its one repository write is `fetch_pinned`'s update of one `refs/remotes/origin/<branch>` ref, and `export_commit` writes only into the directory its caller names.
+- `adopt_inspection`'s module docstring sentence "and nothing that writes" becomes true again: say that its one repository write is `fetch_pinned`'s update of one `refs/remotes/origin/<branch>` ref, and `export_commit` writes only into the directory its caller names. The module's opening "bounded, read-only inspection" line and the `# Git, as a child process` section comment's "Every query below is read-only" are corrected the same way (PR-04): every query is read-only except `fetch_pinned`'s one remote-tracking ref update.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -100,7 +100,15 @@ class RemoteRegistrationTest(VerifyTestCase):
         write_adoption_records(root)
         commit(root, "adopt")
         adoption = git(root, "rev-parse", "HEAD").strip()
-        publish(root)
+        # Freshness (PR-02): origin first holds only `base`, pushed from this
+        # checkout, so its `refs/remotes/origin/main` is stale; the adoption
+        # then advances on origin itself, never through a push that updates
+        # `root`'s remote-tracking ref.
+        bare = publish(root, ("HEAD~2:main",))
+        stale = git(root, "rev-parse", "refs/remotes/origin/main").strip()
+        git(root, "push", "--quiet", "origin", f"{adoption}:refs/staging/adopt")
+        git(bare, "update-ref", "refs/heads/main", adoption)
+        self.assertNotEqual(stale, adoption)
         # Diverge: local main falls behind the adoption (no contract at all),
         # gains unpushed work, an unstaged edit and an untracked file.
         git(root, "reset", "--quiet", "--hard", base)
@@ -130,6 +138,8 @@ class RemoteRegistrationTest(VerifyTestCase):
         self.assertEqual(tree_snapshot(root), snapshot)
         self.assertEqual(untracked.read_text("utf-8"), "untracked bytes\n")
         self.assertFalse((root / ".git" / "FETCH_HEAD").exists())
+        self.assertEqual(
+            git(root, "rev-parse", "refs/remotes/origin/main").strip(), adoption)
         plain = self.report(root)
         self.assertEqual(plain["result"], "not_conformant", plain)
         self.assertEqual(plain["revision"]["ref"], "HEAD")
@@ -154,6 +164,19 @@ class RemoteRegistrationTest(VerifyTestCase):
         self.assertEqual(self.report(root)["result"], "adopted")
         self.refuse_with(root, "not_integrated",
                          "adopt.registration.not_integrated")
+
+    def test_a_configured_fetch_mapping_cannot_move_a_local_branch(self):
+        # PR-01: `--refmap=` disables configured `remote.origin.fetch`
+        # mappings, so even one aimed at a local branch is not applied.
+        root = verifiable_repo(self.home)
+        publish(root)
+        git(root, "branch", "keep", "HEAD~1")
+        keep = git(root, "rev-parse", "refs/heads/keep").strip()
+        git(root, "config", "--add", "remote.origin.fetch",
+            "+refs/heads/main:refs/heads/keep")
+        report = self.report(root, "--register")
+        self.assertIs(report["registered"], True)
+        self.assertEqual(git(root, "rev-parse", "refs/heads/keep").strip(), keep)
 
     def test_no_origin_refuses_not_integrated(self):
         self.refuse_with(verifiable_repo(self.home), "not_integrated",
@@ -225,7 +248,10 @@ Expected: FAIL — `test_a_diverged_local_branch_registers_from_the_remote` refu
 2. `adopt_verify.py`: add `import contextlib`, `import tempfile`, `from collections.abc import Iterator`, import the new `adopt_inspection` names, and write `remote_source`, `require_integrated` and the new `register_project` checks per the invariants. `commit_is_ancestor`'s parameter `branch` is renamed `revision` and its docstring says it takes a commit id or ref.
 3. `adopt_project.py` `command_verify`:
 
+Only the body after the existing `require_manifest()` call is replaced; that call stays first, before the target is touched or fetched (PR-05).
+
 ```python
+    require_manifest()
     root = adopt_inspection.require_repository(args.repo_root)
     if not args.register:
         verification = adopt_verify.verify_repository(
@@ -244,7 +270,7 @@ Expected: FAIL — `test_a_diverged_local_branch_registers_from_the_remote` refu
 - [ ] **Step 4: Verify**
 
 Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_adopt_verify.py`
-Expected: PASS, 29 tests, no failures.
+Expected: PASS, 30 tests, no failures.
 
 Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_adopt_project.py home/common/agent-skills/tests/test_adopt_apply.py`
 Expected: PASS (plan and apply untouched).
