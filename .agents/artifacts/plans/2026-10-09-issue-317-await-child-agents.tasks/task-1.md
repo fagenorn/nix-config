@@ -19,7 +19,7 @@
 
 - [ ] **Step 1: Write the failing tests**
 
-In `InterimChildResultContractsTest`, replace `test_the_paragraph_states_the_rule_in_order` with the version below and add the new method after it:
+In `InterimChildResultContractsTest`, replace `test_the_paragraph_states_the_rule_in_order` with the version below (an existing pin updated in place; no new English pin, per D8):
 
 ```python
     def test_the_paragraph_states_the_rule_in_order(self):
@@ -39,22 +39,12 @@ In `InterimChildResultContractsTest`, replace `test_the_paragraph_states_the_rul
             "the one case that may lead to a fresh dispatch.",
             "Only the child's final hand-back counts as its result.")
 
-    def test_no_copy_permits_ending_the_turn_on_a_live_child(self):
-        for path in (SDD, FROM_ISSUE, SHIP_ISSUE):
-            with self.subTest(path=path.parent.name):
-                paragraph = self.paragraph(path)
-                self.assertIn("and wait for that report within your turn.", paragraph)
-                self.assertIn(
-                    "If the message cannot be delivered or its reply cannot be "
-                    "awaited in your turn,", paragraph)
-                self.assertNotIn("may end your", paragraph)
-                self.assertNotIn("host wakes you", paragraph)
 ```
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k InterimChildResultContractsTest`
-Expected: FAIL — `test_the_paragraph_states_the_rule_in_order` misses `and wait for that report within your turn.`; `test_no_copy_permits_ending_the_turn_on_a_live_child` fails for all three subtests.
+Expected: FAIL — `test_the_paragraph_states_the_rule_in_order` misses `and wait for that report within your turn.`.
 
 - [ ] **Step 3: Edit the three paragraphs (per D2, D7)**
 

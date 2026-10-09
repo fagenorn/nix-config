@@ -41,7 +41,7 @@ Task 2 — `own-commands` names agents, plus the stale-wording guard — `home/c
 
 | AC | Kind | Task | Check |
 |----|------|------|-------|
-| AC1 | code | Task 2 | `test_dispatch_contracts.py`: `SourceTreeContractsTest.test_own_commands` against the reworded `CONTRACTS["own-commands"]` and `StaleTurnEndWordingTest.test_no_document_keeps_the_commands_only_or_host_wakes_wording` (with Task 1's `InterimChildResultContractsTest.test_no_copy_permits_ending_the_turn_on_a_live_child`), run by `just agent-workflow-tests` |
+| AC1 | code | Task 2 | `test_dispatch_contracts.py`: `SourceTreeContractsTest.test_own_commands` against the reworded `CONTRACTS["own-commands"]` and `StaleTurnEndWordingTest.test_no_document_keeps_the_commands_only_or_host_wakes_wording` (with Task 1's updated `InterimChildResultContractsTest` anchors), run by `just agent-workflow-tests` |
 | AC2 | evidence | Task 2 | Command: the hand-back texts of the run's owner launches. Conditions: a post-merge orchestrate-issues run over two or more issues that reach Phase 7 on the merged skills. Threshold: zero matches of `waiting for`. Task 2's implementer writes acceptance-record row AC2 as `not measured — post-merge`, Verdict `unverified` (D5); ship-issue holds the issue `needs-verification` for the user to close. |
 
 ## Decisions
@@ -50,3 +50,10 @@ Task 2 — `own-commands` names agents, plus the stale-wording guard — `home/c
 - ship-issue's slim interim copy widens the undeliverable condition but keeps its direct "follow" without the "the child is one you cannot wait for" gloss, so the file shrinks: D7 (appended by this plan).
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (gpt-6-astra, xhigh), isolated read-only mode, no fallback; base `ef7eab96bb7bfbb5e804ac8eaa6672cf3d91e657`; no focus.
+- Accepted 2, rejected 0, deferred 0.
+- 317-R1 (Should fix, accepted): Task 2's stale-wording test matches through `_clause_pattern`, so a copy wrapped across `> ` blockquote lines is still caught.
+- 317-R2 (Discussion, accepted per D8): Task 1 adds no new English phrase pin; it only updates the existing `InterimChildResultContractsTest` anchors, and the stale-wording guard lives with the carrier clauses in `test_dispatch_contracts.py`.

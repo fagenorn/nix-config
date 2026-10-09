@@ -60,7 +60,7 @@ class StaleTurnEndWordingTest(unittest.TestCase):
             f"{label}: {phrase}"
             for label, text in sorted(guarded_documents().items())
             for phrase in STALE_TURN_END_WORDING
-            if phrase in " ".join(text.split())
+            if _clause_pattern(phrase).search(text)
         ]
         self.assertEqual(found, [])
 ```
