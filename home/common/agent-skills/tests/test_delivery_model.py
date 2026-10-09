@@ -1172,7 +1172,7 @@ class DeliveryModelTest(unittest.TestCase):
         digest = fixtures["control"]["summaries"][0]["contract_digest"]
         finalize = {"id": "finalize", "kind": "finalize"}
         wait = {"id": "wait:2026-09-21T01:00:00Z", "kind": "wait", "wake_on": ["deadline"],
-                "deadline_at": "2026-09-21T01:00:00Z"}
+                "deadline_at": "2026-09-21T01:00:00Z", "wait_seconds": 3600}
         for name, change in {
                 "extra_member": lambda value: action(value).update(issue=151),
                 "missing_issues": lambda value: action(value).pop("issues"),
@@ -1634,6 +1634,50 @@ class OwnerLivenessResponseTest(unittest.TestCase):
         self.assertEqual(self.validate(copy.deepcopy(reply)), reply)
         with self.assertRaises(self.model.DeliveryModelError):
             self.validate({**reply, "reason": "late"})
+
+
+class ControlWaitResponseTest(unittest.TestCase):
+    """#310 D9: the boundary recomputes a control wait's `wait_seconds`."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = load_model(SOURCE, "delivery_model_control_wait_test")
+
+    def validate(self, value):
+        return self.model.validate_delivery_object(
+            value, expected_kind="workflow-response", notes_max_characters=4096)
+
+    def with_wait(self, deadline, seconds):
+        value = copy.deepcopy(workflow_responses(self.model)["control"])
+        self.assertEqual(value["now"], "2026-09-21T00:00:00Z")
+        value["next_deadline"] = deadline
+        value["actions"].append({"id": f"wait:{deadline}", "kind": "wait",
+                                 "wake_on": ["deadline", "owner_notification", "tracker_change"],
+                                 "deadline_at": deadline, "wait_seconds": seconds})
+        return value
+
+    def test_the_exact_value_is_accepted(self):
+        for deadline, seconds in (("2026-09-21T01:00:00Z", 3600),
+                                  ("2026-09-21T00:00:01Z", 1),
+                                  ("2026-09-21T00:00:00Z", 0),
+                                  ("2026-09-20T23:59:00Z", 0)):
+            with self.subTest(deadline=deadline):
+                value = self.with_wait(deadline, seconds)
+                self.assertEqual(self.validate(copy.deepcopy(value)), value)
+
+    def test_any_other_value_or_shape_is_rejected(self):
+        cases = {"one_short": self.with_wait("2026-09-21T01:00:00Z", 3599),
+                 "one_over": self.with_wait("2026-09-21T01:00:00Z", 3601),
+                 "negative_past": self.with_wait("2026-09-20T23:59:00Z", -60),
+                 "boolean": self.with_wait("2026-09-21T00:00:01Z", True),
+                 "float": self.with_wait("2026-09-21T01:00:00Z", 3600.0)}
+        missing = self.with_wait("2026-09-21T01:00:00Z", 3600)
+        del missing["actions"][-1]["wait_seconds"]
+        cases["missing"] = missing
+        for name, value in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(self.model.DeliveryModelError):
+                    self.validate(value)
 
 
 if __name__ == "__main__":

@@ -732,8 +732,10 @@ class LifecycleHarness:
                 self.assertIsInstance(action["deadline_at"], str)
             elif action["kind"] == "wait":
                 self.assertEqual(set(action), {
-                    "id", "kind", "wake_on", "deadline_at",
+                    "id", "kind", "wake_on", "deadline_at", "wait_seconds",
                 })
+                self.assertIs(type(action["wait_seconds"]), int)
+                self.assertGreaterEqual(action["wait_seconds"], 0)
                 self.assertIsInstance(action["wake_on"], list)
                 self.assertTrue(set(action["wake_on"]) <= {
                     "owner_notification", "tracker_change", "deadline",
@@ -1089,7 +1091,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(response["actions"][-1], {
             "id": "wait:2026-08-19T15:00:00Z", "kind": "wait",
             "wake_on": ["deadline", "owner_notification", "tracker_change"],
-            "deadline_at": "2026-08-19T15:00:00Z",
+            "deadline_at": "2026-08-19T15:00:00Z", "wait_seconds": 10800,
         })
         self.assertEqual(response["next_deadline"], "2026-08-19T15:00:00Z")
         reopened = self.read_state()
@@ -8423,6 +8425,52 @@ class OwnerLivenessTest(LifecycleHarness, unittest.TestCase):
                     [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
                      "workflow-response", "--input", "-", "--policy", str(BUDGET_POLICY)],
                     input=json.dumps(value), capture_output=True, text=True, check=False,
+                    env=self.cli_env)
+                self.assertEqual(checked.returncode, 2)
+
+
+class ControlWaitSecondsTest(LifecycleHarness, unittest.TestCase):
+    """#310 D9: control computes the wait observer's sleep."""
+
+    def wait_action(self, response):
+        waits = [a for a in response["actions"] if a["kind"] == "wait"]
+        self.assertEqual(len(waits), 1)
+        return waits[0]
+
+    def test_the_wait_names_the_seconds_until_its_deadline(self):
+        self.init_run()
+        worktree = str(self.root / "wt-14")
+        response = self.control_validated(
+            now=DEFAULT_NOW, issues=[14], max_parallel=100, attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, candidate={"path": worktree,
+                                                          "state": "absent"})])
+        self.assertEqual(self.wait_action(response), {
+            "id": "wait:2026-08-13T20:30:00Z", "kind": "wait",
+            "wake_on": ["deadline", "owner_notification", "tracker_change"],
+            "deadline_at": "2026-08-13T20:30:00Z", "wait_seconds": 1800})
+        later = self.control_validated(
+            now="2026-08-13T20:10:07Z", issues=[14], max_parallel=100,
+            attempt_budget_minutes=30, tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, recorded={
+                "path": os.path.abspath(worktree), "state": "matching_issue_branch"})])
+        self.assertEqual(self.wait_action(later)["wait_seconds"], 1193)
+
+    def test_the_boundary_refuses_any_other_wait_seconds(self):
+        self.init_run()
+        response = self.control_validated(
+            now=DEFAULT_NOW, issues=[14], max_parallel=100, attempt_budget_minutes=30,
+            tracker=[self.tracker_fact(14)],
+            worktrees=[self.worktree_fact(14, candidate={"path": str(self.root / "wt-14"),
+                                                          "state": "absent"})])
+        for value in (1799, 1801, -1, True, None):
+            with self.subTest(wait_seconds=value):
+                mutated = json.loads(json.dumps(response))
+                self.wait_action(mutated)["wait_seconds"] = value
+                checked = subprocess.run(
+                    [sys.executable, str(ARTIFACT_BUDGET), "validate-report", "--boundary",
+                     "workflow-response", "--input", "-", "--policy", str(BUDGET_POLICY)],
+                    input=json.dumps(mutated), capture_output=True, text=True, check=False,
                     env=self.cli_env)
                 self.assertEqual(checked.returncode, 2)
 

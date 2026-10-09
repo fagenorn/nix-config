@@ -275,7 +275,7 @@ CONTROL_DISPATCH_FIELDS = frozenset(
     }
 )
 CONTROL_DISPATCH_KINDS = frozenset({"spawn", "resume", "retry", "recover"})
-CONTROL_WAIT_FIELDS = frozenset({"id", "kind", "wake_on", "deadline_at"})
+CONTROL_WAIT_FIELDS = frozenset({"id", "kind", "wake_on", "deadline_at", "wait_seconds"})
 CONTROL_WAKE_EVENTS = frozenset(
     {"owner_notification", "tracker_change", "deadline"}
 )
@@ -3197,6 +3197,9 @@ def command_control(args: argparse.Namespace) -> int:
                 "id": f"wait:{next_deadline}", "kind": "wait",
                 "wake_on": sorted(CONTROL_WAKE_EVENTS),
                 "deadline_at": next_deadline,
+                "wait_seconds": max(0, math.ceil((
+                    parse_utc(next_deadline, "next deadline")
+                    - parse_utc(now, "control now")).total_seconds())),
             })
         elif contract_requests:
             actions.append({"id": "delivery_contract", "kind": "delivery_contract",

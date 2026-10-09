@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime
+import math
 from typing import Any
 
 from ._canonical import (canonical_bytes, canonical_digest, _boolean, _digest,
@@ -210,7 +211,10 @@ def _control_response(value: Any, notes_max: int) -> dict[str, Any]:
         if not isinstance(item, dict) or "kind" not in item: _reject()
         if item["kind"] in {"spawn", "resume", "retry"}: _owner_action(item, notes_max, control=True)
         elif item["kind"] == "wait":
-            _object(item, _members("id kind wake_on deadline_at")); _string(item["id"], "wait id"); _utc(item["deadline_at"], "wait deadline"); _sorted_unique(item["wake_on"], "wake events")
+            _object(item, _members("id kind wake_on deadline_at wait_seconds")); _string(item["id"], "wait id"); _utc(item["deadline_at"], "wait deadline"); _sorted_unique(item["wake_on"], "wake events")
+            _integer(item["wait_seconds"], "wait seconds", minimum=0)
+            remaining = datetime.strptime(item["deadline_at"], "%Y-%m-%dT%H:%M:%SZ") - datetime.strptime(value["now"], "%Y-%m-%dT%H:%M:%SZ")
+            if item["wait_seconds"] != max(0, math.ceil(remaining.total_seconds())): _reject()
             if any(event not in {"owner_notification", "tracker_change", "deadline"} for event in item["wake_on"]): _reject()
         elif item["kind"] == "finalize": _object(item, _members("id kind")); _string(item["id"], "finalize id")
         elif item["kind"] == "delivery_remainder": _remainder(item, notes_max)
