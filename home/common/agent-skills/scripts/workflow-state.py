@@ -4188,7 +4188,7 @@ def command_owner_liveness(args: argparse.Namespace) -> int:
     """Answer whether one owner launch has recorded progress within a bound (#310 D2-D5).
 
     Read-only like ``check-launch`` (no lock, no write, neither ``transact`` nor
-    ``workflow_paths``), and the one read-only command that reads the clock, once.
+    ``workflow_paths``), but unlike it, it reads the clock, exactly once.
     A supplied ``--since`` is skew-checked against that same reading.
     """
     runtime = _delivery()
@@ -5205,9 +5205,8 @@ def build_parser() -> argparse.ArgumentParser:
     owner_liveness = subparsers.add_parser("owner-liveness", description=(
         "Answer whether one owner launch has recorded ledger progress within "
         "--stall-minutes, measured from the later of its last progress and --since "
-        "(default: the clock). It takes no lock and writes nothing. It is the one "
-        "read-only command that reads the clock, once; a supplied --since may lead "
-        "it by at most 60 seconds."))
+        "(default: the clock). It takes no lock and writes nothing, and it reads the "
+        "clock exactly once; a supplied --since may lead it by at most 60 seconds."))
     owner_liveness.add_argument("--repo-root", required=True)
     owner_liveness.add_argument("--run-id", required=True)
     owner_liveness.add_argument("--action-id", required=True)

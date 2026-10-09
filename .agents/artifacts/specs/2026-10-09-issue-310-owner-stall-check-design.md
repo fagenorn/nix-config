@@ -22,7 +22,7 @@ can fire at once or fail to arm.
 ## Solution
 
 1. **A stall bound in policy.** `bindings.workflow.orchestration.stall_minutes`
-   is an optional positive integer. This repo sets it to 90 (D1).
+   is an optional positive integer. This repo sets it to 90 (D1) (not authored in this PR, per D15).
 2. **One read-only verb.** `workflow-state owner-liveness` answers whether one
    owner launch has recorded ledger progress within the bound, measured from a
    base time. When it has, the reply gives the whole seconds left until the
@@ -47,7 +47,7 @@ can fire at once or fail to arm.
   value is defaulted. This follows the `light_lane` precedent for an optional
   member (D1).
 - `.agents/project.json` and the eval fixture repo's project file both set
-  `stall_minutes: 90`.
+  `stall_minutes: 90` (not authored in this PR, per D15).
 - orchestrate-issues §1 maps the member next to `attempt_budget_minutes`. This
   paragraph is where the AC says the setting is documented. The adapter passes
   the setting only to `owner-liveness`. It is not added to the control request,
@@ -59,9 +59,8 @@ Arguments: `--repo-root`, `--run-id`, `--action-id`, `--stall-minutes N`
 (a positive integer, required), and `--since <UTC>` (optional).
 
 - It is read-only: it takes no lock and makes no write. It reads the clock once,
-  through `ledger_clock()`, the seam from #309. This is the one read-only verb
-  that reads the clock. Its help text says so, the same way `build-delivery`
-  states its contract-stamp exception (D2).
+  through `ledger_clock()`, the seam from #309. Its help text says so, the same
+  way `build-delivery` states its contract-stamp exception (D2).
 - **Base.** An omitted `--since` makes the base the clock's value. A supplied
   `--since` must be a UTC timestamp no more than 60 seconds ahead of the clock.
   Otherwise the verb refuses with exit 2. This is the same skew rule and
@@ -156,8 +155,8 @@ Arguments: `--repo-root`, `--run-id`, `--action-id`, `--stall-minutes N`
   other value. The action id stays `wait:<deadline_at>`, and the control
   interface version stays 3 (D9).
 - §4 replaces "arm the one-shot observer … and its `deadline_at`" with: arm one
-  background `sleep <wait_seconds>` as the observer. The skill tree carries no
-  `date` invocation.
+  background `sleep <wait_seconds>` as the observer. orchestrate-issues' SKILL.md
+  carries no `date` invocation.
 
 ### Living docs and budget
 
@@ -217,7 +216,7 @@ clock with `WORKFLOW_STATE_TEST_CLOCK`.
      returned verbatim;
    - `0`, a negative number, a boolean and a string, each refused with
      `contract.workflow.*`;
-   - the real `.agents/project.json` resolving with `stall_minutes: 90`.
+   - the real `.agents/project.json` resolving with `stall_minutes: 90` (not authored in this PR, per D15).
 
 No new eval is added. The replay is the deterministic measure that AC 1 names
 as an alternative to an eval, and the existing evals' expected outputs do not
@@ -248,7 +247,7 @@ ran: full (shadow)
 
 | ID | Choice | Grounding | Rejected alternative |
 |----|--------|-----------|----------------------|
-| D1 | `workflow.orchestration.stall_minutes`, an optional positive integer or `null`. Absent or `null` means no stall check. This repo and the fixture set 90 | AC "single named setting … where `attempt_budget_minutes` is documented"; the `light_lane` precedent (absent or null means unsupported); bootstrap "no policy is defaulted". 90 is the light-lane budget, frees the incident owner about an hour into its 2.5-hour hold, and leaves long registered workers time to run | A required member would break every other onboarded repo's resolve until it is edited. A built-in default violates "never defaulted". A value of 30–60 risks stopping owners that wait on a long worker |
+| D1 | `workflow.orchestration.stall_minutes`, an optional positive integer or `null`. Absent or `null` means no stall check. This repo and the fixture set 90 (not authored in this PR, per D15) | AC "single named setting … where `attempt_budget_minutes` is documented"; the `light_lane` precedent (absent or null means unsupported); bootstrap "no policy is defaulted". 90 is the light-lane budget, frees the incident owner about an hour into its 2.5-hour hold, and leaves long registered workers time to run | A required member would break every other onboarded repo's resolve until it is edited. A built-in default violates "never defaulted". A value of 30–60 risks stopping owners that wait on a long worker |
 | D2 | A new read-only verb, `owner-liveness`, which reads the clock only through `ledger_clock()`. `check-launch` is unchanged | `check-launch` is read-only with no clock, and `launch-scope` and owners parse its closed four-key reply. #309's single clock seam. The issue asks for a helper-computed duration | Extending `check-launch` adds a clock and members to a reply that `launch-scope` closes over. An adapter-side computation puts the date arithmetic back |
 | D3 | Progress evidence is the latest of the record's `last_progress_at`, this launch's `at`, and the registration and release times of this launch's workers | These are the only per-launch timestamped writes in the ledger. Workers that commit must be registered (#222), so Phase 6 tasks show up. The run's `updated_at` is shared by all owners | `progress_marker` has no time, and adding one is a schema change. Counting `updated_at` lets one owner's progress hide another's stall |
 | D4 | The bound is measured from `max(progress_at, since)`. `since` is the clock at the latest interim notification, returned by the helper and passed back verbatim. A supplied `--since` gets #309's 60-second skew rule | Measuring from the last progress alone would stop an owner the moment it goes interim after a long legitimate phase. The adapter must not write times (#309) | Measuring from `progress_at` alone causes false stalls. An adapter-recorded time is the hand-typed clock again |
@@ -259,7 +258,7 @@ ran: full (shadow)
 | D9 | The control `wait` action gains `wait_seconds = max(0, ceil(deadline_at − now))`. The validator recomputes it from the response's `now`, and the interface stays version 3 | AC 2. The adapter is the only consumer, and its validator ships in the same tree. A deadline already passed yields 0, which wakes control to reap | Bumping to v4 churns every pin for one derived member. Letting the adapter compute the value is the BSD/GNU `date` bug |
 | D10 | Grill: a current launch whose record is at or past its `deadline_at` answers `past_deadline`, and the adapter sends nothing for it | Control raises `owner_unavailable is not applicable` for an expired record, and its own deadline wait already reaps it | Answering `stalled` past the deadline makes the adapter's next control call fail |
 | D11 | Plan: `owner-liveness` reads the clock exactly once. `supplied_time` gains a keyword-only `clock` argument, so the `--since` skew check reuses the verb's one reading. `--since` must be a whole-second `YYYY-MM-DDTHH:MM:SSZ`, and `--stall-minutes` is parsed in the handler (one to nine digits, no leading zero), so each refusal is one stderr line at exit 2. The verb does not run the boundary validator on its own reply | One reading keeps `since`, `wait_seconds` and the verdict on the same instant (#309 D11). The reply's times must pass the delivery model's whole-second `_utc`. Argparse type errors print a usage line too. Like `check-launch` and `resume-pack`, a read-only reply has no commit to protect, and its callers validate it | A second clock read can straddle a second boundary. A fractional `--since` would be echoed and then refused by the boundary. `type=positive_int` gives a two-line refusal |
-| D12 | Plan: the AC 1 replay is its own test with its own driver: both owners admitted under seven slots, `stall_minutes` 90 (the committed value), and the `owner-liveness` clock pinned through `WORKFLOW_STATE_TEST_CLOCK` with `mock.patch.dict(os.environ, …)`, because `BuilderHarness.cli` copies `os.environ`. The remainder-launch verb case lives in `test_delivered_control.py`, whose harness already builds a real remainder | `replay()` feeds the committed `baseline.json` metrics, so extending it would churn that baseline. #309's plan used the same override route for `BuilderHarness` | Folding the stall scenario into `replay()` changes every baseline metric. Hand-building a remainder record in `test_workflow_state.py` duplicates the delivery runtime |
+| D12 | Plan: the AC 1 replay is its own test with its own driver: both owners admitted under seven slots, `stall_minutes` 90 (the committed value; not authored in `.agents/project.json` in this PR, per D15), and the `owner-liveness` clock pinned through `WORKFLOW_STATE_TEST_CLOCK` with `mock.patch.dict(os.environ, …)`, because `BuilderHarness.cli` copies `os.environ`. The remainder-launch verb case lives in `test_delivered_control.py`, whose harness already builds a real remainder | `replay()` feeds the committed `baseline.json` metrics, so extending it would churn that baseline. #309's plan used the same override route for `BuilderHarness` | Folding the stall scenario into `replay()` changes every baseline metric. Hand-building a remainder record in `test_workflow_state.py` duplicates the delivery runtime |
 | D13 | Plan: the no-`date` pin is a regex over the whole orchestrate-issues `SKILL.md`, with positive and negative controls, in `test_shell_example_contracts.py`. The `sleep <wait_seconds>` pin is an example found through `_examples` | `date` is not in `COMMAND_VOCABULARY`, so `_examples` skips a prose or `text`-fence `date` call. An example-only scan could never fail (the-bar "Tests that can fail") | A head-based scan of examples alone misses the defect it exists to catch |
 | D14 | Phase 5: `owner-liveness` truncates every stored time feeding `progress_at` to whole seconds before comparing, and never rewrites the ledger | Codex plan review PR310-01: `progress` and worker verbs keep a supplied fractional `--now`, which a whole-second reply check would otherwise reject; matches `ledger_clock()`'s truncation | Ceil to the next second (lets a stall fire up to 1 s late for no gain) or relax the boundary to fractional times (widens the reply contract) |
 | D15 | Phase 6: this PR adds resolver support for `stall_minutes` but authors no value in `.agents/project.json` or the eval fixture; authoring 90 is a follow-up commit after the resolver is deployed (`just switch`). Amends D1's committed value | The installed resolver (Nix store) refuses an unknown `workflow.orchestration` member, verified: `resolve-project resolve` on the Task-1 worktree exits 2; every lifecycle tool resolving the branch (ship's `build-delivery`, Phase-entry resolves, concurrent owners after syncing main) would refuse until a switch. Precedent: #279 shipped `light_lane` support (47f1aa4f) and authored the value later (b3e50de5) | Commit the value now (blocks this delivery's own ship and every concurrent owner that syncs main until `just switch`) |
