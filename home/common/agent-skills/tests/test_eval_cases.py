@@ -205,12 +205,31 @@ class EvalCasesTest(unittest.TestCase):
                                       name=check["name"]):
                         self.assertNotRegex(check["shell"], FAIL_THEN_CONTINUE)
 
-    def test_from_issue_asserts_never_prefix_an_absolute_artifact_dir(self):
-        for case in skill_cases("from-issue"):
-            for check in case.get("asserts") or []:
-                with self.subTest(case=case["id"], name=check["name"]):
-                    self.assertNotRegex(check["shell"], r'\$(WT|REPO|PRE_WT)/\$(SPEC|PLAN)_DIR')
-                    self.assertNotRegex(check["shell"], r'commits_touch "\$WT" "\$(SPEC|PLAN)_DIR"')
+    ARTIFACT_DIR = r'\$(?:(?:SPEC|PLAN)_DIR\b|\{(?:SPEC|PLAN)_DIR\})'
+
+    def test_no_assert_prefixes_an_absolute_artifact_dir(self):
+        prefixed = re.compile(r'\$\{?(?:WT|REPO|PRE_WT)\}?/' + self.ARTIFACT_DIR)
+        touched = re.compile(
+            r'commits_touch\s+"\$\{?(?:WT|PRE_WT)\}?"[^;&|]*"' + self.ARTIFACT_DIR + '"')
+        samples = (
+            ('has_file "$REPO/$PLAN_DIR"/*.md', True),
+            ('has_file "$WT/${SPEC_DIR}"/*.md', True),
+            ('commits_touch "$WT" "$SPEC_DIR"', True),
+            ('has_file "$PLAN_DIR"/*.md', False),
+            ('has_file "$WT/${PLAN_DIR#"$REPO"/}"/*.md', False),
+            ('commits_touch "$WT" "${SPEC_DIR#"$REPO"/}"', False),
+            ('git -C "$REPO" log main -- "$SPEC_DIR"', False),
+        )
+        for sample, flagged in samples:
+            with self.subTest(sample=sample):
+                self.assertEqual(bool(prefixed.search(sample) or touched.search(sample)), flagged)
+        for path in case_files():
+            for case in json.loads(path.read_text(encoding="utf-8"))["evals"]:
+                for check in case.get("asserts") or []:
+                    with self.subTest(path=str(path.relative_to(REPO_ROOT)), case=case["id"],
+                                      name=check["name"]):
+                        self.assertNotRegex(check["shell"], prefixed)
+                        self.assertNotRegex(check["shell"], touched)
 
     def test_plan_tasks_verifiable_reads_indexed_members(self):
         index = ("# Plan\n\n## Task index\n\n"
