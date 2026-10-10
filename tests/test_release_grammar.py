@@ -7,7 +7,8 @@ from . import release_test_support as support
 
 def violations(release, contract=None):
     return release_profile.grammar_violations(
-        release, contract or support.base_contract(), support.descriptors())
+        release, contract if contract is not None else support.base_contract(),
+        support.descriptors())
 
 class DescriptorTest(unittest.TestCase):
     def test_forge_and_fixture_descriptors_are_valid(self):
@@ -114,6 +115,24 @@ class GrammarRefusesTest(unittest.TestCase):
     def test_profiles_force_deploy_unsupported(self):
         self.refused(lambda p, c: c["capabilities"]["deploy"].update(support="supported"),
                      "contract.release.deploy_conflict", "/capabilities/deploy/support")
+
+    def test_malformed_bindings_report_only_invalid(self):
+        def drop_bindings(p, c):
+            del p["bindings"]
+        cases = {
+            "missing bindings": drop_bindings,
+            "adapters list": lambda p, c: p["bindings"].update(adapters=[]),
+            "targets string": lambda p, c: p["bindings"].update(targets="x"),
+            "principals null": lambda p, c: p["bindings"].update(principals=None),
+            "credentials list": lambda p, c: p["bindings"].update(credentials=[]),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name):
+                profile, contract = support.forge_profile(), support.base_contract()
+                mutate(profile, contract)
+                found = violations(support.release_of("github-release", profile), contract)
+                self.assertTrue(found)
+                self.assertEqual({v["repair_id"] for v in found}, {"contract.release.invalid"})
 
     def test_malformed_contract_never_raises(self):
         for contract in ({}, {"bindings": []}, {"bindings": {"tracker": None}}, []):

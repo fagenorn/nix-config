@@ -127,10 +127,12 @@ class _Profile:
     def __init__(self, grammar: _Grammar, base: str, profile: object) -> None:
         self.g, self.base, self.profile = grammar, base, profile
         self.ranges: dict[str, tuple[Any, Any]] = {}
-        self.aliases: dict[str, Any] = {}
-        self.targets: dict[str, Any] = {}
-        self.principals: dict[str, Any] = {}
-        self.credentials: dict[str, Any] = {}
+        # A registry stays None until its bindings group is a well-formed object, so a
+        # malformed group is reported once and never again as unknown references.
+        self.aliases: dict[str, Any] | None = None
+        self.targets: dict[str, Any] | None = None
+        self.principals: dict[str, Any] | None = None
+        self.credentials: dict[str, Any] | None = None
         self.nodes: list[dict[str, Any]] = []
 
     def at(self, *parts: object) -> str:
