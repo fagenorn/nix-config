@@ -1,6 +1,6 @@
 # Task 2: The pure `attempt_custody` module and the vocabulary's one home
 
-The pure half of attempt custody: every rule that needs no file, lock or clock. Read the root's Global Constraints first. Decisions: D1, D3, D5, D8, D11, D16, D18, D19, D21.
+The pure half of attempt custody: every rule that needs no file, lock or clock. Read the root's Global Constraints first. Decisions: D1, D3, D5, D8, D11, D16, D18, D19, D21, D24, D25.
 
 **Files:**
 - Create: `python/agent_tools/attempt_custody.py`
@@ -23,24 +23,32 @@ The pure half of attempt custody: every rule that needs no file, lock or clock. 
   - `span_lapsed(custody, lease: Mapping | None, now_ms: int) -> bool`: true unless the lease record still names the custody's epoch and instance and `now_ms < expires_at` (the core's own lapse comparison; a custody transaction has one key).
   - `@dataclass(frozen=True) class Operation`: `kind: str`, `executor_id: str | None = None`, `ttl_ms: int | None = None`, `reason: str | None = None`.
   - `class ProjectionMismatch(ValueError)`.
-  - `settle_plan(issue_state, attempt, transaction, *, lease, now_ms, latest, report_digest=None) -> tuple[Operation, ...]`, specified below.
+  - `settle_plan(issue_state, attempt, transaction, *, lease, now_ms, latest, report_digest=None, bound=False) -> tuple[Operation, ...]`, specified below.
 
-**The settle planner.** Inputs: the ledger's issue object and one of its attempts; that attempt's custody `Transaction` or `None`; `lease`, the record `inspect_lease` returns for the subject's worktree key (`None` with no transaction); `now_ms`; `latest`, whether this is the issue's last attempt; `report_digest`, the digest of an owner report this write submits for this attempt. It returns the operations that bring the core to the spec's projection table, in order. `current` is `launch_id(issue, attempt, len(launches))`, `span` the transaction's open custody, `parked` whether its state is `attention_required`.
+**The settle planner.** Inputs: the ledger's issue object and one of its attempts; that attempt's custody `Transaction` or `None`; `lease`, the record `inspect_lease` returns for the subject's worktree key (`None` with no transaction); `now_ms`; `latest`, whether this is the issue's last attempt; `report_digest`, the digest of an owner report this write submits for this attempt; `bound`, whether this write is the attempt's 8 → 9 bind (the locked read's plan lists it). It returns the operations that bring the core to the spec's projection table, in order. `current` is `launch_id(issue, attempt, len(launches))`.
 
-1. **No transaction** (D19, D11): not `latest`, or the attempt state outside `LIVE_STATES` → `()`. Otherwise the plan starts with `Operation("create")` and continues below as a transaction in `created` with no span.
+The planner tracks two facts separately and updates both as it emits operations, so a plan resumed after any of its operations emits only what is still missing (D24): `span`, the transaction's open custody with `lapsed = span_lapsed(span, lease, now_ms)`, and `parked`, whether the state is `attention_required`. Two shared steps:
+
+- *close*: with no span, nothing; a lapsed span → `reap(<reason>)`, which also leaves the transaction parked; a live span → `release`. Either way no span remains.
+- *park* with a parking reason and a reap reason: a lapsed span → `reap(<reap reason>)` and nothing else; otherwise `park(<parking reason>)` unless already parked, then `release` of a live span.
+
+1. **No transaction** (D19, D11, D25): `()` unless `bound`, or `latest` with the attempt state in `LIVE_STATES`. Otherwise the plan starts with `Operation("create")` and continues below as a transaction in `created`, not parked, with no span.
 2. **Terminal transaction** (D18): attempt state in `LIVE_STATES` → `ProjectionMismatch`; otherwise `()`.
-3. **`active`**, with `deadline = at_ms(deadline_at)`:
-   - `span` is `current`'s: nothing when the lease record still names this span and expires at `deadline`, or when `deadline <= now_ms`; otherwise `acquire(current, ttl_ms=deadline - now_ms)` when the span has lapsed (D16) and `renew(ttl_ms=deadline - now_ms)` when it is live.
-   - otherwise close any open span (`release` when live, `reap("expiry")` when lapsed), then `acquire(current, ttl_ms=deadline - now_ms)` when `deadline > now_ms`, then `unpark("resumed")` when the transaction was parked or the reap just parked it.
-4. **`handed_off`**: close any open span the same way, then `unpark("resumed")` when parked.
-5. **`suspended`** with cause `blocked_on`: span lapsed → `reap(reason)`, where reason is `"expiry"` for `unknown` and `suspension_reason(blocked_on)` otherwise; span live → `park(suspension_reason(blocked_on))`, `release`; no span → `park(suspension_reason(blocked_on))` unless already parked.
-6. **A synthetic verdict** (`result_source` `stalled` or `expiry`): the same three cases with the source as both reasons. It never seals.
-7. **Any other verdict** (`owner`, `refused`, `superseded`), in this order: `reap("expiry")` when an open span has lapsed; `record_result(current)` when the source is `owner`, a `report_digest` was given, `launch_fence(transaction, current)` is not `None` and `result_recorded` is false (D21); then `release` of a still-live span when `merge_recorded`, else `seal("<result_source>:<state>")`.
+3. **`active`**, with `ttl = at_ms(deadline_at) - now_ms`:
+   - `span` is `current`'s and live: `renew(ttl_ms=ttl)` when `ttl > 0` and the lease does not expire at the deadline, else nothing.
+   - `span` is `current`'s and lapsed: `acquire(current, ttl_ms=ttl)` when `ttl > 0` (D16); else `reap("expiry")` when parked, and nothing when not (lapsed and unreaped is still the active row).
+   - any other span, or none: *close* with reason `expiry`, then `acquire(current, ttl_ms=ttl)` when `ttl > 0`.
+   - last, whatever the span step did: `unpark("resumed")` when parked.
+4. **`handed_off`**: *close* with reason `expiry`, then `unpark("resumed")` when parked.
+5. **`suspended`** with cause `blocked_on`: *park* with `suspension_reason(blocked_on)` and the reap reason `"expiry"` for `unknown`, the parking reason otherwise.
+6. **A synthetic verdict** (`result_source` `stalled` or `expiry`): *park* with the source as both reasons. It never seals.
+7. **Any other verdict** (`owner`, `refused`, `superseded`), in this order: `reap("expiry")` when an open span has lapsed; `record_result(current)` when the source is `owner`, a `report_digest` was given, the transaction exists, `launch_fence(transaction, current)` is not `None` and `result_recorded` is false (D21; an attempt this plan creates has no span, so no result, D25); then `release` of a still-live span when `merge_recorded`, else `seal("<result_source>:<state>")`.
 
 Operation fields: `acquire` and `record_result` carry `executor_id`; `acquire` and `renew` carry `ttl_ms`; `reap`, `park`, `unpark` and `seal` carry `reason`; every other field is `None`.
 
 **Invariants:**
 - The planner is total over `ATTEMPT_STATES` and raises only `ProjectionMismatch`; applying its plan and planning again at the same clock yields `()` or, for a verdict that seals, the single `seal`.
+- Recovery (D24): after any leading part of a plan has been applied, planning again at the same clock and applying that plan reaches the state, custody and lease the uninterrupted plan reaches. No plan parks a parked transaction, unparks one that is not parked, or presents a lapsed custody to `advance`.
 - The four vocabulary constants have one definition, in the package; `workflow-state.py` imports them under their existing names and defines none.
 - `suspend_attempt` in `workflow-state.py` computes its count through `stall_count` and its bound through `stalled`; its observable behaviour does not change.
 
@@ -173,6 +181,9 @@ class SettlePlanTest(unittest.TestCase):
     """The planner over real core snapshots; the store's clock is this test's `now`."""
 
     def setUp(self):
+        self.fresh()
+
+    def fresh(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.now = T0
@@ -186,11 +197,47 @@ class SettlePlanTest(unittest.TestCase):
         return self.store.acquire(self.id, executor_id=f"14:1:{launch}",
                                   subject_path=WORKTREE, ttl_ms=minutes * MINUTE).custody
 
-    def plan(self, attempt_, *, issue_=None, latest=True, digest=None, bare=False):
+    def plan(self, attempt_, *, issue_=None, latest=True, digest=None, bare=False,
+             bound=False):
         transaction = None if bare else self.store.load(self.id)
         lease = None if bare else self.store.inspect_lease(ac.worktree_key(WORKTREE))
         return ac.settle_plan(issue_ or issue(), attempt_, transaction, lease=lease,
-                              now_ms=self.now, latest=latest, report_digest=digest)
+                              now_ms=self.now, latest=latest, report_digest=digest,
+                              bound=bound)
+
+    def apply(self, operations, report):
+        """Apply `operations` to the store the way the settle step maps them."""
+        for op in operations:
+            held = self.store.load(self.id).custody
+            if op.kind == "acquire":
+                self.store.acquire(self.id, executor_id=op.executor_id,
+                                   subject_path=WORKTREE, ttl_ms=op.ttl_ms)
+            elif op.kind == "release":
+                self.store.release(held)
+            elif op.kind == "reap":
+                self.store.reap(self.id, reason=op.reason)
+            elif op.kind in ("park", "unpark"):
+                target = "attention_required" if op.kind == "park" else "created"
+                self.store.advance(self.id, target, reason=op.reason, custody=held)
+            elif op.kind == "record_result":
+                fence = ac.launch_fence(self.store.load(self.id), op.executor_id)
+                self.store.record_owner_result(self.id, executor_id=op.executor_id,
+                                               subject_path=WORKTREE, fence=fence,
+                                               result=report)
+            elif op.kind == "seal":
+                self.store.advance(self.id, "abandoned", reason=op.reason,
+                                   external_state="known", custody=held)
+            else:
+                self.fail(f"unexpected operation {op}")
+
+    def held(self):
+        transaction = self.store.load(self.id)
+        holder = self.store.inspect_lease(ac.worktree_key(WORKTREE))["holder"]
+        return (transaction.state,
+                None if transaction.custody is None else transaction.custody.executor_id,
+                None if holder is None else holder["executor_id"],
+                [event["type"] for event in transaction.events
+                 if event["type"] in ("stop_synthesized", "owner_result")])
 
     def test_an_attempt_without_a_transaction(self):
         self.assertEqual(self.plan(attempt("active"), bare=True),
@@ -204,6 +251,16 @@ class SettlePlanTest(unittest.TestCase):
             (Op("create"), Op("park", reason="suspended:human_gate")))
         self.assertEqual(self.plan(attempt("stopped", source="owner"), bare=True), ())
         self.assertEqual(self.plan(attempt("active"), bare=True, latest=False), ())
+
+    def test_an_attempt_its_binding_write_ended_is_still_created(self):
+        stopped = attempt("stopped", source="owner", result=result("stopped"))
+        self.assertEqual(self.plan(stopped, bare=True, bound=True, digest="sha256:" + "1" * 64),
+                         (Op("create"), Op("seal", reason="owner:stopped")))
+        merged = attempt("merged", source="owner", result=result("merged", "b" * 40))
+        self.assertEqual(self.plan(merged, bare=True, bound=True), (Op("create"),))
+        stalled = attempt("stopped", source="stalled", result=result("stopped"))
+        self.assertEqual(self.plan(stalled, bare=True, bound=True, latest=False),
+                         (Op("create"), Op("park", reason="stalled")))
 
     def test_an_active_attempt(self):
         self.acquire()
@@ -320,6 +377,55 @@ class SettlePlanTest(unittest.TestCase):
         with self.assertRaises(ac.ProjectionMismatch):
             self.plan(attempt("active"))
 
+    def test_a_plan_interrupted_after_any_operation_converges(self):
+        report = {"state": "stopped"}
+        digest = telemetry_digest(report)
+        resumed = attempt("active", launches=2, deadline="2026-08-13T21:01:00Z")
+        stopped = attempt("stopped", source="owner", result=result("stopped"))
+        merged = attempt("merged", source="owner", result=result("merged", "b" * 40))
+
+        def lapse():
+            self.now = T0 + 31 * MINUTE
+
+        def reap():
+            lapse()
+            self.store.reap(self.id, reason="expiry")
+
+        def later():
+            self.now = T0 + 5 * MINUTE
+
+        cases = {
+            "suspension": (None, attempt("suspended", blocked_on="transport"), 2),
+            "stalled stop": (None, attempt("stopped", source="stalled",
+                                           result=result("stopped")), 2),
+            "resume after a reap": (reap, resumed, 2),
+            "resume after an unreaped expiry": (lapse, resumed, 3),
+            "takeover": (later, attempt("active", launches=2), 2),
+            "expired handoff resumed": (lapse, attempt("handed_off"), 2),
+            "late verdict": (lapse, stopped, 3),
+            "verdict": (None, stopped, 2),
+            "merged verdict": (None, merged, 2)}
+        for name, (prepare, attempt_, length) in cases.items():
+            def start():
+                self.fresh()
+                self.acquire()
+                if prepare is not None:
+                    prepare()
+
+            start()
+            whole = self.plan(attempt_, digest=digest)
+            self.assertEqual(len(whole), length, name)
+            self.apply(whole, report)
+            reached = self.held()
+            self.assertEqual(self.plan(attempt_, digest=digest), (), name)
+            for cut in range(1, length):
+                with self.subTest(case=name, applied=cut):
+                    start()
+                    self.apply(self.plan(attempt_, digest=digest)[:cut], report)
+                    self.apply(self.plan(attempt_, digest=digest), report)
+                    self.assertEqual(self.held(), reached)
+                    self.assertEqual(self.plan(attempt_, digest=digest), ())
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -341,7 +447,7 @@ In `workflow-state.py`, delete the definitions of `BLOCKED_ON_VALUES`, `OWNER_BL
 - [ ] **Step 5: Verify**
 
 Run: `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_attempt_custody.py`
-Expected: `OK`, 20 tests.
+Expected: `OK`, 22 tests.
 
 Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py` (timeout 1800 s)
 Expected: `OK`: the suspension and stall cases pass on the moved vocabulary.

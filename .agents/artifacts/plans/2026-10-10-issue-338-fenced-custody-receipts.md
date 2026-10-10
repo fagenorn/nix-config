@@ -9,7 +9,7 @@
 
 **Tech stack:** Python 3 standard library and `unittest`; `agent_tools` (`transaction_core`, `transaction_custody`, `attempt_identity`, `attempt_store`); `just`.
 
-Spec: `.agents/artifacts/specs/2026-10-10-issue-338-fenced-custody-receipts-design.md`, for https://github.com/fagenorn/nix-config/issues/338. Its `## Decision ledger` rows D1–D22 are cited by ID.
+Spec: `.agents/artifacts/specs/2026-10-10-issue-338-fenced-custody-receipts-design.md`, for https://github.com/fagenorn/nix-config/issues/338. Its `## Decision ledger` rows D1–D26 are cited by ID.
 
 ## Global Constraints
 
@@ -58,18 +58,29 @@ Task 7 — Skill argv, contract prose and the final gate — `home/common/agent-
 | AC | Kind | Task | Check |
 |----|------|------|-------|
 | AC1 | code | Task 3 | `home/common/agent-skills/tests/test_attempt_custody.py`: the three `CustodyLeaseTest.test_ac1_*` tests; with Task 1's `tests/test_transaction_custody.py`: `RenewTest.test_renew_with_a_ttl_rebases_the_lease_in_place_whatever_the_margin` and `test_renew_with_a_ttl_refuses_a_bad_ttl_and_a_lapsed_span` |
-| AC2 | code | Task 5 | same file: `LateLegacyResultTest.test_ac2_a_late_finish_supersedes_the_reapers_stop_in_the_receipt`, `test_ac2_a_late_merged_finish_is_recorded_and_left_unsealed`, `LateSummaryTest.test_ac2_a_late_summary_supersedes_the_reapers_stop_in_the_receipt` |
+| AC2 | code | Task 5 | same file: `LateLegacyResultTest.test_ac2_a_late_finish_supersedes_the_reapers_stop_in_the_receipt`, `test_ac2_a_late_merged_finish_is_recorded_and_left_unsealed`, `LateSummaryTest.test_ac2_a_late_summary_supersedes_the_reapers_stop_in_the_receipt`; with Task 3's `CustodyRepairTest` (an interrupted seal is completed) |
 | AC3 | code | Task 4 | same file: `MisbindingTest.test_ac3_a_session_in_another_attempts_worktree_is_refused_before_any_write` |
 | AC4 | code | Task 5 | same file: `LateSummaryTest.test_ac4_merged_and_closed_are_observed_apart_from_custody`, beside the AC2 and AC3 fixtures above |
-| AC5 | code | Task 5 | same file: `LaunchFenceTest.test_ac5_attempt_keyed_finish_is_refused_and_its_result_retained`; with Task 4's `test_ac5_attempt_keyed_progress_and_suspend_after_a_successor_launch` and `test_ac5_an_attempt_created_at_schema_9_needs_its_launch_named` |
+| AC5 | code | Task 5 | same file: `LaunchFenceTest.test_ac5_attempt_keyed_finish_is_refused_and_its_result_retained`; `test_an_earlier_launch_cannot_replace_its_successors_stalled_stop`; with Task 4's `test_ac5_attempt_keyed_progress_and_suspend_after_a_successor_launch` and `test_ac5_an_attempt_created_at_schema_9_needs_its_launch_named` |
 | AC6 | code | Task 7 | `just agent-workflow-tests` green at the final head with D22's fixture changes as the only edits to pre-existing tests and `test_admission_replay` on its committed baseline; `just build`; `just agent-installed-skill-tests`; with Task 6's `CompatibilityTest.test_ac6_the_base_helper_refuses_a_schema_9_ledger_without_writing` and `test_ac6_launch_projections_print_the_same_bytes_across_the_bind` |
 
 ## Decisions
 
-- Custody object, lease window, launch as a span, projection and write order: D1–D4, D12, D15, D16. Clock, every-attempt settle, sealed-is-final, lazy creation: D17–D19.
+- Custody object, lease window, launch as a span, projection and write order: D1–D4, D12, D15, D16. Clock, every-attempt settle, sealed-is-final, lazy creation: D17–D19. Interrupted-write recovery and seal completion: D24.
 - Verdicts, receipts and what stays unsealed: D5. Intake, adoption and retention: D6, D21.
-- Misbinding: D7. Launch naming, fencing reasons and where they print: D9, D13, D20.
+- Misbinding: D7. Launch naming, fencing reasons and where they print: D9, D13, D20, D23.
 - Suspension vocabulary and its home: D8. Remainders and the delivery runtime untouched: D10.
-- Migration, schema marker, old-helper pin: D4, D11, D14. Floor fixture changes: D22.
+- Migration, schema marker, old-helper pin: D4, D11, D14, D25. Floor fixture changes: D22. Byte-exact refusal fixtures: D26.
+
+## Standards review provenance
+
+Plan review by `Codex`, base SHA `5bd914e199f3e57217780596beefe69838f4efd4`, isolated read-only mode, no focus, no fallback. Accepted 6, rejected 0, deferred 0; every finding was re-checked against the cited code first.
+
+- 338-B1: accepted. A finish from an earlier launch over a synthetic stop is fenced and retained (Task 5; D23).
+- 338-B2: accepted. The planner tracks parking and span separately, with a per-prefix recovery test (Task 2; D24).
+- 338-B3: accepted. The preflight ignores a holder whose own earlier plan ends its span (Task 3; D24).
+- 338-B4: accepted. An unchanged repeat and `migrate --apply` complete a pending seal (Tasks 3 and 5; D24).
+- 338-B5: accepted. An attempt its binding write ends is still bound and sealed (Tasks 2 and 3; D25).
+- 338-S1: accepted. Byte-exact refusal fixtures use a finish helper that restores nothing (Tasks 3 to 5; D26).
 
 ---

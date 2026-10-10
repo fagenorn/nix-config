@@ -1,6 +1,6 @@
 # Task 5: Late-result intake: recording, adoption, retention
 
-An owner's `finish` now reaches the core: recorded against its launch's span, adopted over a reaper's stop, or retained when it is refused. Read the root's Global Constraints first. Decisions: D5, D6, D10, D17, D18, D20, D21.
+An owner's `finish` now reaches the core: recorded against its launch's span, adopted over a reaper's stop, or retained when it is refused. Read the root's Global Constraints first. Decisions: D5, D6, D10, D17, D18, D20, D21, D23, D24, D26.
 
 **Files:**
 - Modify: `home/common/agent-skills/scripts/workflow-state.py`, `python/agent_tools/attempt_store.py`
@@ -15,16 +15,19 @@ An owner's `finish` now reaches the core: recorded against its launch's span, ad
 **Behaviour:**
 
 1. **The report as submitted.** The legacy `finish` keeps a deep copy of the validated result object taken right after `load_result_file`, before the worktree note is added; `finish --summary-file` keeps the validated summary. That object is `OwnerCall.report`. The legacy call stays `keyed=True`; the summary call is `OwnerCall(issue=report["issue"], attempt=custody["attempt"], action_id=custody["action_id"], keyed=False, report=report, supplied=…, summary=True)` and is passed only for `custody["kind"] == "implementation"` (D10: remainders are untouched).
-2. **Recording.** When the mutation changed the ledger and the call carries a report, `transact` passes `report=OwnerReport(call.issue, call.attempt, call.report)` to `commit_state`. The settle step records it against the last launch's span before any seal or release.
-3. **Adoption** (D21), in `admit_owner_call` after the fence: when the call carries a report, the caller's launch is the attempt's last, the attempt is its issue's latest, it has a custody transaction and `reaped(transaction, <launch id>)` is true, call `adopt_late_finish` on the locked copy of the state. It presents the record as `active` again in two cases and does nothing in any other: the record is `suspended` with `blocked_on` `unknown` and no result (set `state` `active`, `blocked_on` `None`); or the call is a summary and the record is a `stalled` stop whose result is the issue's outcome (also clear `result`, `finished_at`, `result_source` and the issue's `outcome`). A summary whose `historical_owner_result` is null is never adopted. The engine then judges the finish as an on-time one; when it refuses, nothing is written.
-4. **Custody refusals.** In the legacy `finish`, `finish requires an active attempt` and `conflicting terminal result for issue … attempt …` are raised as `CustodyRefusal` with the same text. In `finish --summary-file`, the mutation first calls `runtime.record_for_custody(issue_state, report["custody"])` for a known issue; its `ValueError` becomes `CustodyRefusal("delivery finish refused")`, the text the runtime's own refusal prints today.
-5. **Retention** (D6, D20). A report is retained through `retain_result`, with `now_ms = at_ms` of the transport's ledger time (`ledger_time(supplied)`), in two places: before `superseded_launch` is raised for a call that carries one, and when the mutation raises `CustodyRefusal` for a call whose launch `admit_owner_call` resolved. The refusal is then raised unchanged; the ledger's bytes do not change.
+2. **Recording.** When the mutation changed the ledger and the call carries a report, `transact` passes `report=OwnerReport(call.issue, call.attempt, call.report)` to `commit_state`. The settle step records it against the last launch's span before any seal or release. That is the caller's span: the fence (with behaviour 3), the adoption rule and the runtime's `record_for_custody` admit a report-carrying mutation only from the attempt's last launch, so `transact` passes the report only when `admit_owner_call` resolved no launch (no custody transaction, nothing is recorded) or the attempt's last one.
+3. **The fence over a synthetic stop** (D23). `admit_owner_call` also raises `FencingRefused("superseded_launch", …)` for a `keyed` call that carries a report when the attempt's `result_source` is in `SYNTHETIC_RESULT_SOURCES` and the caller's launch is not the attempt's last: the engine would otherwise replace the successor's stop with the earlier launch's report. `progress` and `suspend` on such an attempt keep the engine's refusals.
+4. **Adoption** (D21), in `admit_owner_call` after the fence: when the call carries a report, the caller's launch is the attempt's last, the attempt is its issue's latest, it has a custody transaction and `reaped(transaction, <launch id>)` is true, call `adopt_late_finish` on the locked copy of the state. It presents the record as `active` again in two cases and does nothing in any other: the record is `suspended` with `blocked_on` `unknown` and no result (set `state` `active`, `blocked_on` `None`); or the call is a summary and the record is a `stalled` stop whose result is the issue's outcome (also clear `result`, `finished_at`, `result_source` and the issue's `outcome`). A summary whose `historical_owner_result` is null is never adopted. The engine then judges the finish as an on-time one; when it refuses, nothing is written.
+5. **Custody refusals.** In the legacy `finish`, `finish requires an active attempt` and `conflicting terminal result for issue … attempt …` are raised as `CustodyRefusal` with the same text. In `finish --summary-file`, the mutation first calls `runtime.record_for_custody(issue_state, report["custody"])` for a known issue; its `ValueError` becomes `CustodyRefusal("delivery finish refused")`, the text the runtime's own refusal prints today.
+6. **Retention** (D6, D20). A report is retained through `retain_result`, with `now_ms = at_ms` of the transport's ledger time (`ledger_time(supplied)`), in two places: before `superseded_launch` is raised for a call that carries one (on an `active` attempt or over a synthetic stop), and when the mutation raises `CustodyRefusal` for a call whose launch `admit_owner_call` resolved. The refusal is then raised unchanged; the ledger's bytes do not change.
 
 **Invariants:**
 - After a reaper's stop, a `finish` from the attempt's last launch succeeds, the ledger shows the owner's result with source `owner`, and the custody history holds `stop_synthesized` and an `owner_result` with `custody` `stale` whose `supersedes` is the stop's `seq`.
 - A non-`merged` verdict with no merge recorded seals `abandoned`; the receipt read back by its digest lists the stop with `superseded_by` and the result with `supersedes`. A `merged` verdict, or any verdict over a recorded merge, leaves the transaction non-terminal with no custody and no receipt (D5).
 - An on-time `finish` is recorded with `custody` `current` and `supersedes` null.
 - A refused finish changes no ledger byte; it adds at most one `owner_result` per distinct report to the launch's span, and none after a seal.
+- An `owner_result` event's `executor_id` is always the launch that sent the report; a report from an earlier launch never becomes the attempt's verdict (D23).
+- The repeat of a finish whose seal was interrupted seals without recording its result a second time (D24).
 - `workflow_delivery*.py` is not edited; a later control sweep that observes a delivery postcondition writes no core file.
 
 - [ ] **Step 1: Write the failing tests**
@@ -34,9 +37,10 @@ In `home/common/agent-skills/tests/test_attempt_custody.py`, add this method to 
 ```python
     def test_ac5_attempt_keyed_finish_is_refused_and_its_result_retained(self):
         self.legacy_owner_resumed_to_launch_2()
+        self.contractless()
         ledger = self.state_path.read_bytes()
         launch_1 = ac.launch_fence(self.custody(14), "14:1:1")
-        refused = self.finish(1, self.stopped(), now=T(33), action_id=False, ok=False)
+        refused = self.finish_raw(1, self.stopped(), now=T(33), action_id=False, ok=False)
         self.assertEqual(refused.returncode, 2)
         self.assertTrue(refused.stderr.startswith(PREFIX + "superseded_launch: "),
                         refused.stderr)
@@ -47,8 +51,38 @@ In `home/common/agent-skills/tests/test_attempt_custody.py`, add this method to 
                           results[0]["fence"], results[0]["result"]),
                          ("14:1:1", "stale", launch_1, self.stopped()))
         self.assertEqual(self.custody(14).custody.executor_id, "14:1:2")
-        self.finish(1, self.stopped(), now=T(33), action_id=False, ok=False)
+        self.finish_raw(1, self.stopped(), now=T(33), action_id=False, ok=False)
         self.assertEqual(len(self.events(14, "owner_result")), 1)
+        self.assertEqual(self.state_path.read_bytes(), ledger)
+
+    def test_an_earlier_launch_cannot_replace_its_successors_stalled_stop(self):
+        self.spawn_14(minutes=10)
+        for index in range(3):
+            self.suspend(issue=14, attempt=1, blocked_on="usage_limit", now=T(2 * index + 1))
+            self.resume(issue=14, worktree=self.worktree, now=T(2 * index + 2))
+        self.suspend(issue=14, attempt=1, blocked_on="usage_limit", now=T(8))
+        self.contractless()
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual((attempt["state"], attempt["result_source"], len(attempt["launches"])),
+                         ("stopped", "stalled", 4))
+        ledger = self.state_path.read_bytes()
+        refused = self.finish_raw(1, self.stopped("from launch 1"), now=T(9),
+                                  action_id="14:1:1", ok=False)
+        self.assertEqual(refused.returncode, 2)
+        self.assertTrue(refused.stderr.startswith(PREFIX + "superseded_launch: "),
+                        refused.stderr)
+        self.assertEqual(self.state_path.read_bytes(), ledger)
+        (kept,) = self.events(14, "owner_result")
+        self.assertEqual((kept["executor_id"], kept["custody"], kept["result"]),
+                         ("14:1:1", "stale", self.stopped("from launch 1")))
+        self.finish_raw(1, self.stopped("from launch 4"), now=T(9))
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual((attempt["state"], attempt["result_source"]), ("stopped", "owner"))
+        sealed = self.custody(14)
+        receipt = self.core().read_receipt(sealed.terminal["receipt_digest"])
+        self.assertEqual([result["executor_id"] for result in receipt["owner_results"]],
+                         ["14:1:1", "14:1:4"])
+        self.assertEqual(sealed.state, "abandoned")
 ```
 
 Add these methods to `DeliveredCustody`:
@@ -156,13 +190,26 @@ class LateLegacyResultTest(LifecycleCustody, unittest.TestCase):
         self.spawn_14()
         self.progress(turn_count=118, context_tokens=20000, now=T(1),
                       handoff_path=self.write_handoff(14))
+        self.contractless()
         ledger = self.state_path.read_bytes()
-        refused = self.finish(1, self.stopped(), now=T(2), ok=False)
+        refused = self.finish_raw(1, self.stopped(), now=T(2), ok=False)
         self.assertEqual(refused.returncode, 2)
         self.assertIn("finish requires an active attempt", refused.stderr)
         self.assertEqual(self.state_path.read_bytes(), ledger)
         (result,) = self.events(14, "owner_result")
         self.assertEqual((result["custody"], result["supersedes"]), ("stale", None))
+
+    def test_the_repeat_of_an_interrupted_finish_seals_one_result(self):
+        self.spawn_14()
+        self.contractless()
+        with mock.patch.object(attempt_store, "seal_custody", side_effect=OSError("crash")):
+            self.finish_raw(1, self.stopped(), now=T(5), ok=False)
+        self.assertIsNone(self.custody(14).terminal)
+        self.finish_raw(1, self.stopped(), now=T(6))
+        sealed = self.custody(14)
+        receipt = self.core().read_receipt(sealed.terminal["receipt_digest"])
+        (result,) = receipt["owner_results"]
+        self.assertEqual((sealed.state, result["custody"]), ("abandoned", "current"))
 
 
 class LateSummaryTest(DeliveredCustody, unittest.TestCase):
@@ -224,17 +271,17 @@ class LateSummaryTest(DeliveredCustody, unittest.TestCase):
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_attempt_custody.py -k LateLegacyResultTest -k LateSummaryTest -k finish_is_refused_and_its_result_retained`
-Expected: 8 fail: a late `finish` is refused (`finish requires an active attempt`, `delivery finish refused`), and no `owner_result` event exists.
+Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_attempt_custody.py -k LateLegacyResultTest -k LateSummaryTest -k finish_is_refused_and_its_result_retained -k cannot_replace_its_successors`
+Expected: 10 fail: a late `finish` is refused (`finish requires an active attempt`, `delivery finish refused`), and no `owner_result` event exists.
 
 - [ ] **Step 3: Implement**
 
-Implement the interfaces and the five behaviours above. Docstrings are written from the implemented code; `command_finish`'s docstring gains what a finish after a reap now does.
+Implement the interfaces and the six behaviours above. Docstrings are written from the implemented code; `command_finish`'s docstring gains what a finish after a reap now does.
 
 - [ ] **Step 4: Verify**
 
 Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_attempt_custody.py`
-Expected: `OK`, 19 tests.
+Expected: `OK`, 25 tests.
 
 Run, one command each, timeout 1800 s: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/<file>` for `test_workflow_state.py`, `test_delivery_workflow.py`, `test_delivered_control.py`, `test_host_admission.py`, `test_attempt_migration.py`.
 Expected: `OK` for each, with no edit to a pre-existing test in this task.

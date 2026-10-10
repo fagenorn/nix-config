@@ -128,8 +128,9 @@ At schema 9 these hold for each issue's latest implementation attempt after ever
 | `stopped` or `failed`, source `owner` or `refused`, no merge recorded | `abandoned`, sealed | none |
 | `merged`, any source, or any verdict over a recorded merge | not terminal | none; not sealed |
 
-An attempt that was already terminal when its ledger reached schema 9 has no custody transaction and
-keeps today's behaviour everywhere (per D11).
+An attempt that was already terminal in the ledger its 8 → 9 bind read has no custody transaction
+and keeps today's behaviour everywhere (per D11). One that was live there is bound even when the
+binding write itself ends it (per D25).
 
 The one writer is a *custody settle* step inside `commit_state`, the boundary every committed ledger
 write already passes. For each issue's latest attempt it reads the custody transaction and applies
@@ -164,11 +165,12 @@ Order and failure:
   reap, so it supersedes the stop the reap wrote (per D16).
 - **The seal goes last.** `advance` to `abandoned` runs after the ledger file is replaced, so a
   crash leaves a ledger verdict whose transaction is not yet sealed, never a sealed transaction the
-  ledger contradicts. The settle step of the run's next write, or `migrate --apply`, completes it.
+  ledger contradicts. The settle step of the run's next write, an unchanged repeat of a command on
+  that ledger, or `migrate --apply` completes it (per D24).
 - **Every operation is idempotent against the core's own state**: an open span with the launch's
   `executor_id` is not acquired again, a reaped span is not reaped again, a recorded result is not
-  recorded twice. So the command that crashed between the core and the ledger converges when it
-  is repeated. A span left open for a launch the ledger never recorded is closed by the settle step
+  recorded twice. The parking and the held span are accounted for separately, so a write
+  interrupted after any one operation converges when the command is repeated (per D24). A span left open for a launch the ledger never recorded is closed by the settle step
   the next time that attempt is settled. A combination the two tables do not produce is refused as
   `custody projection mismatch` before any write.
 - **Locks.** `.direct-<issue>.lock` → ledger `state.lock`s → the attempt store's blocking lock →
@@ -192,7 +194,8 @@ read-only dry run.
 - **Bind:** the settle step creates each planned transaction, and acquires a span only for an
   attempt that is `active` and unexpired at the write's time. A suspended attempt is parked with
   its recorded cause. No history is replayed into the core: migration states what is held now
-  (per D11).
+  (per D11). An attempt the binding write ends gets its transaction with no span, so its verdict
+  seals with no owner result (per D25).
 - A helper from before this package refuses schema 9 through its existing version check, with the
   ledger unchanged. There is no reverse transform.
 
@@ -209,7 +212,8 @@ Owner transports are `progress`, `suspend`, both `finish` transports, `checkpoin
   `--action-id <action_id>`.
 - **The fence.** Under the ledger lock, before the mutation: when the attempt is `active` and the
   caller's launch is not the attempt's last launch, the transport is refused as
-  `superseded_launch`. The inner check is the settle step: it compares the attempt with its custody
+  `superseded_launch`; so is a legacy `finish` from an earlier launch that would replace a
+  synthetic stop (per D23). The inner check is the settle step: it compares the attempt with its custody
   transaction on every commit and the core fences each operation it applies. Every refusal the
   engine already makes keeps its message, including
   the two the from-issue skill matches (`progress requires an active attempt`,
@@ -359,7 +363,7 @@ Three seams, all already in `just agent-workflow-tests`. No other seam may be in
 questions are answered by D1 (which object carries the lease), D5 (supersede and the receipt), D6
 (the intake), D7 (misbinding) and D8 (suspension vocabulary). D17 to D22 are plan-phase rows,
 taken after this design was built as a throwaway prototype and run against the lifecycle suites;
-where one refines a sentence above, the row governs.
+D23 to D26 apply the plan review. Where a row refines a sentence above, the row governs.
 
 | ID | Choice | Grounding | Rejected alternative |
 |----|--------|-----------|----------------------|
@@ -385,3 +389,7 @@ where one refines a sentence above, the row governs.
 | D20 | `superseded_launch` and `launch_identity_required` are printed by `progress`, `suspend` and legacy `finish` only; a transport that already names its launch keeps the engine's refusal text. A finish refused for custody by either the fence or the engine is retained: the engine's custody refusals raise a `WorkflowError` subclass with unchanged text, and the version-2 path asks the runtime's `record_for_custody` first. Fence, adoption and retention are one pre-mutation step of `transact`. | D13 against the spec's fence sentence; `_call("delivery finish refused")` discards the runtime's reason; D10 leaves the runtime unedited; the floor pins the existing texts. | The fencing prefix on every owner transport (rewords shipped refusals); predicting the engine's refusal before the mutation (a second copy of its rules). |
 | D21 | Adoption needs the attempt's last launch, no recorded verdict, and a synthesized stop on that launch's latest span; over a suspension only when its cause is `unknown`. A result is recorded only for a launch the core issued a span for, so an attempt bound while expired seals with no owner result. Transition reasons: `resumed` for a return to `created`, `<result_source>:<state>` for a seal. | Spec "Adoption"; D11; `record_owner_result` refuses a span the core never issued; prototype: the runtime accepts a reaped record presented as `active`. | Adopting over any parked attempt (an owner's own late suspension is not an expiry); refusing a verdict on a spanless launch (refuses a finish the engine admits today). |
 | D22 | The floor's fixtures change in four declared ways beyond the schema number: `install_legacy` releases the live custody in its root and makes a schema-8 ledger by package 1's own transform; owner-transport helpers name the attempt's last launch; two runs that hold one worktree at overlapping ledger times get separate worktrees; the unknown-schema fixture becomes 10. No fixture deletes a lease record. | Prototype against the lifecycle suites: every other failure fell into one of these; the core refuses an acquisition whose epoch does not increase; AC6's declared changes. | Deleting lease records in fixtures (the core refuses the next acquisition); admitting a second run into a live worktree (the fence the issue asks for). |
+| D23 | `superseded_launch` also refuses, and retains, a legacy `finish` from an earlier launch when the attempt holds a synthetic stop; the engine's replacement of that stop is reached only by the last launch. Refines D20. | Plan review: the fence covered `active` only, so after a successor stalled an earlier launch's report replaced the stop and was recorded on the successor's span; D6: a report from an earlier launch is refused and retained; AC5. | Recording the adopted report on the caller's span instead (the earlier launch's result would still become the attempt's verdict). |
+| D24 | Settle recovery, refining D18: the planner accounts for parking and for the held span separately; the acquisition preflight ignores a holder whose own earlier plan in the same settle ends its span; a pending seal is also completed by an unchanged `transact` and by `migrate --apply` on a `current` ledger that has one, neither rewriting the ledger. | Plan review, each confirmed in the code: the core refuses a second parking; a resume cut after `acquire` planned nothing; a retry met its predecessor's unsealed lease; `migration_report` binds only `migrate` rows and an unchanged mutation skips `commit_state`. Prototype: every one-operation prefix of nine plans converges on the live core. | A full settle on every unchanged write (creates transactions for hand-built ledgers on a no-op); opening every `current` ledger on apply (locks and may create files in ledgers with nothing pending). |
+| D25 | An attempt the 8 → 9 plan lists is bound whatever its binding write makes of it: ended by that write, it gets a transaction with no span and seals with no owner result. Refines D11 and D19. | Plan review: a finish as the first migrating write left a live attempt with no transaction or receipt; spec: the settle step creates each planned transaction; D21: a result needs a span the core issued. | Acquiring a span in the finishing write so the result is recorded (a lease the core never saw the launch hold, D11); leaving it unbound (the plan listed it). |
+| D26 | Fixtures that assert unchanged ledger bytes send the legacy `finish` through a helper that neither prepares nor restores the ledger, after the fixture is made contractless. | Plan review: the harness's `finish` restores the bytes on refusal, so the assertion could not fail; the-bar tests that can fail. | Changing the shared harness's `finish` (alters every floor test's ledger handling). |

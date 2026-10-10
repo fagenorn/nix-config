@@ -19,7 +19,7 @@
 1. An unknown issue, or an attempt ordinal past the issue's attempts → `None`: the engine refuses in its own words.
 2. A named launch must be an implementation id of the same issue and attempt, else `WorkflowError("--action-id does not name this issue and attempt")`.
 3. An attempt-keyed call speaks for the attempt's bound launch: the custody subject's `bound_launch` when the attempt has a custody transaction; else `bound_launches[(issue, attempt)]` when this write is the bind; else null when the attempt is its issue's latest and in `LIVE_STATES`; any other attempt → `None` (D11: no custody transaction, today's behaviour). A null bound launch is `FencingRefused("launch_identity_required", …)`, telling the caller to pass `--action-id`.
-4. For a `keyed` call on an `active` attempt whose last launch is not the caller's: `FencingRefused("superseded_launch", …)` naming both launch ids.
+4. For a `keyed` call on an `active` attempt whose last launch is not the caller's: `FencingRefused("superseded_launch", …)` naming both launch ids. Task 5 extends this rule to a finish that would replace a synthetic stop (D23).
 5. In every other case the mutation runs and the engine's own refusals apply unchanged (D13).
 
 `progress`, `suspend` and the legacy `finish` pass `owner_call=OwnerCall(issue=args.issue, attempt=args.attempt, action_id=args.action_id, keyed=True, …)` to `transact`. No other transport passes one in this task.
@@ -221,7 +221,7 @@ In `LifecycleHarness` (`test_workflow_state.py`), add:
         return ("--action-id", action_id)
 ```
 
-`progress`, `suspend` and `finish` gain a keyword `action_id=None` and append `*self.launch_arguments(issue, attempt, action_id)` to their argv (`finish` computes it before it rewrites the ledger); `concurrent_finish` appends `*self.launch_arguments(issue, attempt, None)`. In `BuilderHarness.cli` (`test_delivery_workflow.py`), add a keyword `cwd=None` and pass it to `subprocess.run`.
+`progress`, `suspend` and `finish` gain a keyword `action_id=None` and append `*self.launch_arguments(issue, attempt, action_id)` to their argv (`finish` computes it before it rewrites the ledger); `concurrent_finish` appends `*self.launch_arguments(issue, attempt, None)`. `LifecycleCustody.finish_raw` (Task 3, in `test_attempt_custody.py`) gains the same keyword and appends the same arguments. In `BuilderHarness.cli` (`test_delivery_workflow.py`), add a keyword `cwd=None` and pass it to `subprocess.run`.
 
 - [ ] **Step 3: Run the new tests and watch them fail**
 
@@ -239,7 +239,7 @@ Pre-existing tests that send `progress`, `suspend` or the legacy `finish` by raw
 - [ ] **Step 6: Verify**
 
 Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_attempt_custody.py`
-Expected: `OK`, 11 tests.
+Expected: `OK`, 15 tests.
 
 Run, one command each, timeout 1800 s: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/<file>` for `test_workflow_state.py`, `test_attempt_migration.py`, `test_host_admission.py`, `test_delivery_workflow.py`, `test_delivered_control.py`.
 Expected: `OK` for each. A failure that is not a raw transport missing its launch is a defect or a spec conflict (Global Constraints).

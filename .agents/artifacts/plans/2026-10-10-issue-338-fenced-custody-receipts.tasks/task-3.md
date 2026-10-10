@@ -1,6 +1,6 @@
 # Task 3: Schema 9: the custody settle step and the 8 → 9 bind
 
-After this task every committed ledger write first makes the core agree: attempts hold their worktree under a lease, and a schema-8 ledger binds on its next write. Owner results and the launch fence come in Tasks 4 and 5. Read the root's Global Constraints first. Decisions: D1–D4, D11, D15–D19, D22.
+After this task every committed ledger write first makes the core agree: attempts hold their worktree under a lease, and a schema-8 ledger binds on its next write. Owner results and the launch fence come in Tasks 4 and 5. Read the root's Global Constraints first. Decisions: D1–D4, D11, D15–D19, D22, D24, D25.
 
 **Files:**
 - Modify: `python/agent_tools/attempt_store.py`, `python/agent_tools/attempt_identity.py`, `home/common/agent-skills/scripts/workflow-state.py`
@@ -19,19 +19,26 @@ After this task every committed ledger write first makes the core agree: attempt
   - `plan_custody(candidate: dict) -> dict`: `plan_custody_migration`, with `MigrationRefused` re-raised as `LedgerRefused` the way `plan_legacy_run` does.
   - `custody_of(store: Path, run: str, issue: int, attempt: int) -> Transaction | None`: lock-free `lookup` then `load`; `None` when the store directory or the index entry is missing; creates nothing; a core error is a `StoreFault`.
   - `settle_custody(store: Path, state: dict, *, now_ms: int, canonical: Callable[[str], str], bound_launches: Mapping, report: OwnerReport | None = None) -> list` and `seal_custody(store: Path, pending: list, *, now_ms: int) -> None`.
+  - `pending_seals(store: Path, state: dict, *, now_ms: int) -> list`: the settle step's read phase with no report and no bound launches, lock-free, creating nothing; the seals, in `seal_custody`'s shape and in read order, of every attempt whose plan is exactly one `seal` (D24).
 - Produces in `workflow-state.py`: `SCHEMA_VERSION = 9`; `commit_state(run_dir, state_path, state, *, run_id, identity, bound_launches=None, report=None)`.
 
 **The settle step.** `settle_custody` is the only place `workflow-state` changes custody (D4).
 
 1. Every core call of one settle reads one clock: `TransactionStore(store, clock=lambda: now_ms)` (D17).
-2. Read phase, no lock: for each issue in ascending number and each of its attempts in order, find the custody transaction by `creation_key(state["transaction_id"], issue, attempt)` (none when the store directory does not exist), load it, read the lease of its subject's worktree key, and call `settle_plan` with `latest` true for the issue's last attempt and `report_digest=telemetry_digest(report.report)` only for the attempt `report` names. `ProjectionMismatch` becomes `StoreRefused("custody projection mismatch: <detail>")`.
+2. Read phase, no lock: for each issue in ascending number and each of its attempts in order, find the custody transaction by `creation_key(state["transaction_id"], issue, attempt)` (none when the store directory does not exist), load it, read the lease of its subject's worktree key, and call `settle_plan` with `latest` true for the issue's last attempt, `bound=(issue, attempt) in bound_launches` (D25) and `report_digest=telemetry_digest(report.report)` only for the attempt `report` names. `ProjectionMismatch` becomes `StoreRefused("custody projection mismatch: <detail>")`.
 3. When no attempt has an operation, return `[]`: no directory, lock file or store is created.
-4. Write phase, under `store_lock`, in two passes. First, for every plan that starts with `create`, build the subject: `run` is `state["transaction_id"]`, `worktree` is `canonical(attempt["worktree"])`, `prior` is the `lookup` of the previous attempt's creation key (`None` for attempt 1), `bound_launch` is `bound_launches.get((issue, attempt))`. When that plan acquires and the worktree key's lease has a holder with `now_ms < expires_at`, raise `FencingRefused("custody_unavailable", …)` naming the worktree, the holder's `executor_id` and its `transaction_id`, before anything is created (D19). Then apply the plans in the order read, each plan's operations in order.
+4. Write phase, under `store_lock`, in two passes. First, for every plan that starts with `create`, build the subject: `run` is `state["transaction_id"]`, `worktree` is `canonical(attempt["worktree"])`, `prior` is the `lookup` of the previous attempt's creation key (`None` for attempt 1), `bound_launch` is `bound_launches.get((issue, attempt))`. When that plan acquires and the worktree key's lease has a holder with `now_ms < expires_at`, raise `FencingRefused("custody_unavailable", …)` naming the worktree, the holder's `executor_id` and its `transaction_id`, before anything is created (D19). One holder is not a refusal: a transaction whose own plan, earlier in the read order of this settle, ends its span with a `seal`, `release` or `reap` (D24: a predecessor's interrupted seal is applied before the retry acquires). Any other live holder still refuses. Then apply the plans in the order read, each plan's operations in order.
 5. Operations, each against the transaction's current snapshot: `create` → `create(creation key, subject, **creation_arguments(subject))`; `acquire` → `acquire(id, executor_id=…, subject_path=subject["worktree"], ttl_ms=…)`; `release` → `release(custody)`; `reap` → `reap(id, reason=…)`; `park` → `advance(id, "attention_required", reason=…, custody=custody)`; `unpark` → `advance(id, "created", reason=…, custody=custody)`; `renew` → `renew(custody, ttl_ms=…)`; `record_result` → `record_owner_result(id, executor_id=…, subject_path=subject["worktree"], fence=launch_fence(snapshot, executor_id), result=report.report)`; `seal` → `advance(id, "abandoned", reason=…, external_state="known", custody=custody)`. `custody` is the snapshot's held custody, or `None`.
 6. A `seal` of an issue's latest attempt is not applied: it is returned, with its transaction id, for `seal_custody`. A `seal` of an earlier attempt is applied in the write phase (D18).
 7. `LeaseUnavailable` becomes `FencingRefused("custody_unavailable", str(error))`; any other `TransactionError` becomes `StoreRefused(f"custody store: {error}")`. `seal_custody` applies the returned seals under `store_lock` with the same clock and error mapping and does nothing for `[]`.
 
-`commit_state` runs, in order: `settle_admission`, `validate_state`, `settle_custody` with `now_ms=at_ms(state["updated_at"])` and `canonical=canonical_worktree_path`, `atomic_write_state`, `seal_custody`. A refusal from `settle_custody` leaves the ledger file untouched.
+`commit_state` runs, in order: `settle_admission`, `validate_state`, `settle_custody` with `now_ms=at_ms(state["updated_at"])` and `canonical=canonical_worktree_path`, `atomic_write_state`, `seal_custody`. A refusal from `settle_custody` leaves the ledger file untouched. It calls both through the module (`attempt_store.settle_custody(…)`, `attempt_store.seal_custody(…)`), which is how the tests interrupt a seal.
+
+**Completing an interrupted seal** (D24). A seal that did not run after its ledger write is completed by three callers, none of which rewrites the ledger:
+
+- the settle step of the run's next changed write (rule 6 above);
+- `transact`, when the ledger exists and the mutation returned unchanged with no bind: `attempt_store.seal_custody(store, attempt_store.pending_seals(store, state, now_ms=at_ms(state["updated_at"])), now_ms=…)` with the same clock, so the identical repeat of the command that crashed seals;
+- `migration_report` with `apply`: for each row whose dry-run verdict is `current`, it re-reads the document and, when `pending_seals` at that document's `updated_at` is not empty, calls the caller's `bind(handle)` (the locked no-op `transact` above). The row's verdict stays `current`; a `current` ledger with nothing pending is not opened, locked or written.
 
 **The 8 → 9 read.** In `locked_read`: a schema-9 document is bound and validated as today and returns `bound_launches={}`. A schema-8 document is bound to its run (`bound_identity`), copied with `schema_version` 9, planned with `plan_custody` and returned with `changed=True`. A schema 1–7 document is upgraded as today, planned with `plan_custody` *before* `mint_run` (a refused ledger mints nothing), then stamped 9. `check_unlocked` makes the same checks and plans without writing. In `_row_verdict` a schema-8 row is checked the same way and answers `migrate` with its `transaction_id` (a refusal is `invalid_state`); schema 9 answers `current` or `migrated`; no report field or reason is added. `attempt_identity._MAX_SCHEMA_VERSION` becomes 9.
 
@@ -42,7 +49,9 @@ In `workflow-state.py`: `transact` unpacks the fourth field and passes it to `co
 - A write the engine refuses changes no core file. A `custody_unavailable` refusal leaves the whole `.superpowers` tree unchanged.
 - A lapse advances the worktree key's epoch on the next acquisition; a `declare-lane` on a live span keeps epoch and instance and adds one term.
 - Lock order is the root's; `settle_custody` and `seal_custody` each take the store lock once and never while `mint_run` holds it.
-- `migrate` without `--apply` writes nothing for a schema-8 ledger.
+- `migrate` without `--apply` writes nothing for a schema-8 ledger, and completes no seal.
+- An attempt the 8 → 9 plan lists has a custody transaction after the binding write whatever that write made of it; one the write ended holds no span and no owner result (D25).
+- An unchanged `transact` writes a core file only to complete a pending seal; with none pending it creates no file, directory or lock.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -58,8 +67,10 @@ import json
 import os
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools import attempt_custody as ac
+from agent_tools import attempt_store
 from agent_tools.transaction_core import TransactionStore
 
 from .test_workflow_state import LifecycleHarness
@@ -120,6 +131,26 @@ class LifecycleCustody(CustodyReads, LifecycleHarness):
     def stopped(self, notes="stopped late"):
         return {**self.merged_result(), "state": "stopped", "pr_url": None,
                 "merge_sha": None, "issue_closed": False, "notes": notes}
+
+    def contractless(self):
+        """Strip every delivery from the stored ledger: the legacy `finish` is refused for
+        a contracted issue. The schema number and the run binding stay."""
+        stored = self.read_state()
+        for issue_state in stored["issues"].values():
+            issue_state["delivery"] = self.empty_delivery()
+            issue_state["delivery_remainders"] = []
+        self.write_state(stored)
+
+    def finish_raw(self, attempt, result, *, issue=14, now, ok=True):
+        """The legacy `finish` as an owner sends it. Unlike the harness's `finish`, it
+        neither prepares the stored ledger nor restores it, so a test reads the bytes the
+        command left (D26)."""
+        path = self.root / f"result-{issue}-{attempt}.json"
+        path.write_text(json.dumps(result), encoding="utf-8")
+        completed = self.run_cli(
+            "finish", "--repo-root", self.root, "--run-id", self.run_id, "--issue", issue,
+            "--attempt", attempt, "--result-file", path, "--now", now, ok=ok)
+        return json.loads(completed.stdout) if ok else completed
 
 
 class CustodyLeaseTest(LifecycleCustody, unittest.TestCase):
@@ -244,6 +275,78 @@ class CustodyMigrationTest(LifecycleCustody, unittest.TestCase):
                           bound.events[1]["reason"]),
                          ("attention_required", None, 2, "suspended:human_gate"))
 
+    def test_a_finish_that_is_the_binding_write_still_binds_and_seals(self):
+        self.spawn_14()
+        self.install_legacy(self.read_state(), "orchestrate-14", version=8)
+        self.contractless()
+        self.assertEqual(self.finish_raw(1, self.stopped(), now=T(5))["state"], "stopped")
+        self.assertEqual(self.read_state()["schema_version"], 9)
+        bound = self.custody(14)
+        self.assertEqual((bound.state, bound.custody, bound.subject["bound_launch"]),
+                         ("abandoned", None, 1))
+        self.assertNotIn("lease_acquired", self.events(14))
+        self.assertEqual(self.events(14, "transitioned")[-1]["reason"], "owner:stopped")
+        receipt = self.core().read_receipt(bound.terminal["receipt_digest"])
+        self.assertEqual((receipt["outcome"], receipt["stops"], receipt["owner_results"]),
+                         ("abandoned", [], []))
+
+
+class CustodyRepairTest(LifecycleCustody, unittest.TestCase):
+    def failed(self):
+        return {**self.stopped("gave up"), "state": "failed"}
+
+    def interrupted_seal(self):
+        """An owner's failed verdict reaches the ledger and its deferred seal never runs."""
+        self.spawn_14()
+        self.contractless()
+        with mock.patch.object(attempt_store, "seal_custody", side_effect=OSError("crash")):
+            crashed = self.finish_raw(1, self.failed(), now=T(5), ok=False)
+        self.assertNotEqual(crashed.returncode, 0)
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual((attempt["state"], attempt["result_source"]), ("failed", "owner"))
+        unsealed = self.custody(14)
+        self.assertEqual((unsealed.state, unsealed.custody.executor_id),
+                         ("created", "14:1:1"))
+
+    def assert_sealed(self):
+        sealed = self.custody(14)
+        self.assertEqual((sealed.state, sealed.custody), ("abandoned", None))
+        receipt = self.core().read_receipt(sealed.terminal["receipt_digest"])
+        self.assertEqual(receipt["outcome"], "abandoned")
+
+    def test_the_identical_finish_completes_an_interrupted_seal(self):
+        self.interrupted_seal()
+        ledger = self.state_path.read_bytes()
+        self.assertEqual(self.finish_raw(1, self.failed(), now=T(6))["state"], "failed")
+        self.assertEqual(self.state_path.read_bytes(), ledger)
+        self.assert_sealed()
+        before = self.tree()
+        self.finish_raw(1, self.failed(), now=T(7))
+        self.assertEqual(self.tree(), before)
+
+    def test_migrate_apply_completes_an_interrupted_seal(self):
+        self.interrupted_seal()
+        ledger = self.state_path.read_bytes()
+        self.run_cli("migrate", "--repo-root", self.root)
+        self.assertEqual(self.custody(14).state, "created")
+        report = json.loads(self.run_cli("migrate", "--repo-root", self.root, "--apply").stdout)
+        row = next(row for row in report["ledgers"] if row["ledger"] == self.run_id)
+        self.assertEqual(row["verdict"], "current")
+        self.assertEqual(self.state_path.read_bytes(), ledger)
+        self.assert_sealed()
+        before = self.tree()
+        self.run_cli("migrate", "--repo-root", self.root, "--apply")
+        self.assertEqual(self.tree(), before)
+
+    def test_a_retry_in_the_same_worktree_completes_the_predecessors_seal_first(self):
+        self.interrupted_seal()
+        self.retry(issue=14, worktree=self.worktree, now=T(6))
+        first, second = self.custody(14, 1), self.custody(14, 2)
+        self.assertEqual((first.state, first.custody), ("abandoned", None))
+        self.assertEqual((second.subject["prior"], second.custody.executor_id),
+                         (first.transaction_id, "14:2:1"))
+        self.assertEqual(self.lease(self.worktree)["epoch"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -254,7 +357,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Run them and watch them fail**
 
 Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_attempt_custody.py`
-Expected: all 7 fail or error: no custody transaction exists (`AttributeError: 'NoneType' object has no attribute …` from `self.custody(14)`), and the ledger is schema 8.
+Expected: all 11 fail or error: no custody transaction exists (`AttributeError: 'NoneType' object has no attribute …` from `self.custody(14)`), `attempt_store` has no `seal_custody` to patch, and the ledger is schema 8.
 
 - [ ] **Step 3: Change the floor's fixtures (D22)**
 
@@ -301,7 +404,7 @@ Two `test_host_admission.py` cases run a second run over the first run's worktre
 
 - [ ] **Step 4: Implement**
 
-Implement the interfaces, the settle step and the 8 → 9 read above. Docstrings and the `attempt_store` module docstring are written from the implemented code.
+Implement the interfaces, the settle step, the seal completion and the 8 → 9 read above. Docstrings and the `attempt_store` module docstring are written from the implemented code.
 
 - [ ] **Step 5: Verify**
 
