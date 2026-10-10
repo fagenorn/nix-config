@@ -5,6 +5,7 @@ import copy
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 import fcntl
+from functools import partial
 import importlib.util
 import json
 import math
@@ -16,13 +17,10 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable, Iterator, NamedTuple
+from typing import Any, Callable, Iterator
 
-from agent_tools.attempt_identity import (
-    REFUSAL_REASONS, MigrationRefused, RunIdentity, RunPlan, classify, creation_arguments,
-    direct_key, identity_of, legacy_identity, minted_plan, plan_migration,
-    prior_run_violation, schema_refusal, subject_handle, subject_violation)
-from agent_tools.transaction_core import TransactionError, TransactionStore
+from agent_tools import attempt_store
+from agent_tools.attempt_identity import RunIdentity, classify, minted_plan, prior_run_violation
 from agent_tools.transaction_storage import is_id
 
 
@@ -293,17 +291,6 @@ CONTROL_FINALIZE_FIELDS = frozenset({"id", "kind"})
 
 class WorkflowError(Exception):
     pass
-
-
-class LedgerRefused(WorkflowError):
-    """A ledger that cannot be read as a run; `reason` is one of
-    `attempt_identity.REFUSAL_REASONS` (#337 D14)."""
-
-    def __init__(self, reason: str, detail: str) -> None:
-        if reason not in REFUSAL_REASONS:
-            raise ValueError(f"unknown refusal reason {reason!r}")
-        super().__init__(f"workflow state refused: {reason}: {detail}")
-        self.reason = reason
 
 
 _DELIVERY_RUNTIMES: dict[int, Any] = {}
@@ -634,8 +621,7 @@ def select_phase_action(
 
     The phase budget is the turn and context ceilings with their headrooms; this
     function never sees the attempt budget's wall clock, and ``delegate`` does not
-    reset it. Direct runs, module-owned and identified by their run transaction's
-    subject, select a self-contained remainder
+    reset it. A ``direct`` run (by its identity) selects a self-contained remainder
     first, then an eligible ``fresh_start``, known near-ceiling usage, work that
     needs no context, and otherwise ``continue``. Every non-direct run retains the
     complete order: eligible ``fresh_start``, known near-ceiling usage, measured
@@ -1381,9 +1367,9 @@ def open_stable_lock(
     return descriptor
 
 
-def ensure_gitignore(directory: Path, label: str = "workflows .gitignore") -> None:
-    gitignore = directory / ".gitignore"
-    require_regular_path(gitignore, label, allow_missing=True)
+def ensure_gitignore(workflows_dir: Path) -> None:
+    gitignore = workflows_dir / ".gitignore"
+    require_regular_path(gitignore, "workflows .gitignore", allow_missing=True)
     no_follow = getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(
@@ -1392,154 +1378,32 @@ def ensure_gitignore(directory: Path, label: str = "workflows .gitignore") -> No
             0o644,
         )
     except FileExistsError:
-        descriptor = open_existing_regular(gitignore, label, os.O_RDONLY)
+        descriptor = open_existing_regular(
+            gitignore, "workflows .gitignore", os.O_RDONLY
+        )
         with os.fdopen(descriptor, encoding="utf-8") as source:
             patterns = source.read().splitlines()
         if "*" not in patterns:
-            raise WorkflowError(f"{label} must contain '*'")
+            raise WorkflowError("workflows .gitignore must contain '*'")
         return
     with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-        verify_open_file(gitignore, output.fileno(), label)
+        verify_open_file(gitignore, output.fileno(), "workflows .gitignore")
         output.write("*\n")
         output.flush()
         os.fsync(output.fileno())
-    fsync_directory(directory)
+    fsync_directory(workflows_dir)
 
 
-def attempt_store_root(repo_root: Path) -> Path:
-    """Where every attempt run's core transaction lives (a pure path, #337 D2)."""
-    return repo_root / ".superpowers" / "attempt-transactions"
-
-
-def ensure_attempt_store(repo_root: Path) -> Path:
-    """Create the attempt store root and its `*` `.gitignore`; write paths only."""
-    ensure_directory(repo_root / ".superpowers", ".superpowers")
-    store = attempt_store_root(repo_root)
-    ensure_directory(store, "attempt transactions")
-    ensure_gitignore(store, "attempt transactions .gitignore")
-    return store
-
-
-def _existing_attempt_store(repo_root: Path) -> Path | None:
-    """The store root when it is a real directory, None when absent; creates nothing."""
-    store = attempt_store_root(repo_root)
-    status = path_status(store)
-    if status is None:
-        return None
-    if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
-        raise WorkflowError("attempt transactions must be a non-symlink directory")
-    return store
-
-
-def mint_run(repo_root: Path, plan: RunPlan) -> str:
-    """The id of `plan`'s run transaction, created if its creation key is new (#337 D9).
-
-    Every `create` runs under the exclusive mint lock, which is taken after any ledger
-    `state.lock` and before the core's own locks, and never while a `state.lock` is
-    requested.
-    """
-    store = ensure_attempt_store(repo_root)
-    descriptor = open_stable_lock(store / "attempt-runs.lock", "attempt mint lock")
-    with os.fdopen(descriptor, "r+b") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            transaction = TransactionStore(store).create(
-                plan.creation_key, plan.subject_json(), **creation_arguments(plan))
-        except TransactionError as error:
-            raise WorkflowError(f"run transaction store: {error}") from error
-    return transaction.transaction_id
-
-
-def lookup_run(repo_root: Path, creation_key: str) -> str | None:
-    """The run id `creation_key` names, or None; never creates the store root."""
-    store = _existing_attempt_store(repo_root)
-    if store is None:
-        return None
-    try:
-        return TransactionStore(store).lookup(creation_key)
-    except TransactionError as error:
-        raise WorkflowError(f"run transaction store: {error}") from error
-
-
-def bound_identity(repo_root: Path, state: dict[str, Any], run_id: str) -> RunIdentity:
-    """The identity of the run transaction a schema-8 `state` names, read without a lock.
-
-    Refuses a missing store, an unknown or invalid transaction, a subject that is not the
-    closed attempt-run subject, and a transaction whose handle is not `run_id`. Creates
-    nothing.
-    """
-    transaction_id = state.get("transaction_id") if isinstance(state, dict) else None
-    if not is_id(transaction_id):
-        raise WorkflowError("invalid transaction identity")
-    store = _existing_attempt_store(repo_root)
-    if store is None:
-        raise WorkflowError("the run transaction store does not exist")
-    try:
-        subject = TransactionStore(store).load(transaction_id).subject
-    except TransactionError as error:
-        raise WorkflowError(f"run transaction store: {error}") from error
-    violation = subject_violation(subject)
-    if violation is not None:
-        raise WorkflowError(f"run transaction {transaction_id}: {violation}")
-    if subject_handle(subject, transaction_id) != run_id:
-        raise WorkflowError(
-            "workflow state run identity does not match its run transaction")
-    return identity_of(subject)
-
-
-class LockedRead(NamedTuple):
-    """A ledger as a locked read yields it: bound to its run transaction at schema 8.
-
-    `changed` is true when the stored file is still a schema-7 or older document, so the
-    caller's commit is also the migration write.
-    """
-
-    state: dict
-    identity: RunIdentity
-    changed: bool
-
-
-def require_known_schema(document: Any) -> None:
-    if schema_refusal(document) is not None:
-        version = document.get("schema_version") if isinstance(document, dict) else None
-        raise LedgerRefused(
-            "unknown_schema", f"unsupported workflow state schema version: {version!r}")
-
-
-def _legacy_identity_or_placeholder(run_id: str) -> RunIdentity:
-    try:
-        return legacy_identity(run_id)
-    except MigrationRefused:
-        return RunIdentity("orchestrated", None, None)
-
-
-def plan_legacy_run(document: dict[str, Any]) -> RunPlan:
-    try:
-        return plan_migration(document)
-    except MigrationRefused as error:
-        raise LedgerRefused(error.reason, str(error).partition(": ")[2]) from error
-
-
-def legacy_candidate(value: Any, *, run_id: str,
-                     migration_contracts: dict[int, Any]) -> tuple[dict[str, Any], RunPlan]:
-    """A schema 1-7 document, migrated to schema 7 on a detached copy, with its run plan.
-
-    The chain, the schema-7 validation and `plan_migration` run in that order, each
-    refusal a `LedgerRefused`; nothing is written and no store is touched.
-    """
+def upgrade_state(value, *, run_id, identity, migration_contracts):
     runtime = _delivery()
     try:
         candidate = _call(None, runtime.migrate, value,
                           migration_contracts=migration_contracts)
-        validate_state(candidate, run_id=run_id,
-                       identity=_legacy_identity_or_placeholder(run_id), schema_version=7)
+        return validate_state(candidate, run_id=run_id, identity=identity, schema_version=7)
     except WorkflowError as error:
-        raise LedgerRefused("invalid_state", str(error)) from error
-    return candidate, plan_legacy_run(candidate)
+        raise attempt_store.LedgerRefused("invalid_state", str(error)) from error
 
-
-def read_locked_state(state_path, run_id, *, repo_root: Path, migration_contracts):
-    """Read a ledger under its `state.lock`, binding a legacy one to a run transaction."""
+def read_locked_state(state_path, run_id, *, migration_contracts):
     require_regular_path(state_path, "workflow state", allow_missing=False)
     try:
         descriptor = open_existing_regular(state_path, "workflow state", os.O_RDONLY)
@@ -1547,18 +1411,10 @@ def read_locked_state(state_path, run_id, *, repo_root: Path, migration_contract
             value = json.load(source)
     except json.JSONDecodeError as error:
         raise WorkflowError(f"invalid workflow state JSON: {error}") from error
-    require_known_schema(value)
-    if value["schema_version"] == SCHEMA_VERSION:
-        identity = bound_identity(repo_root, value, run_id)
-        return LockedRead(validate_state(value, run_id=run_id, identity=identity),
-                          identity, False)
-    candidate, plan = legacy_candidate(value, run_id=run_id,
-                                       migration_contracts=migration_contracts)
-    candidate["transaction_id"] = mint_run(repo_root, plan)
-    candidate["schema_version"] = SCHEMA_VERSION
-    identity = identity_of(plan.subject)
-    return LockedRead(validate_state(candidate, run_id=run_id, identity=identity),
-                      identity, True)
+    return attempt_store.locked_read(
+        state_path, value, run_id=run_id,
+        upgrade=partial(upgrade_state, migration_contracts=migration_contracts),
+        validate=validate_state)
 
 
 def fsync_directory(directory: Path) -> None:
@@ -1624,14 +1480,12 @@ def transact(
 ) -> Any:
     """Run `mutation` on one ledger under its `state.lock` and commit what it changed.
 
-    The commit also happens when the locked read bound or migrated the ledger (#337 D14).
-    `mutation(state)` is called with the run's `RunIdentity` as a second argument when
-    `with_identity` is set; `new_identity` is the identity of a run `allow_missing` creates.
-    `refuse_direct` refuses a direct run identity before the mutation runs.
+    A bind of the ledger by the locked read is committed too (#337 D14).
+    `with_identity` passes the run's `RunIdentity` to `mutation`; `new_identity` is that of a
+    run `allow_missing` creates; `refuse_direct` refuses a direct run first.
     """
     _delivery()
     run_dir, state_path, lock_path = workflow_paths(repo_root, run_id)
-    root = run_dir.parents[2]
     require_regular_path(state_path, "workflow state", allow_missing=True)
     require_regular_path(lock_path, "state lock", allow_missing=True)
     ensure_gitignore(run_dir.parent)
@@ -1642,21 +1496,22 @@ def transact(
             state_path, "workflow state", allow_missing=True
         )
         if state_exists:
-            read = read_locked_state(
-                state_path, run_id, repo_root=root,
-                migration_contracts=migration_contracts or {},
+            current, identity, migrated = read_locked_state(
+                state_path, run_id, migration_contracts=migration_contracts or {},
             )
-            state, identity, bound = copy.deepcopy(read.state), read.identity, read.changed
+            state = copy.deepcopy(current)
         elif allow_missing:
             if new_identity is None:
                 raise WorkflowError("internal error: a new run has no identity")
-            state, identity, bound = None, new_identity, False
+            state = None
+            identity = new_identity
+            migrated = False
         else:
             raise WorkflowError(f"workflow run {run_id!r} is not initialized")
         if refuse_direct and identity.direct:
             raise WorkflowError("direct run identities are reserved for direct-owner")
         result, changed = mutation(state, identity) if with_identity else mutation(state)
-        if changed or bound:
+        if changed or migrated:
             if state is None:
                 if allow_missing and isinstance(result, dict):
                     state = result
@@ -1720,15 +1575,13 @@ def new_run_state(
 ) -> dict[str, Any]:
     """Create one run's durable state, linked to the run it succeeds.
 
-    ``transaction_id`` is the run's core run transaction; for a minted run it equals
-    ``run_id``, and a legacy-named run records the transaction it is bound to.
+    ``transaction_id`` is the run's core transaction (a minted run's ``run_id``).
 
     ``prior_run`` is the identity of the run this one continues — only the
     direct-owner ``new_run`` escape hatch has a predecessor, and recording it
     keeps an issue's history one readable chain instead of N unlinked run
-    directories (per D5). The link is the handle of the issue's previous direct
-    run, as recorded: a legacy ``direct-`` id or a ``rel_`` id. That run's
-    sequence is lower, so the chain cannot cycle.
+    directories (per D5). The link always points at a lower direct sequence, so
+    the chain cannot cycle.
     """
     return {
         "schema_version": SCHEMA_VERSION,
@@ -2310,24 +2163,13 @@ def reject_reserved_direct_run_id(run_id: str) -> None:
 
 
 def command_init_run(args: argparse.Namespace) -> int:
-    """Mint a run (`--creation-key`) or re-bootstrap an initialized one (`--run-id`).
-
-    `--creation-key` mints the run's core transaction before it takes the ledger's
-    `state.lock`, then creates the ledger under the transaction's id when it is missing;
-    the same key answers the same run. `--run-id` never creates anything: it refuses a
-    ledger that does not exist and writes only the migration of a legacy one (#337 D9,
-    D14).
-    """
+    """Mint a run (`--creation-key`) or re-bootstrap an existing one (`--run-id`, no create)."""
     _delivery()
     supplied = supplied_time(args.now, "--now")
     if args.creation_key is not None:
-        orchestrated = RunIdentity("orchestrated", None, None)
-        try:
-            plan = minted_plan(identity=orchestrated, prior_run=None,
-                               caller_key=args.creation_key)
-        except ValueError as error:
-            raise WorkflowError("invalid creation key") from error
-        run_id = mint_run(resolve_repo_root(args.repo_root), plan)
+        plan = attempt_store.creation_key_plan(args.creation_key)
+        run_id = attempt_store.mint_run(
+            attempt_store.store_root(resolve_repo_root(args.repo_root) / ".superpowers"), plan)
 
         def initialize(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
             if state is not None:
@@ -2337,7 +2179,7 @@ def command_init_run(args: argparse.Namespace) -> int:
             return state, True
 
         state = transact(args.repo_root, run_id, initialize, allow_missing=True,
-                         new_identity=orchestrated)
+                         new_identity=RunIdentity("orchestrated", None, None))
     else:
         reject_reserved_direct_run_id(args.run_id)
         if not RUN_ID_PATTERN.fullmatch(args.run_id):
@@ -2447,10 +2289,7 @@ def _apply_one_issue_policy(
 ) -> dict[str, Any]:
     """Derive and apply the shared lifecycle policy for exactly one issue.
 
-    ``issue`` is the issue number the caller is deciding for: ``control`` names the
-    issue it iterates and ``direct-owner`` the request's. A ledger, tracker or worktree
-    observation that names another issue is refused. ``run_dir`` is used only for the
-    paths the policy reads and writes, never to derive an issue.
+    ``issue`` is the one the caller decides for; an observation naming another is refused.
 
     ``forge`` carries the issue branch's pull-request observation, from direct
     and control alike. A merged one reconciles the latest attempt only when
@@ -3555,6 +3394,8 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     )
                 claimed.append((sequence, run_id, run_dir))
 
+            attempts = attempt_store.store_root(repo_root / ".superpowers")
+
             def retain(sequence: int, run_id: str, run_dir: Path,
                        probed: bool) -> tuple[int, str, Path, Path]:
                 """Lock one run's ledger to the end of the call and check it read-only."""
@@ -3569,13 +3410,13 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     os.fdopen(lock_descriptor, "r+b")
                 )
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-                checked = read_state_unlocked(state_path, run_id, repo_root=repo_root)
+                checked = read_state_unlocked(state_path, run_id)
                 if set(checked["issues"]) != {str(issue)}:
                     raise WorkflowError(
                         "direct run state must contain exactly the requested issue"
                     )
-                if probed and bound_identity(
-                        repo_root, checked, run_id) != RunIdentity("direct", issue, sequence):
+                if probed and attempt_store.bound_identity(
+                        attempts, checked, run_id) != RunIdentity("direct", issue, sequence):
                     raise WorkflowError(
                         "direct run state does not match its sequence in the index"
                     )
@@ -3586,34 +3427,15 @@ def command_direct_owner(args: argparse.Namespace) -> int:
             candidates = [retain(sequence, run_id, run_dir, False)
                           for sequence, run_id, run_dir in sorted(claimed)]
             sequence = candidates[-1][0] if candidates else 0
-            while True:
-                sequence += 1
-                probed_id = lookup_run(repo_root, direct_key(issue, sequence))
-                if probed_id is None:
-                    break
-                if classify(probed_id) != "core":
-                    raise WorkflowError("direct run index entry is not a run transaction")
-                probed_dir = workflows_dir / probed_id
-                probed_status = path_status(probed_dir)
-                if probed_status is None:
-                    break
-                if (
-                    stat.S_ISLNK(probed_status.st_mode)
-                    or not stat.S_ISDIR(probed_status.st_mode)
-                ):
-                    raise WorkflowError(
-                        "direct run entry must be a non-symlink directory"
-                    )
-                if path_status(probed_dir / "state.json") is None:
-                    break
+            for sequence, probed_id, probed_dir in attempt_store.indexed_direct_runs(
+                    attempts, workflows_dir, issue, after=sequence):
                 candidates.append(retain(sequence, probed_id, probed_dir, True))
 
             # Bind: a legacy ledger is committed as schema 8 at once, under its held lock.
             retained: list[tuple[int, str, Path, Path, dict[str, Any], RunIdentity]] = []
             for sequence, run_id, run_dir, state_path in candidates:
                 read = read_locked_state(
-                    state_path, run_id, repo_root=repo_root,
-                    migration_contracts=migration_contracts,
+                    state_path, run_id, migration_contracts=migration_contracts,
                 )
                 if read.changed:
                     commit_state(run_dir, state_path, read.state, run_id=run_id,
@@ -3717,7 +3539,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     # mint lock is taken under the issue lock and the retained
                     # `state.lock`s (D9); the same facts mint the same transaction.
                     identity = RunIdentity("direct", issue, new_sequence)
-                    run_id = mint_run(repo_root, minted_plan(
+                    run_id = attempt_store.mint_run(attempts, minted_plan(
                         identity=identity, prior_run=prior_run, caller_key=None))
                     run_dir = workflows_dir / run_id
                     state_path = run_dir / "state.json"
@@ -3780,8 +3602,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         assert state is not None
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
-                        commit_state(run_dir, state_path, state, run_id=run_id,
-                                     identity=identity)
+                        commit_state(run_dir, state_path, state, run_id=run_id, identity=identity)
                     response = direct_observe(
                         issue,
                         run_id if selected is not None and not request["new_run"]
@@ -3798,8 +3619,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     assert state is not None
                     state["issues"][str(issue)] = policy["issue_state"]
                     state["updated_at"] = request["now"]
-                    commit_state(run_dir, state_path, state, run_id=run_id,
-                                 identity=identity)
+                    commit_state(run_dir, state_path, state, run_id=run_id, identity=identity)
                     response = direct_terminal(
                         issue=issue, run_id=run_id, source="lifecycle",
                         reason="failed", blockers=[],
@@ -3810,8 +3630,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         assert state is not None
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
-                        commit_state(run_dir, state_path, state, run_id=run_id,
-                                     identity=identity)
+                        commit_state(run_dir, state_path, state, run_id=run_id, identity=identity)
                     response = direct_terminal(
                         issue=issue,
                         run_id=(run_id if state is not None else None),
@@ -3829,8 +3648,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     if policy["changed"]:
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
-                        commit_state(run_dir, state_path, state, run_id=run_id,
-                                     identity=identity)
+                        commit_state(run_dir, state_path, state, run_id=run_id, identity=identity)
                     response = direct_terminal(
                         issue=issue, run_id=run_id, source="lifecycle",
                         reason=policy["attempt"]["result"]["state"],
@@ -3840,8 +3658,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     assert state is not None
                     state["issues"][str(issue)] = policy["issue_state"]
                     state["updated_at"] = request["now"]
-                    commit_state(run_dir, state_path, state, run_id=run_id,
-                                 identity=identity)
+                    commit_state(run_dir, state_path, state, run_id=run_id, identity=identity)
                     response = direct_terminal(
                         issue=issue, run_id=run_id, source="lifecycle",
                         reason="merged", blockers=[],
@@ -3876,8 +3693,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         ledger_repo_root=str(repo_root), run_id=run_id,
                         reentry=reentry_command(issue))
                     if changed:
-                        commit_state(run_dir, state_path, state, run_id=run_id,
-                                     identity=identity)
+                        commit_state(run_dir, state_path, state, run_id=run_id, identity=identity)
                     else:
                         validate_state(state, run_id=run_id, identity=identity)
                 else:
@@ -4185,27 +4001,22 @@ def command_finish_delivery(args):
     return 0
 
 
-def read_state_unlocked(state_path: Path, run_id: str, *, repo_root: Path) -> dict[str, Any]:
+def read_state_unlocked(state_path: Path, run_id: str) -> dict[str, Any]:
     """Read one run's state and validate it without a lock or a write (#193 D4).
 
     check-launch and the build-delivery ledger lookup share this reader. No
     lock: `atomic_write_state` publishes by `os.replace`, so an unlocked reader
     sees either the whole prior file or the whole new one, never a torn one — and
-    taking the lock would mean creating `state.lock`, which is a write. Schemas
-    1–7 are checked on a detached copy through the migration chain, the schema-7
-    validation and the migration plan; schema 8 through a lock-free load of the
-    run transaction it names. No store, lock or directory is created, and the
-    document is returned as stored.
+    taking the lock would mean creating `state.lock`, which is a write. The
+    document is checked by `attempt_store.check_unlocked` and returned as stored.
     """
     try:
         raw_state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise WorkflowError("invalid workflow state") from error
-    require_known_schema(raw_state)
-    if raw_state["schema_version"] == SCHEMA_VERSION:
-        identity = bound_identity(repo_root, raw_state, run_id)
-        return validate_state(raw_state, run_id=run_id, identity=identity)
-    legacy_candidate(raw_state, run_id=run_id, migration_contracts={})
+    attempt_store.check_unlocked(
+        state_path, raw_state, run_id=run_id,
+        upgrade=partial(upgrade_state, migration_contracts={}), validate=validate_state)
     return raw_state
 
 
@@ -4241,12 +4052,11 @@ def _installing_runs(repo_root: Path, issue: str, digest: str) -> Iterator[Path]
             yield run_dir
 
 
-def _installed_delivery(runtime: Any, repo_root: Path, run_dir: Path, issue: str,
-                        digest: str) -> dict[str, Any]:
+def _installed_delivery(runtime: Any, run_dir: Path, issue: str, digest: str) -> dict[str, Any]:
     """The validated delivery an installing run holds, re-read unlocked, or a refusal (#193 D14)."""
     invalid = f"build-delivery refused: installing ledger {run_dir.name} is invalid"
     try:
-        state = read_state_unlocked(run_dir / "state.json", run_dir.name, repo_root=repo_root)
+        state = read_state_unlocked(run_dir / "state.json", run_dir.name)
         delivery = state["issues"][issue]["delivery"]
         # Validation already ties contract_digest to the contract, so this
         # only fires when the file was replaced between the two unlocked reads.
@@ -4281,7 +4091,7 @@ def installed_initial_intent(runtime: Any, repo_root_value: str,
     run_dir = next(_installing_runs(repo_root, issue, digest), None)
     if run_dir is None:
         return None
-    delivery = _installed_delivery(runtime, repo_root, run_dir, issue, digest)
+    delivery = _installed_delivery(runtime, run_dir, issue, digest)
     try:
         root = next(item for item in delivery["authorization_intents"]
                     if item["predecessor_intent_id"] is None)
@@ -4313,7 +4123,7 @@ def installing_ledger_delivery(runtime: Any, repo_root_value: str,
                             "than one ledger: " + ", ".join(run.name for run in runs))
     if not runs:
         return None
-    return copy.deepcopy(_installed_delivery(runtime, repo_root, runs[0], issue, digest))
+    return copy.deepcopy(_installed_delivery(runtime, runs[0], issue, digest))
 
 
 def command_check_launch(args: argparse.Namespace) -> int:
@@ -4334,7 +4144,7 @@ def command_check_launch(args: argparse.Namespace) -> int:
         raise WorkflowError("invalid run_id")
     parse_action_id(args.action_id)
     state_path = repo_root / ".superpowers" / "workflows" / args.run_id / "state.json"
-    state = (read_state_unlocked(state_path, args.run_id, repo_root=repo_root)
+    state = (read_state_unlocked(state_path, args.run_id)
              if require_regular_path(state_path, "workflow state", allow_missing=True)
              else None)
     current_action_id, reason = launch_verdict(runtime, state, args.action_id)
@@ -4481,7 +4291,7 @@ def command_owner_liveness(args: argparse.Namespace) -> int:
     since = supplied_time(args.since, "--since", clock=clock) or clock
     repo_root = resolve_repo_root(args.repo_root)
     state_path = repo_root / ".superpowers" / "workflows" / args.run_id / "state.json"
-    state = (read_state_unlocked(state_path, args.run_id, repo_root=repo_root)
+    state = (read_state_unlocked(state_path, args.run_id)
              if require_regular_path(state_path, "workflow state", allow_missing=True)
              else None)
     _, reason = launch_verdict(runtime, state, args.action_id)
@@ -4672,7 +4482,7 @@ def command_mark_progress(args: argparse.Namespace) -> int:
     runtime = _delivery()
     repo_root = resolve_repo_root(args.repo_root)
     state_path = repo_root / ".superpowers" / "workflows" / args.run_id / "state.json"
-    state = (read_state_unlocked(state_path, args.run_id, repo_root=repo_root)
+    state = (read_state_unlocked(state_path, args.run_id)
              if require_regular_path(state_path, "workflow state", allow_missing=True)
              else None)
 
@@ -4788,7 +4598,7 @@ def command_resume_pack(args: argparse.Namespace) -> int:
     runtime = _delivery()
     repo_root = resolve_repo_root(args.repo_root)
     state_path = repo_root / ".superpowers" / "workflows" / args.run_id / "state.json"
-    state = (read_state_unlocked(state_path, args.run_id, repo_root=repo_root)
+    state = (read_state_unlocked(state_path, args.run_id)
              if require_regular_path(state_path, "workflow state", allow_missing=True)
              else None)
     attempt, current = resume_pack_attempt(runtime, state, args.action_id)
@@ -4901,7 +4711,7 @@ def command_check_worker(args: argparse.Namespace) -> int:
         raise WorkflowError("invalid run_id")
     parse_worker_id(args.worker_id)
     state_path = repo_root / ".superpowers" / "workflows" / args.run_id / "state.json"
-    state = (read_state_unlocked(state_path, args.run_id, repo_root=repo_root)
+    state = (read_state_unlocked(state_path, args.run_id)
              if require_regular_path(state_path, "workflow state", allow_missing=True)
              else None)
     current_action_id, reason = worker_verdict(runtime, state, args.worker_id)
@@ -5549,7 +5359,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.handler(args)
-    except (WorkflowError, OSError) as error:
+    except (WorkflowError, OSError, attempt_store.StoreRefused) as error:
         print(f"workflow-state: {error}", file=sys.stderr)
         return 2
 

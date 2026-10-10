@@ -3,8 +3,8 @@
 Grammar, plan, subject and report: which dialect a run id is in, the creation key and subject
 a run's one core `rel_` transaction is created under, the lineage rule, and the migration
 report's shape. Every function here is pure, with no file, directory, clock or environment
-read. `workflow-state` owns every effect: it reads the ledgers, takes the locks, calls
-`TransactionStore.create` and `lookup`, and renders the report.
+read. `agent_tools.attempt_store` owns the store effects (`TransactionStore.create`, `lookup`
+and `load`, and the mint lock); `workflow-state` owns the ledgers, their locks and the report.
 """
 
 import copy
