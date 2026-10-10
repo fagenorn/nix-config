@@ -1187,7 +1187,7 @@ class ShipIssueGuardedCommandSweepTest(unittest.TestCase):
                     findings, (), guarded_findings_report(f"ship-issue/{name}", findings))
 
 
-ORCHESTRATE_SKILL =SOURCE_TREES["claude-only"] / "orchestrate-issues/SKILL.md"
+ORCHESTRATE_SKILL = SOURCE_TREES["claude-only"] / "orchestrate-issues/SKILL.md"
 # A `date` invocation: at a line start or after a shell operator, `$(` or a
 # backtick, followed by an option, a closing backtick or parenthesis, or the end.
 DATE_INVOCATION = re.compile(r"(?:^|[;&|(`]|\$\()\s*date(?:\s+[-+]|\s*[`)]|\s*$)", re.M)
