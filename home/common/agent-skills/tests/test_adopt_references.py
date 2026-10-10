@@ -13,7 +13,7 @@ from agent_tools import adopt_references
 from agent_tools.adopt_links import Tree
 
 PATHS = [".claude/specs/x.md", ".claude/specs/sub/s.md", ".claude/plans/y.md",
-         ".claude/skills.config.json", ".out-of-scope/z.md", "docs/guide.txt",
+         ".claude/settings.json", ".out-of-scope/z.md", "docs/guide.txt",
          "tools/check.py"]
 MOVES = [(".claude/specs/x.md", ".agents/artifacts/specs/x.md"),
          (".claude/specs/sub/s.md", ".agents/artifacts/specs/sub/s.md"),
