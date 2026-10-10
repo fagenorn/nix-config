@@ -214,6 +214,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             initialized = run("init-run", "--repo-root", root, "--run-id", "admission",
                               "--now", NOW)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            minted = json.loads(initialized.stdout)["run_id"]
             direct_path = root / "direct.json"
             direct_path.write_text(json.dumps(self.direct_request()))
             direct = run("direct-owner", "--repo-root", root,
@@ -227,7 +228,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 "path": str(root / "worktree"), "state": "absent"}}]
             control_path = root / "control.json"
             control_path.write_text(json.dumps(control_request))
-            control = run("control", "--repo-root", root, "--run-id", "admission",
+            control = run("control", "--repo-root", root, "--run-id", minted,
                           "--request-file", control_path)
             self.assertEqual(control.returncode, 0, control.stderr)
             response = json.loads(control.stdout); summary = response["summaries"][0]
@@ -246,7 +247,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                  "--run-id", "legacy-contractless", "--now", NOW],
                 capture_output=True, text=True, check=False)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
-            state_path = root / ".superpowers/workflows/legacy-contractless/state.json"
+            minted = json.loads(initialized.stdout)["run_id"]
+            state_path = root / ".superpowers/workflows" / minted / "state.json"
             worktree = str(root / "worktree")
             state = json.loads(state_path.read_text())
             state["issues"]["151"] = {"issue": 151, "outcome": None, "attempts": [
@@ -262,7 +264,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             result_path.write_text(json.dumps(result), encoding="utf-8")
             finished = subprocess.run(
                 [sys.executable, str(WORKFLOW), "finish", "--repo-root", str(root),
-                 "--run-id", "legacy-contractless", "--issue", "151", "--attempt", "1",
+                 "--run-id", minted, "--issue", "151", "--attempt", "1",
                  "--result-file", str(result_path), "--now", NOW],
                 capture_output=True, text=True, check=False)
             self.assertEqual(finished.returncode, 0, finished.stderr)
@@ -288,13 +290,14 @@ class DeliveryAdmissionTest(unittest.TestCase):
         self.assertEqual(self.workflow._delivery().migrate(
             adjacent, migration_contracts={})["schema_version"], 7)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run = root / ".superpowers/workflows/admission"
+            root = Path(raw); run = root / ".superpowers/workflows/orchestrate-151"
             run.mkdir(parents=True)
-            (run / "state.json").write_text(json.dumps(self.legacy(2)))
+            (run / "state.json").write_text(
+                json.dumps({**self.legacy(2), "run_id": "orchestrate-151"}))
             with mock.patch.object(self.workflow, "atomic_write_state",
                                    wraps=self.workflow.atomic_write_state) as write:
                 result = self.workflow.transact(
-                    str(root), "admission", lambda state: (state, False),
+                    str(root), "orchestrate-151", lambda state: (state, False),
                     migration_contracts={151: contract})
             write.assert_called_once()
             self.assertEqual(write.call_args.args[2]["schema_version"], 7)
@@ -1118,8 +1121,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
             def store(value):
                 nonlocal serial; serial += 1
                 path = root / f"input-{serial}.json"; path.write_text(json.dumps(value)); return path
-            run_id = "orchestrated"
-            invoke("init-run", "--repo-root", root, "--run-id", run_id, "--now", NOW)
+            run_id = invoke("init-run", "--repo-root", root, "--run-id", "orchestrated",
+                            "--now", NOW)["run_id"]
             request = self.control_request(contract)
             request.update(tracker=[{"issue": 151, "state": "open", "open_blockers": [],
                 "decision_blockers": []}], worktrees=[{"issue": 151, "recorded": None,
@@ -1154,7 +1157,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual((action["custody"]["remainder"],
                               action["custody"]["launch"], action["deadline_at"]),
                              (1, 2, remainder["deadline_at"]))
-            state = json.loads((root / ".superpowers/workflows/orchestrated/state.json").read_text())
+            state = json.loads((root / f".superpowers/workflows/{run_id}/state.json").read_text())
             self.assertEqual(len(state["issues"]["151"]["attempts"]), 1)
 
     def test_a_refused_remainder_launch_parks_under_host_capacity(self):
@@ -1163,7 +1166,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
         home = make_home()
         self.addCleanup(shutil.rmtree, home, True)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); worktree = str(root / "worktree"); run_id = "refusal"
+            root = Path(raw); worktree = str(root / "worktree")
             def invoke(*args, stdin=None):
                 completed = subprocess.run(
                     [sys.executable, str(WORKFLOW), *map(str, args)],
@@ -1172,7 +1175,6 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     env={**os.environ, "HOME": str(home)})
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 return json.loads(completed.stdout)
-            run = ("--repo-root", root, "--run-id", run_id)
             def control(now, tracker, *, recorded, owners=()):
                 request = self.control_request(contract)
                 request.update(host_route="claude-code", now=now, owners=list(owners),
@@ -1185,7 +1187,9 @@ class DeliveryAdmissionTest(unittest.TestCase):
                                                             "state": "absent"}}])
                 request["authorization_intents"]["151"] = delivery["authorization_intents"]
                 return invoke("control", *run, "--request-file", "-", stdin=request)
-            invoke("init-run", *run, "--now", NOW)
+            run_id = invoke("init-run", "--repo-root", root, "--run-id", "refusal",
+                            "--now", NOW)["run_id"]
+            run = ("--repo-root", root, "--run-id", run_id)
             owner = control(NOW, "open", recorded=False)["actions"][0]
             failed = self.failed_summary(owner["custody"], digest)
             failed["delivery_observations"] = [observation(
@@ -1217,12 +1221,13 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(claims[action["custody"]["action_id"]]["release_event"],
                              "launch_refused")
 
-    def remainder_sweeps(self, root, home, run_id):
+    def remainder_sweeps(self, root, home, key):
         """Drive a claude-code run until remainder r1:1 is suspended on a denial (#190).
 
         Issue 151's owner spawns, fails after selecting its output, and an
         authority denial parks the minted remainder on ``human_gate``. Returns
-        ``(control, checkpoint)``. ``control(now, max_parallel=1)`` sweeps with
+        ``(control, checkpoint, run_id)``, the run id ``init-run --run-id key`` replies
+        with. ``control(now, max_parallel=1)`` sweeps with
         the recorded worktree observed as ``recorded`` (``matching_issue_branch``
         unless given) and returns the raw response bytes.
         ``checkpoint(custody, now)`` reports that custody again without progress
@@ -1230,7 +1235,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
         """
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
         digest = self.model.canonical_digest(contract)
-        worktree = str(root / "worktree"); run = ("--repo-root", root, "--run-id", run_id)
+        worktree = str(root / "worktree")
 
         def invoke(*args, stdin=None):
             completed = subprocess.run(
@@ -1259,7 +1264,9 @@ class DeliveryAdmissionTest(unittest.TestCase):
             return json.loads(invoke("checkpoint-delivery", *run, "--checkpoint-file",
                                      "-", "--now", now, stdin=report))
 
-        invoke("init-run", *run, "--now", NOW)
+        run_id = json.loads(invoke("init-run", "--repo-root", root, "--run-id", key,
+                                   "--now", NOW))["run_id"]
+        run = ("--repo-root", root, "--run-id", run_id)
         owner = json.loads(control(NOW, spawn=True))["actions"][0]
         failed = self.failed_summary(owner["custody"], digest)
         failed["delivery_observations"] = [observation(
@@ -1271,7 +1278,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
         denial["observed_at"] = "2026-09-21T00:00:02Z"; seal(self.model, denial)
         parked = checkpoint(remainder["custody"], "2026-09-21T00:00:02Z", denial)
         self.assertEqual((parked["state"], parked["blocked_on"]), ("suspended", "human_gate"))
-        return control, checkpoint
+        return control, checkpoint, run_id
 
     @staticmethod
     def remainder_launch(response):
@@ -1283,8 +1290,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
         """T1: a live remainder takes no free slot and the sweep does not crash."""
         home = make_home(); self.addCleanup(shutil.rmtree, home, True)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run_id = "live-remainder"
-            control, _ = self.remainder_sweeps(root, home, run_id)
+            root = Path(raw)
+            control, _, run_id = self.remainder_sweeps(root, home, "live-remainder")
             launch = self.remainder_launch(control("2026-09-21T00:00:03Z"))
             self.assertEqual((launch["custody"]["remainder"], launch["custody"]["launch"]),
                              (1, 2))
@@ -1308,8 +1315,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
         """T3: the reap that crosses the stall bound fails the remainder, dispatching nothing."""
         home = make_home(); self.addCleanup(shutil.rmtree, home, True)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run_id = "stalled-remainder"
-            control, checkpoint = self.remainder_sweeps(root, home, run_id)
+            root = Path(raw)
+            control, checkpoint, run_id = self.remainder_sweeps(root, home, "stalled-remainder")
             for launch, now, reported in (
                     (2, "2026-09-21T00:00:03Z", "2026-09-21T00:00:04Z"),
                     (3, "2026-09-21T00:00:05Z", "2026-09-21T00:00:06Z"),
@@ -1337,7 +1344,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
         """T4: baseline, a resumable human-gate remainder still resumes at a free slot."""
         home = make_home(); self.addCleanup(shutil.rmtree, home, True)
         with tempfile.TemporaryDirectory() as raw:
-            control, _ = self.remainder_sweeps(Path(raw), home, "suspended-remainder")
+            control, _, _ = self.remainder_sweeps(Path(raw), home, "suspended-remainder")
             action = self.remainder_launch(control("2026-09-21T00:00:03Z", max_parallel=2))
             self.assertEqual((action["custody"]["remainder"], action["custody"]["launch"]),
                              (1, 2))
@@ -1346,8 +1353,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
         """T3 (#194): a resumable remainder on an absent worktree is reported, not raised."""
         home = make_home(); self.addCleanup(shutil.rmtree, home, True)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run_id = "absent-remainder"
-            control, _ = self.remainder_sweeps(root, home, run_id)
+            root = Path(raw)
+            control, _, run_id = self.remainder_sweeps(root, home, "absent-remainder")
             state_path = root / f".superpowers/workflows/{run_id}/state.json"
             before = json.loads(state_path.read_text())["issues"]["151"]
             response = control("2026-09-21T00:00:03Z", max_parallel=2, recorded="absent")
@@ -1377,7 +1384,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 "claude-code": {"support": "supported", "agent_slots": 4},
                 "codex": {"support": "unsupported"}}}), encoding="utf-8")
         with tempfile.TemporaryDirectory() as raw:
-            control, _ = self.remainder_sweeps(Path(raw), home, "short-slots")
+            control, _, _ = self.remainder_sweeps(Path(raw), home, "short-slots")
             self.remainder_launch(control("2026-09-21T00:00:03Z"))
             response = json.loads(control("2026-09-21T00:00:04Z", max_parallel=2))
             self.assertEqual(response["admission"]["waiting"], [])
@@ -1388,7 +1395,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
         digest = self.model.canonical_digest(contract)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run_id = "recovery-control"; serial = 0
+            root = Path(raw); serial = 0
             def store(value):
                 nonlocal serial; serial += 1
                 path = root / f"control-recovery-{serial}.json"
@@ -1398,7 +1405,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     capture_output=True, text=True, check=False)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 return json.loads(completed.stdout)
-            invoke("init-run", "--repo-root", root, "--run-id", run_id, "--now", NOW)
+            run_id = invoke("init-run", "--repo-root", root, "--run-id", "recovery-control",
+                            "--now", NOW)["run_id"]
             request = self.control_request(contract)
             request.update(tracker=[{"issue": 151, "state": "open", "open_blockers": [],
                 "decision_blockers": []}], worktrees=[{"issue": 151, "recorded": None,
@@ -1493,16 +1501,17 @@ class DeliveryAdmissionTest(unittest.TestCase):
             return {str(issue): copy.deepcopy(value) for issue in issues}
 
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run_id = "dispatch-wire"
+            root = Path(raw)
             home = make_home(); self.addCleanup(shutil.rmtree, home, True)
             env = {**os.environ, "HOME": str(home)}
             bound = {issue: self.issue_contract(issue, str(root / f"worktree-{issue}"))
                      for issue in issues}
             initialized = subprocess.run(
                 [sys.executable, str(WORKFLOW), "init-run", "--repo-root", str(root),
-                 "--run-id", run_id, "--now", NOW], capture_output=True, check=False,
-                env=env)
+                 "--run-id", "dispatch-wire", "--now", NOW], capture_output=True,
+                check=False, env=env)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            run_id = json.loads(initialized.stdout)["run_id"]
             request = {"interface_version": 3, "host_route": "claude-code", "now": NOW,
                 "max_parallel": 2,
                 "attempt_budget_minutes": 30, "human_directed": True, "issues": issues,
@@ -3658,7 +3667,7 @@ class LedgerClockTest(LifecycleHarness, unittest.TestCase):
             (refused.returncode, refused.stdout, refused.stderr),
             (2, "", SKEW.format(label="direct owner now", supplied=ahead, lead=900,
                                 clock=PINNED)))
-        self.assertFalse(self.direct_state_path("direct-73-000001").exists())
+        self.assertEqual(self.run_dirs(), [self.run_id])
 
     def test_a_present_null_now_is_still_refused(self):
         self.pin()
