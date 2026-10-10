@@ -392,8 +392,9 @@ REGISTRY: tuple[Check, ...] = (
     Check("repository.residue.promoted_duplicate", "repository", "residue", "required",
           ("repository.contract.valid",), PROMOTED_DUPLICATE_FINDINGS,
           "check_residue_promoted_duplicate"),
-    # The third code of each trio is emitted by the compiler slice; declaring
-    # it now is what closes the registry rather than growing it later (D5).
+    # Each release-profile row is a pair: `subject_absent` where the contract
+    # declares `release: "unsupported"`, and the failure code, which is the
+    # live verdict of the compiler rule the check runs (#124 D14).
     Check("repository.release_profile.rolled_back_reachable", "repository",
           "release_profile", "optional", ("repository.contract.valid",),
           (("subject_absent", "release_profile.compensate.add"),
