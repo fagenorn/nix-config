@@ -33,13 +33,20 @@ LAUNCHER = re.compile(
     rb"exec (?P<python>/nix/store/[^/\s]+/bin/python3)"
     rb' -I -m agent_tools\.(?P<module>[a-z][a-z0-9_]*) "\$@"\n*'
 )
+SCRIPT_LAUNCHER = re.compile(
+    rb"#![^\n]+\n"
+    rb"unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
+    rb"exec (?P<python>/nix/store/[^/\s]+/bin/python3)"
+    rb' -I (?P<script>/nix/store/[^/\s]+-workflow-state\.py) "\$@"\n*'
+)
 MARKER = "HOSTILE agent_tools IMPORTED"
 HOSTILE_EXIT = 97
 TIMEOUT_SECONDS = 60
-# Flat installed scripts that name the package without being launchers: only
-# `workflow-state`, whose transitional lookups run `agent_tools.resolve_project`
-# and import `agent_tools.host_admission` from source (#177 D6, D13). #178
-# deletes this entry with them.
+# Flat installed scripts that name the package without being `-m` launchers: only
+# `workflow-state`, a script launcher under the same interpreter, checked by
+# `SCRIPT_LAUNCHER` (#337 D11, D16); its transitional lookups run
+# `agent_tools.resolve_project` and load `host_admission` from `~/.agents/lib/python`
+# (#177 D6, D13). #178 deletes this entry with them.
 NOT_LAUNCHERS = ("workflow-state",)
 # The commands #175, #179, #177, #249, #264 and #279 accepted as launchers: a floor, not the full
 # set, which the command table in lib/agent-tools.nix owns (#175 D8).
@@ -148,6 +155,36 @@ class AgentToolsLauncherTest(unittest.TestCase):
     def run_child(self, argv, env, cwd):
         return subprocess.run(argv, env=env, cwd=cwd, capture_output=True, text=True,
                               timeout=TIMEOUT_SECONDS, check=False)
+
+    def workflow_state_launcher(self):
+        data = (self.root / ".agents/bin/workflow-state").read_bytes()
+        match = SCRIPT_LAUNCHER.fullmatch(data)
+        self.assertIsNotNone(match, data[:300])
+        return match
+
+    def test_workflow_state_runs_under_the_package_interpreter(self):
+        match = self.workflow_state_launcher()
+        pythons = {python for python, _module in self.launchers().values()}
+        self.assertEqual(pythons, {match["python"].decode()})
+
+    def test_workflow_state_ignores_a_hostile_agent_tools(self):
+        completed = self.run_child(
+            [str(self.root / ".agents/bin/workflow-state"), "--help"],
+            self.hostile_env(), self.hostile)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(completed.stdout.startswith("usage: workflow-state "))
+        self.assertNotIn(MARKER, completed.stdout + completed.stderr)
+
+    def test_installed_workflow_state_mints_a_run_against_the_store_core(self):
+        with tempfile.TemporaryDirectory() as repo:
+            completed = self.run_child(
+                [str(self.root / ".agents/bin/workflow-state"), "init-run", "--repo-root",
+                 repo, "--creation-key", "installed-check"],
+                self.hostile_env(), self.hostile)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertRegex(json.loads(completed.stdout)["run_id"], r"^rel_[0-9a-f-]{36}$")
+            self.assertNotIn(MARKER, completed.stdout + completed.stderr)
+            self.assertTrue((Path(repo) / ".superpowers/attempt-transactions").is_dir())
 
     def test_the_command_table_generates_each_deployed_command(self):
         launchers = self.launchers()

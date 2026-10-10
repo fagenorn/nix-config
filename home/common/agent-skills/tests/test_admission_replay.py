@@ -165,8 +165,7 @@ class AdmissionReplayTest(BuilderHarness, unittest.TestCase):
             "host-route", "--route", "claude-code").stdout))
         if route["support"] != "supported":
             return route, None, None
-        run = ("--repo-root", self.root, "--run-id", "replay")
-        self.cli("init-run", *run, "--now", at(0))
+        run = self.mint_run("replay", now=at(0))
         worktrees = {n: str(self.root / ".worktrees" / f"worktree-issue-{n}-replay")
                      for n in ISSUES}
         built = {n: self.build("contract", self.contract_input(
@@ -247,7 +246,7 @@ class AdmissionReplayTest(BuilderHarness, unittest.TestCase):
         return json.loads(BASELINE.read_text(encoding="utf-8"))[name]
 
     def claims(self):
-        state = self.root / ".superpowers/workflows/replay/state.json"
+        state = self.root / ".superpowers/workflows" / self.run_id / "state.json"
         return {c["holder"]: c for c in json.loads(state.read_text())["admission"]["claims"]}
 
     def test_the_measured_shape_admits_one_owner_at_a_time(self):
@@ -276,9 +275,8 @@ class AdmissionReplayTest(BuilderHarness, unittest.TestCase):
         route, _, _ = self.replay(3)
         self.assertEqual((route["support"], route["reason_code"]),
                          ("unsupported", "declaration_invalid"))
-        run = ("--repo-root", self.root, "--run-id", "refused")
-        self.cli("init-run", *run, "--now", at(0))
-        state = self.root / ".superpowers/workflows/refused/state.json"
+        run = self.mint_run("refused", now=at(0))
+        state = self.root / ".superpowers/workflows" / self.run_id / "state.json"
         before = state.read_bytes()
         # A fresh request a valid declaration admits, so the declaration is the only
         # reason the control call can refuse (D32).
@@ -305,8 +303,7 @@ class AdmissionReplayTest(BuilderHarness, unittest.TestCase):
         """#310 AC1: rule (a) arms a liveness check and rule (d) frees a stalled owner."""
         self.project()
         self.declare(7)
-        run = ("--repo-root", self.root, "--run-id", "replay")
-        self.cli("init-run", *run, "--now", at(0))
+        run = self.mint_run("replay", now=at(0))
         worktrees = {n: str(self.root / ".worktrees" / f"worktree-issue-{n}-stall")
                      for n in ISSUES}
         built = {n: self.build("contract", self.contract_input(

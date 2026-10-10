@@ -227,15 +227,16 @@ class ClaimLedgerTest(LifecycleHarness, unittest.TestCase):
 
     def test_schema_three_reads_migrate_to_a_null_admission(self):
         self.admitted()
-        self.write_state(self._as_legacy(self.read_state(), 3))
+        self.install_legacy(self.read_state(), "orchestrate-14", 3)
         self.assertEqual(self.check_launch(action_id="14:1:1")["reason"], "current")
         self.init_run()  # a locked read persists the migration
         state = self.read_state()
-        self.assertEqual((state["schema_version"], state["admission"]), (7, None))
+        self.assertEqual((state["schema_version"], state["admission"]), (8, None))
+        self.assert_bound(state)
 
     def test_direct_runs_carry_no_admission(self):
-        self.acquire_direct()
-        state = json.loads(self.direct_state_path("direct-73-000001").read_text())
+        owner = self.acquire_direct()
+        state = json.loads(self.direct_state_path(owner["run_id"]).read_text())
         self.assertIsNone(state["admission"])
 
 
@@ -404,7 +405,7 @@ class ControlAdmissionTest(AdmissionSweeps, unittest.TestCase):
     def test_migrated_live_custody_is_adopted_and_new_admission_waits(self):
         self.init_run()  # the harness declaration: 64 slots
         self.sweep(T0)
-        self.write_state(self._as_legacy(self.read_state(), 3))
+        self.install_legacy(self.read_state(), "orchestrate-12-14", 3)
         self.slots(4)
         response = self.sweep("2026-08-13T20:05:00Z", issues=(12, 14, 15),
                               recorded=(12, 14), max_parallel=3)

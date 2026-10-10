@@ -45,10 +45,8 @@ in
     # deltas) stays in each repo under docs/standards/.
     ".agents/standards".source = ./standards;
 
-    ".agents/bin/workflow-state" = {
-      source = ./scripts/workflow-state.py;
-      executable = true;
-    };
+    ".agents/bin/workflow-state".source =
+      agentTools.scriptLauncher "workflow-state" ./scripts/workflow-state.py;
 
     ".agents/bin/artifact-budget" = {
       source = ./scripts/artifact-budget;

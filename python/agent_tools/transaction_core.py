@@ -12,7 +12,8 @@ the recovery plan; `transaction_proof` the proof's collection, cohorts and settl
 budget; `transaction_custody` the lease authority and admissibility; `transaction_receipt`
 the receipts, hazard markers and post-terminal observations; `transaction_storage` the
 durable-file primitives and the refusal classes. The store adds the locks, the clock, the
-fenced check and the writes. No command and no caller until #125.
+fenced check and the writes. Its first caller is `workflow-state`, which mints and binds
+attempt run transactions (#337).
 """
 
 import contextlib
@@ -307,6 +308,13 @@ class TransactionStore:
         return self._append(prior, now, [{
             "type": "transitioned", "from": source, "to": target, "reason": reason,
             "external_state": external_state}])
+
+    def lookup(self, creation_key: str) -> str | None:
+        """The id `creation_key`'s index entry names, or None; reads the index as `create`
+        does and writes, creates and locks nothing (#337 D2)."""
+        if type(creation_key) is not str or not creation_key:
+            raise StateInvalid("creation_key is not a non-empty string")
+        return _read_index(self.root, creation_key)
 
     def create(self, creation_key: str, subject: dict, *, concurrency_keys: Collection[str],
                proof: dict, recovery: dict, authority_class: str) -> Transaction:
