@@ -53,8 +53,8 @@ class GrammarTest(unittest.TestCase):
         self.assertEqual(ai.direct_key(41, 2), "attempt-run/v1:direct:41:2")
         self.assertEqual(ai.legacy_key("run-20261009-337"),
                          "attempt-run/v1:legacy:run-20261009-337")
-        self.assertEqual(ai.run_key("orchestrate-issues:20261010:337-338"),
-                         "attempt-run/v1:run:orchestrate-issues:20261010:337-338")
+        self.assertEqual(ai.run_key("orchestrate-issues:1791590400:337-338"),
+                         "attempt-run/v1:run:orchestrate-issues:1791590400:337-338")
         for bad in ("", "-x", "a/b", "a b", "x" * 129):
             with self.subTest(key=bad), self.assertRaises(ValueError):
                 ai.run_key(bad)
