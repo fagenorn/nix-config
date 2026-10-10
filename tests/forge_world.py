@@ -150,8 +150,8 @@ class ForgeWorld:
         self.respond_json("gh", argv("pr_merge.protection"), {
             "required_status_checks": {"contexts": ["Nix Eval"]}, "enforce_admins": {"enabled": True}})
 
-    def invoke_ready(self, slug: str = CANONICAL["slug"], *, full_name: str | None = None,
-                     push_urls: list[str] | None = None, tag_local: str | None = None,
+    def invoke_ready(self, slug: str = CANONICAL["slug"], *, origin: str | None = None,
+                     full_name: str | None = None, push_urls: list[str] | None = None, tag_local: str | None = None,
                      tag_lookup_exit: int = 0, tag_create_exit: int = 0, compare: str = "ahead",
                      guard_exit: int = 0, push_exit: int = 0, push_stderr: str = "",
                      push_sleep: float = 0, create_exit: int = 0,
@@ -161,11 +161,12 @@ class ForgeWorld:
         """Register the invoke happy path, each step's answer adjustable by a keyword.
 
         `slug` changes only what `origin` is: the target repository stays the canonical one,
-        which `invoke.repository` and `tag.compare` are keyed on. `tag_local` names the commit
+        which `invoke.repository` and `tag.compare` are keyed on. `origin` replaces the whole
+        origin URL (and so the default push URL), host included. `tag_local` names the commit
         an existing annotated local tag peels to; by default no local tag exists.
         """
         tag, commit = CANONICAL["tag"], CANONICAL["commit"]
-        origin = f"git@github.com:{slug}.git"
+        origin = origin or f"git@github.com:{slug}.git"
         self.respond("git", ["rev-parse", "--show-toplevel"], stdout=f"{self.checkout}\n")
         self.respond("git", ["remote", "get-url", "origin"], stdout=origin + "\n")
         self.respond("git", ["remote", "get-url", "--push", "--all", "origin"],

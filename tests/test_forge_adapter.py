@@ -102,19 +102,22 @@ class TagInspectTest(ForgeCase):
                          "store_unreachable")
 
 class PrMergeInspectTest(ForgeCase):
-    def pr(self, state, parents=(C["base_tip"], C["head"]), protection=None):
+    def pr(self, state, parents=(C["base_tip"], C["head"]), protection=None, base="main"):
+        def on_base(row):
+            return [part.replace("/heads/main", f"/heads/{base}").replace("/branches/main/", f"/branches/{base}/")
+                    for part in ROWS[row]["argv"][1:]]
         self.world.respond_json("gh", ROWS["pr_merge.view"]["argv"][1:], {
-            "state": state, "baseRefName": "main", "headRefName": "topic", "headRefOid": C["head"],
+            "state": state, "baseRefName": base, "headRefName": "topic", "headRefOid": C["head"],
             "mergeCommit": {"oid": C["merge_commit"]} if state == "MERGED" else None,
             "url": "https://github.com/fagenorn/nix-config/pull/336", "statusCheckRollup": []})
-        self.world.respond_json("gh", ROWS["pr_merge.base_ref"]["argv"][1:], {"object": {"sha": C["base_tip"]}})
+        self.world.respond_json("gh", on_base("pr_merge.base_ref"), {"object": {"sha": C["base_tip"]}})
         self.world.respond_json("gh", ROWS["pr_merge.merge_commit"]["argv"][1:],
                                 {"parents": [{"sha": sha} for sha in parents]})
         if protection is None:
-            self.world.respond_json("gh", ROWS["pr_merge.protection"]["argv"][1:], {
+            self.world.respond_json("gh", on_base("pr_merge.protection"), {
                 "required_status_checks": {"contexts": ["Nix Eval"]}, "enforce_admins": {"enabled": True}})
         else:
-            protection("gh", ROWS["pr_merge.protection"]["argv"][1:])
+            protection("gh", on_base("pr_merge.protection"))
 
     def request(self):
         return effect("pr_merge", pr=C["pr"], expected_base_tip=C["base_tip"], expected_head=C["head"])
@@ -133,6 +136,12 @@ class PrMergeInspectTest(ForgeCase):
                 self.assertEqual((observation["outcome"], observation["facts"]["protection"]["status"]),
                                  (outcome, status))
                 self.assertEqual(observation["facts"]["base_tip"], C["base_tip"])
+
+    def test_a_pr_merged_into_another_base_is_diverged(self):
+        self.pr("MERGED", base="release")
+        observation = self.inspect(self.request())
+        self.assertEqual((observation["outcome"], observation["reason"]), ("diverged", "base_mismatch"))
+        self.assertEqual((observation["facts"]["state"], observation["facts"]["base"]), ("MERGED", "release"))
 
     def test_the_facts_are_the_demo_readback(self):
         self.pr("OPEN")
@@ -424,6 +433,14 @@ class InvokeFailureTest(InvokeCase):
              ("rejected", "precondition_failed")),
             ("two push urls", dict(push_urls=["git@github.com:fagenorn/nix-config.git"] * 2),
              ("rejected", "precondition_failed")),
+            ("push url on another forge", dict(push_urls=["git@gitlab.com:fagenorn/nix-config.git"]),
+             ("rejected", "precondition_failed")),
+            ("origin on another forge", dict(origin="git@gitlab.com:fagenorn/nix-config.git",
+                                             push_urls=["git@github.com:fagenorn/nix-config.git"]),
+             ("rejected", "precondition_failed")),
+            ("push url on a github lookalike host",
+             dict(push_urls=["https://github.com.evil.example/fagenorn/nix-config.git"]),
+             ("rejected", "precondition_failed")),
             ("local tag lookup fails", dict(tag_lookup_exit=128), ("rejected", "provider_unavailable")),
             ("local tag creation fails", dict(tag_create_exit=128), ("rejected", "provider_unavailable")),
         )
@@ -433,6 +450,17 @@ class InvokeFailureTest(InvokeCase):
                 self.world.invoke_ready(**ready)
                 self.assertEqual(self.outcome(), expected)
                 self.assertEqual(self.mutations(), [])
+
+    def test_every_github_spelling_of_the_target_is_the_same_repository(self):
+        for origin, push in (("https://github.com/fagenorn/nix-config.git",
+                              "ssh://git@github.com/fagenorn/nix-config.git"),
+                             ("ssh://git@github.com/fagenorn/nix-config",
+                              "https://github.com/fagenorn/nix-config")):
+            with self.subTest(origin=origin, push=push):
+                self.world.reset()
+                self.world.invoke_ready(origin=origin, push_urls=[push])
+                self.assertEqual(self.outcome(), ("accepted", None))
+                self.assertEqual(len(self.mutations()), 1)
 
     def test_provider_answers(self):
         cases = (

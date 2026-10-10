@@ -1,15 +1,17 @@
-"""The GitHub forge adapter (#124 D8, D19): its static descriptor.
+"""The GitHub forge adapter (#124 D8, D19): `describe`, `inspect` and `invoke`.
 
-`describe()` is the adapter's whole declared surface for this task: which operations it
-carries, which it refuses, and what a profile may bind. `pr_merge` is declared but
-`unsupported` (`target_cas_unproven`), so a profile that names it is a grammar violation
-(D8). `tag` and `release` are the two supported publication operations, both `index`
-mode, both irreversible and create-if-absent.
+These three functions are the adapter's whole public surface, one per half of the adapter
+contract (D7): the static descriptor, the read half and the write half.
 
-The descriptor is built fresh on every call, so a caller may mutate what it receives.
-This module imports only the standard library, apart from one call-time import of
-`adopt_planning.normalize_remote_url` inside `invoke`: the registry in `release_adapter`
-imports this module, never the reverse (D7), and `adopt_planning` reaches the registry.
+`describe()` declares which operations the adapter carries, which it refuses, and what a
+profile may bind. `pr_merge` is declared but `unsupported` for `invoke`
+(`target_cas_unproven`), so a profile that names it is a grammar violation (D8), while its
+read half is implemented. `tag` and `release` are the two supported publication
+operations, both `index` mode, both irreversible and create-if-absent. The descriptor is
+built fresh on every call, so a caller may mutate what it receives.
+
+This module imports only the standard library: the registry in `release_adapter` imports
+this module, never the reverse (D7).
 
 `inspect(request)` is the read half (D11, D17, D25, spec section 7). It issues only
 `gh api` and `gh pr view` reads, by name, with `GITHUB_TOKEN` and `GH_TOKEN` removed from
@@ -42,6 +44,8 @@ DETAIL_LIMIT = 240
 TOKEN_VARIABLES = ("GITHUB_TOKEN", "GH_TOKEN")
 HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
 SLUG = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+GITHUB_REMOTE = re.compile(r"(?:git@github\.com:|https://github\.com/|ssh://git@github\.com/)"
+                           r"(?P<slug>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?")
 BRANCH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*")
 VERSION = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -274,7 +278,9 @@ def _inspect_pr_merge(parameters: dict[str, Any], deadline: float) -> dict[str, 
         return _unknown(error.reason, error.detail, subject)
     facts = {"state": state, "base": base, "head": head, "head_oid": head_oid,
              "base_tip": base_tip, "protection": protection}
-    if state == "OPEN":
+    if base != parameters["target"]["branch"]:
+        outcome, reason = "diverged", "base_mismatch"
+    elif state == "OPEN":
         outcome, reason = "absent", "pr_open"
     elif state == "CLOSED":
         outcome, reason = "diverged", "pr_closed"
@@ -447,9 +453,18 @@ def _invoke_shape(request: Any) -> tuple[str, dict[str, Any]]:
     return operation, parameters
 
 
-def _same_repository(slug: str, checkout: str) -> None:
-    from agent_tools.adopt_planning import normalize_remote_url  # call time: import cycle
+def _github_slug(url: str) -> str | None:
+    """`owner/name` of a remote URL on the host `github.com` exactly, else None.
 
+    Only the three GitHub spellings are recognised (`git@github.com:`, `https://github.com/`
+    and `ssh://git@github.com/`): a URL on any other host, a lookalike host included, names
+    no GitHub repository however its path reads.
+    """
+    match = GITHUB_REMOTE.fullmatch(url.strip())
+    return None if match is None or ".." in match["slug"] else match["slug"]
+
+
+def _same_repository(slug: str, checkout: str) -> None:
     origin = _precondition_read(["git", "remote", "get-url", "origin"], checkout)
     pushes = [line for line in _precondition_read(
         ["git", "remote", "get-url", "--push", "--all", "origin"], checkout).splitlines()
@@ -458,8 +473,12 @@ def _same_repository(slug: str, checkout: str) -> None:
         ["gh", "api", f"repos/{slug}", "--jq", ".full_name"], checkout).strip()
     if len(pushes) != 1:
         raise _Refusal("rejected", "precondition_failed", f"origin has {len(pushes)} push urls")
-    for what, found in (("origin", normalize_remote_url(origin)),
-                        ("push url", normalize_remote_url(pushes[0])), ("repository", named)):
+    for what, url in (("origin", origin), ("push url", pushes[0])):
+        if _github_slug(url) is None:
+            raise _Refusal("rejected", "precondition_failed",
+                           f"{what} is not a github.com repository url")
+    for what, found in (("origin", _github_slug(origin)),
+                        ("push url", _github_slug(pushes[0])), ("repository", named)):
         if found != slug:
             raise _Refusal("rejected", "precondition_failed",
                            f"{what} is {found}, not {slug}")
