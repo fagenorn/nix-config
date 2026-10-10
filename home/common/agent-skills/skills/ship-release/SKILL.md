@@ -20,7 +20,7 @@ A direct invocation keeps the current session as owner; never split release owne
 
 ## Project bindings (resolve first)
 
-Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.tracker`, `bindings.vcs`, `bindings.commands`, `bindings.workflow.release`, and `bindings.deploy`. A blocked required capability stops; authored unsupported takes only the existing no-capability route.
+Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Use `bindings.tracker`, `bindings.vcs`, `bindings.commands`, and `bindings.deploy`. A blocked required capability stops; authored unsupported takes only the existing no-capability route.
 
 `<integration>` and `<default>` come from `bindings.vcs.integration_branch` and `bindings.vcs.default_branch`; repository identity comes only from `bindings.tracker.repo_slug`. When identical there is no PR: run Phases 0 **and** 1, skip Phases 2–4, continue at Phase 4.5; the release ref is the confirmed tip of `<default>`.
 
@@ -222,15 +222,12 @@ Annotated (`-a`, as `git describe` and `gh release` expect), tagging `MERGE_SHA`
 ```bash
 ${GH_PREFIX}gh pr view <pr-num> --json body -q .body
 
-${GH_PREFIX}gh release create "$NEXT_VERSION" \
-  --target <default> \
-  --title "$NEXT_VERSION — <one-line scope from PR title>" \
-  --notes-file <release-notes-path>
+${GH_PREFIX}gh release create <vX.Y.Z> --repo <repo-slug> --verify-tag --title "<vX.Y.Z> — <one-line scope from PR title>" --notes-file <release-notes-path>
 
 rm <release-notes-path>
 ```
 
-Between the two: write the body the first command printed to `<release-notes-path>` (outside the working tree) with the file-writing tool, pass that path to the second (never inline `--notes`: the shell mangles the body's fences and backticks), and remove it once the Release exists. No PR (single-branch): write the Phase 1 body there. Skip `--prerelease` and `--draft`.
+Between the two: write the body the first command printed to `<release-notes-path>` (outside the working tree) with the file-writing tool, pass it to the second (never inline `--notes`: the shell mangles the body's fences and backticks), and remove it afterwards. Write the tag and slug literally, like the merge line. No PR (single-branch): write the Phase 1 body there.
 
 ### 4.5g. Verify
 

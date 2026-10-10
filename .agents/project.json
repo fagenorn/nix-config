@@ -111,7 +111,6 @@
         "plan": "codex-plan-review",
         "code": "codex-diff-review"
       },
-      "release": null,
       "light_lane": {
         "mode": "shadow",
         "budget_minutes": 90,
@@ -161,9 +160,6 @@
     "review.code": {
       "support": "supported"
     },
-    "release": {
-      "support": "unsupported"
-    },
     "deploy": {
       "support": "unsupported"
     }
@@ -187,5 +183,108 @@
   "platform": {
     "min_inclusive": "1.0.0",
     "max_exclusive": "2.0.0"
+  },
+  "release": {
+    "profiles": {
+      "github-release": {
+        "profile_version": 1,
+        "target": {
+          "environment": "github-main",
+          "concurrency_keys": [
+            "release/fagenorn/nix-config"
+          ]
+        },
+        "requirements": {
+          "adapters": {
+            "forge": {
+              "min_inclusive": "1.0.0",
+              "max_exclusive": "2.0.0"
+            }
+          }
+        },
+        "bindings": {
+          "adapters": {
+            "forge": {
+              "adapter": "github-forge"
+            }
+          },
+          "targets": {
+            "repository": {
+              "adapter": "forge",
+              "kind": "github_repository",
+              "repository": "fagenorn/nix-config",
+              "branch": "main"
+            }
+          },
+          "principals": {
+            "maintainer": {
+              "class": "forge_write"
+            }
+          },
+          "credentials": {
+            "forge-keyring": {
+              "adapter": "forge",
+              "class": "gh_keyring"
+            }
+          }
+        },
+        "publication": {
+          "actions": [
+            {
+              "id": "tag",
+              "mode": "index",
+              "adapter": "forge",
+              "operation": "tag",
+              "target": "repository",
+              "principal": "maintainer",
+              "credential": "forge-keyring",
+              "effect": "irreversible",
+              "config_schema_version": 1,
+              "config": {},
+              "deps": [],
+              "observation_deadline_ms": 600000
+            },
+            {
+              "id": "github-release",
+              "mode": "index",
+              "adapter": "forge",
+              "operation": "release",
+              "target": "repository",
+              "principal": "maintainer",
+              "credential": "forge-keyring",
+              "effect": "irreversible",
+              "config_schema_version": 1,
+              "config": {},
+              "deps": [
+                "tag"
+              ],
+              "observation_deadline_ms": 600000
+            }
+          ]
+        },
+        "activation": "none",
+        "proof": {
+          "convergence_window_ms": 1800000,
+          "obligations": []
+        },
+        "recovery": {
+          "units": {
+            "tag": {
+              "posture": "supersedable_only",
+              "anchor": null,
+              "compatibility": null,
+              "edges": []
+            },
+            "github-release": {
+              "posture": "supersedable_only",
+              "anchor": null,
+              "compatibility": null,
+              "edges": []
+            }
+          }
+        },
+        "limits": {}
+      }
+    }
   }
 }

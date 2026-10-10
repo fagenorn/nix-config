@@ -18,7 +18,7 @@ import json
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
-from agent_tools import agent_platform
+from agent_tools import agent_platform, release_profile
 from agent_tools.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
     APPROVAL_CLASSES,
@@ -58,6 +58,7 @@ from agent_tools.adopt_inspection import (
     refuse,
     sha256_hash,
 )
+from agent_tools.release_bridge import project_legacy_deploy
 
 # --------------------------------------------------------------------------
 # Project identity (D35)
@@ -348,7 +349,10 @@ def legacy_binding_operations(root: Path,
     every other key exactly as authored; a file that is absent, unreadable, not
     a JSON object, or already in agreement produces no operation at all.
     Agreement is a property of the parsed value, not of its bytes: a file that
-    already holds every merged key in its own formatting is not work.
+    already holds every merged key in its own formatting is not work. When the
+    contract's `release` is admissible, the file is also projected through
+    `project_legacy_deploy` (#148 D30): the profile owns the deploy intent, so
+    the legacy `deploy` member is dropped.
     """
     operations: list[dict] = []
     contents: dict[str, bytes] = {}
@@ -370,12 +374,16 @@ def legacy_binding_operations(root: Path,
             value = binding_value(contract, route)
             if isinstance(value, str):
                 config[key] = value
-        if config == authored:
+        candidate = current if config == authored else authored_bytes(config)
+        release = contract.get("release")
+        if (release == "unsupported" or isinstance(release, dict)) \
+                and not release_profile.grammar_violations(release, contract):
+            candidate = project_legacy_deploy(candidate, release)
+        if candidate == current:
             continue
-        after = authored_bytes(config)
         operations.append(operation("write-file", [target], [target],
-                                    sha256_hash(current), sha256_hash(after)))
-        contents[target] = after
+                                    sha256_hash(current), sha256_hash(candidate)))
+        contents[target] = candidate
     return operations, contents
 
 

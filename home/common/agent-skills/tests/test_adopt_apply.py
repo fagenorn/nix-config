@@ -71,6 +71,11 @@ def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
         "plan": "review", "code": "review"}
     contract["bindings"]["vcs"]["commit"] = {
         "co_authored_by": True, "signed": signed}
+    # This repository's GitHub release profile derives a `blocked` release
+    # capability on any host without the forge adapter's executables on PATH;
+    # no apply case is about release, so the fixture opts out of it to keep the
+    # verdicts host-independent.
+    contract["release"] = "unsupported"
     scaffold(root, contract, home)
     # The projections were rendered from a contract that still declared
     # `platform`; dropping the member afterwards leaves them in sync, because a
