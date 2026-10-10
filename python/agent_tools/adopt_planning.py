@@ -150,7 +150,8 @@ def candidate_questions(found: Candidates) -> list[dict]:
     return sorted(
         ({"id": "candidate-class",
           "subject": entry["path"],
-          "value": candidate_answer(entry["provenance"], entry["path"]),
+          "value": candidate_answer(entry["provenance"], entry["path"],
+                                    entry["path"] not in found.uncontained),
           "basis": CANDIDATE_BASIS,
           "impact": question_impact("candidate-class"),
           "recommendation": question_recommendation("candidate-class")}
@@ -193,8 +194,9 @@ def apply_answers(found: Candidates, inventory: Inventory,
             raise refuse("adopt_failure", "adopt.decisions.unmatched_answer",
                          pointer, "the answered subject is not an undecided "
                          "candidate of this inspection")
-        if answer["value"] != candidate_answer(entry["provenance"],
-                                               entry["path"]):
+        if answer["value"] != candidate_answer(
+                entry["provenance"], entry["path"],
+                entry["path"] not in found.uncontained):
             raise refuse("adopt_failure", "adopt.decisions.invalid_answer",
                          pointer, "the answer is not the one this "
                          "candidate's open question offers")
@@ -646,17 +648,22 @@ def evaluate_ready_gates(root: Path, found: Candidates,
         READY_GATES[3], "failed" if untracked else "passed",
         "adopt.worktree.untracked_overlap" if untracked else None))
 
-    # A planned destination that already exists or sits under an existing
-    # file, or that collides with another: the same path, or one inside the
-    # other.
+    # A planned destination that already exists (a dangling symlink
+    # included) or sits under an existing file or any symlink, or that
+    # collides with another: the same path, or one inside the other.
+    def present(path: Path) -> bool:
+        return path.is_symlink() or path.exists()
+
+    def not_a_directory(path: Path) -> bool:
+        return path.is_symlink() or (path.exists() and not path.is_dir())
+
     destinations = [new for _, new in found.moves]
     counts = Counter(destinations)
     planned = set(destinations)
     occupied = [
         new for new in destinations
-        if (root / new).exists()
-        or any((root / str(parent)).exists()
-               and not (root / str(parent)).is_dir()
+        if present(root / new)
+        or any(not_a_directory(root / str(parent))
                for parent in PurePosixPath(new).parents)
         or counts[new] > 1
         or any(str(parent) in planned
@@ -689,8 +696,8 @@ GATE_MESSAGES = {
         "an untracked file sits inside an inspected source or a planned "
         "destination",
     "no-existing-destination": (
-        "a planned destination already exists, sits under a file, or "
-        "collides with another"),
+        "a planned destination already exists, sits under a file or "
+        "symlink, or collides with another"),
     "move-sources-tracked": "a planned move source is not tracked",
     "no-secret-path-in-moves":
         "a secret-shaped path is a planned move source or target",

@@ -343,6 +343,22 @@ def ignored_symlink_repo(home: Path) -> Path:
     return root
 
 
+def tracked_symlink_repo(home: Path) -> Path:
+    """`nix_config_shape_repo` plus a tracked `.claude/link.md` that is a
+    symlink out of the checkout: an unclassified candidate `apply` could
+    never move, because its stored operation would name an uncontained
+    path."""
+    root = nix_config_shape_repo(home)
+    outside = Path(tempfile.mkdtemp()).resolve() / "elsewhere.md"
+    outside.write_text("# outside the repository\n", encoding="utf-8")
+    (root / ".claude" / "link.md").symlink_to(outside)
+    commit(root, "track an escaping agent link")
+    return root
+
+
+LINK = ".claude/link.md"
+
+
 ODD = ".claude/odd.md"
 ARCHIVED = ".agents/knowledge/archive/adopted/.claude/odd.md"
 
@@ -1062,6 +1078,35 @@ class RecordTreeClassificationTest(AdoptTestCase):
         commit(root, "put a file where a destination's parent goes")
         self.assert_destination_gate_fails(self.ready_plan(root))
 
+    def test_a_dangling_symlink_destination_parent_fails_the_gate(self):
+        root = nix_config_shape_repo(self.home)
+        (root / ".agents" / "artifacts").mkdir(parents=True, exist_ok=True)
+        (root / ".agents" / "artifacts" / "notes").symlink_to("missing")
+        write(root, ".claude/notes/n.md", "# note n\n")
+        commit(root, "put a dangling link where a destination's parent goes")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
+    def test_a_dangling_symlink_at_a_destination_fails_the_gate(self):
+        root = nix_config_shape_repo(self.home)
+        notes = root / ".agents" / "artifacts" / "notes"
+        notes.mkdir(parents=True, exist_ok=True)
+        (notes / "n.md").symlink_to("missing")
+        write(root, ".claude/notes/n.md", "# note n\n")
+        commit(root, "put a dangling link where a destination goes")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
+    def test_a_symlinked_directory_destination_parent_fails_the_gate(self):
+        """A link to a real directory is still a link, not a directory the
+        move can create its destination in."""
+        root = nix_config_shape_repo(self.home)
+        write(root, "elsewhere/keep.md", "# keep\n")
+        (root / ".agents" / "artifacts").mkdir(parents=True, exist_ok=True)
+        (root / ".agents" / "artifacts" / "notes").symlink_to(
+            "../../elsewhere", target_is_directory=True)
+        write(root, ".claude/notes/n.md", "# note n\n")
+        commit(root, "put a directory link where a destination's parent goes")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
     def assert_destination_gate_fails(self, doc: object) -> None:
         gate = next(gate for gate in doc["verification"]["ready_gates"]
                     if gate["id"] == "no-existing-destination")
@@ -1111,6 +1156,11 @@ class CandidateQuestionTest(AdoptTestCase):
         self.assertEqual(entry["subject"], ".claude/secrets/key.md")
         self.assertIsNone(entry["value"])
 
+    def test_a_tracked_symlink_out_of_the_repository_has_no_answer(self):
+        doc = self.ready_plan(tracked_symlink_repo(self.home))
+        entry = self.only_open(doc)
+        self.assertEqual((entry["subject"], entry["value"]), (LINK, None))
+
     def test_an_ignored_candidate_is_offered_retention(self):
         doc = self.ready_plan(ignored_symlink_repo(self.home))
         entry = self.only_open(doc)
@@ -1148,7 +1198,7 @@ class CandidateQuestionTest(AdoptTestCase):
                     function("candidate-class:.claude/odd.md")
         with self.assertRaises(ValueError):
             adopt_inspection.candidate_answer("untracked-explicit-paths",
-                                              ".claude/odd.md")
+                                              ".claude/odd.md", True)
 
 
 class CandidateAnswerTest(AdoptTestCase):
@@ -1242,6 +1292,13 @@ class CandidateAnswerTest(AdoptTestCase):
                 self.refused(root, "adopt.decisions.invalid_answer",
                              ("candidate-class", ".claude/secrets/key.md",
                               value))
+
+    def test_archiving_a_tracked_symlink_out_of_the_repository_is_invalid(self):
+        root = tracked_symlink_repo(self.home)
+        for value in ("archive-history", "retain-product"):
+            with self.subTest(value=value):
+                self.refused(root, "adopt.decisions.invalid_answer",
+                             ("candidate-class", LINK, value))
 
     def test_one_subject_answered_twice_is_an_invalid_answer(self):
         self.refused(candidate_repo(self.home, ODD),

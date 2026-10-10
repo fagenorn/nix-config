@@ -117,7 +117,7 @@ ARCHIVE_ADOPTED_DIR = ".agents/knowledge/archive/adopted"
 
 # The fixed basis of every `candidate-class` question (D8): it never names the
 # candidate, which the entry's `subject` carries.
-CANDIDATE_BASIS = "no classification row covers this agent path"
+CANDIDATE_BASIS = "no classification row settles this agent path"
 
 READY_GATES = (
     "contract-valid-after-amendment",
@@ -360,21 +360,27 @@ def question_recommendation(question_id: str) -> str:
         return ("answer it with plan --answer candidate-class <subject> "
                 "<value>, using this entry's subject and value, and apply "
                 "the plan id that run prints; a null value marks a "
-                "secret-shaped path with no answer: add a central "
-                "classification row for it, or remove it from the repository "
-                "in its own commit, then plan again")
+                "secret-shaped path or a symlink out of the repository, with "
+                "no answer: add a central classification row for a "
+                "secret-shaped path, or remove either from the repository in "
+                "its own commit, then plan again")
     raise ValueError(f"unknown question id: {question_id!r}")
 
 
-def candidate_answer(provenance: str, path: str) -> str | None:
-    """The offered answer for one undecided candidate (D4, D7).
+def candidate_answer(provenance: str, path: str,
+                     contained: bool) -> str | None:
+    """The offered answer for one undecided candidate (D4, D7, D13).
 
-    A tracked candidate is offered the archive unless its name looks secret,
-    in which case no answer is offered; a targeted-ignored one is offered
-    retention. Any other provenance is not a candidate source.
+    A tracked candidate is offered the archive unless its name looks secret
+    or it is not `contained` (a symlink resolving outside the repository,
+    whose move `apply` refuses), in which case no answer is offered; a
+    targeted-ignored one is offered retention. Any other provenance is not a
+    candidate source.
     """
     if provenance == "tracked":
-        return None if is_secret_path(path) else "archive-history"
+        if is_secret_path(path) or not contained:
+            return None
+        return "archive-history"
     if provenance == "targeted-ignored":
         return "retain-product"
     raise ValueError(f"unknown candidate provenance: {provenance!r}")
@@ -541,6 +547,28 @@ def contained_path(root: Path, relative: str) -> Path | None:
     if resolved == anchor or anchor in resolved.parents:
         return resolved
     return None
+
+
+def contained_relative(root: Path, relative: object) -> bool:
+    """Whether `relative` is a repository-relative path inside `root`.
+
+    `apply`'s check on every stored operation path, and `plan`'s on a tracked
+    candidate it would offer to move. Resolved rather than merely inspected,
+    so a component that is a symlink out of the checkout is caught as well as
+    a literal `..` or a leading `/`.
+    `strict=False`: a planned destination does not exist yet.
+    """
+    if not isinstance(relative, str) or not relative:
+        return False
+    candidate = Path(relative)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return False
+    try:
+        anchor = root.resolve(strict=True)
+        resolved = (anchor / candidate).resolve()
+    except (OSError, RuntimeError):
+        return False
+    return resolved != anchor and anchor in resolved.parents
 
 
 def read_bytes_bounded(path: Path) -> bytes | None:
@@ -822,6 +850,8 @@ class Candidates:
         self.moves: list[tuple[str, str]] = []
         self.tracked_paths: set[str] = set()
         self.groups: dict[str, dict] = {}
+        # Tracked undecided candidates that resolve outside the root (D13).
+        self.uncontained: set[str] = set()
 
 
 def classify_inventory(root: Path, inventory: Inventory) -> Candidates:
@@ -838,6 +868,8 @@ def classify_inventory(root: Path, inventory: Inventory) -> Candidates:
                 found.entries.append(evidence_entry(
                     path, "tracked", "unclassified", "needs-decision", None, 1,
                     object_hash(object_id), NOTES["unclassified"]))
+                if not contained_relative(root, path):
+                    found.uncontained.add(path)
             continue
         if is_secret_path(path):
             found.entries.append(evidence_entry(

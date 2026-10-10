@@ -43,6 +43,7 @@ from agent_tools.adopt_inspection import (
     RUNTIME_SENTINEL,
     canonical_json,
     classify,
+    contained_relative,
     gate_entry,
     git_or_fail,
     is_agent_path,
@@ -147,26 +148,6 @@ def stored_answers(document: dict) -> list[dict]:
             "adopt_failure", "adopt.plan.malformed", "/decisions/answered",
             "the stored plan's answered decisions are not well formed")
     return answered
-
-
-def contained_relative(root: Path, relative: object) -> bool:
-    """Whether `relative` is a repository-relative path inside `root`.
-
-    Resolved rather than merely inspected, so a component that is a symlink
-    out of the checkout is caught as well as a literal `..` or a leading `/`.
-    `strict=False`: a planned destination does not exist yet.
-    """
-    if not isinstance(relative, str) or not relative:
-        return False
-    candidate = Path(relative)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        return False
-    try:
-        anchor = root.resolve(strict=True)
-        resolved = (anchor / candidate).resolve()
-    except (OSError, RuntimeError):
-        return False
-    return resolved != anchor and anchor in resolved.parents
 
 
 def validate_operations(root: Path, operations: list[object]) -> None:
