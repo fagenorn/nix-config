@@ -1,4 +1,4 @@
-"""The `release` command: read-only release profile inspection (#124 D5, D15, D17, D18, D23).
+"""The `release` command: read-only release inspection (#124 D5, D15, D17, D18, D23).
 
 `release profile inspect <profile-id>` resolves the project exactly as `resolve-project
 resolve` does, so a resolver refusal reaches the caller unchanged, then reports one authored
@@ -8,9 +8,14 @@ writes nothing and uses no network; the only child process is `git rev-parse HEA
 project root. An inadmissible profile is still reported in full (#69: diagnosis never
 mutates), so the report is built from the authored profile and the admissibility findings,
 not from `compile_profile`, which refuses what is inadmissible.
+
+`release adapter inspect <adapter> <operation> --parameters <json>` is the one adapter read
+the command exposes (D15): it resolves no project, calls the registered adapter's `inspect`
+for one effect and prints the observation. No adapter `invoke` is reachable from any command.
 """
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -178,6 +183,30 @@ def command_profile_inspect(args: argparse.Namespace) -> int:
     return emit_json(inspect_profile(root, source, args.profile_id, manifest, manifest_path))
 
 
+def _adapter_error(code: str, repair_id: str, pointer: str, message: str) -> ContractError:
+    return ContractError(code, repair_id, [{"pointer": pointer, "message": message}])
+
+
+def command_adapter_inspect(args: argparse.Namespace) -> int:
+    adapter = release_adapter.REGISTRY.get(args.adapter)
+    if adapter is None:
+        raise _adapter_error("adapter_unknown", "release.adapter.unknown", "/adapter",
+                             f"no adapter is registered as {args.adapter}")
+    operation = release_adapter.DESCRIPTORS[args.adapter]["operations"].get(args.operation)
+    if operation is None or operation["inspect"] != "supported":
+        raise _adapter_error("operation_unknown", "release.adapter.operation_unknown", "/operation",
+                             f"{args.adapter} cannot inspect an operation {args.operation}")
+    try:
+        parameters = json.loads(args.parameters)
+    except ValueError:
+        parameters = None
+    if not isinstance(parameters, dict):
+        raise _adapter_error("parameters_invalid", "release.adapter.parameters_invalid",
+                             "/parameters", "--parameters must be a JSON object")
+    return emit_json(adapter.inspect(
+        {"kind": "effect", "operation": args.operation, "parameters": parameters}))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="release", description="Inspect the project's release profiles, read-only.")
@@ -188,13 +217,22 @@ def build_parser() -> argparse.ArgumentParser:
         "inspect", help="print the ReleaseProfileInspection of one profile on stdout")
     inspect.add_argument("profile_id", help="the release profile id")
     add_repo_root(inspect)
+    adapter = areas.add_parser("adapter", help="adapter inspection")
+    adapter_actions = adapter.add_subparsers(dest="action", required=True)
+    adapter_inspect = adapter_actions.add_parser(
+        "inspect", help="print the effect observation of one adapter operation on stdout")
+    adapter_inspect.add_argument("adapter", help="the registered adapter name")
+    adapter_inspect.add_argument("operation", help="the operation to inspect")
+    adapter_inspect.add_argument("--parameters", required=True,
+                                 help="the operation parameters, a JSON object")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        return command_profile_inspect(args)
+        return (command_adapter_inspect if args.area == "adapter"
+                else command_profile_inspect)(args)
     except ContractError as error:
         return emit_error(error.code, error.repair_id, error.violations, error.reason_code)
     except Exception:

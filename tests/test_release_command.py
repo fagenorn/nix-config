@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from .forge_world import CANONICAL, ROWS, ForgeWorld
+
 REPO = Path(__file__).resolve().parents[1]
 PYTHON = REPO / "python"
 SHARE = REPO / "home/common/agent-skills"
@@ -38,10 +40,10 @@ class ReleaseCommandCase(unittest.TestCase):
     def contract(self):
         return json.loads((self.root / ".agents/project.json").read_text("utf-8"))
 
-    def run_release(self, *args):
-        env = dict(os.environ, PYTHONPATH=str(PYTHON), HOME=str(self.home))
-        result = subprocess.run([sys.executable, "-m", "agent_tools.release", *args,
-                                 "--repo-root", str(self.root)],
+    def run_release(self, *args, env=None, repo_root=True):
+        env = dict(os.environ, PYTHONPATH=str(PYTHON), HOME=str(self.home), **(env or {}))
+        tail = ["--repo-root", str(self.root)] if repo_root else []
+        result = subprocess.run([sys.executable, "-m", "agent_tools.release", *args, *tail],
                                 capture_output=True, text=True, env=env, timeout=120)
         return result.returncode, json.loads(result.stdout), result.stderr
 
@@ -95,6 +97,46 @@ class ProfileInspectTest(ReleaseCommandCase):
         self.write_contract(contract)
         code, payload, _ = self.run_release("profile", "inspect", "github-release")
         self.assertEqual((code, payload["error"]["code"]), (2, "invalid_contract"))
+
+class AdapterInspectTest(ReleaseCommandCase):
+    """`release adapter inspect` resolves no project, so it runs without `--repo-root`."""
+
+    def adapter(self, *args, env=None):
+        return self.run_release("adapter", "inspect", *args, env=env, repo_root=False)
+
+    def test_typed_errors(self):
+        code, payload, _ = self.adapter("nope", "tag", "--parameters", "{}")
+        self.assertEqual((code, payload["error"]["code"], payload["error"]["repair_id"]),
+                         (2, "adapter_unknown", "release.adapter.unknown"))
+        code, payload, _ = self.adapter("github-forge", "merge", "--parameters", "{}")
+        self.assertEqual((code, payload["error"]["code"], payload["error"]["repair_id"]),
+                         (2, "operation_unknown", "release.adapter.operation_unknown"))
+        for text in ("[1]", "{"):
+            code, payload, _ = self.adapter("github-forge", "tag", "--parameters", text)
+            self.assertEqual((code, payload["error"]["code"], payload["error"]["repair_id"]),
+                             (2, "parameters_invalid", "release.adapter.parameters_invalid"))
+
+    def test_reads_a_live_pull_request_through_the_adapter(self):
+        world = ForgeWorld(self)
+        world.respond_json("gh", ROWS["pr_merge.view"]["argv"][1:], {
+            "state": "OPEN", "baseRefName": CANONICAL["branch"], "headRefName": "topic",
+            "headRefOid": CANONICAL["head"], "mergeCommit": None,
+            "url": "https://github.com/fagenorn/nix-config/pull/336", "statusCheckRollup": []})
+        world.respond_json("gh", ROWS["pr_merge.base_ref"]["argv"][1:],
+                           {"object": {"sha": CANONICAL["base_tip"]}})
+        world.respond_json("gh", ROWS["pr_merge.protection"]["argv"][1:], {
+            "required_status_checks": {"contexts": ["Nix Eval"]}, "enforce_admins": {"enabled": True}})
+        parameters = {"target": {"kind": "github_repository", "repository": CANONICAL["slug"],
+                                 "branch": CANONICAL["branch"]},
+                      "pr": CANONICAL["pr"], "expected_base_tip": CANONICAL["base_tip"],
+                      "expected_head": CANONICAL["head"]}
+        code, observation, err = self.adapter("github-forge", "pr_merge", "--parameters",
+                                              json.dumps(parameters), env=world.env())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(observation["outcome"], "absent")
+        self.assertEqual(observation["facts"]["protection"]["status"], "protected")
+        self.assertTrue(world.calls())
+        self.assertFalse(any(call["token_visible"] for call in world.calls()))
 
 if __name__ == "__main__":
     unittest.main()
