@@ -10,7 +10,9 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 from agent_tools import attempt_identity as ai
 from agent_tools.transaction_core import TransactionStore
@@ -18,6 +20,8 @@ from agent_tools.transaction_core import TransactionStore
 from .test_delivered_control import DeliveredControlHarness
 from .test_workflow_state import DEFAULT_NOW, SCRIPT, LifecycleHarness
 
+BASE_COMMIT = "eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7"
+REPO = Path(__file__).resolve().parents[4]
 CORE = re.compile(
     r"^rel_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
@@ -473,3 +477,93 @@ class MigrationAcceptanceTest(MigrationFixtures, unittest.TestCase):
         self.assertEqual(child.returncode, 0, stderr)
         self.assertEqual(self.rows(json.loads(stdout))["orchestrate-21-24-r2"]["verdict"],
                          "migrated")
+
+
+class LegacyOwnerCompatibilityTest(MigrationFixtures, unittest.TestCase):
+    def live_legacy_owner(self):
+        """A schema-7 `orchestrate-14` ledger with an active owner on 14:1:1."""
+        self.init_run(creation_key="fixture-14")
+        self.spawn(issue=14, worktree=str(self.root / "wt-14"))
+        self.install_legacy(self.read_state(), "orchestrate-14")
+        self.assertEqual(json.loads(self.state_path.read_text())["schema_version"], 7)
+
+    def owner_lifecycle(self):
+        """progress, register-worker, release-worker, suspend, then finish: legacy ids only."""
+        worktree = self.root / "wt-14"
+        self.progress(issue=14, phase=1, now="2026-08-13T20:01:00Z")
+        self.register_worker(action_id="14:1:1", now="2026-08-13T20:02:00Z")
+        self.release_worker(worker_id="14:1:1:w1", event="returned",
+                            now="2026-08-13T20:03:00Z")
+        self.suspend(issue=14, attempt=1, blocked_on="usage_limit",
+                     now="2026-08-13T20:04:00Z")
+        self.resume(issue=14, worktree=worktree, now="2026-08-13T20:05:00Z")
+        bound = self.read_state()["transaction_id"]
+        self.finish(1, self.merged_result(), now="2026-08-13T20:30:00Z")
+        self.assertEqual(self.read_state()["issues"]["14"]["attempts"][-1]["state"], "merged")
+        self.assert_owner_bound()  # finish ran on the schema-8 ledger and kept its binding (D25)
+        self.assertEqual(self.read_state()["transaction_id"], bound)
+
+    def assert_owner_bound(self):
+        state = self.read_state()
+        self.assertEqual(state["run_id"], "orchestrate-14")
+        self.assert_bound(state)
+
+    def test_control_migrates_under_a_live_owner(self):
+        self.live_legacy_owner()
+        worktree = str(self.root / "wt-14")
+        self.control(now="2026-08-13T20:00:30Z", issues=[14],
+                     tracker=[self.tracker_fact(14)], max_parallel=100,
+                     worktrees=[self.worktree_fact(14, recorded={
+                         "path": worktree, "state": "matching_issue_branch"})])
+        self.assert_owner_bound()
+        self.owner_lifecycle()
+
+    def test_owner_write_is_the_migrating_write(self):
+        self.live_legacy_owner()
+        self.progress(issue=14, phase=1, now="2026-08-13T20:00:30Z")
+        self.assert_owner_bound()
+        self.owner_lifecycle()
+
+    def base_helper(self, scratch):
+        found = subprocess.run(["git", "-C", str(REPO), "cat-file", "-e",
+                                f"{BASE_COMMIT}^{{commit}}"], capture_output=True)
+        if found.returncode != 0:
+            self.fail(f"base commit {BASE_COMMIT} is missing; fetch it, do not skip (D13)")
+        archive = subprocess.run(["git", "-C", str(REPO), "archive", BASE_COMMIT,
+                                  "home/common/agent-skills/scripts",
+                                  "home/common/agent-skills/artifact-budget-policy.json"],
+                                 capture_output=True, check=True)
+        subprocess.run(["tar", "-x", "-C", str(scratch)], input=archive.stdout, check=True)
+        return scratch / "home/common/agent-skills/scripts/workflow-state.py"
+
+    def test_base_helper_refuses_schema_8_without_writing(self):
+        self.live_legacy_owner()
+        with tempfile.TemporaryDirectory() as scratch:
+            script = self.base_helper(Path(scratch))
+            env = {**self.cli_env, "PYTHONPATH": str(REPO / "python")}
+
+            def base(command, *rest):
+                return subprocess.run(
+                    [sys.executable, str(script), command, "--repo-root", str(self.root),
+                     "--run-id", "orchestrate-14", *rest],
+                    env=env, cwd=scratch, capture_output=True, text=True, timeout=120)
+
+            # Positive control (D26): the extracted helper reads the schema-7 ledger.
+            control = base("check-launch", "--action-id", "14:1:1")
+            self.assertEqual(control.returncode, 0, control.stderr)
+            self.progress(issue=14, phase=1, now="2026-08-13T20:00:30Z")
+            self.assert_owner_bound()
+            snapshot = self.tree_snapshot()
+            for args in (("check-launch", "--action-id", "14:1:1"),
+                         ("progress", "--issue", "14", "--attempt", "1", "--phase", "2",
+                          "--next-needs-context", "true", "--artifacts-sufficient", "false",
+                          "--remainder-self-contained", "false")):
+                with self.subTest(command=args[0]):
+                    completed = base(*args)
+                    # Exit 2 with a schema refusal: check-launch rejects the unknown
+                    # `transaction_id` field, progress the chain's version 8 (D26).
+                    self.assertEqual(completed.returncode, 2, completed.stdout)
+                    self.assertTrue(completed.stderr.startswith("workflow-state: "),
+                                    completed.stderr)
+                    self.assertIn("workflow state schema", completed.stderr)
+                    self.assertEqual(self.tree_snapshot(), snapshot)
