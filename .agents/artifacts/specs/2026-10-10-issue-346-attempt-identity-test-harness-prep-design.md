@@ -38,7 +38,7 @@ Call sites routed, as the issue lists them: literal `direct-<n>-00000k` replies 
 
 - `BuilderHarness.runs` (a dict), `run_of(label)` = `self.runs.get(label, label)`, `mint_run(key, *, now=NOW)` = `init-run --run-id key`, read back into `self.run_id` and `self.runs[key]`, returning the `--repo-root`/`--run-id` argument tuple.
 - `ContractLifecycleTest.write_run(label, attempts, *, schema=7)` registers `self.runs[label] = label` and writes under that run id. `control`, `legacy_finish` and every `--run-id "<label>"` / `.superpowers/workflows/<label>` site (chain, orch, legacy, v2, forge-v2, forge-wait, orch-fail, `spawn_contracted`, `HelperInputTest` "inputs") go through `run_of` / `mint_run`.
-- `direct_runs(issue)` scans `*/state.json` for ledgers holding `issue` (branch text).
+- `direct_runs(issue)` keeps today's `glob(f"direct-{issue}-*")` body; the branch's `*/state.json` scan is weaker on main and stays in #337 (D7).
 - `DeliveryAdmissionTest`: each `init-run` (admission, legacy-contractless, orchestrated, refusal, recovery-control, dispatch-wire) reads the run id back and later calls use it; `remainder_sweeps(root, home, key)` returns `(control, checkpoint, run_id)` and its five callers unpack it; the transact-on-legacy test uses an `orchestrate-151` ledger.
 - `LedgerClockTest`'s direct skew test asserts `self.run_dirs() == [self.run_id]`.
 

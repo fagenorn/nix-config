@@ -205,6 +205,7 @@ class LifecycleHarness:
         completed = self.run_cli("init-run", "--repo-root", self.root, *which,
                                  *(() if now is None else ("--now", now)))
         value = json.loads(completed.stdout)
+        self.assertEqual(value["run_id"], which[1])  # D8: pin today's id
         self.run_id = value["run_id"]
         return {"interface_version": 1, "run_id": value["run_id"],
                 "requirements": [self._legacy_bootstrap(item)
@@ -4313,7 +4314,8 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             self.assertEqual(len(attempts), 1)
             self.assertEqual(len(attempts[0]["launches"]), 2)
             self.assertEqual(attempts[0]["worktree"], str(worktree))
-            self.assertEqual(self.run_dirs(), [owner["run_id"]])
+            runs = sorted(path.name for path in self.workflows_dir.glob("direct-73-*"))
+            self.assertEqual(runs, [owner["run_id"]])
 
     def test_direct_owner_retries_owner_failure_then_replays_terminal_and_starts_new_run(self):
         owner = self.acquire_direct()
@@ -4428,7 +4430,10 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                     "blockers": blockers, "result": None,
                     "reentry": "/from-issue 73 --auto",
                 })
-                self.assertEqual(self.run_dirs(), [])
+                self.assertFalse(any(
+                    path.name.startswith("direct-73-")
+                    for path in self.workflows_dir.iterdir()
+                ))
 
     def test_reserved_direct_ids_are_closed_to_init_and_control_but_open_to_owner_mutations(self):
         request_path = self.root / "control-reserved.json"
