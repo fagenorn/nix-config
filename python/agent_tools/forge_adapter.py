@@ -7,8 +7,9 @@ carries, which it refuses, and what a profile may bind. `pr_merge` is declared b
 mode, both irreversible and create-if-absent.
 
 The descriptor is built fresh on every call, so a caller may mutate what it receives.
-This module imports only the standard library: the registry in `release_adapter`
-imports it, never the reverse (D7).
+This module imports only the standard library, apart from one call-time import of
+`adopt_planning.normalize_remote_url` inside `invoke`: the registry in `release_adapter`
+imports this module, never the reverse (D7), and `adopt_planning` reaches the registry.
 
 `inspect(request)` is the read half (D11, D17, D25, spec section 7). It issues only
 `gh api` and `gh pr view` reads, by name, with `GITHUB_TOKEN` and `GH_TOKEN` removed from
@@ -16,12 +17,22 @@ the child environment so the keyring credential answers. It never mutates, never
 Release's `target_commitish`, never calls the guard, and runs every read of one call under
 a single `COLLECTION_BUDGET_SECONDS` deadline. Whatever it cannot read it reports as
 `unknown`, never raises. It imports no `host_admission` or `launch_*` module (AC9).
+
+`invoke(request)` is the write half (D8, D9, D11, D22, D23, spec section 7). It follows the
+spec's ordered steps and stops at the first refusal: request shape, working checkout, same
+repository, containment (`tag`), the local annotated tag (`tag`), the rendered command, the
+`claude-bash-lifecycle-guard` verdict, and then one mutation. It makes at most one provider
+mutation, never retries, never reads the target (`tag.ref`, `tag.object`, `release.view`) and
+returns only `accepted`, `rejected` or `unknown`: that a mutation landed is the core's to
+observe afterwards (#85, #206). Every child runs with the token variables removed.
 """
 
 import json
 import os
 import re
+import shlex
 import subprocess
+import tempfile
 import time
 from typing import Any
 
@@ -369,3 +380,192 @@ def inspect(request: Any) -> dict[str, Any]:
         return {"outcome": "unknown", "reason": "store_unreachable", "references": [],
                 "observed_at": _now_ms()}
     return _unknown("parameters_invalid", "request is not a closed effect or predicate request")
+
+
+class _Refusal(Exception):
+    """An `invoke` that ends here: the closed `InvokeResult` to return."""
+
+    def __init__(self, result: str, error_class: str, reference: str) -> None:
+        super().__init__(reference)
+        self.answer = {"result": result, "error_class": error_class,
+                       "reference": reference[:DETAIL_LIMIT] or "refused"}
+
+
+FORBIDDEN_TITLE = frozenset('"$`\\\x00\r\n')
+
+
+def _run_child(argv: list[str], cwd: str | None, stdin: str | None = None
+               ) -> tuple[str, subprocess.CompletedProcess | None, str]:
+    """Run `argv` by name within `CHILD_TIMEOUT_SECONDS`: `(status, process, detail)`.
+
+    `status` is `ok` (the process finished, whatever its exit), `timeout` or `missing`.
+    """
+    env = {name: value for name, value in os.environ.items() if name not in TOKEN_VARIABLES}
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, errors="replace",
+                              timeout=CHILD_TIMEOUT_SECONDS, env=env, cwd=cwd, input=stdin,
+                              stdin=None if stdin is not None else subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return "timeout", None, "timed out"
+    except OSError as error:
+        return "missing", None, str(error)
+    return "ok", done, done.stderr.strip()[:DETAIL_LIMIT]
+
+
+def _precondition_read(argv: list[str], cwd: str | None) -> str:
+    """Stdout of one precondition read; nothing was mutated, so a failed read is a refusal."""
+    status, done, detail = _run_child(argv, cwd)
+    name = " ".join(argv[:2])
+    if status == "timeout":
+        raise _Refusal("rejected", "transient_transport", f"{name}: timed out")
+    if status == "missing" or done.returncode != 0:
+        raise _Refusal("rejected", "provider_unavailable", f"{name}: {detail or 'failed'}")
+    return done.stdout
+
+
+def _invoke_shape(request: Any) -> tuple[str, dict[str, Any]]:
+    """The operation and parameters of a request that is a supported, valid effect."""
+    if not (isinstance(request, dict) and set(request) == {"kind", "operation", "parameters"}
+            and request["kind"] == "effect" and isinstance(request["operation"], str)):
+        raise _Refusal("rejected", "invalid_input", "request is not a closed effect request")
+    operation, parameters = request["operation"], request["parameters"]
+    entry = describe()["operations"].get(operation)
+    if entry is None or entry["support"] != "supported":
+        reason = "unknown_operation" if entry is None else entry["reason"]
+        raise _Refusal("rejected", "unsupported_operation", f"{operation}: {reason}")
+    problem = _parameters_problem(operation, parameters)
+    if problem is None and operation == "release":
+        if any(char in FORBIDDEN_TITLE for char in parameters["title"]):
+            problem = "title has a character that cannot be quoted"
+        else:
+            try:
+                parameters["notes"].encode("utf-8")
+            except UnicodeEncodeError:
+                problem = "notes are not UTF-8 text"
+    if problem is not None:
+        raise _Refusal("rejected", "invalid_input", problem)
+    return operation, parameters
+
+
+def _same_repository(slug: str, checkout: str) -> None:
+    from agent_tools.adopt_planning import normalize_remote_url  # call time: import cycle
+
+    origin = _precondition_read(["git", "remote", "get-url", "origin"], checkout)
+    pushes = [line for line in _precondition_read(
+        ["git", "remote", "get-url", "--push", "--all", "origin"], checkout).splitlines()
+        if line.strip()]
+    named = _precondition_read(
+        ["gh", "api", f"repos/{slug}", "--jq", ".full_name"], checkout).strip()
+    if len(pushes) != 1:
+        raise _Refusal("rejected", "precondition_failed", f"origin has {len(pushes)} push urls")
+    for what, found in (("origin", normalize_remote_url(origin)),
+                        ("push url", normalize_remote_url(pushes[0])), ("repository", named)):
+        if found != slug:
+            raise _Refusal("rejected", "precondition_failed",
+                           f"{what} is {found}, not {slug}")
+
+
+def _contained(parameters: dict[str, Any], checkout: str) -> None:
+    slug, branch = parameters["target"]["repository"], parameters["target"]["branch"]
+    commit = parameters["candidate"]["commit"]
+    status = _precondition_read(
+        ["gh", "api", f"repos/{slug}/compare/{commit}...{branch}", "--jq", ".status"],
+        checkout).strip()
+    if not status:
+        raise _Refusal("rejected", "provider_unavailable", "compare returned no status")
+    if status not in ("identical", "ahead"):
+        raise _Refusal("rejected", "precondition_failed", f"{commit} is {status} of {branch}")
+
+
+def _local_tag(tag: str, commit: str, checkout: str) -> None:
+    """Reuse an annotated local tag at `commit`, create it when absent, else refuse (D25)."""
+    kind = _precondition_read(
+        ["git", "for-each-ref", "--format=%(objecttype)", f"refs/tags/{tag}"], checkout).strip()
+    if not kind:
+        _precondition_read(["git", "tag", "-a", tag, commit, "-m", f"release: {tag}"], checkout)
+        return
+    peeled = _precondition_read(["git", "rev-parse", f"refs/tags/{tag}^{{commit}}"],
+                                checkout).strip() if kind == "tag" else None
+    if peeled is not None and SHA.fullmatch(peeled) is None:
+        raise _Refusal("rejected", "provider_unavailable", "rev-parse did not return a commit id")
+    if peeled != commit:
+        raise _Refusal("rejected", "precondition_failed",
+                       f"local tag {tag} is not an annotated tag at {commit}")
+
+
+def _guard(raw: str, checkout: str) -> None:
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": raw}, "cwd": checkout})
+    status, done, detail = _run_child(["claude-bash-lifecycle-guard"], checkout, payload)
+    if status == "ok" and done.returncode == 0:
+        return
+    if status == "ok" and not detail:
+        detail = f"exit {done.returncode}"
+    raise _Refusal("rejected", "authorization_denied", f"guard: {detail}")
+
+
+def _mutate(argv: list[str], raw: str, checkout: str, operation: str, tag: str) -> dict[str, Any]:
+    _guard(raw, checkout)
+    status, done, detail = _run_child(argv, checkout)
+    name = " ".join(argv[:2])
+    if status == "timeout":
+        return {"result": "unknown", "error_class": "transient_transport",
+                "reference": f"{name}: timed out"}
+    if status == "missing":
+        return {"result": "unknown", "error_class": "provider_unavailable",
+                "reference": f"{name}: {detail}"[:DETAIL_LIMIT]}
+    if done.returncode == 0:
+        url = done.stdout.strip().splitlines()[:1]
+        if operation == "release":
+            reference = url[0].strip() if url and url[0].startswith("http") else f"release:{tag}"
+        else:
+            reference = f"refs/tags/{tag}"
+        return {"result": "accepted", "error_class": None, "reference": reference}
+    marker = "already exists" if operation == "tag" else "HTTP 422"
+    if marker in done.stderr:
+        return {"result": "rejected", "error_class": "precondition_failed",
+                "reference": f"{name}: {marker}"}
+    return {"result": "unknown", "error_class": "transient_transport",
+            "reference": f"{name}: {detail or 'exit ' + str(done.returncode)}"[:DETAIL_LIMIT]}
+
+
+def _invoke(operation: str, parameters: dict[str, Any]) -> dict[str, Any]:
+    slug, tag = parameters["target"]["repository"], parameters["candidate"]["version"]
+    commit = parameters["candidate"]["commit"]
+    toplevel = _precondition_read(["git", "rev-parse", "--show-toplevel"], None).strip()
+    if not os.path.isabs(toplevel):
+        raise _Refusal("rejected", "provider_unavailable", "rev-parse did not return a directory")
+    _same_repository(slug, toplevel)
+    if operation == "tag":
+        _contained(parameters, toplevel)
+        _local_tag(tag, commit, toplevel)
+        argv, raw = ["git", "push", "origin", f"refs/tags/{tag}"], f"git push origin refs/tags/{tag}"
+        return _mutate(argv, raw, toplevel, operation, tag)
+    descriptor, path = tempfile.mkstemp(prefix="forge-release-notes-", suffix=".md")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(parameters["notes"])
+        argv = ["gh", "release", "create", tag, "--repo", slug, "--verify-tag", "--title",
+                parameters["title"], "--notes-file", path]
+        raw = (f'gh release create {tag} --repo {slug} --verify-tag '
+               f'--title "{parameters["title"]}" --notes-file {shlex.quote(path)}')
+        if shlex.split(raw) != argv:
+            raise _Refusal("rejected", "invalid_input", "rendered command does not match its argv")
+        return _mutate(argv, raw, toplevel, operation, tag)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def invoke(request: Any) -> dict[str, Any]:
+    """The `InvokeResult` of one effect request: `{result, error_class, reference}` (#124 D8, D9).
+
+    A refusal at any step returns before the mutation, which is made at most once and never
+    retried. Whether it landed is the core's to observe afterwards (#85, #206).
+    """
+    try:
+        operation, parameters = _invoke_shape(request)
+        return _invoke(operation, parameters)
+    except _Refusal as refusal:
+        return refusal.answer

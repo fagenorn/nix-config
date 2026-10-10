@@ -94,6 +94,63 @@
         "api",
         "repos/fagenorn/nix-config/branches/main/protection"
       ]
+    },
+    {
+      "id": "invoke.repository",
+      "operation": "shared",
+      "kind": "read",
+      "raw": "gh api repos/fagenorn/nix-config --jq .full_name",
+      "argv": [
+        "gh",
+        "api",
+        "repos/fagenorn/nix-config",
+        "--jq",
+        ".full_name"
+      ]
+    },
+    {
+      "id": "tag.compare",
+      "operation": "tag",
+      "kind": "read",
+      "raw": "gh api repos/fagenorn/nix-config/compare/1111111111111111111111111111111111111111...main --jq .status",
+      "argv": [
+        "gh",
+        "api",
+        "repos/fagenorn/nix-config/compare/1111111111111111111111111111111111111111...main",
+        "--jq",
+        ".status"
+      ]
+    },
+    {
+      "id": "tag.push",
+      "operation": "tag",
+      "kind": "mutation",
+      "raw": "git push origin refs/tags/v1.2.3",
+      "argv": [
+        "git",
+        "push",
+        "origin",
+        "refs/tags/v1.2.3"
+      ]
+    },
+    {
+      "id": "release.create",
+      "operation": "release",
+      "kind": "mutation",
+      "raw": "gh release create v1.2.3 --repo fagenorn/nix-config --verify-tag --title \"v1.2.3 — release\" --notes-file /tmp/forge-notes-fixture.md",
+      "argv": [
+        "gh",
+        "release",
+        "create",
+        "v1.2.3",
+        "--repo",
+        "fagenorn/nix-config",
+        "--verify-tag",
+        "--title",
+        "v1.2.3 — release",
+        "--notes-file",
+        "/tmp/forge-notes-fixture.md"
+      ]
     }
   ]
 }

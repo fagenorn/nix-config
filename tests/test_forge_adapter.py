@@ -318,5 +318,123 @@ class HostCapacityTest(unittest.TestCase):
         for name in names:
             self.assertFalse("host_admission" in name or name.split(".")[-1].startswith("launch_"), name)
 
+class InvokeCase(ForgeCase):
+    def invoke(self, operation, **extra):
+        parameters = {"target": TARGET, "candidate": CANDIDATE, **extra}
+        if operation == "release":
+            parameters.setdefault("title", C["title"])
+            parameters.setdefault("notes", "release notes body")
+        result = forge_adapter.invoke({"kind": "effect", "operation": operation, "parameters": parameters})
+        self.assertEqual(release_adapter.invoke_result_problems(result), [])
+        return result
+
+    def mutations(self):
+        return [c for c in self.world.calls() if (c["tool"], c["argv"][:2]) in
+                (("git", ["push", "origin"]), ("gh", ["release", "create"]))]
+
+class PublicSurfaceTest(unittest.TestCase):
+    def test_exactly_three_public_operations(self):
+        public = sorted(name for name, value in vars(forge_adapter).items()
+                        if callable(value) and not name.startswith("_")
+                        and getattr(value, "__module__", None) == forge_adapter.__name__)
+        self.assertEqual(public, ["describe", "inspect", "invoke"])
+
+class InvokeResultSetTest(InvokeCase):
+    def test_happy_paths_render_the_fixture_and_pass_the_guard(self):
+        self.world.invoke_ready()
+        self.assertEqual(self.invoke("tag"), {"result": "accepted", "error_class": None,
+                                              "reference": "refs/tags/v1.2.3"})
+        [push] = self.mutations()
+        self.assertEqual(["git", *push["argv"]], ROWS["tag.push"]["argv"])
+        [guard] = [c for c in self.world.calls() if c["tool"] == "claude-bash-lifecycle-guard"]
+        payload = json.loads(guard["stdin"])
+        self.assertEqual(payload, {"tool_name": "Bash", "tool_input": {"command": ROWS["tag.push"]["raw"]},
+                                   "cwd": str(self.world.checkout)})
+        self.assertFalse(any(c["token_visible"] for c in self.world.calls()))
+
+    def test_release_create_matches_the_fixture_and_removes_the_notes_file(self):
+        self.world.invoke_ready()
+        self.assertEqual(self.invoke("release")["result"], "accepted")
+        [create] = self.mutations()
+        notes = create["argv"][-1]
+        self.assertTrue(Path(notes).is_absolute())
+        self.assertFalse(Path(notes).exists())
+        expected = [notes if token == C["notes_path"] else token for token in ROWS["release.create"]["argv"]]
+        self.assertEqual(["gh", *create["argv"]], expected)
+        [guard] = [c for c in self.world.calls() if c["tool"] == "claude-bash-lifecycle-guard"]
+        self.assertEqual(json.loads(guard["stdin"])["tool_input"]["command"],
+                         ROWS["release.create"]["raw"].replace(C["notes_path"], notes))
+
+class InvokeFailureTest(InvokeCase):
+    def test_pr_merge_is_refused_before_any_call(self):
+        result = forge_adapter.invoke({"kind": "effect", "operation": "pr_merge", "parameters": {
+            "target": TARGET, "pr": C["pr"], "expected_base_tip": C["base_tip"], "expected_head": C["head"]}})
+        self.assertEqual((result["result"], result["error_class"]), ("rejected", "unsupported_operation"))
+        self.assertEqual(self.world.calls(), [])
+
+    def test_invalid_input_and_unknown_operations_make_no_call(self):
+        self.world.invoke_ready()
+        bad_titles = ('a "quoted" title', "cost $5", "back`tick", "back\\slash", "nul\x00", "line\nbreak", "cr\rhere")
+        for title in bad_titles:
+            with self.subTest(title=title):
+                result = self.invoke("release", title=title)
+                self.assertEqual((result["result"], result["error_class"]), ("rejected", "invalid_input"))
+        for name, candidate in (("version", {**CANDIDATE, "version": "1.2.3"}),
+                                ("commit", {**CANDIDATE, "commit": "abc"})):
+            with self.subTest(name):
+                result = self.invoke("tag", candidate=candidate)
+                self.assertEqual((result["result"], result["error_class"]), ("rejected", "invalid_input"))
+        result = forge_adapter.invoke({"kind": "effect", "operation": "merge", "parameters": {}})
+        self.assertEqual((result["result"], result["error_class"], result["reference"]),
+                         ("rejected", "unsupported_operation", "merge: unknown_operation"))
+        self.assertEqual(self.world.calls(), [])
+
+    def outcome(self, operation="tag"):
+        result = self.invoke(operation)
+        return result["result"], result["error_class"]
+
+    def test_each_refusal_stops_before_the_mutation(self):
+        cases = (
+            ("guard denial", dict(guard_exit=2), ("rejected", "authorization_denied")),
+            ("other owner origin", dict(slug="someone-else/nix-config"), ("rejected", "precondition_failed")),
+            ("redirected repository", dict(full_name="someone/renamed"), ("rejected", "precondition_failed")),
+            ("uncontained commit", dict(compare="behind"), ("rejected", "precondition_failed")),
+            ("tag at another commit", dict(tag_local="9" * 40), ("rejected", "precondition_failed")),
+            ("push url elsewhere", dict(push_urls=["git@github.com:someone-else/nix-config.git"]),
+             ("rejected", "precondition_failed")),
+            ("two push urls", dict(push_urls=["git@github.com:fagenorn/nix-config.git"] * 2),
+             ("rejected", "precondition_failed")),
+            ("local tag lookup fails", dict(tag_lookup_exit=128), ("rejected", "provider_unavailable")),
+            ("local tag creation fails", dict(tag_create_exit=128), ("rejected", "provider_unavailable")),
+        )
+        for name, ready, expected in cases:
+            with self.subTest(name):
+                self.world.reset()
+                self.world.invoke_ready(**ready)
+                self.assertEqual(self.outcome(), expected)
+                self.assertEqual(self.mutations(), [])
+
+    def test_provider_answers(self):
+        cases = (
+            ("tag exists remotely", "tag",
+             dict(push_exit=1, push_stderr="! [rejected] v1.2.3 -> v1.2.3 (already exists)"),
+             ("rejected", "precondition_failed")),
+            ("release exists", "release",
+             dict(create_exit=1, create_stdout="", create_stderr="HTTP 422: Validation Failed"),
+             ("rejected", "precondition_failed")),
+            ("push timeout", "tag", dict(push_sleep=2), ("unknown", "transient_transport")),
+        )
+        for name, operation, ready, expected in cases:
+            with self.subTest(name):
+                self.world.reset()
+                self.world.invoke_ready(**ready)
+                saved = forge_adapter.CHILD_TIMEOUT_SECONDS
+                forge_adapter.CHILD_TIMEOUT_SECONDS = 0.5
+                try:
+                    self.assertEqual(self.outcome(operation), expected)
+                finally:
+                    forge_adapter.CHILD_TIMEOUT_SECONDS = saved
+                self.assertEqual(len(self.mutations()), 1)
+
 if __name__ == "__main__":
     unittest.main()

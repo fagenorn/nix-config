@@ -9,6 +9,10 @@ and a `gh` that sees a token variable exits 65, so a leaked credential fails lou
 
 The standard responses are built from the shared spelling fixture, never from copied
 literals, so the world and the guard suite cannot disagree about a provider spelling.
+
+`invoke_ready(...)` registers the invoke happy path (D12, D23): `checkout` is a real temporary
+directory the fake `git rev-parse --show-toplevel` names. A call whose argv carries
+`--notes-file <path>` is keyed with that path replaced by `<NOTES>`; the real path is logged.
 """
 import json
 import os
@@ -42,7 +46,10 @@ if tool == "gh" and token:
     sys.stderr.write("gh: a token variable reached the child\\n")
     sys.exit(65)
 responses = json.loads((state / "responses.json").read_text("utf-8"))
-response = responses.get(json.dumps([tool, *argv]))
+keyed = list(argv)
+if "--notes-file" in keyed:
+    keyed[keyed.index("--notes-file") + 1] = "<NOTES>"
+response = responses.get(json.dumps([tool, *keyed]))
 if response is None:
     sys.stderr.write("fake " + tool + ": unregistered call\\n")
     sys.exit(64)
@@ -58,9 +65,10 @@ class ForgeWorld:
         tmp = tempfile.TemporaryDirectory()
         test_case.addCleanup(tmp.cleanup)
         root = Path(tmp.name).resolve()
-        self.state, self.bin = root / "state", root / "bin"
+        self.state, self.bin, self.checkout = root / "state", root / "bin", root / "checkout"
         self.state.mkdir()
         self.bin.mkdir()
+        self.checkout.mkdir()
         for tool in TOOLS:
             path = self.bin / tool
             path.write_text(SCRIPT.format(python=sys.executable), encoding="utf-8")
@@ -141,3 +149,41 @@ class ForgeWorld:
                           {"parents": [{"sha": values["base_tip"]}, {"sha": values["head"]}]})
         self.respond_json("gh", argv("pr_merge.protection"), {
             "required_status_checks": {"contexts": ["Nix Eval"]}, "enforce_admins": {"enabled": True}})
+
+    def invoke_ready(self, slug: str = CANONICAL["slug"], *, full_name: str | None = None,
+                     push_urls: list[str] | None = None, tag_local: str | None = None,
+                     tag_lookup_exit: int = 0, tag_create_exit: int = 0, compare: str = "ahead",
+                     guard_exit: int = 0, push_exit: int = 0, push_stderr: str = "",
+                     push_sleep: float = 0, create_exit: int = 0,
+                     create_stdout: str = f"https://github.com/{CANONICAL['slug']}/releases/tag/"
+                                          f"{CANONICAL['tag']}\n",
+                     create_stderr: str = "") -> None:
+        """Register the invoke happy path, each step's answer adjustable by a keyword.
+
+        `slug` changes only what `origin` is: the target repository stays the canonical one,
+        which `invoke.repository` and `tag.compare` are keyed on. `tag_local` names the commit
+        an existing annotated local tag peels to; by default no local tag exists.
+        """
+        tag, commit = CANONICAL["tag"], CANONICAL["commit"]
+        origin = f"git@github.com:{slug}.git"
+        self.respond("git", ["rev-parse", "--show-toplevel"], stdout=f"{self.checkout}\n")
+        self.respond("git", ["remote", "get-url", "origin"], stdout=origin + "\n")
+        self.respond("git", ["remote", "get-url", "--push", "--all", "origin"],
+                     stdout="".join(url + "\n" for url in (push_urls or [origin])))
+        self.respond("gh", ROWS["invoke.repository"]["argv"][1:],
+                     stdout=(full_name or CANONICAL["slug"]) + "\n")
+        self.respond("gh", ROWS["tag.compare"]["argv"][1:], stdout=compare + "\n")
+        listing = ["for-each-ref", "--format=%(objecttype)", f"refs/tags/{tag}"]
+        if tag_local is None:
+            self.respond("git", listing, exit=tag_lookup_exit)
+        else:
+            self.respond("git", listing, stdout="tag\n", exit=tag_lookup_exit)
+            self.respond("git", ["rev-parse", f"refs/tags/{tag}^{{commit}}"], stdout=tag_local + "\n")
+        self.respond("git", ["tag", "-a", tag, commit, "-m", f"release: {tag}"], exit=tag_create_exit)
+        self.respond("claude-bash-lifecycle-guard", [], exit=guard_exit,
+                     stderr="lifecycle guard: refused" if guard_exit else "")
+        self.respond("git", ROWS["tag.push"]["argv"][1:], exit=push_exit, stderr=push_stderr,
+                     sleep=push_sleep)
+        create = [("<NOTES>" if part == CANONICAL["notes_path"] else part)
+                  for part in ROWS["release.create"]["argv"][1:]]
+        self.respond("gh", create, exit=create_exit, stdout=create_stdout, stderr=create_stderr)
