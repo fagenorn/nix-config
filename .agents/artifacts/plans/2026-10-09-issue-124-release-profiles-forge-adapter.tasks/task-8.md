@@ -16,7 +16,7 @@ Decisions: D9, D10, D12, D21, D22. Spec §8. AC4 is owned here.
 **Invariants:**
 - Standard library only; no `agent_tools` import; no fixture read at run time (D9).
 - **Tag-push arm** (judged inside `validate_push` before the branch arm): argv exactly `["git", "push", "origin", "refs/tags/<tag>"]`, `<tag>` matching `^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`, owner authorized, and `git cat-file -t refs/tags/<tag>` (policy `git_bin`, cwd = payload cwd, child timeout) printing exactly `tag`; otherwise blocked `unsafe push: …`. Other namespaced pushes keep today's refusal; the branch arm (incl. the legacy `git push origin <tag>`) is unchanged.
-- **Release-creation arm**: `("gh release create", "release")` and `(["gh", "release", "create"], "release")` join the literal tables; the segment must be exactly `gh release create <tag> --repo <detected slug> --verify-tag --title "<title>" --notes-file <path>` — flags in that order, nothing after, `shlex.split(segment)` equal to the argv rebuilt from the parsed parts, `<tag>` SemVer as above, owner authorized, `free_text_problem(title, False) is None`, `<path>` absolute with no character of `UNSAFE_BRANCH_CHARS` and no whitespace. The `unset GITHUB_TOKEN && ` segment prefix composes exactly as for `git push`.
+- **Release-creation arm**: `("gh release create", "release")` and `(["gh", "release", "create"], "release")` join the literal tables; it judges the **whole command** like `validate_merge` (D24): after stripping the optional `UNSET_GITHUB_TOKEN_PREFIX`, it must be exactly `gh release create <tag> --repo <detected slug> --verify-tag --title "<title>" --notes-file <path>` — flags in that order, nothing after, `shlex.split(segment)` equal to the argv rebuilt from the parsed parts, `<tag>` SemVer as above, owner authorized, `free_text_problem(title, False) is None`, `<path>` absolute with no character of `UNSAFE_BRANCH_CHARS` and no whitespace. Nothing else may precede or follow.
 - **D5 repair (#116 D5)**: on the feature arm (`--delete-branch`), after the existing PR lookup, a `headRefName` equal to the default branch or to the repository's declared integration base blocks `unsafe merge: --delete-branch would delete the permanent branch <head>`, before any protection lookup.
 - `home.packages` adds the existing `lifecycleGuard` derivation; the registered hook path and the allow surface are unchanged (`EXPECTED_ALLOW` stays green).
 
@@ -83,6 +83,8 @@ Decisions: D9, D10, D12, D21, D22. Spec §8. AC4 is owned here.
                 base.replace('"v1.2.3 — r"', '"v1.2.3 $(id)"'),
                 base.replace("/tmp/n.md", "notes.md"),
                 base + "; true",
+                "true; " + base,
+                base + " && true",
                 base.replace("create v1.2.3", "create 1.2.3")):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)
@@ -114,13 +116,6 @@ Expected: FAIL — `refs/tags/…` pushes are refused as namespaced refs, `gh re
 
 - [ ] **Step 4: Verify**
 
-Run: `just build` (3600 s); the full guard suite (600 s) — PASS, no failures; `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_ship_release_contracts.py home/common/agent-skills/tests/test_shell_example_contracts.py home/common/agent-skills/tests/test_workflow_skill_contracts.py` — PASS; `just agent-instruction-budget` (600 s) prints `check: pass`; `git diff --stat origin/main -- home/common/claude-code/lifecycle_guard.py` shows the file changed and `if rg -q 'agent_tools' home/common/claude-code/lifecycle_guard.py; then exit 1; fi` exits 0.
+Run: `just build` (3600 s); the full guard suite (600 s) — PASS, no failures; `unittest home/common/agent-skills/tests/test_{ship_release_contracts,shell_example_contracts,workflow_skill_contracts}.py` — PASS; `just agent-instruction-budget` (600 s) prints `check: pass`; `git diff --stat origin/main -- home/common/claude-code/lifecycle_guard.py` shows the file changed and `if rg -q 'agent_tools' home/common/claude-code/lifecycle_guard.py; then exit 1; fi` exits 0.
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add home/common/claude-code/lifecycle_guard.py home/common/claude-code/default.nix \
-  home/common/claude-code/README.md tests/test_claude_permission_guard.py \
-  home/common/agent-skills/skills/ship-release/SKILL.md home/common/agent-skills/tests/test_ship_release_contracts.py
-git commit -m "feat(guard): tag-push and release-creation arms, permanent-branch delete repair (#124)"
-```
+- [ ] **Step 5: Commit** exactly the **Files** above as `feat(guard): tag-push and release-creation arms, permanent-branch delete repair (#124)`.

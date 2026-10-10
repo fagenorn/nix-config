@@ -4,7 +4,7 @@
 - Modify: `python/agent_tools/resolve_project.py`
 - Modify: `python/agent_tools/conformance_checks.py`, `python/agent_tools/conformance_registry.py`
 - Modify: `.agents/project.json` and `home/common/agent-skills/evals/fixture-repo/.agents/project.json`
-- Modify: `home/common/agent-skills/skills/ship-release/SKILL.md` (line 23 only), `home/common/agent-skills/tests/test_workflow_skill_contracts.py`
+- Modify: `home/common/agent-skills/skills/ship-release/SKILL.md` (line 23 only), `home/common/agent-skills/skills/ship-release/evals/evals.json` (eval 1's binding list only), `home/common/agent-skills/tests/test_workflow_skill_contracts.py`
 - Test: `home/common/agent-skills/tests/test_{resolve_project,conformance_checks,conformance_registry}.py` (the registry suite only if it pins finding codes)
 
 Decisions: D1, D2, D14, D20 (AC6 restore-anchor seam), D21 (ship-release citation), D23 (blocked precedence). Spec §1, §10.
@@ -146,11 +146,11 @@ class ReleaseProfileChecksTest(ReportAssertions, unittest.TestCase):
 
 (`release_fixture(name)` loads `RELEASE_FIXTURES / name`. `CHECKS_MODULE`, `REGISTRY_MODULE`, `CHECKS`, `findings`, `status`, `reason_code` follow the existing S3 tests and `conformance_registry.Check`; read them first and adjust only the test's spelling.)
 
-Existing tests: in `test_resolve_project.py` replace each `del …["capabilities"]["release"]` by deleting `capabilities["deploy"]` (the test still needs a missing-member violation, now at `/capabilities/deploy`), and in `test_unsupported_capabilities_impose_no_binding_requirement` assert `contract["release"] == "unsupported"` instead of the `workflow.release` line. The `--require release` refusals stay valid (still `unsupported`) until Task 4.
+Existing tests: in `test_resolve_project.py` add `AUTHORED_CAPABILITY_NAMES` (without `"release"`) and pick it or `CAPABILITY_NAMES` by what each use iterates — authored contract members (`test_dropping_any_capability_declaration_refuses`, `CommittedContractTest`) or resolved snapshots (all eleven); replace each `del …["capabilities"]["release"]` by deleting `capabilities["deploy"]` (the test still needs a missing-member violation, now at `/capabilities/deploy`); and in `test_unsupported_capabilities_impose_no_binding_requirement` set `contract["release"] = "unsupported"` (Task 4 replaces the source value) and delete the `workflow.release` line. The `--require release` refusals stay valid (still `unsupported`) until Task 4.
 
 - [ ] **Step 2: Run and watch them fail**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_resolve_project.py -k ReleaseMember` and `… test_conformance_checks.py -k ReleaseProfileChecks`
+Run: `unittest home/common/agent-skills/tests/test_resolve_project.py -k ReleaseMember` and `… test_conformance_checks.py -k ReleaseProfileChecks`
 Expected: FAIL — the resolver rejects `/release` as `member_unexpected`.
 
 - [ ] **Step 3: Implement**
@@ -159,19 +159,11 @@ Expected: FAIL — the resolver rejects `/release` as `member_unexpected`.
 2. `conformance_checks`: rewrite the section comment and three docstrings for the activated behavior; `release_profile_outcome(context, rule)` implements the conformance invariant above and raises `ValueError` on an unknown locator state.
 3. `conformance_registry`: delete the three `("profile_unsupported", …)` finding tuples.
 4. Both contracts: add `"release": "unsupported"` as the last top-level member; delete `bindings.workflow.release` and `capabilities.release`.
-5. `ship-release/SKILL.md` line 23: delete `` `bindings.workflow.release`, `` from the binding list (the sentence otherwise unchanged); delete `"bindings.workflow.release"` from the `ship-release/SKILL.md` tuple in `test_workflow_skill_contracts.py` (D21).
+5. `ship-release/SKILL.md` line 23: delete `` `bindings.workflow.release`, `` from the binding list (the sentence otherwise unchanged); delete `"bindings.workflow.release"` from the `ship-release/SKILL.md` tuple in `test_workflow_skill_contracts.py` (D21); in `ship-release/evals/evals.json` eval 1's `expected_output`, delete `workflow.release, ` from the binding list (the sentence otherwise unchanged).
 
 - [ ] **Step 4: Verify**
 
-Run (each in the foreground, 900 s): `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_resolve_project.py home/common/agent-skills/tests/test_resolve_platform.py home/common/agent-skills/tests/test_conformance.py home/common/agent-skills/tests/test_conformance_checks.py home/common/agent-skills/tests/test_conformance_registry.py home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_adopt_project.py tests/test_release_profile.py`
-Expected: PASS, no failures or errors. Then `bash home/common/agent-skills/evals/tests/test-run-eval-tree.sh` exits 0, and `if rg -q 'bindings\.workflow\.release|"workflow"\]\["release"|profile_unsupported' python home/common/agent-skills/skills; then exit 1; fi` exits 0.
+Run (each in the foreground, 900 s): `unittest home/common/agent-skills/tests/test_{resolve_project,resolve_platform,conformance,conformance_checks,conformance_registry,workflow_skill_contracts,adopt_project}.py tests/test_release_profile.py`
+Expected: PASS, no failures or errors. Then `bash home/common/agent-skills/evals/tests/test-run-eval-tree.sh` exits 0, and `if rg -q 'workflow\.release|"workflow"\]\["release"|profile_unsupported' python home/common/agent-skills/skills; then exit 1; fi` exits 0.
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add python/agent_tools/resolve_project.py python/agent_tools/conformance_checks.py \
-  python/agent_tools/conformance_registry.py .agents/project.json \
-  home/common/agent-skills/evals/fixture-repo/.agents/project.json \
-  home/common/agent-skills/skills/ship-release/SKILL.md home/common/agent-skills/tests
-git commit -m "feat(resolver): required release member, derived capability, live release-profile checks (#124)"
-```
+- [ ] **Step 5: Commit** exactly the **Files** above as `feat(resolver): required release member, derived capability, live release-profile checks (#124)`.

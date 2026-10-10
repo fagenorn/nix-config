@@ -137,19 +137,14 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_release_command.py`
+Run: `unittest tests/test_release_command.py`
 Expected: ERROR — `No module named agent_tools.release` (stdout empty, `json.loads` raises).
 
 - [ ] **Step 3: Implement** `agent_tools.release` (argparse; `resolve` → `load_contract` → typed errors → `inspect_profile` → `emit_json`), the `lib/agent-tools.nix` row, and the README section. The README section describes only code at this commit: the member's two forms, the grammar/admissibility tiers and outcomes, `bind_candidate` as `create`'s exact input, the inspection contract, and the bridge projection with the sweep as its one writer (cite #124 decision IDs).
 
 - [ ] **Step 4: Verify**
 
-Run (600 s): `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_release_command.py`
+Run (600 s): `unittest tests/test_release_command.py`
 Expected: PASS, 3 tests. Then `just build` (3600 s) succeeds (the new launcher row's module exists and imports).
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add python/agent_tools/release.py lib/agent-tools.nix python/README.md tests/test_release_command.py justfile
-git commit -m "feat(release): read-only release profile inspection command (#124)"
-```
+- [ ] **Step 5: Commit** exactly the **Files** above as `feat(release): read-only release profile inspection command (#124)`.

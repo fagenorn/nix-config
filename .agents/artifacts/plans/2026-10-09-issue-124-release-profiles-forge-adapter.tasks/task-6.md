@@ -14,15 +14,15 @@ Decisions: D7, D8, D11, D12, D15, D17, D22. Spec §6, §7 (inspect half). AC9 is
 **Interfaces:**
 - Consumes: Task 1's `release_adapter`; Task 2's `ResolvedReleaseProfile` (`adapters[alias]`, nodes); `transaction_invocation.OUTCOMES`/`ERROR_CLASSES` (read only); Task 5's `release.build_parser`.
 - Produces (`release_adapter`): `EFFECT_OUTCOMES = transaction_invocation.OUTCOMES`, `PREDICATE_OUTCOMES = ("satisfied", "unsatisfied", "unknown")`, `INVOKE_RESULTS = ("accepted", "rejected", "unknown")`; validators returning `list[str]` problems — `effect_observation_problems` (exactly `{outcome ∈ EFFECT_OUTCOMES, reason: non-empty str, observed_subject: object, references: list[str], observed_at: int epoch ms, facts: object}`), `predicate_observation_problems` (exactly `{outcome ∈ PREDICATE_OUTCOMES, reason, references, observed_at}`), `invoke_result_problems` (exactly `{result ∈ INVOKE_RESULTS, error_class, reference: non-empty str}`, `error_class` None exactly when `accepted`, else in `ERROR_CLASSES`; no `succeeded` anywhere); `reference_text(obs) = json.dumps({"reason", "references"}, sort_keys=True, separators=(",", ":"))`; `core_binding(adapter, profile: ResolvedReleaseProfile, alias) -> CoreBinding` with `.inspect`, `.invoke`, `.observe`.
-- Produces (`forge_adapter`): `inspect(request) -> dict`; `CHILD_TIMEOUT_SECONDS = 30` (tests lower it).
+- Produces (`forge_adapter`): `inspect(request) -> dict`; `CHILD_TIMEOUT_SECONDS = 30` (invoke children) and `COLLECTION_BUDGET_SECONDS = 30` (a whole `inspect`, D25); tests lower both.
 - Produces (CLI): `release adapter inspect <adapter> <operation> --parameters <json>` → the effect observation, exit 0. Exit 2 errors: `adapter_unknown` (`release.adapter.unknown`), `operation_unknown` (`release.adapter.operation_unknown`, also when `inspect` is `unsupported`), `parameters_invalid` (`release.adapter.parameters_invalid`, not a JSON object). It resolves no project.
 
 **Adapter request (closed, D7):** `{"kind": "effect", "operation", "parameters"}` or `{"kind": "predicate", "predicate", "operation", "parameters"}`. Forge parameters: `target` (`kind == "github_repository"`, `repository`, `branch`; `handle` ignored); `tag`/`release` add `candidate: {version, commit}` (`release` also `title`, `notes`); `pr_merge` adds `pr` (positive int), `expected_base_tip`, `expected_head` (40-hex). `action`, `operation`, `config` are tolerated; anything else unknown or missing → `unknown`/`parameters_invalid`, no child process.
 
 **Invariants:**
-- `core_binding` raises `ValueError` when `adapter.describe()`'s `name` or `descriptor_digest` differs from `profile["adapters"][alias]` (the profile pins the implementation, D5, D17), when a request's `parameters["action"]` is not a node bound to `alias`, or when an adapter result fails its validator. It adds no retry, ordering or outcome policy.
+- `core_binding` raises `ValueError` when `adapter.describe()`'s `name` or `descriptor_digest` differs from `profile["adapters"][alias]` (the profile pins the implementation, D5, D17), when a request's `parameters["action"]` is not a node bound to `alias`, when the request's `operation`, `target` or `config` parameter differs from that node's (D24), or when an adapter result fails its validator. It adds no retry, ordering or outcome policy.
 - `.inspect(req)` → `{"outcome", "reference": reference_text(obs)}` of `adapter.inspect({"kind": "effect", "operation": req["parameters"]["operation"], "parameters": req["parameters"]})`; `.invoke(req)` → the adapter's `invoke` result unchanged; `.observe(req)` unwraps the core's derived nesting `p = req["parameters"]["parameters"]`, calls `adapter.inspect({"kind": "predicate", "predicate": req["predicate"], "operation": p["operation"], "parameters": p})` and returns `{"outcome", "reason", "reference"}`.
-- Forge inspect issues only the fixture's read spellings, `gh` by name, `GITHUB_TOKEN`/`GH_TOKEN` removed from the child environment, each under `CHILD_TIMEOUT_SECONDS`; it never reads `target_commitish`, never mutates, never calls the guard.
+- Forge inspect issues only the fixture's read spellings, `gh` by name, `GITHUB_TOKEN`/`GH_TOKEN` removed from the child environment, under one `COLLECTION_BUDGET_SECONDS` deadline (each child gets the remainder; exhaustion → `unknown`/`lookup_timeout`, D25); it never reads `target_commitish`, never mutates, never calls the guard.
 - `forge_adapter` imports no `host_admission` or `launch_*` module (AC9).
 
 ## Forge inspect (exact, spec §7, D11)
@@ -171,11 +171,11 @@ class InspectFailureTest(ForgeCase):
             with self.subTest(name):
                 self.world.reset()
                 respond()
-                forge_adapter.CHILD_TIMEOUT_SECONDS, saved = 0.5, forge_adapter.CHILD_TIMEOUT_SECONDS
+                forge_adapter.COLLECTION_BUDGET_SECONDS, saved = 0.5, forge_adapter.COLLECTION_BUDGET_SECONDS
                 try:
                     observation = self.inspect(effect("tag", candidate=CANDIDATE))
                 finally:
-                    forge_adapter.CHILD_TIMEOUT_SECONDS = saved
+                    forge_adapter.COLLECTION_BUDGET_SECONDS = saved
                 self.assertEqual((observation["outcome"], observation["reason"]), ("unknown", reason))
 
     def test_invalid_parameters_make_no_call(self):
@@ -216,27 +216,20 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-(`ForgeWorld.reset()` clears responses and the call log.) Add `core_binding` tests to the same file as `CoreBindingTest`: compile `release_test_support.forge_profile()` with `release_test_support.descriptors()`, bind alias `forge`; assert `core_binding(forge_adapter, compiled, "forge").inspect({"parameters": <bound tag unit parameters>, …})` returns exactly `{"outcome", "reference"}` with a JSON `reference`; that a binding against a descriptor whose digest differs (compile with a descriptor copy whose `collector.max_concurrent_collections` is 2) raises `ValueError`; and that `observe` on a derived request `{"predicate": "publication_visible", "parameters": {"name": "tag", "parameters": <unit parameters>}}` returns `{"outcome": "unsatisfied", "reason": "ref_absent", "reference": …}` when `tag.ref` is 404.
+(`ForgeWorld.reset()` clears responses and the call log.) Add `test_the_collection_budget_spans_every_read` (D25): canonical responses with `tag.ref` and `tag.object` each sleeping 0.35 s under `COLLECTION_BUDGET_SECONDS = 0.5` → `unknown`/`lookup_timeout`. Add `core_binding` tests to the same file as `CoreBindingTest`: compile `release_test_support.forge_profile()` with `release_test_support.descriptors()`, bind alias `forge`; assert `core_binding(forge_adapter, compiled, "forge").inspect({"parameters": <bound tag unit parameters>, …})` returns exactly `{"outcome", "reference"}` with a JSON `reference`; that a binding against a descriptor whose digest differs (compile with a descriptor copy whose `collector.max_concurrent_collections` is 2) raises `ValueError`; and that `observe` on a derived request `{"predicate": "publication_visible", "parameters": {"name": "tag", "parameters": <unit parameters>}}` returns `{"outcome": "unsatisfied", "reason": "ref_absent", "reference": …}` when `tag.ref` is 404; and that `inspect`, `invoke` and `observe` raise `ValueError` with no call logged when the tag unit's parameters keep `action: "tag"` but change `operation`, `target.repository` or `config` (D24).
 
 In `tests/test_release_command.py` add `AdapterInspectTest(ReleaseCommandCase)`, running `python -m agent_tools.release adapter inspect …` without `--repo-root` (the subcommand takes none): unknown adapter → exit 2 `adapter_unknown`; `github-forge merge` → `operation_unknown`; `--parameters '[1]'` → `parameters_invalid`; with `ForgeWorld.env()` (its bin as `PATH`, plus `FORGE_WORLD`) in the child and an `OPEN` PR registered, `release adapter inspect github-forge pr_merge --parameters <canonical pr_merge parameters>` exits 0 with `outcome == "absent"` and `facts.protection.status == "protected"`.
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_forge_adapter.py`
+Run: `unittest tests/test_forge_adapter.py`
 Expected: ERROR — `AttributeError: module 'agent_tools.forge_adapter' has no attribute 'inspect'` (and the fixture file is missing).
 
 - [ ] **Step 3: Implement** the result validators, `reference_text`, `core_binding`, forge `inspect` (one private `_gh(argv) -> (status, payload | None, detail)` runner that scrubs the two token variables and maps 404/403/timeout/missing executable), the fixture rows, the fake world, and the `adapter inspect` subcommand (which calls `release_adapter.REGISTRY[name].inspect` and prints with `resolve_project.emit_json`; it resolves no project).
 
 - [ ] **Step 4: Verify**
 
-Run (900 s): `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_forge_adapter.py tests/test_release_command.py tests/test_release_profile.py tests/test_release_grammar.py`
+Run (900 s): `unittest tests/test_forge_adapter.py tests/test_release_command.py tests/test_release_profile.py tests/test_release_grammar.py`
 Expected: PASS, no skips.
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add python/agent_tools/release_adapter.py python/agent_tools/forge_adapter.py python/agent_tools/release.py \
-  tests/fixtures/forge-adapter-spellings.json tests/forge_world.py tests/test_forge_adapter.py \
-  tests/test_release_command.py justfile
-git commit -m "feat(release): adapter results, core binding and forge inspect (#124)"
-```
+- [ ] **Step 5: Commit** exactly the **Files** above as `feat(release): adapter results, core binding and forge inspect (#124)`.

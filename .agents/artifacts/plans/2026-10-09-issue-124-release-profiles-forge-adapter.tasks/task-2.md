@@ -196,19 +196,14 @@ if __name__ == "__main__":
 
 - [ ] **Step 3: Run it and watch it fail**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_release_profile.py`
+Run: `unittest tests/test_release_profile.py`
 Expected: ERROR — `AttributeError: module 'agent_tools.release_profile' has no attribute 'compile_profile'` (and `support` lacks `CANDIDATE`).
 
 - [ ] **Step 4: Implement** the rules, lowering, freezing, digest and binding above in `release_profile.py`. `TransactionStore(root)` requires an absolute existing directory; `create(creation_key, subject, *, concurrency_keys, proof, recovery, authority_class)` compiles before any lock, so the tree under the root is unchanged by a refused create.
 
 - [ ] **Step 5: Verify**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_release_profile.py tests/test_release_grammar.py`
+Run: `unittest tests/test_release_profile.py tests/test_release_grammar.py`
 Expected: PASS, 19 tests.
 
-- [ ] **Step 6: Commit**
-
-```bash
-git add python/agent_tools/release_profile.py tests/release_test_support.py tests/test_release_profile.py justfile
-git commit -m "feat(release): admissibility compiler and candidate binding (#124)"
-```
+- [ ] **Step 6: Commit** exactly the **Files** above as `feat(release): admissibility compiler and candidate binding (#124)`.

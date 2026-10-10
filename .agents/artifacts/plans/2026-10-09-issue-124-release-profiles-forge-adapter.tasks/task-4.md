@@ -108,21 +108,14 @@ Make the capability-state tests independent of nix-config's release declaration:
 
 - [ ] **Step 2: Run and watch them fail**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_release_bridge.py`
+Run: `unittest tests/test_release_bridge.py`
 Expected: ERROR — `ImportError: cannot import name 'release_bridge'`.
 
 - [ ] **Step 3: Implement** `release_bridge` per the invariants (imports: `json`, `copy`, `adopt_inspection.authored_bytes`, `release_adapter`), the `legacy_binding_operations` change, the fixture file (`git show 1722a65d^:.claude/skills.config.json > tests/fixtures/legacy-skills-config-1722a65d.json`), and the contract edit (the `release` value copied from `github-release-profile.json`, two-space indented like the rest of the file).
 
 - [ ] **Step 4: Verify**
 
-Run (900 s): `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_release_bridge.py home/common/agent-skills/tests/test_adopt_project.py home/common/agent-skills/tests/test_adopt_project_boundaries.py home/common/agent-skills/tests/test_conformance_checks.py home/common/agent-skills/tests/test_conformance.py home/common/agent-skills/tests/test_conformance_registry.py home/common/agent-skills/tests/test_resolve_project.py home/common/agent-skills/tests/test_resolve_platform.py`
+Run (900 s): `unittest tests/test_release_bridge.py home/common/agent-skills/tests/test_{adopt_project,adopt_project_boundaries,conformance_checks,conformance,conformance_registry,resolve_project,resolve_platform}.py`
 Expected: PASS. Then `cmp tests/fixtures/legacy-skills-config-1722a65d.json <(git show 1722a65d^:.claude/skills.config.json)` exits 0.
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add .agents/project.json python/agent_tools/release_bridge.py python/agent_tools/adopt_planning.py \
-  tests/fixtures/legacy-skills-config-1722a65d.json tests/test_release_bridge.py justfile \
-  home/common/agent-skills/tests
-git commit -m "feat(release): nix-config github-release profile and legacy deploy projection (#124)"
-```
+- [ ] **Step 5: Commit** exactly the **Files** above as `feat(release): nix-config github-release profile and legacy deploy projection (#124)`.

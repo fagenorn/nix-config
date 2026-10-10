@@ -19,9 +19,9 @@ Decisions: D7, D8, D9, D11, D12, D17, D22, D23 (working checkout, precondition-r
 - Spec §7's invoke steps apply in order, stopping at the first refusal, with these exact values:
   1. **Shape.** Unknown or not-`supported` operation (`pr_merge`, D8) → `rejected`/`unsupported_operation`, reference `"<op>: <descriptor reason or unknown_operation>"`; invalid parameters (Task 6's set; `title` free of `"`, `$`, `` ` ``, `\`, NUL, CR, LF; SemVer `version`; 40-hex `commit`) → `rejected`/`invalid_input`. No child process either way.
   2. **Checkout (D23).** `git rev-parse --show-toplevel` in the process working directory; later `git` calls and the guard payload use it as `cwd`.
-  3. **Same repository.** `normalize_remote_url(git remote get-url origin)` and `invoke.repository`'s stripped stdout both equal `target.repository`, else `rejected`/`precondition_failed`.
+  3. **Same repository.** `normalize_remote_url(git remote get-url origin)`, the one line of `git remote get-url --push --all origin` (D24) and `invoke.repository`'s stripped stdout all equal `target.repository`, else `rejected`/`precondition_failed`.
   4. **Containment (`tag`).** `tag.compare` ∈ `{identical, ahead}`, else `rejected`/`precondition_failed`.
-  5. **Local tag (`tag`).** `git cat-file -t refs/tags/<tag>` non-zero → `git tag -a <tag> <commit> -m "release: <tag>"`; `tag` with `git rev-parse refs/tags/<tag>^{commit}` == commit → reuse; else `rejected`/`precondition_failed`.
+  5. **Local tag (`tag`).** `git for-each-ref --format=%(objecttype) refs/tags/<tag>` (D25): empty → `git tag -a <tag> <commit> -m "release: <tag>"`; `tag` with `git rev-parse refs/tags/<tag>^{commit}` == commit → reuse; otherwise `rejected`/`precondition_failed`. A failed lookup or tag creation is a failed precondition read (below).
   6. **Render** the fixture's `tag.push` / `release.create` spelling; `release` writes `notes` to a `tempfile.mkstemp(prefix="forge-release-notes-", suffix=".md")` file (mode 0600, removed in a `finally`); `assert shlex.split(raw) == argv`.
   7. **Guard.** `claude-bash-lifecycle-guard` by name, stdin `{"tool_name": "Bash", "tool_input": {"command": raw}, "cwd": <checkout>}`; non-zero, timeout or missing → `rejected`/`authorization_denied`, reference `"guard: " + ≤240 chars of stderr`.
   8. **Mutation** once, tokens scrubbed: exit 0 → `accepted`, reference `refs/tags/<tag>` or the stripped stdout URL (else `release:<tag>`); `already exists` (git) or `HTTP 422` (gh) → `rejected`/`precondition_failed`; timeout or other non-zero → `unknown`/`transient_transport`.
@@ -40,7 +40,7 @@ The local `git` calls of steps 2, 3 and 5 are not fixture rows: they are neither
 
 - [ ] **Step 1: Write the failing tests**
 
-Extend `ForgeWorld` with `checkout` (a real temporary directory) and `invoke_ready(slug=C["slug"], *, full_name=None, tag_local=None, compare="ahead", guard_exit=0, push_exit=0, push_stderr="", push_sleep=0, create_exit=0, create_stdout=<release URL>, create_stderr="")`, registering the happy path: toplevel → `checkout`; origin → `git@github.com:<slug>.git`; `invoke.repository` → `full_name or C["slug"]`; `tag.compare` → `compare`; `cat-file` exit 1 (or `tag` plus `rev-parse` → `tag_local` when given); `git tag -a` → 0; the guard → `guard_exit` (stderr `lifecycle guard: refused`); push and create as given (create keyed with its `--notes-file` path replaced by `<NOTES>`; the real path is logged).
+Extend `ForgeWorld` with `checkout` (a real temporary directory) and `invoke_ready(slug=C["slug"], *, full_name=None, push_urls=None, tag_local=None, tag_lookup_exit=0, tag_create_exit=0, compare="ahead", guard_exit=0, push_exit=0, push_stderr="", push_sleep=0, create_exit=0, create_stdout=<release URL>, create_stderr="")`, registering the happy path: toplevel → `checkout`; origin → `git@github.com:<slug>.git`; `get-url --push --all origin` → `push_urls` (default that one origin URL; parameter `push_urls=None`); `invoke.repository` → `full_name or C["slug"]`; `tag.compare` → `compare`; `for-each-ref` → empty stdout, exit `tag_lookup_exit` (default 0) (or `tag` plus `rev-parse` → `tag_local` when given); `git tag -a` → `tag_create_exit` (default 0); the guard → `guard_exit` (stderr `lifecycle guard: refused`); push and create as given (create keyed with its `--notes-file` path replaced by `<NOTES>`; the real path is logged).
 
 Add to `tests/test_forge_adapter.py`:
 
@@ -110,6 +110,12 @@ class InvokeFailureTest(InvokeCase):
             ("redirected repository", dict(full_name="someone/renamed"), ("rejected", "precondition_failed")),
             ("uncontained commit", dict(compare="behind"), ("rejected", "precondition_failed")),
             ("tag at another commit", dict(tag_local="9" * 40), ("rejected", "precondition_failed")),
+            ("push url elsewhere", dict(push_urls=["git@github.com:someone-else/nix-config.git"]),
+             ("rejected", "precondition_failed")),
+            ("two push urls", dict(push_urls=["git@github.com:fagenorn/nix-config.git"] * 2),
+             ("rejected", "precondition_failed")),
+            ("local tag lookup fails", dict(tag_lookup_exit=128), ("rejected", "provider_unavailable")),
+            ("local tag creation fails", dict(tag_create_exit=128), ("rejected", "provider_unavailable")),
         )
         for name, ready, expected in cases:
             with self.subTest(name):
@@ -196,20 +202,14 @@ If the store refuses `ready` without anchor verification for this recovery plan,
 
 - [ ] **Step 2: Run and watch them fail**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_forge_adapter.py tests/test_release_adapter_core.py`
+Run: `unittest tests/test_forge_adapter.py tests/test_release_adapter_core.py`
 Expected: FAIL/ERROR — `forge_adapter` has no `invoke`; `PublicSurfaceTest` lists two names.
 
 - [ ] **Step 3: Implement** `invoke` per the invariants, the four fixture rows, the `ForgeWorld` extensions, and the README section. The README section describes only code at this commit: descriptors and registry, the closed result shapes (no `succeeded`), `core_binding` and its digest pin, the forge operations (`pr_merge` `target_cas_unproven`), the two mutation spellings with `--verify-tag` and the guard call, and the shared fixture (cite #124 decision IDs).
 
 - [ ] **Step 4: Verify**
 
-Run (900 s): `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_forge_adapter.py tests/test_release_adapter_core.py tests/test_transaction_invocation.py`
+Run (900 s): `unittest tests/test_forge_adapter.py tests/test_release_adapter_core.py tests/test_transaction_invocation.py`
 Expected: PASS, no skips. Then `if rg -q 'succeeded' python/agent_tools/forge_adapter.py python/agent_tools/release_adapter.py; then exit 1; fi` exits 0.
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add python/agent_tools/forge_adapter.py tests/fixtures/forge-adapter-spellings.json tests/forge_world.py \
-  tests/test_forge_adapter.py tests/test_release_adapter_core.py python/README.md justfile
-git commit -m "feat(release): forge invoke behind the lifecycle guard, observed after invocation (#124)"
-```
+- [ ] **Step 5: Commit** exactly the **Files** above as `feat(release): forge invoke behind the lifecycle guard, observed after invocation (#124)`.

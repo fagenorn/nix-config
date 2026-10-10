@@ -241,7 +241,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 3: Run it and watch it fail**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_release_grammar.py`
+Run: `unittest tests/test_release_grammar.py`
 Expected: ERROR — `ImportError: cannot import name 'forge_adapter' from 'agent_tools'`.
 
 - [ ] **Step 4: Implement**
@@ -250,14 +250,7 @@ Expected: ERROR — `ImportError: cannot import name 'forge_adapter' from 'agent
 
 - [ ] **Step 5: Verify**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_release_grammar.py`
+Run: `unittest tests/test_release_grammar.py`
 Expected: PASS, 11 tests. Then `PYTHONPATH="$PWD/python" python3 -c "import agent_tools.release_profile"` exits 0 (the import-time registry build passes).
 
-- [ ] **Step 6: Commit**
-
-```bash
-git add python/agent_tools/release_adapter.py python/agent_tools/forge_adapter.py \
-  python/agent_tools/release_profile.py tests/release_test_support.py tests/fixtures/release \
-  tests/test_release_grammar.py justfile
-git commit -m "feat(release): adapter descriptors, closed registry and profile grammar (#124)"
-```
+- [ ] **Step 6: Commit** exactly the **Files** above as `feat(release): adapter descriptors, closed registry and profile grammar (#124)`.

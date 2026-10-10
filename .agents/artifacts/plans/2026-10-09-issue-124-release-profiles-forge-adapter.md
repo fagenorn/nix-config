@@ -19,7 +19,7 @@ Spec: `.agents/artifacts/specs/2026-10-09-issue-124-release-profiles-forge-adapt
 - No `ResolvedProject` member is added; `capabilities` keeps exactly its eleven entries (D1).
 - No adapter `invoke` is reachable from any CLI; the `release` command is read-only (D15).
 - No release, tag, push, Release, branch-protection or billing mutation is performed by any task or test.
-- Test commands run from the worktree root, in the foreground under `launch-scope exec … --`, as `PYTHONPATH="$PWD/python" python3 -m unittest <file> [-k <pattern>]` with a timeout of at least 600 s. Each new test file is added to the `agent-workflow-tests` recipe in `justfile` by the task that creates it.
+- Test commands run from the worktree root, in the foreground under `launch-scope exec … --`, as `PYTHONPATH="$PWD/python" python3 -m unittest <file> [-k <pattern>]` (members write it `unittest <file>`) with a timeout of at least 600 s. Each new test file is added to the `agent-workflow-tests` recipe in `justfile` by the task that creates it.
 - The guard suite runs only against a built settings artifact: after `just build` (timeout 3600 s), `CLAUDE_SETTINGS_PATH="$(nix-store --query --requisites ./result | grep -- '-claude-code-settings\.json$')" python3 -m unittest tests/test_claude_permission_guard.py`.
 - Final gate, once on the final head (sdd's final gate): `just build` (3600 s), `just agent-workflow-tests` (3600 s), the guard suite above, and `just agent-instruction-budget` with no `--raise-label` (600 s), which must print `check: pass`.
 - Every commit is signed and ends with the session's `Co-Authored-By` and `Claude-Session` trailers.
@@ -45,7 +45,7 @@ Task 1 — Descriptor schema, closed registry, forge descriptor and profile gram
 
 Task 2 — Admissibility compiler, `ResolvedReleaseProfile` and `bind_candidate` — `python/agent_tools/release_profile.py`, `tests/release_test_support.py`, `tests/test_release_profile.py`, `justfile` — full — [task-2.md](2026-10-09-issue-124-release-profiles-forge-adapter.tasks/task-2.md)
 
-Task 3 — Required `release` member, derived `capabilities.release`, conformance activation — `python/agent_tools/{resolve_project,conformance_checks,conformance_registry}.py`, `.agents/project.json`, `home/common/agent-skills/evals/fixture-repo/.agents/project.json`, `home/common/agent-skills/skills/ship-release/SKILL.md`, `home/common/agent-skills/tests/test_{resolve_project,conformance_checks,conformance_registry,workflow_skill_contracts}.py` — full — [task-3.md](2026-10-09-issue-124-release-profiles-forge-adapter.tasks/task-3.md)
+Task 3 — Required `release` member, derived `capabilities.release`, conformance activation — `python/agent_tools/{resolve_project,conformance_checks,conformance_registry}.py`, `.agents/project.json`, `home/common/agent-skills/evals/fixture-repo/.agents/project.json`, `home/common/agent-skills/skills/ship-release/{SKILL.md,evals/evals.json}`, `home/common/agent-skills/tests/test_{resolve_project,conformance_checks,conformance_registry,workflow_skill_contracts}.py` — full — [task-3.md](2026-10-09-issue-124-release-profiles-forge-adapter.tasks/task-3.md)
 
 Task 4 — nix-config's `github-release` profile and the legacy deploy bridge — `.agents/project.json`, `python/agent_tools/{release_bridge,adopt_planning}.py`, `tests/fixtures/legacy-skills-config-1722a65d.json`, `tests/test_release_bridge.py`, `home/common/agent-skills/tests/test_{adopt_project,conformance_checks,resolve_project,resolve_platform,conformance,conformance_registry}.py`, `justfile` — full — [task-4.md](2026-10-09-issue-124-release-profiles-forge-adapter.tasks/task-4.md)
 
@@ -74,6 +74,12 @@ Task 8 — Guard arms, the D5 repair, `PATH` wiring, ship-release 4.5f — `home
 ## Decisions
 
 Members cite the spec ledger by ID (D1–D17). Appended by this plan: D18 (group A carries descriptors, registry and the `release` command), D19 (descriptor shape), D20 (AC1/AC6 proofs), D21 (ship-release citation, one-line 4.5f), D22 (fixture coverage, repository classes), D23 (lowering, digest, blocked precedence, bridge questions, invoke checkout, precondition reads).
+
+Phase 5 appended D24 and D25.
+
+## Standards review provenance
+
+Codex (`codex-plan-review`, job `01a12398`), isolated read-only, no fallback, base `eca16cd`. 7 accepted (PR124-01–04 Blocking, 05–07 Should fix; Tasks 3, 6, 7, 8; D24, D25), 0 rejected, 0 deferred. Decision issues were not reachable by the reviewer.
 
 ---
 
