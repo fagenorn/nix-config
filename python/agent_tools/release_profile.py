@@ -29,6 +29,7 @@ clock, network or environment.
 """
 
 import copy
+import json
 import re
 from collections.abc import Mapping
 from types import MappingProxyType
@@ -794,14 +795,27 @@ def _rule_rolled_back_reachable(profile_id, profile, contract, descriptors):
     return found
 
 
+def _target_identity(profile: Mapping[str, Any], descriptors: Mapping[str, dict],
+                     handle: str) -> str:
+    """The bound target a handle names: its normalized target without the handle.
+
+    Two handles bound to the same kind and kind members name one target, so a rule that
+    asks whether two nodes touch the same target compares these, never the handles.
+    """
+    target = thaw(_normalized_target(profile, descriptors, handle))
+    del target["handle"]
+    return json.dumps(target, sort_keys=True)
+
+
 def _rule_restore_anchor(profile_id, profile, contract, descriptors):
-    in_place = {node["target"] for _, _, node in _authored(profile)
+    in_place = {_target_identity(profile, descriptors, node["target"])
+                for _, _, node in _authored(profile)
                 if _operation(profile, descriptors, node)["mutability"] == "in_place"}
     found = []
     for name, unit in profile["recovery"]["units"].items():
         anchor = unit["anchor"]
         if unit["posture"] == "restorable" and anchor is not None \
-                and anchor["target"] in in_place:
+                and _target_identity(profile, descriptors, anchor["target"]) in in_place:
             found.append(_finding(
                 "restore_anchor",
                 _pointer_base(profile_id) + _pointer("recovery", "units", name, "anchor",

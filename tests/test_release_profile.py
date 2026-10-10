@@ -103,6 +103,20 @@ class RulesTest(unittest.TestCase):
                          [("restore_anchor_destroyed",
                            "/release/profiles/restorable/recovery/units/promote-pointer/anchor/target")])
 
+    def test_an_anchor_on_a_second_handle_to_the_same_target_is_still_destroyed(self):
+        """The rule compares bound target identities, not handles: a second handle carrying
+        the overwritten target's data names the same target; one with other data does not."""
+        for bucket_url, expected in (("s3://fixture", ["restore_anchor_destroyed"]),
+                                     ("s3://elsewhere", [])):
+            with self.subTest(bucket_url=bucket_url):
+                profile = support.destroyed_anchor_profile()
+                profile["bindings"]["targets"]["anchor-bucket"] = {
+                    "adapter": "store", "kind": "object_store", "bucket_url": bucket_url}
+                profile["recovery"]["units"]["promote-pointer"]["anchor"]["target"] = "anchor-bucket"
+                found = release_profile.rule_findings("restore_anchor", "restorable", profile,
+                                                      support.base_contract(), D())
+                self.assertEqual([f["reason"] for f in found], expected)
+
 class FrozenAndBoundTest(unittest.TestCase):
     def test_compiled_profile_is_frozen_deterministic_and_detached(self):
         profile = support.forge_profile()
