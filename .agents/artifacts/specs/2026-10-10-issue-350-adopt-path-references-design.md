@@ -172,8 +172,9 @@ Each file with at least one `extend` or `rewrite` answer is one `write-file` wit
 edited bytes, appended to the tail after the Markdown link rewrites and before
 the projection regenerations, sorted by target. No operation kind, ready gate or
 commit gate is added, and `verify` gains no check. A reference write naming a
-path any other operation names is a derivation bug and raises `ValueError`, as
-for Markdown writes. `apply` re-derives the list
+path any other operation holds is a derivation bug and raises `ValueError`, as
+for Markdown writes; a `regenerate-projection` that only reads the path as a
+source does not hold it (D14). `apply` re-derives the list
 through `compose_plan` and requires byte equality with the stored `changes`
 (issue 148 D33), which is the inner check on these edits.
 
@@ -239,3 +240,4 @@ updated in the same commit. AC5 is `just agent-workflow-tests`.
 | D11 | Plan: the three occurrence conditions decide alone, so in `os.path.join(".claude", "specs")` the quoted `".claude"` is an occurrence that offers only `retain`, and only the joined path `.claude/specs` goes unrecognised; this corrects the example list under "Occurrences" | D3 admits a whole quoted string so that `".claude"` in a directory-name set counts, and the tool cannot tell that set from a call argument (D6); D5 gives the underivable case `retain`, which records that the operator saw it | A fourth condition dropping quoted strings inside calls, which hides `skip(".claude")` and makes the inventory depend on the call heuristic D6 keeps for edits only |
 | D12 | Plan: `apply_answers` takes the checkout root and the fixed exclusion set and returns the references with the settled answers, deriving them once inside its sorted pass, at the first `path-reference` answer from the moves the validated candidate answers add, or after the pass | D7 keeps one sorted pass and its refusal order and D10 settles candidate moves first; `candidate-class` sorts before `path-reference`, so the moves are final at that point and nothing is mutated before every answer validates | A second validation function called by `compose_plan` after the candidate mutation, which reports an unknown id ahead of an earlier-sorted invalid reference answer and so changes the refusal order |
 | D13 | The reader's `git grep` passes `--no-color`, with a fixture case under forced colour | Task 1 review: a `color.ui=always` git config wraps each result in escape codes, so every candidate was dropped and `plan` asked nothing, silently | Keeping the plan's exact command: fails open on a user config the tool does not control |
+| D14 | Final review: a `regenerate-projection` naming a reference file in `sources` does not count against that file's single writer; any operation naming it in `targets`, or any other kind naming it in `sources`, still raises | A projection only reads its source and runs after the write, so the file keeps one writer, as a Markdown projection source does under `check_markdown_writes`; counting the read made `plan` raise on a repository whose projection source holds an answered reference | Keeping D9's "any other operation names" wording: no plan can be composed for such a repository, a failure of the tool and not of the repository |
