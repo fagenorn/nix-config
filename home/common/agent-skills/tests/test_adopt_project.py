@@ -265,7 +265,11 @@ def adopted_repo(home: Path, *, records: bool = True) -> Path:
     (D34). `records=False` is the fixture the discovery negatives start from.
     """
     root = init_repo()
-    scaffold(root, fixture_contract(), home)
+    # This repository's GitHub release profile derives a `blocked` release
+    # capability on any host without the forge adapter's executables on PATH,
+    # which no conformant checkout may carry; the fixture opts out of release
+    # to keep its verdict host-independent.
+    scaffold(root, fixture_contract(release="unsupported"), home)
     write(root, ".agents/runtime/.gitignore", "*\n")
     git(root, "add", "-f", ".agents/runtime/.gitignore")
     git(root, "remote", "add", "origin",

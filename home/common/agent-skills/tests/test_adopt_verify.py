@@ -60,6 +60,11 @@ def verifiable_repo(home: Path, *, project_id: str = "fixture/target",
     contract = fixture_contract()
     contract["project"] = {"id": project_id, "name": project_id.split("/")[-1]}
     contract["bindings"]["tracker"]["cli"] = tracker_cli
+    # This repository's GitHub release profile derives a `blocked` release
+    # capability on any host without the forge adapter's executables on PATH;
+    # no verify case is about release, so the fixture opts out of it to keep the
+    # verdicts host-independent.
+    contract["release"] = "unsupported"
     scaffold(root, contract, home)
     write(root, ".agents/runtime/.gitignore", "*\n")
     git(root, "add", "-f", ".agents/runtime/.gitignore")

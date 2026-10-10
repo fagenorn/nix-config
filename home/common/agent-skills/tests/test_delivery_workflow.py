@@ -1721,6 +1721,10 @@ class DeliveryBuilderTest(BuilderHarness, unittest.TestCase):
     def test_contract_refusals_exit_two_with_empty_stdout(self):
         def gitlab(contract_value):
             contract_value["bindings"]["tracker"]["kind"] = "gitlab"
+            # A declared GitHub release profile is refused on a non-GitHub
+            # tracker (G17) before the builder runs; the builder's tracker
+            # rule is what is under test.
+            contract_value["release"] = "unsupported"
         cases = (("non-github tracker", gitlab, {}, b"tracker kind"),
                  ("foreign issue branch", None, {"worktree": "/wt/issue-172-other"},
                   b"branch pattern"),
