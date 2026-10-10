@@ -23,6 +23,7 @@ from agent_tools.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
     APPROVAL_CLASSES,
     AdoptError,
+    CANDIDATE_BASIS,
     CONTRACT_FILENAME,
     Candidates,
     EVIDENCE_RECORD_DIR,
@@ -38,6 +39,7 @@ from agent_tools.adopt_inspection import (
     RUNTIME_SENTINEL_BYTES,
     approval_class_for,
     authored_bytes,
+    candidate_answer,
     canonical_json,
     contained_path,
     document_bytes,
@@ -133,6 +135,24 @@ def derive_identity(root: Path, contract_id: str | None) -> tuple[
         "impact": question_impact(question_id),
         "recommendation": question_recommendation(question_id),
     }]
+
+
+
+def candidate_questions(found: Candidates) -> list[dict]:
+    """One open `candidate-class` question per undecided candidate (#340).
+
+    Every prose member is fixed and never names the candidate: the entry's
+    `subject` does, so the question is stable across plans of one tree.
+    """
+    return sorted(
+        ({"id": "candidate-class",
+          "subject": entry["path"],
+          "value": candidate_answer(entry["provenance"], entry["path"]),
+          "basis": CANDIDATE_BASIS,
+          "impact": question_impact("candidate-class"),
+          "recommendation": question_recommendation("candidate-class")}
+         for entry in found.entries if entry["action"] == "needs-decision"),
+        key=lambda entry: entry["subject"])
 
 # --------------------------------------------------------------------------
 # The `.gitignore` amendment

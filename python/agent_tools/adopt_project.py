@@ -219,6 +219,11 @@ def compose_plan(root: Path, manifest: dict) -> Composition:
             contract_id = project["id"]
     project_id, recommended, open_questions = adopt_planning.derive_identity(
         root, contract_id)
+    open_questions = sorted(
+        open_questions + adopt_planning.candidate_questions(found),
+        key=lambda entry: (
+            adopt_inspection.QUESTION_IDS.index(entry["id"]),
+            entry.get("subject", "")))
     decisions = {"recommended": recommended, "answered": [],
                  "open": open_questions}
 
@@ -369,7 +374,12 @@ def emit_human(document: dict) -> int:
     for entry in document["decisions"]["recommended"]:
         lines.append(f"recommended {entry['id']}: {entry['value']}")
     for entry in document["decisions"]["open"]:
-        lines.append(f"open {entry['id']}: {entry['recommendation']}")
+        if entry["id"] == "candidate-class":
+            answer = "none" if entry["value"] is None else entry["value"]
+            lines.append(f"open {entry['id']} {entry['subject']} "
+                         f"(answer: {answer}): {entry['recommendation']}")
+        else:
+            lines.append(f"open {entry['id']}: {entry['recommendation']}")
     for blocker in plan["blockers"]:
         lines.append(f"blocked by {blocker['id']}: {blocker['message']}")
     lines.append(f"next: {document['handoff']['next_command'] or '(none)'}")

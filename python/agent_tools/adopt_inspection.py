@@ -108,8 +108,16 @@ LIFECYCLE_CLASSES = (
 )
 
 # D35: the public question contract. An id is a literal, never formatted at
-# emission, so a caller can dispatch over the set exhaustively.
-QUESTION_IDS = ("project-id",)
+# emission, so a caller can dispatch over the set exhaustively. A
+# `candidate-class` entry is keyed by its `subject`, the candidate path.
+QUESTION_IDS = ("project-id", "candidate-class")
+
+# The archive bucket for adopted agent records.
+ARCHIVE_ADOPTED_DIR = ".agents/knowledge/archive/adopted"
+
+# The fixed basis of every `candidate-class` question (D8): it never names the
+# candidate, which the entry's `subject` carries.
+CANDIDATE_BASIS = "no classification row covers this agent path"
 
 READY_GATES = (
     "contract-valid-after-amendment",
@@ -332,6 +340,10 @@ def question_impact(question_id: str) -> str:
         return ("adoption cannot name the project it is adopting, so the "
                 "contract, the fleet registry and the adoption evidence "
                 "record would all disagree about its identity")
+    if question_id == "candidate-class":
+        return ("the candidate keeps the needs-decision action, so the "
+                "no-needs-decision and no-open-decisions gates fail and the "
+                "plan stays draft")
     raise ValueError(f"unknown question id: {question_id!r}")
 
 
@@ -341,7 +353,24 @@ def question_recommendation(question_id: str) -> str:
         return ("declare exactly one remote naming the canonical repository, "
                 "or author .agents/project.json with the intended project id "
                 "before planning again")
+    if question_id == "candidate-class":
+        return ("add a central classification row for this path, or remove "
+                "it from the repository in its own commit, then plan again")
     raise ValueError(f"unknown question id: {question_id!r}")
+
+
+def candidate_answer(provenance: str, path: str) -> str | None:
+    """The offered answer for one undecided candidate (D4, D7).
+
+    A tracked candidate is offered the archive unless its name looks secret,
+    in which case no answer is offered; a targeted-ignored one is offered
+    retention. Any other provenance is not a candidate source.
+    """
+    if provenance == "tracked":
+        return None if is_secret_path(path) else "archive-history"
+    if provenance == "targeted-ignored":
+        return "retain-product"
+    raise ValueError(f"unknown candidate provenance: {provenance!r}")
 
 
 def plan_state_is_terminal(state: str) -> bool:
