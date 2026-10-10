@@ -60,5 +60,10 @@ The spec's fourth criterion, the budget gate, is not an issue criterion (D11): T
 - The byte budget and the stop rule: D9; the measured cut list and the two reflowed-line limits: D13 (appended by this plan).
 - AC1 pending at merge: D10. The Acceptance map's three rows: D11 (appended by this plan).
 - R1's comparison, R2's block for a fence, R3's line and the source-only sweep: D12.
+- The prefix is not a listed spelling of the local branch delete: D14 (appended by the standards review).
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`), isolated read-only mode, no fallback. Base SHA `02d2f378`, plan at `fb086ec6`. Findings: 0 blocking, 1 should-fix, 0 discussion; 1 accepted, 0 rejected, 0 deferred. PR-351-01 (the check accepted the prefix on the local branch delete) was verified against `validate_branch_delete` and applied to Task 1 as D14.
 
 ---

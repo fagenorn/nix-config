@@ -33,6 +33,8 @@ checked here.
   findings in fixture order, then the R3 heading finding.
 - No rule has an exemption (D4). A guarded verb is recognised only at the start of a living
   example, after the guard's own prefix literal.
+- The prefix is a listed spelling only for a form whose `prefixed` exit equals its `bare`
+  exit, so a prefixed `branch.local` is an R1 finding and never satisfies R3 (D14).
 - No new assertion pins an English phrase of a skill document.
 
 The rules, R1 to R3, are the spec's "The skill check" section; D12 fixes what that
@@ -190,7 +192,16 @@ class GuardedCommandShapeTest(unittest.TestCase):
     def test_each_failure_class_is_found(self):
         first, later = GUARDED_FORMS["push.first"], GUARDED_FORMS["push.later"]
         merge = GUARDED_FORMS["merge.subject"]
+        local = GUARDED_FORMS["branch.local"]
         cases = {
+            "the prefix on the local branch delete":
+                ("OTHER.md", f"Run `{SANCTIONED_PREFIX}{local}` ({GUARDED_ANCHOR}).",
+                 [(1, "R1", f"{SANCTIONED_PREFIX}{local}")]),
+            "a prefixed local branch delete as a site's only one":
+                ("HUMAN-GATE.md",
+                 _conforming("HUMAN-GATE.md").replace(
+                     f"`{local}`", f"`{SANCTIONED_PREFIX}{local}`"),
+                 [(1, "R1", f"{SANCTIONED_PREFIX}{local}"), (0, "R3", local)]),
             "a push with no citation in its block":
                 ("OTHER.md", f"Run `{first}`.", [(1, "R2", first)]),
             "a merge fence with no citation in its lead-in":
@@ -308,30 +319,34 @@ def guarded_command_findings(document_text, shapes, document_name):
     """Every R1, R2 and R3 finding of one ship-issue document (#351).
 
     R1: a living example that begins with a guarded verb, after the sanctioned
-    prefix, is one of `shapes`' skill-form templates. R2: its block carries the
+    prefix, is one of `shapes`' skill-form templates, and carries that prefix
+    only when the form's `prefixed` and `bare` exits agree. R2: its block carries the
     anchor. R3: every form listing `document_name` as a site appears there
     meeting R1 and R2, and SKILL.md holds the anchor's heading exactly once.
     """
     anchor = shapes["anchor"]
     verbs = [verb.split() for verb in shapes["verbs"]]
-    templates = {form["template"] for form in shapes["skill_forms"]}
+    forms = {form["template"]: form for form in shapes["skill_forms"]}
     findings, satisfied = [], set()
     for position, kind, payload in sorted(_examples(document_text), key=lambda e: e[0]):
         if kind != "call":
             continue
-        command = _squeezed(payload[0].text)
-        if command.startswith(SANCTIONED_PREFIX):
-            command = command[len(SANCTIONED_PREFIX):]
+        spelled = _squeezed(payload[0].text)
+        prefixed = spelled.startswith(SANCTIONED_PREFIX)
+        command = spelled[len(SANCTIONED_PREFIX):] if prefixed else spelled
         words = command.split()
         if not any(words[:len(verb)] == verb for verb in verbs):
             continue
         line = position[0]
-        listed = command in templates
+        form = forms.get(command)
+        # The prefix is a listed spelling only where it leaves the guard's verdict alone.
+        listed = form is not None and (
+            not prefixed or form["prefixed"]["exit"] == form["bare"]["exit"])
         cited = anchor in _squeezed(payload[2])
         if not listed:
-            findings.append(GuardedFinding(line, "R1", command))
+            findings.append(GuardedFinding(line, "R1", spelled))
         if not cited:
-            findings.append(GuardedFinding(line, "R2", command))
+            findings.append(GuardedFinding(line, "R2", spelled))
         if listed and cited:
             satisfied.add(command)
     for form in shapes["skill_forms"]:
