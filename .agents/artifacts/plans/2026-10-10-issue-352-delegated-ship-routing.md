@@ -53,6 +53,13 @@ Task 3 — Evals for the delegated ship route and the acceptance record — `hom
 | AC3 | code | Task 3 | `python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k test_delegated_return_line -k test_generic_delegated_owner_returns -k test_delegate_action_checks -k test_from_issue_evals_cover` (4 tests pass); `just agent-instruction-budget` prints `check: pass`; evals 5, 6 and 7 each graded once against the worktree's skill text, verdicts in acceptance-record row AC3. Evals 5 and 6 are the cases at orchestrated depth. |
 | AC4 | code | Task 1 | `python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py -k DelegatedShipLaunchTest` (3 tests pass) |
 
+## Standards review provenance
+
+Reviewer: Codex (`plan-review`, isolated read-only, no focus), base SHA `02d2f378ad8c4abbb8e3a3960b4c93b10879bd6b`, no fallback. Blocking 0. Should-fix 2: 1 accepted, 1 rejected, 0 deferred.
+
+- PR-001, accepted (D12): Task 1's finish test drives the production `finish --summary-file` path instead of the legacy `--result-file` transport. Applied as Task 1's review amendment.
+- PR-002, rejected: it reported the acceptance record's `Criterion` cells as rewritten. They match the live issue body line for line; the review packet had carried a paraphrase of the criteria, which is what the finding compared against.
+
 ## Decisions
 
 - Who launches the ship owner and what is returned: D1, D2. Release, reap and the Phase-6 `progress` call: D3. The direct-autonomous rollover stays: D4. No helper change: D5. The closed line and no second delegation: D6. Ceilings and cuts: D7, as amended by D9. Eval and contract-test shape: D8.
