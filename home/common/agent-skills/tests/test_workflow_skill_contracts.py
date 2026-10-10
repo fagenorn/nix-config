@@ -200,6 +200,8 @@ ORCHESTRATE_MACHINE_TEXT = {
     ORCHESTRATE: (
         "workflow-state host-route --route claude-code", '`host_route: "claude-code"`',
         "--boundary workflow-response", "workflow_bootstrap", "workflow-state init-run",
+        "workflow-state init-run --repo-root <ledger_repo_root> --creation-key "
+        "orchestrate-issues:<YYYYMMDD>:",
         "workflow-state control", "workflow-state build-delivery", "--request-file -",
         "matching_issue_branch | absent | mismatch", "`worktree_fact`",
         "`recorded_worktree_absent`", "`recorded_worktree_mismatch`",
@@ -1362,6 +1364,8 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             durable, "workflow-state init-run", "max_parallel: 1",
             "workflow-state control", "first `spawn` envelope",
         )
+        self.assertIn("workflow-state init-run --creation-key from-issue:<num>:<YYYYMMDD>",
+                      durable)
 
     def test_direct_auto_acquires_only_through_direct_owner(self):
         identity = self.section(
