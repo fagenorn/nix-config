@@ -13,7 +13,7 @@ branch has diverged. Whether to stop depends on what you're about to do:
   branch, and continue.
   Under parallel `from-issue --auto` runs, divergence is the expected steady state.
 - **Anything that rewrites the local integration branch** — `git reset --hard` + cherry-pick to
-  "clean up", `git rebase`, `git push origin <integration-branch>` → **stop and surface**,
+  "clean up", `git rebase`, pushing the integration branch → **stop and surface**,
   ground against the passed `bindings.paths.hints`: it can discard another in-flight session's
   spec/plan commits.
 

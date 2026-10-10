@@ -1175,7 +1175,19 @@ class GuardedCommandShapeTest(unittest.TestCase):
             + GUARDED_POINTER)
 
 
-ORCHESTRATE_SKILL = SOURCE_TREES["claude-only"] / "orchestrate-issues/SKILL.md"
+class ShipIssueGuardedCommandSweepTest(unittest.TestCase):
+    def test_every_guarded_command_is_a_cited_form(self):
+        documents = ship_issue_documents()
+        self.assertIn("SKILL.md", [name for name, _ in documents])
+        for name, path in documents:
+            with self.subTest(document=name):
+                findings = guarded_command_findings(
+                    path.read_text(encoding="utf-8"), GUARDED_SHAPES, name)
+                self.assertEqual(
+                    findings, (), guarded_findings_report(f"ship-issue/{name}", findings))
+
+
+ORCHESTRATE_SKILL =SOURCE_TREES["claude-only"] / "orchestrate-issues/SKILL.md"
 # A `date` invocation: at a line start or after a shell operator, `$(` or a
 # backtick, followed by an option, a closing backtick or parenthesis, or the end.
 DATE_INVOCATION = re.compile(r"(?:^|[;&|(`]|\$\()\s*date(?:\s+[-+]|\s*[`)]|\s*$)", re.M)
