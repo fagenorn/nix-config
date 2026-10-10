@@ -30,7 +30,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import adopt_inspection, adopt_planning, adopt_project
+from agent_tools import adopt_inspection, adopt_links, adopt_planning, adopt_project
 
 MANIFEST = Path(__file__).resolve().parents[1] / "platform-manifest.json"
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -47,8 +47,9 @@ OPERATION_KINDS = ("git-mv", "write-file", "delete-file",
 PROVENANCES = ("tracked", "targeted-ignored",
                "targeted-ignored-metadata-only", "git-worktree-metadata-only",
                "untracked-explicit-paths")
-TOP_LEVEL_MEMBERS = ["changes", "decisions", "evidence", "handoff", "plan",
-                     "schema_version", "verification"]
+TOP_LEVEL_MEMBERS = ["changes", "decisions", "evidence", "handoff",
+                     "link_rewrites", "plan", "schema_version",
+                     "verification"]
 PLAN_MEMBERS = ["base_revision", "blockers", "input_digest", "outcome",
                 "plan_id", "platform", "project_id", "state"]
 HANDOFF_MEMBERS = ["evidence_record", "migration_map", "next_command",
@@ -322,6 +323,92 @@ def record_trees_repo(home: Path) -> Path:
     write(root, ".claude/research/r.md", "# research r\n")
     commit(root, "add agent records")
     return root
+
+
+LINK_README_BEFORE = (
+    "# readme\n"
+    "\n"
+    "See [spec x](.claude/specs/x.md#intro) and [plans](./.claude/plans/).\n"
+    "Image: ![diagram](<.claude/specs/x.md> \"Spec x\") and [plan y][y].\n"
+    "Broken: [gone](.claude/specs/missing.md). "
+    "Web: [site](https://example.com/.claude/specs/x.md).\n"
+    "Self: [me](README.md). Code: `[c](.claude/specs/x.md)`.\n"
+    "\n"
+    "~~~\n"
+    "[fenced](.claude/specs/x.md)\n"
+    "~~~\n"
+    "\n"
+    "[y]: .claude/plans/y.md \"Plan y\"\n")
+LINK_README_AFTER = (
+    "# readme\n"
+    "\n"
+    "See [spec x](.agents/artifacts/specs/x.md#intro) and "
+    "[plans](./.agents/artifacts/plans/).\n"
+    "Image: ![diagram](<.agents/artifacts/specs/x.md> \"Spec x\") and "
+    "[plan y][y].\n"
+    "Broken: [gone](.claude/specs/missing.md). "
+    "Web: [site](https://example.com/.claude/specs/x.md).\n"
+    "Self: [me](README.md). Code: `[c](.claude/specs/x.md)`.\n"
+    "\n"
+    "~~~\n"
+    "[fenced](.claude/specs/x.md)\n"
+    "~~~\n"
+    "\n"
+    "[y]: .agents/artifacts/plans/y.md \"Plan y\"\n")
+
+# Base path -> base text, and path after the moves -> rewritten text (#345).
+LINKED_BASE = {
+    "README.md": LINK_README_BEFORE,
+    ".claude/rules/r.md": "# rule r\n\nFollow [spec x](../specs/x.md).\n",
+    ".claude/specs/x.md": (
+        "# spec x\n\nBack to [readme](../../README.md), "
+        "[plan y](../plans/y.md) and "
+        "[rejected z](../../.out-of-scope/z.md).\n"),
+}
+LINKED_AFTER = {
+    "README.md": LINK_README_AFTER,
+    ".claude/rules/r.md": (
+        "# rule r\n\nFollow [spec x](../../.agents/artifacts/specs/x.md).\n"),
+    ".agents/artifacts/specs/x.md": (
+        "# spec x\n\nBack to [readme](../../../README.md), "
+        "[plan y](../plans/y.md) and "
+        "[rejected z](../../knowledge/rejections/z.md).\n"),
+}
+LINKED_SOURCES = {"README.md": "README.md",
+                  ".claude/rules/r.md": ".claude/rules/r.md",
+                  ".agents/artifacts/specs/x.md": ".claude/specs/x.md"}
+LINKED_SUMMARY = {
+    "inbound": {"links": 5, "files": [".claude/rules/r.md", "README.md"]},
+    "outbound": {"links": 2, "files": [".agents/artifacts/specs/x.md"]},
+    "unrewritable": [],
+    "already_broken": 1,
+}
+DISSOLVED_README = "# readme\n\nAgent records: [records](.claude/).\n"
+
+
+def write_linked_tree(root: Path) -> None:
+    """Inbound links from a root file and a retained `.claude/` file, and
+    outbound links from a moved spec, over any fixture carrying
+    `.claude/specs/x.md`, `.claude/plans/y.md` and `.out-of-scope/z.md`."""
+    for path, text in LINKED_BASE.items():
+        write(root, path, text)
+    commit(root, "link the agent trees")
+
+
+def linked_repo(home: Path) -> Path:
+    root = nix_config_shape_repo(home)
+    write_linked_tree(root)
+    return root
+
+
+def write_dissolved_tree(root: Path) -> None:
+    """`.claude/` loses its last retained file and gains a research record,
+    so its members move under two different prefixes and a link to the
+    directory itself has no single successor (D5)."""
+    git(root, "rm", "--quiet", ".claude/skills.config.json")
+    write(root, ".claude/research/r.md", "# research r\n")
+    write(root, "README.md", DISSOLVED_README)
+    commit(root, "link the dissolving agent tree")
 
 
 def candidate_repo(home: Path, *paths: str) -> Path:
@@ -612,7 +699,7 @@ class ProjectIdentityTest(AdoptTestCase):
 
 
 class DocumentShapeTest(AdoptTestCase):
-    def test_exactly_seven_top_level_members(self):
+    def test_exactly_eight_top_level_members(self):
         for name, build in (("bootstrap", bootstrap_repo),
                             ("reconcile", reconcile_repo),
                             ("adopted", adopted_repo),
@@ -620,6 +707,9 @@ class DocumentShapeTest(AdoptTestCase):
             with self.subTest(fixture=name):
                 doc = self.ready_plan(build(self.home))
                 self.assertEqual(sorted(doc), TOP_LEVEL_MEMBERS)
+                self.assertEqual(sorted(doc["link_rewrites"]),
+                                 ["already_broken", "inbound", "outbound",
+                                  "unrewritable"])
                 self.assertEqual(doc["schema_version"], 1)
                 self.assertEqual(sorted(doc["plan"]), PLAN_MEMBERS)
                 self.assertEqual(sorted(doc["handoff"]), HANDOFF_MEMBERS)
@@ -708,7 +798,7 @@ class DocumentShapeTest(AdoptTestCase):
 def documented_plan_id(doc: object) -> str:
     """D15's digest, recomputed here from the document's own inputs.
 
-    The formula is the spec's, not the implementation's: the six named
+    The formula is the spec's, not the implementation's: the seven named
     members, canonical JSON, SHA-256. Nothing is pasted from a previous
     run.
     """
@@ -719,6 +809,7 @@ def documented_plan_id(doc: object) -> str:
         "platform": doc["plan"]["platform"],
         "evidence": doc["evidence"],
         "decisions_answered": doc["decisions"]["answered"],
+        "link_rewrites": doc["link_rewrites"],
     }
     payload = json.dumps(source, sort_keys=True,
                          separators=(",", ":")).encode("utf-8")
@@ -971,6 +1062,7 @@ class TypedOperationTest(AdoptTestCase):
                         for entry in doc["evidence"]],
             "checks": [{"id": gate["id"], "status": gate["status"]}
                        for gate in doc["verification"]["ready_gates"]],
+            "link_rewrites": doc["link_rewrites"],
             "path_migration_map": doc["handoff"]["migration_map"],
         }
         expected = json.dumps(record, sort_keys=True, indent=2,
@@ -1385,6 +1477,124 @@ class CandidateAnswerTest(AdoptTestCase):
 
     def test_archive_history_relocates(self):
         self.assertTrue(adopt_inspection.action_relocates("archive-history"))
+
+
+class LinkRewritePlanTest(AdoptTestCase):
+    """#345: `plan` rewrites relative Markdown links across the moves."""
+
+    def link_writes(self, doc: object) -> list[dict]:
+        return [op for op in doc["changes"] if op["op"] == "write-file"
+                and op["targets"][0] in LINKED_AFTER]
+
+    def test_the_linked_fixture_plans_to_ready_with_the_rewrites(self):
+        doc = self.ready_plan(linked_repo(self.home))
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        writes = self.link_writes(doc)
+        self.assertEqual([op["targets"] for op in writes],
+                         [[".agents/artifacts/specs/x.md"],
+                          [".claude/rules/r.md"], ["README.md"]])
+        for op in writes:
+            target = op["targets"][0]
+            self.assertEqual(op["sources"], [target])
+            self.assertEqual(op["before"], sha256_hash(
+                LINKED_BASE[LINKED_SOURCES[target]].encode("utf-8")))
+            self.assertEqual(op["after"], sha256_hash(
+                LINKED_AFTER[target].encode("utf-8")))
+        order = [(op["op"], op["targets"][0] if op["targets"] else None)
+                 for op in doc["changes"]]
+        legacy = order.index(("write-file", ".claude/skills.config.json"))
+        first = order.index(("write-file", ".agents/artifacts/specs/x.md"))
+        projections = [index for index, (kind, _) in enumerate(order)
+                       if kind == "regenerate-projection"]
+        self.assertLess(legacy, first)
+        self.assertTrue(projections)
+        self.assertLess(first + 2, min(projections))
+
+    def test_anchors_titles_and_reference_definitions_survive_and_urls_stay(self):
+        doc = self.ready_plan(linked_repo(self.home))
+        readme = next(op for op in self.link_writes(doc)
+                      if op["targets"] == ["README.md"])
+        self.assertEqual(readme["after"], sha256_hash(
+            LINK_README_AFTER.encode("utf-8")))
+        before = [link.target
+                  for link in adopt_links.links(LINK_README_BEFORE)]
+        after = [link.target for link in adopt_links.links(LINK_README_AFTER)]
+        self.assertEqual(list(zip(before, after)), [
+            (".claude/specs/x.md#intro", ".agents/artifacts/specs/x.md#intro"),
+            ("./.claude/plans/", "./.agents/artifacts/plans/"),
+            (".claude/specs/x.md", ".agents/artifacts/specs/x.md"),
+            (".claude/specs/missing.md", ".claude/specs/missing.md"),
+            ("https://example.com/.claude/specs/x.md",
+             "https://example.com/.claude/specs/x.md"),
+            ("README.md", "README.md"),
+            (".claude/plans/y.md", ".agents/artifacts/plans/y.md"),
+        ])
+
+    def test_the_summary_is_published_and_enters_the_plan_id(self):
+        doc = self.ready_plan(linked_repo(self.home))
+        self.assertEqual(doc["link_rewrites"], LINKED_SUMMARY)
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+
+    def test_a_different_rewrite_set_is_a_different_plan_id(self):
+        doc = self.ready_plan(linked_repo(self.home))
+        inputs = (doc["plan"]["project_id"], doc["plan"]["base_revision"],
+                  doc["plan"]["platform"], doc["evidence"],
+                  doc["decisions"]["answered"])
+        self.assertEqual(
+            adopt_planning.compute_plan_id(*inputs, doc["link_rewrites"]),
+            doc["plan"]["plan_id"])
+        other = json.loads(json.dumps(LINKED_SUMMARY))
+        other["inbound"] = {"links": 4, "files": ["README.md"]}
+        self.assertNotEqual(adopt_planning.compute_plan_id(*inputs, other),
+                            doc["plan"]["plan_id"])
+
+    def test_the_human_view_prints_one_link_line(self):
+        code, out, err = run("plan", "--repo-root",
+                             str(linked_repo(self.home)), "--format", "human",
+                             home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertIn("\nlinks: inbound 5 in 2 files, outbound 2 in 1 files, "
+                      "unrewritable 0, already broken 1\n", out)
+
+    def test_a_dissolved_directory_link_keeps_the_plan_draft(self):
+        root = nix_config_shape_repo(self.home)
+        write_dissolved_tree(root)
+        code, doc, err = self.plan(root)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(
+            [gate for gate in doc["verification"]["ready_gates"]
+             if gate["status"] == "failed"],
+            [{"id": "no-unrewritable-link", "status": "failed",
+              "repair_id": "adopt.link.unrewritable"}])
+        self.assertEqual(doc["link_rewrites"]["unrewritable"],
+                         [{"path": "README.md", "target": ".claude/"}])
+        self.assertIn(
+            {"id": "no-unrewritable-link",
+             "message": "a relative Markdown link into or out of a moved "
+                        "path cannot be rewritten to resolve to the same "
+                        "target"},
+            doc["plan"]["blockers"])
+
+    def test_the_link_gate_is_the_last_ready_gate(self):
+        self.assertEqual(adopt_inspection.READY_GATES[-2:],
+                         ("no-secret-path-in-moves", "no-unrewritable-link"))
+
+    def test_a_markdown_file_any_other_operation_names_is_a_derivation_bug(self):
+        op = adopt_planning.operation
+        link = op("write-file", ["README.md"], ["README.md"],
+                  "sha256:" + "0" * 64, "sha256:" + "1" * 64)
+        adopt_planning.check_markdown_writes([link], {"README.md"})
+        delete = op("delete-file", ["notes.md"], [],
+                    "git-object:" + "0" * 40, None)
+        for changes, targets in (([link], set()),
+                                 ([link, link], {"README.md"}),
+                                 ([], {"README.md"}),
+                                 ([delete], set())):
+            with self.subTest(changes=changes, targets=targets):
+                with self.assertRaises(ValueError):
+                    adopt_planning.check_markdown_writes(changes, targets)
 
 
 class GitignoreAmendmentTest(AdoptTestCase):

@@ -2,19 +2,21 @@
 
 `plan` inspects a target checkout inside a bounded, read-only boundary,
 classifies every candidate it finds under one closed action set, routes the
-repository to exactly one of five closed outcomes, and emits the seven-member
+repository to exactly one of five closed outcomes, and emits the eight-member
 adoption plan document: `schema_version`, `plan`, `evidence`, `decisions`,
-`changes`, `verification`, `handoff` (R4.3).
+`changes`, `link_rewrites`, `verification`, `handoff` (R4.3).
 
 The document is content-addressed. `plan_id` is the SHA-256 of canonical JSON
 over exactly `{adopt_schema_version, project_id, base_revision, platform,
-evidence, decisions.answered}` (D15), so two checkouts of one revision on one
-platform produce one identifier and any change to a source byte, the base
-revision or a platform input produces another. The absolute checkout path is
-deliberately outside that source and appears only in `handoff`.
+evidence, decisions.answered, link_rewrites}` (D15), so two checkouts of one
+revision on one platform produce one identifier and any change to a source
+byte, the base revision or a platform input produces another. The absolute
+checkout path is deliberately outside that source and appears only in
+`handoff`.
 
 `plan` mutates nothing: it runs `git` and the resolver as child processes,
-reads tracked object ids rather than tracked bytes, and writes only under
+reads tracked object ids, and the base revision's Markdown blobs through git,
+rather than the working tree's bytes, and writes only under
 `~/.agents/state/` (R4.1, D14).
 
 `apply` takes a stored `ready` plan by that id, refuses on any drift, and
@@ -24,8 +26,9 @@ scope — outside the target checkout, so it cannot appear in the target's own
 gate leaves no commit and retains the worktree with its evidence (D17); a
 green run produces exactly one commit on one new branch and removes the
 worktree only after proving that the commit changes exactly the paths the plan
-declared and that the ref carries it. It never pushes, never merges and never
-writes the fleet registry.
+declared, that no Markdown file in it has more non-resolving relative links
+than its pre-move counterpart, and that the ref carries it. It never pushes,
+never merges and never writes the fleet registry.
 
 `verify` answers the conformance question read-only against one pinned
 revision — the contract resolves, every projection is in sync, no agent path is
@@ -66,7 +69,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from agent_tools import adopt_apply, adopt_inspection, adopt_planning, adopt_verify, agent_platform
+from agent_tools import adopt_apply, adopt_inspection, adopt_links, adopt_planning, adopt_verify, agent_platform
 from agent_tools.siblings import sibling_argv
 
 
@@ -200,6 +203,10 @@ def compose_plan(root: Path, manifest: dict,
                       key=lambda entry: (entry["path"], entry["provenance"]))
 
     contract_source = load_contract_source(root)
+    links = adopt_links.derive_link_rewrites(
+        root, inventory.base_revision, found.moves,
+        [path for path, _ in adopt_planning.evidence_record_members(found)],
+        adopt_planning.generated_targets(contract_source))
     exit_code, payload = run_resolver(root, "resolve")
     contract_resolves = exit_code == 0
     repair_id = (None if contract_resolves
@@ -247,13 +254,13 @@ def compose_plan(root: Path, manifest: dict,
     }
     plan_id = adopt_planning.compute_plan_id(
         project_id, inventory.base_revision, platform_block, evidence,
-        decisions["answered"])
+        decisions["answered"], links.summary)
 
     ready_gates = adopt_planning.evaluate_ready_gates(
         root, found, contract_source, contract_resolves, unfixable, untracked,
-        decisions)
+        decisions, links.summary)
     head, tail, contents = adopt_planning.build_operations(
-        root, found, manifest, contract_source, plan_id)
+        root, found, manifest, contract_source, plan_id, links)
 
     agent_surface = any(
         entry["lifecycle_class"] != "runtime-residue"
@@ -280,9 +287,10 @@ def compose_plan(root: Path, manifest: dict,
         records = adopt_planning.adoption_records(plan_id)
         bookkeeping, written = adopt_planning.bookkeeping_operations(
             found, plan_id, outcome, inventory.base_revision, platform_block,
-            decisions, ready_gates)
+            decisions, ready_gates, links.summary)
         contents.update(written)
         changes = head + bookkeeping + tail
+        adopt_planning.check_markdown_writes(changes, set(links.files))
         evidence_record = records["evidence_record"]
         migration_map = records["migration_map"]
     else:
@@ -319,6 +327,7 @@ def compose_plan(root: Path, manifest: dict,
         "evidence": evidence,
         "decisions": decisions,
         "changes": changes,
+        "link_rewrites": links.summary,
         "verification": {
             "ready_gates": ready_gates,
             "commit_gates": [adopt_inspection.gate_entry(gate, "not_run", None)
@@ -377,6 +386,8 @@ def load_contract_source(root: Path) -> dict | None:
 def emit_human(document: dict) -> int:
     """A bounded semantic view. What is stored is unchanged (R4.8)."""
     plan = document["plan"]
+    rewrites = document["link_rewrites"]
+    inbound, outbound = rewrites["inbound"], rewrites["outbound"]
     lines = [
         f"outcome: {plan['outcome']}",
         f"state:   {plan['state']}",
@@ -385,6 +396,10 @@ def emit_human(document: dict) -> int:
         f"plan id: {plan['plan_id']}",
         f"evidence: {len(document['evidence'])} entries",
         f"changes:  {len(document['changes'])} operations",
+        f"links: inbound {inbound['links']} in {len(inbound['files'])} "
+        f"files, outbound {outbound['links']} in {len(outbound['files'])} "
+        f"files, unrewritable {len(rewrites['unrewritable'])}, "
+        f"already broken {rewrites['already_broken']}",
     ]
     for entry in document["decisions"]["recommended"]:
         lines.append(f"recommended {entry['id']}: {entry['value']}")
@@ -560,11 +575,12 @@ def command_apply(args: argparse.Namespace) -> int:
 
     commit = adopt_inspection.git_or_fail(
         worktree, "rev-parse", "HEAD").decode("ascii", "strict").strip()
-    # The gates judged the worktree before the commit; these two judge the
-    # commit itself. Content first — a verification command or a `pre-commit`
-    # hook can stage after the last gate passed — then the ref.
+    # The gates judged the worktree before the commit; these judge the commit
+    # itself. Content and links first — a verification command or a
+    # `pre-commit` hook can stage after the last gate passed — then the ref.
     try:
         adopt_apply.prove_commit_content(worktree, commit, changes)
+        adopt_apply.prove_commit_links(worktree, commit, changes)
     except adopt_inspection.AdoptError as error:
         adopt_apply.retain_failure(digest, document, worktree, branch, gates,
                                    error.repair_id)

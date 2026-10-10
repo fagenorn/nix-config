@@ -135,6 +135,7 @@ READY_GATES = (
     "no-existing-destination",
     "move-sources-tracked",
     "no-secret-path-in-moves",
+    "no-unrewritable-link",
 )
 
 # The gates `apply` runs inside its isolated worktree before it commits. They
@@ -144,6 +145,7 @@ COMMIT_GATES = (
     "worktree-status-matches-operations",
     "projections-in-sync",
     "no-unclassified-agent-path",
+    "no-new-broken-link",
     "cold-clone-resolves",
     "resolve-capabilities-available",
     "workflow-verification-commands",
@@ -175,9 +177,12 @@ SECRET_MARKERS = ("credential", "credentials", "private", "secret", "secrets",
                   "token", "tokens")
 SECRET_PREFIXES = (".env",)
 
-# D30: the whole living-reference sweep. Nothing outside this tuple is ever a
-# rewrite target — a repository-wide reference scan is not mechanically
-# decidable and would risk re-pointing machine-global platform source.
+# D30: the whole living-reference sweep for non-link text. Nothing outside
+# this tuple is ever a rewrite target for a prose or configuration reference —
+# a repository-wide reference scan is not mechanically decidable and would risk
+# re-pointing machine-global platform source. Relative Markdown link targets are
+# the one exception, rewritten across every tracked Markdown file by
+# `adopt_links` (#345 D1).
 LEGACY_BINDING_CONFIGS = (".claude/skills.config.json",)
 LEGACY_BINDING_KEYS = (
     ("specDir", ("artifacts", "specs")),
@@ -599,20 +604,21 @@ def read_bytes_bounded(path: Path) -> bytes | None:
 REMOTE = "origin"
 
 
-def run_git(root: Path, *args: str,
-            network: bool = False) -> tuple[int, bytes]:
+def run_git(root: Path, *args: str, network: bool = False,
+            input: bytes | None = None) -> tuple[int, bytes]:
     """`git -C root args`, and its exit code and stdout.
 
     A `network` call never prompts for credentials: it runs with
     `GIT_TERMINAL_PROMPT=0`, so an unauthenticated remote fails instead of
-    hanging. Every other call inherits the environment unchanged.
+    hanging. Every other call inherits the environment unchanged. `input`
+    is written to the command's stdin.
     """
     environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0"} if network \
         else None
     try:
         proc = subprocess.run(["git", "-C", str(root), *args],
                               capture_output=True, timeout=300,
-                              env=environment)
+                              env=environment, input=input)
     except (OSError, subprocess.SubprocessError):
         raise refuse("adopt_failure", "adopt.git.unavailable", "",
                      "git could not be started") from None
@@ -660,15 +666,14 @@ def tracked_inventory(root: Path) -> list[tuple[str, str]]:
     return sorted(inventory)
 
 
-def tree_inventory(root: Path, revision: str) -> list[tuple[str, str]]:
-    """Every path in the tree at `revision` with its git object id.
+def tree_records(root: Path, revision: str) -> list[tuple[str, str, str]]:
+    """Every path in the tree at `revision` as sorted `(path, mode, oid)`.
 
-    From `git ls-tree -r -z`, whose records are `<mode> <type> <object>\t<path>`:
-    the same `(path, object id)` shape `tracked_inventory` reads from the
-    index. A record that has no path or not exactly three head fields refuses
+    From `git ls-tree -r -z`, whose records are `<mode> <type> <object>\t<path>`.
+    A record that has no path or not exactly three head fields refuses
     `adopt.git.unparseable_tree`.
     """
-    inventory = []
+    records = []
     for record in split_nul(git_or_fail(root, "ls-tree", "-r", "-z",
                                         revision)):
         head, _, path = record.partition("\t")
@@ -676,8 +681,18 @@ def tree_inventory(root: Path, revision: str) -> list[tuple[str, str]]:
         if len(fields) != 3 or not path:
             raise refuse("adopt_failure", "adopt.git.unparseable_tree", "",
                          "a tree record could not be read")
-        inventory.append((path, fields[2]))
-    return sorted(inventory)
+        records.append((path, fields[0], fields[2]))
+    return sorted(records)
+
+
+def tree_inventory(root: Path, revision: str) -> list[tuple[str, str]]:
+    """Every path in the tree at `revision` with its git object id.
+
+    `tree_records` without the mode: the same `(path, object id)` shape
+    `tracked_inventory` reads from the index.
+    """
+    return [(path, object_id)
+            for path, _, object_id in tree_records(root, revision)]
 
 
 def has_remote(root: Path) -> bool:
