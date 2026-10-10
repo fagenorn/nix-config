@@ -1,5 +1,5 @@
-"""The bounded, read-only inspection of an adoption target, and its closed
-lifecycle vocabulary.
+"""The bounded inspection of an adoption target, and its closed lifecycle
+vocabulary.
 
 `adopt-project` owns adoption end to end; this module is the lower half it is
 built from — the closed sets every adoption verb dispatches over, the error
@@ -7,8 +7,10 @@ contract they refuse through, the content hashes, the path predicates that keep
 the inspection inside the target root and away from secret-shaped paths, and
 the four bounded git queries that are the whole of R4.2.
 
-It is imported, never run: no `main`, no argparse, and nothing that writes. It
-does not import `agent_tools.resolve_project` and never will (D26) — the resolver is
+It is imported, never run: no `main` and no argparse. Its one repository write
+is `fetch_pinned`'s update of a single `refs/remotes/origin/<branch>` ref, and
+`export_commit` writes only into the directory its caller names. It does not
+import `agent_tools.resolve_project` and never will (D26) — the resolver is
 reached only as a subprocess, by the entry point.
 
 A module of the `agent_tools` package, imported by `agent_tools.adopt_project` and
@@ -17,10 +19,13 @@ its sibling adoption modules.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
+import tarfile
 
 # --------------------------------------------------------------------------
 # Closed sets
@@ -510,16 +515,30 @@ def read_bytes_bounded(path: Path) -> bytes | None:
 # --------------------------------------------------------------------------
 # Git, as a child process
 #
-# The only process this module starts. Every query below is read-only; the
-# resolver is not among them, because it is reached by the entry point alone
+# The only process this module starts. Every query below is read-only except
+# `fetch_pinned`'s one remote-tracking ref update; the resolver is not among them, because it is reached by the entry point alone
 # and only ever as a subprocess at its absolute installed path (D26).
 # --------------------------------------------------------------------------
 
 
-def run_git(root: Path, *args: str) -> tuple[int, bytes]:
+# The one remote a registration reads from (D2): never configurable.
+REMOTE = "origin"
+
+
+def run_git(root: Path, *args: str,
+            network: bool = False) -> tuple[int, bytes]:
+    """`git -C root args`, and its exit code and stdout.
+
+    A `network` call never prompts for credentials: it runs with
+    `GIT_TERMINAL_PROMPT=0`, so an unauthenticated remote fails instead of
+    hanging. Every other call inherits the environment unchanged.
+    """
+    environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0"} if network \
+        else None
     try:
         proc = subprocess.run(["git", "-C", str(root), *args],
-                              capture_output=True, timeout=300)
+                              capture_output=True, timeout=300,
+                              env=environment)
     except (OSError, subprocess.SubprocessError):
         raise refuse("adopt_failure", "adopt.git.unavailable", "",
                      "git could not be started") from None
@@ -560,6 +579,112 @@ def tracked_inventory(root: Path) -> list[tuple[str, str]]:
                          "a tracked index record could not be read")
         inventory.append((path, fields[1]))
     return sorted(inventory)
+
+
+def tree_inventory(root: Path, revision: str) -> list[tuple[str, str]]:
+    """Every path in the tree at `revision` with its git object id.
+
+    From `git ls-tree -r -z`, whose records are `<mode> <type> <object>\t<path>`:
+    the same `(path, object id)` shape `tracked_inventory` reads from the
+    index. A record that has no path or not exactly three head fields refuses
+    `adopt.git.unparseable_tree`.
+    """
+    inventory = []
+    for record in split_nul(git_or_fail(root, "ls-tree", "-r", "-z",
+                                        revision)):
+        head, _, path = record.partition("\t")
+        fields = head.split()
+        if len(fields) != 3 or not path:
+            raise refuse("adopt_failure", "adopt.git.unparseable_tree", "",
+                         "a tree record could not be read")
+        inventory.append((path, fields[2]))
+    return sorted(inventory)
+
+
+def has_remote(root: Path) -> bool:
+    """Whether `origin` is a configured remote, from `git remote`."""
+    return REMOTE in git_or_fail(root, "remote").decode(
+        "utf-8", "surrogateescape").split()
+
+
+@dataclass(frozen=True)
+class RemoteHeads:
+    """What `origin` advertises: its default branch and every branch name.
+
+    `default` is the branch `HEAD` points at, and `None` when `HEAD` is not a
+    symref to a branch the remote also lists.
+    """
+
+    default: str | None
+    branches: frozenset[str]
+
+
+def remote_heads(root: Path) -> RemoteHeads:
+    """`origin`'s default branch and branch names, in one `git ls-remote`.
+
+    `git ls-remote --symref origin HEAD refs/heads/*`. A non-zero exit refuses
+    `adopt.git.remote_unreachable`.
+    """
+    code, out = run_git(root, "ls-remote", "--symref", REMOTE, "HEAD",
+                        "refs/heads/*", network=True)
+    if code != 0:
+        raise refuse("adopt_failure", "adopt.git.remote_unreachable", "",
+                     "the remote could not be listed")
+    target = None
+    branches = set()
+    for line in out.decode("utf-8", "surrogateescape").splitlines():
+        value, _, name = line.partition("\t")
+        if name == "HEAD" and value.startswith("ref: refs/heads/"):
+            target = value[len("ref: refs/heads/"):]
+        elif name.startswith("refs/heads/"):
+            branches.add(name[len("refs/heads/"):])
+    return RemoteHeads(
+        default=target if target in branches else None,
+        branches=frozenset(branches))
+
+
+def fetch_pinned(root: Path, branch: str) -> str:
+    """Fetch `origin`'s `branch` into its remote-tracking ref; its commit id.
+
+    The refspec is explicit and forced, and `--refmap=` discards every
+    configured `remote.origin.fetch` mapping, so nothing but
+    `refs/remotes/origin/<branch>` and fetched objects is written: no
+    `FETCH_HEAD`, no tags, no maintenance, no submodules (D4, D11). The id is
+    then read back with `git rev-parse --verify`. Either command failing
+    refuses `adopt.git.fetch_failed`.
+    """
+    tracking = f"refs/remotes/{REMOTE}/{branch}"
+    code, _ = run_git(
+        root, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+        "--no-auto-maintenance", "--no-recurse-submodules", "--refmap=",
+        REMOTE, f"+refs/heads/{branch}:{tracking}", network=True)
+    if code == 0:
+        code, out = run_git(root, "rev-parse", "--verify", "--quiet",
+                            f"{tracking}^{{commit}}")
+    if code != 0:
+        raise refuse("adopt_failure", "adopt.git.fetch_failed", "",
+                     "the remote branch could not be fetched")
+    return out.decode("ascii", "strict").strip()
+
+
+def export_commit(root: Path, commit: str, destination: Path) -> None:
+    """Extract the tracked files of `commit` into the new `destination`.
+
+    `git archive` to a sibling tarball, then the same bounded extraction the
+    cold-clone gate uses (`filter="data"`). A failed archive, tar error or OS
+    error refuses `adopt.git.export_failed`. `destination` must not exist.
+    """
+    archive = destination.with_name(destination.name + ".tar")
+    code, _ = run_git(root, "archive", "-o", str(archive), commit)
+    try:
+        if code != 0:
+            raise OSError("git archive did not succeed")
+        destination.mkdir()
+        with tarfile.open(archive) as bundle:
+            bundle.extractall(destination, filter="data")
+    except (tarfile.TarError, OSError):
+        raise refuse("adopt_failure", "adopt.git.export_failed", "",
+                     "the remote commit could not be exported") from None
 
 
 def targeted_ignored(root: Path, targets: tuple[str, ...]) -> list[str]:
@@ -691,9 +816,9 @@ def introducing_commit(root: Path, revision: str,
     return text.splitlines()[0] if text else None
 
 
-def commit_is_ancestor(root: Path, commit: str, branch: str) -> bool:
-    """Whether `commit` is reachable from `branch` (D19)."""
-    code, _ = run_git(root, "merge-base", "--is-ancestor", commit, branch)
+def commit_is_ancestor(root: Path, commit: str, revision: str) -> bool:
+    """Whether `commit` is reachable from `revision`, a commit id or ref (D19)."""
+    code, _ = run_git(root, "merge-base", "--is-ancestor", commit, revision)
     return code == 0
 
 

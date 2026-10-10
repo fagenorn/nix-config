@@ -21,28 +21,36 @@ from `adopt_inspection` is named in the `from` import below.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import contextlib
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+import tempfile
 
 from agent_tools import agent_platform
 from agent_tools.adopt_inspection import (
     AdoptError,
     EVIDENCE_RECORD_DIR,
+    REMOTE,
     VERIFY_RESULTS,
     blob_at,
     classify,
     commit_is_ancestor,
     evidence_records_at,
+    export_commit,
+    fetch_pinned,
     git_or_fail,
+    has_remote,
     introducing_commit,
     is_agent_path,
     parses_as_evidence_record,
     parses_as_migration_map,
     refuse,
+    remote_heads,
     resolver_error_code,
     resolver_violation_pointers,
     tracked_inventory,
+    tree_inventory,
     verify_check_entry,
 )
 
@@ -77,6 +85,61 @@ def head_source(root: Path) -> VerificationSource:
     return VerificationSource(
         ref="HEAD", commit=commit, resolver_root=root,
         inventory=tracked_inventory(root), branch=None)
+
+
+@contextlib.contextmanager
+def remote_source(root: Path,
+                  run_resolver: Resolver) -> Iterator[VerificationSource]:
+    """The source `--register` reads: `origin`'s default branch, fetched.
+
+    The default branch `D` is fetched once and pinned to its commit `R`, then
+    exported into a scratch directory the resolver is run on, so nothing in the
+    checkout can answer for the remote. The scratch directory lives as long as
+    the caller's `with` block and is removed on success and on every refusal.
+    No `origin` refuses `not_integrated` with `adopt.registration.no_remote`,
+    and an `origin` that advertises no default branch with
+    `adopt.registration.remote_default_unknown`.
+    """
+    if not has_remote(root):
+        raise refuse(
+            "not_integrated", "adopt.registration.no_remote", "",
+            "the repository has no `origin` remote to register against")
+    default = remote_heads(root).default
+    if default is None:
+        raise refuse(
+            "not_integrated", "adopt.registration.remote_default_unknown", "",
+            "`origin` does not name a default branch it also lists")
+    with tempfile.TemporaryDirectory() as scratch:
+        pinned = fetch_pinned(root, default)
+        exported = Path(scratch) / "default"
+        export_commit(root, pinned, exported)
+        exit_code, payload = run_resolver(exported, "resolve")
+        named = integration_branch(payload) if exit_code == 0 else None
+        # Task 3 replaces this refusal with a hop to the named branch.
+        if named is not None and named != default:
+            raise refuse(
+                "not_integrated",
+                "adopt.registration.integration_branch_unresolved", "",
+                "the contract at the remote default branch names another "
+                "integration branch")
+        yield VerificationSource(
+            ref=f"refs/remotes/{REMOTE}/{default}", commit=pinned,
+            resolver_root=exported, inventory=tree_inventory(root, pinned),
+            branch=default)
+
+
+def require_integrated(verification: Verification) -> None:
+    """Refuse `not_integrated` when the pinned commit carries no adoption.
+
+    Called only under `--register`, before `registration_allowed`: a remote
+    revision with no adoption evidence record is not an integrated adoption
+    whatever else the report says (D7).
+    """
+    if not verification.evidence_candidates:
+        raise refuse(
+            "not_integrated", "adopt.registration.not_integrated", "",
+            "the remote integration branch carries no adoption evidence "
+            "record")
 
 
 def registration_allowed(result: str) -> bool:
@@ -170,7 +233,10 @@ class Verification:
 
     `report` is exactly what is printed. `resolve_payload` is kept beside it
     rather than folded in, because the integration branch registration checks
-    is contract policy the report has no business publishing.
+    is contract policy the report has no business publishing. `source` is the
+    pinned revision the report was read at, which registration walks ancestry
+    from, and `evidence_candidates` every adoption evidence record path found
+    in it, which `require_integrated` reads: an empty list is no adoption.
     """
 
     def __init__(self, report: dict, resolve_payload: object,
@@ -298,26 +364,33 @@ def verify_repository(root: Path, source: VerificationSource,
 def register_project(root: Path, verification: Verification) -> None:
     """Record `{project_id, root}` in the fleet, or refuse and change nothing.
 
-    The ancestry check comes first because it is the ordering #67 documents and
-    D19 makes checked: a commit that lives only on a feature branch names a
-    state the integration branch does not have. The duplicate check and the
+    The ancestry check is the ordering #67 documents and D19 makes checked: a
+    commit that lives only on a feature branch names a state the integration
+    branch does not have. It is walked from the pinned commit id of the fetched
+    remote branch, never a branch name (D7). The duplicate check and the
     replacement then happen inside one exclusive lock over a registry reread
     underneath it, so two registrations racing under one `HOME` serialize
     instead of one overwriting the other.
     """
     report = verification.report
-    branch = integration_branch(verification.resolve_payload)
+    source = verification.source
     project_id = report["project_id"]
     commit = report["adoption_commit"]
+    branch = integration_branch(verification.resolve_payload)
     if branch is None or project_id is None or commit is None:
         raise refuse(
             "adopt_failure", "adopt.registration.incomplete", "",
             "registration needs a project id, an adoption commit and a "
             "declared integration branch")
-    if not commit_is_ancestor(root, commit, branch):
+    if source.branch is None or branch != source.branch:
+        raise refuse(
+            "not_integrated", "adopt.registration.integration_branch_unresolved",
+            "", "the contract's integration branch is not the remote branch "
+            "the verification read")
+    if not commit_is_ancestor(root, commit, source.commit):
         raise refuse(
             "not_integrated", "adopt.registration.not_integrated", "",
-            "the adoption commit is not reachable from the contract's "
+            "the adoption commit is not reachable from the remote "
             "integration branch")
     try:
         with agent_platform.registry_transaction() as entries:
