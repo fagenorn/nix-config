@@ -26,8 +26,9 @@ scope — outside the target checkout, so it cannot appear in the target's own
 gate leaves no commit and retains the worktree with its evidence (D17); a
 green run produces exactly one commit on one new branch and removes the
 worktree only after proving that the commit changes exactly the paths the plan
-declared and that the ref carries it. It never pushes, never merges and never
-writes the fleet registry.
+declared, that no Markdown file in it has more non-resolving relative links
+than its pre-move counterpart, and that the ref carries it. It never pushes,
+never merges and never writes the fleet registry.
 
 `verify` answers the conformance question read-only against one pinned
 revision — the contract resolves, every projection is in sync, no agent path is
@@ -574,11 +575,12 @@ def command_apply(args: argparse.Namespace) -> int:
 
     commit = adopt_inspection.git_or_fail(
         worktree, "rev-parse", "HEAD").decode("ascii", "strict").strip()
-    # The gates judged the worktree before the commit; these two judge the
-    # commit itself. Content first — a verification command or a `pre-commit`
-    # hook can stage after the last gate passed — then the ref.
+    # The gates judged the worktree before the commit; these judge the commit
+    # itself. Content and links first — a verification command or a
+    # `pre-commit` hook can stage after the last gate passed — then the ref.
     try:
         adopt_apply.prove_commit_content(worktree, commit, changes)
+        adopt_apply.prove_commit_links(worktree, commit, changes)
     except adopt_inspection.AdoptError as error:
         adopt_apply.retain_failure(digest, document, worktree, branch, gates,
                                    error.repair_id)

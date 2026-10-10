@@ -2,11 +2,12 @@
 
 Everything `adopt-project apply` is made of below its command function: the
 stored document's loader, the validation of every caller-reachable operation,
-the typed execution of the operations themselves, the six pre-commit gates and
-their ordered run, the fixed commit message (D28), the two proofs taken over
-the commit once it exists — that it changes exactly the planned paths, and
-that the branch carries it and nothing else — and the retention of a failed
-attempt beside its worktree (D17).
+the typed execution of the operations themselves, the seven pre-commit gates
+and their ordered run, the fixed commit message (D28), the three proofs taken
+over the commit once it exists — that it changes exactly the planned paths,
+that no Markdown file in it has more non-resolving relative links than its
+pre-move counterpart, and that the branch carries it and nothing else — and
+the retention of a failed attempt beside its worktree (D17).
 
 Every refusal here mutates nothing, and nothing here trusts a stored
 operation: the plan id authenticates the plan's *inputs*, and the entry point
@@ -35,6 +36,13 @@ import tarfile
 import tempfile
 
 from agent_tools import agent_platform
+from agent_tools.adopt_links import (
+    Tree,
+    broken_count,
+    index_records,
+    markdown_texts,
+    tree_records,
+)
 from agent_tools.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
     AdoptError,
@@ -232,10 +240,13 @@ def expected_status(operations: list[dict]) -> tuple[list[tuple], set[tuple]]:
 
     A projection regeneration is idempotent: it is a no-op on a conformant
     source and a rewrite otherwise, so it is the one operation whose status
-    entry is permitted rather than demanded.
+    entry is permitted rather than demanded. A write onto a move's target is
+    that move's content, so it is satisfied by the move's record.
     """
     required: list[tuple] = []
     optional: set[tuple] = set()
+    moved = {operation["targets"][0]
+             for operation in operations if operation["op"] == "git-mv"}
     for operation in operations:
         kind = operation["op"]
         if kind == "git-mv":
@@ -243,6 +254,8 @@ def expected_status(operations: list[dict]) -> tuple[list[tuple], set[tuple]]:
                                     operation["sources"][0])))
         elif kind == "write-file":
             target = operation["targets"][0]
+            if target in moved:
+                continue
             required.append(
                 ("A " if operation["before"] is None else "M ", (target,)))
         elif kind == "delete-file":
@@ -253,6 +266,29 @@ def expected_status(operations: list[dict]) -> tuple[list[tuple], set[tuple]]:
         else:
             raise ValueError(f"unknown operation kind: {kind!r}")
     return required, optional
+
+
+def fold_split_renames(actual: list[tuple],
+                       required: list[tuple]) -> list[tuple]:
+    """`actual` with each split rename the plan demanded joined back up.
+
+    A moved Markdown file whose links were rewritten may be too dissimilar for
+    git's rename detection, which then reports the planned move as a deletion
+    plus an addition. For every required rename absent from `actual` while both
+    halves are present, the two records become the rename, at the deletion's
+    position; every other record is returned unchanged and in order (D16).
+    """
+    folded = list(actual)
+    for record in required:
+        code, paths = record
+        if code != "R " or len(paths) != 2 or record in folded:
+            continue
+        target, source = paths
+        deletion, addition = ("D ", (source,)), ("A ", (target,))
+        if deletion in folded and addition in folded:
+            folded[folded.index(deletion)] = record
+            folded.remove(addition)
+    return folded
 
 
 def staged_object_id(root: Path, relative: str) -> str | None:
@@ -359,7 +395,7 @@ class GateRun:
 
 def gate_worktree_status_matches(run: GateRun) -> bool:
     required, optional = expected_status(run.operations)
-    actual = status_records(run.worktree)
+    actual = fold_split_renames(status_records(run.worktree), required)
     remaining = list(required)
     for record in actual:
         if record in remaining:
@@ -379,6 +415,44 @@ def gate_worktree_status_matches(run: GateRun) -> bool:
         if record not in optional:
             return False
     return not remaining
+
+
+def new_broken_link_files(worktree: Path, base: list[tuple[str, str, str]],
+                          result: list[tuple[str, str, str]],
+                          operations: list[dict]) -> list[str]:
+    """The result paths with more non-resolving relative links than before.
+
+    Each side is judged against its own tree: the base's links against the
+    base's tracked paths, the result's against the result's. A moved file is
+    compared with the file it came from, through the plan's `git-mv`
+    operations, and a result file with no base counterpart is compared with
+    zero. Sorted, so the gate and the post-commit proof — which both call this
+    — name the same files from the same records (D9).
+    """
+    origin = {operation["targets"][0]: operation["sources"][0]
+              for operation in operations if operation["op"] == "git-mv"}
+    base_tree = Tree(path for path, _, _ in base)
+    result_tree = Tree(path for path, _, _ in result)
+    base_texts = markdown_texts(worktree, base)
+    return sorted(
+        path for path, text in markdown_texts(worktree, result).items()
+        if broken_count(path, text, result_tree) > (
+            broken_count(origin.get(path, path),
+                         base_texts[origin.get(path, path)], base_tree)
+            if origin.get(path, path) in base_texts else 0))
+
+
+def gate_no_new_broken_link(run: GateRun) -> bool:
+    """No Markdown file in the staged index gains a non-resolving link.
+
+    The base is the worktree's `HEAD` — the plan's base revision until the
+    commit exists — and the result is the index, each counted against its own
+    tree's tracked paths. It stays a gate so that a plan whose rewrites cannot
+    keep a link resolving refuses before any commit exists (D9).
+    """
+    return not new_broken_link_files(
+        run.worktree, tree_records(run.worktree, "HEAD"),
+        index_records(run.worktree), run.operations)
 
 
 def gate_projections_in_sync(run: GateRun) -> bool:
@@ -479,6 +553,7 @@ COMMIT_GATE_CHECKS = {
     "worktree-status-matches-operations": gate_worktree_status_matches,
     "projections-in-sync": gate_projections_in_sync,
     "no-unclassified-agent-path": gate_no_unclassified_agent_path,
+    "no-new-broken-link": gate_no_new_broken_link,
     "cold-clone-resolves": gate_cold_clone_resolves,
     "resolve-capabilities-available": gate_resolve_capabilities_available,
     "workflow-verification-commands": gate_workflow_verification_commands,
@@ -609,6 +684,24 @@ def prove_commit_content(worktree: Path, commit: str,
             "verification_failed", "adopt.commit.unplanned_content", "",
             "the adoption commit does not change exactly the paths the "
             "plan's operations declare")
+
+
+def prove_commit_links(worktree: Path, commit: str,
+                       operations: list[dict]) -> None:
+    """No Markdown file in the commit has more broken links than it did.
+
+    The verification commands run after the link gate and a `pre-commit` hook
+    after every gate, and either can edit a Markdown file the plan already
+    writes without changing the path set `prove_commit_content` reads. So the
+    commit's own links are counted against its parent's, by the same rule the
+    gate applies to the index (D17).
+    """
+    if new_broken_link_files(worktree, tree_records(worktree, commit + "^"),
+                             tree_records(worktree, commit), operations):
+        raise refuse(
+            "verification_failed", "adopt.commit.new_broken_link", "",
+            "the adoption commit carries more non-resolving relative "
+            "Markdown links in a file than its pre-move counterpart had")
 
 
 def prove_branch_carries_commit(root: Path, worktree: Path, branch: str,

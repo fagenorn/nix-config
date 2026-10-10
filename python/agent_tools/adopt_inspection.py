@@ -145,6 +145,7 @@ COMMIT_GATES = (
     "worktree-status-matches-operations",
     "projections-in-sync",
     "no-unclassified-agent-path",
+    "no-new-broken-link",
     "cold-clone-resolves",
     "resolve-capabilities-available",
     "workflow-verification-commands",
