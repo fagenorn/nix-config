@@ -525,6 +525,26 @@ class LifecycleHarness:
             "--request-file", request_path, ok=ok,
         )
 
+    def direct_run_id(self, issue, sequence):
+        """The run id `direct-owner` gives direct run `sequence` of `issue`."""
+        return f"direct-{issue}-{sequence:06d}"
+
+    def run_dirs(self):
+        """The names of the run directories under `workflows`."""
+        return sorted(path.name for path in self.workflows_dir.iterdir() if path.is_dir())
+
+    def mint_direct_ledger(self, state, issue, sequence, prior_run):
+        """Install `state` as direct run `sequence` of `issue` beside an empty `state.lock`;
+        `prior_run` is unused."""
+        run_id = self.direct_run_id(issue, sequence)
+        run_dir = self.workflows_dir / run_id
+        run_dir.mkdir()
+        (run_dir / "state.lock").write_bytes(b"")
+        (run_dir / "state.json").write_text(json.dumps(
+            {**state, "run_id": run_id}, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8")
+        return run_dir
+
     def direct_state_path(self, run_id):
         return self.workflows_dir / run_id / "state.json"
 
@@ -541,7 +561,7 @@ class LifecycleHarness:
         selected = self.direct_owner(**common, tracker=tracker)
         self.assertEqual(selected, {
             "interface_version": 1, "kind": "observe", "issue": issue,
-            "run_id": f"direct-{issue}-000001",
+            "run_id": self.direct_run_id(issue, 1),
             "requirements": [{"kind": "candidate_worktree"}],
         })
         return self.direct_owner(
@@ -3911,7 +3931,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(owner, {
             "interface_version": 1, "kind": "owner",
             "ledger_repo_root": str(self.root.resolve()),
-            "run_id": "direct-73-000001", "issue": 73, "attempt": 1,
+            "run_id": self.direct_run_id(73, 1), "issue": 73, "attempt": 1,
             "owner": "73:1", "action_id": "73:1:1", "launch_kind": "spawn",
             "worktree": worktree, "handoff_path": None,
             "deadline_at": "2026-08-20T13:00:00Z",
@@ -3989,7 +4009,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(rejected.stdout, "")
         self.assertIn("attempt deadline is out of range", rejected.stderr)
         self.assertNotIn("Traceback", rejected.stderr)
-        self.assertFalse((self.workflows_dir / "direct-73-000001").exists())
+        self.assertFalse((self.workflows_dir / self.direct_run_id(73, 1)).exists())
 
     def test_direct_owner_requires_explicit_unavailable_authorization_to_resume_active(self):
         owner = self.acquire_direct()
@@ -4011,7 +4031,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(
             (resumed["run_id"], resumed["attempt"], resumed["owner"],
              resumed["action_id"], resumed["launch_kind"], resumed["deadline_at"]),
-            ("direct-73-000001", 1, "73:1", "73:1:2", "resume",
+            (self.direct_run_id(73, 1), 1, "73:1", "73:1:2", "resume",
              "2026-08-20T13:00:00Z"),
         )
         persisted = json.loads(state_path.read_text())["issues"]["73"]["attempts"][0]
@@ -4267,8 +4287,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             self.assertEqual(len(attempts), 1)
             self.assertEqual(len(attempts[0]["launches"]), 2)
             self.assertEqual(attempts[0]["worktree"], str(worktree))
-            runs = sorted(path.name for path in self.workflows_dir.glob("direct-73-*"))
-            self.assertEqual(runs, [owner["run_id"]])
+            self.assertEqual(self.run_dirs(), [owner["run_id"]])
 
     def test_direct_owner_retries_owner_failure_then_replays_terminal_and_starts_new_run(self):
         owner = self.acquire_direct()
@@ -4307,7 +4326,8 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         next_needed = self.direct_owner(
             now="2026-08-20T10:33:00Z", new_run=True, tracker=tracker,
         )
-        self.assertEqual(next_needed["run_id"], "direct-73-000002")
+        second = self.direct_run_id(73, 2)
+        self.assertEqual(next_needed["run_id"], second)
         self.assertEqual(next_needed["requirements"], [{
             "kind": "recorded_worktree", "path": owner["worktree"],
         }])
@@ -4320,10 +4340,10 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(
             (renewed["run_id"], renewed["attempt"], renewed["launch_kind"],
              renewed["worktree"]),
-            ("direct-73-000002", 1, "spawn", owner["worktree"]),
+            (second, 1, "spawn", owner["worktree"]),
         )
-        self.assertTrue(self.direct_state_path("direct-73-000001").exists())
-        self.assertTrue(self.direct_state_path("direct-73-000002").exists())
+        self.assertTrue(self.direct_state_path(owner["run_id"]).exists())
+        self.assertTrue(self.direct_state_path(second).exists())
 
     def test_direct_new_run_tracker_terminals_do_not_leak_uncreated_run_id(self):
         owner = self.acquire_direct()
@@ -4382,10 +4402,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                     "blockers": blockers, "result": None,
                     "reentry": "/from-issue 73 --auto",
                 })
-                self.assertFalse(any(
-                    path.name.startswith("direct-73-")
-                    for path in self.workflows_dir.iterdir()
-                ))
+                self.assertEqual(self.run_dirs(), [])
 
     def test_reserved_direct_ids_are_closed_to_init_and_control_but_open_to_owner_mutations(self):
         request_path = self.root / "control-reserved.json"
@@ -4461,15 +4478,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         owner = self.acquire_direct()
         first_dir = self.workflows_dir / owner["run_id"]
         first_state = json.loads((first_dir / "state.json").read_text())
-        second_dir = self.workflows_dir / "direct-73-000002"
-        second_dir.mkdir()
-        (second_dir / "state.lock").write_bytes(b"")
-        second_state = copy.deepcopy(first_state)
-        second_state["run_id"] = "direct-73-000002"
-        (second_dir / "state.json").write_text(
-            json.dumps(second_state, sort_keys=True, separators=(",", ":")) + "\n",
-            encoding="utf-8",
-        )
+        second_dir = self.mint_direct_ledger(first_state, 73, 2, owner["run_id"])
         snapshots = {
             path: path.read_bytes()
             for path in (first_dir / "state.json", second_dir / "state.json")
@@ -4517,10 +4526,9 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(sorted(item[2] for item in completed), [0, 2])
         successful = [json.loads(stdout) for stdout, _, code in completed if code == 0]
         self.assertEqual(len(successful), 1)
-        self.assertEqual(successful[0]["run_id"], "direct-73-000001")
-        runs = sorted(path.name for path in self.workflows_dir.iterdir()
-                      if path.name.startswith("direct-73-") and path.is_dir())
-        self.assertEqual(runs, ["direct-73-000001"])
+        self.assertEqual(successful[0]["run_id"], self.direct_run_id(73, 1))
+        runs = self.run_dirs()
+        self.assertEqual(runs, [self.direct_run_id(73, 1)])
         state = json.loads(self.direct_state_path(runs[0]).read_text())
         self.assertEqual(len(state["issues"]["73"]["attempts"]), 1)
         self.assertEqual(len(state["issues"]["73"]["attempts"][0]["launches"]), 1)
@@ -4645,7 +4653,6 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         owner = self.acquire_direct()
         active = json.loads(self.direct_state_path(owner["run_id"]).read_text())
         terminal = copy.deepcopy(active)
-        terminal["run_id"] = "direct-73-000002"
         terminal["updated_at"] = "2026-08-20T10:01:00Z"
         attempt = terminal["issues"]["73"]["attempts"][0]
         result = self.merged_result(73)
@@ -4654,19 +4661,10 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "finished_at": "2026-08-20T10:01:00Z", "result_source": "owner",
         })
         terminal["issues"]["73"]["outcome"] = copy.deepcopy(result)
-        second = self.workflows_dir / "direct-73-000002"
-        second.mkdir()
-        (second / "state.lock").write_bytes(b"")
-        (second / "state.json").write_text(
-            json.dumps(terminal, sort_keys=True, separators=(",", ":")) + "\n",
-            encoding="utf-8",
-        )
+        second = self.mint_direct_ledger(terminal, 73, 2, owner["run_id"])
         snapshots = {
             path: path.read_bytes()
-            for path in (
-                self.direct_state_path("direct-73-000001"),
-                self.direct_state_path("direct-73-000002"),
-            )
+            for path in (self.direct_state_path(owner["run_id"]), second / "state.json")
         }
         rejected = self.direct_owner_raw(ok=False)
         self.assertEqual(rejected.returncode, 2)
@@ -4878,7 +4876,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             }),
         )
         self.assertEqual(renewed["kind"], "owner")
-        self.assertEqual(renewed["run_id"], "direct-31-000002")
+        self.assertEqual(renewed["run_id"], self.direct_run_id(31, 2))
         successor = json.loads(
             self.direct_state_path(renewed["run_id"]).read_text()
         )
@@ -5107,10 +5105,10 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         )
         self.assertEqual(needed, {
             "interface_version": 1, "kind": "observe", "issue": 33,
-            "run_id": "direct-33-000001",
+            "run_id": self.direct_run_id(33, 1),
             "requirements": [{"kind": "forge_pr", "path": "issue-33-"}],
         })
-        self.assertFalse((self.workflows_dir / "direct-33-000001").exists())
+        self.assertFalse((self.workflows_dir / self.direct_run_id(33, 1)).exists())
         # An observed forge without a pull request continues the ladder.
         self.assertEqual(
             self.direct_owner(
@@ -7864,7 +7862,7 @@ class PhaseGateReplyTest(LifecycleHarness, unittest.TestCase):
         reply = self.progress(issue=191, phase=1, now="2026-08-20T10:05:00Z",
                               remainder_self_contained=True)
         self.assertEqual(reply, {
-            "interface_version": 2, "kind": "phase_gate", "run_id": "direct-191-000001",
+            "interface_version": 2, "kind": "phase_gate", "run_id": self.direct_run_id(191, 1),
             "issue": 191, "custody": {"kind": "implementation", "attempt": 1,
                                       "launch": 1, "action_id": "191:1:1"},
             "action": "delegate", "handoff_path": None})
