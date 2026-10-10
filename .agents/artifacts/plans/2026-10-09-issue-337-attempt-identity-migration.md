@@ -40,7 +40,7 @@ Measured at `cd7c09f7` (Tasks 1–5 done), `git diff -U10 907dba23...cd7c09f7` p
 
 `review-package` packs whole per-file `-U10` records, plan and spec files included, into at most 8 members of at most 65536 bytes and 524288 in all, so 15+ files fit while no record exceeds 65536. At the amendment's parent it reports `complete`: 7 members, largest 64674, total 398606; condensing the completed members (D35) frees more.
 
-Remaining growth (estimates): Task 6 adds about 3800 bytes to `workflow-state.py` (to about 58000, under the 60000 ceiling), about 7000 to `attempt_store.py` and about 18000 to `test_attempt_migration.py`; Task 7 brings `test_attempt_migration.py` to about 45000; Task 8 adds 8 small records, about 47000 bytes in all. The forecast below carries these bounds per path for `review-feasibility project` (D36). Fallback slices: Tasks 1–5 and Tasks 6–8.
+Remaining growth (estimates): Task 6 adds about 3800 bytes to `workflow-state.py` (to about 58000, under the 60000 ceiling), about 7000 to `attempt_store.py` and about 18000 to `test_attempt_migration.py`; Task 7 brings `test_attempt_migration.py` to about 45000; Task 8 adds 8 small records, about 47000 bytes in all. The forecast below carries these bounds per path for `review-feasibility project` (D36). Fallback slices: Tasks 1–5 and Tasks 6–8. At `50046121`, `--completed-through 5` projects `complete`: 8 members, largest 65503, total 451217.
 
 ## Task index
 
