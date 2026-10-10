@@ -273,6 +273,11 @@ class PathReferencePlanTest(AdoptTestCase):
                       "retained 0, open 0\n", out)
 ```
 
+Two further cases join `PathReferencePlanTest` (standards review PR-S1, PR-S2); write them from the fixture builders above, in the style of the cases already listed:
+
+- `test_a_reference_to_an_answered_candidate_is_asked_in_either_answer_order` — a fixture built with `candidate_repo` holding one unclassified tracked candidate plus one tracked non-Markdown file whose only path literal names that candidate. With no answer the plan holds the `candidate-class` question and no `path-reference` question. Answering `archive-history` alone opens exactly one `path-reference` question for the literal and leaves the plan `draft`. Supplying the `candidate-class` and the `path-reference` answers together, once in each `--answer` order on the command line, returns the same `path_references` rows and the same `plan_id` (D12).
+- `test_a_reference_target_any_other_operation_names_is_a_derivation_bug` — in-process, modelled on `test_a_markdown_file_any_other_operation_names_is_a_derivation_bug`: `check_reference_writes` accepts one `write-file` with `sources == targets == [target]`, and raises `ValueError` for each of: no operation naming the target, two `write-file` operations naming it, a `delete-file` (or move) naming it beside the write, and a `write-file` whose `sources` and `targets` differ (D9).
+
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run: `env PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_adopt_project.py -k PathReferencePlanTest -k DocumentShapeTest -k test_the_question_set_is_closed`

@@ -47,7 +47,7 @@ Task 3 — `apply` commits the answered references, and the contract is document
 | AC2 | code (classified) | Task 3 | `test_adopt_apply.py`: `PathReferenceApplyTest.test_the_extended_script_passes_on_the_adopt_commit_as_on_base` (with `test_a_retained_reference_leaves_the_check_failing`) |
 | AC3 | code (classified) | Task 2 | `test_adopt_project.py`: `PathReferencePlanTest.test_markdown_rewriting_is_unchanged_and_other_files_are_untouched` (with Task 3's byte-identity assertion on the unrelated script and the unedited issue-345 suites `LinkRewritePlanTest`, `LinkRewriteApplyTest`) |
 | AC4 | code (classified) | Task 2 | `test_adopt_project.py`: `PathReferencePlanTest.test_the_answer_is_covered_by_the_plan_id` (with Task 3's `PathReferenceApplyTest.test_the_evidence_record_lists_the_answer_and_the_row`) |
-| AC5 | code (classified) | Task 3 | `just agent-workflow-tests` passes on the final head, run by sdd's final gate after Task 3 (Tasks 1–3's suites already green) |
+| AC5 | evidence (classified) | Task 3 | Command `just agent-workflow-tests`, run on the final head after Task 3 by sdd's final gate; threshold: exit code `0` |
 
 ## Decisions
 
@@ -58,3 +58,11 @@ Task 3 — `apply` commits the answered references, and the contract is document
 - The `path_references` rows, the evidence record and `plan_id`: D8. `write-file` placement and the single-writer check: D9.
 
 ---
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, fresh isolated read-only thread), base `02d2f378ad8c4abbb8e3a3960b4c93b10879bd6b`, no fallback, no focus. Findings: 0 blocking, 3 should-fix, 0 discussion; accepted 3, rejected 0, deferred 0. Each was verified against the live worktree before it was applied.
+
+- PR-S1 (accepted): Task 2 gains a case for a reference created by a candidate answer, checked in both answer orders.
+- PR-S2 (accepted): Task 2 gains rejection cases for `check_reference_writes`.
+- PR-S3 (accepted): AC5 is classified as evidence, with its command, condition and threshold.
