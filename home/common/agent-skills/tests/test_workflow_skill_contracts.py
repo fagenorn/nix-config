@@ -74,6 +74,12 @@ LIFECYCLE_DOCS = (*sorted((REPO_ROOT / "home/common/agent-skills/skills/from-iss
 # no subagent-launch tool, spelled once for the module (per D4).
 CAPABILITY_GAP_LINE = "capability_gap: agent_dispatch"
 DELEGATED_RETURN_LINE = "Delegated owner: return the ship handoff"
+FROM_ISSUE_EVALS = FROM_ISSUE_DIR / "evals/evals.json"
+DELEGATED_SHIP_EVALS = (
+    "delegated-owner-returns-ship-handoff",
+    "delegating-owner-handles-delegated-return",
+    "no-subagent-launch-ships-inline",
+)
 INPUT_FLAG_RE = re.compile(r"(--request-file|--checkpoint-file|--summary-file|--input)\s+(\S+)")
 V2_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "attempt_budget_minutes",
     "new_run", "owner_unavailable", "tracker", "worktree", "forge", "delivery_contract",
@@ -973,6 +979,17 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             action, "id=from-issue-phase-delegate", f"`{DELEGATED_RETURN_LINE}`",
             "--boundary workflow-response", "--boundary ship-handoff",
             "workflow-state progress", "id=from-issue-ledger-remainder")
+
+    def test_from_issue_evals_cover_the_delegated_ship_route(self):
+        # #352 D8: three plan-only cases, two at orchestrated depth.
+        cases = {case["name"]: case
+                 for case in json.loads(FROM_ISSUE_EVALS.read_text(encoding="utf-8"))["evals"]}
+        for name in DELEGATED_SHIP_EVALS:
+            with self.subTest(case=name):
+                self.assertIn(name, cases)
+                self.assertEqual(cases[name]["mode"], "plan-only")
+                self.assertTrue(cases[name]["prompt"].strip())
+                self.assertTrue(cases[name]["expected_output"].strip())
 
     def test_from_issue_phase_seven_ships_inline_on_the_dispatch_gap(self):
         # The fallback ends in the suspension procedure, never a direct
