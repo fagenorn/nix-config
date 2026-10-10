@@ -945,9 +945,9 @@ class LifecycleHarness:
         holding the old `stopped`/`result_source="expiry"` shape must keep
         loading and keep driving the retry ladder and the provisional-result
         override, so the tests that pin those rules seed the record directly.
-        `prior_schema` writes it under schema 2, without the admission block
-        and the delivery fields — the on-disk shape a live run carries across
-        deploy.
+        `prior_schema` installs the ledger as schema 2 via `install_legacy`
+        under `orchestrate-<issue>`, rebinding `self.run_id` — the on-disk
+        shape a live run carries across deploy.
         """
         state = self.read_state()
         issue_state = state["issues"][str(issue)]
@@ -4457,6 +4457,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                 "--now", "2026-08-20T10:00:00Z",
             )
             zero_id = json.loads(initialized.stdout)["run_id"]
+            self.assertEqual(zero_id, "direct-73-000000")
             self.assertEqual(json.loads(initialized.stdout), {
                 "interface_version": 2, "kind": "workflow_bootstrap",
                 "run_id": zero_id, "requirements": [],
