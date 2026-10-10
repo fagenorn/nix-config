@@ -686,5 +686,30 @@ class ConcurrencyKeysTest(StoreCase):
         self.assertIn("unknown event type 'lease_renewed'", str(caught.exception))
 
 
+class LookupTest(StoreCase):
+    def test_lookup_reads_the_index_and_writes_nothing(self):
+        self.assertIsNone(self.store.lookup("demo:none"))
+        self.assertEqual(self.tree(), [])
+        created = self.store.create("demo:a", SUBJECT, concurrency_keys=KEYS,
+                                    proof=EMPTY_PROOF, recovery=EMPTY_RECOVERY,
+                                    authority_class=AUTHORITY)
+        before = {path: (self.root / path).read_bytes() if (self.root / path).is_file()
+                  else None for path in self.tree()}
+        self.assertEqual(self.store.lookup("demo:a"), created.transaction_id)
+        self.assertIsNone(self.store.lookup("demo:b"))
+        self.assertEqual({path: (self.root / path).read_bytes() if (self.root / path).is_file()
+                          else None for path in self.tree()}, before)
+
+    def test_a_bad_key_or_entry_is_state_invalid(self):
+        for key in ("", None, 7):
+            with self.subTest(key=key), self.assertRaises(StateInvalid):
+                self.store.lookup(key)
+        self.store.create("demo:a", SUBJECT, concurrency_keys=KEYS, proof=EMPTY_PROOF,
+                          recovery=EMPTY_RECOVERY, authority_class=AUTHORITY)
+        self.index_path("demo:a").write_text("{}")
+        with self.assertRaises(StateInvalid):
+            self.store.lookup("demo:a")
+
+
 if __name__ == "__main__":
     unittest.main()

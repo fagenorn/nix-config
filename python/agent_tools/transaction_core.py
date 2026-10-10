@@ -308,6 +308,13 @@ class TransactionStore:
             "type": "transitioned", "from": source, "to": target, "reason": reason,
             "external_state": external_state}])
 
+    def lookup(self, creation_key: str) -> str | None:
+        """The id `creation_key`'s index entry names, or None; reads the index as `create`
+        does and writes, creates and locks nothing (#337 D2)."""
+        if type(creation_key) is not str or not creation_key:
+            raise StateInvalid("creation_key is not a non-empty string")
+        return _read_index(self.root, creation_key)
+
     def create(self, creation_key: str, subject: dict, *, concurrency_keys: Collection[str],
                proof: dict, recovery: dict, authority_class: str) -> Transaction:
         """Create the transaction for `creation_key`, or return the one it already names.

@@ -113,6 +113,7 @@ agent-workflow-tests:
     tests/test_review_range.py \
     tests/test_verified_tree.py \
     tests/test_transaction_core.py \
+    tests/test_attempt_identity.py \
     tests/test_transaction_custody.py \
     tests/test_transaction_invocation.py \
     tests/test_transaction_plan.py \
