@@ -63,8 +63,8 @@ same destination, or one destination could sit inside another. The existing
 `no-existing-destination` gate widens: it fails when a planned destination
 exists on disk or sits under an existing file, **or** is the destination of
 more than one planned move, **or** is an ancestor of another planned
-destination. Its id, repair id (`adopt.destination.occupied`) and message
-stay; `READY_GATES` does not grow.
+destination. Its id and repair id (`adopt.destination.occupied`) stay and its message
+widens to name every failure (per D11); `READY_GATES` does not grow.
 
 ### The `candidate-class` question (per D3, D4, D7)
 
@@ -206,3 +206,4 @@ The existing `project-id` key-set pins stay green unchanged. AC3 is
 | D8 | `candidate-class` prose is three fixed module constants (basis, impact, one recommendation that covers both the answerable and the `value: null` case), and the human view prints `open candidate-class <subject> (answer: <value or none>): <recommendation>` | D35 fixed prose and the `NOTES` rule (no path in digest-adjacent prose); `question_recommendation(question_id)` keeps its one-argument signature; the operator needs the value to type `--answer` | A recommendation selected by provenance, which widens the D35 dispatch signature for one sentence; a human line without the value, which leaves the operator to read the JSON |
 | D9 | Answer validation runs in a fixed order over answers sorted by `(id, subject, value)` — id, duplicate subject, unmatched subject, value — and refuses on the first violation with pointer `/decisions/answered`; `apply` validates the stored `decisions.answered` shape immediately after loading the stored plan, before any other refusal | The bar's fail loud and deterministic refusal bytes (D12); `load_stored_plan` already owns stored-shape refusals as `adopt.plan.malformed` | Reporting every violation at once, which no caller consumes; validating stored answers inside `compose_plan`, which would surface a malformed store as an invalid answer instead of a malformed plan |
 | D10 | `no-existing-destination` also fails when one planned destination is a proper ancestor of another, or when an existing non-directory sits among a destination's ancestors; extends D2 | Standards review B1: distinct destinations can still demand that one path be both a file and a directory (`.claude/research/x.md/r.md` beside `.claude/specs/x.md`), so the plan reaches `ready` and `apply` fails creating the parent in `adopt_apply.execute_operation`; the bar's fail loud; `READY_GATES` is a published closed set (D2) | Exact-duplicate detection alone, which passes the nested case; a new gate id, rejected for D2's reason; leaving the conflict to `apply`, which fails only after the id was approved |
+| D11 | `no-existing-destination`'s message becomes "a planned destination already exists, sits under a file, or collides with another" | Task 1 review: the old text is false for the collision and nesting failures D2 and D10 add; the plan's Global Constraint that fixed strings describe the code as it behaves | Keeping the old message, which tells the operator a destination exists when none does |

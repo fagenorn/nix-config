@@ -608,7 +608,9 @@ GATE_MESSAGES = {
     "no-untracked-overlap":
         "an untracked file sits inside an inspected source or a planned "
         "destination",
-    "no-existing-destination": "a planned destination already exists",
+    "no-existing-destination": (
+        "a planned destination already exists, sits under a file, or "
+        "collides with another"),
     "move-sources-tracked": "a planned move source is not tracked",
     "no-secret-path-in-moves":
         "a secret-shaped path is a planned move source or target",
