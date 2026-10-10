@@ -21,10 +21,9 @@ is reviewed on its own.
 
 ## Trigger
 
-Before the merge, read `gh pr view <pr-num> --json state,headRefOid,mergeable`. The route runs
-when:
+Before the merge, read `gh pr view <pr-num> --json state,headRefOid,mergeable`. The route runs when:
 
-- the PR is open with `mergeable: CONFLICTING`, or `gh pr merge` was refused because the head
+- the PR is open with `mergeable: CONFLICTING`, or the merge was refused because the head
   conflicts with its base or is behind a base that requires an up-to-date head. A head merely
   behind a base with no such rule merges as it is;
 - the PR is open and its `headRefOid` is not the current selection's head but a sync run from
@@ -33,7 +32,7 @@ when:
   already landed**.
 
 `mergeable: UNKNOWN` means the provider has not computed it yet. It is no trigger: proceed to
-the merge, and if the merge is then refused, the first case applies.
+the merge; if it is then refused, the first case applies.
 
 ## Steps
 
@@ -55,7 +54,8 @@ landed.
    for an empty delta, and `merge-delta-clean` once every Blocking and Should-fix finding is
    applied and re-reviewed. Retain Minor and Discussion findings under Phase 5's durable
    Minor/Discussion detail.
-4. **Push.** Run `check-launch` (SKILL.md's `## Launch guard`), then `git push origin <branch>`.
+4. **Push.** Run `check-launch` (SKILL.md's `## Launch guard`), then
+   `git push origin <branch>` (`## gh hygiene`).
 5. **Wait for CI.** Run Phase 6's CI wait, with the reviewed head re-fixed to the pushed head.
 6. **Select.** For each merge of the sync run, oldest first, make `## Delivery loop`'s builder
    call with `--kind sync-selection`, from the installed `contract`, the current selection as

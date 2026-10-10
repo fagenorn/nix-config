@@ -27,7 +27,7 @@ carries as `historical_owner_result`.
 
 ## Merge exit code in a worktree
 
-`gh pr merge` runs local post-merge steps (check out the default branch, delete
+The merge runs local post-merge steps (check out the default branch, delete
 the local branch) that fail with `failed to run git: fatal: '<branch>' is already
 used by worktree at '<main-root>'` — a non-zero exit **after the merge already
 landed on the remote**. Retrying the merge or reporting failure on that exit

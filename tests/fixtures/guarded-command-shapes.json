@@ -1,0 +1,76 @@
+{
+  "anchor": "`## gh hygiene`",
+  "verbs": ["git push", "gh pr merge", "git branch -d"],
+  "values": {
+    "<branch>": "issue-351-topic",
+    "<pr-num>": "351",
+    "<resolved-repository>": "fagenorn/nix-config",
+    "<rendered subject>": "feature (#351)"
+  },
+  "skill_forms": [
+    {
+      "id": "push.first",
+      "template": "git push -u origin <branch>",
+      "sites": ["SKILL.md"],
+      "label": "push",
+      "bare": {"exit": 0},
+      "prefixed": {"exit": 0}
+    },
+    {
+      "id": "push.later",
+      "template": "git push origin <branch>",
+      "sites": ["REVIEW.md", "POST-SELECTION-SYNC.md"],
+      "label": "push",
+      "bare": {"exit": 0},
+      "prefixed": {"exit": 0}
+    },
+    {
+      "id": "merge.subject",
+      "template": "gh pr merge <pr-num> --repo <resolved-repository> --merge --subject \"<rendered subject>\" --delete-branch",
+      "sites": ["SKILL.md"],
+      "label": "merge",
+      "bare": {"exit": 0},
+      "prefixed": {"exit": 0}
+    },
+    {
+      "id": "merge.plain",
+      "template": "gh pr merge <pr-num> --repo <resolved-repository> --merge --delete-branch",
+      "sites": [],
+      "label": "merge",
+      "bare": {"exit": 0},
+      "prefixed": {"exit": 0}
+    },
+    {
+      "id": "branch.local",
+      "template": "git branch -d <branch>",
+      "sites": ["SKILL.md", "HUMAN-GATE.md"],
+      "label": "branch deletion",
+      "bare": {"exit": 0},
+      "prefixed": {"exit": 2, "reason": "forbidden raw command character"}
+    },
+    {
+      "id": "branch.remote",
+      "template": "git push origin --delete <branch>",
+      "sites": ["SKILL.md", "HUMAN-GATE.md"],
+      "label": "push",
+      "bare": {"exit": 2, "reason": "expected exactly git push [-u] origin <branch>"},
+      "prefixed": {"exit": 2, "reason": "expected exactly git push [-u] origin <branch>"}
+    }
+  ],
+  "refused_shapes": [
+    {"id": "push.redirect-pipe", "form": "push.first", "before": "", "after": " 2>&1 | tail -3",
+     "label": "push", "reason": "forbidden raw command character"},
+    {"id": "push.env-wrapper", "form": "push.first", "before": "env -u GITHUB_TOKEN ", "after": "",
+     "label": "push", "reason": "not in a command position"},
+    {"id": "merge.env-wrapper", "form": "merge.subject", "before": "env -u GITHUB_TOKEN ", "after": "",
+     "label": "merge", "reason": "not in a command position"},
+    {"id": "merge.after-cd", "form": "merge.subject", "before": "cd /tmp/worktree && ", "after": "",
+     "label": "merge", "reason": "does not match the guarded merge grammar"},
+    {"id": "merge.then-echo", "form": "merge.plain", "before": "", "after": "; echo exit=$?",
+     "label": "merge", "reason": "does not match the guarded merge grammar"},
+    {"id": "mention.unquoted", "form": "push.later", "before": "workflow-state finish --notes refused ", "after": "",
+     "label": "push", "reason": "not in a command position"},
+    {"id": "branch.after-cd", "form": "branch.local", "before": "cd /tmp/worktree && ", "after": "",
+     "label": "branch deletion", "reason": "forbidden raw command character"}
+  ]
+}
