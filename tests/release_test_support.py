@@ -42,5 +42,31 @@ def destroyed_anchor_profile() -> dict:
     return _load("destroyed-anchor-profile.json")
 
 
+CANDIDATE = {"version": "v1.2.3", "commit": "1" * 40, "title": "v1.2.3 \u2014 release",
+             "notes": "notes body"}
+
+
+def derived_class_profile() -> dict:
+    profile = forge_profile()
+    profile["proof"]["obligations"].append({
+        "id": "visible", "semantic": "published_artifact_identity", "form": "event",
+        "predicate": "release_visible", "collector": "forge", "required": True, "deps": [],
+        "parameters": {}})
+    return profile
+
+
+def missing_deadline_profile() -> dict:
+    profile = forge_profile()
+    del profile["publication"]["actions"][0]["observation_deadline_ms"]
+    return profile
+
+
+def unreachable_rollback_profile() -> dict:
+    profile = restorable_profile()
+    profile["recovery"]["units"]["publish-artifact"] = {
+        "posture": "supersedable_only", "anchor": None, "compatibility": None, "edges": []}
+    return profile
+
+
 def release_of(profile_id: str, profile: dict) -> dict:
     return {"profiles": {profile_id: copy.deepcopy(profile)}}

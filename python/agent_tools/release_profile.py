@@ -1,4 +1,5 @@
-"""The release profile grammar (#124 D2, D4, D7, D19).
+"""The release profile grammar and admissibility compiler (#124 D2 to D5, D7, D17, D19, D20,
+D23).
 
 `grammar_violations(release, contract, descriptors)` is the one function that judges the
 authored `release` member against spec section 2. It returns the resolver's
@@ -17,14 +18,28 @@ observable as a compile rejection and never as `invalid_contract`.
 Besides the authored `release` the function reads only
 `contract["bindings"]["tracker"]`, `contract["bindings"]["vcs"]["default_branch"]` and
 `contract["capabilities"]["deploy"]`. It imports `release_adapter` and `agent_platform`.
+
+The compiler half judges a grammar-valid profile. `admissibility_findings` runs the four
+`RULES` over every node and reports every finding (unlike the core's first-failure
+compilers); rule 4 lowers the profile to a proof and a recovery declaration and reports the
+core compilers' reasons verbatim. `compile_profile` returns the deep-frozen
+`ResolvedReleaseProfile`, and `bind_candidate` turns it plus one candidate into exactly the
+inputs `TransactionStore.create` takes. Every function here is pure: it reads no file,
+clock, network or environment.
 """
 
+import copy
 import re
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 
 from agent_tools import release_adapter
 from agent_tools.agent_platform import parse_semver
+from agent_tools.canonical import telemetry_digest
+from agent_tools.transaction_plan import MAX_CONVERGENCE_WINDOW_MS, compile_proof
+from agent_tools.transaction_recovery_plan import bind_recovery, compile_recovery
+from agent_tools.transaction_storage import ProofPlanRejected, RecoveryPlanRejected
 
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 GRAMMAR_REPAIR_IDS = (
@@ -52,6 +67,19 @@ UNIT_MEMBERS = frozenset(("posture", "anchor", "compatibility", "edges"))
 EDGE_MEMBERS = frozenset(("action", "operation", "parameters", "residue"))
 GITHUB_REPOSITORY_KIND = "github_repository"
 BOUNDED_SPEND = "reversible_bounded_spend"
+SCHEMA = "release-profile/v1"
+RULES = ("observation_deadline", "rolled_back_reachable", "restore_anchor", "core_plans")
+RULE_CHECKS = MappingProxyType({
+    "observation_deadline": ("repository.release_profile.observation_deadline",
+                             "observation_deadline_optional", "release_profile.deadline.require"),
+    "rolled_back_reachable": ("repository.release_profile.rolled_back_reachable",
+                              "rolled_back_unreachable", "release_profile.compensate.add"),
+    "restore_anchor": ("repository.release_profile.restore_anchor", "restore_anchor_destroyed",
+                       "release_profile.materialize.add")})
+VERSION_PATTERN = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
+TITLE_FORBIDDEN = frozenset('"$`\\\0\r\n')
+CANDIDATE_KEYS = frozenset(("version", "commit", "title", "notes"))
 PHASE_MODES = {"publication": release_adapter.PUBLICATION_MODES,
                "activation": release_adapter.ACTIVATION_MODES}
 
@@ -652,3 +680,335 @@ def grammar_violations(release: object, contract: object,
     grammar = _Grammar(contract, descriptors)
     grammar.release(release)
     return grammar.found
+
+
+# Admissibility compiler (#124 D3, D5, D17, D20, D23)
+
+
+class ProfileInadmissible(Exception):
+    """A grammar-valid profile the compiler refuses; `findings` is never empty."""
+
+    def __init__(self, findings: list[dict[str, str]]) -> None:
+        self.findings = tuple(findings)
+        super().__init__("; ".join(f"{f['rule']}: {f['reason']}" for f in self.findings))
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def thaw(value: Any) -> Any:
+    """A plain deep copy of a frozen value: mappings become dicts, tuples become lists."""
+    if isinstance(value, Mapping):
+        return {key: thaw(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [thaw(item) for item in value]
+    return copy.deepcopy(value)
+
+
+_BUILD = object()
+
+
+class ResolvedReleaseProfile(Mapping):
+    """The deep-frozen compiled profile; only `compile_profile` builds one (D20)."""
+
+    __slots__ = ("_members",)
+
+    def __init__(self, members: Mapping[str, Any], *, _token: object = None) -> None:
+        if _token is not _BUILD:
+            raise TypeError("ResolvedReleaseProfile is built by compile_profile only")
+        self._members = _freeze(members)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._members[key]
+
+    def __iter__(self):
+        return iter(self._members)
+
+    def __len__(self) -> int:
+        return len(self._members)
+
+
+def _pointer_base(profile_id: str) -> str:
+    return _pointer("release", "profiles", profile_id)
+
+
+def _authored(profile: Mapping[str, Any]) -> list[tuple[str, int, dict[str, Any]]]:
+    """`(phase, authored index, node)` for every publication action, then activation unit."""
+    found = [("publication", index, node)
+             for index, node in enumerate(profile["publication"]["actions"])]
+    if profile["activation"] != "none":
+        found += [("activation", index, node)
+                  for index, node in enumerate(profile["activation"]["units"])]
+    return found
+
+
+def _descriptor(profile: Mapping[str, Any], descriptors: Mapping[str, dict],
+                alias: str) -> dict[str, Any]:
+    return descriptors[profile["bindings"]["adapters"][alias]["adapter"]]
+
+
+def _operation(profile: Mapping[str, Any], descriptors: Mapping[str, dict],
+               node: Mapping[str, Any]) -> dict[str, Any]:
+    return _descriptor(profile, descriptors, node["adapter"])["operations"][node["operation"]]
+
+
+def _rule_observation_deadline(profile_id, profile, contract, descriptors):
+    base, found = _pointer_base(profile_id), []
+    for phase, index, node in _authored(profile):
+        here = base + _pointer(phase, "actions" if phase == "publication" else "units", index)
+        if "observation_deadline_ms" not in node:
+            found.append(_finding("observation_deadline", here, "observation_deadline_optional",
+                                  f"node {node['id']} declares no observation_deadline_ms"))
+        elif not 1 <= node["observation_deadline_ms"] <= MAX_CONVERGENCE_WINDOW_MS:
+            found.append(_finding("observation_deadline", here + "/observation_deadline_ms",
+                                  "observation_deadline_out_of_bounds",
+                                  f"node {node['id']} observation_deadline_ms "
+                                  f"{node['observation_deadline_ms']} is not in "
+                                  f"[1, {MAX_CONVERGENCE_WINDOW_MS}]"))
+    return found
+
+
+def _rule_rolled_back_reachable(profile_id, profile, contract, descriptors):
+    units = profile["recovery"]["units"]
+    if not any(unit["posture"] == "restorable" for unit in units.values()):
+        return []
+    found = []
+    for _, _, node in _authored(profile):
+        if _operation(profile, descriptors, node)["mutability"] != "create_if_absent":
+            continue
+        unit = units[node["id"]]
+        if not (unit["posture"] == "compensatable" and unit["edges"]
+                and all(edge["action"] == "compensate" and isinstance(edge["residue"], str)
+                        and edge["residue"] != "" for edge in unit["edges"])):
+            found.append(_finding(
+                "rolled_back_reachable",
+                _pointer_base(profile_id) + _pointer("recovery", "units", node["id"]),
+                "rolled_back_unreachable",
+                f"node {node['id']} creates if absent and is not compensatable with "
+                "residue-bearing compensate edges beside a restorable unit"))
+    return found
+
+
+def _rule_restore_anchor(profile_id, profile, contract, descriptors):
+    in_place = {node["target"] for _, _, node in _authored(profile)
+                if _operation(profile, descriptors, node)["mutability"] == "in_place"}
+    found = []
+    for name, unit in profile["recovery"]["units"].items():
+        anchor = unit["anchor"]
+        if unit["posture"] == "restorable" and anchor is not None \
+                and anchor["target"] in in_place:
+            found.append(_finding(
+                "restore_anchor",
+                _pointer_base(profile_id) + _pointer("recovery", "units", name, "anchor",
+                                                     "target"),
+                "restore_anchor_destroyed",
+                f"anchor target {anchor['target']} is overwritten in place by another node"))
+    return found
+
+
+def _rule_core_plans(profile_id, profile, contract, descriptors):
+    proof_declaration, recovery_declaration = lower(profile_id, profile, descriptors)
+    base, found = _pointer_base(profile_id), []
+    proof = recovery = None
+    try:
+        recovery = compile_recovery(recovery_declaration, where=base + "/recovery")
+    except RecoveryPlanRejected as error:
+        found.append(_finding("core_plans", base + "/recovery", "recovery." + error.reason,
+                              str(error)))
+    try:
+        proof = compile_proof(proof_declaration, where=base + "/proof")
+    except ProofPlanRejected as error:
+        found.append(_finding("core_plans", base + "/proof", "proof." + error.reason,
+                              str(error)))
+    if proof is not None and recovery is not None:
+        try:
+            bind_recovery(recovery, proof, where=base + "/recovery")
+        except RecoveryPlanRejected as error:
+            found.append(_finding("core_plans", base + "/recovery", "recovery." + error.reason,
+                                  str(error)))
+    return found
+
+
+_RULE_FUNCTIONS = {"observation_deadline": _rule_observation_deadline,
+                   "rolled_back_reachable": _rule_rolled_back_reachable,
+                   "restore_anchor": _rule_restore_anchor,
+                   "core_plans": _rule_core_plans}
+
+
+def _finding(rule: str, pointer: str, reason: str, detail: str) -> dict[str, str]:
+    return {"rule": rule, "pointer": pointer, "reason": reason, "detail": detail}
+
+
+def rule_findings(rule: str, profile_id: str, profile: Mapping[str, Any], contract: object,
+                  descriptors: Mapping[str, dict] = release_adapter.DESCRIPTORS
+                  ) -> list[dict[str, str]]:
+    """Every finding of one admissibility rule over a grammar-valid profile."""
+    return _RULE_FUNCTIONS[rule](profile_id, profile, contract, descriptors)
+
+
+def admissibility_findings(profile_id: str, profile: Mapping[str, Any], contract: object,
+                           descriptors: Mapping[str, dict] = release_adapter.DESCRIPTORS
+                           ) -> list[dict[str, str]]:
+    """The four rules' findings in `RULES` order, concatenated."""
+    return [finding for rule in RULES
+            for finding in rule_findings(rule, profile_id, profile, contract, descriptors)]
+
+
+def adapter_identities(profile: Mapping[str, Any],
+                       descriptors: Mapping[str, dict] = release_adapter.DESCRIPTORS
+                       ) -> dict[str, dict[str, str]]:
+    """Alias to the adapter name, contract version and descriptor digest the profile binds."""
+    identities = {}
+    for alias, entry in profile["bindings"]["adapters"].items():
+        descriptor = descriptors[entry["adapter"]]
+        identities[alias] = {"adapter": entry["adapter"],
+                             "adapter_contract_version": descriptor["adapter_contract_version"],
+                             "descriptor_digest": release_adapter.descriptor_digest(descriptor)}
+    return identities
+
+
+def profile_digest(profile: Mapping[str, Any],
+                   descriptors: Mapping[str, dict] = release_adapter.DESCRIPTORS) -> str:
+    return telemetry_digest({"profile": profile,
+                             "adapters": adapter_identities(profile, descriptors)})
+
+
+def ordered_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Kahn's algorithm, always taking the earliest-authored ready node."""
+    remaining, placed, ordered = list(nodes), set(), []
+    while remaining:
+        ready = next((node for node in remaining if all(dep in placed for dep in node["deps"])),
+                     None)
+        if ready is None:
+            raise ValueError("nodes contain a dependency cycle or an unknown dependency")
+        remaining.remove(ready)
+        placed.add(ready["id"])
+        ordered.append(ready)
+    return ordered
+
+
+def _normalized_target(profile: Mapping[str, Any], descriptors: Mapping[str, dict],
+                       handle: str) -> dict[str, Any]:
+    target = profile["bindings"]["targets"][handle]
+    members = _descriptor(profile, descriptors, target["adapter"])["target_kinds"][target["kind"]]
+    return {"handle": handle, "kind": target["kind"], **{m: target[m] for m in members}}
+
+
+def lower(profile_id: str, profile: Mapping[str, Any],
+          descriptors: Mapping[str, dict] = release_adapter.DESCRIPTORS
+          ) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The candidate-independent proof and recovery declarations of a grammar-valid profile."""
+    publication = ordered_nodes(list(profile["publication"]["actions"]))
+    activation = [] if profile["activation"] == "none" \
+        else ordered_nodes(list(profile["activation"]["units"]))
+    proof_units, recovery_units = [], []
+    for phase, nodes in (("publication", publication), ("activation", activation)):
+        for node in nodes:
+            parameters = {"action": node["id"], "operation": node["operation"],
+                          "target": _normalized_target(profile, descriptors, node["target"])}
+            unit = profile["recovery"]["units"][node["id"]]
+            anchor = unit["anchor"]
+            if anchor is not None:
+                anchor = {"predicate": anchor["predicate"],
+                          "parameters": {**anchor["parameters"],
+                                         "target": _normalized_target(
+                                             profile, descriptors, anchor["target"])}}
+            proof_units.append({"name": node["id"], "parameters": parameters, "phase": phase,
+                                "collector": node["adapter"]})
+            recovery_units.append({
+                "name": node["id"], "parameters": copy.deepcopy(parameters),
+                "effect": node["adapter"], "operation": node["operation"],
+                "posture": unit["posture"], "anchor": anchor,
+                "compatibility": unit["compatibility"], "edges": unit["edges"]})
+    aliases = {alias: descriptors[entry["adapter"]]
+               for alias, entry in profile["bindings"]["adapters"].items()}
+    collectors = {alias: {"basis": "deterministic",
+                          "predicates": sorted(name for name, entry in d["predicates"].items()
+                                               if entry["support"] == "supported"),
+                          **d["collector"]} for alias, d in aliases.items()}
+    effects = {alias: {"operations": sorted(
+        name for name, entry in d["operations"].items()
+        if entry["support"] == "supported" or entry["recovery_capable"])}
+        for alias, d in aliases.items()}
+    proof = {"units": proof_units, "obligations": profile["proof"]["obligations"],
+             "collectors": collectors,
+             "convergence_window_ms": profile["proof"]["convergence_window_ms"]}
+    recovery = {"effects": effects, "units": recovery_units}
+    return copy.deepcopy(proof), copy.deepcopy(recovery)
+
+
+def compile_profile(profile_id: str, profile: Mapping[str, Any], contract: object,
+                    descriptors: Mapping[str, dict] = release_adapter.DESCRIPTORS
+                    ) -> ResolvedReleaseProfile:
+    """The frozen compiled profile; `ValueError` for a grammar violation (callers resolve
+    first), `ProfileInadmissible` for any admissibility finding."""
+    profile = copy.deepcopy(profile)
+    release = {"profiles": {profile_id: profile}}
+    violations = grammar_violations(release, contract, descriptors)
+    if violations:
+        raise ValueError(f"profile {profile_id!r} violates the grammar: "
+                         f"{violations[0]['pointer']}: {violations[0]['message']}")
+    findings = admissibility_findings(profile_id, profile, contract, descriptors)
+    if findings:
+        raise ProfileInadmissible(findings)
+    proof, recovery = lower(profile_id, profile, descriptors)
+    nodes = {phase: ordered_nodes(list(profile[phase]["actions" if phase == "publication"
+                                                  else "units"]))
+             if profile[phase] != "none" else [] for phase in ("publication", "activation")}
+    everything = nodes["publication"] + nodes["activation"]
+    return ResolvedReleaseProfile({
+        "schema": SCHEMA, "profile_id": profile_id,
+        "profile_version": profile["profile_version"],
+        "digest": profile_digest(profile, descriptors),
+        "target": profile["target"],
+        "adapters": adapter_identities(profile, descriptors),
+        "publication": nodes["publication"], "activation": nodes["activation"],
+        "deadlines": {node["id"]: node["observation_deadline_ms"] for node in everything},
+        "proof_declaration": proof, "recovery_declaration": recovery,
+        "limits": profile["limits"],
+        "candidate_members": {node["id"]: _operation(profile, descriptors, node)[
+            "candidate_members"] for node in everything}}, _token=_BUILD)
+
+
+def _candidate_problem(candidate: object) -> str | None:
+    if not isinstance(candidate, dict) or set(candidate) != CANDIDATE_KEYS:
+        return f"candidate must be an object with exactly {', '.join(sorted(CANDIDATE_KEYS))}"
+    version, commit, title = candidate["version"], candidate["commit"], candidate["title"]
+    if not isinstance(version, str) or VERSION_PATTERN.fullmatch(version) is None:
+        return "candidate version must match vMAJOR.MINOR.PATCH"
+    if not isinstance(commit, str) or COMMIT_PATTERN.fullmatch(commit) is None:
+        return "candidate commit must be 40 lowercase hex digits"
+    if not isinstance(title, str) or title == "" or TITLE_FORBIDDEN & set(title):
+        return "candidate title must be a non-empty string free of quotes, $, backtick, " \
+               "backslash, NUL, CR and LF"
+    if not isinstance(candidate["notes"], str):
+        return "candidate notes must be a string"
+    return None
+
+
+def bind_candidate(compiled: ResolvedReleaseProfile, candidate: dict) -> dict[str, Any]:
+    """The exact `TransactionStore.create` inputs for one candidate, as plain values (D5)."""
+    if not isinstance(compiled, ResolvedReleaseProfile):
+        raise TypeError("bind_candidate takes a ResolvedReleaseProfile")
+    problem = _candidate_problem(candidate)
+    if problem is not None:
+        raise ValueError(problem)
+    identity = {"version": candidate["version"], "commit": candidate["commit"]}
+    configs = {node["id"]: node["config"] for node in
+               (*compiled["publication"], *compiled["activation"])}
+    proof, recovery = thaw(compiled["proof_declaration"]), thaw(compiled["recovery_declaration"])
+    for unit in (*proof["units"], *recovery["units"]):
+        name = unit["name"]
+        unit["parameters"].update({"candidate": dict(identity), "config": thaw(configs[name])})
+        for member in compiled["candidate_members"][name]:
+            unit["parameters"][member] = candidate[member]
+    return {"proof": proof, "recovery": recovery,
+            "concurrency_keys": list(compiled["target"]["concurrency_keys"]),
+            "subject": {"profile_id": compiled["profile_id"],
+                        "profile_version": compiled["profile_version"],
+                        "profile_digest": compiled["digest"], "candidate": identity}}
