@@ -436,6 +436,14 @@ LEGACY_MIGRATION_INPUTS = {
     "home/common/agent-skills/tests/test_adopt_project_boundaries.py": frozenset({
         ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
     }),
+    # The release bridge (#124) reads the retired deploy member of the legacy config.
+    "python/agent_tools/release_bridge.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
+    "tests/test_release_bridge.py": frozenset({
+        ".claude/skills.config.json", "maxParallel",  # policy-gate-pattern
+    }),
+    "tests/fixtures/legacy-skills-config-1722a65d.json": frozenset({
+        "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
+    }),
 }
 
 SUPPORT_POLICY_FORBIDDEN = (

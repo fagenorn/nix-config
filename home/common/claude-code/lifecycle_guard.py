@@ -38,6 +38,9 @@ GUARDED_LITERALS = (
     ("git branch -d", "branch"),
     ("git push", "push"),
     ("gh release create", "release"),
+    # `new` is gh's alias of `create`; it routes to the same grammar, which
+    # refuses it because the grammar spells `create`.
+    ("gh release new", "release"),
 )
 GUARDED_TOKEN_LITERALS = (
     (["gh", "pr", "merge"], "merge"),
@@ -45,6 +48,7 @@ GUARDED_TOKEN_LITERALS = (
     (["git", "branch", "-d"], "branch"),
     (["git", "push"], "push"),
     (["gh", "release", "create"], "release"),
+    (["gh", "release", "new"], "release"),
 )
 # The raise label is the user's Instruction Budget raise decision. The refusal
 # is a mistake-catcher for agents, not enforcement (#294).
@@ -1229,7 +1233,9 @@ def validate_merge(command, context):
     # disposable: never the default branch, never the declared integration
     # branch (#116 D5). Judged before any protection lookup.
     head = pr_facts.get("headRefName")
-    if isinstance(head, str) and head in (context.base_branch, integration_base):
+    if not isinstance(head, str) or not head:
+        return block("unsafe merge: cannot read the PR head branch")
+    if head in (context.base_branch, integration_base):
         return block(
             f"unsafe merge: --delete-branch would delete the permanent branch {head}"
         )

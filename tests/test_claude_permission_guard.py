@@ -780,7 +780,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "--merge --delete-branch",
             cwd=repo,
             env={"FAKE_PR_JSON":
-                 '{"state":"OPEN","baseRefName":"dev",'
+                 '{"state":"OPEN","baseRefName":"dev","headRefName":"issue-42-topic",'
                  '"url":"https://github.com/elevenyellow/nodocom/pull/42"}',
                  "FAKE_PROTECTION_MODE": "nonzero"},
         )
@@ -794,14 +794,14 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         merge = "gh pr merge 7 --repo elevenyellow/nodocom --merge --delete-branch"
         dev_pr = {
             "FAKE_PROTECTION_MODE": "nonzero",
-            "FAKE_PR_JSON": '{"state":"OPEN","baseRefName":"dev",'
+            "FAKE_PR_JSON": '{"state":"OPEN","baseRefName":"dev","headRefName":"issue-7-topic",'
                             '"url":"https://github.com/elevenyellow/nodocom/pull/7"}',
         }
         allowed = self.run_guard(merge, cwd=repo, env=dev_pr)
         self.assertEqual(0, allowed.returncode, allowed.stderr)
         main_pr = {
             "FAKE_PROTECTION_MODE": "nonzero",
-            "FAKE_PR_JSON": '{"state":"OPEN","baseRefName":"main",'
+            "FAKE_PR_JSON": '{"state":"OPEN","baseRefName":"main","headRefName":"issue-7-topic",'
                             '"url":"https://github.com/elevenyellow/nodocom/pull/7"}',
         }
         blocked = self.run_guard(merge, cwd=repo, env=main_pr)
@@ -1050,7 +1050,10 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 base + "; true",
                 "true; " + base,
                 base + " && true",
-                base.replace("create v1.2.3", "create 1.2.3")):
+                base.replace("create v1.2.3", "create 1.2.3"),
+                # `gh release new` is gh's alias of `create`
+                "gh release new v1.2.3 --repo someone-else/x --target main --draft",
+                base.replace("release create", "release new")):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(2, result.returncode, command)
@@ -1068,6 +1071,21 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 result = self.run_guard(merge, cwd=repo, env=env)
                 self.assertEqual(2, result.returncode)
                 self.assertIn("permanent branch", result.stderr)
+
+    def test_feature_arm_refuses_an_uncertain_head(self):
+        """The head is the thing --delete-branch deletes: unreadable means refused."""
+        repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
+        merge = "gh pr merge 7 --repo elevenyellow/nodocom --merge --delete-branch"
+        base = {"state": "OPEN", "baseRefName": "dev",
+                "url": "https://github.com/elevenyellow/nodocom/pull/7", "statusCheckRollup": []}
+        for label, extra in (("missing", {}), ("null", {"headRefName": None}),
+                             ("empty", {"headRefName": ""}), ("number", {"headRefName": 7})):
+            with self.subTest(head=label):
+                env = {"FAKE_PR_JSON": json.dumps({**base, **extra}),
+                       "FAKE_PROTECTION_MODE": "nonzero"}
+                result = self.run_guard(merge, cwd=repo, env=env)
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn("cannot read the PR head branch", result.stderr)
 
     def test_hostile_interpreter_environment_is_ignored(self):
         # Each plant exits 0 before the guard can judge: a BASH_ENV file that the
