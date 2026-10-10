@@ -299,9 +299,9 @@ class ScopeHarness(LifecycleHarness):
         common = subprocess.run(
             ["git", "-C", str(self.root), "rev-parse", "--path-format=absolute",
              "--git-common-dir"], env=self.env, check=True, capture_output=True, text=True)
+        self.init_run()
         self.registry = Path(common.stdout.strip()) / "agent-launch" / self.run_id
         self.repo_scope = launch_scope.repository_scope(self.registry.parent)
-        self.init_run()
         self.assertEqual(self.spawn(issue=14, worktree=str(self.root / "wt-14"))["id"], "14:1:1")
 
     def write_shim(self, body):

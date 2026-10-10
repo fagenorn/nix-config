@@ -377,12 +377,14 @@ class DeliveredControlTest(DeliveredControlHarness, unittest.TestCase):
         built = self.build("contract", self.contract_input())
         workflow = self.isolated_workflow(64)
         env = {**os.environ, "HOME": str(self.home), "PYTHONDONTWRITEBYTECODE": "1"}
-        run_args = ("--repo-root", str(self.root), "--run-id", "atomic")
         initialized = subprocess.run(
-            [sys.executable, str(workflow), "init-run", *run_args, "--now", NOW],
+            [sys.executable, str(workflow), "init-run", "--repo-root", str(self.root),
+             "--creation-key", "atomic", "--now", NOW],
             capture_output=True, check=False, env=env)
         self.assertEqual(initialized.returncode, 0, initialized.stderr.decode())
-        state = self.root / ".superpowers/workflows/atomic/state.json"
+        minted = json.loads(initialized.stdout)["run_id"]
+        run_args = ("--repo-root", str(self.root), "--run-id", minted)
+        state = self.root / ".superpowers/workflows" / minted / "state.json"
         before = state.read_bytes()
         request = json.dumps(self.control_request(
             [171], contracts={"171": built["contract"]},
