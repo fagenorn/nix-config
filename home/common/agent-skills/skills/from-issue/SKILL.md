@@ -23,7 +23,7 @@ Take one tracker issue from triage to merged code by chaining the canonical skil
 - **`standards-review.md`** — Phase 5.
 - **`REVIEW-CONTRACT.md`** — Phase-5 reviewer contract: hand it over **by absolute path**, never read it in.
 - **`rollover.md`** — the direct autonomous controller's Phase-5 transfer and its stop afterwards.
-- **`delegated-owner.md`** — the rollover's delegated owner, Phases 6–7; read it first, before any resume pack.
+- **`delegated-owner.md`** — the rollover's or the `delegate` action's delegated owner; read it first, before any resume pack.
 - **`ship-handoff.md`** — Phase 7.
 
 ## Lifecycle identity
@@ -94,7 +94,7 @@ still in the foreground." and "Create every scratch directory or scratch worktre
 `launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>` prints.", and it
 creates every commit through `launch-commit`. Release it with `--event returned` when it returns. Never register the fresh delegated owner or the ledger-only bookkeeper. Stop a background worker you cannot wait for through the host's task-stop and release it with `--event stopped`; with no stop capability, wait for it to return. An owner that can neither wait nor stop returns without a terminal write and leaves recovery to the dispatcher.
 
-**Self-reap.** With lifecycle identity, every exit that ends this owner's launch — the `handoff` action, the terminal return procedure and the suspension procedure — first releases every worker this owner registered, then runs `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` with this owner's own `action_id`, and only then makes the exit write; when the ledger-only bookkeeper makes that write, the reap runs before the bookkeeper is dispatched. A reap that exits non-zero does not block the exit write: name its exit code and, when it printed a report, its `skipped` launches in this owner's result. A delegating owner does not reap: the fresh delegated owner reaps the adopted launch at its own exit.
+**Self-reap.** With lifecycle identity, every exit that ends this owner's launch — the `handoff` action, the terminal return procedure and the suspension procedure — first releases every worker this owner registered, then runs `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` with this owner's own `action_id`, and only then makes the exit write; when the ledger-only bookkeeper makes that write, the reap runs before the bookkeeper is dispatched. A reap that exits non-zero does not block the exit write: name its exit code and, when it printed a report, its `skipped` launches in this owner's result. After a `delegate`, the owner whose exit ends the launch reaps it.
 
 **Interim child results.** A child's return that the host marks interim (its own background work still running, or a result that may be interim) is not a completion. Re-engage that same child by its recorded agent identity: tell it to wait for its job inside its turn and then return its final report, and wait for that report within your turn. Never answer an interim result with a text-only reply, never suspend for it (it is not an `external` wait), and never dispatch a replacement or stop the child. A registered lifecycle worker stays registered under its existing worker id and registers nothing new: an interim result is not its `returned` event. If the message cannot be delivered or its reply cannot be awaited in your turn, follow from-issue's **Writing workers** route (task-stop, then release `--event stopped`), then this skill's handling of a lost child, the one case that may lead to a fresh dispatch. Only the child's final hand-back counts as its result.
 
@@ -109,12 +109,13 @@ creates every commit through `launch-commit`. Release it with `--event returned`
 <!-- agent-dispatch: id=from-issue-phase-delegate role=issue-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") delegates the entire remainder to a fresh issue owner with the lifecycle envelope and artifact paths.
    Before dispatching it, run `workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` with this owner's own `action_id` and, on exit 0, put its stdout in the prompt as a `Resume pack` paragraph.
+   Off the direct-autonomous route the prompt also carries the line `Delegated owner: return the ship handoff`. Match its return in order: (a) only the re-entry line or a `Suspended (…)` line, or bytes valid at `--boundary workflow-response`: relay it, write nothing and stop, with no reap; (b) bytes valid at `--boundary ship-handoff`, `state: complete`, with this owner's identity: call `workflow-state progress` for Phase 6, then run Phase 7 with those bytes unchanged as the handoff; (c) anything else: a contract failure through the terminal return procedure.
    Exception — **ledger-only remainder**: when every content artifact is final and only `workflow-state` transitions plus verbatim result relay remain, delegate to the cheap bookkeeper instead:
 <!-- agent-dispatch: id=from-issue-ledger-remainder role=bookkeeper model=haiku effort=low -->
 Agent(subagent_type="mechanic", model="haiku", effort="low") executes the ledger-only remainder: the exact workflow-state commands and verbatim JSON relay, with no content judgment.
    Give it the exact commands, identities, and paths inline; it decides nothing and edits nothing.
 
-On the direct-autonomous route, `rollover.md` replaces the generic Phase-5 delegation above and `delegated-owner.md` its Phase-6 and Phase-7 `delegate` gates; every other acquisition mode keeps the generic action semantics. Without lifecycle identity, apply the same action order locally with the 120-turn/150000-token ceilings and default interactive handoff behavior.
+On the direct-autonomous route, `rollover.md` replaces the generic Phase-5 delegation above and `delegated-owner.md` its Phase-6 and Phase-7 `delegate` gates. Off it, a Phase-6 `delegate` is the Phase-7 ship-owner dispatch. Without lifecycle identity, apply the same action order locally with the 120-turn/150000-token ceilings and default interactive handoff behavior.
 
 If `workflow-state progress` is rejected with `cannot record progress at or after attempt deadline` or `progress requires an active attempt`, do not retry it: release every worker this owner registered, run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`, then print the canonical re-entry line `/from-issue <num> --auto` and stop, writing no `finish`, whether the rejection meant a suspension or the `stopped(stalled)` bound.
 
@@ -201,7 +202,7 @@ sdd returns only canonical JSON: pipe the received bytes through `artifact-budge
 ## Phase 7 — Ship
 
 <!-- agent-dispatch: id=from-issue-ship-owner role=ship-owner model=opus effort=high -->
-Agent(subagent_type="general-purpose", model="opus", effort="high") launches `ship-issue` as a fresh ship owner, not inline via `Skill`. By now this conversation carries every artifact of the flow; a fresh ~10k subagent returns one summary instead of ~100 turns over a 200–300k prefix.
+Agent(subagent_type="general-purpose", model="opus", effort="high") launches `ship-issue` as a fresh ship owner, not inline via `Skill`.
 
 Read `ship-handoff.md` for the exact subagent prompt (with lifecycle identity the `ship-handoff/v2` candidate; ledger-free the legacy handoff), the inline fallback when `ship-issue` is absent, and the `## Remainder owner prompt` this same site launches for a validated `delivery_remainder` object; the remainder owner writes its own `finish`, so relay its validated reply unchanged and skip the terminal write.
 

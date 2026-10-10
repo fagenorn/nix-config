@@ -244,7 +244,7 @@
       "id": "from-issue-ship-owner",
       "path": "home/common/agent-skills/skills/from-issue/SKILL.md",
       "marker": "<!-- agent-dispatch: id=from-issue-ship-owner role=ship-owner model=opus effort=high -->",
-      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\") launches `ship-issue` as a fresh ship owner, not inline via `Skill`. By now this conversation carries every artifact of the flow; a fresh ~10k subagent returns one summary instead of ~100 turns over a 200–300k prefix.",
+      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\") launches `ship-issue` as a fresh ship owner, not inline via `Skill`.",
       "role": "ship-owner",
       "model": "opus",
       "effort": "high",

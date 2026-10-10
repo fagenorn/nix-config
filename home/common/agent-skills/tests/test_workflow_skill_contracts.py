@@ -73,6 +73,7 @@ LIFECYCLE_DOCS = (*sorted((REPO_ROOT / "home/common/agent-skills/skills/from-iss
 # The closed capability-gap line ship-issue returns when its Phase-0 probe finds
 # no subagent-launch tool, spelled once for the module (per D4).
 CAPABILITY_GAP_LINE = "capability_gap: agent_dispatch"
+DELEGATED_RETURN_LINE = "Delegated owner: return the ship handoff"
 INPUT_FLAG_RE = re.compile(r"(--request-file|--checkpoint-file|--summary-file|--input)\s+(\S+)")
 V2_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "attempt_budget_minutes",
     "new_run", "owner_unavailable", "tracker", "worktree", "forge", "delivery_contract",
@@ -940,6 +941,38 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             if spellings:
                 carriers.add(path.name)
         self.assertLessEqual({"ship-handoff.md", "delegated-owner.md"}, carriers)
+
+    def test_delegated_return_line_is_spelled_identically_everywhere(self):
+        # #352 D6: one closed prompt line, matched byte for byte.
+        pattern = r"Delegated owner:[^`\n]*"
+        carriers = set()
+        for path in sorted(FROM_ISSUE_DIR.glob("*.md")):
+            spellings = set(re.findall(pattern, path.read_text(encoding="utf-8")))
+            with self.subTest(document=path.name):
+                self.assertLessEqual(spellings, {DELEGATED_RETURN_LINE})
+            if spellings:
+                carriers.add(path.name)
+        self.assertEqual(carriers, {"SKILL.md", "delegated-owner.md"})
+
+    def test_generic_delegated_owner_returns_the_handoff_without_a_terminal_write(self):
+        # #352 D1-D3: argv and boundary names only (agent-helpers rule 6).
+        delegated = DELEGATED_OWNER.read_text(encoding="utf-8")
+        self.assertEqual(delegated.count("## Generic delegate"), 1)
+        generic = delegated.split("## Generic delegate", 1)[1]
+        self.assert_ordered(generic, f"`{DELEGATED_RETURN_LINE}`", "release-worker",
+                            "--boundary ship-handoff")
+        for forbidden in ("workflow-state finish", "--boundary ship-summary"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, generic)
+
+    def test_delegate_action_checks_the_return_before_it_ships(self):
+        # #352 D2: the delegator tries the terminal reply before the handoff.
+        action = self.section(self.from_issue, "4. **`delegate`**",
+                              "## Terminal return procedure")
+        self.assert_ordered(
+            action, "id=from-issue-phase-delegate", f"`{DELEGATED_RETURN_LINE}`",
+            "--boundary workflow-response", "--boundary ship-handoff",
+            "workflow-state progress", "id=from-issue-ledger-remainder")
 
     def test_from_issue_phase_seven_ships_inline_on_the_dispatch_gap(self):
         # The fallback ends in the suspension procedure, never a direct
