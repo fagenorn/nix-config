@@ -20,6 +20,14 @@ import tempfile
 from typing import Any, Callable, Iterator
 
 from agent_tools import attempt_store
+from agent_tools.attempt_custody import (
+    AUTO_RESUMABLE_BLOCKED_ON,
+    BLOCKED_ON_VALUES,
+    OWNER_BLOCKED_ON_VALUES,
+    STALL_LIMIT,
+    stall_count,
+    stalled,
+)
 from agent_tools.attempt_identity import RunIdentity, classify, minted_plan, prior_run_violation
 from agent_tools.transaction_storage import is_id
 
@@ -33,25 +41,6 @@ ATTEMPT_STATES = frozenset(
 RESULT_STATES = frozenset({"merged", "stopped", "failed"})
 RESULT_SOURCES = frozenset({"owner", "expiry", "superseded", "refused", "stalled"})
 SYNTHETIC_RESULT_SOURCES = frozenset({"expiry", "stalled"})
-# ``host_capacity`` is written only by control, from a ``launch_refused`` owner
-# observation; it is auto-resumable, but its resume is gated until some other
-# claim is released after the refused launch's own claim (per D7, D26).
-# ``agent_dispatch`` is written only by an owner, through ``suspend``, when its
-# own context cannot launch the agents a phase needs. It is not auto-resumable:
-# the ledger cannot see how deep a relaunch would run, and blind resumes would
-# spend ``STALL_LIMIT``, so only a human-directed re-entry clears it (per D6).
-# ``deadline`` is an owner value: sdd's headroom rule writes it through
-# ``suspend`` when too little time is left before the attempt's
-# ``deadline_at`` for its next task. It is auto-resumable, like ``transport``,
-# because a resume's fresh window is the remedy (per #281 D2).
-BLOCKED_ON_VALUES = frozenset({
-    "usage_limit", "transport", "human_gate", "external", "unknown", "host_capacity",
-    "agent_dispatch", "deadline",
-})
-OWNER_BLOCKED_ON_VALUES = BLOCKED_ON_VALUES - {"unknown", "host_capacity"}
-AUTO_RESUMABLE_BLOCKED_ON = frozenset(
-    {"usage_limit", "transport", "unknown", "host_capacity", "deadline"})
-STALL_LIMIT = 3
 RESULT_FIELDS = (
     "issue",
     "state",
@@ -1785,10 +1774,12 @@ def suspend_attempt(attempt: dict[str, Any], *, blocked_on: str, now: str) -> bo
     if blocked_on not in BLOCKED_ON_VALUES:
         raise WorkflowError("invalid suspension cause")
     phase = attempt["phase"]
-    stalled_resumes = (
-        attempt["stalled_resumes"] + 1 if attempt["suspend_phase"] == phase else 0
+    stalled_resumes = stall_count(
+        phase=phase,
+        suspend_phase=attempt["suspend_phase"],
+        stalled_resumes=attempt["stalled_resumes"],
     )
-    if stalled_resumes >= STALL_LIMIT:
+    if stalled(stalled_resumes):
         stop_attempt(
             attempt,
             reason="suspension stalled without phase progress",
