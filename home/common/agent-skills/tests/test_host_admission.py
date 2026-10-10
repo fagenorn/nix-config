@@ -231,7 +231,7 @@ class ClaimLedgerTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(self.check_launch(action_id="14:1:1")["reason"], "current")
         self.init_run()  # a locked read persists the migration
         state = self.read_state()
-        self.assertEqual((state["schema_version"], state["admission"]), (8, None))
+        self.assertEqual((state["schema_version"], state["admission"]), (9, None))
         self.assert_bound(state)
 
     def test_direct_runs_carry_no_admission(self):
@@ -256,7 +256,7 @@ class AdmissionSweeps(LifecycleHarness):
     def sweep(self, now, issues=(12, 14), *, recorded=(), unobserved=(), forge=None,
               owners=None, ok=True, **fields):
         def fact(n):
-            path = str(self.root / f"wt-{n}")
+            path = str(getattr(self, "worktree_base", self.root) / f"wt-{n}")
             if n in recorded:
                 return self.worktree_fact(n, recorded={"path": path,
                                                        "state": "matching_issue_branch"})
@@ -298,6 +298,7 @@ class ControlAdmissionTest(AdmissionSweeps, unittest.TestCase):
         self.assertEqual((self.kinds(woken), woken["admission"]["waiting"]),
                          ([("wait", None)], [14]))
         self.run_id = "issue-14-seven"
+        self.worktree_base = self.root / "seven"  # a run holds its own worktrees (#338 D22)
         self.slots(7)
         self.init_run()
         both = self.sweep(T0)
@@ -337,6 +338,7 @@ class ControlAdmissionTest(AdmissionSweeps, unittest.TestCase):
                                        ("resumed", (12,), "superseded")):
             with self.subTest(label):
                 self.run_id = f"reap-{label}"
+                self.worktree_base = self.root / label  # a run holds its own worktrees (#338 D22)
                 self.slots(4)
                 self.init_run()
                 self.sweep(T0, issues=(12,))

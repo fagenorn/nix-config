@@ -25,6 +25,7 @@ from agent_tools.attempt_custody import (
     BLOCKED_ON_VALUES,
     OWNER_BLOCKED_ON_VALUES,
     STALL_LIMIT,
+    at_ms,
     stall_count,
     stalled,
 )
@@ -32,7 +33,7 @@ from agent_tools.attempt_identity import RunIdentity, classify, minted_plan, pri
 from agent_tools.transaction_storage import is_id
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 CONTROL_INTERFACE_VERSION = 3
 DIRECT_OWNER_INTERFACE_VERSION = 2
 ATTEMPT_STATES = frozenset(
@@ -848,9 +849,9 @@ def validate_attempt(
 
 def validate_state(value: Any, *, run_id: str, identity: RunIdentity,
                    schema_version: int = SCHEMA_VERSION) -> dict[str, Any]:
-    """Validate one ledger at `schema_version` (8, or 7 for a document not yet bound).
+    """Validate one ledger at `schema_version` (9, or 7 for a document not yet bound).
 
-    `identity` is the run's identity: from its transaction's subject at schema 8, from its
+    `identity` is the run's identity: from its transaction's subject at schema 9, from its
     legacy name before it is bound.
     """
     fields = STATE_FIELDS if schema_version == SCHEMA_VERSION else LEGACY_STATE_FIELDS
@@ -1458,16 +1459,36 @@ def atomic_write_state(run_dir: Path, state_path: Path, state: dict[str, Any]) -
         raise
 
 
+def custody_clock(state: dict[str, Any]) -> int:
+    """The committed state's ``updated_at`` in milliseconds: the one clock of a custody
+    settle (#338 D17). A stamp that is not a UTC ``...Z`` time is refused, not raised."""
+    try:
+        return at_ms(state["updated_at"])
+    except ValueError as error:
+        raise WorkflowError(f"invalid run update time: {error}") from error
+
+
 def commit_state(run_dir: Path, state_path: Path, state: dict[str, Any], *,
-                 run_id: str, identity: RunIdentity) -> None:
+                 run_id: str, identity: RunIdentity,
+                 bound_launches: dict[tuple[int, int], int] | None = None,
+                 report: attempt_store.OwnerReport | None = None) -> None:
     """The one write boundary every committed state write passes (D5).
 
-    It settles the admission block at the commit's ``updated_at``, validates
-    the whole state, then publishes it atomically, in that order.
+    It settles the admission block at the commit's ``updated_at``, validates the whole
+    state, settles attempt custody in the core (``bound_launches`` is the 8 -> 9 plan of a
+    binding write, ``report`` an owner result it submits; a refusal leaves the ledger
+    untouched), then publishes the state atomically and applies the seals the settle
+    deferred, in that order (#338 D4).
     """
     settle_admission(state, at=state["updated_at"])
     validate_state(state, run_id=run_id, identity=identity)
+    now_ms = custody_clock(state)
+    store = attempt_store.ledger_store(state_path)
+    pending = attempt_store.settle_custody(
+        store, state, now_ms=now_ms, canonical=canonical_worktree_path,
+        bound_launches=bound_launches or {}, report=report)
     atomic_write_state(run_dir, state_path, state)
+    attempt_store.seal_custody(store, pending, now_ms=now_ms)
 
 
 Mutation = Callable[..., tuple[Any, bool]]
@@ -1480,7 +1501,9 @@ def transact(
 ) -> Any:
     """Run `mutation` on one ledger under its `state.lock` and commit what it changed.
 
-    A bind of the ledger by the locked read is committed too (#337 D14).
+    A bind of the ledger by the locked read is committed too (#337 D14), with its 8 -> 9
+    plan. A mutation that changed nothing still completes a seal an earlier write left
+    undone, and writes no ledger byte (#338 D24).
     `with_identity` passes the run's `RunIdentity` to `mutation`; `new_identity` is that of a
     run `allow_missing` creates; `refuse_direct` refuses a direct run first.
     """
@@ -1496,7 +1519,7 @@ def transact(
             state_path, "workflow state", allow_missing=True
         )
         if state_exists:
-            current, identity, migrated = read_locked_state(
+            current, identity, migrated, bound_launches = read_locked_state(
                 state_path, run_id, migration_contracts=migration_contracts or {},
             )
             state = copy.deepcopy(current)
@@ -1505,7 +1528,7 @@ def transact(
                 raise WorkflowError("internal error: a new run has no identity")
             state = None
             identity = new_identity
-            migrated = False
+            migrated, bound_launches = False, {}
         else:
             raise WorkflowError(f"workflow run {run_id!r} is not initialized")
         if refuse_direct and identity.direct:
@@ -1517,7 +1540,14 @@ def transact(
                     state = result
                 else:
                     raise WorkflowError("internal error: changed transaction has no state")
-            commit_state(run_dir, state_path, state, run_id=run_id, identity=identity)
+            commit_state(run_dir, state_path, state, run_id=run_id, identity=identity,
+                         bound_launches=bound_launches)
+        elif state_exists:
+            # An identical repeat of a command whose seal never ran completes it (#338 D24).
+            now_ms = custody_clock(state)
+            store = attempt_store.ledger_store(state_path)
+            attempt_store.seal_custody(
+                store, attempt_store.pending_seals(store, state, now_ms=now_ms), now_ms=now_ms)
         return result
 
 
@@ -3445,7 +3475,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     attempts, workflows_dir, issue, after=sequence):
                 candidates.append(retain(sequence, probed_id, probed_dir, True))
 
-            # Bind: a legacy ledger is committed as schema 8 at once, under its held lock.
+            # Bind: a legacy ledger is committed as schema 9 at once, under its held lock.
             retained: list[tuple[int, str, Path, Path, dict[str, Any], RunIdentity]] = []
             for sequence, run_id, run_dir, state_path in candidates:
                 read = read_locked_state(
@@ -3453,7 +3483,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                 )
                 if read.changed:
                     commit_state(run_dir, state_path, read.state, run_id=run_id,
-                                 identity=read.identity)
+                                 identity=read.identity, bound_launches=read.bound_launches)
                 retained.append(
                     (sequence, run_id, run_dir, state_path, read.state, read.identity)
                 )

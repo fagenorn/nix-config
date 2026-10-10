@@ -190,11 +190,34 @@ class LifecycleHarness:
         (self.workflows_dir / ".gitignore").write_text("*\n", encoding="utf-8")
         (run_dir / "state.lock").write_bytes(b"")
         self.run_id = handle
-        self.write_state(self._as_legacy(state, version, handle=handle))
+        self.release_custody()
+        self.write_state(self._as_legacy(state, min(version, 7), handle=handle))
+        if version == 8:
+            self.bind_as_schema_8()
+
+    def release_custody(self):
+        """Give up every live core custody in this root: a legacy ledger about to be
+        installed never held a lease, and lease records are never deleted (#338 D11)."""
+        for path in sorted((self.store_root / "leases").glob("*.json")):
+            holder = json.loads(path.read_text(encoding="utf-8"))["holder"]
+            if holder is None:
+                continue
+            store = TransactionStore(self.store_root, clock=lambda: holder["acquired_at"])
+            custody = store.load(holder["transaction_id"]).custody
+            if custody is not None:
+                store.release(custody)
+
+    def bind_as_schema_8(self):
+        """The stored schema-7 ledger as package 1 bound it: its run minted, schema 8."""
+        document = json.loads(self.state_path.read_text(encoding="utf-8"))
+        plan = attempt_store.plan_legacy_run(document)
+        document["transaction_id"] = attempt_store.mint_run(self.store_root, plan)
+        document["schema_version"] = 8
+        self.write_state(document)
 
     def assert_bound(self, state):
-        """`state` is schema 8 and bound to the transaction its legacy handle's key names."""
-        self.assertEqual(state["schema_version"], 8)
+        """`state` is schema 9 and bound to the transaction its legacy handle's key names."""
+        self.assertEqual(state["schema_version"], 9)
         self.assertEqual(state["transaction_id"], TransactionStore(self.store_root).lookup(
             attempt_identity.legacy_key(state["run_id"])))
 
@@ -361,9 +384,9 @@ class LifecycleHarness:
         return root
 
     def _legacy_finish_input(self, stored):
-        """The ledger the legacy `finish` runs on: a schema-8 ledger keeps its binding and
+        """The ledger the legacy `finish` runs on: a schema-9 ledger keeps its binding and
         loses only its deliveries, as legacy finish refuses only a contracted issue (D25)."""
-        if stored["schema_version"] != 8:
+        if stored["schema_version"] != 9:
             return self._as_legacy(stored, 2)
         stripped = copy.deepcopy(stored)
         for issue_state in stripped["issues"].values():
@@ -2566,7 +2589,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         stdout_json = self.finish(1, merged, now="2026-08-13T20:20:00Z")
         state = self.read_state()
         attempt = state["issues"]["14"]["attempts"][0]
-        self.assertEqual(state["schema_version"], 8)
+        self.assertEqual(state["schema_version"], 9)
         self.assert_bound(state)
         self.assertIsNone(attempt["blocked_on"])
         self.assertEqual(attempt["stalled_resumes"], 0)
@@ -2964,7 +2987,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                     "lane": None, "lane_budget_minutes": None, "lane_history": [],
                 }
                 expected_state = {
-                    "schema_version": 8, "run_id": self.run_id, "workers": [],
+                    "schema_version": 9, "run_id": self.run_id, "workers": [],
                     "transaction_id": self.run_id, "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
                     "prior_run": None, "admission": self.spawned_admission(14),
                     "issues": {"14": {
@@ -3013,7 +3036,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "lane": None, "lane_budget_minutes": None, "lane_history": [],
         }
         expected_state = {
-            "schema_version": 8, "run_id": self.run_id, "workers": [],
+            "schema_version": 9, "run_id": self.run_id, "workers": [],
             "transaction_id": self.run_id, "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
             "prior_run": None, "admission": self.spawned_admission(14),
             "issues": {"14": {
@@ -4757,7 +4780,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertIn("exhaust", rejected.stderr)
         # The locked read binds the legacy ledger (D14); its history is otherwise untouched.
         self.assertEqual(json.loads(state_path.read_text()), {
-            **state, "schema_version": 8, "transaction_id": TransactionStore(
+            **state, "schema_version": 9, "transaction_id": TransactionStore(
                 self.store_root).lookup(attempt_identity.direct_key(73, 999999))})
 
     def test_direct_authorization_flags_fail_when_not_applicable(self):
@@ -5582,7 +5605,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             self.assertEqual(state, self._as_legacy(baseline, version, handle="orchestrate-151"))
             self.assert_bound(value)
             write.assert_called_once()
-            self.assertEqual(write.call_args.args[2]["schema_version"], 8)
+            self.assertEqual(write.call_args.args[2]["schema_version"], 9)
 
     def test_locked_loader_requires_keyword_migration_context(self):
         self.init_run()
@@ -6492,7 +6515,7 @@ class WorkerRegistryTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(self.check_worker("14:1:1:w9")["reason"], "unknown_worker")
         self.assertEqual(self.state_path.read_bytes(), before)
         state = self.read_state()
-        self.assertEqual(state["schema_version"], 8)
+        self.assertEqual(state["schema_version"], 9)
         self.assertEqual(state["workers"][0], {
             "worker_id": "14:1:1:w1", "launch": "14:1:1", "parent": None,
             "registered_at": "2026-08-13T20:01:00Z", "released_at": None,
@@ -6685,7 +6708,7 @@ class ProgressMarkerSchemaTest(LifecycleHarness, unittest.TestCase):
 
     def test_a_new_attempt_starts_with_a_null_marker_at_schema_six(self):
         self.spawn_16()
-        self.assertEqual(self.read_state()["schema_version"], 8)
+        self.assertEqual(self.read_state()["schema_version"], 9)
         self.assertIsNone(self.attempt()["progress_marker"])
 
     def test_a_schema_five_ledger_keeps_its_stall_count_and_upgrades_on_first_write(self):
@@ -6710,7 +6733,7 @@ class ProgressMarkerSchemaTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(
             (upgraded["schema_version"], attempt["progress_marker"],
              attempt["stalled_resumes"], attempt["suspend_phase"]),
-            (8, None, 1, 0))
+            (9, None, 1, 0))
 
     def test_a_schema_five_hybrid_is_refused_without_a_write(self):
         self.spawn_16()
@@ -6777,7 +6800,7 @@ class LaneSchemaTest(LifecycleHarness, unittest.TestCase):
 
     def test_a_new_attempt_starts_without_a_lane_at_schema_seven(self):
         self.spawn_16()
-        self.assertEqual(self.read_state()["schema_version"], 8)
+        self.assertEqual(self.read_state()["schema_version"], 9)
         self.assertEqual(self.lane_of(self.attempt()), (None, None, []))
 
     def test_a_retry_attempt_does_not_inherit_its_predecessors_lane(self):
@@ -6812,7 +6835,7 @@ class LaneSchemaTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(
             (upgraded["schema_version"],
              self.lane_of(upgraded["issues"]["16"]["attempts"][0])),
-            (8, (None, None, [])))
+            (9, (None, None, [])))
 
     def test_a_schema_six_hybrid_is_refused_without_a_write(self):
         self.spawn_16()
@@ -7291,7 +7314,7 @@ class ProgressMarkerTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(
             (state["schema_version"],
              state["issues"]["16"]["attempts"][0]["progress_marker"]),
-            (8, self.base))
+            (9, self.base))
 
     def race(self, module_name, interleave, *, now="2026-08-13T20:09:00Z"):
         """Run `mark-progress` in-process with `interleave()` between its probe and
