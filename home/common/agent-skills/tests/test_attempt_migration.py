@@ -3,8 +3,10 @@
 Run: just agent-workflow-tests
 """
 
+import hashlib
 import json
 import re
+import shutil
 import unittest
 
 from agent_tools import attempt_identity as ai
@@ -148,4 +150,115 @@ class DirectReservationTest(MigrationFixtures, unittest.TestCase):
         refused = self.run_cli("init-run", "--repo-root", self.root, "--run-id",
                                "direct-14-000001", ok=False)
         self.assertIn("reserved for direct-owner", refused.stderr)
+        self.assertEqual(self.tree_snapshot(), before)
+
+
+class DirectOwnerIdentityTest(MigrationFixtures, unittest.TestCase):
+    def first_direct_run(self, issue=41):
+        return self.acquire_direct(issue=issue)["run_id"]
+
+    def install_terminal_legacy_direct(self, handle):
+        """Leave issue 41 with one terminal run, retained as a legacy-named schema-7 ledger.
+
+        The run is driven like the new-run test of `test_direct_new_run_records_the_prior_run_link`;
+        its minted directory and index entry are then removed, so only `handle` names
+        sequence 1.
+        """
+        owner = self.acquire_direct(issue=41)
+        minted = owner["run_id"]
+        self.run_id = minted
+        self.finish(1, {**self.merged_result(41), "state": "stopped", "pr_url": None,
+                        "merge_sha": None, "issue_closed": False, "notes": "semantic stop"},
+                    issue=41, now="2026-08-20T10:05:00Z")
+        self.terminal_worktree = owner["worktree"]
+        state = self.read_state()
+        self.install_legacy(state, handle)
+        shutil.rmtree(self.workflows_dir / minted)
+        key = ai.direct_key(41, 1)
+        (self.store_root / "creation-keys" /
+         f"{hashlib.sha256(key.encode('utf-8')).hexdigest()}.json").unlink()
+        self.assertIsNone(self.store().lookup(key))
+
+    def new_run_fields(self, issue):
+        return {"issue": issue, "new_run": True, "now": "2026-08-20T10:10:00Z",
+                "tracker": self.tracker_fact(issue),
+                "worktree": self.worktree_fact(issue, recorded={
+                    "path": self.terminal_worktree, "state": "matching_issue_branch"})}
+
+    def test_a_first_direct_run_is_minted_and_named_by_its_transaction(self):
+        run_id = self.first_direct_run()
+        self.assertRegex(run_id, CORE)
+        self.assertEqual(self.direct_run_id(41, 1), run_id)
+        self.run_id = run_id
+        state = self.read_state()
+        self.assertEqual((state["transaction_id"], state["prior_run"]), (run_id, None))
+        subject = self.store().load(run_id).subject
+        self.assertEqual((subject["kind"], subject["issue"], subject["sequence"],
+                          subject["alias"]), ("direct", 41, 1, None))
+        self.assertFalse(any(p.name.startswith("direct-41-")
+                             for p in self.workflows_dir.iterdir()))
+
+    def test_a_new_run_after_a_legacy_terminal_links_the_legacy_handle(self):
+        self.install_terminal_legacy_direct("direct-41-000001")
+        reply = self.direct_owner(**self.new_run_fields(41))
+        self.assertRegex(reply["run_id"], CORE)
+        self.run_id = reply["run_id"]
+        self.assertEqual(self.read_state()["prior_run"], "direct-41-000001")
+        self.assertEqual(self.store().load(reply["run_id"]).subject["sequence"], 2)
+        legacy = json.loads((self.workflows_dir / "direct-41-000001" / "state.json")
+                            .read_text())
+        self.assertEqual(legacy["schema_version"], 8)  # bound and committed (D14)
+        self.assertEqual(self.store().lookup(ai.direct_key(41, 1)),
+                         legacy["transaction_id"])
+
+    def test_a_reserved_slot_without_a_ledger_is_reused(self):
+        self.install_terminal_legacy_direct("direct-41-000001")
+        plan = ai.minted_plan(identity=ai.RunIdentity("direct", 41, 2),
+                              prior_run="direct-41-000001", caller_key=None)
+        self.store_root.mkdir(parents=True, exist_ok=True)
+        reserved = self.store().create(plan.creation_key, plan.subject_json(),
+                                       **ai.creation_arguments(plan)).transaction_id
+        reply = self.direct_owner(**self.new_run_fields(41))
+        self.assertEqual(reply["run_id"], reserved)
+        self.assertIsNone(self.store().lookup(ai.direct_key(41, 3)))
+
+    def test_a_refused_legacy_ledger_refuses_the_call_and_mints_nothing(self):
+        self.init_run()
+        state = {**self.read_state(), "prior_run": "direct-42-000001"}
+        self.install_legacy(state, "direct-41-000002")
+        ledger = self.workflows_dir / "direct-41-000002" / "state.json"
+        before = ledger.read_bytes()
+        refused = self.direct_owner_raw(issue=41, ok=False)
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("ambiguous_lineage", refused.stderr)
+        self.assertEqual(ledger.read_bytes(), before)
+        for sequence in (1, 2, 3):
+            self.assertIsNone(self.store().lookup(ai.direct_key(41, sequence)))
+
+    def test_a_valid_ledger_before_a_refused_one_stays_unbound(self):
+        self.install_terminal_legacy_direct("direct-41-000001")
+        first = self.workflows_dir / "direct-41-000001" / "state.json"
+        self.install_legacy({**json.loads(first.read_text()), "prior_run": "direct-42-000001"},
+                            "direct-41-000002")
+        second = self.workflows_dir / "direct-41-000002" / "state.json"
+        before = (first.read_bytes(), second.read_bytes())
+        refused = self.direct_owner_raw(issue=41, ok=False)
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("ambiguous_lineage", refused.stderr)
+        self.assertEqual((first.read_bytes(), second.read_bytes()), before)  # D23
+        for sequence in (1, 2, 3):
+            self.assertIsNone(self.store().lookup(ai.direct_key(41, sequence)))
+
+    def test_control_and_rebootstrap_refuse_a_minted_direct_run_by_identity(self):
+        run_id = self.first_direct_run()
+        self.run_id = run_id
+        before = self.tree_snapshot()
+        control = self.control_raw(now="2026-08-20T10:30:00Z", issues=[41],
+                                   tracker=[self.tracker_fact(41)], worktrees=[], ok=False)
+        self.assertEqual(control.returncode, 2)
+        self.assertIn("reserved for direct-owner", control.stderr)
+        rebootstrap = self.run_cli("init-run", "--repo-root", self.root, "--run-id", run_id,
+                                   ok=False)
+        self.assertEqual(rebootstrap.returncode, 2)
+        self.assertIn("reserved for direct-owner", rebootstrap.stderr)
         self.assertEqual(self.tree_snapshot(), before)

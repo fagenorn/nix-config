@@ -14,6 +14,9 @@ import tempfile
 import unittest
 from unittest import mock
 
+from agent_tools import attempt_identity
+from agent_tools.transaction_core import TransactionStore
+
 if __package__:
     from .test_delivered_control import DELIVERED, DISPATCH, LIVE, DeliveredControlHarness
 else:
@@ -560,6 +563,15 @@ class LifecycleHarness:
             "--request-file", request_path, ok=ok,
         )
 
+    def direct_run_id(self, issue, sequence):
+        """The run id the attempt transaction store names for direct run `sequence` of `issue`."""
+        run_id = None
+        if self.store_root.is_dir():
+            run_id = TransactionStore(self.store_root).lookup(
+                attempt_identity.direct_key(issue, sequence))
+        self.assertIsNotNone(run_id, f"no direct run {sequence} of issue {issue}")
+        return run_id
+
     def direct_state_path(self, run_id):
         return self.workflows_dir / run_id / "state.json"
 
@@ -576,7 +588,7 @@ class LifecycleHarness:
         selected = self.direct_owner(**common, tracker=tracker)
         self.assertEqual(selected, {
             "interface_version": 1, "kind": "observe", "issue": issue,
-            "run_id": f"direct-{issue}-000001",
+            "run_id": self.direct_run_id(issue, 1),
             "requirements": [{"kind": "candidate_worktree"}],
         })
         return self.direct_owner(

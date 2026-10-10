@@ -20,8 +20,8 @@ from typing import Any, Callable, Iterator, NamedTuple
 
 from agent_tools.attempt_identity import (
     REFUSAL_REASONS, MigrationRefused, RunIdentity, RunPlan, classify, creation_arguments,
-    identity_of, legacy_identity, minted_plan, plan_migration, prior_run_violation,
-    schema_refusal, subject_handle, subject_violation)
+    direct_key, identity_of, legacy_identity, minted_plan, plan_migration,
+    prior_run_violation, schema_refusal, subject_handle, subject_violation)
 from agent_tools.transaction_core import TransactionError, TransactionStore
 from agent_tools.transaction_storage import is_id
 
@@ -1726,8 +1726,9 @@ def new_run_state(
     ``prior_run`` is the identity of the run this one continues — only the
     direct-owner ``new_run`` escape hatch has a predecessor, and recording it
     keeps an issue's history one readable chain instead of N unlinked run
-    directories (per D5). The link always points at a lower direct sequence, so
-    the chain cannot cycle.
+    directories (per D5). The link is the handle of the issue's previous direct
+    run, as recorded: a legacy ``direct-`` id or a ``rel_`` id. That run's
+    sequence is lower, so the chain cannot cycle.
     """
     return {
         "schema_version": SCHEMA_VERSION,
@@ -2427,6 +2428,7 @@ def control_summary(
 
 def _apply_one_issue_policy(
     *,
+    issue: int,
     ledger_issue: dict[str, Any] | None,
     tracker: dict[str, Any] | None,
     worktree: dict[str, Any] | None,
@@ -2444,6 +2446,11 @@ def _apply_one_issue_policy(
     contract: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Derive and apply the shared lifecycle policy for exactly one issue.
+
+    ``issue`` is the issue number the caller is deciding for: ``control`` names the
+    issue it iterates and ``direct-owner`` the request's. A ledger, tracker or worktree
+    observation that names another issue is refused. ``run_dir`` is used only for the
+    paths the policy reads and writes, never to derive an issue.
 
     ``forge`` carries the issue branch's pull-request observation, from direct
     and control alike. A merged one reconciles the latest attempt only when
@@ -2487,18 +2494,8 @@ def _apply_one_issue_policy(
     order the return would come before a merged pull request had ever been
     considered for an attempt nobody holds (per D3, D13).
     """
-    if ledger_issue is not None:
-        issue = ledger_issue["issue"]
-    elif tracker is not None:
-        issue = tracker["issue"]
-    elif worktree is not None:
-        issue = worktree["issue"]
-    else:
-        match = DIRECT_RUN_ID_PATTERN.fullmatch(run_dir.name)
-        if match is None:
-            raise WorkflowError("cannot derive issue identity for one-issue policy")
-        issue = int(match.group(1))
-
+    if ledger_issue is not None and ledger_issue["issue"] != issue:
+        raise WorkflowError("ledger issue does not match requested issue")
     if tracker is not None and tracker["issue"] != issue:
         raise WorkflowError("tracker observation does not match ledger issue")
     if worktree is not None and worktree["issue"] != issue:
@@ -2978,6 +2975,7 @@ def command_control(args: argparse.Namespace) -> int:
                 continue
             issue_state = state["issues"].get(str(issue))
             analysis[issue] = _apply_one_issue_policy(
+                issue=issue,
                 ledger_issue=copy.deepcopy(issue_state),
                 tracker=tracker_by_issue[issue],
                 worktree=worktree_by_issue.get(issue),
@@ -3111,6 +3109,7 @@ def command_control(args: argparse.Namespace) -> int:
                 return planned[issue]
             issue_state = state["issues"].get(str(issue))
             result = _apply_one_issue_policy(
+                issue=issue,
                 ledger_issue=copy.deepcopy(issue_state),
                 tracker=tracker_by_issue[issue],
                 worktree=worktree_by_issue.get(issue),
@@ -3533,7 +3532,6 @@ def command_direct_owner(args: argparse.Namespace) -> int:
         fcntl.flock(issue_lock.fileno(), fcntl.LOCK_EX)
         with ExitStack() as retained_locks:
             prefix = f"direct-{issue}-"
-            retained: list[tuple[int, str, Path, Path, dict[str, Any]]] = []
             claimed: list[tuple[int, str, Path]] = []
             for entry in os.scandir(workflows_dir):
                 if not entry.name.startswith(prefix):
@@ -3557,7 +3555,9 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     )
                 claimed.append((sequence, run_id, run_dir))
 
-            for sequence, run_id, run_dir in sorted(claimed):
+            def retain(sequence: int, run_id: str, run_dir: Path,
+                       probed: bool) -> tuple[int, str, Path, Path]:
+                """Lock one run's ledger to the end of the call and check it read-only."""
                 lock_path = run_dir / "state.lock"
                 state_path = run_dir / "state.json"
                 require_regular_path(lock_path, "state lock", allow_missing=False)
@@ -3569,16 +3569,57 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     os.fdopen(lock_descriptor, "r+b")
                 )
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-                state = read_locked_state(
-                    state_path, run_id, repo_root=repo_root,
-                    migration_contracts=migration_contracts,
-                ).state
-                if set(state["issues"]) != {str(issue)}:
+                checked = read_state_unlocked(state_path, run_id, repo_root=repo_root)
+                if set(checked["issues"]) != {str(issue)}:
                     raise WorkflowError(
                         "direct run state must contain exactly the requested issue"
                     )
+                if probed and bound_identity(
+                        repo_root, checked, run_id) != RunIdentity("direct", issue, sequence):
+                    raise WorkflowError(
+                        "direct run state does not match its sequence in the index"
+                    )
+                return sequence, run_id, run_dir, state_path
+
+            # Preflight: every scanned and probed ledger is checked, none written, so a
+            # refused one refuses the call before any bind, index entry or mint (D23).
+            candidates = [retain(sequence, run_id, run_dir, False)
+                          for sequence, run_id, run_dir in sorted(claimed)]
+            sequence = candidates[-1][0] if candidates else 0
+            while True:
+                sequence += 1
+                probed_id = lookup_run(repo_root, direct_key(issue, sequence))
+                if probed_id is None:
+                    break
+                if classify(probed_id) != "core":
+                    raise WorkflowError("direct run index entry is not a run transaction")
+                probed_dir = workflows_dir / probed_id
+                probed_status = path_status(probed_dir)
+                if probed_status is None:
+                    break
+                if (
+                    stat.S_ISLNK(probed_status.st_mode)
+                    or not stat.S_ISDIR(probed_status.st_mode)
+                ):
+                    raise WorkflowError(
+                        "direct run entry must be a non-symlink directory"
+                    )
+                if path_status(probed_dir / "state.json") is None:
+                    break
+                candidates.append(retain(sequence, probed_id, probed_dir, True))
+
+            # Bind: a legacy ledger is committed as schema 8 at once, under its held lock.
+            retained: list[tuple[int, str, Path, Path, dict[str, Any], RunIdentity]] = []
+            for sequence, run_id, run_dir, state_path in candidates:
+                read = read_locked_state(
+                    state_path, run_id, repo_root=repo_root,
+                    migration_contracts=migration_contracts,
+                )
+                if read.changed:
+                    commit_state(run_dir, state_path, read.state, run_id=run_id,
+                                 identity=read.identity)
                 retained.append(
-                    (sequence, run_id, run_dir, state_path, state)
+                    (sequence, run_id, run_dir, state_path, read.state, read.identity)
                 )
             stamp_request(request)
             nonterminal = [
@@ -3652,31 +3693,36 @@ def command_direct_owner(args: argparse.Namespace) -> int:
             else:
                 retained_worktree = None
                 prior_run = None
+                new_sequence = None
                 if request["new_run"]:
                     assert greatest is not None
                     if greatest[0] >= 999999:
                         raise WorkflowError("direct run sequence exhausted")
-                    run_sequence = greatest[0] + 1
+                    new_sequence = greatest[0] + 1
                     terminal_issue = greatest[4]["issues"][str(issue)]
                     retained_worktree = terminal_issue["attempts"][-1]["worktree"]
                     prior_run = greatest[1]
-                    run_id = f"direct-{issue}-{run_sequence:06d}"
-                    run_dir = workflows_dir / run_id
-                    state_path = run_dir / "state.json"
-                    state = None
-                    issue_state = None
                 elif selected is None:
                     if retained:
                         raise WorkflowError("invalid direct run history")
-                    run_id = f"direct-{issue}-000001"
+                    new_sequence = 1
+                else:
+                    _, run_id, run_dir, state_path, current_state, identity = selected
+                    state = copy.deepcopy(current_state)
+                    issue_state = state["issues"][str(issue)]
+
+                if new_sequence is not None:
+                    # The run's transaction is minted before the policy runs, so every
+                    # reply that names the unallocated run names its final handle. The
+                    # mint lock is taken under the issue lock and the retained
+                    # `state.lock`s (D9); the same facts mint the same transaction.
+                    identity = RunIdentity("direct", issue, new_sequence)
+                    run_id = mint_run(repo_root, minted_plan(
+                        identity=identity, prior_run=prior_run, caller_key=None))
                     run_dir = workflows_dir / run_id
                     state_path = run_dir / "state.json"
                     state = None
                     issue_state = None
-                else:
-                    _, run_id, run_dir, state_path, current_state = selected
-                    state = copy.deepcopy(current_state)
-                    issue_state = state["issues"][str(issue)]
 
                 if issue_state is not None and issue_state["attempts"]:
                     latest = issue_state["attempts"][-1]
@@ -3697,6 +3743,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                             "run updated_at", state["updated_at"])
 
                 policy = _apply_one_issue_policy(
+                    issue=issue,
                     ledger_issue=issue_state,
                     tracker=request["tracker"],
                     worktree=request["worktree"],
@@ -3734,7 +3781,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
                         commit_state(run_dir, state_path, state, run_id=run_id,
-                                     identity=legacy_identity(run_id))
+                                     identity=identity)
                     response = direct_observe(
                         issue,
                         run_id if selected is not None and not request["new_run"]
@@ -3752,7 +3799,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     state["issues"][str(issue)] = policy["issue_state"]
                     state["updated_at"] = request["now"]
                     commit_state(run_dir, state_path, state, run_id=run_id,
-                                 identity=legacy_identity(run_id))
+                                 identity=identity)
                     response = direct_terminal(
                         issue=issue, run_id=run_id, source="lifecycle",
                         reason="failed", blockers=[],
@@ -3764,7 +3811,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
                         commit_state(run_dir, state_path, state, run_id=run_id,
-                                     identity=legacy_identity(run_id))
+                                     identity=identity)
                     response = direct_terminal(
                         issue=issue,
                         run_id=(run_id if state is not None else None),
@@ -3783,7 +3830,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
                         commit_state(run_dir, state_path, state, run_id=run_id,
-                                     identity=legacy_identity(run_id))
+                                     identity=identity)
                     response = direct_terminal(
                         issue=issue, run_id=run_id, source="lifecycle",
                         reason=policy["attempt"]["result"]["state"],
@@ -3794,7 +3841,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     state["issues"][str(issue)] = policy["issue_state"]
                     state["updated_at"] = request["now"]
                     commit_state(run_dir, state_path, state, run_id=run_id,
-                                 identity=legacy_identity(run_id))
+                                 identity=identity)
                     response = direct_terminal(
                         issue=issue, run_id=run_id, source="lifecycle",
                         reason="merged", blockers=[],
@@ -3802,11 +3849,6 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     )
                 elif operation in {"spawn", "resume", "retry", "refuse", "recover"}:
                     if state is None:
-                        # A new direct run is bound under its legacy name, as a migrated
-                        # one is; the mint lock is taken before the run's own `state.lock`.
-                        transaction_id = mint_run(repo_root, plan_legacy_run({
-                            "run_id": run_id, "prior_run": prior_run,
-                            "issues": {str(issue): None}}))
                         ensure_gitignore(workflows_dir)
                         try:
                             run_dir.mkdir()
@@ -3822,7 +3864,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         )
                         fcntl.flock(new_lock.fileno(), fcntl.LOCK_EX)
                         state = new_run_state(
-                            run_id=run_id, transaction_id=transaction_id, now=request["now"],
+                            run_id=run_id, transaction_id=run_id, now=request["now"],
                             issues={str(issue): policy["issue_state"]},
                             prior_run=prior_run,
                         )
@@ -3835,9 +3877,9 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         reentry=reentry_command(issue))
                     if changed:
                         commit_state(run_dir, state_path, state, run_id=run_id,
-                                     identity=legacy_identity(run_id))
+                                     identity=identity)
                     else:
-                        validate_state(state, run_id=run_id, identity=legacy_identity(run_id))
+                        validate_state(state, run_id=run_id, identity=identity)
                 else:
                     raise WorkflowError("invalid one-issue policy operation")
 
