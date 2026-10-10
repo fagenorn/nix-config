@@ -52,9 +52,10 @@ class DeliveredControlHarness(BuilderHarness):
             {"schema_version": 1, "routes": {
                 "claude-code": {"support": "supported", "agent_slots": 7},
                 "codex": {"support": "unsupported"}}}), encoding="utf-8")
-        self.run_args = ("--repo-root", self.root, "--run-id", "delivered")
-        self.ledger = self.root / ".superpowers/workflows/delivered/state.json"
-        self.cli("init-run", *self.run_args, "--now", at(0))
+        minted = json.loads(self.cli("init-run", "--repo-root", self.root, "--creation-key",
+                                     "delivered", "--now", at(0)).stdout)["run_id"]
+        self.run_args = ("--repo-root", self.root, "--run-id", minted)
+        self.ledger = self.root / ".superpowers/workflows" / minted / "state.json"
         self.worktrees = {n: str(self.root / ".worktrees" / f"worktree-issue-{n}-shape")
                           for n in ISSUES}
         self.built = {n: self.build("contract", self.contract_input(

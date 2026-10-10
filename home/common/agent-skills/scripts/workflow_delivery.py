@@ -1291,7 +1291,11 @@ class DeliveryRuntime:
         }
 
     def migrate(self, value: object, *, migration_contracts: dict[int, object]) -> object:
-        """Compose schema 1→2→3→4→5→6→7 on a detached copy without persisting."""
+        """Compose schema 1→2→3→4→5→6→7 on a detached copy without persisting.
+
+        A schema-8 document passes through as a deep copy: schema 8 is `workflow-state`'s
+        binding to a run transaction (#337), not a delivery change.
+        """
         if not isinstance(migration_contracts, dict):
             raise ValueError("invalid migration contracts")
         for issue, contract in migration_contracts.items():
@@ -1302,7 +1306,7 @@ class DeliveryRuntime:
                     raise ValueError("migration contract issue mismatch")
         candidate = copy.deepcopy(value)
         seen: set[int] = set()
-        while isinstance(candidate, dict) and candidate.get("schema_version") != 7:
+        while isinstance(candidate, dict) and candidate.get("schema_version") not in {7, 8}:
             version = candidate.get("schema_version")
             if type(version) is not int or version in seen or version not in {1, 2, 3, 4, 5, 6}:
                 raise ValueError("unsupported workflow state schema version")

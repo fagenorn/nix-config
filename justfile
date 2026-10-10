@@ -62,6 +62,7 @@ agent_tools_path := justfile_directory() / "python"
 agent-workflow-tests:
   PYTHONPATH="{{agent_tools_path}}" python3 -m unittest -v \
     home/common/agent-skills/tests/test_workflow_state.py \
+    home/common/agent-skills/tests/test_attempt_migration.py \
     home/common/agent-skills/tests/test_host_admission.py \
     home/common/agent-skills/tests/test_admission_replay.py \
     home/common/agent-skills/tests/test_delivery_model.py \

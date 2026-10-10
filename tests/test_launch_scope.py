@@ -1143,6 +1143,12 @@ class ReapTest(ScopeHarness, unittest.TestCase):
                 self.assertEqual((done.returncode, done.stdout), (2, ""), done.stderr)
         self.assertTrue(keep.is_dir())
 
+    def test_a_minted_run_handle_is_a_safe_segment(self):
+        handle = "rel_0190f0e0-0000-7000-8000-000000000000"
+        self.assertTrue(launch_scope.is_safe_segment(handle))
+        for unsafe in (".", "..", "a/b", ""):
+            self.assertFalse(launch_scope.is_safe_segment(unsafe))
+
 
 if __name__ == "__main__":
     unittest.main()

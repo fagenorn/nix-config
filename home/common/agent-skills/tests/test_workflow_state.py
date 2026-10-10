@@ -88,9 +88,13 @@ class LifecycleHarness:
                 "selected_outputs": [], "stage_facts": [], "postconditions": {}}
 
     @staticmethod
-    def _as_legacy(state, version, *, keep_delivery=False):
+    def _as_legacy(state, version, *, keep_delivery=False, handle=None):
         state = copy.deepcopy(state)
         state["schema_version"] = version
+        if version < 8:
+            state.pop("transaction_id", None)
+        if handle is not None:
+            state["run_id"] = handle
         if version < 7:
             for issue in state["issues"].values():
                 for attempt in issue["attempts"]:
@@ -163,6 +167,26 @@ class LifecycleHarness:
     def state_path(self):
         return self.workflows_dir / self.run_id / "state.json"
 
+    @property
+    def store_root(self):
+        return self.root / ".superpowers" / "attempt-transactions"
+
+    def tree_snapshot(self):
+        """Every path under `<root>/.superpowers` mapped to its bytes, or "<dir>"."""
+        base = self.root / ".superpowers"
+        return {str(path.relative_to(base)): "<dir>" if path.is_dir() else path.read_bytes()
+                for path in sorted(base.rglob("*"))}
+
+    def install_legacy(self, state, handle, version=7):
+        """A retained legacy ledger: `state` as schema `version` under `handle`, beside its
+        empty `state.lock` and the workflows `.gitignore` a retained ledger has (D21)."""
+        run_dir = self.workflows_dir / handle
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (self.workflows_dir / ".gitignore").write_text("*\n", encoding="utf-8")
+        (run_dir / "state.lock").write_bytes(b"")
+        self.run_id = handle
+        self.write_state(self._as_legacy(state, version, handle=handle))
+
     def run_cli(self, *args, ok=True):
         completed = INPROCESS_CLI.run_script(SCRIPT, args, env=self.cli_env)
         if ok and completed.returncode != 0:
@@ -171,17 +195,18 @@ class LifecycleHarness:
             )
         return completed
 
-    def init_run(self, *, now=DEFAULT_NOW):
+    def init_run(self, *, now=DEFAULT_NOW, creation_key="lifecycle-harness"):
         completed = self.run_cli(
             "init-run",
             "--repo-root",
             self.root,
-            "--run-id",
-            self.run_id,
+            "--creation-key",
+            creation_key,
             "--now",
             now,
         )
         value = json.loads(completed.stdout)
+        self.run_id = value["run_id"]
         return {"interface_version": 1, "run_id": value["run_id"],
                 "requirements": [self._legacy_bootstrap(item)
                                  for item in value["requirements"]]}
@@ -323,7 +348,17 @@ class LifecycleHarness:
 
     def finish(self, attempt, result, *, issue=14, now=DEFAULT_NOW, ok=True):
         current_bytes = self.state_path.read_bytes()
-        self.write_state(self._as_legacy(json.loads(current_bytes), 2))
+        stored = json.loads(current_bytes)
+        if stored["schema_version"] == 8:
+            # Legacy finish refuses only a contracted issue, so a schema-8 ledger
+            # keeps its binding and loses only its deliveries (D25).
+            stripped = copy.deepcopy(stored)
+            for issue_state in stripped["issues"].values():
+                issue_state["delivery"] = self.empty_delivery()
+                issue_state["delivery_remainders"] = []
+            self.write_state(stripped)
+        else:
+            self.write_state(self._as_legacy(stored, 2))
         result_path = self.root / f"result-{issue}-{attempt}.json"
         result_path.write_text(json.dumps(result), encoding="utf-8")
         completed = self.run_cli(

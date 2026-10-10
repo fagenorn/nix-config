@@ -12,7 +12,8 @@ the recovery plan; `transaction_proof` the proof's collection, cohorts and settl
 budget; `transaction_custody` the lease authority and admissibility; `transaction_receipt`
 the receipts, hazard markers and post-terminal observations; `transaction_storage` the
 durable-file primitives and the refusal classes. The store adds the locks, the clock, the
-fenced check and the writes. No command and no caller until #125.
+fenced check and the writes. Its first caller is `workflow-state`, which mints and binds
+attempt run transactions (#337).
 """
 
 import contextlib
