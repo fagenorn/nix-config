@@ -9,7 +9,7 @@
 
 **Tech stack:** Python 3 standard library (`agent_tools` package under `python/`), `unittest`, git fixture repositories.
 
-Spec: `.agents/artifacts/specs/2026-10-10-issue-350-adopt-path-references-design.md` (its `## Decision ledger` rows D1–D12 are cited by ID).
+Spec: `.agents/artifacts/specs/2026-10-10-issue-350-adopt-path-references-design.md` (its `## Decision ledger` rows D1–D13 are cited by ID).
 
 ## Global Constraints
 
@@ -51,7 +51,7 @@ Task 3 — `apply` commits the answered references, and the contract is document
 
 ## Decisions
 
-- Inventory with questions, no gate and no `verify` check: D1. Scanned files and the fixed exclusion set: D2, D10.
+- Inventory with questions, no gate and no `verify` check: D1. Scanned files and the fixed exclusion set: D2, D10; the colour-free `git grep`: D13 (appended during execution).
 - Tokens and the occurrence test: D3, read with D11 (appended by this plan: the three conditions decide, so a quoted directory name inside a call is an occurrence that offers `retain` only).
 - Successors and carried forms: D4. Answers and the two `extend` shapes: D5, D6.
 - The question, its subject and the answer replay: D7; where the derivation sits in `apply_answers`: D12 (appended by this plan).
