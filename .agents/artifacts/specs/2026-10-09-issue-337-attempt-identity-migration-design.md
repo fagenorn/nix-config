@@ -116,7 +116,8 @@ Validation adds: `transaction_id` is a core id; a `core`-dialect `run_id` equals
 or `direct` for the same issue with a lower sequence (the existing "cannot precede itself" rule
 stays). Every locked read and every unlocked read of a schema-8 ledger also checks the binding
 read-only: the store loads `transaction_id` and the subject's handle (`alias.run_id`, else the
-transaction id) equals the ledger's `run_id`, else the read is refused. A missing store or an
+transaction id) equals the ledger's `run_id` and the subject's `prior_run` equals the ledger's,
+else the read is refused. A missing store or an
 unknown transaction is a refusal, never a re-mint (per D4).
 
 ### Migration transform (7 → 8)
@@ -128,10 +129,10 @@ it. It runs in two halves, in this order:
 1. **Plan (pure, in `agent_tools.attempt_identity`)**: from the schema-7 document alone, classify
    `run_id`, check lineage, and return the creation key and subject, or a refusal with a closed
    reason. It reads no file and no directory name.
-2. **Bind (effectful, in workflow-state under the ledger's lock)**: take the attempt mint lock,
-   `create` under the plan's key and subject (which deduplicates), release the mint lock, set
-   `transaction_id` and `schema_version: 8`, then hand the state to the mutation and the existing
-   commit (validate, then atomic replace).
+2. **Bind (effectful, in `agent_tools.attempt_store`, under the ledger's lock that workflow-state
+   holds)**: take the attempt mint lock, `create` under the plan's key and subject (which
+   deduplicates), release the mint lock, set `transaction_id` and `schema_version: 8`, then hand the
+   state to the mutation and workflow-state's existing commit (validate, then atomic replace).
 
 Refusal reasons form a closed set, and every one is raised before any write:
 
@@ -161,7 +162,8 @@ corrupt one does today.
 ### Dry run and apply: `workflow-state migrate`
 
 `workflow-state migrate --repo-root <root> [--apply]`; the thin shell lives in workflow-state because
-apply must write under the owning module's lock, and every rule lives in `attempt_identity` (per D7).
+apply must write under the owning module's lock; the inventory, rows and report live in
+`agent_tools.attempt_store` and the pure rules in `attempt_identity` (per D7, D27).
 
 - **Dry run (default)** lists the non-dot entries of `<root>/.superpowers/workflows` that hold a
   `state.json`, reads each without a lock (as `check-launch` does), runs the plan half, and resolves
@@ -198,18 +200,24 @@ apply must write under the owning module's lock, and every rule lives in `attemp
   mints under that key with `prior_run` set as today, and its ledger is named by the transaction id.
   An index entry whose ledger is absent (a crash between mint and ledger write) is excluded from
   the retained list. The next mint computes that same sequence and predecessor, so `create`
-  returns the reserved id instead of a second one. TODO(execute): confirm against the
-  selection rules near the scan, which rely on sequence order only.
+  returns the reserved id instead of a second one. The probe stops at the first miss, or at the
+  first entry whose ledger directory or `state.json` is absent. The selection rules after the scan rely
+  on sequence order only: at most one retained run is nonterminal and no terminal run lies above
+  it, and the greatest sequence is a `new_run`'s predecessor.
 - The orchestrate-issues skill's §2 "mint a new one" becomes a call to `init-run --creation-key
-  orchestrate-issues:<YYYYMMDD>:<issues in caller order joined by ->`, taking `run_id` from the
-  bootstrap; from-issue's durable acquisition takes `run_id` from `init-run --creation-key` the same
-  way. The run-reuse listing rule is unchanged (#339).
+  orchestrate-issues:<unix-ts>:<issues in caller order joined by ->`, taking `run_id` from the
+  bootstrap; from-issue's durable acquisition takes `run_id` from `init-run --creation-key
+  from-issue:<num>:<unix-ts>` the same way. `<unix-ts>` is the invocation's start in Unix seconds,
+  taken once and reused for any retry of that `init-run` (per D39). The run-reuse listing rule is
+  unchanged (#339).
 
 ### Store root, locks and ordering
 
 - **Store root:** `<ledger root>/.superpowers/attempt-transactions/`, a sibling of `workflows/`,
-  created by workflow-state on its write paths only (#204 D2 leaves root creation to the caller),
-  and given the same `*` `.gitignore` as `workflows/`. No existing ledger moves (#72).
+  created by `agent_tools.attempt_store` on workflow-state's write paths only (#204 D2 leaves root
+  creation to the caller), and given the same `*` `.gitignore` as `workflows/`, published whole by
+  linking a fsynced temporary sibling into place, so a concurrent first caller never reads it
+  partly written. No existing ledger moves (#72).
 - **Attempt mint lock:** `<store root>/attempt-runs.lock`, taken with a **blocking** exclusive
   `flock` around every `create`. The core's creation and per-transaction locks are non-blocking
   (`TransactionBusy`); since every creator in this store holds the mint lock, they are never
@@ -238,14 +246,16 @@ apply must write under the owning module's lock, and every rule lives in `attemp
 
 ### Packaging
 
-The plan half, the grammar and the report shaping are one new module, `agent_tools.attempt_identity`
-(Phase-0's split into identity and migration modules is unnecessary at this size; per D7).
+The plan half, the grammar and the report shaping are one new pure module,
+`agent_tools.attempt_identity` (Phase-0's split into identity and migration modules is unnecessary
+at this size; per D7); the store effects, the binding check and `migrate`'s rows are a second
+module, `agent_tools.attempt_store` (per D27).
 workflow-state imports it and `agent_tools.transaction_core` with a plain import. In source mode the
 recipes' `PYTHONPATH` supplies the package. Installed, `~/.agents/bin/workflow-state` becomes a
 launcher that clears the `NIX_PYTHON*` variables and runs the store copy of the script under the
 agent_tools environment's interpreter, which `lib/agent-tools.nix` now exports beside its
-launchers. TODO(execute): settle whether that launcher can pass `-I` given the script's
-path-loading of its installed delivery runtime; the installed-layout tests decide (per D11). The python/README.md transaction-core paragraph ("no caller until #125") and the agent-skills README's lifecycle-helper section gain the run identity and `migrate` contract.
+launchers. That launcher passes `-I`: the script's delivery runtime and host-admission library
+load by absolute path, not through `sys.path` (per D11, D16). The python/README.md transaction-core paragraph ("no caller until #125") and the agent-skills README's lifecycle-helper section gain the run identity and `migrate` contract.
 
 ## Test seams
 
@@ -335,3 +345,5 @@ ran: full (shadow)
 | D36 | The review-feasibility forecast assigns every carried commit `907dba23..cd7c09f7` to Task 5, using one ownership range and one record per carried path. Tasks 1–4 have empty ranges and empty records. The spec and plan commits that come after `cd7c09f7` are the process tail. | `review_forecast` ownership ranges are `head ^base` walks inside the delivery closure. The merge `cd7c09f7` can only be reached by the range based at `907dba23`, which contains all eleven carried commits, and the merge edge from its first parent brings main-side paths, so the process owner cannot hold it. | Per-task ranges (no range isolates the merge commit) or rebuilding history without the merge (reverses D32). |
 | D37 | `attempt_store` gains `StoreFault(StoreRefused)` for a store that cannot be read: a non-directory store root and every `TransactionError` from `lookup_run` and `bound_identity` except `UnknownTransaction`. `migrate` reports a plain `StoreRefused` (and the caller's refusals) on a schema-8 ledger as `refused` / `invalid_state` and lets a `StoreFault` exit 2. Task 6 tests both paths and a dry run over legacy ledgers before any store exists. | `bound_identity` raised one `StoreRefused` for ledger faults and store read failures alike, so mapping it to `invalid_state` would have turned an unreadable store into exit 0, against § Exit codes (D8). Messages and every other caller stay unchanged because the new type is a subclass. | Matching on message text (brittle); making every schema-8 `StoreRefused` exit 2 (a ledger naming a missing transaction is a ledger fault, reported as data like the other refusals). |
 | D38 | Two policy lookups: Task 7 archives `home/common/agent-skills/artifact-budget-policy.json` from `eca16cd8` with `scripts/`, and Task 8 adds a `~/.agents/share/artifact-budget-policy.json` fallback to `artifact_budget_paths` in `workflow-state.py`, which joins Task 8's files. | `_delivery()` reads the notes limit from the policy before any command. The policy sits beside `scripts/` in the source layout, and installed it sits at `<script dir>/../share/`. A store-copy script, `/nix/store/<hash>-workflow-state.py`, therefore looks in `/nix/share`, and an archive of `scripts/` alone has no policy. In both cases the helper exits 2 with "artifact-budget policy is unavailable". | Passing the policy path through an environment variable (a new launcher contract no other caller has); copying the policy into the store beside the script (adds a Nix path and a second lookup rule). |
+| D39 | The orchestrate-issues and from-issue durable creation keys carry `<unix-ts>`, the invocation's start time in Unix seconds, in place of `<YYYYMMDD>`: `orchestrate-issues:<unix-ts>:<issues>` and `from-issue:<num>:<unix-ts>`. The value is taken once per invocation and reused for any retry of that same `init-run`; a later restart of the same orchestration still finds its run through the unchanged reuse rule and re-bootstraps with `--run-id`. No code parses the key; it is an opaque caller key. | Creation-key idempotency exists for retries of one invocation, not across invocations; the reuse rule (#339) owns cross-invocation reuse. With a date, a second same-day invocation over the same issues after the first run finalized got the old finalized run back from `init-run --creation-key`. | A per-day counter (finding the next one needs a scan, which #117 forbids); keeping the date (two invocations on one day collide). |
+| D40 | To fit Task 8's argv and the D39 key text inside the exact ceilings, meaning-preserving prose elsewhere in the two edited files is condensed: Task 8 condensed orchestrate-issues SKILL.md §1, §3 and §4 besides §2, and acquire-durable.md lines 5, 7 and 9; the final-review fix wave paid for D39 in §1, §2, §3 and §4 and in acquire-durable.md line 5, and re-wrapped three long SKILL.md lines without changing their bytes. No rule is dropped, and no ceiling moves. | D22 (no ceiling is raised and no agent applies the raise label); the ceilings of the orchestration-dispatcher and from-issue-controller profiles were exact at the base. | Raising a ceiling (D22 forbids it); dropping the mandated `init-run` argv to make room (Task 8 and D39 require it). |

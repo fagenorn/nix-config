@@ -526,10 +526,13 @@ def validate_result(value: Any, *, expected_issue: int | None = None) -> dict[st
 def artifact_budget_paths() -> tuple[list[str], Path | None]:
     """Resolve the Task-1 CLI and its repository/installed policy.
 
-    Installed, the CLI and the policy sit beside this script's `bin` directory
-    (`../share`), else under `~/.agents` (`bin/artifact-budget`,
-    `share/artifact-budget-policy.json`): the store copy `workflow-state` runs
-    from has neither beside it (#337 D38).
+    In the source layout (`artifact_budget.py` beside the resolved script, the
+    policy in its parent directory) that module runs under this interpreter.
+    Otherwise the CLI is `artifact-budget` beside the script, else
+    `~/.agents/bin/artifact-budget`, and the policy is
+    `<script dir>/../share/artifact-budget-policy.json`, else
+    `~/.agents/share/artifact-budget-policy.json` (None when neither exists):
+    the store copy `workflow-state` runs from has neither beside it (#337 D38).
     """
 
     def trusted_policy(path: Path) -> Path | None:
