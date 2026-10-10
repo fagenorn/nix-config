@@ -382,8 +382,9 @@ def legacy_binding_operations(root: Path,
 
 def evidence_record_members(found: Candidates) -> list[tuple[str, str]]:
     """Every adoption evidence record in the inspected tree, as sorted
-    `(path, object_id)` pairs: the files a re-adoption supersedes, and the
-    files whose own links no move may rewrite."""
+    `(path, object_id)` pairs: the records a re-adoption supersedes, and
+    paths the link derivation treats as deleted, so a link to one is
+    unrewritable."""
     return sorted(
         (path, object_id) for info in found.groups.values()
         for path, object_id in info["members"]
