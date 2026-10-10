@@ -599,20 +599,21 @@ def read_bytes_bounded(path: Path) -> bytes | None:
 REMOTE = "origin"
 
 
-def run_git(root: Path, *args: str,
-            network: bool = False) -> tuple[int, bytes]:
+def run_git(root: Path, *args: str, network: bool = False,
+            input: bytes | None = None) -> tuple[int, bytes]:
     """`git -C root args`, and its exit code and stdout.
 
     A `network` call never prompts for credentials: it runs with
     `GIT_TERMINAL_PROMPT=0`, so an unauthenticated remote fails instead of
-    hanging. Every other call inherits the environment unchanged.
+    hanging. Every other call inherits the environment unchanged. `input`
+    is written to the command's stdin.
     """
     environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0"} if network \
         else None
     try:
         proc = subprocess.run(["git", "-C", str(root), *args],
                               capture_output=True, timeout=300,
-                              env=environment)
+                              env=environment, input=input)
     except (OSError, subprocess.SubprocessError):
         raise refuse("adopt_failure", "adopt.git.unavailable", "",
                      "git could not be started") from None
