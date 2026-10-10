@@ -27,14 +27,23 @@ worktree only after proving that the commit changes exactly the paths the plan
 declared and that the ref carries it. It never pushes, never merges and never
 writes the fleet registry.
 
-`verify` answers the conformance question read-only against the committed
-state — the contract resolves, every projection is in sync, no agent path is
-unclassified, and exactly one adoption evidence record is discoverable at
-`HEAD` with the migration map it names (D34). All three answers are reports on
-exit 0. `--register` is the one write to the user-scope fleet registry, and
-only once the adoption commit derived from that record is an ancestor of the
-contract's declared integration branch (D19); what it stores is an identity
-and a location and nothing else (D18).
+`verify` answers the conformance question read-only against one pinned
+revision — the contract resolves, every projection is in sync, no agent path is
+unclassified, and exactly one adoption evidence record is discoverable in it
+with the migration map it names (D34). Plain `verify` reads `HEAD`: the
+resolver runs on the working tree, the inventory comes from the index, and
+records are read at the `HEAD` commit it pins (D10). All three answers are
+reports on exit 0. `--register` is the one write to the user-scope fleet
+registry, and it reads nothing from the checkout's branches or files: it lists
+`origin`, fetches the remote default branch and, when the contract there names
+another integration branch, that branch too, each into
+`refs/remotes/origin/<branch>` (the fetched objects and those remote-tracking
+refs are the only repository writes), exports the pinned commit with
+`git archive` into a temporary directory removed on every exit, and runs every
+check there. It refuses `not_integrated` when that commit carries no evidence
+record or the adoption commit derived from it is not its ancestor (D19). What
+it stores is `{project_id, root}` with the real root and nothing else (#148
+D18).
 
 The resolver is consumed **only** as a child process, never imported (D26):
 `run_resolver` runs `agent_tools.resolve_project` under this process's own
@@ -167,15 +176,19 @@ class Composition:
         self.overlap = overlap
 
 
-def compose_plan(root: Path, manifest: dict) -> Composition:
+def compose_plan(root: Path, manifest: dict,
+                 answered: list[dict]) -> Composition:
     """The one derivation both `plan` and `apply` read a repository through.
 
     `apply` re-runs exactly this to recompute the input digest and regenerate
     the canonical operation list (D33), so a second, subtly different
     derivation cannot exist to disagree with it. It writes nothing.
+    `answered` is the operator's answers to open `candidate-class` questions,
+    applied before anything else is derived, so they enter `plan_id`.
     """
     inventory = inspect_repository(root)
     found = adopt_inspection.classify_inventory(root, inventory)
+    answered = adopt_planning.apply_answers(found, inventory, answered)
     untracked = adopt_inspection.untracked_under(
         root, adopt_inspection.overlap_targets(found))
     for path in untracked:
@@ -219,7 +232,12 @@ def compose_plan(root: Path, manifest: dict) -> Composition:
             contract_id = project["id"]
     project_id, recommended, open_questions = adopt_planning.derive_identity(
         root, contract_id)
-    decisions = {"recommended": recommended, "answered": [],
+    open_questions = sorted(
+        open_questions + adopt_planning.candidate_questions(found),
+        key=lambda entry: (
+            adopt_inspection.QUESTION_IDS.index(entry["id"]),
+            entry.get("subject", "")))
+    decisions = {"recommended": recommended, "answered": answered,
                  "open": open_questions}
 
     platform_block = {
@@ -324,7 +342,9 @@ def compose_plan(root: Path, manifest: dict) -> Composition:
 def command_plan(args: argparse.Namespace) -> int:
     manifest = require_manifest()
     root = adopt_inspection.require_repository(args.repo_root)
-    document = compose_plan(root, manifest).document
+    answers = [{"id": question, "subject": subject, "value": value}
+               for question, subject, value in args.answer]
+    document = compose_plan(root, manifest, answers).document
     # Before the write, never after: storing is what binds this id to this
     # checkout, and the binding a stored document already carries is never
     # re-pointed at a second one (D15, D16).
@@ -368,8 +388,16 @@ def emit_human(document: dict) -> int:
     ]
     for entry in document["decisions"]["recommended"]:
         lines.append(f"recommended {entry['id']}: {entry['value']}")
+    for entry in document["decisions"]["answered"]:
+        lines.append(f"answered {entry['id']} {entry['subject']}: "
+                     f"{entry['value']}")
     for entry in document["decisions"]["open"]:
-        lines.append(f"open {entry['id']}: {entry['recommendation']}")
+        if entry["id"] == "candidate-class":
+            answer = "none" if entry["value"] is None else entry["value"]
+            lines.append(f"open {entry['id']} {entry['subject']} "
+                         f"(answer: {answer}): {entry['recommendation']}")
+        else:
+            lines.append(f"open {entry['id']}: {entry['recommendation']}")
     for blocker in plan["blockers"]:
         lines.append(f"blocked by {blocker['id']}: {blocker['message']}")
     lines.append(f"next: {document['handoff']['next_command'] or '(none)'}")
@@ -407,6 +435,9 @@ def require_manifest() -> dict:
 # authenticates the plan's *inputs*, and re-deriving the operation list through
 # `compose_plan` authenticates the operations, which live outside the digest in
 # a mutable stored document (D33). Nothing here trusts a stored operation.
+# The operator's answers travel inside the stored plan and are re-applied here;
+# the recomputed digest is what authenticates them, so `apply` takes no answer
+# of its own.
 # --------------------------------------------------------------------------
 
 
@@ -414,6 +445,7 @@ def command_apply(args: argparse.Namespace) -> int:
     manifest = require_manifest()
     digest = adopt_apply.plan_digest(args.plan_id)
     document = adopt_apply.load_stored_plan(digest)
+    answers = adopt_apply.stored_answers(document)
     stored_plan = document["plan"]
     if stored_plan["state"] != "ready":
         raise adopt_inspection.refuse(
@@ -445,7 +477,7 @@ def command_apply(args: argparse.Namespace) -> int:
             "a retained worktree for this plan still exists and is never "
             "deleted without an acknowledged cleanup")
 
-    composed = compose_plan(root, manifest)
+    composed = compose_plan(root, manifest, answers)
     if composed.document["plan"]["plan_id"] != stored_plan["plan_id"]:
         raise adopt_inspection.refuse(
             "plan_stale", "adopt.plan.inputs_changed", "/plan/input_digest",
@@ -554,10 +586,19 @@ def command_apply(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 # `verify`
 #
-# The conformance question, answered read-only against the *committed* state,
+# The conformance question, answered read-only against one pinned revision,
 # and — only with `--register` — the one write to the user-scope fleet
-# registry. The checks, the report and the registration transaction live in
-# `adopt_verify`; what is left here is the order they run in.
+# registry. Plain `verify` reads `HEAD` (resolver on the working tree,
+# inventory from the index, records at the `HEAD` commit it pins). `--register`
+# reads nothing from the checkout's branches or files: `adopt_verify.
+# remote_source` lists `origin`, fetches the remote default branch and, when
+# the contract there names another integration branch, that branch too, each
+# into `refs/remotes/origin/<branch>` (the fetched objects and those
+# remote-tracking refs are the only repository writes), and exports the pinned
+# commit with `git archive` into a temporary directory that is removed on every
+# exit, and every check runs there. The checks, the report and the
+# registration transaction live in `adopt_verify`; what is left here is the
+# order they run in.
 #
 # Every one of the three answers is a report on exit 0 (R6.4): exit 2 and the
 # D12 error object are reserved for the closed `ADOPT_ERROR_CODES`, so
@@ -571,10 +612,16 @@ def command_verify(args: argparse.Namespace) -> int:
     # as an adoption failure rather than as a non-conformant repository.
     require_manifest()
     root = adopt_inspection.require_repository(args.repo_root)
-    verification = adopt_verify.verify_repository(root, run_resolver)
-    if args.register and adopt_verify.registration_allowed(
-            verification.report["result"]):
-        adopt_verify.register_project(root, verification)
+    if not args.register:
+        verification = adopt_verify.verify_repository(
+            root, adopt_verify.head_source(root), run_resolver)
+    else:
+        with adopt_verify.remote_source(root, run_resolver) as source:
+            verification = adopt_verify.verify_repository(
+                root, source, run_resolver)
+        adopt_verify.require_integrated(verification)
+        if adopt_verify.registration_allowed(verification.report["result"]):
+            adopt_verify.register_project(root, verification)
     emit_json(verification.report)
     return adopt_verify.verify_exit_code(verification.report["result"])
 
@@ -597,6 +644,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--format", choices=("json", "human"), default="json",
                       help="the view printed on stdout; the stored document "
                            "is the same either way")
+    plan.add_argument("--answer", action="append", nargs=3, default=[],
+                      metavar=("QUESTION", "SUBJECT", "VALUE"),
+                      help="settle one open candidate-class question; "
+                           "repeatable")
     apply_plan = subparsers.add_parser(
         "apply", help="carry out a stored ready plan in an isolated worktree")
     # Two flags and no more: naming the content-addressed id is the exact-plan
@@ -617,8 +668,10 @@ def build_parser() -> argparse.ArgumentParser:
     # implicitly (R6.3).
     verify.add_argument("--register", action="store_true",
                         help="record the project in the user-scope fleet "
-                             "registry once its adoption commit is on the "
-                             "declared integration branch")
+                             "registry; conformance and integration are "
+                             "proven against the contract's integration "
+                             "branch fetched from origin, never the local "
+                             "checkout")
     return parser
 
 

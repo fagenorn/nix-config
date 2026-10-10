@@ -30,7 +30,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import adopt_planning, adopt_project
+from agent_tools import adopt_inspection, adopt_planning, adopt_project
 
 MANIFEST = Path(__file__).resolve().parents[1] / "platform-manifest.json"
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -311,6 +311,60 @@ def nix_config_shape_repo(home: Path) -> Path:
         "https://github.com/fixture/target.git")
     commit(root)
     return root
+
+
+def record_trees_repo(home: Path) -> Path:
+    """`nix_config_shape_repo` plus one tracked record under each of
+    `.claude/handoffs`, `.claude/notes` and `.claude/research` (#340)."""
+    root = nix_config_shape_repo(home)
+    write(root, ".claude/handoffs/h.md", "# handoff h\n")
+    write(root, ".claude/notes/n.md", "# note n\n")
+    write(root, ".claude/research/r.md", "# research r\n")
+    commit(root, "add agent records")
+    return root
+
+
+def candidate_repo(home: Path, *paths: str) -> Path:
+    """`nix_config_shape_repo` plus tracked agent paths no row classifies."""
+    root = nix_config_shape_repo(home)
+    for path in paths:
+        write(root, path, f"# {path}\n")
+    commit(root, "add unclassified agent paths")
+    return root
+
+
+def ignored_symlink_repo(home: Path) -> Path:
+    """`nix_config_shape_repo` plus an ignored `.claude/settings.local.json`
+    that is a symlink out of the checkout: the one way an ignored candidate
+    stays `needs-decision`."""
+    root = nix_config_shape_repo(home)
+    outside = Path(tempfile.mkdtemp()).resolve() / "settings.json"
+    outside.write_text("{}\n", encoding="utf-8")
+    with (root / ".gitignore").open("a", encoding="utf-8") as handle:
+        handle.write(".claude/settings.local.json\n")
+    (root / ".claude" / "settings.local.json").symlink_to(outside)
+    commit(root, "ignore an escaping local settings link")
+    return root
+
+
+def tracked_symlink_repo(home: Path) -> Path:
+    """`nix_config_shape_repo` plus a tracked `.claude/link.md` that is a
+    symlink out of the checkout: an unclassified candidate `apply` could
+    never move, because its stored operation would name an uncontained
+    path."""
+    root = nix_config_shape_repo(home)
+    outside = Path(tempfile.mkdtemp()).resolve() / "elsewhere.md"
+    outside.write_text("# outside the repository\n", encoding="utf-8")
+    (root / ".claude" / "link.md").symlink_to(outside)
+    commit(root, "track an escaping agent link")
+    return root
+
+
+LINK = ".claude/link.md"
+
+
+ODD = ".claude/odd.md"
+ARCHIVED = ".agents/knowledge/archive/adopted/.claude/odd.md"
 
 
 GITIGNORE_WITH_COMMENT = (
@@ -651,29 +705,30 @@ class DocumentShapeTest(AdoptTestCase):
 # --------------------------------------------------------------------------
 
 
+def documented_plan_id(doc: object) -> str:
+    """D15's digest, recomputed here from the document's own inputs.
+
+    The formula is the spec's, not the implementation's: the six named
+    members, canonical JSON, SHA-256. Nothing is pasted from a previous
+    run.
+    """
+    source = {
+        "adopt_schema_version": doc["schema_version"],
+        "project_id": doc["plan"]["project_id"],
+        "base_revision": doc["plan"]["base_revision"],
+        "platform": doc["plan"]["platform"],
+        "evidence": doc["evidence"],
+        "decisions_answered": doc["decisions"]["answered"],
+    }
+    payload = json.dumps(source, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
 class PlanIdentityTest(AdoptTestCase):
-    def expected_plan_id(self, doc: object) -> str:
-        """D15's digest, recomputed here from the document's own inputs.
-
-        The formula is the spec's, not the implementation's: the six named
-        members, canonical JSON, SHA-256. Nothing is pasted from a previous
-        run.
-        """
-        source = {
-            "adopt_schema_version": doc["schema_version"],
-            "project_id": doc["plan"]["project_id"],
-            "base_revision": doc["plan"]["base_revision"],
-            "platform": doc["plan"]["platform"],
-            "evidence": doc["evidence"],
-            "decisions_answered": doc["decisions"]["answered"],
-        }
-        payload = json.dumps(source, sort_keys=True,
-                             separators=(",", ":")).encode("utf-8")
-        return "sha256:" + hashlib.sha256(payload).hexdigest()
-
     def test_plan_id_is_the_documented_digest_and_equals_input_digest(self):
         doc = self.ready_plan(nix_config_shape_repo(self.home))
-        self.assertEqual(doc["plan"]["plan_id"], self.expected_plan_id(doc))
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
         self.assertEqual(doc["plan"]["input_digest"], doc["plan"]["plan_id"])
 
     def test_platform_block_is_the_three_reproducible_manifest_values(self):
@@ -980,6 +1035,356 @@ class TypedOperationTest(AdoptTestCase):
         doc = self.ready_plan(root)
         for op in doc["changes"]:
             self.assertNotIn(".claude/other.config.json", op["targets"])
+
+
+class RecordTreeClassificationTest(AdoptTestCase):
+    """#340 AC1: the three record trees are classified centrally."""
+
+    def test_the_three_record_trees_plan_to_ready(self):
+        doc = self.ready_plan(record_trees_repo(self.home))
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["decisions"]["open"], [])
+        pairs = [(op["sources"][0], op["targets"][0])
+                 for op in doc["changes"] if op["op"] == "git-mv"]
+        for pair in ((".claude/handoffs/h.md",
+                      ".agents/artifacts/handoffs/h.md"),
+                     (".claude/notes/n.md", ".agents/artifacts/notes/n.md"),
+                     (".claude/research/r.md",
+                      ".agents/artifacts/specs/r.md")):
+            self.assertIn(pair, pairs)
+        entries = {entry["path"]: entry for entry in doc["evidence"]}
+        for group, target in (
+                (".claude/handoffs", ".agents/artifacts/handoffs"),
+                (".claude/notes", ".agents/artifacts/notes"),
+                (".claude/research", ".agents/artifacts/specs")):
+            with self.subTest(group=group):
+                entry = entries[group]
+                self.assertEqual(
+                    (entry["provenance"], entry["lifecycle_class"],
+                     entry["action"], entry["target"], entry["count"]),
+                    ("tracked", "durable-artifact", "move-canonical",
+                     target, 1))
+
+    def test_two_moves_into_one_destination_fail_the_destination_gate(self):
+        root = nix_config_shape_repo(self.home)
+        write(root, ".claude/research/x.md", "# research x\n")
+        commit(root, "collide with .claude/specs/x.md")
+        doc = self.ready_plan(root)
+        gate = next(gate for gate in doc["verification"]["ready_gates"]
+                    if gate["id"] == "no-existing-destination")
+        self.assertEqual(gate, {"id": "no-existing-destination",
+                                "status": "failed",
+                                "repair_id": "adopt.destination.occupied"})
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertIn("no-existing-destination",
+                      [blocker["id"] for blocker in doc["plan"]["blockers"]])
+
+    def test_a_destination_inside_another_fails_the_destination_gate(self):
+        root = nix_config_shape_repo(self.home)
+        # `.agents/artifacts/specs/x.md` is `.claude/specs/x.md`'s destination
+        # and this record's destination's parent: distinct paths, one of
+        # which would have to be both a file and a directory.
+        write(root, ".claude/research/x.md/r.md", "# research r\n")
+        commit(root, "nest a destination inside another")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
+    def test_a_destination_under_an_existing_file_fails_the_gate(self):
+        root = nix_config_shape_repo(self.home)
+        write(root, ".agents/artifacts/notes", "a file, not a directory\n")
+        write(root, ".claude/notes/n.md", "# note n\n")
+        commit(root, "put a file where a destination's parent goes")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
+    def test_a_dangling_symlink_destination_parent_fails_the_gate(self):
+        root = nix_config_shape_repo(self.home)
+        (root / ".agents" / "artifacts").mkdir(parents=True, exist_ok=True)
+        (root / ".agents" / "artifacts" / "notes").symlink_to("missing")
+        write(root, ".claude/notes/n.md", "# note n\n")
+        commit(root, "put a dangling link where a destination's parent goes")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
+    def test_a_dangling_symlink_at_a_destination_fails_the_gate(self):
+        root = nix_config_shape_repo(self.home)
+        notes = root / ".agents" / "artifacts" / "notes"
+        notes.mkdir(parents=True, exist_ok=True)
+        (notes / "n.md").symlink_to("missing")
+        write(root, ".claude/notes/n.md", "# note n\n")
+        commit(root, "put a dangling link where a destination goes")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
+    def test_a_symlinked_directory_destination_parent_fails_the_gate(self):
+        """A link to a real directory is still a link, not a directory the
+        move can create its destination in."""
+        root = nix_config_shape_repo(self.home)
+        write(root, "elsewhere/keep.md", "# keep\n")
+        (root / ".agents" / "artifacts").mkdir(parents=True, exist_ok=True)
+        (root / ".agents" / "artifacts" / "notes").symlink_to(
+            "../../elsewhere", target_is_directory=True)
+        write(root, ".claude/notes/n.md", "# note n\n")
+        commit(root, "put a directory link where a destination's parent goes")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
+    def assert_destination_gate_fails(self, doc: object) -> None:
+        gate = next(gate for gate in doc["verification"]["ready_gates"]
+                    if gate["id"] == "no-existing-destination")
+        self.assertEqual(gate["status"], "failed", gate)
+        self.assertEqual(doc["plan"]["state"], "draft")
+
+
+class CandidateQuestionTest(AdoptTestCase):
+    """#340 AC2: every undecided candidate carries a stable question."""
+
+    OPEN_MEMBERS = ["basis", "id", "impact", "recommendation", "subject",
+                    "value"]
+
+    def only_open(self, doc: object) -> dict:
+        self.assertEqual(len(doc["decisions"]["open"]), 1,
+                         doc["decisions"]["open"])
+        entry = doc["decisions"]["open"][0]
+        self.assertEqual(sorted(entry), self.OPEN_MEMBERS)
+        self.assertEqual(entry["id"], "candidate-class")
+        return entry
+
+    def test_a_tracked_candidate_opens_one_archive_question(self):
+        doc = self.ready_plan(candidate_repo(self.home, ".claude/odd.md"))
+        entry = self.only_open(doc)
+        self.assertEqual((entry["subject"], entry["value"]),
+                         (".claude/odd.md", "archive-history"))
+        for member in ("basis", "impact", "recommendation"):
+            self.assertNotIn(".claude/odd.md", entry[member])
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(
+            sorted(blocker["id"] for blocker in doc["plan"]["blockers"]),
+            ["no-needs-decision", "no-open-decisions"])
+
+    def test_the_prose_is_fixed_across_candidates(self):
+        doc = self.ready_plan(candidate_repo(
+            self.home, ".claude/zeta/b.md", ".claude/a.md"))
+        entries = doc["decisions"]["open"]
+        self.assertEqual([entry["subject"] for entry in entries],
+                         [".claude/a.md", ".claude/zeta/b.md"])
+        for member in ("basis", "impact", "recommendation"):
+            self.assertEqual(entries[0][member], entries[1][member])
+
+    def test_a_secret_shaped_candidate_has_no_answer(self):
+        doc = self.ready_plan(candidate_repo(
+            self.home, ".claude/secrets/key.md"))
+        entry = self.only_open(doc)
+        self.assertEqual(entry["subject"], ".claude/secrets/key.md")
+        self.assertIsNone(entry["value"])
+
+    def test_a_tracked_symlink_out_of_the_repository_has_no_answer(self):
+        doc = self.ready_plan(tracked_symlink_repo(self.home))
+        entry = self.only_open(doc)
+        self.assertEqual((entry["subject"], entry["value"]), (LINK, None))
+
+    def test_an_ignored_candidate_is_offered_retention(self):
+        doc = self.ready_plan(ignored_symlink_repo(self.home))
+        entry = self.only_open(doc)
+        self.assertEqual((entry["subject"], entry["value"]),
+                         (".claude/settings.local.json", "retain-product"))
+
+    def test_project_id_sorts_before_candidate_questions(self):
+        root = reconcile_repo(self.home, remotes=())
+        write(root, ".claude/odd.md", "# odd\n")
+        commit(root, "add an unclassified agent path")
+        doc = self.ready_plan(root)
+        self.assertEqual([entry["id"] for entry in doc["decisions"]["open"]],
+                         ["project-id", "candidate-class"])
+        self.assertEqual(sorted(doc["decisions"]["open"][0]),
+                         ["basis", "id", "impact", "recommendation", "value"])
+
+    def test_the_human_view_names_each_subject_and_its_answer(self):
+        root = candidate_repo(self.home, ".claude/odd.md",
+                              ".claude/secrets/key.md")
+        code, human, err = run("plan", "--repo-root", str(root),
+                               "--format", "human", home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertIn("open candidate-class .claude/odd.md "
+                      "(answer: archive-history): ", human)
+        self.assertIn("open candidate-class .claude/secrets/key.md "
+                      "(answer: none): ", human)
+
+    def test_the_question_set_is_closed(self):
+        self.assertEqual(adopt_inspection.QUESTION_IDS,
+                         ("project-id", "candidate-class"))
+        for function in (adopt_inspection.question_impact,
+                         adopt_inspection.question_recommendation):
+            with self.subTest(function=function.__name__):
+                with self.assertRaises(ValueError):
+                    function("candidate-class:.claude/odd.md")
+        with self.assertRaises(ValueError):
+            adopt_inspection.candidate_answer("untracked-explicit-paths",
+                                              ".claude/odd.md", True)
+
+
+class CandidateAnswerTest(AdoptTestCase):
+    """#340 AC2: answering a candidate is reflected in the plan id."""
+
+    def answered(self, root: Path, *triples: tuple[str, str, str]):
+        args = [token for triple in triples
+                for token in ("--answer", *triple)]
+        return self.plan(root, *args)
+
+    def stored_plans(self) -> list[str]:
+        store = self.home / ".agents" / "state" / "adopt" / "plans"
+        return sorted(path.name for path in store.iterdir()) \
+            if store.is_dir() else []
+
+    def refused(self, root: Path, repair_id: str,
+                *triples: tuple[str, str, str]) -> None:
+        before = self.stored_plans()
+        code, payload, err = self.answered(root, *triples)
+        self.assertEqual(code, 2, err or payload)
+        self.assertEqual(payload["error"]["code"], "adopt_failure")
+        self.assertEqual(payload["error"]["repair_id"], repair_id)
+        self.assertEqual(payload["error"]["violations"][0]["pointer"],
+                         "/decisions/answered")
+        self.assertEqual(self.stored_plans(), before)
+
+    def first_violation(self, root: Path, *triples) -> tuple[str, dict]:
+        code, payload, err = self.answered(root, *triples)
+        self.assertEqual(code, 2, err or payload)
+        return (payload["error"]["repair_id"],
+                payload["error"]["violations"][0])
+
+    def test_answering_reaches_ready_and_changes_the_plan_id(self):
+        root = candidate_repo(self.home, ODD)
+        draft = self.ready_plan(root)
+        code, doc, err = self.answered(
+            root, ("candidate-class", ODD, "archive-history"))
+        self.assertEqual(code, 0, err)
+        self.assertNotEqual(doc["plan"]["plan_id"], draft["plan"]["plan_id"])
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["decisions"]["open"], [])
+        self.assertEqual(doc["decisions"]["answered"], [
+            {"id": "candidate-class", "subject": ODD,
+             "value": "archive-history"}])
+        # The independent oracle, with every other digest input held
+        # constant: the id covers the non-empty answers, and the same
+        # document with no answers digests differently.
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+        unanswered = {**doc, "decisions": {**doc["decisions"],
+                                           "answered": []}}
+        self.assertNotEqual(doc["plan"]["plan_id"],
+                            documented_plan_id(unanswered))
+        entry = next(e for e in doc["evidence"] if e["path"] == ODD)
+        self.assertEqual(
+            (entry["lifecycle_class"], entry["action"], entry["target"]),
+            ("unclassified", "archive-history", ARCHIVED))
+        pairs = [(op["sources"][0], op["targets"][0])
+                 for op in doc["changes"] if op["op"] == "git-mv"]
+        self.assertIn((ODD, ARCHIVED), pairs)
+
+    def test_an_answered_ignored_candidate_is_retained_without_an_operation(self):
+        path = ".claude/settings.local.json"
+        code, doc, err = self.answered(
+            ignored_symlink_repo(self.home),
+            ("candidate-class", path, "retain-product"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["decisions"]["open"], [])
+        entry = next(e for e in doc["evidence"] if e["path"] == path)
+        self.assertEqual((entry["action"], entry["target"]),
+                         ("retain-product", None))
+        for op in doc["changes"]:
+            self.assertNotIn(path, op["sources"] + op["targets"])
+
+    def test_a_non_candidate_question_id_is_an_invalid_answer(self):
+        self.refused(candidate_repo(self.home, ODD),
+                     "adopt.decisions.invalid_answer",
+                     ("project-id", ODD, "archive-history"))
+
+    def test_a_value_the_question_does_not_offer_is_an_invalid_answer(self):
+        self.refused(candidate_repo(self.home, ODD),
+                     "adopt.decisions.invalid_answer",
+                     ("candidate-class", ODD, "retain-product"))
+
+    def test_every_answer_to_a_secret_shaped_candidate_is_invalid(self):
+        root = candidate_repo(self.home, ".claude/secrets/key.md")
+        for value in ("archive-history", "retain-product"):
+            with self.subTest(value=value):
+                self.refused(root, "adopt.decisions.invalid_answer",
+                             ("candidate-class", ".claude/secrets/key.md",
+                              value))
+
+    def test_archiving_a_tracked_symlink_out_of_the_repository_is_invalid(self):
+        root = tracked_symlink_repo(self.home)
+        for value in ("archive-history", "retain-product"):
+            with self.subTest(value=value):
+                self.refused(root, "adopt.decisions.invalid_answer",
+                             ("candidate-class", LINK, value))
+
+    def test_one_subject_answered_twice_is_an_invalid_answer(self):
+        self.refused(candidate_repo(self.home, ODD),
+                     "adopt.decisions.invalid_answer",
+                     ("candidate-class", ODD, "archive-history"),
+                     ("candidate-class", ODD, "archive-history"))
+
+    def test_a_subject_that_is_not_an_undecided_candidate_is_unmatched(self):
+        root = candidate_repo(self.home, ODD)
+        for subject in (".claude/missing.md", ".claude/specs/x.md"):
+            with self.subTest(subject=subject):
+                self.refused(root, "adopt.decisions.unmatched_answer",
+                             ("candidate-class", subject, "archive-history"))
+
+    def test_the_human_view_prints_the_answer(self):
+        root = candidate_repo(self.home, ODD)
+        code, human, err = run(
+            "plan", "--repo-root", str(root), "--format", "human",
+            "--answer", "candidate-class", ODD, "archive-history",
+            home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"answered candidate-class {ODD}: archive-history\n",
+                      human)
+
+    def test_answer_order_on_the_command_line_does_not_matter(self):
+        root = candidate_repo(self.home, ODD, ".claude/a.md")
+        first = ("candidate-class", ".claude/a.md", "archive-history")
+        second = ("candidate-class", ODD, "archive-history")
+        forward = run("plan", "--repo-root", str(root), "--answer", *first,
+                      "--answer", *second, home=self.home)
+        backward = run("plan", "--repo-root", str(root), "--answer", *second,
+                       "--answer", *first, home=self.home)
+        self.assertEqual(forward[0], 0, forward[2])
+        self.assertEqual(forward[1], backward[1])
+
+    def test_competing_violations_report_the_sorted_first_one(self):
+        root = candidate_repo(self.home, ODD)
+        bad_id = ("project-id", ODD, "archive-history")
+        unmatched = ("candidate-class", ".claude/missing.md",
+                     "archive-history")
+        expected = ("adopt.decisions.unmatched_answer",
+                    {"pointer": "/decisions/answered",
+                     "message": "the answered subject is not an undecided "
+                                "candidate of this inspection"})
+        for triples in ((bad_id, unmatched), (unmatched, bad_id)):
+            with self.subTest(triples=triples):
+                self.assertEqual(self.first_violation(root, *triples),
+                                 expected)
+
+    def test_a_duplicate_subject_is_reported_before_its_value(self):
+        root = candidate_repo(self.home, ODD)
+        good = ("candidate-class", ODD, "archive-history")
+        bad = ("candidate-class", ODD, "retain-product")
+        expected = ("adopt.decisions.invalid_answer",
+                    {"pointer": "/decisions/answered",
+                     "message": "a candidate is answered more than once"})
+        for triples in ((good, bad), (bad, good)):
+            with self.subTest(triples=triples):
+                self.assertEqual(self.first_violation(root, *triples),
+                                 expected)
+
+    def test_the_recommendation_names_the_answer_flag(self):
+        self.assertIn("plan --answer candidate-class <subject> <value>",
+                      adopt_inspection.question_recommendation(
+                          "candidate-class"))
+
+    def test_archive_history_relocates(self):
+        self.assertTrue(adopt_inspection.action_relocates("archive-history"))
 
 
 class GitignoreAmendmentTest(AdoptTestCase):

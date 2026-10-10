@@ -15,20 +15,25 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
+from collections import Counter
+from pathlib import Path, PurePosixPath
 
 from agent_tools import agent_platform, release_profile
 from agent_tools.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
     APPROVAL_CLASSES,
+    ARCHIVE_ADOPTED_DIR,
     AdoptError,
+    CANDIDATE_BASIS,
     CONTRACT_FILENAME,
     Candidates,
     EVIDENCE_RECORD_DIR,
     GITIGNORE,
+    Inventory,
     LEGACY_BINDING_CONFIGS,
     LEGACY_BINDING_KEYS,
     MIGRATION_MAP_DIR,
+    NOTES,
     OPERATION_KINDS,
     QUESTION_IDS,
     READY_GATES,
@@ -37,6 +42,7 @@ from agent_tools.adopt_inspection import (
     RUNTIME_SENTINEL_BYTES,
     approval_class_for,
     authored_bytes,
+    candidate_answer,
     canonical_json,
     contained_path,
     document_bytes,
@@ -133,6 +139,83 @@ def derive_identity(root: Path, contract_id: str | None) -> tuple[
         "impact": question_impact(question_id),
         "recommendation": question_recommendation(question_id),
     }]
+
+
+
+def candidate_questions(found: Candidates) -> list[dict]:
+    """One open `candidate-class` question per undecided candidate (#340).
+
+    Every prose member is fixed and never names the candidate: the entry's
+    `subject` does, so the question is stable across plans of one tree.
+    """
+    return sorted(
+        ({"id": "candidate-class",
+          "subject": entry["path"],
+          "value": candidate_answer(entry["provenance"], entry["path"],
+                                    entry["path"] not in found.uncontained),
+          "basis": CANDIDATE_BASIS,
+          "impact": question_impact("candidate-class"),
+          "recommendation": question_recommendation("candidate-class")}
+         for entry in found.entries if entry["action"] == "needs-decision"),
+        key=lambda entry: entry["subject"])
+
+def apply_answers(found: Candidates, inventory: Inventory,
+                  answers: list[dict]) -> list[dict]:
+    """Settle the answered candidates in `found`; return the answers, sorted.
+
+    Each answer is `{"id", "subject", "value"}`, all strings. They are
+    validated in order of `(id, subject, value)`, refusing on the first
+    violation: an id other than `candidate-class`, a subject already answered,
+    a subject that is not the path of a `needs-decision` entry, and a value
+    other than the one that candidate's open question offers. Nothing is
+    mutated until every answer has validated, so a refusal changes nothing.
+
+    A valid answer sets the entry's action to the value and its note to the
+    answered note, leaving it `unclassified`. Archiving also gives it its
+    archive destination, registers it as a one-member group and records the
+    move; retaining adds nothing (D4). The result is sorted by `(id,
+    subject)` and enters the plan id unchanged (D5, D15).
+    """
+    pointer = "/decisions/answered"
+    entries = {entry["path"]: entry for entry in found.entries
+               if entry["action"] == "needs-decision"}
+    seen: set[str] = set()
+    for answer in sorted(answers, key=lambda a: (a["id"], a["subject"],
+                                                 a["value"])):
+        if answer["id"] != "candidate-class":
+            raise refuse("adopt_failure", "adopt.decisions.invalid_answer",
+                         pointer, "only a candidate-class question can be "
+                         "answered")
+        if answer["subject"] in seen:
+            raise refuse("adopt_failure", "adopt.decisions.invalid_answer",
+                         pointer, "a candidate is answered more than once")
+        seen.add(answer["subject"])
+        entry = entries.get(answer["subject"])
+        if entry is None:
+            raise refuse("adopt_failure", "adopt.decisions.unmatched_answer",
+                         pointer, "the answered subject is not an undecided "
+                         "candidate of this inspection")
+        if answer["value"] != candidate_answer(
+                entry["provenance"], entry["path"],
+                entry["path"] not in found.uncontained):
+            raise refuse("adopt_failure", "adopt.decisions.invalid_answer",
+                         pointer, "the answer is not the one this "
+                         "candidate's open question offers")
+
+    tracked = dict(inventory.tracked)
+    settled = sorted(answers, key=lambda a: (a["id"], a["subject"]))
+    for answer in settled:
+        path, value = answer["subject"], answer["value"]
+        entry = entries[path]
+        entry["action"] = value
+        entry["note"] = NOTES["answered"]
+        if value == "archive-history":
+            target = f"{ARCHIVE_ADOPTED_DIR}/{path}"
+            entry["target"] = target
+            found.groups[path] = {"action": value, "target": target,
+                                  "members": [(path, tracked[path])]}
+            found.moves.append((path, target))
+    return settled
 
 # --------------------------------------------------------------------------
 # The `.gitignore` amendment
@@ -573,8 +656,26 @@ def evaluate_ready_gates(root: Path, found: Candidates,
         READY_GATES[3], "failed" if untracked else "passed",
         "adopt.worktree.untracked_overlap" if untracked else None))
 
-    occupied = [new for _, new in found.moves
-                if (root / new).exists()]
+    # A planned destination that already exists (a dangling symlink
+    # included) or sits under an existing file or any symlink, or that
+    # collides with another: the same path, or one inside the other.
+    def present(path: Path) -> bool:
+        return path.is_symlink() or path.exists()
+
+    def not_a_directory(path: Path) -> bool:
+        return path.is_symlink() or (path.exists() and not path.is_dir())
+
+    destinations = [new for _, new in found.moves]
+    counts = Counter(destinations)
+    planned = set(destinations)
+    occupied = [
+        new for new in destinations
+        if present(root / new)
+        or any(not_a_directory(root / str(parent))
+               for parent in PurePosixPath(new).parents)
+        or counts[new] > 1
+        or any(str(parent) in planned
+               for parent in PurePosixPath(new).parents)]
     gates.append(gate_entry(
         READY_GATES[4], "failed" if occupied else "passed",
         "adopt.destination.occupied" if occupied else None))
@@ -602,7 +703,9 @@ GATE_MESSAGES = {
     "no-untracked-overlap":
         "an untracked file sits inside an inspected source or a planned "
         "destination",
-    "no-existing-destination": "a planned destination already exists",
+    "no-existing-destination": (
+        "a planned destination already exists, sits under a file or "
+        "symlink, or collides with another"),
     "move-sources-tracked": "a planned move source is not tracked",
     "no-secret-path-in-moves":
         "a secret-shaped path is a planned move source or target",

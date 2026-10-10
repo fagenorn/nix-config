@@ -43,6 +43,7 @@ from agent_tools.adopt_inspection import (
     RUNTIME_SENTINEL,
     canonical_json,
     classify,
+    contained_relative,
     gate_entry,
     git_or_fail,
     is_agent_path,
@@ -126,24 +127,27 @@ def load_stored_plan(digest: str) -> dict:
     return document
 
 
-def contained_relative(root: Path, relative: object) -> bool:
-    """Whether `relative` is a repository-relative path inside `root`.
+def stored_answers(document: dict) -> list[dict]:
+    """The operator's answers the stored plan carries, or a refusal.
 
-    Resolved rather than merely inspected, so a component that is a symlink
-    out of the checkout is caught as well as a literal `..` or a leading `/`.
-    `strict=False`: a planned destination does not exist yet.
+    `apply` re-applies them before re-deriving the plan, so a stored value of
+    any other shape is refused here rather than handed to the shared
+    validation: each answer is exactly `{id, subject, value}` with string
+    values (D9).
     """
-    if not isinstance(relative, str) or not relative:
-        return False
-    candidate = Path(relative)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        return False
-    try:
-        anchor = root.resolve(strict=True)
-        resolved = (anchor / candidate).resolve()
-    except (OSError, RuntimeError):
-        return False
-    return resolved != anchor and anchor in resolved.parents
+    decisions = document.get("decisions")
+    answered = decisions.get("answered") if isinstance(decisions, dict) \
+        else None
+    if (not isinstance(answered, list)
+            or any(not isinstance(answer, dict)
+                   or set(answer) != {"id", "subject", "value"}
+                   or any(not isinstance(value, str)
+                          for value in answer.values())
+                   for answer in answered)):
+        raise refuse(
+            "adopt_failure", "adopt.plan.malformed", "/decisions/answered",
+            "the stored plan's answered decisions are not well formed")
+    return answered
 
 
 def validate_operations(root: Path, operations: list[object]) -> None:
