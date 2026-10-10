@@ -3,8 +3,19 @@
 Design for [#337](https://github.com/fagenorn/nix-config/issues/337), package 1 of 3 of
 [#125](https://github.com/fagenorn/nix-config/issues/125), executing the
 [#117 decision](2026-09-20-issue-117-attempt-lifecycle-first-consumer-design.md) over the
-[#204 core](2026-09-27-issue-204-transaction-core-skeleton-design.md). Base: main `eca16cd8`.
+[#204 core](2026-09-27-issue-204-transaction-core-skeleton-design.md). Base: main `907dba23`
+(first planned on `eca16cd8`; see Resume).
 Decisions were taken autonomously under `from-issue --auto`; each non-obvious one is a ledger row.
+
+## Resume
+
+Attempt 1 (run `run-20261009-337-338-339`, branch `worktree-issue-337-orchestrated` on `eca16cd8`)
+finished plan Tasks 1–5 and stopped at `decompose_required`: two test files' `-U10` diffs were over
+the review-package member cap. [#346](https://github.com/fagenorn/nix-config/issues/346) (PR #348,
+`907dba23`) then landed the behaviour-neutral half of Task 5's test sweep on main. Branch
+`worktree-issue-337-resume` starts at `907dba23` and merges the old branch at `cd7c09f7` (per D32).
+Measured against `907dba23`, `workflow-state.py` is 54166 bytes and both test files are under
+46 KB. Tasks 6–8 remain. D1–D31 stand, with baselines moved by D33 and the D13 pin kept by D34.
 
 ## Problem
 
@@ -317,3 +328,6 @@ ran: full (shadow)
 | D29 | Each changed code or test file's `git diff -U10 eca16cd8..HEAD` stays at most 60000 bytes after every task, and `workflow-state.py` at most 55000 after Task 4. The cumulative `review-package` check runs at each task head. | Review-package policy: 65536-byte member, 8 members, 524288 aggregate; a replay of Task 4's moves measured 54618 bytes, nearly all of it the call-site churn D15, D17, D20 and D23 require. | The 45000 target first set (unreachable unless the lock-holding `direct-owner` logic leaves its lock owner) or no per-file ceiling (the failure is found only at the cumulative gate, after the work is done). |
 | D30 | The plan stays at 8 members: the original Tasks 7 (installed launcher) and 8 (docs and final gate) merge into Task 8, the new store-move task is Task 4, and the original Tasks 4–6 become 5–7. Tasks 1–3 are marked complete. | Implementation-plan budget: at most 8 members; both merged tasks end on the same `just build` and installed-layout run (3600 s each), which the final gate repeats. | Folding the AC4 compatibility proofs into `migrate` (AC3 and AC4 could no longer be accepted apart) or a ninth member (over budget). |
 | D31 | The Task 5 sweep adapts direct `upgrade_state` calls to Task 4's signature (`identity=`) and their `WorkflowError` expectations to `attempt_store.LedgerRefused("invalid_state")`; the pure chain stays asserted at schema 7, schema 8 only after a locked read | Codex amendment review P337-R1: Task 4's callback contract made the sweep's listed edits insufficient (test_workflow_state.py upgrade_state calls) | Keep `upgrade_state` raising `WorkflowError` (would re-thread the error type through the moved package code) |
+| D32 | The resume carries Tasks 1–5 forward by merging the old branch into a branch cut from `907dba23` (`-X theirs`, merge `cd7c09f7`), not by rebuilding or cherry-picking. The old branch and worktree stay untouched. | #346 was split out so that #337's rebase would be mechanical; conflicts arose only in the two swept test files, and the merged tree equals the old branch apart from two kept main-only hunks; `just agent-workflow-tests` passed (2507 OK). | Rebuilding Tasks 1–5 (redoes reviewed work) or cherry-picking ~30 commits (replays every conflict once per commit and gains nothing over one merge). |
+| D33 | Reverses D29's baseline only: every per-file `-U10` ceiling, the cumulative `review-package` check, and the unchanged-file checks (admission-replay baseline, `instruction-load.json`) are measured from the merge base with `origin/main`, currently `907dba23`, instead of `eca16cd8`. The ceilings stay the same. | The review package diffs the branch against the integration branch; `eca16cd8..HEAD` would also count #346's main-side hunks. The admission baseline and `instruction-load.json` are identical at both commits. | Keeping `eca16cd8` (charges #346's merged work to #337's budget and misstates what review sees). |
+| D34 | The old-helper test stays pinned to `eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7`. | D13 needs a real pre-schema-8 generation that the checkout holds; `home/common/agent-skills/scripts` is byte-identical at `eca16cd8` and `907dba23` (schema 7), and `eca16cd8` is an ancestor of both. If main changes that tree before #337 merges, the pin moves to the new merge base. | Moving the pin to `907dba23` (the extracted bytes are the same, so it only churns the planned task text). |
