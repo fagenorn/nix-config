@@ -2,7 +2,7 @@
 
 The claude-code module's store wrapper clears NIX_PYTHON* and runs this file
 under `python3 -I` with `--policy <store JSON of the Nix-owned values>`.
-Standard library only: it imports nothing from agent_tools.
+Standard library only: it imports nothing from the repository's helper package.
 """
 
 import argparse
@@ -37,12 +37,14 @@ GUARDED_LITERALS = (
     ("gh pr create", "pr-create"),
     ("git branch -d", "branch"),
     ("git push", "push"),
+    ("gh release create", "release"),
 )
 GUARDED_TOKEN_LITERALS = (
     (["gh", "pr", "merge"], "merge"),
     (["gh", "pr", "create"], "pr-create"),
     (["git", "branch", "-d"], "branch"),
     (["git", "push"], "push"),
+    (["gh", "release", "create"], "release"),
 )
 # The raise label is the user's Instruction Budget raise decision. The refusal
 # is a mistake-catcher for agents, not enforcement (#294).
@@ -55,6 +57,7 @@ OPERATION_LABELS = {
     "pr-create": "PR creation",
     "branch": "branch deletion",
     "push": "push",
+    "release": "release creation",
     "label": "instruction-budget-raise label edit",
 }
 # Words that keep the command position open: shell keywords that introduce a
@@ -88,6 +91,10 @@ REF_NAME_PATTERN = re.compile(r"[A-Za-z0-9._/-]+")
 # name: `git push origin refs/heads/main` and `heads/main` both update the
 # branch `main`, so they must never be compared as plain names.
 REF_NAMESPACE_COMPONENTS = frozenset({"refs", "heads", "tags", "remotes"})
+# The release tag the forge adapter pushes and publishes: vMAJOR.MINOR.PATCH,
+# no leading zeros, nothing else (D9).
+SEMVER_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+TAG_REF_PREFIX = "refs/tags/"
 SEGMENT_SEPARATORS = frozenset(";&|\n")
 UNSAFE_BRANCH_CHARS = set(";&|<>$`\\\n\r*?[]{}()#~")
 UNSAFE_TEXT_CHARS = frozenset('"$`\\\0\r')
@@ -823,6 +830,7 @@ class Context:
         self.integration_bases = policy.integration_bases
         self.repository = detect_repository(self.git_bin, cwd, self.timeout)
         self.base_branch = default_branch(self.git_bin, cwd, self.timeout)
+        self.cwd = cwd
 
 
 def ownership_problem(repository, authorized_owners):
@@ -960,6 +968,31 @@ def validate_branch_delete(command, git_bin, timeout):
     return 0
 
 
+def validate_tag_push(tag, context):
+    """The tag-push arm: `git push origin refs/tags/<vX.Y.Z>` of an existing annotated tag.
+
+    The caller has judged the owner and the raw characters. The tag must exist
+    locally as an annotated tag object (`git cat-file -t` prints `tag`), so a
+    lightweight tag, a missing one or a branch of the same name never passes.
+    """
+    if SEMVER_TAG.fullmatch(tag) is None:
+        return block("unsafe push: a tag push must name a vMAJOR.MINOR.PATCH tag")
+    try:
+        kind = subprocess.run(
+            [context.git_bin, "cat-file", "-t", TAG_REF_PREFIX + tag],
+            capture_output=True,
+            text=True,
+            timeout=context.timeout,
+            check=False,
+            cwd=context.cwd,
+        )
+    except subprocess.TimeoutExpired:
+        return block("unsafe push: tag lookup timed out")
+    if kind.returncode != 0 or kind.stdout.strip() != "tag":
+        return block(f"unsafe push: {tag} is not an existing annotated tag")
+    return 0
+
+
 def validate_push(segment, context):
     problem = ownership_problem(context.repository, context.authorized_owners)
     if problem is not None:
@@ -970,6 +1003,12 @@ def validate_push(segment, context):
         command_argv = shlex.split(segment)
     except ValueError as error:
         return block(f"unsafe push: invalid command quoting: {error}")
+    if (
+        len(command_argv) == 4
+        and command_argv[:3] == ["git", "push", "origin"]
+        and command_argv[3].startswith(TAG_REF_PREFIX)
+    ):
+        return validate_tag_push(command_argv[3][len(TAG_REF_PREFIX):], context)
     if len(command_argv) == 5 and command_argv[:4] == ["git", "push", "-u", "origin"]:
         branch = command_argv[4]
     elif len(command_argv) == 4 and command_argv[:3] == ["git", "push", "origin"]:
@@ -1028,6 +1067,59 @@ def validate_pr_create(segment, context):
         )
     if head == base:
         return block("unsafe PR creation: head and base must differ")
+    return 0
+
+
+def parse_release_raw(command, repository):
+    """The guarded release creation as (tag, title, notes_path), or None.
+
+    The one spelling is `gh release create <tag> --repo <repository>
+    --verify-tag --title "<title>" --notes-file <path>`: no `--target`, no
+    draft or prerelease flags, nothing before or after.
+    """
+    prefix = "gh release create "
+    if not command.startswith(prefix):
+        return None
+    tag, separator, remainder = command[len(prefix):].partition(" ")
+    if not separator or SEMVER_TAG.fullmatch(tag) is None:
+        return None
+    title_prefix = f'--repo {repository} --verify-tag --title "'
+    if not remainder.startswith(title_prefix):
+        return None
+    title, quote_found, path = remainder[len(title_prefix):].rpartition('" --notes-file ')
+    if not quote_found or free_text_problem(title, False) is not None:
+        return None
+    if (
+        not os.path.isabs(path)
+        or any(character in UNSAFE_BRANCH_CHARS or character.isspace() for character in path)
+    ):
+        return None
+    return tag, title, path
+
+
+def validate_release(command, context):
+    """Release creation is judged on the whole command, like the merge."""
+    problem = ownership_problem(context.repository, context.authorized_owners)
+    if problem is not None:
+        return block(f"unsafe release creation: {problem}")
+    if command.startswith(UNSET_GITHUB_TOKEN_PREFIX):
+        command = command[len(UNSET_GITHUB_TOKEN_PREFIX):]
+    parts = parse_release_raw(command, context.repository)
+    if parts is None:
+        return block(
+            "unsafe release creation: command does not match the guarded release grammar"
+        )
+    tag, title, path = parts
+    try:
+        command_argv = shlex.split(command)
+    except ValueError as error:
+        return block(f"unsafe release creation: invalid command quoting: {error}")
+    expected_argv = [
+        "gh", "release", "create", tag, "--repo", context.repository,
+        "--verify-tag", "--title", title, "--notes-file", path,
+    ]
+    if command_argv != expected_argv:
+        return block("unsafe release creation: tokenised command does not match guarded argv")
     return 0
 
 
@@ -1132,6 +1224,15 @@ def validate_merge(command, context):
 
     if not delete_branch:
         return validate_release_merge(pr_facts, base, integration_base, context)
+
+    # The feature arm deletes the PR's head branch, so the head must be
+    # disposable: never the default branch, never the declared integration
+    # branch (#116 D5). Judged before any protection lookup.
+    head = pr_facts.get("headRefName")
+    if isinstance(head, str) and head in (context.base_branch, integration_base):
+        return block(
+            f"unsafe merge: --delete-branch would delete the permanent branch {head}"
+        )
 
     # A declared integration branch is deliberately exempt from the
     # protection demand: it is the development-pace branch, and its CI
@@ -1288,6 +1389,8 @@ def main():
                 status = validate_push(segment, context)
             elif operation == "pr-create":
                 status = validate_pr_create(segment, context)
+            elif operation == "release":
+                status = validate_release(command, context)
             else:
                 status = validate_merge(command, context)
         if status != 0:

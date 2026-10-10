@@ -979,6 +979,96 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertEqual(2, result.returncode)
         self.assertIn("lifecycle guard: unexpected failure:", result.stderr)
 
+    # ------------------------------------------------------------------
+    # Forge adapter arms (#124): the tag push and the release creation the
+    # github-release profile invokes, plus the permanent-branch repair (#116 D5).
+    # ------------------------------------------------------------------
+
+    SPELLINGS = json.loads((Path(__file__).parent / "fixtures/forge-adapter-spellings.json")
+                           .read_text(encoding="utf-8"))
+    CANONICAL_SLUG = SPELLINGS["canonical"]["slug"]
+    REPOSITORY_CLASSES = (  # (class, slug, authorized, env), D22
+        ("default-only", "fagenorn/nix-config", True, {}),
+        ("distinct-integration", "elevenyellow/nodocom", True, {}),
+        ("protection-inaccessible", "fagenorn/nix-config", True, {"FAKE_PROTECTION_MODE": "nonzero"}),
+        ("other-owner", "someone-else/nix-config", False, {}),
+    )
+
+    def tagged_repo(self, slug, tag="v1.2.3", annotated=True):
+        repo = self.make_repo(f"git@github.com:{slug}.git")
+        # Signing is switched off: a host's tag.gpgsign would turn the lightweight tag
+        # into a signed annotated one and demand a message.
+        identity = ["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                    "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"]
+        subprocess.run([*identity, "commit", "--quiet", "--allow-empty", "-m", "init"],
+                       cwd=repo, check=True, capture_output=True)
+        argv = [*identity, "tag"]
+        argv += ["-a", tag, "-m", "release"] if annotated else [tag]
+        subprocess.run(argv, cwd=repo, check=True, capture_output=True)
+        return repo
+
+    def test_every_adapter_spelling_is_an_allowed_row(self):
+        """AC4, D12: one fixture drives the adapter suite and this table."""
+        for name, slug, authorized, env in self.REPOSITORY_CLASSES:
+            repo = self.tagged_repo(slug)
+            for row in self.SPELLINGS["rows"]:
+                raw = row["raw"].replace(self.CANONICAL_SLUG, slug)
+                with self.subTest(repository=name, row=row["id"]):
+                    result = self.run_guard(raw, cwd=repo, env=env)
+                    expect_allowed = authorized or row["kind"] == "read"
+                    self.assertEqual(0 if expect_allowed else 2, result.returncode, result.stderr)
+
+    def test_tag_push_near_misses_are_refused(self):
+        repo = self.tagged_repo("fagenorn/nix-config")
+        lightweight = self.tagged_repo("fagenorn/nix-config", tag="v2.0.0", annotated=False)
+        for command, cwd in (
+                ("git push origin refs/tags/v2.0.0", lightweight),
+                ("git push origin refs/tags/v1.2", repo),
+                ("git push origin refs/tags/release-1", repo),
+                ("git push origin refs/heads/v1.2.3", repo),
+                ("git push origin +refs/tags/v1.2.3", repo),
+                ("git push origin refs/tags/v1.2.3 extra", repo),
+                ("git push --force origin refs/tags/v1.2.3", repo),
+                ("git push origin refs/tags/v9.9.9", repo)):
+            with self.subTest(command=command):
+                self.assertEqual(2, self.run_guard(command, cwd=cwd).returncode)
+        other = self.tagged_repo("someone-else/nix-config")
+        self.assertEqual(2, self.run_guard("git push origin refs/tags/v1.2.3", cwd=other).returncode)
+
+    def test_release_create_near_misses_are_refused(self):
+        repo = self.tagged_repo("fagenorn/nix-config")
+        base = 'gh release create v1.2.3 --repo fagenorn/nix-config --verify-tag --title "v1.2.3 — r" --notes-file /tmp/n.md'
+        self.assertEqual(0, self.run_guard(base, cwd=repo).returncode)
+        self.assertEqual(0, self.run_guard("unset GITHUB_TOKEN && " + base, cwd=repo).returncode)
+        for command in (
+                base.replace(" --verify-tag", ""),
+                base.replace("--verify-tag --title", "--title").replace("/tmp/n.md", "/tmp/n.md --verify-tag"),
+                base.replace("--verify-tag", "--target main"),
+                base.replace("--repo fagenorn/nix-config", "--repo fagenorn/other"),
+                base.replace('"v1.2.3 — r"', '"v1.2.3 $(id)"'),
+                base.replace("/tmp/n.md", "notes.md"),
+                base + "; true",
+                "true; " + base,
+                base + " && true",
+                base.replace("create v1.2.3", "create 1.2.3")):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+
+    def test_feature_arm_never_deletes_a_permanent_branch(self):
+        """#116 D5: dev -> main and main -> dev both refuse --delete-branch."""
+        repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
+        merge = "gh pr merge 7 --repo elevenyellow/nodocom --merge --delete-branch"
+        for head, base in (("dev", "main"), ("main", "dev")):
+            with self.subTest(head=head, base=base):
+                env = {"FAKE_PR_JSON": json.dumps({
+                    "state": "OPEN", "baseRefName": base, "headRefName": head,
+                    "url": "https://github.com/elevenyellow/nodocom/pull/7",
+                    "statusCheckRollup": []})}
+                result = self.run_guard(merge, cwd=repo, env=env)
+                self.assertEqual(2, result.returncode)
+                self.assertIn("permanent branch", result.stderr)
+
     def test_hostile_interpreter_environment_is_ignored(self):
         # Each plant exits 0 before the guard can judge: a BASH_ENV file that the
         # wrapper's bash would source, a `json` package reached through PYTHONPATH,

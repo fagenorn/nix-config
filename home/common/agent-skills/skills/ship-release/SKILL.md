@@ -222,15 +222,12 @@ Annotated (`-a`, as `git describe` and `gh release` expect), tagging `MERGE_SHA`
 ```bash
 ${GH_PREFIX}gh pr view <pr-num> --json body -q .body
 
-${GH_PREFIX}gh release create "$NEXT_VERSION" \
-  --target <default> \
-  --title "$NEXT_VERSION — <one-line scope from PR title>" \
-  --notes-file <release-notes-path>
+${GH_PREFIX}gh release create <vX.Y.Z> --repo <repo-slug> --verify-tag --title "<vX.Y.Z> — <one-line scope from PR title>" --notes-file <release-notes-path>
 
 rm <release-notes-path>
 ```
 
-Between the two: write the body the first command printed to `<release-notes-path>` (outside the working tree) with the file-writing tool, pass that path to the second (never inline `--notes`: the shell mangles the body's fences and backticks), and remove it once the Release exists. No PR (single-branch): write the Phase 1 body there. Skip `--prerelease` and `--draft`.
+Between the two: write the body the first command printed to `<release-notes-path>` (outside the working tree) with the file-writing tool, pass it to the second (never inline `--notes`: the shell mangles the body's fences and backticks), and remove it afterwards. Write the tag and slug literally, like the merge line. No PR (single-branch): write the Phase 1 body there.
 
 ### 4.5g. Verify
 
