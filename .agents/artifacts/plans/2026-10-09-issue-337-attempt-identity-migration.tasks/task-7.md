@@ -11,7 +11,7 @@ Test-only task: it proves AC4 against the code Tasks 2–6 built. If a test can 
 
 **Invariants:**
 - The legacy owner uses only the legacy handle `orchestrate-14`, the action id `14:1:1` and worker id `14:1:1:w1` — never the transaction id.
-- The base generation is the real one: `git -C <repo root> archive eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7 home/common/agent-skills/scripts | tar -x -C <tmp>`; the commit's absence is a test **failure** (`self.fail`), never a skip (D13; the pin stays per D34). `<repo root>` is `Path(__file__).resolve().parents[4]` (the checkout holding `home/`).
+- The base generation is the real one: `git -C <repo root> archive eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7 home/common/agent-skills/scripts home/common/agent-skills/artifact-budget-policy.json | tar -x -C <tmp>`. The policy comes from the same commit because the base helper's `_delivery()` reads it from `scripts/../artifact-budget-policy.json` in its source layout (`artifact_budget_paths`) before any command runs; without it `check-launch` exits 2 on "artifact-budget policy is unavailable" and the positive control fails (D38). the commit's absence is a test **failure** (`self.fail`), never a skip (D13; the pin stays per D34). `<repo root>` is `Path(__file__).resolve().parents[4]` (the checkout holding `home/`).
 - The base helper runs as a subprocess `[sys.executable, <tmp>/home/common/agent-skills/scripts/workflow-state.py, ...]` with `env = {**self.cli_env, "PYTHONPATH": <repo root>/python}` (it imports `agent_tools.host_admission` from source in its `scripts` layout) and `cwd=<tmp>`.
 - Every refusal leaves the `.superpowers` tree snapshot byte-identical.
 
@@ -71,7 +71,8 @@ class LegacyOwnerCompatibilityTest(MigrationFixtures, unittest.TestCase):
         if found.returncode != 0:
             self.fail(f"base commit {BASE_COMMIT} is missing; fetch it, do not skip (D13)")
         archive = subprocess.run(["git", "-C", str(REPO), "archive", BASE_COMMIT,
-                                  "home/common/agent-skills/scripts"],
+                                  "home/common/agent-skills/scripts",
+                                  "home/common/agent-skills/artifact-budget-policy.json"],
                                  capture_output=True, check=True)
         subprocess.run(["tar", "-x", "-C", str(scratch)], input=archive.stdout, check=True)
         return scratch / "home/common/agent-skills/scripts/workflow-state.py"
@@ -129,5 +130,5 @@ Stage the test file, then `launch-commit … -- -m "test: live legacy owners and
 ## Review feasibility task
 
 ```json
-{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64],"id":7,"records":[{"bounds":[{"added_lines":824,"boundary":"attempt-identity","deleted_lines":0,"record_bytes":45000,"support":{"covers":["t5-4","t6-3","t7-1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t7-1","last_task":7,"owner":7,"path":"home/common/agent-skills/tests/test_attempt_migration.py"}]}}
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64],"id":7,"records":[{"bounds":[{"added_lines":862,"boundary":"attempt-identity","deleted_lines":0,"record_bytes":48000,"support":{"covers":["t5-4","t6-3","t7-1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t7-1","last_task":7,"owner":7,"path":"home/common/agent-skills/tests/test_attempt_migration.py"}]}}
 ```
