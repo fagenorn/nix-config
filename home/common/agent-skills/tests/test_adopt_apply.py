@@ -23,17 +23,24 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools import adopt_apply, adopt_links, adopt_planning
+from agent_tools import adopt_apply, adopt_inspection, adopt_links, adopt_planning
 
 from .test_adopt_project import (
+    CHECK_LINKS,
+    CHECK_LINKS_EXTENDED,
     GITIGNORE_WITH_COMMENT,
     LINKED_AFTER,
     LINKED_BASE,
     LINKED_SOURCES,
     LINKED_SUMMARY,
+    REFERENCE_ROW,
+    REFERENCE_SUBJECT,
+    UNRELATED_SCRIPT,
     commit,
     fixture_contract,
     git,
@@ -45,6 +52,7 @@ from .test_adopt_project import (
     write,
     write_dissolved_tree,
     write_linked_tree,
+    write_reference_tree,
 )
 
 CONTRACT = ".agents/project.json"
@@ -143,6 +151,13 @@ def linked_apply_repo(home: Path, **options) -> Path:
     """`apply_repo` plus #345's inbound and outbound relative links."""
     root = apply_repo(home, **options)
     write_linked_tree(root)
+    return root
+
+
+def referenced_apply_repo(home: Path) -> Path:
+    """`apply_repo` plus #350's link-check script and its reference tree."""
+    root = apply_repo(home)
+    write_reference_tree(root)
     return root
 
 
@@ -770,6 +785,65 @@ class LinkRewriteApplyTest(ApplyTestCase):
         self.assertEqual([gate["id"] for gate in record["gates"]
                           if gate["status"] == "failed"],
                          ["no-new-broken-link"])
+
+
+class PathReferenceApplyTest(ApplyTestCase):
+    """#350: an answered path reference is edited in the adoption commit."""
+
+    def answered_plan(self, root: Path, value: str) -> dict:
+        code, out, err = run("plan", "--repo-root", str(root), "--answer",
+                             "path-reference", REFERENCE_SUBJECT, value,
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+        document = json.loads(out)
+        self.assertEqual(document["plan"]["state"], "ready",
+                         document["plan"]["blockers"])
+        return document
+
+    def check(self, root: Path, revision: str) -> tuple[int, str]:
+        """The fixture's own link check, run on an export of `revision`."""
+        export = Path(tempfile.mkdtemp()) / "tree"
+        adopt_inspection.export_commit(root, revision, export)
+        proc = subprocess.run(
+            [sys.executable, str(export / CHECK_LINKS), str(export)],
+            capture_output=True, text=True, timeout=120)
+        return proc.returncode, proc.stdout
+
+    def test_the_extended_script_passes_on_the_adopt_commit_as_on_base(self):
+        root = referenced_apply_repo(self.home)
+        document = self.answered_plan(root, "extend")
+        branch = self.succeed(root, document["plan"]["plan_id"])["branch"]
+        self.assertEqual(git(root, "show", f"{branch}:{CHECK_LINKS}"),
+                         CHECK_LINKS_EXTENDED)
+        self.assertEqual(git(root, "show", f"{branch}:{UNRELATED_SCRIPT}"),
+                         git(root, "show", f"HEAD:{UNRELATED_SCRIPT}"))
+        self.assertEqual(
+            git(root, "rev-list", "--count", f"HEAD..{branch}").strip(), "1")
+        base = self.check(root, "HEAD")
+        self.assertEqual(base, (0, "ok\n"))
+        self.assertEqual(self.check(root, branch), base)
+
+    def test_a_retained_reference_leaves_the_check_failing(self):
+        root = referenced_apply_repo(self.home)
+        document = self.answered_plan(root, "retain")
+        branch = self.succeed(root, document["plan"]["plan_id"])["branch"]
+        self.assertEqual(git(root, "show", f"{branch}:{CHECK_LINKS}"),
+                         git(root, "show", f"HEAD:{CHECK_LINKS}"))
+        self.assertEqual(self.check(root, branch),
+                         (1, ".agents/artifacts/specs/x.md: missing.md\n"))
+
+    def test_the_evidence_record_lists_the_answer_and_the_row(self):
+        root = referenced_apply_repo(self.home)
+        document = self.answered_plan(root, "extend")
+        result = self.succeed(root, document["plan"]["plan_id"])
+        record = json.loads(git(
+            root, "show", f"{result['branch']}:{result['evidence_record']}"))
+        self.assertIn({"id": "path-reference", "subject": REFERENCE_SUBJECT,
+                       "value": "extend"}, record["decisions_accepted"])
+        self.assertEqual(record["path_references"],
+                         [{**REFERENCE_ROW, "answer": "extend"}])
+        self.assertEqual(record["path_references"],
+                         document["path_references"])
 
 
 class CommitLinkProofTest(ApplyTestCase):

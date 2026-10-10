@@ -18,7 +18,8 @@ import json
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
-from agent_tools import adopt_links, agent_platform, release_profile
+from agent_tools import (adopt_links, adopt_references, agent_platform,
+                         release_profile)
 from agent_tools.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
     APPROVAL_CLASSES,
@@ -35,6 +36,7 @@ from agent_tools.adopt_inspection import (
     MIGRATION_MAP_DIR,
     NOTES,
     OPERATION_KINDS,
+    PATH_REFERENCE_BASIS,
     QUESTION_IDS,
     READY_GATES,
     RUNTIME_IGNORE_PATTERN,
@@ -59,6 +61,7 @@ from agent_tools.adopt_inspection import (
     sha256_hash,
 )
 from agent_tools.adopt_links import LinkRewrites
+from agent_tools.adopt_references import References
 from agent_tools.release_bridge import project_legacy_deploy
 
 # --------------------------------------------------------------------------
@@ -160,37 +163,100 @@ def candidate_questions(found: Candidates) -> list[dict]:
          for entry in found.entries if entry["action"] == "needs-decision"),
         key=lambda entry: entry["subject"])
 
-def apply_answers(found: Candidates, inventory: Inventory,
-                  answers: list[dict]) -> list[dict]:
-    """Settle the answered candidates in `found`; return the answers, sorted.
+def reference_questions(references: References,
+                        answers: dict[str, str]) -> list[dict]:
+    """One open `path-reference` question per unanswered occurrence (#350).
 
-    Each answer is `{"id", "subject", "value"}`, all strings. They are
-    validated in order of `(id, subject, value)`, refusing on the first
-    violation: an id other than `candidate-class`, a subject already answered,
-    a subject that is not the path of a `needs-decision` entry, and a value
-    other than the one that candidate's open question offers. Nothing is
-    mutated until every answer has validated, so a refusal changes nothing.
+    In occurrence order. Every prose member is fixed and never names the file
+    or the literal: the entry's `subject` does, so the question is stable
+    across plans of one tree. The entry carries no `value`, because the
+    answer is the operator's choice among the occurrence's own `answers`.
+    """
+    return [{"id": "path-reference",
+             "subject": occurrence.subject,
+             "answers": list(occurrence.answers),
+             "basis": PATH_REFERENCE_BASIS,
+             "impact": question_impact("path-reference"),
+             "recommendation": question_recommendation("path-reference")}
+            for occurrence in references.occurrences
+            if occurrence.subject not in answers]
 
-    A valid answer sets the entry's action to the value and its note to the
-    answered note, leaving it `unclassified`. Archiving also gives it its
-    archive destination, registers it as a one-member group and records the
-    move; retaining adds nothing (D4). The result is sorted by `(id,
-    subject)` and enters the plan id unchanged (D5, D15).
+
+def reference_answers(answered: list[dict]) -> dict[str, str]:
+    """`subject -> value` of the settled `path-reference` answers."""
+    return {answer["subject"]: answer["value"] for answer in answered
+            if answer["id"] == "path-reference"}
+
+
+def apply_answers(root: Path, found: Candidates, inventory: Inventory,
+                  answers: list[dict],
+                  excluded: set[str]) -> tuple[list[dict], References]:
+    """Settle the answered questions; return the answers, sorted, and the
+    references the settled moves leave.
+
+    Each answer is `{"id", "subject", "value"}`, all strings, and answers a
+    `candidate-class` or a `path-reference` question. They are validated in
+    order of `(id, subject, value)`, refusing on the first violation: an id
+    other than those two, a question answered twice and then, for a
+    `candidate-class`, a subject that is not the path of a `needs-decision`
+    entry and a value other than the one that candidate's open question
+    offers or, for a `path-reference`, a subject that is no occurrence of this
+    inspection and a value that occurrence does not offer. Nothing in `found`
+    is mutated until every answer has validated, so a refusal changes nothing.
+
+    The references are derived once, from the base revision's tracked text
+    with `excluded` skipped, over the moves the answers settle (D12): at the
+    first `path-reference` answer, over `found.moves` plus the archive
+    destination of every `archive-history` answer validated before it, which
+    is every one of them because `candidate-class` sorts first; with no such
+    answer, after the candidate mutation below, over `found.moves`. The two
+    are the same moves, so the answers' order on the command line changes
+    nothing.
+
+    A valid `candidate-class` answer sets the entry's action to the value and
+    its note to the answered note, leaving it `unclassified`. Archiving also
+    gives it its archive destination, registers it as a one-member group and
+    records the move; retaining adds nothing (D4). The answers, sorted by
+    `(id, subject)`, enter the plan id unchanged (D5, D15), and are returned
+    with the derived `References`.
     """
     pointer = "/decisions/answered"
     entries = {entry["path"]: entry for entry in found.entries
                if entry["action"] == "needs-decision"}
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
+    moves = list(found.moves)
+    references: References | None = None
     for answer in sorted(answers, key=lambda a: (a["id"], a["subject"],
                                                  a["value"])):
-        if answer["id"] != "candidate-class":
+        question = answer["id"]
+        if question not in ("candidate-class", "path-reference"):
             raise refuse("adopt_failure", "adopt.decisions.invalid_answer",
-                         pointer, "only a candidate-class question can be "
-                         "answered")
-        if answer["subject"] in seen:
+                         pointer, "only a candidate-class or path-reference "
+                         "question can be answered")
+        if (question, answer["subject"]) in seen:
             raise refuse("adopt_failure", "adopt.decisions.invalid_answer",
-                         pointer, "a candidate is answered more than once")
-        seen.add(answer["subject"])
+                         pointer, "a candidate is answered more than once"
+                         if question == "candidate-class" else
+                         "a path reference is answered more than once")
+        seen.add((question, answer["subject"]))
+        if question == "path-reference":
+            if references is None:
+                references = adopt_references.derive_references(
+                    root, inventory.base_revision, moves, excluded)
+            occurrence = next(
+                (o for o in references.occurrences
+                 if o.subject == answer["subject"]), None)
+            if occurrence is None:
+                raise refuse("adopt_failure",
+                             "adopt.decisions.unmatched_answer", pointer,
+                             "the answered subject is not a path reference "
+                             "of this inspection")
+            if answer["value"] not in occurrence.answers:
+                raise refuse("adopt_failure",
+                             "adopt.decisions.invalid_answer", pointer,
+                             "the answer is not one this path reference's "
+                             "open question offers")
+            continue
         entry = entries.get(answer["subject"])
         if entry is None:
             raise refuse("adopt_failure", "adopt.decisions.unmatched_answer",
@@ -202,10 +268,15 @@ def apply_answers(found: Candidates, inventory: Inventory,
             raise refuse("adopt_failure", "adopt.decisions.invalid_answer",
                          pointer, "the answer is not the one this "
                          "candidate's open question offers")
+        if answer["value"] == "archive-history":
+            moves.append((answer["subject"],
+                          f"{ARCHIVE_ADOPTED_DIR}/{answer['subject']}"))
 
     tracked = dict(inventory.tracked)
     settled = sorted(answers, key=lambda a: (a["id"], a["subject"]))
     for answer in settled:
+        if answer["id"] != "candidate-class":
+            continue
         path, value = answer["subject"], answer["value"]
         entry = entries[path]
         entry["action"] = value
@@ -216,7 +287,10 @@ def apply_answers(found: Candidates, inventory: Inventory,
             found.groups[path] = {"action": value, "target": target,
                                   "members": [(path, tracked[path])]}
             found.moves.append((path, target))
-    return settled
+    if references is None:
+        references = adopt_references.derive_references(
+            root, inventory.base_revision, found.moves, excluded)
+    return settled, references
 
 # --------------------------------------------------------------------------
 # The `.gitignore` amendment
@@ -414,6 +488,16 @@ def generated_targets(contract_source: dict | None) -> set[str]:
             and isinstance(entry.get("target"), str)}
 
 
+def reference_excluded(contract_source: dict | None) -> set[str]:
+    """The files no path-reference is read from or written to (D10): the
+    contract, the `.gitignore`, the runtime sentinel, the legacy binding
+    configs and every `generated_file` projection target. Each is amended or
+    regenerated by an operation of its own, so an edit of the same bytes would
+    be a second answer to what the file becomes."""
+    return ({CONTRACT_FILENAME, GITIGNORE, RUNTIME_SENTINEL,
+             *LEGACY_BINDING_CONFIGS} | generated_targets(contract_source))
+
+
 def check_markdown_writes(changes: list[dict],
                           link_targets: set[str]) -> None:
     """Refuse an operation list whose Markdown handling is not the link
@@ -440,11 +524,40 @@ def check_markdown_writes(changes: list[dict],
             f"a delete-file operation names Markdown: {sorted(deleted)!r}")
 
 
+def check_reference_writes(changes: list[dict],
+                           reference_targets: set[str]) -> None:
+    """Refuse an operation list that does not hold each path-reference file
+    exactly once, as a plain in-place write (D9).
+
+    For every target exactly one operation may hold it, and that one is a
+    `write-file` whose `sources` and `targets` are both `[target]`: a file
+    edited by a reference answer and also moved, deleted, regenerated or
+    written a second time would disagree with itself. An operation holds a
+    file it names in `targets`, or in `sources` unless it is a
+    `regenerate-projection`, which only reads its source and runs after the
+    write, so a projection source a reference answer edits has one writer, as
+    one the link rewriter edits does under `check_markdown_writes`. This is a
+    derivation bug, never a repository condition, so it raises rather than
+    gating."""
+    for target in sorted(reference_targets):
+        naming = [op for op in changes
+                  if target in op["targets"]
+                  or (target in op["sources"]
+                      and op["op"] != "regenerate-projection")]
+        if len(naming) != 1 or not (
+                naming[0]["op"] == "write-file"
+                and naming[0]["sources"] == [target]
+                and naming[0]["targets"] == [target]):
+            raise ValueError(
+                f"{target!r} is not held by exactly one in-place write-file "
+                f"operation: {naming!r}")
+
+
 def build_operations(root: Path, found: Candidates, manifest: dict,
                      contract_source: dict | None,
-                     plan_id: str,
-                     links: LinkRewrites) -> tuple[list[dict], list[dict],
-                                                   dict[str, bytes]]:
+                     plan_id: str, links: LinkRewrites,
+                     reference_files: dict[str, tuple[str, str]]
+                     ) -> tuple[list[dict], list[dict], dict[str, bytes]]:
     """The typed operations either side of the adoption's own bookkeeping.
 
     Returned as `(head, tail, contents)` rather than one list because
@@ -454,8 +567,10 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
     contract amendment, the relocations sorted by old path, the runtime
     sentinel and the `.gitignore` amendment, then the deletion of any
     superseded evidence record and the two records, then the living-reference
-    rewrite, the Markdown link rewrites sorted by target, and finally the
-    projection regenerations.
+    rewrite, the Markdown link rewrites sorted by target, the path-reference
+    writes sorted by target, and finally the projection regenerations.
+    `reference_files` maps each non-Markdown file an answered path reference
+    edits onto its `(before, after)` texts.
 
     `contents` maps each `write-file` target onto the exact bytes whose hash
     the operation publishes as `after`. The plan document carries the hash and
@@ -527,6 +642,16 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
                               sha256_hash(before), sha256_hash(after)))
         contents[target] = after
 
+    # One in-place `write-file` per non-Markdown file an answered path
+    # reference edits (#350). Those files are never moved (a move source is
+    # not read for references), so the target is where the file already is.
+    for target in sorted(reference_files):
+        before, after = (text.encode("utf-8")
+                         for text in reference_files[target])
+        tail.append(operation("write-file", [target], [target],
+                              sha256_hash(before), sha256_hash(after)))
+        contents[target] = after
+
     projections = (amended or {}).get("projections")
     if isinstance(projections, list):
         rows = [entry for entry in projections if isinstance(entry, dict)
@@ -567,8 +692,9 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
                            base_revision: str, platform_block: dict,
                            decisions: dict,
                            ready_gates: list[dict],
-                           link_rewrites: dict) -> tuple[list[dict],
-                                                        dict[str, bytes]]:
+                           link_rewrites: dict,
+                           path_references: list[dict]) -> tuple[
+                               list[dict], dict[str, bytes]]:
     """The path-migration map and the adoption evidence record, preceded by
     the deletion of every evidence record an earlier adoption committed.
 
@@ -609,6 +735,7 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
         "checks": [{"id": gate["id"], "status": gate["status"]}
                    for gate in ready_gates],
         "link_rewrites": link_rewrites,
+        "path_references": path_references,
         "path_migration_map": records["migration_map"],
     })
     return [
@@ -800,10 +927,12 @@ def blockers_for(gates: list[dict]) -> list[dict]:
 
 def compute_plan_id(project_id: str | None, base_revision: str,
                     platform_block: dict, evidence: list[dict],
-                    answered: list[dict], link_rewrites: dict) -> str:
-    """D15's content address over exactly seven inputs: the project id, the
+                    answered: list[dict], link_rewrites: dict,
+                    path_references: list[dict]) -> str:
+    """D15's content address over exactly eight inputs: the project id, the
     base revision, the platform block, the evidence, the answered decisions,
-    the schema version and the `link_rewrites` summary (#345).
+    the schema version, the `link_rewrites` summary (#345) and the
+    `path_references` rows (#350).
 
     The manifest's `migrations` array is deliberately *not* one of them (D36):
     it can only route toward `migration_required` or `repair_required`, and
@@ -820,6 +949,7 @@ def compute_plan_id(project_id: str | None, base_revision: str,
         "evidence": evidence,
         "decisions_answered": answered,
         "link_rewrites": link_rewrites,
+        "path_references": path_references,
     }
     return "sha256:" + hashlib.sha256(canonical_json(source)).hexdigest()
 
