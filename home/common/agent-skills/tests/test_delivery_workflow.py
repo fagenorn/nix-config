@@ -2874,9 +2874,8 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         return value
 
     def direct_runs(self, issue):
-        """The run directories whose ledger holds `issue`."""
-        return sorted(path.parent for path in (self.root / ".superpowers/workflows").glob(
-            "*/state.json") if str(issue) in json.loads(path.read_text())["issues"])
+        """The direct-run entries of `issue` under `workflows`."""
+        return sorted((self.root / ".superpowers/workflows").glob(f"direct-{issue}-*"))
 
     FOLLOW_UP = "worktree-issue-172-chained-follow-up"
 
