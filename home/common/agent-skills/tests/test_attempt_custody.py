@@ -179,6 +179,28 @@ class CustodyLeaseTest(LifecycleCustody, unittest.TestCase):
         self.assertEqual(self.custody(14).custody.executor_id, "14:1:1")
 
 
+    def test_a_resume_into_a_taken_worktree_refuses_the_whole_sweep_before_any_write(self):
+        self.init_run()
+        taken = str(self.root / "wt-20")
+        self.spawn(issue=20, worktree=taken)
+        self.suspend(issue=20, attempt=1, blocked_on="transport", now=T(1))
+        first = self.run_id
+        self.init_run(creation_key="second-run")
+        self.spawn(issue=30, worktree=taken, now=T(2))
+        self.run_id = first
+        before = self.tree()
+        refused = self.control_raw(
+            ok=False, now=T(3), issues=[14, 20], max_parallel=100,
+            tracker=[self.tracker_fact(14), self.tracker_fact(20)],
+            worktrees=[
+                self.worktree_fact(14, candidate={
+                    "path": os.path.abspath(self.root / "wt-14"), "state": "absent"}),
+                self.worktree_fact(20, recorded={
+                    "path": os.path.abspath(taken), "state": "matching_issue_branch"})])
+        self.assert_fenced(refused, "custody_unavailable", before)
+        self.assertIsNone(self.custody(14))
+
+
 class CustodyMigrationTest(LifecycleCustody, unittest.TestCase):
     def migrate(self, *flags):
         return json.loads(self.run_cli("migrate", "--repo-root", self.root, *flags).stdout)
@@ -201,6 +223,20 @@ class CustodyMigrationTest(LifecycleCustody, unittest.TestCase):
                          (1, "14:1:1"))
         self.assertEqual(self.lease(self.worktree)["holder"]["expires_at"], ac.at_ms(T(30)))
         self.assertEqual(self.row(self.migrate())["verdict"], "current")
+
+    def test_migrate_apply_reports_a_refused_bind_as_a_row_and_binds_the_rest(self):
+        self.spawn_14()
+        stored = self.read_state()
+        self.install_legacy(stored, "orchestrate-14", version=8)
+        self.install_legacy(stored, "orchestrate-14-r2", version=8)
+        completed = self.run_cli("migrate", "--repo-root", self.root, "--apply")
+        rows = {row["ledger"]: row for row in json.loads(completed.stdout)["ledgers"]}
+        self.assertEqual(
+            [(rows[name]["verdict"], rows[name]["reason"])
+             for name in ("orchestrate-14", "orchestrate-14-r2")],
+            [("migrated", None), ("refused", "invalid_state")])
+        self.run_id = "orchestrate-14-r2"
+        self.assertEqual(self.read_state()["schema_version"], 8)
 
     def test_migrate_apply_parks_a_suspension_and_replays_no_history(self):
         self.spawn_14()

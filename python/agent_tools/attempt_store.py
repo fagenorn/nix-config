@@ -526,27 +526,31 @@ def _preflight(core: TransactionStore, run: str, planned: list[_Planned], *, now
                canonical: Callable[[str], str],
                bound_launches: Mapping[tuple[int, int], int]) -> dict[int, dict]:
     """The subject of every plan that creates, and the refusal of a live holder before any
-    create (#338 D19).
+    write (#338 D19).
 
-    A live holder of the worktree key is no refusal when its own plan, earlier in the read
-    order, ends its span (D24): a predecessor's interrupted seal is applied first.
+    Every plan that acquires is checked, a new attempt's and an existing one's alike, so a
+    refused sweep has written nothing. A live holder of the worktree key is no refusal when
+    it is the plan's own transaction or when its own plan, earlier in the read order, ends
+    its span (D24): a predecessor's interrupted seal is applied first.
     """
     subjects, ending = {}, set()
     for position, plan in enumerate(planned):
-        if plan.operations[0].kind == "create":
-            subject = _new_subject(core, run, plan, canonical=canonical,
-                                   bound_launches=bound_launches)
-            subjects[position] = subject
-            if any(operation.kind == "acquire" for operation in plan.operations):
-                with _core_errors():
-                    lease = core.inspect_lease(custody_rules.worktree_key(subject["worktree"]))
-                holder = None if lease is None else lease["holder"]
-                if holder is not None and now_ms < holder["expires_at"] \
-                        and holder["transaction_id"] not in ending:
-                    raise FencingRefused(
-                        "custody_unavailable",
-                        f"worktree {subject['worktree']} is held by executor "
-                        f"{holder['executor_id']} of transaction {holder['transaction_id']}")
+        creating = plan.operations[0].kind == "create"
+        if creating:
+            subjects[position] = _new_subject(core, run, plan, canonical=canonical,
+                                              bound_launches=bound_launches)
+        if any(operation.kind == "acquire" for operation in plan.operations):
+            worktree = (subjects[position] if creating else plan.transaction.subject)["worktree"]
+            with _core_errors():
+                lease = core.inspect_lease(custody_rules.worktree_key(worktree))
+            holder = None if lease is None else lease["holder"]
+            own = None if creating else plan.transaction.transaction_id
+            if holder is not None and now_ms < holder["expires_at"] \
+                    and holder["transaction_id"] not in ending | {own}:
+                raise FencingRefused(
+                    "custody_unavailable",
+                    f"worktree {worktree} is held by executor {holder['executor_id']} "
+                    f"of transaction {holder['transaction_id']}")
         if plan.transaction is not None and _ends_span(plan):
             ending.add(plan.transaction.transaction_id)
     return subjects
@@ -590,11 +594,14 @@ def _apply(core: TransactionStore, run: str, plan: _Planned, subject: dict | Non
                 identifier, executor_id=operation.executor_id, subject_path=path,
                 fence=custody_rules.launch_fence(snapshot, operation.executor_id),
                 result=report.report)
-        elif plan.latest:  # the one operation left is `seal`
-            seals.append(PendingSeal(identifier, operation.reason))
+        elif operation.kind == "seal":
+            if plan.latest:
+                seals.append(PendingSeal(identifier, operation.reason))
+            else:
+                snapshot = core.advance(identifier, "abandoned", reason=operation.reason,
+                                        external_state="known", custody=custody)
         else:
-            snapshot = core.advance(identifier, "abandoned", reason=operation.reason,
-                                    external_state="known", custody=custody)
+            raise ValueError(f"unknown custody operation {operation.kind!r}")
     return seals
 
 
@@ -604,7 +611,7 @@ def settle_custody(store: Path, state: dict, *, now_ms: int, canonical: Callable
     """Bring the core's custody to the projection of `state`, before its ledger write (#338 D4).
 
     Every core call reads the clock `now_ms`. The read phase takes no lock and plans every
-    attempt (`custody_projection mismatch` is a `StoreRefused`); with nothing to do it returns
+    attempt (`custody projection mismatch` is a `StoreRefused`); with nothing to do it returns
     `[]` and creates no directory, lock file or store. Otherwise, under the store lock, a
     live holder of a new attempt's worktree is `FencingRefused("custody_unavailable")` before
     anything is created, then the plans are applied in the order read. `bound_launches` is
@@ -806,7 +813,9 @@ def migration_report(superpowers: Path, *, apply: bool, upgrade: Callable[..., d
     A read-only dry run comes first and completes no seal. With `apply`, each `migrate` ledger
     is bound through the caller's locked no-op write `bind(handle)` on bytes re-read under that
     ledger's lock, so a refusal under the lock (`LedgerRefused`) replaces the advisory dry-run
-    verdict, and the rows are then recomputed. A `current` ledger whose document has a seal
+    verdict, and the rows are then recomputed. Any other `StoreRefused` of a ledger (a fencing
+    refusal, a projection mismatch) is likewise its `invalid_state` row, and later ledgers are
+    still bound. A `current` ledger whose document has a seal
     pending (`pending_seals`, #338 D24) gets the same `bind(handle)`, which completes the seal
     without rewriting the ledger; its verdict stays `current`, and one with nothing pending is
     not opened, locked or written. Refusals are reported data; a missing `workflows` directory
@@ -819,13 +828,17 @@ def migration_report(superpowers: Path, *, apply: bool, upgrade: Callable[..., d
         bound = []
         for ledger, row in rows.items():
             binding = row["verdict"] == "migrate"
-            if not binding and not (row["verdict"] == "current"
-                                    and _seals_pending(superpowers, ledger)):
+            if not binding and row["verdict"] != "current":
                 continue
             try:
+                if not binding and not _seals_pending(superpowers, ledger):
+                    continue
                 bind(ledger)
-            except LedgerRefused as error:
-                rows[ledger] = {**row, "verdict": "refused", "reason": error.reason}
+            except StoreFault:
+                raise
+            except StoreRefused as error:
+                reason = error.reason if isinstance(error, LedgerRefused) else "invalid_state"
+                rows[ledger] = {**row, "verdict": "refused", "reason": reason}
             else:
                 if binding:
                     bound.append(ledger)
