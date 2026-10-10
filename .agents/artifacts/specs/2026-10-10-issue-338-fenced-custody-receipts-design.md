@@ -100,15 +100,16 @@ Three things become fencing events:
   recorded under the old fence and keeps `event` evidence.
 - **Clock.** Every core call a write makes reads one clock: the write's ledger time in
   milliseconds (the supplied `--now`, else the ledger clock read under the ledger lock).
-- **Two core additions, nothing else** (per D12):
-  - `TransactionStore.check_custody(custody)`: the fenced check alone, under the transaction lock at
-    one clock reading. It writes nothing and raises what a fenced write would.
-  - `TransactionStore.renew(custody, *, ttl_ms=None)`: without `ttl_ms` it is unchanged. With a
-    positive integer it sets every record's TTL to `ttl_ms` and its expiry to `now + ttl_ms`,
-    whatever the margin, keeping epoch and instance and adding one term and one renewal. A lapsed
-    span is `StaleCustody` with nothing written.
-
-  No attempt word enters a `transaction_*` module, so the neutrality check keeps passing.
+- **One core addition, nothing else** (per D12):
+  `TransactionStore.renew(custody, *, ttl_ms=None)`. Without `ttl_ms` it is unchanged. With a
+  positive integer it sets every record's TTL to `ttl_ms` and its expiry to `now + ttl_ms`,
+  whatever the margin, keeping epoch and instance and adding one term and one renewal. A lapsed
+  span is `StaleCustody` with nothing written. No attempt word enters a `transaction_*` module, so
+  the neutrality check keeps passing.
+- **A lapsed span is never renewed or released** (per D16). `declare-lane` may re-base a launch
+  whose old window has already passed, as the `light_deadline` escalation does. That is a
+  reacquisition by the same launch: the lapse is recorded and a new span opens with the same
+  `executor_id` at the next epoch. A launch's span is therefore its latest span.
 
 ### Ledger projection and write order
 
@@ -124,8 +125,8 @@ At schema 9 these hold for each issue's latest implementation attempt after ever
 | `handed_off` | `created` | none; the last span closed `released` |
 | `suspended` | `attention_required` | none |
 | `stopped`, source `stalled` | `attention_required` | none; not sealed |
-| `stopped` or `failed`, source `owner` or `refused` | `abandoned`, sealed | none |
-| `merged`, any source | not terminal | none; not sealed |
+| `stopped` or `failed`, source `owner` or `refused`, no merge recorded | `abandoned`, sealed | none |
+| `merged`, any source, or any verdict over a recorded merge | not terminal | none; not sealed |
 
 An attempt that was already terminal when its ledger reached schema 9 has no custody transaction and
 keeps today's behaviour everywhere (per D11).
@@ -146,10 +147,10 @@ custody, so `control`, `direct-owner`, the reaper, both `finish` transports, `ch
 | expired `active` → `suspended` (`unknown`) | `reap` with reason `expiry` |
 | expired `handed_off` → `suspended` (`unknown`) | `advance` to `attention_required` with reason `suspended:unknown` |
 | → `stopped`, source `stalled` | `reap` with reason `stalled` when the span lapsed, else `advance` to `attention_required` with reason `stalled` and `release` |
-| owner verdict (source `owner`) | `record_owner_result` unless that span already holds a result with the same digest; `merged`: `release` a live span; otherwise seal |
+| owner verdict (source `owner`) | `record_owner_result` unless that span already holds a result with the same digest; with a merge recorded: `release` a live span; otherwise seal |
 | `merged`, source `superseded` | `release` a live span |
 | source `refused` | seal, when not already sealed |
-| `deadline_at` moved on the current launch | `renew` with the new window |
+| `deadline_at` moved on the current launch | `renew` with the new window; `acquire` again when the span has lapsed |
 
 Order and failure:
 
@@ -157,6 +158,10 @@ Order and failure:
   A core refusal aborts the write with the ledger untouched. `LeaseUnavailable` from `acquire`,
   another custody transaction holding the worktree live, is the fencing refusal
   `custody_unavailable`; no launch steals a live lease.
+- **A lapsed span is closed by `reap`.** Wherever a row above would release, park or seal over a
+  span that has lapsed and that nobody reaped, the settle step first calls `reap`, with the row's
+  parking reason, or `expiry` when the row has none. A late owner result is recorded after that
+  reap, so it supersedes the stop the reap wrote (per D16).
 - **The seal goes last.** `advance` to `abandoned` runs after the ledger file is replaced, so a
   crash leaves a ledger verdict whose transaction is not yet sealed, never a sealed transaction the
   ledger contradicts. The settle step of the run's next write, or `migrate --apply`, completes it.
@@ -204,8 +209,9 @@ Owner transports are `progress`, `suspend`, both `finish` transports, `checkpoin
   `--action-id <action_id>`.
 - **The fence.** Under the ledger lock, before the mutation: when the attempt is `active` and the
   caller's launch is not the attempt's last launch, the transport is refused as
-  `superseded_launch`. When the caller's launch is the last launch and the attempt is `active`,
-  `check_custody` must pass. Every refusal the engine already makes keeps its message, including
+  `superseded_launch`. The inner check is the settle step: it compares the attempt with its custody
+  transaction on every commit and the core fences each operation it applies. Every refusal the
+  engine already makes keeps its message, including
   the two the from-issue skill matches (`progress requires an active attempt`,
   `cannot record progress at or after attempt deadline`).
 - **Fencing refusals** are one closed set, printed as
@@ -223,17 +229,18 @@ Owner transports are `progress`, `suspend`, both `finish` transports, `checkpoin
 Before an owner transport takes a lock or creates anything, it reads the process's own working
 directory, resolved to a physical path. For that directory and each ancestor, nearest first, it reads
 the lease record of `attempt-worktree:<path>` with the core's lock-free `inspect_lease`. The first
-path that has a record is the worktree the session stands in. If that path is not the `worktree` of
-the custody transaction the transport addresses, the transport is refused as `custody_misbound`
-(per D7).
+path that has a record is the worktree the session stands in. The transport is refused as
+`custody_misbound` unless that path is the recorded worktree, resolved the same way, of the attempt
+or remainder the transport addresses, which is read from the ledger without a lock (per D7).
 
 - The directory is observed by the helper. No argument or environment variable supplies it.
 - A session standing in no attempt worktree (the main checkout, a scratch directory, a Phase-0
   owner before its worktree exists) is admitted: it is bound to nothing.
 - The check reads only the core's store. It runs no child process, and when the store does not
   exist yet it finds no record.
-- A record counts whether or not its holder is live: the question is whose worktree this is, not
-  who holds it now.
+- A record counts whether or not its holder is live, so a finished attempt's worktree still counts:
+  the question is whose worktree this is, not who holds it now. The refusal names both paths; the
+  remedy is to run from the addressed worktree or from outside every attempt worktree.
 
 ### Late-result intake and terminal truth
 
@@ -247,18 +254,21 @@ store.
   is recorded yet and one of these holds: the span is live; the span has lapsed and nobody reaped it
   (the engine's existing "finish after the deadline records the report"); or the reaper closed that
   span with a synthesized stop, whether the ledger now shows the expiry suspension or a `stalled`
-  stop. The last case is new for a suspension and for the version-2 summary: workflow-state hands
-  the delivery runtime the record as it stood before the reaper's write, so the summary is judged
-  exactly as an on-time one, and a refusal still writes nothing. The ledger then shows the owner's
-  result with source `owner`, as the legacy replacement of a synthetic stop does today.
+  stop. The last case is new for a suspension and for the version-2 summary. A summary is adopted
+  this way only when it carries a `historical_owner_result`; workflow-state then presents the
+  record to the delivery runtime as `active` again, so the summary is judged exactly as an on-time
+  one, and a refusal still writes nothing. The ledger then shows the owner's result with source
+  `owner`, as the legacy replacement of a synthetic stop does today.
 - **Refusal with retention.** A `finish` the fence or the engine refuses for custody, whose launch
   the core issued a span for, is recorded in the intake (`custody: stale`) before the refusal is
   printed. The ledger's bytes do not change. A checkpoint carries no result and is only refused.
   A result that arrives after the seal is refused and not retained; receipt supplements are
   [issue 339][i339]'s.
 - **What seals** (per D5). A synthesized stop never seals: it parks. A verdict that is not `merged`
-  (an owner's `stopped` or `failed`, a lifecycle `refused`) seals the transaction `abandoned`: the
-  custody ended and no delivery effect happened under it. The core writes the
+  (an owner's `stopped` or `failed`, a lifecycle `refused`) seals the transaction `abandoned` when
+  the ledger records no merge for the issue: the result's `merge_sha` is null and the `pr_merged`
+  postcondition is not `observed`. The custody ended and no delivery effect happened under it. A
+  failed verdict over a recorded merge is treated as `merged` is below. The core writes the
   `transaction-terminal-receipt/v1`, reads it back, and only then closes. Its `stops` lists every
   synthesized stop with `superseded_by`, and its `owner_results` lists every owner result with
   `supersedes`, its custody flag and a digest of the report.
@@ -313,11 +323,11 @@ Three seams, all already in `just agent-workflow-tests`. No other seam may be in
 2. **`agent_tools.attempt_custody`'s pure functions**, imported normally by a new
    `tests/test_attempt_custody.py`, as `tests/test_attempt_identity.py` does for package 1.
 3. **The core store with an injected clock**, in the existing `tests/test_transaction_custody.py`,
-   for `check_custody` and `renew(ttl_ms=…)`.
+   for `renew(ttl_ms=…)`.
 
 | Criterion | Deterministic check (seam) |
 |---|---|
-| AC1 state in the core, epoch-fenced; lapse advances, renewal does not | A spawn creates the custody transaction: `lookup` of its creation key answers, its custody names action id `…:1:1`, and the worktree key's lease is at epoch 1 and expires at `deadline_at`. `declare-lane` leaves epoch and instance, makes the term 2 and moves the expiry to the new `deadline_at`. A control sweep after the deadline appends `lease_lapse_detected` and `stop_synthesized`; the resume appends `lease_reacquired` with reason `expired` at epoch 2. A `snapshot` evidence recorded under launch 1 through the store reads back inadmissible, `fence_changed`, after the resume. Core: `renew(ttl_ms=…)` keeps the epoch and refuses a lapsed span (1, 3) |
+| AC1 state in the core, epoch-fenced; lapse advances, renewal does not | A spawn creates the custody transaction: `lookup` of its creation key answers, its custody names action id `…:1:1`, and the worktree key's lease is at epoch 1 and expires at `deadline_at`. `declare-lane` leaves epoch and instance, makes the term 2 and moves the expiry to the new `deadline_at`; declared after the old window passed, it opens a second span for the same action id at the next epoch. A control sweep after the deadline appends `lease_lapse_detected` and `stop_synthesized`; the resume appends `lease_reacquired` with reason `expired` at epoch 2. A `snapshot` evidence recorded under launch 1 through the store reads back inadmissible, `fence_changed`, after the resume. Core: `renew(ttl_ms=…)` keeps the epoch and refuses a lapsed span (1, 3) |
 | AC2 late owner result supersedes a synthesized stop; receipt holds both | Expire an owner, let control reap, then send that launch's `finish` with a `stopped` result, once by the legacy transport and once as a version-2 summary. The command succeeds, the ledger shows the owner's result with source `owner`, and the receipt read back by its digest has outcome `abandoned`, one stop with reason `expiry` whose `superseded_by` is the owner result's seq, and one owner result with `custody: stale` whose `supersedes` is the stop's seq. The same with a `merged` result: both events are in the loaded history, linked the same way, and the transaction is not terminal (1) |
 | AC3 misbound session refused before any write | Two issues are active in one run and both worktrees exist. Each owner transport, table-driven, is sent for issue A's launch with the process standing inside issue B's worktree: exit 2, `fencing violation: custody_misbound`, and the tree snapshot is unchanged. The same transport from the test root is admitted (1) |
 | AC4 fixtures: late owner, misbinding, separate postconditions | The AC2 and AC3 fixtures, plus a contracted issue whose owner's `merged` summary arrives after a reap: the custody transaction holds the owner result and no receipt, the ledger's `pr_merged` postcondition is observed while `tracker_closed` is pending, and a later sweep that observes the tracker closed changes that one postcondition and no core file (1) |
@@ -355,14 +365,15 @@ questions are answered by D1 (which object carries the lease), D5 (supersede and
 | D2 | The lease's validity is the attempt's budget window; nothing an owner writes renews it; `declare-lane` is the one in-place renewal. | Issue 133: expiry is one fixed instant; the core's `reap` records a synthesized stop only for a lapsed span, so reaper and lease must agree on that instant; issue 280 re-bases a live launch's deadline. | A shorter lease renewed by owner writes: it either lapses before the deadline (a reap issue 133 forbids, or one launch split over several epochs) or outlives it (the reaper could then record no stop). The record's separate effect lease belongs with core-invoked effects, which this package has none of. |
 | D3 | A launch is a custody span whose executor is the action id; a dead-owner takeover releases the old span in the write that acquires the new one. | P1 D5 left launch references to alias core launch identities here; every `acquire` already advances the epoch; `owner_unavailable` is the host's observation that the holder is gone, and the engine takes over in the same sweep today. | A separate launch id table (a second identity for one launch); waiting out the dead owner's lease (changes the shipped same-sweep takeover the regression floor covers). |
 | D4 | The ledger's attempt fields stay as a projection written by one settle step inside `commit_state`: core first, seal last, every operation idempotent, schema 9 as the marker. | Record: adapters "retain no independently writable lifecycle ledger" and a mirrored pair is rejected, so the core must be able to refuse a write; `commit_state` is already the one write boundary; issue 339 owns control reading core state; the-bar defense in depth. | Rewriting each command to call the core (touches every lane and the delivery runtime, far over the review cap); ledger first with the core following (the core could never refuse, which is the mirror the record rejects). |
-| D5 | A non-`merged` verdict seals `abandoned`; a synthesized stop parks; a `merged` attempt records its result and stays unsealed. | Record: synthetic stops are provisional and "park unknown reality"; `abandoned` needs absence of declared effects, and review staging is not delivery (record D13); success needs the plan's proof; the-bar truthful terminal states. | Sealing every closed attempt `abandoned` (labels delivered work abandoned); sealing `merged` as `succeeded` over an empty plan (success with no proof); a proof plan over the four postconditions now (ports issue 151's objects, which is issue 339's, and legacy contractless issues could never satisfy it). |
+| D5 | A non-`merged` verdict with no merge recorded seals `abandoned`; a synthesized stop parks; a `merged` attempt, or a failed one over a recorded merge (grill: a failed summary after selection mints a remainder), records its result and stays unsealed. | Record: synthetic stops are provisional and "park unknown reality"; `abandoned` needs absence of declared effects, and review staging is not delivery (record D13); success needs the plan's proof; the-bar truthful terminal states. | Sealing every closed attempt `abandoned` (labels delivered work abandoned); sealing `merged` as `succeeded` over an empty plan (success with no proof); a proof plan over the four postconditions now (ports issue 151's objects, which is issue 339's, and legacy contractless issues could never satisfy it). |
 | D6 | The intake is `record_owner_result` on the custody transaction, holding the report as submitted. A `finish` from the last launch is adopted, also over a reaper suspension and for a version-2 summary; one from an earlier launch is refused and retained. | Issue 338 "never refusing the result into a false `stopped`"; record: authentic late evidence stays tied to its launch and never restores authority; the engine already adopts a late report over a synthetic stop; the core intake needs an issued span. | A separate intake file (a second evidence store); refusing every late report (the defect being fixed); adopting a report from a superseded launch (overrides the successor's custody). |
-| D7 | Misbinding is found from the process's own physical working directory: the nearest ancestor with a worktree lease record must be the addressed attempt's worktree. | Record: "a caller-supplied current directory … is not authority"; `inspect_lease` is lock-free and writes nothing; lease records keep their key forever; AC3 "before any write". | A `--cwd` argument (caller-supplied); `git rev-parse` in the directory (a child process, and it names a checkout, not an attempt); requiring every transport to run inside its own worktree (refuses controllers and Phase-0 owners, whose worktree does not exist yet). |
+| D7 | Misbinding is found from the process's own physical working directory: the nearest ancestor with a worktree lease record must be the addressed attempt's or remainder's recorded worktree. A finished attempt's worktree still counts. | Record: "a caller-supplied current directory … is not authority"; `inspect_lease` is lock-free and writes nothing; lease records keep their key forever; AC3 "before any write". | A `--cwd` argument (caller-supplied); `git rev-parse` in the directory (a child process, and it names a checkout, not an attempt); requiring every transport to run inside its own worktree (refuses controllers and Phase-0 owners, whose worktree does not exist yet). |
 | D8 | Suspension is a parking with a closed reason; the vocabulary and stall arithmetic move to the package as their one home; the counters and the progress marker stay ledger fields. | Record's core/adapter table: suspension adds no terminal, phases and progress translation are adapter facts; agent-helpers rule 1; the neutrality check forbids attempt words in `transaction_*`. | Blocked-on names inside the core modules (fails neutrality); moving the counters into core events now (control reads them from the ledger until issue 339, so it would be a second home). |
 | D9 | `progress`, `suspend` and legacy `finish` take an optional `--action-id`; without it they speak for the attempt's `bound_launch`, and an attempt created at schema 9 has none, so they are refused. Skill argv gains the flag inside the current instruction ceilings. | Record D16: an attempt-keyed transport binds to the launch current at migration, and later owners name their launch on every write; owners already hold their action id; only the user applies the budget-raise label. | Binding an unnamed transport to launch 1 (a resumed owner is refused anyway, and the rule says nothing true about who is calling); leaving new attempts attempt-keyed (the superseded-owner write the record rejects). |
 | D10 | Remainder custody, delivery objects and the delivery runtime are untouched: late version-2 summaries are adopted by handing the runtime the pre-reap record. | Issue 339 ports remainders and delivery objects; issue 338 scope excludes delivery reconciliation changes; `workflow_delivery*.py` are risk paths. | Editing the runtime's custody check (changes delivery admission for remainders too); giving remainders custody transactions now (issue 339's port, done twice). |
 | D11 | Migration binds only attempts that are not terminal, issues a span only to one that is active and unexpired, and replays no history. An attempt terminal before migration keeps today's behaviour. | Record: migration preserves history "without treating synthetic stops as core failed receipts" and applies the dry run's transform on write; the core records what it witnessed, and its event times are the write's. | Replaying recorded launches and stops into the core (events dated at migration that the core never witnessed); binding terminal history (transactions that can never change). |
-| D12 | The core gains exactly `check_custody` and `renew(…, ttl_ms=…)`. | The fenced check is private and the adapter must not re-implement it (the-bar DRY); the shipped renewal extends only by the recorded TTL inside its margin, so it cannot follow a declared re-base; P1 added `lookup` the same way. | Reading lease files from the adapter (a second judge of custody); releasing and reacquiring on `declare-lane` (advances the epoch, so no renewal would exist to satisfy AC1). |
+| D12 | The core gains exactly `renew(…, ttl_ms=…)`. | The shipped renewal extends only by the recorded TTL inside its margin, so it cannot follow a declared re-base; P1 added `lookup` the same way; every other operation the settle step needs is already public and fenced by the core. | Releasing and reacquiring on every `declare-lane` (advances the epoch, so no renewal would exist to satisfy AC1); a public fenced-check method (grill: under the ledger lock the settle step's comparison already is that check, and a lapse check on `mark-progress` or `checkpoint-delivery` would refuse writes the engine admits today). |
 | D13 | Fencing refusals are one closed set under one prefix, and every refusal the engine makes today keeps its text. | Issue 338: classified as fencing events, "never as write conflicts or silent execution"; the from-issue skill matches two existing `progress` messages; the-bar fail loud. | Rewording existing refusals (breaks the skill's matches and the floor); one generic refusal (the classification is the criterion). |
 | D14 | The old-helper check runs the real base generation, extracted from the pinned base commit, and schema 9 changes no field. | P1 D13 and D10: exclusion by schema bump, tested with the real older helper; the-bar tests that can fail. | A field-level marker (churns every hand-built fixture for no reader); asserting only the current helper's refusal of schema 10. |
 | D15 | Package 1's blocking attempt-store lock wraps every core write workflow-state makes. | The core's locks are non-blocking and `leases.lock` is shared by every run under one root; P1 D9 solved the same contention for `create`. | Retrying on `TransactionBusy` (a sleep-shaped race fix) or a blocking core lock (changes the core contract for every consumer). |
+| D16 | A span that lapsed is closed only by `reap` and reopened only by `acquire`: the settle step reaps before it parks, seals or records a late result, and a `declare-lane` after the old window passed reacquires for the same launch at the next epoch. | Grill against the code: the core refuses a release, a renewal or a custody-bearing `advance` on a lapsed span; the engine admits `suspend`, `finish` and the `light_deadline` escalation after the deadline; issue 92: same-owner reacquisition after expiry advances the epoch. | Refusing those writes after the deadline (changes shipped behaviour the floor covers); reviving the lapsed lease in place (a lapse that leaves the epoch unchanged). |
