@@ -14,11 +14,19 @@ whole, whose heredocs are `<<` with a quoted delimiter, and which carries no
 chain, redirect or command substitution; the helpers are read from that allow
 list, never restated.
 
-`refused_examples(document_text)` is the one boundary: every sweep and every
-fixture below calls it on a document's text and nothing else produces findings.
+`refused_examples(document_text)` is the boundary for refused forms: every form
+sweep and form fixture below calls it on a document's text.
+`guarded_command_findings(document_text, shapes, document_name)` is the boundary
+for the commands the lifecycle guard adjudicates in ship-issue (#351): a living
+example that holds one of the fixture's verbs as consecutive unquoted words,
+wherever they stand in it, must be as a whole a form listed in
+tests/fixtures/guarded-command-shapes.json, and its block must carry the
+fixture's anchor. A verb inside one quoted argument is a mention, as it is to
+the guard. Nothing else produces findings.
 """
 from bisect import bisect_right
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import re
 import sys
@@ -94,7 +102,27 @@ def whole_allowed_helpers(nix_text):
     return frozenset(word.rsplit("/", 1)[-1] for word in words)
 
 
+EVALUATORS_ASSIGNMENT = re.compile(
+    r'^SHELL_EVALUATORS = frozenset\(\{([^{}\n]*)\}\)\s*$', re.M
+)
+
+
+def guard_evaluators(guard_text):
+    """The names in the guard's single SHELL_EVALUATORS assignment."""
+    matches = EVALUATORS_ASSIGNMENT.findall(guard_text)
+    if len(matches) != 1:
+        raise ValueError(
+            f"expected exactly one SHELL_EVALUATORS assignment in "
+            f"{GUARD_SOURCE}, found {len(matches)}"
+        )
+    names = frozenset(re.findall(r'"([^"]+)"', matches[0]))
+    if not names:
+        raise ValueError(f"SHELL_EVALUATORS in {GUARD_SOURCE} names no evaluator")
+    return names
+
+
 SANCTIONED_PREFIX = guard_prefix(GUARD_SOURCE.read_text(encoding="utf-8"))
+SHELL_EVALUATORS = guard_evaluators(GUARD_SOURCE.read_text(encoding="utf-8"))
 LIFECYCLE_HELPERS = whole_allowed_helpers(ALLOW_LIST_SOURCE.read_text(encoding="utf-8"))
 
 
@@ -431,6 +459,7 @@ class _OpenFence(NamedTuple):
     opener_text: str
     indent: int  # leading spaces on the opener line
     body: list  # (line number, line de-indented by up to `indent` spaces)
+    lead: str  # the prose block that introduces the fence, "" when none does
 
 
 def _leading_spaces(line):
@@ -459,15 +488,21 @@ def _spans(block):
 def _examples(document_text):
     """Every example with its sort position, plus unclosed-fence findings.
 
-    Yields ((line, column), kind, payload): kind "call" carries the _Example and
-    whether a shell fence holds it, kind "unclosed" carries a ready Finding.
+    Yields ((line, column), kind, payload): kind "call" carries the _Example,
+    whether a shell fence holds it, and the text of its block (a span's own prose
+    block; for a fence call, the last prose block since the previous fence closed),
+    kind "unclosed" carries a ready Finding.
     """
     fences = []  # open _OpenFence entries, innermost last
     block = []  # the prose block being read: (line number, indent, stripped line)
+    lead = ""  # the last prose block since a fence closed
 
     def flushed():
+        nonlocal lead
+        if block:
+            lead = "\n".join(text for _, _, text in block)
         for position, call in _spans(block):
-            yield position, "call", (call, False)
+            yield position, "call", (call, False, lead)
         block.clear()
 
     for number, line in enumerate(document_text.splitlines(), 1):
@@ -480,10 +515,13 @@ def _examples(document_text):
                 if closed.info in SHELL_FENCE_INFO or closed.info in AMBIGUOUS_FENCE_INFO:
                     shell = closed.info in SHELL_FENCE_INFO
                     for call in _calls(closed.body, ambiguous=not shell):
-                        yield (call[0][0], 0), "call", (_Example.joined(call, "\n"), shell)
+                        yield ((call[0][0], 0), "call",
+                               (_Example.joined(call, "\n"), shell, closed.lead))
+                if not fences:
+                    lead = ""
             else:
                 word = info.split()[0] if info else ""
-                fences.append(_OpenFence(run, word, number, line, _leading_spaces(line), []))
+                fences.append(_OpenFence(run, word, number, line, _leading_spaces(line), [], lead))
             continue
         if fences:
             innermost = fences[-1]
@@ -525,6 +563,143 @@ def shell_fence_heads(document_text):
             if head is not None:
                 heads.add(head)
     return frozenset(heads)
+
+
+GUARDED_SHAPES = json.loads(
+    (REPO_ROOT / "tests/fixtures/guarded-command-shapes.json").read_text(encoding="utf-8"))
+SHIP_ISSUE_DIRECTORY = "ship-issue"
+
+
+class GuardedFinding(NamedTuple):
+    line: int  # 0 for a finding about the whole document
+    rule: str  # "R1", "R2" or "R3"
+    example: str
+
+
+def _squeezed(text):
+    return " ".join(text.split())
+
+
+# Characters that end a shell word wherever they stand unquoted.
+_WORD_BREAKS = frozenset(";&|(){}<>`")
+
+
+def _shell_words(text):
+    """`text` as shell words with their quotes removed, as the lifecycle guard
+    tokenises a segment: a quoted run stays inside its word, a backslash-newline
+    joins two lines, and None stands for each word-breaking character. None for
+    the whole text when a quote never closes."""
+    words, word, quote, index = [], None, None, 0
+
+    def ended():
+        nonlocal word
+        if word is not None:
+            words.append(word)
+            word = None
+
+    while index < len(text):
+        char = text[index]
+        index += 1
+        if quote == "'":
+            if char == "'":
+                quote = None
+            else:
+                word += char
+        elif char == "\\" and index < len(text):
+            if text[index] != "\n":
+                word = (word or "") + text[index]
+            index += 1
+        elif quote == '"':
+            if char == '"':
+                quote = None
+            else:
+                word += char
+        elif char in "'\"":
+            quote, word = char, word or ""
+        elif char.isspace():
+            ended()
+        elif char in _WORD_BREAKS:
+            ended()
+            words.append(None)
+        else:
+            word = (word or "") + char
+    if quote is not None:
+        return None
+    ended()
+    return words
+
+
+def _runs_guarded_verb(text, verbs):
+    """Whether one of `verbs` stands in `text` as consecutive unquoted words, or
+    anywhere at all once a shell evaluator is among its words."""
+    words = _shell_words(text)
+    if words is None or any(
+            word is not None and word.rsplit("/", 1)[-1] in SHELL_EVALUATORS
+            for word in words):
+        # No quote can be trusted, or a quoted argument is shell source the guard
+        # refuses unread (`bash -c '<verb> …'`): fail closed on the raw text, as
+        # the guard does.
+        return any(" ".join(verb) in _squeezed(text) for verb in verbs)
+    return any(words[start:start + len(verb)] == verb
+               for verb in verbs for start in range(len(words)))
+
+
+def guarded_command_findings(document_text, shapes, document_name):
+    """Every R1, R2 and R3 finding of one ship-issue document (#351).
+
+    R1: a living example that holds a guarded verb as consecutive unquoted words,
+    at its start or after any other words, or anywhere behind a shell evaluator,
+    is as a whole one of `shapes`' skill-form templates, spelled space for space
+    after the sanctioned prefix, and carries that prefix only when the form's
+    `prefixed` and `bare` exits agree. Only living examples
+    are read: every call of a shell fence is one, and a line of an unlabeled or
+    `text` fence is one only when its command head is in the vocabulary, so a
+    diagram line there is not. R2: its block carries the anchor. R3: every form
+    listing `document_name` as a site appears there meeting R1 and R2, and
+    SKILL.md holds the anchor's heading exactly once.
+    """
+    anchor = shapes["anchor"]
+    verbs = [verb.split() for verb in shapes["verbs"]]
+    forms = {form["template"]: form for form in shapes["skill_forms"]}
+    findings, satisfied = [], set()
+    for position, kind, payload in sorted(_examples(document_text), key=lambda e: e[0]):
+        if kind != "call":
+            continue
+        if not _runs_guarded_verb(payload[0].text, verbs):
+            continue
+        spelled = _squeezed(payload[0].text)
+        prefixed = spelled.startswith(SANCTIONED_PREFIX)
+        command = spelled[len(SANCTIONED_PREFIX):] if prefixed else spelled
+        line = position[0]
+        form = forms.get(command)
+        # A listed spelling is exact: the guard reads the merge's single spaces
+        # literally, so a doubled space or a tab is not the form. The prefix is a
+        # listed spelling only where it leaves the guard's verdict alone.
+        listed = payload[0].text.strip() == spelled and form is not None and (
+            not prefixed or form["prefixed"]["exit"] == form["bare"]["exit"])
+        cited = anchor in _squeezed(payload[2])
+        if not listed:
+            findings.append(GuardedFinding(line, "R1", spelled))
+        if not cited:
+            findings.append(GuardedFinding(line, "R2", spelled))
+        if listed and cited:
+            satisfied.add(command)
+    for form in shapes["skill_forms"]:
+        if document_name in form["sites"] and form["template"] not in satisfied:
+            findings.append(GuardedFinding(0, "R3", form["template"]))
+    if document_name == "SKILL.md":
+        heading = anchor.strip("`")
+        if document_text.splitlines().count(heading) != 1:
+            findings.append(GuardedFinding(0, "R3", heading))
+    return tuple(findings)
+
+
+def ship_issue_documents():
+    """(document name, path) of every swept document directly in ship-issue/."""
+    return tuple(
+        (Path(relative).name, SOURCE_TREES[tree] / relative)
+        for tree, relative in swept_documents()
+        if tree == "shared" and Path(relative).parts[:-1] == (SHIP_ISSUE_DIRECTORY,))
 
 
 def swept_documents():
@@ -958,6 +1133,195 @@ class InstalledTreeSweepTest(unittest.TestCase):
                     self.assertTrue(path.is_file(), f"the {view} view lacks {path}")
                     findings = refused_examples(path.read_text(encoding="utf-8"))
                     self.assertEqual(findings, (), findings_report(str(path), findings))
+
+
+GUARDED_ANCHOR = GUARDED_SHAPES["anchor"]
+GUARDED_FORMS = {form["id"]: form["template"] for form in GUARDED_SHAPES["skill_forms"]}
+GUARDED_POINTER = "see ship-issue/SKILL.md, ## gh hygiene"
+
+
+def guarded_findings_report(document, findings):
+    lines = [f"{document}:{f.line}: {f.rule}: {f.example}" for f in findings]
+    return "\n".join(lines + [GUARDED_POINTER])
+
+
+def _conforming(name):
+    """The smallest document called `name` that meets R1, R2 and R3."""
+    blocks = [GUARDED_ANCHOR.strip("`")] if name == "SKILL.md" else []
+    blocks += [f"Run `{form['template']}` ({GUARDED_ANCHOR})."
+               for form in GUARDED_SHAPES["skill_forms"] if name in form["sites"]]
+    return "\n\n".join(blocks) + "\n"
+
+
+def _guarded(document, name="OTHER.md"):
+    return [tuple(f) for f in guarded_command_findings(document, GUARDED_SHAPES, name)]
+
+
+class GuardedCommandShapeTest(unittest.TestCase):
+    """#351: every guarded command in ship-issue/ is a listed form that cites the rule."""
+
+    def test_the_fixture_is_well_formed(self):
+        verbs = [verb.split() for verb in GUARDED_SHAPES["verbs"]]
+        documents = {name for name, _ in ship_issue_documents()}
+        self.assertEqual(len(GUARDED_FORMS), len(GUARDED_SHAPES["skill_forms"]))
+        sited = set()
+        for form in GUARDED_SHAPES["skill_forms"]:
+            with self.subTest(form=form["id"]):
+                words = form["template"].split()
+                self.assertTrue(any(words[:len(verb)] == verb for verb in verbs))
+                self.assertLessEqual(set(PLACEHOLDER.findall(form["template"])),
+                                     set(GUARDED_SHAPES["values"]))
+                self.assertLessEqual(set(form["sites"]), documents)
+                sited.update(form["sites"])
+        self.assertIn("SKILL.md", sited)
+        for shape in GUARDED_SHAPES["refused_shapes"]:
+            with self.subTest(shape=shape["id"]):
+                self.assertIn(shape["form"], GUARDED_FORMS)
+                self.assertTrue(shape["before"] or shape["after"])
+
+    def test_conforming_documents_yield_nothing(self):
+        for name in ("SKILL.md", "REVIEW.md", "POST-SELECTION-SYNC.md", "HUMAN-GATE.md",
+                     "OTHER.md"):
+            with self.subTest(document=name):
+                self.assertEqual(_guarded(_conforming(name), name), [])
+
+    def test_each_failure_class_is_found(self):
+        first, later = GUARDED_FORMS["push.first"], GUARDED_FORMS["push.later"]
+        merge = GUARDED_FORMS["merge.subject"]
+        local = GUARDED_FORMS["branch.local"]
+        cases = {
+            "the prefix on the local branch delete":
+                ("OTHER.md", f"Run `{SANCTIONED_PREFIX}{local}` ({GUARDED_ANCHOR}).",
+                 [(1, "R1", f"{SANCTIONED_PREFIX}{local}")]),
+            "a prefixed local branch delete as a site's only one":
+                ("HUMAN-GATE.md",
+                 _conforming("HUMAN-GATE.md").replace(
+                     f"`{local}`", f"`{SANCTIONED_PREFIX}{local}`"),
+                 [(1, "R1", f"{SANCTIONED_PREFIX}{local}"), (0, "R3", local)]),
+            "a push with no citation in its block":
+                ("OTHER.md", f"Run `{first}`.", [(1, "R2", first)]),
+            "a merge fence with no citation in its lead-in":
+                ("OTHER.md", f"Merge it:\n\n```\n{merge}\n```", [(4, "R2", merge)]),
+            "a remote-less push":
+                ("OTHER.md", f"Run `git push` ({GUARDED_ANCHOR}).", [(1, "R1", "git push")]),
+            "a push carrying a redirection":
+                ("OTHER.md", f"Run `{first} 2>&1` ({GUARDED_ANCHOR}).",
+                 [(1, "R1", f"{first} 2>&1")]),
+            "a site with its form removed":
+                ("REVIEW.md", "Nothing is pushed here.", [(0, "R3", later)]),
+            # ship-issue/REVIEW.md's fix step 4, verbatim at 02d2f378.
+            "REVIEW.md with only the remote-less push":
+                ("REVIEW.md",
+                 "4. Run `check-launch` (SKILL.md's `## Launch guard`); on anything but "
+                 "`current: true`, stop without\n   pushing and take the no-write stop. "
+                 "Then `git push`.",
+                 [(2, "R1", "git push"), (2, "R2", "git push"), (0, "R3", later)]),
+            "a bare verb named in a span":
+                ("OTHER.md", "`gh pr merge` runs local post-merge steps.",
+                 [(1, "R1", "gh pr merge"), (1, "R2", "gh pr merge")]),
+            "a citation in another block":
+                ("OTHER.md", f"See {GUARDED_ANCHOR}.\n\nRun `{later}`.", [(3, "R2", later)]),
+            "a citation in another list item":
+                ("OTHER.md", f"- shape: {GUARDED_ANCHOR};\n- `{later}`.", [(2, "R2", later)]),
+            "a fence introduced only by an earlier fence's lead-in":
+                ("OTHER.md",
+                 f"Then ({GUARDED_ANCHOR}):\n\n```\ngit status\n```\n\n```\n{later}\n```",
+                 [(8, "R2", later)]),
+            "SKILL.md without the anchor's heading":
+                ("SKILL.md", _conforming("SKILL.md").split("\n", 1)[1],
+                 [(0, "R3", "## gh hygiene")]),
+            "SKILL.md with the anchor's heading twice":
+                ("SKILL.md", _conforming("SKILL.md") + "\n## gh hygiene\n",
+                 [(0, "R3", "## gh hygiene")]),
+            "a diagram line in a shell fence":
+                ("OTHER.md", f"```bash\n7. Merge → {merge}\n```",
+                 [(2, "R1", f"7. Merge → {merge}"), (2, "R2", f"7. Merge → {merge}")]),
+            "a verb split by a line continuation":
+                ("OTHER.md",
+                 f"Then ({GUARDED_ANCHOR}):\n\n```bash\n"
+                 + first.replace("git ", "git \\\n  ", 1) + "\n```",
+                 [(4, "R1", first.replace("git ", "git \\ ", 1))]),
+            "a mention behind a quote that never closes":
+                ("OTHER.md", f"Run `echo \"refused {later}` ({GUARDED_ANCHOR}).",
+                 [(1, "R1", f"echo \"refused {later}")]),
+            "a form quoted as a shell evaluator's source":
+                ("OTHER.md", f"Run `bash -c '{first}'` ({GUARDED_ANCHOR}).",
+                 [(1, "R1", f"bash -c '{first}'")]),
+            "a form passed to an evaluator named by path":
+                ("OTHER.md", f"Run `/bin/sh -c \"{later}\"` ({GUARDED_ANCHOR}).",
+                 [(1, "R1", f"/bin/sh -c \"{later}\"")]),
+            "a merge spelled with a doubled space":
+                ("OTHER.md",
+                 f"Run `{merge.replace('gh pr', 'gh  pr', 1)}` ({GUARDED_ANCHOR}).",
+                 [(1, "R1", merge)]),
+            "a push fence spelled with a tab":
+                ("OTHER.md",
+                 f"Then ({GUARDED_ANCHOR}):\n\n```bash\n"
+                 + later.replace("git push", "git\tpush", 1) + "\n```",
+                 [(4, "R1", later)]),
+            "a site whose only form has a doubled space":
+                ("REVIEW.md",
+                 _conforming("REVIEW.md").replace("git push", "git  push", 1),
+                 [(1, "R1", later), (0, "R3", later)]),
+        }
+        for name, (document_name, text, expected) in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(_guarded(text, document_name), expected)
+
+    def test_every_refused_shape_is_an_r1_finding(self):
+        for shape in GUARDED_SHAPES["refused_shapes"]:
+            dressed = f"{shape['before']}{GUARDED_FORMS[shape['form']]}{shape['after']}"
+            sites = {
+                "a span": (1, f"Run `{dressed}` ({GUARDED_ANCHOR})."),
+                "a shell fence": (4, f"Then ({GUARDED_ANCHOR}):\n\n```bash\n{dressed}\n```"),
+            }
+            for site, (line, text) in sites.items():
+                with self.subTest(shape=shape["id"], site=site):
+                    self.assertEqual(_guarded(text), [(line, "R1", dressed)])
+
+    def test_accepted_spellings_yield_nothing(self):
+        later = GUARDED_FORMS["push.later"]
+        merge = GUARDED_FORMS["merge.subject"]
+        cases = {
+            "the sanctioned prefix before a form":
+                f"Run `{SANCTIONED_PREFIX}{later}` ({GUARDED_ANCHOR}).",
+            "a citation wrapped across lines of the block":
+                f"Then `{later}` (`## gh\nhygiene`).",
+            "a fence cited by its lead-in":
+                f"Then ({GUARDED_ANCHOR}):\n\n```\n{merge}\n```",
+            "a list-item fence cited by its item":
+                f"2. Clean up ({GUARDED_ANCHOR}):\n   ```\n   git worktree prune\n"
+                f"   {GUARDED_FORMS['branch.local']}\n   ```",
+            "a quoted mention inside another command": "Run `rg -n 'git branch -d' docs/`.",
+            "a guarded verb in prose": "The merge runs alone; so does git push.",
+            "a diagram line in a bare fence": f"```\n7. Merge → {merge}\n```",
+        }
+        mention = next(shape for shape in GUARDED_SHAPES["refused_shapes"]
+                       if shape["id"] == "mention.unquoted")
+        cases["the unquoted mention, quoted as one argument"] = (
+            f"Run `{mention['before']}\"{GUARDED_FORMS[mention['form']]}\"{mention['after']}`.")
+        for name, text in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(_guarded(text), [])
+
+    def test_a_finding_report_names_document_line_rule_and_example(self):
+        findings = guarded_command_findings("Run `git push`.", GUARDED_SHAPES, "OTHER.md")
+        self.assertEqual(
+            guarded_findings_report("ship-issue/OTHER.md", findings),
+            "ship-issue/OTHER.md:1: R1: git push\nship-issue/OTHER.md:1: R2: git push\n"
+            + GUARDED_POINTER)
+
+
+class ShipIssueGuardedCommandSweepTest(unittest.TestCase):
+    def test_every_guarded_command_is_a_cited_form(self):
+        documents = ship_issue_documents()
+        self.assertIn("SKILL.md", [name for name, _ in documents])
+        for name, path in documents:
+            with self.subTest(document=name):
+                findings = guarded_command_findings(
+                    path.read_text(encoding="utf-8"), GUARDED_SHAPES, name)
+                self.assertEqual(
+                    findings, (), guarded_findings_report(f"ship-issue/{name}", findings))
 
 
 ORCHESTRATE_SKILL = SOURCE_TREES["claude-only"] / "orchestrate-issues/SKILL.md"
