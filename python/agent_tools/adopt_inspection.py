@@ -108,8 +108,16 @@ LIFECYCLE_CLASSES = (
 )
 
 # D35: the public question contract. An id is a literal, never formatted at
-# emission, so a caller can dispatch over the set exhaustively.
-QUESTION_IDS = ("project-id",)
+# emission, so a caller can dispatch over the set exhaustively. A
+# `candidate-class` entry is keyed by its `subject`, the candidate path.
+QUESTION_IDS = ("project-id", "candidate-class")
+
+# The archive bucket for adopted agent records.
+ARCHIVE_ADOPTED_DIR = ".agents/knowledge/archive/adopted"
+
+# The fixed basis of every `candidate-class` question (D8): it never names the
+# candidate, which the entry's `subject` carries.
+CANDIDATE_BASIS = "no classification row settles this agent path"
 
 READY_GATES = (
     "contract-valid-after-amendment",
@@ -189,6 +197,12 @@ CLASSIFICATION_RULES = (
      ".agents/artifacts/specs"),
     (".claude/plans", "prefix", "durable-artifact", "move-canonical",
      ".agents/artifacts/plans"),
+    (".claude/handoffs", "prefix", "durable-artifact", "move-canonical",
+     ".agents/artifacts/handoffs"),
+    (".claude/notes", "prefix", "durable-artifact", "move-canonical",
+     ".agents/artifacts/notes"),
+    (".claude/research", "prefix", "durable-artifact", "move-canonical",
+     ".agents/artifacts/specs"),
     (".out-of-scope", "prefix", "canonical-tracked", "move-canonical",
      ".agents/knowledge/rejections"),
     (".claude/skills.config.json", "exact", "legacy-native-store",
@@ -236,6 +250,8 @@ NOTES = {
                     "cannot proceed until it is classified",
     "escaping-symlink": "resolves outside the target root; contents are never "
                         "read",
+    "answered": "classified by an answered candidate-class question; the "
+                "inspection found no lifecycle class for it",
 }
 
 
@@ -270,10 +286,11 @@ def approval_class_for(kind: str) -> str:
 
 
 def action_relocates(action: str) -> bool:
-    """Whether an action moves a candidate to a new canonical home."""
-    if action == "move-canonical":
+    """Whether an action moves a candidate to a new home: a canonical one, or
+    the adoption archive."""
+    if action in ("move-canonical", "archive-history"):
         return True
-    if action in ("generate-projection", "retain-product", "archive-history",
+    if action in ("generate-projection", "retain-product",
                   "delete-exact-duplicate", "needs-decision"):
         return False
     raise ValueError(f"unknown adoption action: {action!r}")
@@ -326,6 +343,10 @@ def question_impact(question_id: str) -> str:
         return ("adoption cannot name the project it is adopting, so the "
                 "contract, the fleet registry and the adoption evidence "
                 "record would all disagree about its identity")
+    if question_id == "candidate-class":
+        return ("the candidate keeps the needs-decision action, so the "
+                "no-needs-decision and no-open-decisions gates fail and the "
+                "plan stays draft")
     raise ValueError(f"unknown question id: {question_id!r}")
 
 
@@ -335,7 +356,34 @@ def question_recommendation(question_id: str) -> str:
         return ("declare exactly one remote naming the canonical repository, "
                 "or author .agents/project.json with the intended project id "
                 "before planning again")
+    if question_id == "candidate-class":
+        return ("answer it with plan --answer candidate-class <subject> "
+                "<value>, using this entry's subject and value, and apply "
+                "the plan id that run prints; a null value marks a "
+                "secret-shaped path or a symlink out of the repository, with "
+                "no answer: add a central classification row for a "
+                "secret-shaped path, or remove either from the repository in "
+                "its own commit, then plan again")
     raise ValueError(f"unknown question id: {question_id!r}")
+
+
+def candidate_answer(provenance: str, path: str,
+                     contained: bool) -> str | None:
+    """The offered answer for one undecided candidate (D4, D7, D13).
+
+    A tracked candidate is offered the archive unless its name looks secret
+    or it is not `contained` (a symlink resolving outside the repository,
+    whose move `apply` refuses), in which case no answer is offered; a
+    targeted-ignored one is offered retention. Any other provenance is not a
+    candidate source.
+    """
+    if provenance == "tracked":
+        if is_secret_path(path) or not contained:
+            return None
+        return "archive-history"
+    if provenance == "targeted-ignored":
+        return "retain-product"
+    raise ValueError(f"unknown candidate provenance: {provenance!r}")
 
 
 def plan_state_is_terminal(state: str) -> bool:
@@ -499,6 +547,28 @@ def contained_path(root: Path, relative: str) -> Path | None:
     if resolved == anchor or anchor in resolved.parents:
         return resolved
     return None
+
+
+def contained_relative(root: Path, relative: object) -> bool:
+    """Whether `relative` is a repository-relative path inside `root`.
+
+    `apply`'s check on every stored operation path, and `plan`'s on a tracked
+    candidate it would offer to move. Resolved rather than merely inspected,
+    so a component that is a symlink out of the checkout is caught as well as
+    a literal `..` or a leading `/`.
+    `strict=False`: a planned destination does not exist yet.
+    """
+    if not isinstance(relative, str) or not relative:
+        return False
+    candidate = Path(relative)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return False
+    try:
+        anchor = root.resolve(strict=True)
+        resolved = (anchor / candidate).resolve()
+    except (OSError, RuntimeError):
+        return False
+    return resolved != anchor and anchor in resolved.parents
 
 
 def read_bytes_bounded(path: Path) -> bytes | None:
@@ -780,6 +850,8 @@ class Candidates:
         self.moves: list[tuple[str, str]] = []
         self.tracked_paths: set[str] = set()
         self.groups: dict[str, dict] = {}
+        # Tracked undecided candidates that resolve outside the root (D13).
+        self.uncontained: set[str] = set()
 
 
 def classify_inventory(root: Path, inventory: Inventory) -> Candidates:
@@ -796,6 +868,8 @@ def classify_inventory(root: Path, inventory: Inventory) -> Candidates:
                 found.entries.append(evidence_entry(
                     path, "tracked", "unclassified", "needs-decision", None, 1,
                     object_hash(object_id), NOTES["unclassified"]))
+                if not contained_relative(root, path):
+                    found.uncontained.add(path)
             continue
         if is_secret_path(path):
             found.entries.append(evidence_entry(
@@ -870,7 +944,8 @@ def overlap_targets(found: Candidates) -> list[str]:
     """
     targets = {".agents"}
     for group, info in found.groups.items():
-        if info["action"] in ("move-canonical", "generate-projection"):
+        if (action_relocates(info["action"])
+                or info["action"] == "generate-projection"):
             targets.add(group)
         if info["target"]:
             targets.add(info["target"])
