@@ -287,6 +287,8 @@ class NextTest(GateCase):
         self.assertEqual([(worker["worker_id"], worker["release_event"])
                           for worker in self.workers()], [("14:1:1:w1", "stopped")])
 
+    # test_a_failed_write_names_the_worker_it_could_not_release — see the note after this block.
+
     def test_an_invalid_next_invocation_prints_one_stderr_line(self):
         base = ("next", self.plan, "--skill-dir", SKILL)
         cases = {
@@ -312,7 +314,9 @@ In `home/common/agent-skills/tests/test_workflow_skill_contracts.py`, directly a
 - [ ] **Step 3: Run the tests and watch them fail**
 
 Run: `env PYTHONPATH="$PWD/python" python3 -m unittest tests/test_sdd_gate.py -k NextTest`
-Expected: 13 of the 14 tests fail. `next` is not a subcommand yet, so each call exits 2 with `sdd-gate: invalid invocation` and an empty stdout; `test_an_invalid_next_invocation_prints_one_stderr_line` expects exactly that and passes already.
+Also write `NextTest.test_a_failed_write_names_the_worker_it_could_not_release`, placed where the comment in the block above marks it (replace the comment). It repeats the failed-write setup, and first replaces the `workflow-state` PATH shim, through the case's existing `write_executable`, with one that exits 1 for the `release-worker` subcommand and passes every other subcommand to the source command unchanged. It asserts the refusal has step `write-brief` and steps `NEXT_STEPS`, that `detail` contains `14:1:1:w1` and `release-worker`, and that `self.workers()` still lists `14:1:1:w1` with no release event (D15). Write it from the fixture's real shim text; the plan does not dictate its body.
+
+Expected: 14 of the 15 tests fail. `next` is not a subcommand yet, so each call exits 2 with `sdd-gate: invalid invocation` and an empty stdout; `test_an_invalid_next_invocation_prints_one_stderr_line` expects exactly that and passes already.
 
 Run: `env PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_skill_contracts.py -k test_installed_policy_surface_matches_source_contract`
 Expected: FAIL — `'".agents/bin/task-brief"' not found` in the Nix module text.
@@ -337,7 +341,7 @@ Expected: FAIL — `'".agents/bin/task-brief"' not found` in the Nix module text
 
 *Step `register-worker`,* under an identity only. `workflow_state("register-worker", "register-worker", "--repo-root", R, "--run-id", I, "--action-id", A)`; a reply without a string `worker_id` is refused at this step. Set `[LIFECYCLE_WORKER]` to `worker_block(R, I, worker_id)`, `R` and `I` exactly as given on the command line.
 
-*Step `write-brief`.* `write_atomic` the rendered brief to `task-<M>-implementer-dispatch.md` in the workspace. On `OSError`: when this call registered a worker, run `workflow-state release-worker --repo-root R --run-id I --worker-id <worker_id> --event stopped` and ignore its result; then `Refusal("write-brief", …)`.
+*Step `write-brief`.* `write_atomic` the rendered brief to `task-<M>-implementer-dispatch.md` in the workspace. On `OSError`: when this call registered a worker, run `workflow-state release-worker --repo-root R --run-id I --worker-id <worker_id> --event stopped`; then `Refusal("write-brief", …)`. When that release exits 0 the detail is the write error alone. When it exits non-zero or cannot start, the step is still `write-brief` and the one-line detail holds the write error, then the worker id, the statement that it is still registered, and the exact `release-worker … --event stopped` command to run before calling `next` again (D15). The refusal object's key set does not change.
 
 *Output.* Ready, in this key order: `command`, `outcome`, `completed`, `task`, `brief_path`, `report_path`, `base_sha`, `worker_id`, `mark_progress`, `delivery` (`base_sha`, `head_sha`, `manifest_root`, `metrics`), `standards`. `completed`, `task`, `brief_path`, `report_path`, `base_sha` and `worker_id` are `null` when they do not apply; `standards` is `[]` without `--task`. `base_sha` is the task's base; `report_path` is `task-<M>-report.md` in the workspace. Refusals and exit codes are Task 3's.
 

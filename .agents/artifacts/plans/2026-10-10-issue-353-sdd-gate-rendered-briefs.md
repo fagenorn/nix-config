@@ -70,9 +70,9 @@ Task 5 — The sdd skill dispatches by rendered brief — `home/common/agent-ski
 | AC2 | evidence | Task 5 | Command: the median `prompt` length of the owner's implementer and task-review `Agent` calls in that same transcript. Conditions: as AC1. Threshold: ≤ 1,000 characters (baseline 8.0k and 7.8k). Task 5's implementer writes acceptance-record row AC2 as `not measured — post-merge`, Verdict `unverified` (D9). |
 | AC3 | code | Task 3 | `tests/test_sdd_gate.py`: `ReviewTest.test_review_renders_the_golden_reviewer_brief` and `ReviewTest.test_an_ungoverned_diff_drops_the_layer_two_document`, with Task 1's `ShippedTemplateTest.test_filling_each_token_with_itself_reproduces_the_prompt_body` in `tests/test_sdd_brief.py`; all run by `just agent-workflow-tests`. |
 | AC4 | code | Task 3 | `tests/test_sdd_gate.py`: `ReviewTest.test_an_over_budget_package_is_refused_at_budget_check`, `ReviewTest.test_a_decompose_required_report_is_refused_at_validate_report` and `ReviewTest.test_a_refused_release_is_refused_at_release_worker`, each asserting the exit code, `step`, `gate` and that no brief was written. |
-| AC5 | code | Task 5 | `just agent-instruction-budget` (its `lint:` lines are `skill-lint`'s) printing `check: pass`; `SDD_MACHINE_TEXT`'s two `sdd-gate` argv pins in `test_workflow_skill_contracts.py`; `test_shell_example_contracts.py` with `sdd-gate` in the vocabulary; `test_eval_cases.py` over the reworded sdd evals. |
+| AC5 | code | Task 5 | `just agent-instruction-budget` (its `lint:` lines are `skill-lint`'s) printing `check: pass`; `SDD_MACHINE_TEXT`'s two `sdd-gate` argv pins in `test_workflow_skill_contracts.py`; `test_shell_example_contracts.py` with `sdd-gate` in the vocabulary; `test_eval_cases.py` over the reworded sdd evals. These checks prove the skill text and the eval data; no task executes the eval scenarios, because running them (`just evals sdd 1`, `3` and `4`) needs the merged helper installed by `just switch`. The record's AC5 row names that run under Conditions as post-install evidence, and its verdict is `met` only when the grader accepts the code checks as sufficient for the criterion, `human_pending` otherwise (D16). |
 
-AC1 and AC2 stay open at merge: the pull request body says they are post-merge evidence and repeats how each is measured (D9).
+AC1 and AC2 stay open at merge: the pull request body says they are post-merge evidence and repeats how each is measured (D9). It also says the reworded sdd evals have not been run and need an installed helper (D16).
 
 ## Decisions
 
@@ -85,5 +85,14 @@ AC1 and AC2 stay open at merge: the pull request body says they are post-merge e
 - Parser, output and selection details the spec left open: D12 (appended by this plan).
 - The byte budget, what is cut to pay for the new text, and the stop rule: D13 (appended by this plan).
 - How the tests force the over-budget refusal and compare the golden: D14 (appended by this plan).
+- A failed cleanup after a failed brief write is reported, not dropped: D15. The sdd eval scenarios are post-install evidence: D16 (both appended by the standards review).
+
+## Standards review provenance
+
+- Reviewer: Codex (`plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no fallback. Base SHA `cd4b1746e5a844a17f806ccf791e6840e26d4cb2`; plan reviewed at `c600cbdc`.
+- Findings: 2 Blocking, 1 Should fix, 0 Discussion. Accepted 3, rejected 0, deferred 0.
+- B1 (accepted): Tasks 1 and 3 stage their new files before `just build`.
+- B2 (accepted): Task 4's `write-brief` step reports a release that failed, with a test (D15).
+- S1 (accepted, narrowed): the plan stops presenting `test_eval_cases.py` as the sdd-eval evidence; running the scenarios stays post-install because the helper is not on `PATH` before `just switch` (D16).
 
 ---

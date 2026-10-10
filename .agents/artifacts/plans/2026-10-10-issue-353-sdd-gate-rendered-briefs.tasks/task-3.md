@@ -573,6 +573,9 @@ Expected: no output, exit 0.
 Run: `git diff --stat cd4b1746e5a844a17f806ccf791e6840e26d4cb2 -- python/agent_tools/review_package.py python/agent_tools/review_publish.py python/agent_tools/review_budget.py home/common/agent-skills/scripts`
 Expected: no output.
 
+Run: `git add python/agent_tools/sdd_gate.py tests/test_sdd_gate.py tests/fixtures/sdd-gate`
+Expected: exit 0. The build reads the flake through Git, which leaves untracked files out; without this the command-table row fails its module assertion.
+
 Run: `just build` (timeout 3600 s)
 Expected: exit 0: the command table's module assertion and the import check accept `agent_tools.sdd_gate`.
 

@@ -328,6 +328,9 @@ Expected: exactly `check: pass`, with no `ceiling:`, `tightness:`, `lint:` or `r
 Run: `env PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_dispatch_contracts.py home/common/agent-skills/tests/test_workflow_skill_contracts.py home/common/agent-skills/tests/test_shell_example_contracts.py home/common/agent-skills/tests/test_agent_model_matrix.py home/common/agent-skills/tests/test_skill_lint.py home/common/agent-skills/tests/test_instruction_load.py`
 Expected: `OK` (skips allowed). These suites read the templates' markers, carrier clauses and machine text.
 
+Run: `git add python/agent_tools/sdd_brief.py tests/test_sdd_brief.py`
+Expected: exit 0. The build reads the flake through Git, which leaves untracked files out, so the new module must be in the index before the build can check it.
+
 Run: `just build` (timeout 3600 s)
 Expected: exit 0. The package build import-checks every module under `python/agent_tools`, the new one included.
 
