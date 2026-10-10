@@ -111,6 +111,7 @@ agent-workflow-tests:
     tests/test_agent_tools_siblings.py \
     tests/test_lane_triage.py \
     tests/test_sdd_brief.py \
+    tests/test_sdd_gate.py \
     tests/test_launch_commit.py \
     tests/test_launch_scope.py \
     tests/test_review_range.py \

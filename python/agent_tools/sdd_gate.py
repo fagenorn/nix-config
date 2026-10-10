@@ -1,0 +1,472 @@
+"""`sdd-gate`: gate an sdd task's evidence, then render its dispatch brief (issue 353).
+
+    sdd-gate review PLAN_FILE --skill-dir DIR --task N [--standards PATH ...]
+        [--repo-root R --run-id I --action-id A --worker-id W]
+
+`review` runs seven steps in order and stops at the first that fails:
+`ledger`, `release-worker`, `review-package`, `validate-report`,
+`budget-check`, `metrics-match`, `render-brief`. It reads the task's base from
+the sdd ledger, releases the reviewing worker when a lifecycle identity is
+given, builds (or reuses) the review package for `base..HEAD`, checks the
+package against the budget authority and writes the rendered reviewer brief
+into the plan's workspace.
+
+Stdout is one compact JSON object and a newline: the ready object (exit 0) or
+the refusal object (exit 3 when the package must be decomposed, exit 2 for
+every other refusal). An invalid invocation prints `sdd-gate: invalid
+invocation` on stderr, nothing on stdout, and exits 2.
+
+Every step is safe to repeat: a package is never deleted or overwritten, an
+existing one is reused only for the same range with its saved report beside it,
+the brief is replaced atomically, and releasing a released worker changes
+nothing. The command never resolves the project, reads the environment only
+through `Path.home()` and reads Git only from the current checkout.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+
+from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools.review_budget import BudgetAuthority, BudgetError, describe
+from agent_tools.sdd_brief import (
+    REVIEWER_TEMPLATE, REVIEWER_TOKENS, BriefError, plan_section, render, select_standards,
+    standards_value,
+)
+from agent_tools.siblings import sibling_argv
+
+INVALID = "sdd-gate: invalid invocation\n"
+DETAIL_LIMIT = 300
+HEADER = re.compile(r"# SDD ledger — plan: (.+)")
+FULL_SHA = re.compile(r"[0-9a-f]{40}")
+TASK_NUMBER = re.compile(r"[1-9][0-9]*")
+GLOBAL_CONSTRAINTS = "## Global Constraints"
+STATES = ("complete", "decompose_required")
+PRODUCER_EXIT = {"complete": 0, "decompose_required": 3}
+# The budget metrics, in the order a brief names them, and the token each fills.
+METRIC_KEYS = ("root_bytes", "total_bytes", "file_count", "largest_member_bytes")
+
+
+class InvocationError(Exception):
+    """The command line is not a valid `sdd-gate` invocation."""
+
+
+class Refusal(Exception):
+    """One step refused: its name, a one-line detail, the gate it maps to and its report.
+
+    `gate` is `decompose_required` or `failed` for the package steps and `None`
+    for the others; `report` is the validated report object exactly when
+    `gate` is `decompose_required`.
+    """
+
+    def __init__(self, step: str, detail: str, *, gate: str | None = None,
+                 report: dict | None = None) -> None:
+        super().__init__(detail)
+        self.step = step
+        self.detail = detail
+        self.gate = gate
+        self.report = report
+
+
+@dataclass(frozen=True)
+class Ledger:
+    """An sdd ledger: its workspace, `progress.md`, the lines read and the checkout's top level."""
+
+    workspace: Path
+    path: Path
+    lines: tuple[str, ...]
+    top: Path
+
+
+@dataclass(frozen=True)
+class Package:
+    """A gated review package: the report's manifest path, its root and measured metrics."""
+
+    manifest_root: str
+    root: Path
+    metrics: dict[str, int]
+    authority: BudgetAuthority
+
+
+def _run(argv: Sequence[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(list(argv), capture_output=True, check=False)
+
+
+def _strict_json(raw: bytes) -> object:
+    """Parse `raw` as UTF-8 JSON, refusing duplicate keys and non-finite constants."""
+    return json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
+                      parse_constant=reject_nonfinite_literal)
+
+
+def _resolved(path: str, top: Path) -> str:
+    """`os.path.realpath` of `path`, taken relative to `top` when it is not absolute."""
+    return os.path.realpath(path if os.path.isabs(path) else top / path)
+
+
+def open_ledger(plan: Path) -> Ledger:
+    """Read the ledger of `plan`'s workspace and check that it is this plan's.
+
+    The workspace is what `sdd-workspace <plan>` prints. The first ledger line
+    must be `# SDD ledger — plan: <path>`, the path (relative to the checkout's
+    top level when not absolute) naming `plan` by real path. Refuses with step
+    `ledger` when the workspace cannot be resolved, the ledger cannot be read or
+    another plan's header leads it.
+    """
+    try:
+        found = _run(["sdd-workspace", str(plan)])
+        shown = _run(["git", "rev-parse", "--show-toplevel"])
+    except OSError as error:
+        raise Refusal("ledger", f"cannot resolve the workspace: {error}") from None
+    if found.returncode != 0 or not found.stdout.strip():
+        raise Refusal("ledger", f"sdd-workspace failed (exit {found.returncode})")
+    if shown.returncode != 0 or not shown.stdout.strip():
+        raise Refusal("ledger", f"git rev-parse failed (exit {shown.returncode})")
+    workspace = Path(found.stdout.decode("utf-8", "replace").strip())
+    top = Path(shown.stdout.decode("utf-8", "replace").strip())
+    path = workspace / "progress.md"
+    try:
+        lines = tuple(path.read_text(encoding="utf-8").splitlines())
+    except (OSError, UnicodeDecodeError) as error:
+        raise Refusal("ledger", f"cannot read {path}: {error}") from None
+    header = HEADER.fullmatch(lines[0]) if lines else None
+    if header is None:
+        raise Refusal("ledger", f"{path} does not start with an SDD ledger header")
+    if _resolved(header.group(1), top) != os.path.realpath(plan):
+        raise Refusal("ledger", f"{path} belongs to another plan: {header.group(1)}")
+    return Ledger(workspace, path, lines, top)
+
+
+def recorded_sha(ledger: Ledger, pattern: str) -> str | None:
+    """The one distinct group-1 value among the ledger lines matching `pattern` in full.
+
+    `None` when no line matches; refuses with step `ledger` when two different
+    values are recorded.
+    """
+    found = {match.group(1) for line in ledger.lines
+             if (match := re.fullmatch(pattern, line)) is not None}
+    if len(found) > 1:
+        raise Refusal("ledger", f"{ledger.path} records {len(found)} different values "
+                                f"for {pattern}")
+    return next(iter(found), None)
+
+
+def task_base(ledger: Ledger, task: int) -> str:
+    """The base commit the ledger's `dispatched` line records for `task`; refuses without one."""
+    base = recorded_sha(ledger, rf"Task {task}: dispatched \(base ([0-9a-f]{{40}})\)")
+    if base is None:
+        raise Refusal("ledger", f"{ledger.path} has no dispatched line for task {task}")
+    return base
+
+
+def append_line(ledger: Ledger, line: str) -> None:
+    """Append `line` and a newline to the ledger, first ending a last line that lacks one."""
+    with ledger.path.open("rb+") as handle:
+        size = handle.seek(0, os.SEEK_END)
+        lead = b""
+        if size:
+            handle.seek(size - 1)
+            lead = b"" if handle.read(1) == b"\n" else b"\n"
+        handle.seek(0, os.SEEK_END)
+        handle.write(lead + line.encode("utf-8") + b"\n")
+
+
+def pinned_head() -> str:
+    """The full `git rev-parse HEAD` of the current checkout; refuses at `review-package`."""
+    try:
+        done = _run(["git", "rev-parse", "HEAD"])
+    except OSError as error:
+        raise Refusal("review-package", f"cannot run git: {error}", gate="failed") from None
+    head = done.stdout.decode("utf-8", "replace").strip()
+    if done.returncode != 0 or FULL_SHA.fullmatch(head) is None:
+        raise Refusal("review-package", "cannot read HEAD", gate="failed")
+    return head
+
+
+def workflow_state(step: str, *argv: str) -> dict:
+    """Run `workflow-state <argv>` by name and return its one JSON object.
+
+    A non-zero exit, a command that cannot start or a reply that is not one JSON
+    object refuses with `step`.
+    """
+    try:
+        done = _run(["workflow-state", *argv])
+    except OSError as error:
+        raise Refusal(step, f"cannot run workflow-state: {error}") from None
+    if done.returncode != 0:
+        reason = done.stderr.decode("utf-8", "replace").strip()
+        raise Refusal(step, f"workflow-state exit {done.returncode}: {reason}")
+    try:
+        reply = _strict_json(done.stdout)
+    except ValueError:
+        reply = None
+    if not isinstance(reply, dict):
+        raise Refusal(step, "workflow-state did not print one JSON object")
+    return reply
+
+
+def write_atomic(path: Path, data: bytes) -> None:
+    """Write `data` to `path` through a temporary file beside it and `os.replace`.
+
+    The temporary file is removed when the write fails and the `OSError` is
+    raised again.
+    """
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(data)
+        os.replace(temporary, path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _package_root(ledger: Ledger, base: str, head: str) -> Path:
+    return ledger.workspace / f"review-{base[:7]}..{head[:7]}.json"
+
+
+def _producer_report(plan: Path, root: Path, saved: Path, base: str, head: str) -> tuple[
+        bytes, int | None]:
+    """The package report's bytes and the producer's exit (`None` when reused)."""
+    if not (root.exists() or root.is_symlink()):
+        try:
+            done = _run([*sibling_argv("review_package"), str(plan), base, head])
+        except OSError as error:
+            raise Refusal("review-package", f"cannot run review-package: {error}",
+                          gate="failed") from None
+        if done.returncode not in (0, 3):
+            raise Refusal("review-package", f"review-package failed (exit {done.returncode})",
+                          gate="failed")
+        return done.stdout, done.returncode
+    try:
+        manifest = _strict_json(root.read_bytes())
+        reusable = isinstance(manifest, dict) and manifest.get("range") == {
+            "base": base, "head": head}
+        raw = saved.read_bytes() if reusable else b""
+    except (OSError, ValueError):
+        reusable = False
+    if not reusable:
+        raise Refusal("review-package", f"{root} exists but is not this range's package "
+                                        "with its saved report", gate="failed")
+    return raw, None
+
+
+def package_gate(plan: Path, ledger: Ledger, base: str, head: str, done: list[str]) -> Package:
+    """Build or reuse the `base..head` package and gate it; append each passed step to `done`.
+
+    Steps `review-package` (produce the package, or reuse the one for exactly this
+    range whose saved report exists), `validate-report` (the authority validates
+    the report, whose artifact path must be this package; a fresh report is saved
+    beside the package; a `decompose_required` report refuses with that gate),
+    `budget-check` (an independent check says `within_budget`) and
+    `metrics-match` (its metrics equal the report's). Every refusal but
+    `decompose_required` carries gate `failed`.
+    """
+    root = _package_root(ledger, base, head)
+    saved = root.with_name(root.stem + ".report.json")
+    raw, exit_code = _producer_report(plan, root, saved, base, head)
+    done.append("review-package")
+
+    try:
+        authority = describe("review-package")
+        validated = authority.validate_report(raw, "producer")
+        report = _strict_json(validated)
+    except (BudgetError, ValueError) as error:
+        raise Refusal("validate-report", f"report refused: {error}", gate="failed") from None
+    artifact = report.get("artifact") if isinstance(report, dict) else None
+    state = report.get("state") if isinstance(report, dict) else None
+    if state not in STATES or not isinstance(artifact, dict) \
+            or not isinstance(artifact.get("path"), str):
+        raise Refusal("validate-report", "report is not a complete or decompose_required "
+                                         "package report", gate="failed")
+    if _resolved(artifact["path"], ledger.top) != os.path.realpath(root):
+        raise Refusal("validate-report", "report names another package root", gate="failed")
+    if exit_code is not None:
+        if exit_code != PRODUCER_EXIT[state]:
+            raise Refusal("validate-report", f"producer exit {exit_code} does not fit state "
+                                             f"{state}", gate="failed")
+        try:
+            write_atomic(saved, validated)
+        except OSError as error:
+            raise Refusal("validate-report", f"cannot save the report: {error}",
+                          gate="failed") from None
+    if state == "decompose_required":
+        raise Refusal("validate-report", "the package must be decomposed",
+                      gate="decompose_required", report=report)
+    done.append("validate-report")
+
+    try:
+        check = authority.check("review-package", root)
+    except BudgetError as error:
+        raise Refusal("budget-check", f"budget check refused: {error}", gate="failed") from None
+    if check.status != "within_budget":
+        raise Refusal("budget-check", f"package is {check.status}", gate="failed")
+    done.append("budget-check")
+
+    if dict(check.metrics) != artifact.get("metrics"):
+        raise Refusal("metrics-match", "the report's metrics differ from the independent check",
+                      gate="failed")
+    done.append("metrics-match")
+    return Package(artifact["path"], root, dict(check.metrics), authority)
+
+
+def _metric_values(prefix: str, metrics: Mapping[str, int]) -> dict[str, str]:
+    return {f"[{prefix}{key.upper()}]": str(metrics[key]) for key in METRIC_KEYS}
+
+
+def shared_values(plan: Path, ledger: Ledger, task: int, authority: BudgetAuthority,
+                  documents: Sequence[Path]) -> dict[str, str]:
+    """The values of the ten tokens both dispatch templates share, but `[GLOBAL_CONSTRAINTS]`.
+
+    These are the task's brief and report files in the workspace, the plan's path
+    and its measured size, the selected standards documents and the stacks
+    directory. Raises `BriefError` when the plan is over budget and
+    `BudgetError` when the authority refuses.
+    """
+    check = authority.check("implementation-plan", plan)
+    if check.status != "within_budget":
+        raise BriefError(f"the plan is {check.status}")
+    return {
+        "[BRIEF_FILE]": str(ledger.workspace / f"task-{task}-brief.md"),
+        "[REPORT_FILE]": str(ledger.workspace / f"task-{task}-report.md"),
+        "[PLAN_ROOT]": str(plan),
+        **_metric_values("PLAN_", check.metrics),
+        "[STANDARDS]": standards_value(documents),
+        "[STACKS_DIR]": str(_global_standards() / "stacks"),
+    }
+
+
+def _global_standards() -> Path:
+    return Path.home() / ".agents/standards"
+
+
+def _touched(base: str, head: str) -> list[str]:
+    """Paths changed between `base` and `head`; a rename counts as a deletion and an addition."""
+    done = _run(["git", "diff", "--name-only", "--no-renames", "-z", base, head])
+    if done.returncode != 0:
+        raise BriefError(f"git diff failed (exit {done.returncode})")
+    return [name for name in done.stdout.decode("utf-8", "replace").split("\0") if name]
+
+
+def _render_brief(plan: Path, ledger: Ledger, args: argparse.Namespace, base: str, head: str,
+                  package: Package, entries: Sequence[Path]) -> tuple[Path, list[Path]]:
+    documents = select_standards(_global_standards(), entries, _touched(base, head))
+    values = shared_values(plan, ledger, args.task, package.authority, documents)
+    template = (args.skill_dir / REVIEWER_TEMPLATE).read_text(encoding="utf-8")
+    text = render(template, REVIEWER_TOKENS, {
+        **values,
+        "[GLOBAL_CONSTRAINTS]": plan_section(plan.read_text(encoding="utf-8"),
+                                             GLOBAL_CONSTRAINTS),
+        "[BASE_SHA]": base,
+        "[HEAD_SHA]": head,
+        "[MANIFEST_ROOT]": package.manifest_root,
+        **_metric_values("", package.metrics),
+    })
+    brief = ledger.workspace / f"task-{args.task}-review-dispatch.md"
+    write_atomic(brief, text.encode("utf-8"))
+    return brief, documents
+
+
+def review(args: argparse.Namespace, done: list[str]) -> dict:
+    """Run the seven `review` steps and return the ready object.
+
+    Each step that passes is appended to `done`; the first that fails raises
+    `Refusal` with its step name, leaving `done` as the completed steps.
+    """
+    plan = Path(os.path.abspath(args.plan_file))
+    entries = [Path(os.path.abspath(value)) for value in args.standards]
+    ledger = open_ledger(plan)
+    base = task_base(ledger, args.task)
+    done.append("ledger")
+
+    if args.worker_id is not None:
+        workflow_state("release-worker", "release-worker", "--repo-root", args.repo_root,
+                       "--run-id", args.run_id, "--worker-id", args.worker_id,
+                       "--event", "returned")
+        done.append("release-worker")
+
+    head = pinned_head()
+    package = package_gate(plan, ledger, base, head, done)
+
+    try:
+        brief, documents = _render_brief(plan, ledger, args, base, head, package, entries)
+    except (BriefError, BudgetError, OSError, UnicodeDecodeError) as error:
+        raise Refusal("render-brief", f"cannot render the brief: {error}") from None
+    done.append("render-brief")
+    return {"command": "review", "outcome": "ready", "task": args.task,
+            "brief_path": str(brief), "base_sha": base, "head_sha": head,
+            "manifest_root": package.manifest_root, "metrics": package.metrics,
+            "standards": [str(document) for document in documents]}
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise InvocationError(message)
+
+
+def _task(value: str) -> int:
+    if TASK_NUMBER.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError("not a task number")
+    return int(value)
+
+
+def _parser() -> _Parser:
+    parser = _Parser(prog="sdd-gate", description="Gate an sdd task's evidence and render "
+                                                  "its dispatch brief.")
+    commands = parser.add_subparsers(dest="command", required=True)
+    review_parser = commands.add_parser("review", help="gate a task's review package and "
+                                                       "render the reviewer brief")
+    review_parser.add_argument("plan_file", metavar="PLAN_FILE")
+    review_parser.add_argument("--skill-dir", required=True, type=Path)
+    review_parser.add_argument("--task", required=True, type=_task)
+    review_parser.add_argument("--standards", action="append", default=[])
+    for flag in ("--repo-root", "--run-id", "--action-id", "--worker-id"):
+        review_parser.add_argument(flag)
+    return parser
+
+
+def _parse(argv: Sequence[str] | None) -> argparse.Namespace:
+    args = _parser().parse_args(argv)
+    identity = (args.repo_root, args.run_id, args.action_id)
+    if any(value is not None for value in identity) and any(value is None for value in identity):
+        raise InvocationError("a lifecycle identity is all three flags or none")
+    if (args.worker_id is not None) != (args.repo_root is not None):
+        raise InvocationError("--worker-id goes with a lifecycle identity")
+    return args
+
+
+def _refusal_object(command: str, refusal: Refusal, done: Sequence[str]) -> dict:
+    return {"command": command, "outcome": "refused", "step": refusal.step,
+            "gate": refusal.gate, "detail": " ".join(refusal.detail.split())[:DETAIL_LIMIT],
+            "report": refusal.report, "completed_steps": list(done)}
+
+
+def _print(value: dict) -> None:
+    sys.stdout.write(json.dumps(value, separators=(",", ":"), ensure_ascii=False) + "\n")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Parse, run the subcommand, print its one JSON object and return the exit code."""
+    try:
+        args = _parse(argv)
+    except InvocationError:
+        sys.stderr.write(INVALID)
+        return 2
+    done: list[str] = []
+    try:
+        _print(review(args, done))
+    except Refusal as refusal:
+        _print(_refusal_object(args.command, refusal, done))
+        return 3 if refusal.gate == "decompose_required" else 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

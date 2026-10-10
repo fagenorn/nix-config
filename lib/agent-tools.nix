@@ -57,6 +57,7 @@ let
     "review-feasibility"
     "review-package"
     "review-range"
+    "sdd-gate"
     "skill-lint"
     "verified-tree"
   ];
