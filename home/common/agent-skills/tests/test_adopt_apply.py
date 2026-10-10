@@ -114,6 +114,18 @@ def readoption_repo(home: Path) -> tuple[Path, dict]:
     return root, first
 
 
+ODD = ".claude/odd.md"
+ARCHIVED = ".agents/knowledge/archive/adopted/.claude/odd.md"
+
+
+def answered_repo(home: Path) -> Path:
+    """`apply_repo` plus one tracked agent path no row classifies (#340)."""
+    root = apply_repo(home)
+    write(root, ODD, "# odd\n")
+    commit(root, "add an unclassified agent path")
+    return root
+
+
 class ApplyTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.home = make_home()
@@ -537,6 +549,83 @@ class DeletionAcknowledgementTest(ApplyTestCase):
         root = apply_repo(self.home)
         plan_id = self.ready_plan(root)["plan"]["plan_id"]
         self.succeed(root, plan_id, "--acknowledge-deletions")
+
+
+class AnsweredCandidateApplyTest(ApplyTestCase):
+    """#340: `apply` re-derives an answered plan from its stored answers."""
+
+    MALFORMED = ([{"id": "candidate-class", "subject": ODD}],
+                 {"id": "candidate-class"},
+                 [{"id": "candidate-class", "subject": ODD, "value": None}])
+
+    def planned(self, root: Path, *extra: str) -> dict:
+        code, out, err = run("plan", "--repo-root", str(root), *extra,
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+        return json.loads(out)
+
+    def answered_plan(self, root: Path) -> str:
+        document = self.planned(root, "--answer", "candidate-class", ODD,
+                                "archive-history")
+        self.assertEqual(document["plan"]["state"], "ready",
+                         document["plan"]["blockers"])
+        return document["plan"]["plan_id"]
+
+    def edit_answers(self, plan_id: str, answered: object) -> None:
+        document = json.loads(self.stored_plan(plan_id).read_text("utf-8"))
+        document["decisions"]["answered"] = answered
+        self.rewrite_stored_plan(plan_id, document)
+
+    def assert_malformed(self, root: Path, plan_id: str) -> None:
+        for answered in self.MALFORMED:
+            with self.subTest(answered=answered):
+                self.edit_answers(plan_id, answered)
+                payload = self.refuse(root, plan_id, "adopt_failure")
+                self.assertEqual(payload["error"]["repair_id"],
+                                 "adopt.plan.malformed")
+
+    def test_an_answered_plan_archives_the_candidate(self):
+        root = answered_repo(self.home)
+        plan_id = self.answered_plan(root)
+        result = self.succeed(root, plan_id)
+        files = self.branch_files(root, result["branch"])
+        self.assertIn(ARCHIVED, files)
+        self.assertNotIn(ODD, files)
+        moves = json.loads(git(
+            root, "show", f"{result['branch']}:{result['migration_map']}"))
+        self.assertIn({"old_path": ODD, "new_path": ARCHIVED},
+                      moves["moves"])
+        record = json.loads(git(
+            root, "show", f"{result['branch']}:{result['evidence_record']}"))
+        self.assertIn({"id": "candidate-class", "subject": ODD,
+                       "value": "archive-history"},
+                      record["decisions_accepted"])
+        stored = json.loads(self.stored_plan(plan_id).read_text("utf-8"))
+        self.assertEqual(
+            {gate["status"] for gate in stored["verification"]["commit_gates"]},
+            {"passed"})
+
+    def test_a_removed_stored_answer_is_plan_stale(self):
+        root = answered_repo(self.home)
+        plan_id = self.answered_plan(root)
+        self.edit_answers(plan_id, [])
+        self.refuse(root, plan_id, "plan_stale")
+
+    def test_a_malformed_stored_answer_refuses_before_anything_runs(self):
+        root = answered_repo(self.home)
+        self.assert_malformed(root, self.answered_plan(root))
+
+    def test_a_malformed_answer_on_a_draft_refuses_before_not_ready(self):
+        root = answered_repo(self.home)
+        draft = self.planned(root)
+        self.assertEqual(draft["plan"]["state"], "draft")
+        self.assert_malformed(root, draft["plan"]["plan_id"])
+
+    def test_an_unstaged_edit_to_an_archived_source_is_a_dirty_worktree(self):
+        root = answered_repo(self.home)
+        plan_id = self.answered_plan(root)
+        write(root, ODD, "# edited\n")
+        self.refuse(root, plan_id, "dirty_worktree")
 
 
 class ReadoptionTest(ApplyTestCase):

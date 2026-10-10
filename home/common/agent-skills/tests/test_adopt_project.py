@@ -343,6 +343,10 @@ def ignored_symlink_repo(home: Path) -> Path:
     return root
 
 
+ODD = ".claude/odd.md"
+ARCHIVED = ".agents/knowledge/archive/adopted/.claude/odd.md"
+
+
 GITIGNORE_WITH_COMMENT = (
     "result\n"
     "__pycache__/\n"
@@ -681,29 +685,30 @@ class DocumentShapeTest(AdoptTestCase):
 # --------------------------------------------------------------------------
 
 
+def documented_plan_id(doc: object) -> str:
+    """D15's digest, recomputed here from the document's own inputs.
+
+    The formula is the spec's, not the implementation's: the six named
+    members, canonical JSON, SHA-256. Nothing is pasted from a previous
+    run.
+    """
+    source = {
+        "adopt_schema_version": doc["schema_version"],
+        "project_id": doc["plan"]["project_id"],
+        "base_revision": doc["plan"]["base_revision"],
+        "platform": doc["plan"]["platform"],
+        "evidence": doc["evidence"],
+        "decisions_answered": doc["decisions"]["answered"],
+    }
+    payload = json.dumps(source, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
 class PlanIdentityTest(AdoptTestCase):
-    def expected_plan_id(self, doc: object) -> str:
-        """D15's digest, recomputed here from the document's own inputs.
-
-        The formula is the spec's, not the implementation's: the six named
-        members, canonical JSON, SHA-256. Nothing is pasted from a previous
-        run.
-        """
-        source = {
-            "adopt_schema_version": doc["schema_version"],
-            "project_id": doc["plan"]["project_id"],
-            "base_revision": doc["plan"]["base_revision"],
-            "platform": doc["plan"]["platform"],
-            "evidence": doc["evidence"],
-            "decisions_answered": doc["decisions"]["answered"],
-        }
-        payload = json.dumps(source, sort_keys=True,
-                             separators=(",", ":")).encode("utf-8")
-        return "sha256:" + hashlib.sha256(payload).hexdigest()
-
     def test_plan_id_is_the_documented_digest_and_equals_input_digest(self):
         doc = self.ready_plan(nix_config_shape_repo(self.home))
-        self.assertEqual(doc["plan"]["plan_id"], self.expected_plan_id(doc))
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
         self.assertEqual(doc["plan"]["input_digest"], doc["plan"]["plan_id"])
 
     def test_platform_block_is_the_three_reproducible_manifest_values(self):
@@ -1144,6 +1149,167 @@ class CandidateQuestionTest(AdoptTestCase):
         with self.assertRaises(ValueError):
             adopt_inspection.candidate_answer("untracked-explicit-paths",
                                               ".claude/odd.md")
+
+
+class CandidateAnswerTest(AdoptTestCase):
+    """#340 AC2: answering a candidate is reflected in the plan id."""
+
+    def answered(self, root: Path, *triples: tuple[str, str, str]):
+        args = [token for triple in triples
+                for token in ("--answer", *triple)]
+        return self.plan(root, *args)
+
+    def stored_plans(self) -> list[str]:
+        store = self.home / ".agents" / "state" / "adopt" / "plans"
+        return sorted(path.name for path in store.iterdir()) \
+            if store.is_dir() else []
+
+    def refused(self, root: Path, repair_id: str,
+                *triples: tuple[str, str, str]) -> None:
+        before = self.stored_plans()
+        code, payload, err = self.answered(root, *triples)
+        self.assertEqual(code, 2, err or payload)
+        self.assertEqual(payload["error"]["code"], "adopt_failure")
+        self.assertEqual(payload["error"]["repair_id"], repair_id)
+        self.assertEqual(payload["error"]["violations"][0]["pointer"],
+                         "/decisions/answered")
+        self.assertEqual(self.stored_plans(), before)
+
+    def first_violation(self, root: Path, *triples) -> tuple[str, dict]:
+        code, payload, err = self.answered(root, *triples)
+        self.assertEqual(code, 2, err or payload)
+        return (payload["error"]["repair_id"],
+                payload["error"]["violations"][0])
+
+    def test_answering_reaches_ready_and_changes_the_plan_id(self):
+        root = candidate_repo(self.home, ODD)
+        draft = self.ready_plan(root)
+        code, doc, err = self.answered(
+            root, ("candidate-class", ODD, "archive-history"))
+        self.assertEqual(code, 0, err)
+        self.assertNotEqual(doc["plan"]["plan_id"], draft["plan"]["plan_id"])
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["decisions"]["open"], [])
+        self.assertEqual(doc["decisions"]["answered"], [
+            {"id": "candidate-class", "subject": ODD,
+             "value": "archive-history"}])
+        # The independent oracle, with every other digest input held
+        # constant: the id covers the non-empty answers, and the same
+        # document with no answers digests differently.
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+        unanswered = {**doc, "decisions": {**doc["decisions"],
+                                           "answered": []}}
+        self.assertNotEqual(doc["plan"]["plan_id"],
+                            documented_plan_id(unanswered))
+        entry = next(e for e in doc["evidence"] if e["path"] == ODD)
+        self.assertEqual(
+            (entry["lifecycle_class"], entry["action"], entry["target"]),
+            ("unclassified", "archive-history", ARCHIVED))
+        pairs = [(op["sources"][0], op["targets"][0])
+                 for op in doc["changes"] if op["op"] == "git-mv"]
+        self.assertIn((ODD, ARCHIVED), pairs)
+
+    def test_an_answered_ignored_candidate_is_retained_without_an_operation(self):
+        path = ".claude/settings.local.json"
+        code, doc, err = self.answered(
+            ignored_symlink_repo(self.home),
+            ("candidate-class", path, "retain-product"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["decisions"]["open"], [])
+        entry = next(e for e in doc["evidence"] if e["path"] == path)
+        self.assertEqual((entry["action"], entry["target"]),
+                         ("retain-product", None))
+        for op in doc["changes"]:
+            self.assertNotIn(path, op["sources"] + op["targets"])
+
+    def test_a_non_candidate_question_id_is_an_invalid_answer(self):
+        self.refused(candidate_repo(self.home, ODD),
+                     "adopt.decisions.invalid_answer",
+                     ("project-id", ODD, "archive-history"))
+
+    def test_a_value_the_question_does_not_offer_is_an_invalid_answer(self):
+        self.refused(candidate_repo(self.home, ODD),
+                     "adopt.decisions.invalid_answer",
+                     ("candidate-class", ODD, "retain-product"))
+
+    def test_every_answer_to_a_secret_shaped_candidate_is_invalid(self):
+        root = candidate_repo(self.home, ".claude/secrets/key.md")
+        for value in ("archive-history", "retain-product"):
+            with self.subTest(value=value):
+                self.refused(root, "adopt.decisions.invalid_answer",
+                             ("candidate-class", ".claude/secrets/key.md",
+                              value))
+
+    def test_one_subject_answered_twice_is_an_invalid_answer(self):
+        self.refused(candidate_repo(self.home, ODD),
+                     "adopt.decisions.invalid_answer",
+                     ("candidate-class", ODD, "archive-history"),
+                     ("candidate-class", ODD, "archive-history"))
+
+    def test_a_subject_that_is_not_an_undecided_candidate_is_unmatched(self):
+        root = candidate_repo(self.home, ODD)
+        for subject in (".claude/missing.md", ".claude/specs/x.md"):
+            with self.subTest(subject=subject):
+                self.refused(root, "adopt.decisions.unmatched_answer",
+                             ("candidate-class", subject, "archive-history"))
+
+    def test_the_human_view_prints_the_answer(self):
+        root = candidate_repo(self.home, ODD)
+        code, human, err = run(
+            "plan", "--repo-root", str(root), "--format", "human",
+            "--answer", "candidate-class", ODD, "archive-history",
+            home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"answered candidate-class {ODD}: archive-history\n",
+                      human)
+
+    def test_answer_order_on_the_command_line_does_not_matter(self):
+        root = candidate_repo(self.home, ODD, ".claude/a.md")
+        first = ("candidate-class", ".claude/a.md", "archive-history")
+        second = ("candidate-class", ODD, "archive-history")
+        forward = run("plan", "--repo-root", str(root), "--answer", *first,
+                      "--answer", *second, home=self.home)
+        backward = run("plan", "--repo-root", str(root), "--answer", *second,
+                       "--answer", *first, home=self.home)
+        self.assertEqual(forward[0], 0, forward[2])
+        self.assertEqual(forward[1], backward[1])
+
+    def test_competing_violations_report_the_sorted_first_one(self):
+        root = candidate_repo(self.home, ODD)
+        bad_id = ("project-id", ODD, "archive-history")
+        unmatched = ("candidate-class", ".claude/missing.md",
+                     "archive-history")
+        expected = ("adopt.decisions.unmatched_answer",
+                    {"pointer": "/decisions/answered",
+                     "message": "the answered subject is not an undecided "
+                                "candidate of this inspection"})
+        for triples in ((bad_id, unmatched), (unmatched, bad_id)):
+            with self.subTest(triples=triples):
+                self.assertEqual(self.first_violation(root, *triples),
+                                 expected)
+
+    def test_a_duplicate_subject_is_reported_before_its_value(self):
+        root = candidate_repo(self.home, ODD)
+        good = ("candidate-class", ODD, "archive-history")
+        bad = ("candidate-class", ODD, "retain-product")
+        expected = ("adopt.decisions.invalid_answer",
+                    {"pointer": "/decisions/answered",
+                     "message": "a candidate is answered more than once"})
+        for triples in ((good, bad), (bad, good)):
+            with self.subTest(triples=triples):
+                self.assertEqual(self.first_violation(root, *triples),
+                                 expected)
+
+    def test_the_recommendation_names_the_answer_flag(self):
+        self.assertIn("plan --answer candidate-class <subject> <value>",
+                      adopt_inspection.question_recommendation(
+                          "candidate-class"))
+
+    def test_archive_history_relocates(self):
+        self.assertTrue(adopt_inspection.action_relocates("archive-history"))
 
 
 class GitignoreAmendmentTest(AdoptTestCase):

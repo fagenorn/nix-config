@@ -250,6 +250,8 @@ NOTES = {
                     "cannot proceed until it is classified",
     "escaping-symlink": "resolves outside the target root; contents are never "
                         "read",
+    "answered": "classified by an answered candidate-class question; the "
+                "inspection found no lifecycle class for it",
 }
 
 
@@ -284,10 +286,11 @@ def approval_class_for(kind: str) -> str:
 
 
 def action_relocates(action: str) -> bool:
-    """Whether an action moves a candidate to a new canonical home."""
-    if action == "move-canonical":
+    """Whether an action moves a candidate to a new home: a canonical one, or
+    the adoption archive."""
+    if action in ("move-canonical", "archive-history"):
         return True
-    if action in ("generate-projection", "retain-product", "archive-history",
+    if action in ("generate-projection", "retain-product",
                   "delete-exact-duplicate", "needs-decision"):
         return False
     raise ValueError(f"unknown adoption action: {action!r}")
@@ -354,8 +357,12 @@ def question_recommendation(question_id: str) -> str:
                 "or author .agents/project.json with the intended project id "
                 "before planning again")
     if question_id == "candidate-class":
-        return ("add a central classification row for this path, or remove "
-                "it from the repository in its own commit, then plan again")
+        return ("answer it with plan --answer candidate-class <subject> "
+                "<value>, using this entry's subject and value, and apply "
+                "the plan id that run prints; a null value marks a "
+                "secret-shaped path with no answer: add a central "
+                "classification row for it, or remove it from the repository "
+                "in its own commit, then plan again")
     raise ValueError(f"unknown question id: {question_id!r}")
 
 
@@ -905,7 +912,8 @@ def overlap_targets(found: Candidates) -> list[str]:
     """
     targets = {".agents"}
     for group, info in found.groups.items():
-        if info["action"] in ("move-canonical", "generate-projection"):
+        if (action_relocates(info["action"])
+                or info["action"] == "generate-projection"):
             targets.add(group)
         if info["target"]:
             targets.add(info["target"])

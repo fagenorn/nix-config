@@ -126,6 +126,29 @@ def load_stored_plan(digest: str) -> dict:
     return document
 
 
+def stored_answers(document: dict) -> list[dict]:
+    """The operator's answers the stored plan carries, or a refusal.
+
+    `apply` re-applies them before re-deriving the plan, so a stored value of
+    any other shape is refused here rather than handed to the shared
+    validation: each answer is exactly `{id, subject, value}` with string
+    values (D9).
+    """
+    decisions = document.get("decisions")
+    answered = decisions.get("answered") if isinstance(decisions, dict) \
+        else None
+    if (not isinstance(answered, list)
+            or any(not isinstance(answer, dict)
+                   or set(answer) != {"id", "subject", "value"}
+                   or any(not isinstance(value, str)
+                          for value in answer.values())
+                   for answer in answered)):
+        raise refuse(
+            "adopt_failure", "adopt.plan.malformed", "/decisions/answered",
+            "the stored plan's answered decisions are not well formed")
+    return answered
+
+
 def contained_relative(root: Path, relative: object) -> bool:
     """Whether `relative` is a repository-relative path inside `root`.
 
