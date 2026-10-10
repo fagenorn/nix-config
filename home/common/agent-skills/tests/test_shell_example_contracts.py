@@ -102,7 +102,27 @@ def whole_allowed_helpers(nix_text):
     return frozenset(word.rsplit("/", 1)[-1] for word in words)
 
 
+EVALUATORS_ASSIGNMENT = re.compile(
+    r'^SHELL_EVALUATORS = frozenset\(\{([^{}\n]*)\}\)\s*$', re.M
+)
+
+
+def guard_evaluators(guard_text):
+    """The names in the guard's single SHELL_EVALUATORS assignment."""
+    matches = EVALUATORS_ASSIGNMENT.findall(guard_text)
+    if len(matches) != 1:
+        raise ValueError(
+            f"expected exactly one SHELL_EVALUATORS assignment in "
+            f"{GUARD_SOURCE}, found {len(matches)}"
+        )
+    names = frozenset(re.findall(r'"([^"]+)"', matches[0]))
+    if not names:
+        raise ValueError(f"SHELL_EVALUATORS in {GUARD_SOURCE} names no evaluator")
+    return names
+
+
 SANCTIONED_PREFIX = guard_prefix(GUARD_SOURCE.read_text(encoding="utf-8"))
+SHELL_EVALUATORS = guard_evaluators(GUARD_SOURCE.read_text(encoding="utf-8"))
 LIFECYCLE_HELPERS = whole_allowed_helpers(ALLOW_LIST_SOURCE.read_text(encoding="utf-8"))
 
 
@@ -610,10 +630,15 @@ def _shell_words(text):
 
 
 def _runs_guarded_verb(text, verbs):
-    """Whether one of `verbs` stands in `text` as consecutive unquoted words."""
+    """Whether one of `verbs` stands in `text` as consecutive unquoted words, or
+    anywhere at all once a shell evaluator is among its words."""
     words = _shell_words(text)
-    if words is None:
-        # No quote can be trusted: fail closed on the raw text, as the guard does.
+    if words is None or any(
+            word is not None and word.rsplit("/", 1)[-1] in SHELL_EVALUATORS
+            for word in words):
+        # No quote can be trusted, or a quoted argument is shell source the guard
+        # refuses unread (`bash -c '<verb> …'`): fail closed on the raw text, as
+        # the guard does.
         return any(" ".join(verb) in _squeezed(text) for verb in verbs)
     return any(words[start:start + len(verb)] == verb
                for verb in verbs for start in range(len(words)))
@@ -623,9 +648,10 @@ def guarded_command_findings(document_text, shapes, document_name):
     """Every R1, R2 and R3 finding of one ship-issue document (#351).
 
     R1: a living example that holds a guarded verb as consecutive unquoted words,
-    at its start or after any other words, is as a whole one of `shapes`'
-    skill-form templates, after the sanctioned prefix, and carries that prefix
-    only when the form's `prefixed` and `bare` exits agree. Only living examples
+    at its start or after any other words, or anywhere behind a shell evaluator,
+    is as a whole one of `shapes`' skill-form templates, spelled space for space
+    after the sanctioned prefix, and carries that prefix only when the form's
+    `prefixed` and `bare` exits agree. Only living examples
     are read: every call of a shell fence is one, and a line of an unlabeled or
     `text` fence is one only when its command head is in the vocabulary, so a
     diagram line there is not. R2: its block carries the anchor. R3: every form
@@ -646,8 +672,10 @@ def guarded_command_findings(document_text, shapes, document_name):
         command = spelled[len(SANCTIONED_PREFIX):] if prefixed else spelled
         line = position[0]
         form = forms.get(command)
-        # The prefix is a listed spelling only where it leaves the guard's verdict alone.
-        listed = form is not None and (
+        # A listed spelling is exact: the guard reads the merge's single spaces
+        # literally, so a doubled space or a tab is not the form. The prefix is a
+        # listed spelling only where it leaves the guard's verdict alone.
+        listed = payload[0].text.strip() == spelled and form is not None and (
             not prefixed or form["prefixed"]["exit"] == form["bare"]["exit"])
         cited = anchor in _squeezed(payload[2])
         if not listed:
@@ -1216,6 +1244,25 @@ class GuardedCommandShapeTest(unittest.TestCase):
             "a mention behind a quote that never closes":
                 ("OTHER.md", f"Run `echo \"refused {later}` ({GUARDED_ANCHOR}).",
                  [(1, "R1", f"echo \"refused {later}")]),
+            "a form quoted as a shell evaluator's source":
+                ("OTHER.md", f"Run `bash -c '{first}'` ({GUARDED_ANCHOR}).",
+                 [(1, "R1", f"bash -c '{first}'")]),
+            "a form passed to an evaluator named by path":
+                ("OTHER.md", f"Run `/bin/sh -c \"{later}\"` ({GUARDED_ANCHOR}).",
+                 [(1, "R1", f"/bin/sh -c \"{later}\"")]),
+            "a merge spelled with a doubled space":
+                ("OTHER.md",
+                 f"Run `{merge.replace('gh pr', 'gh  pr', 1)}` ({GUARDED_ANCHOR}).",
+                 [(1, "R1", merge)]),
+            "a push fence spelled with a tab":
+                ("OTHER.md",
+                 f"Then ({GUARDED_ANCHOR}):\n\n```bash\n"
+                 + later.replace("git push", "git\tpush", 1) + "\n```",
+                 [(4, "R1", later)]),
+            "a site whose only form has a doubled space":
+                ("REVIEW.md",
+                 _conforming("REVIEW.md").replace("git push", "git  push", 1),
+                 [(1, "R1", later), (0, "R3", later)]),
         }
         for name, (document_name, text, expected) in cases.items():
             with self.subTest(case=name):
