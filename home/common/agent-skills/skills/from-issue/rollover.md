@@ -16,7 +16,7 @@ The continuation is one closed JSON object. Its `owner` is the validated interfa
     "interface_version": 2,
     "kind": "owner",
     "ledger_repo_root": "/absolute/primary-checkout",
-    "run_id": "direct-74-000001",
+    "run_id": "rel_0192f1c4-7a3e-7b21-9c4d-5e6f7a8b9c0d",
     "issue": 74,
     "attempt": 1,
     "owner": "74:1",

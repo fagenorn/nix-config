@@ -52,9 +52,10 @@ class DeliveredControlHarness(BuilderHarness):
             {"schema_version": 1, "routes": {
                 "claude-code": {"support": "supported", "agent_slots": 7},
                 "codex": {"support": "unsupported"}}}), encoding="utf-8")
-        self.run_args = ("--repo-root", self.root, "--run-id", "delivered")
-        self.ledger = self.root / ".superpowers/workflows/delivered/state.json"
-        self.cli("init-run", *self.run_args, "--now", at(0))
+        minted = json.loads(self.cli("init-run", "--repo-root", self.root, "--creation-key",
+                                     "delivered", "--now", at(0)).stdout)["run_id"]
+        self.run_args = ("--repo-root", self.root, "--run-id", minted)
+        self.ledger = self.root / ".superpowers/workflows" / minted / "state.json"
         self.worktrees = {n: str(self.root / ".worktrees" / f"worktree-issue-{n}-shape")
                           for n in ISSUES}
         self.built = {n: self.build("contract", self.contract_input(
@@ -376,12 +377,14 @@ class DeliveredControlTest(DeliveredControlHarness, unittest.TestCase):
         built = self.build("contract", self.contract_input())
         workflow = self.isolated_workflow(64)
         env = {**os.environ, "HOME": str(self.home), "PYTHONDONTWRITEBYTECODE": "1"}
-        run_args = ("--repo-root", str(self.root), "--run-id", "atomic")
         initialized = subprocess.run(
-            [sys.executable, str(workflow), "init-run", *run_args, "--now", NOW],
+            [sys.executable, str(workflow), "init-run", "--repo-root", str(self.root),
+             "--creation-key", "atomic", "--now", NOW],
             capture_output=True, check=False, env=env)
         self.assertEqual(initialized.returncode, 0, initialized.stderr.decode())
-        state = self.root / ".superpowers/workflows/atomic/state.json"
+        minted = json.loads(initialized.stdout)["run_id"]
+        run_args = ("--repo-root", str(self.root), "--run-id", minted)
+        state = self.root / ".superpowers/workflows" / minted / "state.json"
         before = state.read_bytes()
         request = json.dumps(self.control_request(
             [171], contracts={"171": built["contract"]},

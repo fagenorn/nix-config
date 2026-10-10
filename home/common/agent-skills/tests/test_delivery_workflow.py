@@ -15,6 +15,9 @@ import tempfile
 import unittest
 from unittest import mock
 
+from agent_tools import attempt_identity
+from agent_tools.transaction_core import TransactionStore
+
 from ._delivery_model_fixtures import (
     authority, cleanup_contract_and_delivery, contract_and_delivery,
     contract_and_delivery_for_stage, observation, pr_subject, seal, selection,
@@ -30,6 +33,8 @@ MODEL = SCRIPTS / "delivery_model/__init__.py"
 POLICY = ROOT / "home/common/agent-skills/artifact-budget-policy.json"
 ARTIFACT_BUDGET = SCRIPTS / "artifact_budget.py"
 NOW = "2026-09-21T00:00:00Z"
+ORCHESTRATED = attempt_identity.RunIdentity("orchestrated", None, None)
+TRANSACTION = "rel_0190f0e0-0000-7000-8000-000000000000"
 WORKTREE_NAME = "worktree-issue-171-delivery-contract-source"
 LATER = "2026-09-21T00:10:00Z"
 SLUGLESS = "worktree-issue-171"
@@ -141,7 +146,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
             "detail_state": "none", "report_path": None, "notes": notes}
 
     def state_with_attempt(self):
-        state = self.workflow.new_run_state(run_id="admission", now=NOW, issues={})
+        state = self.workflow.new_run_state(
+            run_id="admission", transaction_id=TRANSACTION, now=NOW, issues={})
         attempt = self.workflow.new_control_attempt(
             issue=151, attempt_number=1, worktree="/worktree", now=NOW,
             deadline_at="2026-09-21T01:00:00Z")
@@ -154,7 +160,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
     def legacy(self, version):
         value = self.state_with_attempt()
         value["schema_version"] = version
-        value.pop("admission"); value.pop("workers")
+        value.pop("admission"); value.pop("workers"); value.pop("transaction_id")
         for issue in value["issues"].values():
             issue.pop("delivery"); issue.pop("delivery_remainders")
             for attempt in issue["attempts"]:
@@ -165,7 +171,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
             for attempt in value["issues"]["151"]["attempts"]:
                 for field in self.workflow.SUSPENSION_DEFAULTS: attempt.pop(field)
         migrated = self.workflow._delivery().migrate(value, migration_contracts={})
-        self.workflow.validate_state(migrated, run_id="admission")
+        self.workflow.validate_state(
+            migrated, run_id="admission", identity=ORCHESTRATED, schema_version=7)
         return value
 
     def test_interface_two_maps_and_singular_inputs_are_closed(self):
@@ -211,7 +218,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             def run(*args):
                 return subprocess.run([sys.executable, str(WORKFLOW), *map(str, args)],
                     capture_output=True, text=True, env=env, check=False)
-            initialized = run("init-run", "--repo-root", root, "--run-id", "admission",
+            initialized = run("init-run", "--repo-root", root, "--creation-key", "admission",
                               "--now", NOW)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
             minted = json.loads(initialized.stdout)["run_id"]
@@ -244,7 +251,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             root = Path(raw)
             initialized = subprocess.run(
                 [sys.executable, str(WORKFLOW), "init-run", "--repo-root", str(root),
-                 "--run-id", "legacy-contractless", "--now", NOW],
+                 "--creation-key", "legacy-contractless", "--now", NOW],
                 capture_output=True, text=True, check=False)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
             minted = json.loads(initialized.stdout)["run_id"]
@@ -279,7 +286,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
         for version in (1, 2):
             legacy = self.legacy(version); original = copy.deepcopy(legacy)
             migrated = self.workflow.upgrade_state(
-                legacy, run_id="admission", migration_contracts={151: contract})
+                legacy, run_id="admission", identity=ORCHESTRATED,
+                migration_contracts={151: contract})
             self.assertEqual(legacy, original); self.assertEqual(migrated["schema_version"], 7)
             self.assertEqual(migrated["issues"]["151"]["delivery"],
                              self.workflow._delivery().empty_delivery())
@@ -300,21 +308,24 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     str(root), "orchestrate-151", lambda state: (state, False),
                     migration_contracts={151: contract})
             write.assert_called_once()
-            self.assertEqual(write.call_args.args[2]["schema_version"], 7)
-            self.assertEqual(result["schema_version"], 7)
+            self.assertEqual(write.call_args.args[2]["schema_version"], 8)
+            self.assertEqual((result["schema_version"], result["transaction_id"]), (8,
+                TransactionStore(root / ".superpowers/attempt-transactions").lookup(
+                    attempt_identity.legacy_key("orchestrate-151"))))
 
     def test_model_owns_nonempty_delivery_validation(self):
         contract, delivery = contract_and_delivery(self.model)
         state = self.state_with_attempt(); state["issues"]["151"]["delivery"] = delivery
-        self.assertEqual(self.workflow.validate_state(state, run_id="admission"), state)
+        self.assertEqual(self.workflow.validate_state(
+            state, run_id="admission", identity=ORCHESTRATED), state)
         bad = copy.deepcopy(state)
         bad["issues"]["151"]["delivery"]["authorization_chain_digest"] = "sha256:" + "f" * 64
         with self.assertRaises(self.workflow.WorkflowError):
-            self.workflow.validate_state(bad, run_id="admission")
+            self.workflow.validate_state(bad, run_id="admission", identity=ORCHESTRATED)
         absent = self.state_with_attempt()
         absent["issues"]["151"]["delivery"]["contract_digest"] = "sha256:" + "a" * 64
         with self.assertRaises(self.workflow.WorkflowError):
-            self.workflow.validate_state(absent, run_id="admission")
+            self.workflow.validate_state(absent, run_id="admission", identity=ORCHESTRATED)
 
     def test_bootstrap_uses_exact_custody_and_remainder_precedence(self):
         state = self.state_with_attempt()
@@ -338,7 +349,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             "result": None, "result_source": None, "recovery": None,
             "finished_at": None}]
         state["updated_at"] = NOW
-        self.workflow.validate_state(state, run_id="admission")
+        self.workflow.validate_state(state, run_id="admission", identity=ORCHESTRATED)
         requirement = self.workflow.bootstrap_response(state)["requirements"][0]
         self.assertEqual(requirement["custody"]["action_id"], "151:r1:1")
         self.assertEqual(set(requirement), {"issue", "owner", "custody", "recorded_worktree",
@@ -363,12 +374,12 @@ class DeliveryAdmissionTest(unittest.TestCase):
             mutations[name] = candidate
         for name, candidate in mutations.items():
             with self.subTest(invalid_remainder=name), self.assertRaises(self.workflow.WorkflowError):
-                self.workflow.validate_state(candidate, run_id="admission")
+                self.workflow.validate_state(candidate, run_id="admission", identity=ORCHESTRATED)
         for malformed in (None, {}, False):
             candidate = self.state_with_attempt()
             candidate["issues"]["151"]["delivery_remainders"] = malformed
             with self.subTest(absent_remainders=malformed), self.assertRaises(self.workflow.WorkflowError):
-                self.workflow.validate_state(candidate, run_id="admission")
+                self.workflow.validate_state(candidate, run_id="admission", identity=ORCHESTRATED)
 
     def test_public_source_and_installed_admission_fail_closed(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -413,11 +424,13 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     (share / "artifact-budget-policy.json").symlink_to(
                         store / "artifact-budget-policy.json")
                 completed = subprocess.run([sys.executable, str(cli), "init-run",
-                    "--repo-root", str(repo), "--run-id", "admission", "--now", NOW],
+                    "--repo-root", str(repo), "--creation-key", "admission", "--now", NOW],
                     capture_output=True, text=True, env=env, check=False)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 self.assertEqual(json.loads(completed.stdout), {"interface_version": 2,
-                    "kind": "workflow_bootstrap", "run_id": "admission", "requirements": []})
+                    "kind": "workflow_bootstrap", "requirements": [],
+                    "run_id": TransactionStore(repo / ".superpowers/attempt-transactions")
+                    .lookup(attempt_identity.run_key("admission"))})
                 malformed = base / "bad.json"; malformed.write_text("{malformed")
                 def rejects_dependency(fragment):
                     result = subprocess.run([sys.executable, str(cli), "direct-owner",
@@ -1121,7 +1134,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             def store(value):
                 nonlocal serial; serial += 1
                 path = root / f"input-{serial}.json"; path.write_text(json.dumps(value)); return path
-            run_id = invoke("init-run", "--repo-root", root, "--run-id", "orchestrated",
+            run_id = invoke("init-run", "--repo-root", root, "--creation-key", "orchestrated",
                             "--now", NOW)["run_id"]
             request = self.control_request(contract)
             request.update(tracker=[{"issue": 151, "state": "open", "open_blockers": [],
@@ -1187,7 +1200,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                                                             "state": "absent"}}])
                 request["authorization_intents"]["151"] = delivery["authorization_intents"]
                 return invoke("control", *run, "--request-file", "-", stdin=request)
-            run_id = invoke("init-run", "--repo-root", root, "--run-id", "refusal",
+            run_id = invoke("init-run", "--repo-root", root, "--creation-key", "refusal",
                             "--now", NOW)["run_id"]
             run = ("--repo-root", root, "--run-id", run_id)
             owner = control(NOW, "open", recorded=False)["actions"][0]
@@ -1226,8 +1239,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
 
         Issue 151's owner spawns, fails after selecting its output, and an
         authority denial parks the minted remainder on ``human_gate``. Returns
-        ``(control, checkpoint, run_id)``, the run id ``init-run --run-id key`` replies
-        with. ``control(now, max_parallel=1)`` sweeps with
+        ``(control, checkpoint, run_id)``, the run minted under creation key ``key``. ``control(now, max_parallel=1)`` sweeps with
         the recorded worktree observed as ``recorded`` (``matching_issue_branch``
         unless given) and returns the raw response bytes.
         ``checkpoint(custody, now)`` reports that custody again without progress
@@ -1264,7 +1276,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             return json.loads(invoke("checkpoint-delivery", *run, "--checkpoint-file",
                                      "-", "--now", now, stdin=report))
 
-        run_id = json.loads(invoke("init-run", "--repo-root", root, "--run-id", key,
+        run_id = json.loads(invoke("init-run", "--repo-root", root, "--creation-key", key,
                                    "--now", NOW))["run_id"]
         run = ("--repo-root", root, "--run-id", run_id)
         owner = json.loads(control(NOW, spawn=True))["actions"][0]
@@ -1405,7 +1417,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     capture_output=True, text=True, check=False)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 return json.loads(completed.stdout)
-            run_id = invoke("init-run", "--repo-root", root, "--run-id", "recovery-control",
+            run_id = invoke("init-run", "--repo-root", root, "--creation-key", "recovery-control",
                             "--now", NOW)["run_id"]
             request = self.control_request(contract)
             request.update(tracker=[{"issue": 151, "state": "open", "open_blockers": [],
@@ -1508,7 +1520,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                      for issue in issues}
             initialized = subprocess.run(
                 [sys.executable, str(WORKFLOW), "init-run", "--repo-root", str(root),
-                 "--run-id", "dispatch-wire", "--now", NOW], capture_output=True,
+                 "--creation-key", "dispatch-wire", "--now", NOW], capture_output=True,
                 check=False, env=env)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
             run_id = json.loads(initialized.stdout)["run_id"]
@@ -1581,10 +1593,10 @@ class BuilderHarness:
         return self.runs.get(label, label)
 
     def mint_run(self, key, *, now=NOW):
-        """`init-run --run-id key`: sets `self.run_id` to the run id it replies with, labels it
+        """`init-run --creation-key key`: sets `self.run_id` to the run it mints, labels it
         `key`, and returns that run's `--repo-root` and `--run-id` arguments."""
         self.run_id = self.runs[key] = json.loads(self.cli(
-            "init-run", "--repo-root", self.root, "--run-id", key,
+            "init-run", "--repo-root", self.root, "--creation-key", key,
             "--now", now).stdout)["run_id"]
         return ("--repo-root", self.root, "--run-id", self.run_id)
 
@@ -2192,20 +2204,21 @@ class HelperInputTest(BuilderHarness, unittest.TestCase):
                            piped=self.pipe("ship-summary", summary))
 
         workflow = load(WORKFLOW, "workflow_state_inputs")
-        legacy = workflow.new_run_state(run_id="legacy-inputs", now=NOW, issues={})
+        legacy = workflow.new_run_state(
+            run_id="orchestrate-151", transaction_id=TRANSACTION, now=NOW, issues={})
         legacy["schema_version"] = 2
-        legacy.pop("admission"); legacy.pop("workers")
+        legacy.pop("admission"); legacy.pop("workers"); legacy.pop("transaction_id")
         legacy["issues"]["151"] = {"issue": 151, "outcome": None, "attempts": [
             workflow.new_control_attempt(issue=151, attempt_number=1,
                 worktree=str(self.root / "wt-151"), now=NOW,
                 deadline_at="2026-09-21T01:00:00Z")]}
         for field in ("progress_marker", "lane", "lane_budget_minutes", "lane_history"):
             legacy["issues"]["151"]["attempts"][0].pop(field)
-        legacy_state = self.root / ".superpowers/workflows/legacy-inputs/state.json"
+        legacy_state = self.root / ".superpowers/workflows/orchestrate-151/state.json"
         legacy_state.parent.mkdir(parents=True)
         legacy_state.write_text(json.dumps(legacy), encoding="utf-8")
         self.assert_parity(legacy_state, ("finish", "--repo-root", self.root, "--run-id",
-                           "legacy-inputs", "--now", LATER, "--issue", 151, "--attempt", 1),
+                           "orchestrate-151", "--now", LATER, "--issue", 151, "--attempt", 1),
                            "--result-file", json.dumps({**historical, "issue": 151}).encode())
 
 
@@ -2838,9 +2851,13 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         return json.loads(completed.stdout) if ok else completed
 
     def write_run(self, label, attempts, *, schema=7):
-        """A retained legacy ledger under `label`, which is its run id."""
-        run_id = self.runs[label] = label
-        state = self.workflow.new_run_state(run_id=run_id, now=NOW, issues={})
+        """A retained legacy ledger under `label`: a direct label is its own run id, any other
+        names a legacy orchestrate-<issue> run."""
+        run_id = self.runs[label] = label if attempt_identity.classify(label) == "direct" else (
+            f"orchestrate-{attempts[0]['issue']}-r{len(self.runs) + 1}")
+        state = self.workflow.new_run_state(
+            run_id=run_id, transaction_id=TRANSACTION, now=NOW, issues={})
+        state.pop("transaction_id")
         if schema < 7:
             attempts = [{name: value for name, value in attempt.items()
                          if name not in ("lane", "lane_budget_minutes", "lane_history")}
@@ -2877,7 +2894,9 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
             claims.append({"holder": "controller", "roles": {"controller": 1}, **held})
         expected = json.loads(before)
         expected.update(updated_at=now, admission={
-            "route": "claude-code", "releases": 0, "claims": claims})
+            "route": "claude-code", "releases": 0, "claims": claims}, schema_version=8,
+            transaction_id=TransactionStore(self.root / ".superpowers/attempt-transactions")
+            .lookup(attempt_identity.legacy_key(expected["run_id"])))
         self.assertEqual(json.loads(path.read_bytes()), expected)
 
     def attempt(self, issue, number=1, *, worktree=None, **changes):
@@ -2887,8 +2906,9 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         return value
 
     def direct_runs(self, issue):
-        """The direct-run entries of `issue` under `workflows`."""
-        return sorted((self.root / ".superpowers/workflows").glob(f"direct-{issue}-*"))
+        """The run directories whose ledger holds `issue`."""
+        return sorted(path.parent for path in (self.root / ".superpowers/workflows").glob(
+            "*/state.json") if str(issue) in json.loads(path.read_text())["issues"])
 
     FOLLOW_UP = "worktree-issue-172-chained-follow-up"
 
@@ -3251,7 +3271,15 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         return {"issue": 171, "recorded": {"path": self.worktree, "state": "mismatch"},
                 "candidate": other if candidate else None}
 
-    def assert_mismatch_refused(self, refused, path, before):
+    def assert_mismatch_refused(self, refused, path, before, *, bound=False):
+        """A refusal leaves the ledger as it was; `bound` is a retained legacy direct ledger
+        that the call's locked read committed as schema 8 first (#337 D14)."""
+        if bound:
+            self.assertEqual(json.loads(path.read_bytes()), {**json.loads(before),
+                "schema_version": 8, "transaction_id": TransactionStore(
+                    self.root / ".superpowers/attempt-transactions").lookup(
+                        attempt_identity.direct_key(171, 1))})
+            before = path.read_bytes()
         self.assertEqual((refused.returncode, refused.stdout, path.read_bytes()), (2, b"", before))
         self.assertIn(b"recorded custody worktree does not match the issue branch", refused.stderr)
 
@@ -3269,7 +3297,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
                 path = self.write_run("direct-171-000001", [self.failed_attempt(171)])
                 before = path.read_bytes()
                 self.assert_mismatch_refused(self.direct(ok=False, tracker=TRACKER, forge=NO_PR,
-                    worktree=self.mismatched(candidate)), path, before)
+                    worktree=self.mismatched(candidate)), path, before, bound=True)
 
     def test_contractless_new_run_on_a_mismatched_retained_path_refuses_at_once(self):
         self.project()
@@ -3280,7 +3308,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         for candidate in (True, False):
             with self.subTest(candidate=candidate):
                 self.assert_mismatch_refused(self.direct(ok=False, new_run=True, tracker=TRACKER,
-                    forge=NO_PR, worktree=self.mismatched(candidate)), path, before)
+                    forge=NO_PR, worktree=self.mismatched(candidate)), path, before, bound=True)
                 self.assertEqual(self.direct_runs(171), [path.parent])
 
     def merged(self, issue):
@@ -3315,9 +3343,11 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
 
     def test_v1_owners_survive_the_migration_to_interface_two(self):
         self.project()
-        state = self.workflow.new_run_state(run_id="survive", now=NOW, issues={})
+        run_id = self.runs["survive"] = "orchestrate-151-152"
+        state = self.workflow.new_run_state(
+            run_id=run_id, transaction_id=TRANSACTION, now=NOW, issues={})
         state["schema_version"] = 2
-        state.pop("admission"); state.pop("workers")
+        state.pop("admission"); state.pop("workers"); state.pop("transaction_id")
         for issue in (151, 152):
             state["issues"][str(issue)] = {"issue": issue, "outcome": None, "attempts": [
                 self.workflow.new_control_attempt(issue=issue, attempt_number=1,
@@ -3325,13 +3355,13 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
                     deadline_at="2026-09-21T01:00:00Z")]}
             for field in ("progress_marker", "lane", "lane_budget_minutes", "lane_history"):
                 state["issues"][str(issue)]["attempts"][0].pop(field)
-        path = self.root / ".superpowers/workflows/survive/state.json"
+        path = self.root / ".superpowers/workflows" / run_id / "state.json"
         path.parent.mkdir(parents=True); path.write_text(json.dumps(state), encoding="utf-8")
-        run = ("--repo-root", self.root, "--run-id", "survive")
+        run = ("--repo-root", self.root, "--run-id", run_id)
         boot = json.loads(self.cli("init-run", *run, "--now", NOW).stdout)
         self.assertEqual([(item["issue"], item["contract_digest"]) for item in boot["requirements"]],
                          [(151, None), (152, None)])
-        self.assertEqual(json.loads(path.read_text())["schema_version"], 7)
+        self.assertEqual(json.loads(path.read_text())["schema_version"], 8)
         swept = self.control("survive", self.control_request([151, 152]))
         self.assertEqual([action["kind"] for action in swept["actions"]], ["wait"])
         self.cli("progress", *run, "--now", LATER, "--issue", 151, "--attempt", 1,
@@ -3478,6 +3508,17 @@ class LedgerClockTest(LifecycleHarness, unittest.TestCase):
     @property
     def run_args(self):
         return ("--repo-root", self.root, "--run-id", self.run_id)
+
+    def run_cli(self, *args, ok=True):
+        """`init-run --run-id` of a run that is not there is the same call under `--creation-key`
+        (D12); `self.run_id` follows the run it mints."""
+        if args[0] == "init-run" and "--run-id" in args and self.run_id == "issue-14-test":
+            args = (*args[:args.index("--run-id")], "--creation-key", "ledger-clock",
+                    *args[args.index("--run-id") + 2:])
+        completed = super().run_cli(*args, ok=ok)
+        if args[0] == "init-run" and completed.returncode == 0:
+            self.run_id = json.loads(completed.stdout)["run_id"]
+        return completed
 
     def pin(self, value=PINNED):
         self.cli_env[CLOCK_ENV] = value
