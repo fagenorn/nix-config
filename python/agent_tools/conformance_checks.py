@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 import subprocess
 
-from agent_tools import host_admission
+from agent_tools import host_admission, release_adapter, release_profile
 from agent_tools.conformance_registry import (
     CHILD_TIMEOUT_SECONDS, CODE_STAGES, Context, LIVE_OWNER,
     NESTED_LEDGER_FINDINGS, NIX_STORE_PREFIX, Outcome, POLICY_PATH_MEMBERS,
@@ -190,7 +190,8 @@ def check_contract_resolvable(context: Context) -> Outcome:
         stage = "projection_fresh"
         context.bindings = resolver.normalize_bindings(source["bindings"], root)
         context.capabilities = resolver.compute_capabilities(
-            context.bindings, root, source["capabilities"])
+            context.bindings, root, source["capabilities"], source["release"],
+            source)
         resolver.validate_projections(root, source)
         context.stages["projection_fresh"] = Outcome("passed")
 
@@ -866,57 +867,72 @@ def check_residue_promoted_duplicate(context: "Context") -> "Outcome":
 # --------------------------------------------------------------------------
 # The release-profile lint items
 #
-# Three #86 findings registered with a declared subject and nothing more. This
-# slice ships no profile compiler, so every one of them reports `not_run`:
-# `subject_absent` where the contract declares no release command at all, and
-# `profile_unsupported` where it declares one this engine cannot read (D27).
-# Each also declares the code it will emit once a compiler exists, which is
-# what closes the registry now rather than growing it later (D5, D31).
+# Three #86 findings, each the live verdict of one admissibility rule of the
+# release-profile compiler (#124 D14): `observation_deadline`,
+# `rolled_back_reachable` and `restore_anchor`. `not_run` with
+# `subject_absent` where the contract declares `release: "unsupported"`;
+# otherwise `failed` for the first profile, in sorted id order, that the rule
+# refuses, and `passed` when none does. The contract has already passed the
+# release grammar by the time these run (they depend on
+# `repository.contract.valid`), which is the compiler's precondition.
+# `RELEASE_DESCRIPTORS` is the descriptor registry the rules read, a module
+# global so a test can inject a descriptor the closed registry does not carry.
 # --------------------------------------------------------------------------
 
 
-def find_release_profile(context: "Context") -> tuple[str, str | None]:
-    """Contract: ("absent", None) when the contract declares no release command,
-    else ("unsupported", <the declared command id>). This slice ships no profile
-    compiler, so a declared release command is a subject it cannot read (D27)."""
-    command_id = context.contract["bindings"]["workflow"]["release"]
-    if command_id is None:
+RELEASE_DESCRIPTORS = release_adapter.DESCRIPTORS
+
+
+def find_release_profile(context: "Context") -> tuple[str, dict | None]:
+    """Contract: ("absent", None) when the contract declares `release:
+    "unsupported"`, else ("profiles", <the contract's `profiles` object>)."""
+    release = context.contract["release"]
+    if release == "unsupported":
         return ("absent", None)
-    return ("unsupported", command_id)
+    return ("profiles", release["profiles"])
 
 
-def release_profile_outcome(context: "Context", repair_id: str) -> "Outcome":
-    """The verdict every release-profile item shares, given its own repair.
+def release_profile_outcome(context: "Context", rule: str) -> "Outcome":
+    """The verdict every release-profile item shares, given its own rule.
 
-    Neither branch can read as a pass, and neither drives `incomplete`, because
-    all three checks are optional (D6).
+    Absent subjects are `not_run`; they cannot read as a pass, and neither
+    drives `incomplete`, because all three checks are optional (D6). The facts
+    of a failure name the first offending profile and its first finding.
     """
-    state, command_id = find_release_profile(context)
+    _, reason_code, repair_id = release_profile.RULE_CHECKS[rule]
+    state, profiles = find_release_profile(context)
     if state == "absent":
         return Outcome("not_run", "subject_absent", repair_id, {"declared": False})
-    if state == "unsupported":
-        return Outcome("not_run", "profile_unsupported", repair_id,
-                       {"declared": True, "release_command": bound_fact(command_id)})
-    raise ValueError(f"unknown release profile state: {state!r}")
+    if state != "profiles":
+        raise ValueError(f"unknown release profile state: {state!r}")
+    for profile_id in sorted(profiles):
+        findings = release_profile.rule_findings(
+            rule, profile_id, profiles[profile_id], context.contract,
+            RELEASE_DESCRIPTORS)
+        if findings:
+            return Outcome("failed", reason_code, repair_id, {
+                "declared": True, "profile_id": bound_fact(profile_id),
+                "pointer": bound_fact(findings[0]["pointer"]),
+                "finding": bound_fact(findings[0]["reason"])})
+    return Outcome("passed", facts={"declared": True})
 
 
 def check_release_profile_rolled_back_reachable(context: "Context") -> "Outcome":
-    """Will fail a publication unit that has activation and immutable
-    publication but no residue-only compensate edge, which makes rolled_back
-    structurally unreachable (#86). This slice ships no profile compiler, so it
-    reports not_run."""
-    return release_profile_outcome(context, "release_profile.compensate.add")
+    """Fails a profile whose recovery declaration leaves `rolled_back`
+    structurally unreachable for a unit that has activation and immutable
+    publication but no residue-only compensate edge (#86)."""
+    return release_profile_outcome(context, "rolled_back_reachable")
 
 
 def check_release_profile_restore_anchor(context: "Context") -> "Outcome":
-    """Will fail a publication unit that destroys the anchor its restore edge
-    returns to, which the profile has to materialize before the unit runs
-    (#86). This slice ships no profile compiler, so it reports not_run."""
-    return release_profile_outcome(context, "release_profile.materialize.add")
+    """Fails a profile with a restore edge whose anchor the unit's own
+    `in_place` publication destroys, which the profile has to materialize
+    before the unit runs (#86)."""
+    return release_profile_outcome(context, "restore_anchor")
 
 
 def check_release_profile_observation_deadline(context: "Context") -> "Outcome":
-    """Will fail a publication unit whose observation phase leaves its deadline
-    optional, so an observation that never concludes never resolves the unit
-    (#86). This slice ships no profile compiler, so it reports not_run."""
-    return release_profile_outcome(context, "release_profile.deadline.require")
+    """Fails a profile with a publication action whose observation deadline is
+    left out, so an observation that never concludes never resolves the unit
+    (#86)."""
+    return release_profile_outcome(context, "observation_deadline")

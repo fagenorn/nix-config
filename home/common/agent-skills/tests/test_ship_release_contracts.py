@@ -139,6 +139,18 @@ class ShipReleaseContractsTest(unittest.TestCase):
     def test_forge_less_skip_check_reads_the_tags_at_the_merge_sha(self):
         self.assertIn('git tag --points-at "$MERGE_SHA"', self.skill)
 
+    def test_release_creation_uses_the_guarded_spelling(self):
+        """D21: 4.5f is the single guarded line, with the tag and slug literal."""
+        block = self.section(self.skill, "### 4.5f.", "### 4.5g.")
+        self.assertIn(
+            '${GH_PREFIX}gh release create <vX.Y.Z> --repo <repo-slug> --verify-tag '
+            '--title "<vX.Y.Z> — <one-line scope from PR title>" '
+            "--notes-file <release-notes-path>\n",
+            block,
+        )
+        for forbidden in ("--target", "$NEXT_VERSION", "\\\n"):
+            self.assertNotIn(forbidden, block)
+
     # -- R3: Phase 0 resumes from durable state and merged PRs ----------------
 
     def test_phase_zero_reads_the_state_file_and_merged_prs(self):

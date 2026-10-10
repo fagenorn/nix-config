@@ -362,7 +362,7 @@ SHARED_POLICY_ENTRIES = {
     "grill-with-docs/SKILL.md": ("bindings.paths.context",),
     "research/SKILL.md": ("bindings.paths.artifacts.specs",),
     "ship-issue/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.workflow.review.code", "bindings.workflow.verification"),
-    "ship-release/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.workflow.release", "bindings.deploy"),
+    "ship-release/SKILL.md": ("bindings.tracker", "bindings.vcs", "bindings.commands", "bindings.deploy"),
     "to-issues/SKILL.md": ("bindings.tracker", "bindings.paths"),
     "wayfind/SKILL.md": ("bindings.tracker",),
     "worktrees/SKILL.md": ("bindings.vcs",),
@@ -435,6 +435,14 @@ LEGACY_MIGRATION_INPUTS = {
     }),
     "home/common/agent-skills/tests/test_adopt_project_boundaries.py": frozenset({
         ".claude/skills.config.json", "specDir", "planDir",  # policy-gate-pattern
+    }),
+    # The release bridge (#124) reads the retired deploy member of the legacy config.
+    "python/agent_tools/release_bridge.py": frozenset({".claude/skills.config.json"}),  # policy-gate-pattern
+    "tests/test_release_bridge.py": frozenset({
+        ".claude/skills.config.json", "maxParallel",  # policy-gate-pattern
+    }),
+    "tests/fixtures/legacy-skills-config-1722a65d.json": frozenset({
+        "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
     }),
 }
 

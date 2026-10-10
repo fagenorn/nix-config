@@ -226,10 +226,13 @@ in
   };
 
   # codex-plugin-cc is implemented in Node and shells out to the separately
-  # managed native Codex CLI.
+  # managed native Codex CLI. The lifecycle guard is also on PATH so the forge
+  # adapter and the project resolver find `claude-bash-lifecycle-guard` by name;
+  # the registered hook keeps its own store path.
   home.packages = [
     pkgs.nodejs
     codexCompanionBin
+    lifecycleGuard
   ];
 
   # Claude-only bridge orchestration. Keeping this outside the shared

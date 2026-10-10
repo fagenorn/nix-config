@@ -49,6 +49,7 @@ let
     "launch-commit"
     "launch-scope"
     "promotion"
+    "release"
     "replay-retained"
     "resolve-project"
     "review-feasibility"

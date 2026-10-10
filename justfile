@@ -123,6 +123,12 @@ agent-workflow-tests:
     tests/test_transaction_receipt.py \
     tests/test_transaction_disposition.py \
     tests/test_transaction_core_sweep.py \
+    tests/test_release_grammar.py \
+    tests/test_release_profile.py \
+    tests/test_release_bridge.py \
+    tests/test_release_command.py \
+    tests/test_forge_adapter.py \
+    tests/test_release_adapter_core.py \
     tests/test_agent_costs.py \
     tests/test_agent_model_drift_schema.py \
     tests/test_agent_model_drift_routing.py \
