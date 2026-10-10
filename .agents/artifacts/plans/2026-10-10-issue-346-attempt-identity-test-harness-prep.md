@@ -53,3 +53,7 @@ Task 4 — Admission read-back, clock skew, budgets and #337 replay — `home/co
 - Mechanical AC2 proxy alongside the diff review: D7 (appended by this plan).
 
 ---
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only mode, base SHA `901da282`, no focus, no fallback. Accepted 1 (PR346-01, blocking: the Task 2 and Task 4 forbidden-text gates now exempt the approved `_as_legacy` line `state.pop("transaction_id", None)`), rejected 0, deferred 0.

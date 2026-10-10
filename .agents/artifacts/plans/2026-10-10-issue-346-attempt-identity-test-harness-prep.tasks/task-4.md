@@ -61,7 +61,7 @@ for f in home/common/agent-skills/tests/test_workflow_state.py home/common/agent
     if { [ "$op" = eq ] && [ "$a" != "$b" ]; } || { [ "$op" = ge ] && [ "$b" -lt "$a" ]; }; then
       echo "FAIL $f $pat $a -> $b"; else echo "ok $f $pat $a -> $b"; fi
   done
-  if git diff "$BASE" -- "$f" | grep -E '^\+.*(TransactionStore|attempt_identity|attempt_store|ORCHESTRATED|TRANSACTION|LedgerRefused|creation-key|transaction_id)'; then echo "FAIL forbidden $f"; fi
+  if git diff "$BASE" -- "$f" | grep -vF 'state.pop("transaction_id", None)' | grep -E '^\+.*(TransactionStore|attempt_identity|attempt_store|ORCHESTRATED|TRANSACTION|LedgerRefused|creation-key|transaction_id)'; then echo "FAIL forbidden $f"; fi
 done
 git diff --name-only "$BASE" HEAD -- . ':!.agents/artifacts'
 ```

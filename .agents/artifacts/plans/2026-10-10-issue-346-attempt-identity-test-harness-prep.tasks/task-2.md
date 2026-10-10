@@ -87,7 +87,7 @@ for spec in 'eq:^[[:space:]]*def test_' 'ge:self\.assert|\.assert_called' 'eq:sk
     echo "FAIL $pat $a -> $b"; else echo "ok $pat $a -> $b"; fi
 done
 n=$(git diff -U10 "$BASE" -- "$f" | wc -c); echo "WS -U10 $n"; [ "$n" -le 60000 ] || echo FAIL
-if git diff "$BASE" -- "$f" | grep -E '^\+.*(TransactionStore|attempt_identity|attempt_store|ORCHESTRATED|LedgerRefused|creation-key|transaction_id|copytree)'; then echo FAIL; fi
+if git diff "$BASE" -- "$f" | grep -vF 'state.pop("transaction_id", None)' | grep -E '^\+.*(TransactionStore|attempt_identity|attempt_store|ORCHESTRATED|LedgerRefused|creation-key|transaction_id|copytree)'; then echo FAIL; fi
 ```
 
 Over 60000: apply D5 — revert pure literal-to-`direct_run_id` sites from Task 1 (smallest value per byte first, never a helper definition) until it fits, and list each reverted site in the report for the PR body.
