@@ -663,15 +663,14 @@ def tracked_inventory(root: Path) -> list[tuple[str, str]]:
     return sorted(inventory)
 
 
-def tree_inventory(root: Path, revision: str) -> list[tuple[str, str]]:
-    """Every path in the tree at `revision` with its git object id.
+def tree_records(root: Path, revision: str) -> list[tuple[str, str, str]]:
+    """Every path in the tree at `revision` as sorted `(path, mode, oid)`.
 
-    From `git ls-tree -r -z`, whose records are `<mode> <type> <object>\t<path>`:
-    the same `(path, object id)` shape `tracked_inventory` reads from the
-    index. A record that has no path or not exactly three head fields refuses
+    From `git ls-tree -r -z`, whose records are `<mode> <type> <object>\t<path>`.
+    A record that has no path or not exactly three head fields refuses
     `adopt.git.unparseable_tree`.
     """
-    inventory = []
+    records = []
     for record in split_nul(git_or_fail(root, "ls-tree", "-r", "-z",
                                         revision)):
         head, _, path = record.partition("\t")
@@ -679,8 +678,18 @@ def tree_inventory(root: Path, revision: str) -> list[tuple[str, str]]:
         if len(fields) != 3 or not path:
             raise refuse("adopt_failure", "adopt.git.unparseable_tree", "",
                          "a tree record could not be read")
-        inventory.append((path, fields[2]))
-    return sorted(inventory)
+        records.append((path, fields[0], fields[2]))
+    return sorted(records)
+
+
+def tree_inventory(root: Path, revision: str) -> list[tuple[str, str]]:
+    """Every path in the tree at `revision` with its git object id.
+
+    `tree_records` without the mode: the same `(path, object id)` shape
+    `tracked_inventory` reads from the index.
+    """
+    return [(path, object_id)
+            for path, _, object_id in tree_records(root, revision)]
 
 
 def has_remote(root: Path) -> bool:

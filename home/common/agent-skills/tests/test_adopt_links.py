@@ -76,6 +76,20 @@ class LinkGrammarTest(unittest.TestCase):
         self.assertEqual(targets("[![i](a.png)](b.md)\n"),
                          [("a.png", False), ("b.md", False)])
 
+    def test_a_title_is_never_scanned_for_links(self):
+        for text, expected in (
+                ('[o](old/a.md "Example: [i](old/b.md)")\n',
+                 [("old/a.md", False)]),
+                ("[o](<a b.md> '[i](c.md)') [p](d.md ([i](e.md)))\n",
+                 [("a b.md", True), ("d.md", False)]),
+                ('[![i](a.png "[t](t.md)")](b.md "[u](u.md)")\n',
+                 [("a.png", False), ("b.md", False)])):
+            with self.subTest(text=text):
+                self.assertEqual(targets(text), expected)
+
+    def test_a_link_overlapping_a_recorded_link_is_not_a_link(self):
+        self.assertEqual(targets("[a [b](c](d.md))\n"), [("d.md", False)])
+
     def test_offsets_cover_exactly_the_target(self):
         text = "x [a](<b c.md>) [d](e.md#f)\r\n[r]: g.md\r\n"
         self.assertEqual(
@@ -165,6 +179,15 @@ class RewriteTest(unittest.TestCase):
         self.assertEqual(result.summary,
                          summary(inbound=(1, ["README.md"])))
 
+    def test_a_title_stays_literal_text(self):
+        before = '[outer](old/a.md "Example: [inner](old/b.md)")\n'
+        after = '[outer](new/x/a.md "Example: [inner](old/b.md)")\n'
+        result = rewrites({"README.md": before})
+        self.assertEqual(result.files, {
+            "README.md": RewrittenFile("README.md", before, after)})
+        self.assertEqual(result.summary,
+                         summary(inbound=(1, ["README.md"])))
+
     def test_an_outbound_link_is_re_rooted_and_co_moved_links_stay(self):
         before = "[r](../README.md) [b](b.md) [c](./sub/c.md) [k](<../keep/k.md>)\n"
         after = "[r](../../README.md) [b](b.md) [c](./sub/c.md) [k](<../../keep/k.md>)\n"
@@ -243,6 +266,30 @@ class RewriteTest(unittest.TestCase):
     def test_angle_emission_escapes_only_what_changes_meaning(self):
         self.assertEqual(adopt_links.angle_target("d ü/a#b?c%d<e>f\r\n.md"),
                          "d ü/a%23b%3Fc%25d%3Ce%3Ef%0D%0A.md")
+
+    def test_a_scheme_shaped_name_is_emitted_relative(self):
+        paths = ["README.md", ".claude/specs/a.md",
+                 ".agents/artifacts/specs/urn:reference.md"]
+        moves = [(".claude/specs/a.md", ".agents/artifacts/specs/a.md")]
+        before = ("[r](<../../.agents/artifacts/specs/urn:reference.md#h>) "
+                  "[s](../../.agents/artifacts/specs/urn%3Areference.md)\n")
+        after = "[r](<./urn:reference.md#h>) [s](urn%3Areference.md)\n"
+        result = rewrites({".claude/specs/a.md": before}, paths=paths,
+                          moves=moves)
+        self.assertEqual(result.files, {
+            ".agents/artifacts/specs/a.md": RewrittenFile(
+                ".claude/specs/a.md", before, after)})
+        after_tree = Tree(["README.md", ".agents/artifacts/specs/a.md",
+                           ".agents/artifacts/specs/urn:reference.md"])
+        self.assertEqual(
+            [(adopt_links.is_relative(link.target),
+              adopt_links.resolve(".agents/artifacts/specs/a.md",
+                                  link.target, after_tree))
+             for link in adopt_links.links(after)],
+            [(True, Resolved(".agents/artifacts/specs/urn:reference.md",
+                             False))] * 2)
+        self.assertEqual(adopt_links.broken_count(
+            ".agents/artifacts/specs/a.md", after, after_tree), 0)
 
     def test_a_co_moved_non_ascii_link_stays_byte_identical(self):
         result = rewrites({"old/a.md": "[u](ü.md)\n"},

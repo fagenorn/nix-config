@@ -5,12 +5,13 @@ across a move (#345): the grammar that finds a link target in a Markdown text
 (`links`), the relativity test and the resolution of a target against a tree
 of paths (`is_relative`, `resolve`), the mapping of each target onto its
 successor and the re-emission of the target (`plan_link_rewrites`), and the
-readers that feed it a tree's Markdown (`tree_records`, `index_records`,
-`markdown_texts`, `derive_link_rewrites`).
+readers that feed it a tree's Markdown (`index_records`, `markdown_texts`,
+`derive_link_rewrites`, over `adopt_inspection.tree_records`, which it
+re-exports).
 
 It is imported and never run. It reads blobs only through git, never the
 working tree, and imports `adopt_inspection` and nothing that imports the
-resolver (#145 D3, #148 D26). Standard library only.
+resolver (#345 D3, #148 D26). Standard library only.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from typing import Iterable
 import urllib.parse
 
 from agent_tools.adopt_inspection import (
-    git_or_fail, is_secret_path, refuse, run_git, split_nul)
+    git_or_fail, is_secret_path, refuse, run_git, split_nul, tree_records)
 
 MARKDOWN_SUFFIXES = (".md", ".markdown")
 REGULAR_MODES = ("100644", "100755")
@@ -195,9 +196,16 @@ def _inline_links(line: str, offset: int) -> list[Link]:
             k = _skip_blanks(line, after)
         if line[k:k + 1] != ")":
             continue
+        # The region from the opening `(` to the closing `)` holds the
+        # destination and the title: no later opener inside it starts a link,
+        # and a candidate whose region reaches into it is not one. The label
+        # stays open, so an image inside link text is still found (D15).
+        region = range(close + 1, k + 1)
+        if any(p in covered for p in region):
+            continue
         found.append(Link(offset + start, offset + end, line[start:end],
                           angle))
-        covered.update(range(start, end))
+        covered.update(region)
     return found
 
 
@@ -359,6 +367,11 @@ def _emitted(link: Link, resolved: Resolved, successor: str,
     if resolved.directory and raw.endswith("/"):
         rel += "/"
     if link.angle:
+        # `quote` encodes a bare target's `:`, but an angle target keeps it
+        # raw, so a first segment like `urn:x.md` would read as a URL scheme
+        # and stop counting as relative; `./` keeps it a path.
+        if _SCHEME.match(rel):
+            rel = "./" + rel
         return angle_target(rel) + suffix
     return urllib.parse.quote(rel, safe="/") + suffix
 
@@ -415,20 +428,6 @@ def plan_link_rewrites(texts: dict[str, str], paths: Iterable[str],
 # --------------------------------------------------------------------------
 # Reading a tree's Markdown through git
 # --------------------------------------------------------------------------
-
-
-def tree_records(root: Path, revision: str) -> list[tuple[str, str, str]]:
-    """`(path, mode, object id)` for every path at `revision`, sorted."""
-    records = []
-    for record in split_nul(git_or_fail(root, "ls-tree", "-r", "-z",
-                                        revision)):
-        head, _, path = record.partition("\t")
-        fields = head.split()
-        if len(fields) != 3 or not path:
-            raise refuse("adopt_failure", "adopt.git.unparseable_tree", "",
-                         "a tree record could not be read")
-        records.append((path, fields[0], fields[2]))
-    return sorted(records)
 
 
 def index_records(root: Path) -> list[tuple[str, str, str]]:
