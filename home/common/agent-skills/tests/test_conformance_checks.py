@@ -11,12 +11,20 @@ import fcntl
 import hashlib
 import json
 import os
+import types
 import unittest
 from pathlib import Path
 
 from .conformance_test_support import (
     REPO_ROOT, ReportAssertions, doctor, fixture, load_module, make_root, run,
 )
+
+
+RELEASE_FIXTURES = REPO_ROOT / "tests/fixtures/release"
+
+
+def release_fixture(name: str) -> dict:
+    return json.loads((RELEASE_FIXTURES / name).read_text(encoding="utf-8"))
 
 
 def write_file(root: Path, relative: str, text: str = "x\n") -> Path:
@@ -535,7 +543,12 @@ class ReleaseProfileLintTest(ReportAssertions, unittest.TestCase):
 
     def test_all_three_are_registered_with_a_declared_subject(self):
         with fixture() as tmp:
-            report, by_id = doctor(self, make_root(tmp))
+            root = make_root(tmp)
+            path = root / ".agents/project.json"
+            contract = json.loads(path.read_text(encoding="utf-8"))
+            contract["release"] = "unsupported"
+            path.write_text(json.dumps(contract), encoding="utf-8")
+            report, by_id = doctor(self, root)
             for check_id in RELEASE_PROFILE_IDS:
                 with self.subTest(check=check_id):
                     check = by_id[check_id]
@@ -556,32 +569,63 @@ class ReleaseProfileLintTest(ReportAssertions, unittest.TestCase):
                 self.assertIsNone(repairs[repair_id]["operation"])
             self.assert_validates(report)
 
-    def test_a_declared_release_command_is_unsupported_not_absent(self):
+
+class ReleaseProfileChecksTest(ReportAssertions, unittest.TestCase):
+    def doctor_with(self, profile):
         with fixture() as tmp:
             root = make_root(tmp)
             path = root / ".agents/project.json"
             contract = json.loads(path.read_text(encoding="utf-8"))
-            contract["bindings"]["workflow"]["release"] = "nix-activate"
-            contract["capabilities"]["release"] = {"support": "supported"}
+            contract["release"] = {"profiles": {"github-release": profile}}
             path.write_text(json.dumps(contract), encoding="utf-8")
             report, by_id = doctor(self, root)
-            for check_id in RELEASE_PROFILE_IDS:
-                check = by_id[check_id]
-                self.assertEqual([check["status"], check["reason_code"]],
-                                 ["not_run", "profile_unsupported"])
-                self.assertEqual(check["facts"], {"declared": True,
-                                                  "release_command": "nix-activate"})
-            self.assertEqual(report["outcome"]["status"], "passed")
             self.assert_validates(report)
+            return by_id
 
-    def test_an_unknown_locator_state_raises(self):
-        """S3: the closed-set default branch (D32)."""
+    def test_an_admissible_profile_passes_all_three(self):
+        by_id = self.doctor_with(release_fixture("github-release-profile.json"))
+        for check_id in RELEASE_PROFILE_IDS:
+            self.assertEqual([by_id[check_id]["status"], by_id[check_id]["facts"]],
+                             ["passed", {"declared": True}])
+
+    def test_nix_config_contract_passes_all_three(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, make_root(tmp))
+            self.assert_validates(report)
+        for check_id in RELEASE_PROFILE_IDS:
+            self.assertEqual(by_id[check_id]["status"], "passed", check_id)
+
+    def test_each_rule_fails_its_own_check(self):
+        missing = release_fixture("github-release-profile.json")
+        del missing["publication"]["actions"][0]["observation_deadline_ms"]
+        restorable = release_fixture("github-release-profile.json")
+        restorable["recovery"]["units"]["tag"] = {
+            "posture": "restorable", "anchor": {"target": "repository", "predicate": "p", "parameters": {}},
+            "compatibility": {"predicate": "q", "parameters": {}},
+            "edges": [{"action": "restore", "operation": "tag", "parameters": {}, "residue": None}]}
+        for profile, check_id, reason in (
+                (missing, "repository.release_profile.observation_deadline", "observation_deadline_optional"),
+                (restorable, "repository.release_profile.rolled_back_reachable", "rolled_back_unreachable")):
+            with self.subTest(check_id=check_id):
+                check = self.doctor_with(profile)[check_id]
+                self.assertEqual([check["status"], check["reason_code"], check["facts"]["profile_id"]],
+                                 ["failed", reason, "github-release"])
+
+    def test_restore_anchor_fails_through_the_s3_seam(self):
+        """D20: forge declares no in_place operation, so only an injected descriptor reaches it."""
         checks = load_module().CHECKS_MODULE
-        original = checks.find_release_profile
-        checks.find_release_profile = lambda _context: ("compiled", "x")
-        self.addCleanup(setattr, checks, "find_release_profile", original)
-        with self.assertRaises(ValueError):
-            checks.check_release_profile_restore_anchor(object())
+        store = release_fixture("fixture-store-descriptor.json")
+        self.addCleanup(setattr, checks, "RELEASE_DESCRIPTORS", checks.RELEASE_DESCRIPTORS)
+        checks.RELEASE_DESCRIPTORS = {**checks.RELEASE_DESCRIPTORS, "fixture-store": store}
+        profile = release_fixture("destroyed-anchor-profile.json")
+        context = types.SimpleNamespace(contract={"release": {"profiles": {"restorable": profile}}})
+        outcome = checks.check_release_profile_restore_anchor(context)
+        self.assertEqual((outcome.status, outcome.reason_code), ("failed", "restore_anchor_destroyed"))
+
+    def test_profile_unsupported_is_retired(self):
+        registry = load_module().registry
+        for check in registry.REGISTRY:
+            self.assertNotIn("profile_unsupported", [code for code, _ in check.findings])
 
 
 LEFTOVER = b"Investigate before changing.\n"

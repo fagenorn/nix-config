@@ -600,7 +600,7 @@ class ReasonCodePositionTest(ResolverTestCase):
 
         cases.append(("capability_unavailable", self.refusal(
             "resolve", "--repo-root", str(self.make_root()),
-            "--require", "release")))
+            "--require", "deploy")))
 
         broken = self.make_root()
         self.set_manifest(None)

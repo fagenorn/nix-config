@@ -49,7 +49,7 @@ import re
 import shutil
 import sys
 
-from agent_tools import agent_platform
+from agent_tools import agent_platform, release_adapter, release_profile
 
 
 CAPABILITY_NAMES = (
@@ -65,6 +65,11 @@ CAPABILITY_NAMES = (
     "release",
     "deploy",
 )
+# D1: `capabilities.release` is derived from the `release` member, never
+# authored, so an authored contract declares these ten and the snapshot all
+# eleven.
+AUTHORED_CAPABILITY_NAMES = tuple(
+    name for name in CAPABILITY_NAMES if name != "release")
 BINDING_NAMESPACES = ("vcs", "tracker", "paths", "commands", "workflow", "deploy")
 CAPABILITY_STATES = ("available", "unsupported", "blocked")
 AUTHORED_SUPPORT = ("supported", "unsupported")
@@ -81,6 +86,8 @@ REASON_CODES = (
     "vcs_worktree_unsupported",
     "knowledge_path_missing",
     "command_missing",
+    "release_profile_inadmissible",
+    "release_adapter_unavailable",
 )
 PROJECTION_KINDS = ("generated_file", "managed_import")
 PROJECTION_STATUSES = ("in_sync", "missing", "stale")
@@ -113,6 +120,7 @@ TOP_LEVEL_MEMBERS = (
     "capabilities",
     "projections",
     "platform",
+    "release",
 )
 # R2.1: the interval's exact members. The closed schema-compatibility reason
 # codes are `agent_platform.SCHEMA_REASON_CODES` — one home for that set (D7),
@@ -138,7 +146,7 @@ PATHS_LIST_MEMBERS = (
 )
 PATHS_MEMBERS = ("artifacts",) + PATHS_LIST_MEMBERS
 COMMAND_MEMBERS = ("argv", "cwd", "env")
-WORKFLOW_MEMBERS = ("verification", "orchestration", "review", "release")
+WORKFLOW_MEMBERS = ("verification", "orchestration", "review")
 # #279: the one workflow member an author may leave out. `null` and absent both
 # mean no light lane; the resolver never inserts the member itself.
 WORKFLOW_OPTIONAL_MEMBERS = ("light_lane",)
@@ -169,7 +177,6 @@ CAPABILITY_BINDING_REQUIREMENTS = {
         (("workflow", "review", "plan"), lambda value: value is not None),),
     "review.code": (
         (("workflow", "review", "code"), lambda value: value is not None),),
-    "release": ((("workflow", "release"), lambda value: value is not None),),
     "deploy": (
         (("deploy", "adapter"), lambda value: value != "none"),
         (("deploy", "command"), lambda value: value is not None),
@@ -739,9 +746,6 @@ def validate_workflow(workflow: dict, commands: dict | None,
             if name in review and review[name] is not None:
                 check_command_id(
                     review[name], f"{pointer}/{name}", commands, violations)
-    if "release" in workflow and workflow["release"] is not None:
-        check_command_id(
-            workflow["release"], "/bindings/workflow/release", commands, violations)
     pointer = "/bindings/workflow/light_lane"
     if "light_lane" in workflow and workflow["light_lane"] is not None and check_object(
             workflow["light_lane"], pointer, "workflow", violations):
@@ -818,8 +822,9 @@ def validate_capabilities(source: dict, violations: list[dict]) -> None:
     if not check_object(capabilities, "/capabilities", "capabilities", violations):
         return
     check_exact_members(
-        capabilities, "/capabilities", CAPABILITY_NAMES, "capabilities", violations)
-    for name in CAPABILITY_NAMES:
+        capabilities, "/capabilities", AUTHORED_CAPABILITY_NAMES, "capabilities",
+        violations)
+    for name in AUTHORED_CAPABILITY_NAMES:
         if name not in capabilities:
             continue
         pointer = f"/capabilities/{name}"
@@ -857,7 +862,7 @@ def validate_capability_bindings(source: dict) -> list[dict]:
     bindings = source.get("bindings")
     if not isinstance(capabilities, dict) or not isinstance(bindings, dict):
         return violations
-    for name in CAPABILITY_NAMES:
+    for name in AUTHORED_CAPABILITY_NAMES:
         declaration = capabilities.get(name)
         if (not isinstance(declaration, dict)
                 or declaration.get("support") != "supported"):
@@ -968,6 +973,11 @@ def validate_contract(source: dict, manifest: dict) -> list[dict]:
         validate_projection_entries(source, violations)
     if "platform" in source:
         validate_platform(source, violations)
+    if "release" in source:
+        # D2: the grammar's violations join the one ordered list; what the
+        # admissibility rules refuse is a capability state, never a violation.
+        violations.extend(
+            release_profile.grammar_violations(source["release"], source))
     violations.extend(validate_capability_bindings(source))
     return violations
 
@@ -1047,8 +1057,6 @@ def first_unmet_prerequisite(name: str, bindings: dict, root: Path) -> str | Non
         ids = [bindings["workflow"]["review"]["plan"]]
     elif name == "review.code":
         ids = [bindings["workflow"]["review"]["code"]]
-    elif name == "release":
-        ids = [bindings["workflow"]["release"]]
     elif name == "deploy":
         ids = [bindings["deploy"]["command"]]
     else:
@@ -1056,10 +1064,54 @@ def first_unmet_prerequisite(name: str, bindings: dict, root: Path) -> str | Non
     return None if commands_resolve(bindings, ids) else "command_missing"
 
 
-def compute_capabilities(bindings: dict, root: Path, declarations: dict) -> dict:
-    """Contract: eleven entries, each {"state", "reason_code", "repair_id"}."""
+def release_capability(release: object, source: dict, root: Path) -> dict:
+    """The derived `capabilities.release` entry (D1, D23).
+
+    `release` is the authored member and the grammar has already accepted it,
+    which `admissibility_findings` assumes. Profiles are read in sorted id
+    order: the first with an admissibility finding blocks as
+    `release_profile_inadmissible`; failing that, the first executable some
+    bound adapter's descriptor names that does not resolve blocks as
+    `release_adapter_unavailable`; otherwise the capability is available.
+    """
+    if release == "unsupported":
+        return {"state": "unsupported", "reason_code": None, "repair_id": None}
+    profiles = release["profiles"]
+    reason_code = None
+    for profile_id in sorted(profiles):
+        if release_profile.admissibility_findings(
+                profile_id, profiles[profile_id], source):
+            reason_code = "release_profile_inadmissible"
+            break
+    else:
+        for profile_id in sorted(profiles):
+            adapters = profiles[profile_id]["bindings"]["adapters"]
+            for alias in sorted(adapters):
+                descriptor = release_adapter.DESCRIPTORS[adapters[alias]["adapter"]]
+                if not all(resolves_on_path(name, root)
+                           for name in descriptor["executables"]):
+                    reason_code = "release_adapter_unavailable"
+                    break
+            if reason_code is not None:
+                break
+    if reason_code is None:
+        return {"state": "available", "reason_code": None, "repair_id": None}
+    return {"state": "blocked", "reason_code": reason_code,
+            "repair_id": f"capability.release.{reason_code}"}
+
+
+def compute_capabilities(bindings: dict, root: Path, declarations: dict,
+                         release: object, source: dict) -> dict:
+    """Contract: eleven entries, each {"state", "reason_code", "repair_id"}.
+
+    Ten are read from the authored `declarations`; `release` is derived from
+    the `release` member by `release_capability` (D1).
+    """
     resolved = {}
     for name in CAPABILITY_NAMES:
+        if name == "release":
+            resolved[name] = release_capability(release, source, root)
+            continue
         support = declarations[name]["support"]
         if support == "unsupported":
             resolved[name] = {
@@ -1098,7 +1150,7 @@ def build_snapshot(root: Path, source: dict, manifest: dict) -> dict:
         },
         "bindings": bindings,
         "capabilities": compute_capabilities(
-            bindings, root, source["capabilities"]),
+            bindings, root, source["capabilities"], source["release"], source),
     }
 
 
