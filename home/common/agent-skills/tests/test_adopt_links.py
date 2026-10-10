@@ -66,6 +66,12 @@ class LinkGrammarTest(unittest.TestCase):
     def test_an_unclosed_backtick_is_literal(self):
         self.assertEqual(targets("a ` b [c](z.md)\n"), [("z.md", False)])
 
+    def test_an_escaped_backtick_opens_no_code_span(self):
+        self.assertEqual(targets("\\` [a](x.md) \\`\n"), [("x.md", False)])
+        self.assertEqual(targets("\\\\`[a](x.md)`\n"), [])
+        self.assertEqual(targets("\\``[a](x.md)`\n"), [])
+        self.assertEqual(targets("`a\\` [b](y.md) `\n"), [("y.md", False)])
+
     def test_an_escaped_bracket_opens_nothing(self):
         self.assertEqual(targets("\\[a](x.md)\n"), [])
 

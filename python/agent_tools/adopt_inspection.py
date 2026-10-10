@@ -177,9 +177,12 @@ SECRET_MARKERS = ("credential", "credentials", "private", "secret", "secrets",
                   "token", "tokens")
 SECRET_PREFIXES = (".env",)
 
-# D30: the whole living-reference sweep. Nothing outside this tuple is ever a
-# rewrite target — a repository-wide reference scan is not mechanically
-# decidable and would risk re-pointing machine-global platform source.
+# D30: the whole living-reference sweep for non-link text. Nothing outside
+# this tuple is ever a rewrite target for a prose or configuration reference —
+# a repository-wide reference scan is not mechanically decidable and would risk
+# re-pointing machine-global platform source. Relative Markdown link targets are
+# the one exception, rewritten across every tracked Markdown file by
+# `adopt_links` (#345 D1).
 LEGACY_BINDING_CONFIGS = (".claude/skills.config.json",)
 LEGACY_BINDING_KEYS = (
     ("specDir", ("artifacts", "specs")),

@@ -839,6 +839,22 @@ class StatusFoldTest(unittest.TestCase):
         self.assertEqual(fold([("R ", ("b/a.md", "a.md"))], required),
                          [("R ", ("b/a.md", "a.md"))])
 
+    def test_a_cross_paired_rename_folds_by_path_effects(self):
+        # A rewritten `n/a.md` byte-identical to the original `b.md` can be
+        # paired by git with the wrong source.
+        required = [("R ", ("n/a.md", "a.md")), ("R ", ("n/b.md", "b.md"))]
+        actual = [("R ", ("n/a.md", "b.md")), ("D ", ("a.md",)),
+                  ("A ", ("n/b.md",))]
+        self.assertEqual(adopt_apply.fold_split_renames(actual, required),
+                         [("R ", ("n/b.md", "b.md")),
+                          ("R ", ("n/a.md", "a.md"))])
+
+    def test_an_unplanned_rename_is_split_into_its_halves(self):
+        self.assertEqual(
+            adopt_apply.fold_split_renames([("R ", ("new.json", "old.json"))],
+                                           []),
+            [("D ", ("old.json",)), ("A ", ("new.json",))])
+
     def test_the_commit_gates_place_the_link_gate_before_the_cold_clone(self):
         gates = adopt_apply.COMMIT_GATES
         self.assertEqual(gates.index("no-new-broken-link") + 1,

@@ -277,8 +277,21 @@ def fold_split_renames(actual: list[tuple],
     plus an addition. For every required rename absent from `actual` while both
     halves are present, the two records become the rename, at the deletion's
     position; every other record is returned unchanged and in order (D16).
+
+    Git's pairing of a rename's source is itself a similarity guess: a
+    rewritten moved file can come out byte-identical to another moved file's
+    original, and git may then pair the wrong source with it. So every rename
+    record the plan did not demand is first split into its deletion and
+    addition, and the planned renames are folded back from those halves: the
+    comparison is over path effects, never over git's inferred pairing.
     """
-    folded = list(actual)
+    folded: list[tuple] = []
+    for record in actual:
+        code, paths = record
+        if code == "R " and len(paths) == 2 and record not in required:
+            folded.extend([("D ", (paths[1],)), ("A ", (paths[0],))])
+        else:
+            folded.append(record)
     for record in required:
         code, paths = record
         if code != "R " or len(paths) != 2 or record in folded:
@@ -401,17 +414,9 @@ def gate_worktree_status_matches(run: GateRun) -> bool:
         if record in remaining:
             remaining.remove(record)
             continue
-        # Git's rename detection is a similarity heuristic, so a planned
-        # deletion and a planned new file with similar content — a superseded
-        # evidence record and its successor — can be reported as one rename.
-        # That record is exactly the planned pair, and is accepted as such.
-        code, paths = record
-        if code == "R " and len(paths) == 2:
-            pair = [("D ", (paths[1],)), ("A ", (paths[0],))]
-            if all(entry in remaining for entry in pair):
-                for entry in pair:
-                    remaining.remove(entry)
-                continue
+        # A rename the plan did not demand — git pairing a superseded evidence
+        # record with its successor, say — arrives here already split into its
+        # planned deletion and addition (`fold_split_renames`).
         if record not in optional:
             return False
     return not remaining

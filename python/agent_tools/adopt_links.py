@@ -11,7 +11,7 @@ re-exports).
 
 It is imported and never run. It reads blobs only through git, never the
 working tree, and imports `adopt_inspection` and nothing that imports the
-resolver (#345 D3, #148 D26). Standard library only.
+resolver (#148 D26). Standard library only.
 """
 
 from __future__ import annotations
@@ -64,11 +64,27 @@ class Link:
     angle: bool
 
 
+def _escaped(line: str, masked: list[bool], i: int) -> bool:
+    """Whether the character at `i` follows an odd run of unmasked backslashes."""
+    count = 0
+    p = i - 1
+    while p >= 0 and line[p] == "\\" and not masked[p]:
+        count += 1
+        p -= 1
+    return count % 2 == 1
+
+
 def _mask_code_spans(line: str) -> list[bool]:
     masked = [False] * len(line)
     i = 0
     while i < len(line):
         if line[i] != "`":
+            i += 1
+            continue
+        # A backslash-escaped backtick is a literal and never opens a span;
+        # the run, if any, starts after it. Inside a span a backslash is
+        # literal, so a closing run needs no such test.
+        if _escaped(line, masked, i):
             i += 1
             continue
         j = i
