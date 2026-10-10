@@ -53,17 +53,20 @@ CHECK_IDS = ["contract-resolves", "projections-in-sync",
 
 
 def verifiable_repo(home: Path, *, project_id: str = "fixture/target",
-                    tracker_cli: str = "gh") -> Path:
+                    tracker_cli: str = "gh",
+                    integration_branch: str = "main") -> Path:
     """A conformant checkout carrying the two adoption records, on `main`.
 
-    The identity and the tracker binary are the two knobs the cases below
-    need: distinct ids for the registry, and a tracker CLI that cannot resolve
-    for the `adopted_with_blockers` verdict.
+    The identity, the tracker binary and the declared integration branch are
+    the knobs the cases below need: distinct ids for the registry, a tracker
+    CLI that cannot resolve for the `adopted_with_blockers` verdict, and a
+    contract that names a branch other than the remote default.
     """
     root = init_repo()
     contract = fixture_contract()
     contract["project"] = {"id": project_id, "name": project_id.split("/")[-1]}
     contract["bindings"]["tracker"]["cli"] = tracker_cli
+    contract["bindings"]["vcs"]["integration_branch"] = integration_branch
     scaffold(root, contract, home)
     write(root, ".agents/runtime/.gitignore", "*\n")
     git(root, "add", "-f", ".agents/runtime/.gitignore")
@@ -447,6 +450,40 @@ class RemoteRegistrationTest(VerifyTestCase):
         payload = self.refuse(root, code, "--register")
         self.assertEqual(payload["error"]["repair_id"], repair_id, payload)
         self.assertFalse(self.registry_path().exists())
+
+    def test_registration_follows_the_contracts_integration_branch(self):
+        root = verifiable_repo(self.home, integration_branch="dev")
+        adoption = git(root, "rev-parse", "HEAD").strip()
+        # The remote default carries the contract (naming `dev`) but not the
+        # adoption; `dev` carries both.
+        publish(root, ("HEAD~1:main", "main:dev"))
+        report = self.report(root, "--register")
+        self.assertEqual(report["result"], "adopted", report["checks"])
+        self.assertIs(report["registered"], True)
+        self.assertEqual(report["revision"], {
+            "ref": "refs/remotes/origin/dev", "commit": adoption})
+        self.assertEqual(
+            git(root, "rev-parse", "refs/remotes/origin/dev").strip(), adoption)
+        self.assertEqual(self.registry()["projects"], [
+            {"project_id": "fixture/target", "root": str(root)}])
+
+    def test_an_integration_branch_missing_on_origin_refuses(self):
+        root = verifiable_repo(self.home, integration_branch="dev")
+        publish(root, ("HEAD~1:main",))
+        self.refuse_with(root, "not_integrated",
+                         "adopt.registration.integration_branch_unresolved")
+
+    def test_a_second_branch_mismatch_refuses(self):
+        root = verifiable_repo(self.home, integration_branch="dev")
+        contract = json.loads(
+            (root / ".agents" / "project.json").read_text("utf-8"))
+        contract["bindings"]["vcs"]["integration_branch"] = "release"
+        write(root, ".agents/project.json", json.dumps(contract, indent=2) + "\n")
+        commit(root, "contract names release")
+        # origin/main names dev; origin/dev names release: no second hop.
+        publish(root, ("HEAD~2:main", "HEAD:dev", "HEAD:release"))
+        self.refuse_with(root, "not_integrated",
+                         "adopt.registration.integration_branch_unresolved")
 
     def test_a_diverged_local_branch_registers_from_the_remote(self):
         root = init_repo()

@@ -5,9 +5,16 @@ ordered conformance checks and the report they compose (R6.4, D34), the closed
 result set's exit codes and registration policy, and the one write to the
 user-scope fleet registry (D18, D19).
 
-It reads the *committed* state and nothing else: no working-tree bytes, no
-snapshot of a `ResolvedProject`, no capability verdict kept anywhere. What
-registration persists is exactly an identity and a location.
+It reads one pinned revision and nothing else, as a `VerificationSource`:
+plain `verify` reads `HEAD` (the resolver runs on the working tree, the
+inventory comes from the index, and every record is read at the `HEAD` commit
+it pins), while `--register` reads nothing from the checkout's branches or
+files. It lists `origin`, fetches the contract's integration branch into
+`refs/remotes/origin/<branch>` (the only repository write), exports the pinned
+commit with `git archive` into a temporary directory removed on every exit and
+runs every check there. No snapshot of a `ResolvedProject` and no capability
+verdict is kept anywhere. What registration persists is exactly an identity and
+a location: `{project_id, root}` with the real root (#148 D18).
 
 The resolver is not reached from this module. `adopt-project` owns the one
 seam it is consumed through — invoked as a child process through
@@ -90,42 +97,67 @@ def head_source(root: Path) -> VerificationSource:
 @contextlib.contextmanager
 def remote_source(root: Path,
                   run_resolver: Resolver) -> Iterator[VerificationSource]:
-    """The source `--register` reads: `origin`'s default branch, fetched.
+    """The source `--register` reads: the contract's integration branch.
 
-    The default branch `D` is fetched once and pinned to its commit `R`, then
-    exported into a scratch directory the resolver is run on, so nothing in the
-    checkout can answer for the remote. The scratch directory lives as long as
-    the caller's `with` block and is removed on success and on every refusal.
+    Nothing is read from the checkout's branches or files. `origin` is listed,
+    its default branch `D` fetched into `refs/remotes/origin/D` and pinned to
+    its commit `R`, and `R` exported with `git archive` into a scratch
+    directory the resolver runs on. If the contract there names another
+    integration branch `B`, that is the one hop made: `B` must be listed by
+    `origin`, is fetched and pinned to `R2` the same way, exported, and its own
+    contract must still name `B`, so there is no second hop. Every later check
+    reads the one pinned commit, and the scratch directory lives as long as the
+    caller's `with` block and is removed on success and on every refusal.
+
     No `origin` refuses `not_integrated` with `adopt.registration.no_remote`,
-    and an `origin` that advertises no default branch with
-    `adopt.registration.remote_default_unknown`.
+    an `origin` that advertises no default branch with
+    `adopt.registration.remote_default_unknown`, and a `B` that `origin` does
+    not list, whose contract does not resolve or does not name `B` with
+    `adopt.registration.integration_branch_unresolved`. A default branch whose
+    contract does not resolve is yielded as it is: `contract-resolves` then
+    fails in the report.
     """
     if not has_remote(root):
         raise refuse(
             "not_integrated", "adopt.registration.no_remote", "",
             "the repository has no `origin` remote to register against")
-    default = remote_heads(root).default
+    heads = remote_heads(root)
+    default = heads.default
     if default is None:
         raise refuse(
             "not_integrated", "adopt.registration.remote_default_unknown", "",
             "`origin` does not name a default branch it also lists")
     with tempfile.TemporaryDirectory() as scratch:
+        branch = default
         pinned = fetch_pinned(root, default)
         exported = Path(scratch) / "default"
         export_commit(root, pinned, exported)
         exit_code, payload = run_resolver(exported, "resolve")
         named = integration_branch(payload) if exit_code == 0 else None
-        # Task 3 replaces this refusal with a hop to the named branch.
         if named is not None and named != default:
-            raise refuse(
-                "not_integrated",
-                "adopt.registration.integration_branch_unresolved", "",
-                "the contract at the remote default branch names another "
-                "integration branch")
+            if named not in heads.branches:
+                raise unresolved_integration_branch(
+                    "the contract's integration branch is not a branch "
+                    "`origin` lists")
+            branch = named
+            pinned = fetch_pinned(root, branch)
+            exported = Path(scratch) / "integration"
+            export_commit(root, pinned, exported)
+            exit_code, payload = run_resolver(exported, "resolve")
+            if exit_code != 0 or integration_branch(payload) != branch:
+                raise unresolved_integration_branch(
+                    "the contract on the integration branch does not resolve "
+                    "or does not name that branch")
         yield VerificationSource(
-            ref=f"refs/remotes/{REMOTE}/{default}", commit=pinned,
+            ref=f"refs/remotes/{REMOTE}/{branch}", commit=pinned,
             resolver_root=exported, inventory=tree_inventory(root, pinned),
-            branch=default)
+            branch=branch)
+
+
+def unresolved_integration_branch(message: str) -> AdoptError:
+    return refuse(
+        "not_integrated", "adopt.registration.integration_branch_unresolved",
+        "", message)
 
 
 def require_integrated(verification: Verification) -> None:
@@ -364,10 +396,12 @@ def verify_repository(root: Path, source: VerificationSource,
 def register_project(root: Path, verification: Verification) -> None:
     """Record `{project_id, root}` in the fleet, or refuse and change nothing.
 
-    The ancestry check is the ordering #67 documents and D19 makes checked: a
-    commit that lives only on a feature branch names a state the integration
+    The root is the real checkout's, not the temporary directory the checks ran
+    in. The ancestry check is the ordering #67 documents and D19 makes checked:
+    a commit that lives only on a feature branch names a state the integration
     branch does not have. It is walked from the pinned commit id of the fetched
-    remote branch, never a branch name (D7). The duplicate check and the
+    remote branch, never a branch name (D7); an adoption commit that is not its
+    ancestor refuses `not_integrated`. The duplicate check and the
     replacement then happen inside one exclusive lock over a registry reread
     underneath it, so two registrations racing under one `HOME` serialize
     instead of one overwriting the other.
