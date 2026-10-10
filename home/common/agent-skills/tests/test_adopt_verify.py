@@ -42,7 +42,7 @@ from .test_adopt_apply import apply_repo, readoption_repo
 
 VERIFY_MEMBERS = ["adoption_commit", "blockers", "checks", "evidence_record",
                   "migration_map", "project_id", "registered", "result",
-                  "root", "schema_version"]
+                  "revision", "root", "schema_version"]
 CHECK_IDS = ["contract-resolves", "projections-in-sync",
              "no-unclassified-agent-path", "adoption-evidence-record",
              "adoption-commit-derived", "path-migration-map"]
@@ -125,6 +125,17 @@ class VerifyTestCase(unittest.TestCase):
 
 
 class VerifyReadOnlyTest(VerifyTestCase):
+    def test_plain_verify_reads_the_committed_head_not_the_index(self):
+        root = adopted_repo(self.home)
+        head = git(root, "rev-parse", "HEAD").strip()
+        record = f".agents/artifacts/evidence/{'a1' * 32}.json"
+        git(root, "rm", "--quiet", "--cached", record)
+        report = self.report(root)
+        self.assertEqual(report["revision"]["commit"], head)
+        self.assertEqual(report["evidence_record"], record)
+        self.assertEqual(
+            self.check(report, "adoption-evidence-record")["status"], "passed")
+
     def test_a_conformant_checkout_is_adopted_and_writes_nothing(self):
         root = adopted_repo(self.home)
         before_status = git(root, "status", "--porcelain")
@@ -132,7 +143,11 @@ class VerifyReadOnlyTest(VerifyTestCase):
         report = self.report(root)
         self.assertEqual(report["result"], "adopted", report)
         self.assertEqual(sorted(report), VERIFY_MEMBERS)
-        self.assertEqual(report["schema_version"], 1)
+        self.assertEqual(report["schema_version"], 2)
+        self.assertEqual(report["revision"], {
+            "ref": "HEAD",
+            "commit": git(root, "rev-parse", "HEAD").strip(),
+        })
         self.assertEqual(report["project_id"], "fixture/target")
         self.assertEqual(report["root"], str(root))
         self.assertEqual(report["blockers"], [])

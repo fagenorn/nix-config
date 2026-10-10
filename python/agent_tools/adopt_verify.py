@@ -22,6 +22,7 @@ from `adopt_inspection` is named in the `from` import below.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from agent_tools import agent_platform
@@ -29,9 +30,11 @@ from agent_tools.adopt_inspection import (
     AdoptError,
     EVIDENCE_RECORD_DIR,
     VERIFY_RESULTS,
-    blob_at_head,
+    blob_at,
     classify,
     commit_is_ancestor,
+    evidence_records_at,
+    git_or_fail,
     introducing_commit,
     is_agent_path,
     parses_as_evidence_record,
@@ -39,7 +42,6 @@ from agent_tools.adopt_inspection import (
     refuse,
     resolver_error_code,
     resolver_violation_pointers,
-    tracked_evidence_records,
     tracked_inventory,
     verify_check_entry,
 )
@@ -48,7 +50,33 @@ from agent_tools.adopt_inspection import (
 # to the resolver's exit code and its parsed JSON, or an `AdoptError`.
 Resolver = Callable[..., tuple[int, object]]
 
-VERIFY_SCHEMA_VERSION = 1
+VERIFY_SCHEMA_VERSION = 2
+
+
+@dataclass(frozen=True)
+class VerificationSource:
+    """The one revision a verification reads, pinned once.
+
+    `ref` is the report's label for it and `commit` the 40-hex id every record
+    is read at. `resolver_root` is the directory the resolver is called on and
+    `inventory` the `(path, object id)` pairs the unclassified-path check
+    reads. `branch` is the fetched branch name; it is always `None` for `HEAD`.
+    """
+
+    ref: str
+    commit: str
+    resolver_root: Path
+    inventory: list[tuple[str, str]]
+    branch: str | None = None
+
+
+def head_source(root: Path) -> VerificationSource:
+    """The source plain `verify` reads: the checkout's own `HEAD` commit."""
+    commit = git_or_fail(root, "rev-parse", "--verify",
+                         "HEAD^{commit}").decode("ascii", "strict").strip()
+    return VerificationSource(
+        ref="HEAD", commit=commit, resolver_root=root,
+        inventory=tracked_inventory(root), branch=None)
 
 
 def registration_allowed(result: str) -> bool:
@@ -145,12 +173,17 @@ class Verification:
     is contract policy the report has no business publishing.
     """
 
-    def __init__(self, report: dict, resolve_payload: object) -> None:
+    def __init__(self, report: dict, resolve_payload: object,
+                 source: VerificationSource,
+                 evidence_candidates: list[str]) -> None:
         self.report = report
         self.resolve_payload = resolve_payload
+        self.source = source
+        self.evidence_candidates = evidence_candidates
 
 
-def verify_repository(root: Path, run_resolver: Resolver) -> Verification:
+def verify_repository(root: Path, source: VerificationSource,
+                      run_resolver: Resolver) -> Verification:
     """Run the ordered conformance checks and build the report.
 
     Every check runs where its inputs exist and is recorded as `not_run` where
@@ -164,7 +197,7 @@ def verify_repository(root: Path, run_resolver: Resolver) -> Verification:
         checks.append(verify_check_entry(
             check_id, status, detail))
 
-    exit_code, payload = run_resolver(root, "resolve")
+    exit_code, payload = run_resolver(source.resolver_root, "resolve")
     resolves = exit_code == 0 and isinstance(payload, dict)
     record("contract-resolves", "passed" if resolves else "failed",
            None if resolves else
@@ -173,10 +206,11 @@ def verify_repository(root: Path, run_resolver: Resolver) -> Verification:
     # Asked even when `resolve` refused, because the commonest reason it
     # refuses *is* projection drift: reporting the drift as "not run" would
     # hide the one check that names which projection went stale.
-    record("projections-in-sync", *projection_check(root, run_resolver))
+    record("projections-in-sync",
+           *projection_check(source.resolver_root, run_resolver))
 
     unclassified = sorted(
-        path for path, _ in tracked_inventory(root)
+        path for path, _ in source.inventory
         if classify(path) is None
         and is_agent_path(path))
     record("no-unclassified-agent-path",
@@ -185,7 +219,7 @@ def verify_repository(root: Path, run_resolver: Resolver) -> Verification:
            if unclassified else None)
 
     record_path, map_path = None, None
-    candidates = tracked_evidence_records(root)
+    candidates = evidence_records_at(root, source.commit)
     if not candidates:
         record("adoption-evidence-record", "failed",
                "no adoption evidence record is committed under "
@@ -196,7 +230,7 @@ def verify_repository(root: Path, run_resolver: Resolver) -> Verification:
                + ", ".join(candidates))
     else:
         found = parses_as_evidence_record(
-            blob_at_head(root, candidates[0]))
+            blob_at(root, source.commit, candidates[0]))
         if found is None:
             record("adoption-evidence-record", "failed",
                    "the committed file does not parse as an adoption "
@@ -211,7 +245,7 @@ def verify_repository(root: Path, run_resolver: Resolver) -> Verification:
         record("adoption-commit-derived", "not_run",
                "no adoption evidence record was discovered")
     else:
-        commit = introducing_commit(root, record_path)
+        commit = introducing_commit(root, source.commit, record_path)
         record("adoption-commit-derived",
                "failed" if commit is None else "passed",
                None if commit is not None else
@@ -227,7 +261,7 @@ def verify_repository(root: Path, run_resolver: Resolver) -> Verification:
                "the evidence record names no path migration map")
         map_path = None
     elif parses_as_migration_map(
-            blob_at_head(root, map_path)) is None:
+            blob_at(root, source.commit, map_path)) is None:
         record("path-migration-map", "failed",
                f"the path migration map is absent or does not parse: "
                f"{map_path}")
@@ -251,13 +285,14 @@ def verify_repository(root: Path, run_resolver: Resolver) -> Verification:
         "result": result,
         "project_id": resolved_project_id(payload),
         "root": str(root),
+        "revision": {"ref": source.ref, "commit": source.commit},
         "adoption_commit": commit,
         "evidence_record": record_path,
         "migration_map": map_path,
         "checks": checks,
         "blockers": blockers,
         "registered": False,
-    }, payload)
+    }, payload, source, candidates)
 
 
 def register_project(root: Path, verification: Verification) -> None:

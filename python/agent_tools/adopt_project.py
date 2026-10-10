@@ -571,7 +571,8 @@ def command_verify(args: argparse.Namespace) -> int:
     # as an adoption failure rather than as a non-conformant repository.
     require_manifest()
     root = adopt_inspection.require_repository(args.repo_root)
-    verification = adopt_verify.verify_repository(root, run_resolver)
+    verification = adopt_verify.verify_repository(
+        root, adopt_verify.head_source(root), run_resolver)
     if args.register and adopt_verify.registration_allowed(
             verification.report["result"]):
         adopt_verify.register_project(root, verification)

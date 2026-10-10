@@ -602,24 +602,26 @@ def registered_worktrees(root: Path) -> list[str]:
     return sorted(names)
 
 
-def blob_at_head(root: Path, relative: str) -> bytes | None:
-    """The tracked bytes of `relative` at `HEAD`, or None when it is not there.
+def blob_at(root: Path, revision: str, relative: str) -> bytes | None:
+    """The bytes of `relative` in the commit `revision`, or None when absent.
 
-    Read out of the commit rather than off disk, because every question
-    `verify` asks is about the committed state: an untracked working-tree file
-    must not be able to answer for a record the history does not carry (D34).
+    Read out of the commit named by `revision` rather than off disk, because
+    every question `verify` asks is about committed state: an untracked
+    working-tree file must not be able to answer for a record the history does
+    not carry (D34).
     """
-    code, out = run_git(root, "show", f"HEAD:{relative}")
+    code, out = run_git(root, "show", f"{revision}:{relative}")
     return out if code == 0 else None
 
 
-def tracked_evidence_records(root: Path) -> list[str]:
-    """Every `.agents/artifacts/evidence/*.json` path in the tree at `HEAD`.
+def evidence_records_at(root: Path, revision: str) -> list[str]:
+    """Every `.agents/artifacts/evidence/*.json` path in the tree at `revision`.
 
-    Listed from the commit, not walked on disk, and one level deep exactly as
-    the glob reads: a nested file is not one of the candidates D34 counts.
+    Listed from the commit named by `revision`, not walked on disk, and one
+    level deep exactly as the glob reads: a nested file is not one of the
+    candidates D34 counts.
     """
-    out = git_or_fail(root, "ls-tree", "-r", "--name-only", "-z", "HEAD",
+    out = git_or_fail(root, "ls-tree", "-r", "--name-only", "-z", revision,
                       "--", EVIDENCE_RECORD_DIR)
     return sorted(path for path in split_nul(out)
                   if is_evidence_record_path(path))
@@ -670,15 +672,19 @@ def parses_as_migration_map(data: bytes | None) -> dict | None:
     return source
 
 
-def introducing_commit(root: Path, relative: str) -> str | None:
-    """The commit that added `relative`, or None when git names none.
+def introducing_commit(root: Path, revision: str,
+                       relative: str) -> str | None:
+    """The commit that added `relative` in the history of `revision`, or None.
+
+    Read from the commit named by `revision`, never the working tree, so an
+    untracked file cannot answer for a record the history does not carry.
 
     The adoption record carries no commit identity and cannot — it is created
     *by* the commit that would name it — so the introducing commit is the only
     identity git already holds (D34).
     """
     code, out = run_git(root, "log", "--diff-filter=A", "--format=%H", "-1",
-                        "--", relative)
+                        revision, "--", relative)
     if code != 0:
         return None
     text = out.decode("utf-8", "surrogateescape").strip()
