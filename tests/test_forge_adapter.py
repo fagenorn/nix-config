@@ -48,6 +48,19 @@ class TagInspectTest(ForgeCase):
         self.assertEqual(self.world.argvs("gh"), [ROWS[i]["argv"][1:] for i in
                                                   ("release.view", "tag.ref", "tag.object")])
 
+    def test_nested_annotated_tag_is_peeled_to_its_commit(self):
+        inner = "6" * 40
+        self.tag_ref()
+        self.world.respond_json("gh", ROWS["tag.object"]["argv"][1:],
+                                {"object": {"type": "tag", "sha": inner}})
+        inner_argv = [part.replace(C["tag_object"], inner) for part in ROWS["tag.object"]["argv"][1:]]
+        self.world.respond_json("gh", inner_argv, {"object": {"type": "commit", "sha": C["commit"]}})
+        observation = self.inspect(effect("tag", candidate=CANDIDATE))
+        self.assertEqual((observation["outcome"], observation["observed_subject"]["commit"]),
+                         ("satisfied", C["commit"]))
+        self.assertEqual(self.world.argvs("gh"),
+                         [ROWS["tag.ref"]["argv"][1:], ROWS["tag.object"]["argv"][1:], inner_argv])
+
     def test_lightweight_tag_is_diverged(self):
         self.tag_ref(object_type="commit", sha=C["commit"])
         observation = self.inspect(effect("tag", candidate=CANDIDATE))
@@ -470,14 +483,17 @@ class InvokeFailureTest(InvokeCase):
             ("release exists", "release",
              dict(create_exit=1, create_stdout="", create_stderr="HTTP 422: Validation Failed"),
              ("rejected", "precondition_failed")),
-            ("push timeout", "tag", dict(push_sleep=2), ("unknown", "transient_transport")),
+            ("push timeout", "tag", dict(push_sleep=6), ("unknown", "transient_transport")),
         )
         for name, operation, ready, expected in cases:
             with self.subTest(name):
                 self.world.reset()
                 self.world.invoke_ready(**ready)
                 saved = forge_adapter.CHILD_TIMEOUT_SECONDS
-                forge_adapter.CHILD_TIMEOUT_SECONDS = 0.5
+                # only the timeout case shortens the child budget: a short budget on the
+                # other cases lets a loaded host time out the guard or a precondition read
+                if expected[1] == "transient_transport":
+                    forge_adapter.CHILD_TIMEOUT_SECONDS = 2
                 try:
                     self.assertEqual(self.outcome(operation), expected)
                 finally:

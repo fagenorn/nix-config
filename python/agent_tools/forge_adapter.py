@@ -49,6 +49,7 @@ GITHUB_REMOTE = re.compile(r"(?:git@github\.com:|https://github\.com/|ssh://git@
 BRANCH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*")
 VERSION = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 SHA = re.compile(r"[0-9a-f]{40}")
+TAG_CHAIN_LIMIT = 8
 TARGET_MEMBERS = frozenset(("kind", "repository", "branch", "handle"))
 TOLERATED = frozenset(("action", "operation", "config"))
 REQUIRED = {"tag": ("target", "candidate"),
@@ -173,7 +174,11 @@ def _sha(value: str, where: str) -> str:
 
 def _tag_state(slug: str, tag: str, commit: str, deadline: float
                ) -> tuple[str, str, str | None, list[str]]:
-    """`(outcome, reason, peeled commit, references)` of the tag, read from its own objects."""
+    """`(outcome, reason, peeled commit, references)` of the tag, read from its own objects.
+
+    A tag object whose target is another tag object is peeled in turn, as local
+    `refs/tags/<tag>^{commit}` peels it, up to `TAG_CHAIN_LIMIT` objects.
+    """
     ref_path = f"repos/{slug}/git/ref/tags/{tag}"
     references = [ref_path]
     status, ref = _read(["api", ref_path], deadline, allow=(404,))
@@ -185,10 +190,16 @@ def _tag_state(slug: str, tag: str, commit: str, deadline: float
         return "diverged", "tag_not_annotated", sha, references
     if kind != "tag":
         raise _Unknown("payload_invalid", f"tag ref object type {kind!r}")
-    object_path = f"repos/{slug}/git/tags/{sha}"
-    references.append(object_path)
-    _, annotated = _read(["api", object_path], deadline)
-    peeled = _sha(_field(annotated, "object", "sha"), "tag object target")
+    for _ in range(TAG_CHAIN_LIMIT):
+        object_path = f"repos/{slug}/git/tags/{sha}"
+        references.append(object_path)
+        _, annotated = _read(["api", object_path], deadline)
+        sha = _sha(_field(annotated, "object", "sha"), "tag object target")
+        if _field(annotated, "object", "type") != "tag":
+            break
+    else:
+        raise _Unknown("payload_invalid", f"tag chain deeper than {TAG_CHAIN_LIMIT} objects")
+    peeled = sha
     if peeled == commit:
         return "satisfied", "observed", peeled, references
     return "diverged", "tag_target_mismatch", peeled, references
