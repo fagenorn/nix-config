@@ -18,9 +18,11 @@ list, never restated.
 sweep and form fixture below calls it on a document's text.
 `guarded_command_findings(document_text, shapes, document_name)` is the boundary
 for the commands the lifecycle guard adjudicates in ship-issue (#351): a living
-example that begins with one of the fixture's verbs must be a form listed in
+example that holds one of the fixture's verbs as consecutive unquoted words,
+wherever they stand in it, must be as a whole a form listed in
 tests/fixtures/guarded-command-shapes.json, and its block must carry the
-fixture's anchor. Nothing else produces findings.
+fixture's anchor. A verb inside one quoted argument is a mention, as it is to
+the guard. Nothing else produces findings.
 """
 from bisect import bisect_right
 from dataclasses import dataclass
@@ -558,14 +560,77 @@ def _squeezed(text):
     return " ".join(text.split())
 
 
+# Characters that end a shell word wherever they stand unquoted.
+_WORD_BREAKS = frozenset(";&|(){}<>`")
+
+
+def _shell_words(text):
+    """`text` as shell words with their quotes removed, as the lifecycle guard
+    tokenises a segment: a quoted run stays inside its word, a backslash-newline
+    joins two lines, and None stands for each word-breaking character. None for
+    the whole text when a quote never closes."""
+    words, word, quote, index = [], None, None, 0
+
+    def ended():
+        nonlocal word
+        if word is not None:
+            words.append(word)
+            word = None
+
+    while index < len(text):
+        char = text[index]
+        index += 1
+        if quote == "'":
+            if char == "'":
+                quote = None
+            else:
+                word += char
+        elif char == "\\" and index < len(text):
+            if text[index] != "\n":
+                word = (word or "") + text[index]
+            index += 1
+        elif quote == '"':
+            if char == '"':
+                quote = None
+            else:
+                word += char
+        elif char in "'\"":
+            quote, word = char, word or ""
+        elif char.isspace():
+            ended()
+        elif char in _WORD_BREAKS:
+            ended()
+            words.append(None)
+        else:
+            word = (word or "") + char
+    if quote is not None:
+        return None
+    ended()
+    return words
+
+
+def _runs_guarded_verb(text, verbs):
+    """Whether one of `verbs` stands in `text` as consecutive unquoted words."""
+    words = _shell_words(text)
+    if words is None:
+        # No quote can be trusted: fail closed on the raw text, as the guard does.
+        return any(" ".join(verb) in _squeezed(text) for verb in verbs)
+    return any(words[start:start + len(verb)] == verb
+               for verb in verbs for start in range(len(words)))
+
+
 def guarded_command_findings(document_text, shapes, document_name):
     """Every R1, R2 and R3 finding of one ship-issue document (#351).
 
-    R1: a living example that begins with a guarded verb, after the sanctioned
-    prefix, is one of `shapes`' skill-form templates, and carries that prefix
-    only when the form's `prefixed` and `bare` exits agree. R2: its block carries the
-    anchor. R3: every form listing `document_name` as a site appears there
-    meeting R1 and R2, and SKILL.md holds the anchor's heading exactly once.
+    R1: a living example that holds a guarded verb as consecutive unquoted words,
+    at its start or after any other words, is as a whole one of `shapes`'
+    skill-form templates, after the sanctioned prefix, and carries that prefix
+    only when the form's `prefixed` and `bare` exits agree. Only living examples
+    are read: every call of a shell fence is one, and a line of an unlabeled or
+    `text` fence is one only when its command head is in the vocabulary, so a
+    diagram line there is not. R2: its block carries the anchor. R3: every form
+    listing `document_name` as a site appears there meeting R1 and R2, and
+    SKILL.md holds the anchor's heading exactly once.
     """
     anchor = shapes["anchor"]
     verbs = [verb.split() for verb in shapes["verbs"]]
@@ -574,12 +639,11 @@ def guarded_command_findings(document_text, shapes, document_name):
     for position, kind, payload in sorted(_examples(document_text), key=lambda e: e[0]):
         if kind != "call":
             continue
+        if not _runs_guarded_verb(payload[0].text, verbs):
+            continue
         spelled = _squeezed(payload[0].text)
         prefixed = spelled.startswith(SANCTIONED_PREFIX)
         command = spelled[len(SANCTIONED_PREFIX):] if prefixed else spelled
-        words = command.split()
-        if not any(words[:len(verb)] == verb for verb in verbs):
-            continue
         line = position[0]
         form = forms.get(command)
         # The prefix is a listed spelling only where it leaves the guard's verdict alone.
@@ -1141,10 +1205,32 @@ class GuardedCommandShapeTest(unittest.TestCase):
             "SKILL.md with the anchor's heading twice":
                 ("SKILL.md", _conforming("SKILL.md") + "\n## gh hygiene\n",
                  [(0, "R3", "## gh hygiene")]),
+            "a diagram line in a shell fence":
+                ("OTHER.md", f"```bash\n7. Merge → {merge}\n```",
+                 [(2, "R1", f"7. Merge → {merge}"), (2, "R2", f"7. Merge → {merge}")]),
+            "a verb split by a line continuation":
+                ("OTHER.md",
+                 f"Then ({GUARDED_ANCHOR}):\n\n```bash\n"
+                 + first.replace("git ", "git \\\n  ", 1) + "\n```",
+                 [(4, "R1", first.replace("git ", "git \\ ", 1))]),
+            "a mention behind a quote that never closes":
+                ("OTHER.md", f"Run `echo \"refused {later}` ({GUARDED_ANCHOR}).",
+                 [(1, "R1", f"echo \"refused {later}")]),
         }
         for name, (document_name, text, expected) in cases.items():
             with self.subTest(case=name):
                 self.assertEqual(_guarded(text, document_name), expected)
+
+    def test_every_refused_shape_is_an_r1_finding(self):
+        for shape in GUARDED_SHAPES["refused_shapes"]:
+            dressed = f"{shape['before']}{GUARDED_FORMS[shape['form']]}{shape['after']}"
+            sites = {
+                "a span": (1, f"Run `{dressed}` ({GUARDED_ANCHOR})."),
+                "a shell fence": (4, f"Then ({GUARDED_ANCHOR}):\n\n```bash\n{dressed}\n```"),
+            }
+            for site, (line, text) in sites.items():
+                with self.subTest(shape=shape["id"], site=site):
+                    self.assertEqual(_guarded(text), [(line, "R1", dressed)])
 
     def test_accepted_spellings_yield_nothing(self):
         later = GUARDED_FORMS["push.later"]
@@ -1163,6 +1249,10 @@ class GuardedCommandShapeTest(unittest.TestCase):
             "a guarded verb in prose": "The merge runs alone; so does git push.",
             "a diagram line in a bare fence": f"```\n7. Merge → {merge}\n```",
         }
+        mention = next(shape for shape in GUARDED_SHAPES["refused_shapes"]
+                       if shape["id"] == "mention.unquoted")
+        cases["the unquoted mention, quoted as one argument"] = (
+            f"Run `{mention['before']}\"{GUARDED_FORMS[mention['form']]}\"{mention['after']}`.")
         for name, text in cases.items():
             with self.subTest(case=name):
                 self.assertEqual(_guarded(text), [])
