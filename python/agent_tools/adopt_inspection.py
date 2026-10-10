@@ -4,14 +4,17 @@ vocabulary.
 `adopt-project` owns adoption end to end; this module is the lower half it is
 built from — the closed sets every adoption verb dispatches over, the error
 contract they refuse through, the content hashes, the path predicates that keep
-the inspection inside the target root and away from secret-shaped paths, and
-the four bounded git queries that are the whole of R4.2.
+the inspection inside the target root and away from secret-shaped paths, the
+bounded git queries of the R4.2 inspection, and the git operations a
+registration reads `origin` through: listing its branches, a pinned fetch and
+the export of a commit.
 
-It is imported, never run: no `main` and no argparse. Its one repository write
-is `fetch_pinned`'s update of a single `refs/remotes/origin/<branch>` ref, and
-`export_commit` writes only into the directory its caller names. It does not
-import `agent_tools.resolve_project` and never will (D26) — the resolver is
-reached only as a subprocess, by the entry point.
+It is imported, never run: no `main` and no argparse. Its only repository
+writes are `fetch_pinned`'s: the fetched objects and one
+`refs/remotes/origin/<branch>` ref per call. `export_commit` writes only into
+the directory its caller names. It does not import
+`agent_tools.resolve_project` and never will (D26) — the resolver is reached
+only as a subprocess, by the entry point.
 
 A module of the `agent_tools` package, imported by `agent_tools.adopt_project` and
 its sibling adoption modules.
@@ -516,8 +519,9 @@ def read_bytes_bounded(path: Path) -> bytes | None:
 # Git, as a child process
 #
 # The only process this module starts. Every query below is read-only except
-# `fetch_pinned`'s one remote-tracking ref update; the resolver is not among them, because it is reached by the entry point alone
-# and only ever as a subprocess at its absolute installed path (D26).
+# `fetch_pinned`, which writes the fetched objects and one remote-tracking ref;
+# the resolver is not among them, because it is reached by the entry point
+# alone and only ever as a subprocess at its absolute installed path (D26).
 # --------------------------------------------------------------------------
 
 
@@ -561,10 +565,15 @@ def split_nul(data: bytes) -> list[str]:
 # --------------------------------------------------------------------------
 # Inspection
 #
-# The whole boundary of R4.2, and nothing wider: tracked object ids, a closed
-# list of targeted ignored paths, two metadata-only trees, registered worktree
-# names, and untracked files overlapping an inspected source or a planned
-# destination.
+# The R4.2 inspection queries: tracked object ids, a closed list of targeted
+# ignored paths, two metadata-only trees, registered worktree names, and
+# untracked files overlapping an inspected source or a planned destination.
+# Beside them sit the queries `verify` reads a pinned revision with (its tree
+# inventory, its blobs and evidence records, and their ancestry) and the
+# operations `--register` reaches `origin` through: `has_remote`,
+# `remote_heads`'s one listing, `fetch_pinned`'s pinned fetch and
+# `export_commit`'s `git archive` export. Only `remote_heads` and
+# `fetch_pinned` touch the network.
 # --------------------------------------------------------------------------
 
 

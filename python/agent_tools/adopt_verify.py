@@ -9,12 +9,14 @@ It reads one pinned revision and nothing else, as a `VerificationSource`:
 plain `verify` reads `HEAD` (the resolver runs on the working tree, the
 inventory comes from the index, and every record is read at the `HEAD` commit
 it pins), while `--register` reads nothing from the checkout's branches or
-files. It lists `origin`, fetches the contract's integration branch into
-`refs/remotes/origin/<branch>` (the only repository write), exports the pinned
-commit with `git archive` into a temporary directory removed on every exit and
-runs every check there. No snapshot of a `ResolvedProject` and no capability
-verdict is kept anywhere. What registration persists is exactly an identity and
-a location: `{project_id, root}` with the real root (#148 D18).
+files. It lists `origin`, fetches the remote default branch and, when the
+contract there names another integration branch, that branch too, each into
+`refs/remotes/origin/<branch>` (the fetched objects and those remote-tracking
+refs are the only repository writes), exports the pinned commit with
+`git archive` into a temporary directory removed on every exit and runs every
+check there. No snapshot of a `ResolvedProject` and no capability verdict is
+kept anywhere. What registration persists is exactly an identity and a
+location: `{project_id, root}` with the real root (#148 D18).
 
 The resolver is not reached from this module. `adopt-project` owns the one
 seam it is consumed through — invoked as a child process through
