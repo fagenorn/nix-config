@@ -955,6 +955,20 @@ class TypedOperationTest(AdoptTestCase):
         self.assertEqual(op["after"], sha256_hash(expected.encode("utf-8")))
         self.assertIn("orchestration", config)
 
+    def test_the_legacy_deploy_member_is_generated(self):
+        root = nix_config_shape_repo(self.home)
+        write(root, ".claude/skills.config.json",
+              json.dumps({"deploy": {"adapter": "none"}, "orchestration": {"maxParallel": 2}}))
+        commit(root, "carry a deploy member")
+        doc = self.ready_plan(root)
+        op = self.only_write(doc, ".claude/skills.config.json")
+        config = {"orchestration": {"maxParallel": 2},
+                  "specDir": ".agents/artifacts/specs",
+                  "planDir": ".agents/artifacts/plans",
+                  "rejectionsDir": ".agents/knowledge/rejections"}
+        expected = json.dumps(config, indent=2, ensure_ascii=False) + "\n"
+        self.assertEqual(op["after"], sha256_hash(expected.encode("utf-8")))
+
     def test_only_the_declared_legacy_binding_config_is_rewritten(self):
         root = nix_config_shape_repo(self.home)
         write(root, ".claude/other.config.json", json.dumps({"specDir": "x"}))

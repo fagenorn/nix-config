@@ -588,6 +588,13 @@ class ReleaseProfileChecksTest(ReportAssertions, unittest.TestCase):
             self.assertEqual([by_id[check_id]["status"], by_id[check_id]["facts"]],
                              ["passed", {"declared": True}])
 
+    def test_nix_config_contract_passes_all_three(self):
+        with fixture() as tmp:
+            report, by_id = doctor(self, make_root(tmp))
+            self.assert_validates(report)
+        for check_id in RELEASE_PROFILE_IDS:
+            self.assertEqual(by_id[check_id]["status"], "passed", check_id)
+
     def test_each_rule_fails_its_own_check(self):
         missing = release_fixture("github-release-profile.json")
         del missing["publication"]["actions"][0]["observation_deadline_ms"]

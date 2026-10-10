@@ -337,7 +337,7 @@ class SnapshotShapeTest(ResolverTestCase):
     def test_unsupported_capabilities_carry_null_reason_and_repair(self):
         code, snap, err = self.resolve(self.make_root())
         self.assertEqual(code, 0, err)
-        for name in ("release", "deploy", "knowledge.context", "knowledge.hints"):
+        for name in ("deploy", "knowledge.context", "knowledge.hints"):
             with self.subTest(capability=name):
                 entry = snap["capabilities"][name]
                 self.assertEqual(entry["state"], "unsupported")
@@ -1041,7 +1041,8 @@ class CapabilityStateTest(ResolverTestCase):
                 if entry["state"] == "blocked":
                     self.assertIn(entry["reason_code"],
                                   ("tracker_cli_missing", "vcs_worktree_unsupported",
-                                   "knowledge_path_missing", "command_missing"))
+                                   "knowledge_path_missing", "command_missing",
+                                   "release_adapter_unavailable"))
                     self.assertEqual(entry["repair_id"],
                                      f"capability.{name}.{entry['reason_code']}")
                 else:
@@ -1052,7 +1053,7 @@ class CapabilityStateTest(ResolverTestCase):
         root = self.make_root()
         code, snap, _, err = self.resolve_with_path(root, make_stub_bin(()))
         self.assertEqual(code, 0, err)
-        for name in ("release", "deploy", "knowledge.context", "knowledge.hints"):
+        for name in ("deploy", "knowledge.context", "knowledge.hints"):
             with self.subTest(capability=name):
                 self.assertEqual(snap["capabilities"][name]["state"], "unsupported")
 
@@ -1249,15 +1250,15 @@ class RequireTest(ResolverTestCase):
         root = self.make_root()
         code, out, _ = run_with_path(
             str(make_stub_bin(("gh", "git", "just", "codex-companion"))),
-            "resolve", "--repo-root", str(root), "--require", "release",
+            "resolve", "--repo-root", str(root), "--require", "knowledge.hints",
             home=self.home)
         payload = json.loads(out)
         self.assertEqual(code, 2)
         error = payload["error"]
         self.assertEqual(error["code"], "capability_unavailable")
         self.assertEqual([v["pointer"] for v in error["violations"]],
-                         ["/capabilities/release"])
-        self.assertEqual(error["repair_id"], "capability.release.unsupported")
+                         ["/capabilities/knowledge.hints"])
+        self.assertEqual(error["repair_id"], "capability.knowledge.hints.unsupported")
         self.assertNotIn("schema_version", payload)
 
     def test_requiring_a_blocked_capability_names_its_reason_code(self):
@@ -1276,11 +1277,11 @@ class RequireTest(ResolverTestCase):
         code, out, _ = run_with_path(
             str(make_stub_bin(("gh", "git", "just", "codex-companion"))),
             "resolve", "--repo-root", str(root),
-            "--require", "release", "--require", "deploy", home=self.home)
+            "--require", "knowledge.hints", "--require", "deploy", home=self.home)
         error = json.loads(out)["error"]
         self.assertEqual(code, 2)
         pointers = [v["pointer"] for v in error["violations"]]
-        self.assertEqual(pointers, ["/capabilities/deploy", "/capabilities/release"])
+        self.assertEqual(pointers, ["/capabilities/deploy", "/capabilities/knowledge.hints"])
         self.assertEqual(error["repair_id"], "capability.deploy.unsupported")
 
     def test_requiring_an_available_capability_returns_the_snapshot(self):
