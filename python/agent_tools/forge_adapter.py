@@ -511,7 +511,8 @@ def _mutate(argv: list[str], raw: str, checkout: str, operation: str, tag: str) 
         return {"result": "unknown", "error_class": "transient_transport",
                 "reference": f"{name}: timed out"}
     if status == "missing":
-        return {"result": "unknown", "error_class": "provider_unavailable",
+        # the spawn failed before any child ran, so nothing was applied
+        return {"result": "rejected", "error_class": "provider_unavailable",
                 "reference": f"{name}: {detail}"[:DETAIL_LIMIT]}
     if done.returncode == 0:
         url = done.stdout.strip().splitlines()[:1]

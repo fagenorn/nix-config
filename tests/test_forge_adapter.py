@@ -2,8 +2,10 @@
 import ast
 import json
 import shlex
+import subprocess
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools import forge_adapter, release_adapter, release_profile
 from . import release_test_support as support
@@ -388,6 +390,24 @@ class InvokeFailureTest(InvokeCase):
         self.assertEqual((result["result"], result["error_class"], result["reference"]),
                          ("rejected", "unsupported_operation", "merge: unknown_operation"))
         self.assertEqual(self.world.calls(), [])
+
+    def test_an_unspawnable_mutation_binary_is_rejected_not_possibly_applied(self):
+        real = subprocess.run
+        for operation, mutation in (("tag", ["git", "push"]), ("release", ["gh", "release"])):
+            def run(argv, *args, **kwargs):
+                if argv[:2] == mutation:
+                    raise PermissionError(13, "Permission denied", argv[0])
+                return real(argv, *args, **kwargs)
+            with self.subTest(operation):
+                self.world.reset()
+                self.world.invoke_ready()
+                with mock.patch.object(forge_adapter.subprocess, "run", side_effect=run):
+                    result = self.invoke(operation)
+                self.assertEqual((result["result"], result["error_class"]),
+                                 ("rejected", "provider_unavailable"))
+                self.assertEqual(self.mutations(), [])
+                self.assertEqual(len([c for c in self.world.calls()
+                                      if c["tool"] == "claude-bash-lifecycle-guard"]), 1)
 
     def outcome(self, operation="tag"):
         result = self.invoke(operation)
