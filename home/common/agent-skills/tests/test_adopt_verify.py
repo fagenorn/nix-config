@@ -319,6 +319,26 @@ class EvidenceDiscoveryTest(VerifyTestCase):
         self.assertIn("path migration map", entry["detail"])
 
 
+class AnsweredCandidateVerifyTest(VerifyTestCase):
+    def test_an_archived_candidate_verifies_as_adopted(self):
+        root = apply_repo(self.home)
+        write(root, ".claude/odd.md", "# odd\n")
+        commit(root, "add an unclassified agent path")
+        code, out, err = run("plan", "--repo-root", str(root), "--answer",
+                             "candidate-class", ".claude/odd.md",
+                             "archive-history", home=self.home)
+        self.assertEqual(code, 0, err or out)
+        plan_id = json.loads(out)["plan"]["plan_id"]
+        code, out, err = run("apply", "--plan-id", plan_id, home=self.home)
+        self.assertEqual(code, 0, err or out)
+        git(root, "merge", "--ff-only", "--quiet", json.loads(out)["branch"])
+        report = self.report(root)
+        self.assertEqual(report["result"], "adopted", report["checks"])
+        self.assertEqual(
+            self.check(report, "no-unclassified-agent-path")["status"],
+            "passed")
+
+
 # --------------------------------------------------------------------------
 # Registration (D19, D18)
 # --------------------------------------------------------------------------

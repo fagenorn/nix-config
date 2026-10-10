@@ -176,15 +176,19 @@ class Composition:
         self.overlap = overlap
 
 
-def compose_plan(root: Path, manifest: dict) -> Composition:
+def compose_plan(root: Path, manifest: dict,
+                 answered: list[dict]) -> Composition:
     """The one derivation both `plan` and `apply` read a repository through.
 
     `apply` re-runs exactly this to recompute the input digest and regenerate
     the canonical operation list (D33), so a second, subtly different
     derivation cannot exist to disagree with it. It writes nothing.
+    `answered` is the operator's answers to open `candidate-class` questions,
+    applied before anything else is derived, so they enter `plan_id`.
     """
     inventory = inspect_repository(root)
     found = adopt_inspection.classify_inventory(root, inventory)
+    answered = adopt_planning.apply_answers(found, inventory, answered)
     untracked = adopt_inspection.untracked_under(
         root, adopt_inspection.overlap_targets(found))
     for path in untracked:
@@ -228,7 +232,12 @@ def compose_plan(root: Path, manifest: dict) -> Composition:
             contract_id = project["id"]
     project_id, recommended, open_questions = adopt_planning.derive_identity(
         root, contract_id)
-    decisions = {"recommended": recommended, "answered": [],
+    open_questions = sorted(
+        open_questions + adopt_planning.candidate_questions(found),
+        key=lambda entry: (
+            adopt_inspection.QUESTION_IDS.index(entry["id"]),
+            entry.get("subject", "")))
+    decisions = {"recommended": recommended, "answered": answered,
                  "open": open_questions}
 
     platform_block = {
@@ -333,7 +342,9 @@ def compose_plan(root: Path, manifest: dict) -> Composition:
 def command_plan(args: argparse.Namespace) -> int:
     manifest = require_manifest()
     root = adopt_inspection.require_repository(args.repo_root)
-    document = compose_plan(root, manifest).document
+    answers = [{"id": question, "subject": subject, "value": value}
+               for question, subject, value in args.answer]
+    document = compose_plan(root, manifest, answers).document
     # Before the write, never after: storing is what binds this id to this
     # checkout, and the binding a stored document already carries is never
     # re-pointed at a second one (D15, D16).
@@ -377,8 +388,16 @@ def emit_human(document: dict) -> int:
     ]
     for entry in document["decisions"]["recommended"]:
         lines.append(f"recommended {entry['id']}: {entry['value']}")
+    for entry in document["decisions"]["answered"]:
+        lines.append(f"answered {entry['id']} {entry['subject']}: "
+                     f"{entry['value']}")
     for entry in document["decisions"]["open"]:
-        lines.append(f"open {entry['id']}: {entry['recommendation']}")
+        if entry["id"] == "candidate-class":
+            answer = "none" if entry["value"] is None else entry["value"]
+            lines.append(f"open {entry['id']} {entry['subject']} "
+                         f"(answer: {answer}): {entry['recommendation']}")
+        else:
+            lines.append(f"open {entry['id']}: {entry['recommendation']}")
     for blocker in plan["blockers"]:
         lines.append(f"blocked by {blocker['id']}: {blocker['message']}")
     lines.append(f"next: {document['handoff']['next_command'] or '(none)'}")
@@ -416,6 +435,9 @@ def require_manifest() -> dict:
 # authenticates the plan's *inputs*, and re-deriving the operation list through
 # `compose_plan` authenticates the operations, which live outside the digest in
 # a mutable stored document (D33). Nothing here trusts a stored operation.
+# The operator's answers travel inside the stored plan and are re-applied here;
+# the recomputed digest is what authenticates them, so `apply` takes no answer
+# of its own.
 # --------------------------------------------------------------------------
 
 
@@ -423,6 +445,7 @@ def command_apply(args: argparse.Namespace) -> int:
     manifest = require_manifest()
     digest = adopt_apply.plan_digest(args.plan_id)
     document = adopt_apply.load_stored_plan(digest)
+    answers = adopt_apply.stored_answers(document)
     stored_plan = document["plan"]
     if stored_plan["state"] != "ready":
         raise adopt_inspection.refuse(
@@ -454,7 +477,7 @@ def command_apply(args: argparse.Namespace) -> int:
             "a retained worktree for this plan still exists and is never "
             "deleted without an acknowledged cleanup")
 
-    composed = compose_plan(root, manifest)
+    composed = compose_plan(root, manifest, answers)
     if composed.document["plan"]["plan_id"] != stored_plan["plan_id"]:
         raise adopt_inspection.refuse(
             "plan_stale", "adopt.plan.inputs_changed", "/plan/input_digest",
@@ -621,6 +644,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--format", choices=("json", "human"), default="json",
                       help="the view printed on stdout; the stored document "
                            "is the same either way")
+    plan.add_argument("--answer", action="append", nargs=3, default=[],
+                      metavar=("QUESTION", "SUBJECT", "VALUE"),
+                      help="settle one open candidate-class question; "
+                           "repeatable")
     apply_plan = subparsers.add_parser(
         "apply", help="carry out a stored ready plan in an isolated worktree")
     # Two flags and no more: naming the content-addressed id is the exact-plan
