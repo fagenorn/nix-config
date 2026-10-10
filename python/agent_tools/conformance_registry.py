@@ -268,8 +268,8 @@ REPAIRS = {
         "module": "conformance", "safety_class": "worktree",
         "operation": None},
     # Every release-profile repair is an edit to an authored profile this
-    # engine neither reads nor writes, so all three are `user_action` with a
-    # null operation (D25).
+    # engine does not write, so all three are `user_action` with a null
+    # operation (D25).
     # A promoted lesson's leftover local copy. Removing an unchanged copy
     # touches only the worktree; a drifted one needs the reader to reconcile
     # the edit with the promoted text first. Neither is executed here (D11).
@@ -397,19 +397,16 @@ REGISTRY: tuple[Check, ...] = (
     Check("repository.release_profile.rolled_back_reachable", "repository",
           "release_profile", "optional", ("repository.contract.valid",),
           (("subject_absent", "release_profile.compensate.add"),
-           ("profile_unsupported", "release_profile.compensate.add"),
            ("rolled_back_unreachable", "release_profile.compensate.add")),
           "check_release_profile_rolled_back_reachable"),
     Check("repository.release_profile.restore_anchor", "repository",
           "release_profile", "optional", ("repository.contract.valid",),
           (("subject_absent", "release_profile.materialize.add"),
-           ("profile_unsupported", "release_profile.materialize.add"),
            ("restore_anchor_destroyed", "release_profile.materialize.add")),
           "check_release_profile_restore_anchor"),
     Check("repository.release_profile.observation_deadline", "repository",
           "release_profile", "optional", ("repository.contract.valid",),
           (("subject_absent", "release_profile.deadline.require"),
-           ("profile_unsupported", "release_profile.deadline.require"),
            ("observation_deadline_optional", "release_profile.deadline.require")),
           "check_release_profile_observation_deadline"),
 )

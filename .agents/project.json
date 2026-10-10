@@ -111,7 +111,6 @@
         "plan": "codex-plan-review",
         "code": "codex-diff-review"
       },
-      "release": null,
       "light_lane": {
         "mode": "shadow",
         "budget_minutes": 90,
@@ -161,9 +160,6 @@
     "review.code": {
       "support": "supported"
     },
-    "release": {
-      "support": "unsupported"
-    },
     "deploy": {
       "support": "unsupported"
     }
@@ -187,5 +183,6 @@
   "platform": {
     "min_inclusive": "1.0.0",
     "max_exclusive": "2.0.0"
-  }
+  },
+  "release": "unsupported"
 }
