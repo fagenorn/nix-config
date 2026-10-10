@@ -1899,6 +1899,24 @@ class PathReferencePlanTest(AdoptTestCase):
                 with self.assertRaises(ValueError):
                     adopt_planning.check_reference_writes(changes, {target})
 
+    def test_a_projection_reading_a_reference_target_is_not_a_second_writer(self):
+        op = adopt_planning.operation
+        target = "tools/agents.tmpl"
+        write_op = op("write-file", [target], [target],
+                      "sha256:" + "0" * 64, "sha256:" + "1" * 64)
+        reads = op("regenerate-projection", [target], ["AGENTS.md"],
+                   "sha256:" + "2" * 64, None)
+        adopt_planning.check_reference_writes([write_op, reads], {target})
+        adopt_planning.check_reference_writes([reads, write_op, reads],
+                                              {target})
+        regenerates = op("regenerate-projection", ["tools/other.tmpl"],
+                         [target], "sha256:" + "0" * 64, None)
+        for changes in ([reads], [write_op, regenerates],
+                        [write_op, reads, write_op]):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    adopt_planning.check_reference_writes(changes, {target})
+
 
 class GitignoreAmendmentTest(AdoptTestCase):
     """The one heuristic in the module, exercised through the operation it

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import subprocess
 import tempfile
@@ -198,6 +199,24 @@ class EditTest(unittest.TestCase):
     def test_an_unoffered_answer_raises(self):
         with self.assertRaises(ValueError):
             edit(EXEMPT, "rewrite")
+
+    def test_an_occurrence_outside_the_closed_sets_raises(self):
+        references = adopt_references.plan_references(
+            {"tools/check.py": ".claude/specs/\n"}, PATHS, MOVES)
+        (occurrence,) = references.occurrences
+        self.assertEqual((occurrence.answers, occurrence.shape),
+                         (ANSWERS_ALL, "line"))
+        for changed, answer in (({"shape": None}, "extend"),
+                                ({"shape": "block"}, "extend"),
+                                ({"replacement": None}, "rewrite"),
+                                ({"answers": ("append",)}, "append")):
+            broken = adopt_references.References(
+                references.texts,
+                (dataclasses.replace(occurrence, **changed),))
+            with self.subTest(changed=changed, answer=answer):
+                with self.assertRaises(ValueError):
+                    adopt_references.rewritten(
+                        broken, {occurrence.subject: answer})
 
     def test_the_summary_rows(self):
         references = adopt_references.plan_references(

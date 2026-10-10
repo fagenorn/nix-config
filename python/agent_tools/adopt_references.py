@@ -250,12 +250,26 @@ def _occurrence(path: str, text: str, token: Token, base: Tree, after: Tree,
 
 def _edit(text: str, occurrence: Occurrence, answer: str
           ) -> tuple[int, int, str]:
+    """The `(start, end, new)` splice an `extend` or `rewrite` answer makes.
+
+    Raises `ValueError` for any other answer, a `rewrite` with no
+    replacement, and an `extend` whose shape is neither `quoted` nor `line`.
+    """
     if answer == "rewrite":
-        return occurrence.start, occurrence.end, occurrence.replacement or ""
+        if occurrence.replacement is None:
+            raise ValueError(
+                f"{occurrence.subject}: rewrite has no replacement")
+        return occurrence.start, occurrence.end, occurrence.replacement
+    if answer != "extend":
+        raise ValueError(f"{occurrence.subject}: {answer!r} makes no edit")
     if occurrence.shape == "quoted":
         quote = text[occurrence.start - 1]
         return occurrence.end + 1, occurrence.end + 1, "".join(
             f", {quote}{form}{quote}" for form in occurrence.additions)
+    if occurrence.shape != "line":
+        raise ValueError(
+            f"{occurrence.subject}: extend has no shape "
+            f"{occurrence.shape!r}")
     line_start, line_end = _line_bounds(text, occurrence.start, occurrence.end)
     line = text[line_start:line_end]
     copies = [line[:occurrence.start - line_start] + form
@@ -304,7 +318,9 @@ def rewritten(references: References, answers: dict[str, str]
               ) -> dict[str, tuple[str, str]]:
     """`path -> (before, after)` for each file an `extend` or `rewrite` edits.
 
-    Raises `ValueError` for an answer the occurrence does not offer.
+    Raises `ValueError` for an answer the occurrence does not offer, and for
+    an offered one it cannot carry out: a `rewrite` with no replacement, an
+    `extend` with no `quoted` or `line` shape, or an answer outside `ANSWERS`.
     """
     edits: dict[str, list[tuple[int, int, str]]] = {}
     for occurrence in references.occurrences:
