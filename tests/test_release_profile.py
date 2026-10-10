@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agent_tools import release_profile
 from agent_tools.transaction_core import TransactionStore
+from agent_tools.transaction_storage import ProofPlanRejected
 from . import release_test_support as support
 
 D = support.descriptors
@@ -41,21 +42,43 @@ class AcceptanceOneTest(unittest.TestCase):
                 for finding in caught.exception.findings:
                     self.assertEqual(sorted(finding), ["detail", "pointer", "reason", "rule"])
 
-    def test_nothing_reaches_the_store(self):
-        """D20: the pipeline compile -> bind -> create raises with an empty store root."""
+    def test_compile_refuses_before_any_store_exists(self):
+        """D20: compile_profile refuses the three inadmissible profiles, so no bind or create follows."""
         cases = (("github-release", support.derived_class_profile()),
                  ("github-release", support.missing_deadline_profile()),
                  ("restorable", support.unreachable_rollback_profile()))
         for profile_id, profile in cases:
             with self.subTest(profile_id=profile_id), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp).resolve()
-                store = TransactionStore(root)
                 before = tree(root)
                 with self.assertRaises(release_profile.ProfileInadmissible):
                     inputs = release_profile.bind_candidate(compile_(profile_id, profile), support.CANDIDATE)
-                    store.create("k", inputs["subject"], concurrency_keys=inputs["concurrency_keys"],
-                                 proof=inputs["proof"], recovery=inputs["recovery"], authority_class="test")
+                    TransactionStore(root).create(
+                        "k", inputs["subject"], concurrency_keys=inputs["concurrency_keys"],
+                        proof=inputs["proof"], recovery=inputs["recovery"], authority_class="test")
                 self.assertEqual(tree(root), before)
+
+    def test_the_core_refuses_a_derived_class_before_any_lock(self):
+        """AC1: declarations the core itself refuses leave the store root as it was; a control
+        create from an accepted profile's declarations does write, so the check can fail."""
+        def create(root, profile_id, profile):
+            proof, recovery = release_profile.lower(profile_id, profile, D())
+            return TransactionStore(root).create(
+                "k", {"profile_id": profile_id}, concurrency_keys=["release/test"],
+                proof=proof, recovery=recovery, authority_class="test")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            before = tree(root)
+            with self.assertRaises(ProofPlanRejected) as caught:
+                create(root, "github-release", support.derived_class_profile())
+            self.assertEqual(caught.exception.reason, "derived_class_named")
+            self.assertEqual(tree(root), before)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            before = tree(root)
+            create(root, "github-release", support.forge_profile())
+            self.assertNotEqual(tree(root), before)
 
 class RulesTest(unittest.TestCase):
     def test_every_finding_is_reported(self):
