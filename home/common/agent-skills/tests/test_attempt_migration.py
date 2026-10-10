@@ -3,17 +3,20 @@
 Run: just agent-workflow-tests
 """
 
+import fcntl
 import hashlib
 import json
 import re
 import shutil
+import subprocess
+import sys
 import unittest
 
 from agent_tools import attempt_identity as ai
 from agent_tools.transaction_core import TransactionStore
 
 from .test_delivered_control import DeliveredControlHarness
-from .test_workflow_state import DEFAULT_NOW, LifecycleHarness
+from .test_workflow_state import DEFAULT_NOW, SCRIPT, LifecycleHarness
 
 CORE = re.compile(
     r"^rel_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
@@ -45,6 +48,60 @@ class MigrationFixtures(LifecycleHarness):
         source = self.delivered_207()
         self.install_legacy(source, handle)
         return source
+
+    def new_run_fields(self, issue):
+        return {"issue": issue, "new_run": True, "now": "2026-08-20T10:10:00Z",
+                "tracker": self.tracker_fact(issue),
+                "worktree": self.worktree_fact(issue, recorded={
+                    "path": self.terminal_worktree, "state": "matching_issue_branch"})}
+
+    def install_direct_pair(self):
+        """Issue 41 as two retained legacy ledgers, `direct-41-000001` (terminal) and
+        `direct-41-000002` (its `new_run` successor), with their minted runs and index
+        entries removed so only the legacy ledgers name the issue (D21)."""
+        owner = self.acquire_direct(issue=41)
+        first_id = owner["run_id"]
+        self.run_id = first_id
+        self.finish(1, {**self.merged_result(41), "state": "stopped", "pr_url": None,
+                        "merge_sha": None, "issue_closed": False, "notes": "semantic stop"},
+                    issue=41, now="2026-08-20T10:05:00Z")
+        self.terminal_worktree = owner["worktree"]
+        first = self.read_state()
+        second_id = self.direct_owner(**self.new_run_fields(41))["run_id"]
+        self.run_id = second_id
+        second = self.read_state()
+        self.install_legacy(first, "direct-41-000001")
+        self.install_legacy({**second, "prior_run": "direct-41-000001"}, "direct-41-000002")
+        for minted in (first_id, second_id):
+            shutil.rmtree(self.workflows_dir / minted)
+        for sequence in (1, 2):
+            key = ai.direct_key(41, sequence)
+            (self.store_root / "creation-keys" /
+             f"{hashlib.sha256(key.encode('utf-8')).hexdigest()}.json").unlink()
+            self.assertIsNone(self.store().lookup(key))
+
+    def edit_ledger(self, handle, **fields):
+        path = self.workflows_dir / handle / "state.json"
+        state = {**json.loads(path.read_text(encoding="utf-8")), **fields}
+        path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
+                        encoding="utf-8")
+
+    def install_refusal_fixtures(self):
+        """Ledgers each refused for a different reason; returns `{handle: reason}`."""
+        source = self.delivered_207()
+        self.install_legacy(source, "issue-14-test")
+        self.install_legacy(source, "orchestrate-90")
+        self.edit_ledger("orchestrate-90", schema_version=9)
+        self.install_legacy({**source, "prior_run": "orchestrate-90"}, "orchestrate-91")
+        self.install_direct_pair()
+        shutil.rmtree(self.workflows_dir / "direct-41-000001")
+        self.edit_ledger("direct-41-000002", prior_run="direct-42-000001")
+        extra = {**source, "issues": {key: {**issue, "extra": 1}
+                                      for key, issue in source["issues"].items()}}
+        self.install_legacy(extra, "orchestrate-92", version=1)
+        return {"issue-14-test": "unknown_dialect", "orchestrate-90": "unknown_schema",
+                "orchestrate-91": "ambiguous_lineage", "direct-41-000002": "ambiguous_lineage",
+                "orchestrate-92": "invalid_state"}
 
     def run_cli_json(self, *args, ok=True):
         completed = self.run_cli(*args, ok=ok)
@@ -179,12 +236,6 @@ class DirectOwnerIdentityTest(MigrationFixtures, unittest.TestCase):
          f"{hashlib.sha256(key.encode('utf-8')).hexdigest()}.json").unlink()
         self.assertIsNone(self.store().lookup(key))
 
-    def new_run_fields(self, issue):
-        return {"issue": issue, "new_run": True, "now": "2026-08-20T10:10:00Z",
-                "tracker": self.tracker_fact(issue),
-                "worktree": self.worktree_fact(issue, recorded={
-                    "path": self.terminal_worktree, "state": "matching_issue_branch"})}
-
     def test_a_first_direct_run_is_minted_and_named_by_its_transaction(self):
         run_id = self.first_direct_run()
         self.assertRegex(run_id, CORE)
@@ -262,3 +313,163 @@ class DirectOwnerIdentityTest(MigrationFixtures, unittest.TestCase):
         self.assertEqual(rebootstrap.returncode, 2)
         self.assertIn("reserved for direct-owner", rebootstrap.stderr)
         self.assertEqual(self.tree_snapshot(), before)
+
+
+class MigrationAcceptanceTest(MigrationFixtures, unittest.TestCase):
+    LEGACY = ("orchestrate-21-24-r2", "issues-29-30-20260817-r2")
+
+    def migrate(self, *flags, ok=True):
+        completed = self.run_cli("migrate", "--repo-root", self.root, *flags, ok=ok)
+        return completed, (json.loads(completed.stdout) if ok else None)
+
+    def rows(self, report):
+        return {row["ledger"]: row for row in report["ledgers"]}
+
+    def install_all(self):
+        source = self.delivered_207()       # built in the driver's own root (D24)
+        for handle in self.LEGACY:
+            self.install_legacy(source, handle)
+        self.init_run(creation_key="fixture-337")
+        self.spawn(issue=337, worktree=str(self.root / "wt-337"))
+        self.install_legacy(self.read_state(), "run-20261009-337-338-339")
+        self.install_direct_pair()          # direct-41-000001 (terminal) and -000002 (D21)
+        return source
+
+    def launch_bytes(self, handle):
+        return [self.run_cli(command, "--repo-root", self.root, "--run-id", handle,
+                             "--action-id", action).stdout
+                for command in ("check-launch", "current-launch")
+                for action in ("207:1:4", "207:r1:1")]
+
+    def test_ac1_minted_runs_and_legacy_rows_with_lineage(self):
+        self.install_all()
+        before = {handle: self.launch_bytes(handle) for handle in self.LEGACY}
+        _, report = self.migrate("--apply")
+        rows = self.rows(report)
+        for handle in (*self.LEGACY, "run-20261009-337-338-339", "direct-41-000001",
+                       "direct-41-000002"):
+            with self.subTest(handle=handle):
+                self.assertEqual(rows[handle]["verdict"], "migrated")
+                key = (ai.direct_key(41, int(handle[-6:])) if handle.startswith("direct-")
+                       else ai.legacy_key(handle))
+                self.assertEqual(self.store().lookup(key), rows[handle]["transaction_id"])
+        self.assertEqual(rows["direct-41-000002"]["prior_transaction_id"],
+                         rows["direct-41-000001"]["transaction_id"])
+        _, again = self.migrate()
+        again_rows = self.rows(again)
+        self.assertEqual(set(again_rows), set(rows))
+        self.assertEqual({handle: row["verdict"] for handle, row in again_rows.items()},
+                         {handle: "current" for handle in rows})
+        self.assertEqual({handle: self.launch_bytes(handle) for handle in self.LEGACY}, before)
+
+    def test_ac2_identity_never_comes_from_names(self):
+        self.install_all()
+        _, report = self.migrate()
+        grouped = self.rows(report)["run-20261009-337-338-339"]
+        self.assertEqual((grouped["alias"]["issues"], grouped["issues"]),
+                         ([337, 338, 339], [337]))
+        retried = self.rows(report)["orchestrate-21-24-r2"]
+        self.assertEqual((retried["alias"]["retry"], retried["prior_run"],
+                          retried["prior_transaction_id"]), (2, None, None))
+        self.migrate("--apply")
+        subject = self.store().load(self.store().lookup(
+            ai.legacy_key("run-20261009-337-338-339"))).subject
+        self.assertNotIn("issues", subject)
+        moved = self.workflows_dir / "orchestrate-99"
+        (self.workflows_dir / "issues-29-30-20260817-r2").rename(moved)
+        snapshot = self.tree_snapshot()
+        _, report = self.migrate()
+        self.assertEqual((self.rows(report)["orchestrate-99"]["verdict"],
+                          self.rows(report)["orchestrate-99"]["reason"]),
+                         ("refused", "location_mismatch"))
+        refused = self.run_cli("check-launch", "--repo-root", self.root, "--run-id",
+                               "orchestrate-99", "--action-id", "207:1:4", ok=False)
+        self.assertEqual(refused.returncode, 2)
+        self.assertEqual(self.tree_snapshot(), snapshot)
+
+    def test_ac3_dry_run_then_idempotent_apply(self):
+        self.install_all()
+        snapshot = self.tree_snapshot()
+        first, _ = self.migrate()
+        second, _ = self.migrate()
+        self.assertEqual(first.stdout, second.stdout)
+        self.assertEqual(self.tree_snapshot(), snapshot)
+        self.migrate("--apply")
+        applied = self.tree_snapshot()
+        _, again = self.migrate("--apply")
+        self.assertEqual(again["counts"]["migrated"], 0)
+        self.assertEqual(self.tree_snapshot(), applied)
+
+    def test_ac3_dry_run_before_any_store_creates_nothing(self):
+        source = self.install_orchestrated("orchestrate-21-24-r2")
+        self.install_legacy(source, "issues-29-30-20260817-r2")
+        self.assertFalse(self.store_root.exists())
+        snapshot = self.tree_snapshot()
+        first, report = self.migrate()
+        second, _ = self.migrate()
+        self.assertEqual(first.stdout, second.stdout)
+        self.assertEqual({row["verdict"] for row in report["ledgers"]}, {"migrate"})
+        self.assertEqual({row["transaction_id"] for row in report["ledgers"]}, {None})
+        self.assertEqual(self.tree_snapshot(), snapshot)
+        self.assertFalse(self.store_root.exists())
+
+    def test_ac3_ledger_refusal_is_data_and_a_store_fault_exits_2(self):
+        self.init_run(creation_key="fixture-unknown")
+        unknown = self.run_id
+        shutil.rmtree(self.store_root / unknown)      # the ledger names a missing transaction
+        _, report = self.migrate()
+        self.assertEqual((self.rows(report)[unknown]["verdict"],
+                          self.rows(report)[unknown]["reason"]), ("refused", "invalid_state"))
+        self.init_run(creation_key="fixture-fault")
+        (self.store_root / self.run_id / "state.json").write_bytes(b"{")  # unreadable record
+        snapshot = self.tree_snapshot()
+        for flags in ((), ("--apply",)):
+            with self.subTest(flags=flags):
+                completed, _ = self.migrate(*flags, ok=False)
+                self.assertEqual((completed.returncode, completed.stdout), (2, ""))
+                self.assertTrue(completed.stderr.startswith("workflow-state: "),
+                                completed.stderr)
+                self.assertEqual(self.tree_snapshot(), snapshot)
+
+    def test_ac3_refusals_are_byte_identical(self):
+        fixtures = self.install_refusal_fixtures()
+        snapshot = self.tree_snapshot()
+        index = sorted((self.store_root / "creation-keys").iterdir())
+        _, report = self.migrate("--apply")
+        rows = self.rows(report)
+        after = self.tree_snapshot()
+        for handle, reason in fixtures.items():
+            with self.subTest(handle=handle):
+                self.assertEqual((rows[handle]["verdict"], rows[handle]["reason"]),
+                                 ("refused", reason))
+                prefix = f"workflows/{handle}/"
+                self.assertEqual({k: v for k, v in after.items() if k.startswith(prefix)},
+                                 {k: v for k, v in snapshot.items() if k.startswith(prefix)})
+        self.assertEqual(sorted((self.store_root / "creation-keys").iterdir()), index)
+
+    def test_ac3_precreated_transaction_is_bound(self):
+        self.install_all()
+        plan = ai.plan_migration(json.loads(
+            (self.workflows_dir / "orchestrate-21-24-r2" / "state.json").read_text()))
+        reserved = self.store().create(plan.creation_key, plan.subject_json(),
+                                       **ai.creation_arguments(plan)).transaction_id
+        _, report = self.migrate("--apply")
+        self.assertEqual(self.rows(report)["orchestrate-21-24-r2"]["transaction_id"], reserved)
+
+    def test_ac3_held_mint_lock_makes_apply_wait(self):
+        self.install_all()
+        ledger = self.workflows_dir / "orchestrate-21-24-r2" / "state.json"
+        before = ledger.read_bytes()
+        with open(self.store_root / "attempt-runs.lock", "a+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            child = subprocess.Popen(
+                [sys.executable, str(SCRIPT), "migrate", "--repo-root", str(self.root),
+                 "--apply"], env=self.cli_env, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                child.wait(timeout=3)
+            self.assertEqual(ledger.read_bytes(), before)
+        stdout, stderr = child.communicate(timeout=120)
+        self.assertEqual(child.returncode, 0, stderr)
+        self.assertEqual(self.rows(json.loads(stdout))["orchestrate-21-24-r2"]["verdict"],
+                         "migrated")

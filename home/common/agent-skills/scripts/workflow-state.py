@@ -2162,6 +2162,18 @@ def reject_reserved_direct_run_id(run_id: str) -> None:
         raise WorkflowError("direct run identities are reserved for direct-owner")
 
 
+def command_migrate(args: argparse.Namespace) -> int:
+    """Exit 0 with refusals as data; exit 2 on usage, an unreadable workflows directory
+    or a store error."""
+    root = resolve_repo_root(args.repo_root)
+    print_json(attempt_store.migration_report(
+        root / ".superpowers", apply=args.apply,
+        upgrade=partial(upgrade_state, migration_contracts={}), validate=validate_state,
+        bind=lambda handle: transact(args.repo_root, handle, lambda state: (None, False)),
+        refusals=(WorkflowError,)))
+    return 0
+
+
 def command_init_run(args: argparse.Namespace) -> int:
     """Mint a run (`--creation-key`) or re-bootstrap an existing one (`--run-id`, no create)."""
     _delivery()
@@ -5199,6 +5211,11 @@ def build_parser() -> argparse.ArgumentParser:
     handle.add_argument("--creation-key",
                         help="mint the run for this key, or answer the one it already names")
     init_run.set_defaults(handler=command_init_run)
+
+    migrate = subparsers.add_parser("migrate")
+    migrate.add_argument("--repo-root", required=True)
+    migrate.add_argument("--apply", action="store_true")
+    migrate.set_defaults(handler=command_migrate)
 
     control = subparsers.add_parser("control")
     control.add_argument("--repo-root", required=True)

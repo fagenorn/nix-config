@@ -7,6 +7,7 @@ chain and `validate_state`; it passes the last two to this module as callbacks.
 """
 
 import fcntl
+import json
 import os
 import stat
 from collections.abc import Callable, Iterator
@@ -14,17 +15,22 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from agent_tools.attempt_identity import (
-    REFUSAL_REASONS, MigrationRefused, RunIdentity, RunPlan, classify, creation_arguments,
-    direct_key, identity_of, legacy_identity, minted_plan, plan_migration, schema_refusal,
+    LEGACY_DIALECTS, REFUSAL_REASONS, REPORT_ROW_FIELDS, MigrationRefused, RunIdentity,
+    RunPlan, classify, creation_arguments, direct_key, identity_of, legacy_alias,
+    legacy_identity, legacy_key, minted_plan, plan_migration, report, schema_refusal,
     subject_handle, subject_violation)
 from agent_tools.transaction_core import TransactionError, TransactionStore
-from agent_tools.transaction_storage import is_id
+from agent_tools.transaction_storage import UnknownTransaction, is_id
 
 BOUND_SCHEMA_VERSION = 8
 
 
 class StoreRefused(Exception):
     """A refusal by the attempt store; the message is what `workflow-state` prints."""
+
+
+class StoreFault(StoreRefused):
+    """The store itself cannot be read; never a refusal of one ledger (#337 D37)."""
 
 
 class LedgerRefused(StoreRefused):
@@ -172,7 +178,7 @@ def _existing_store(store: Path) -> Path | None:
     if status is None:
         return None
     if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
-        raise StoreRefused("attempt transactions must be a non-symlink directory")
+        raise StoreFault("attempt transactions must be a non-symlink directory")
     return store
 
 
@@ -211,7 +217,7 @@ def lookup_run(store: Path, creation_key: str) -> str | None:
     try:
         return TransactionStore(store).lookup(creation_key)
     except TransactionError as error:
-        raise StoreRefused(f"run transaction store: {error}") from error
+        raise StoreFault(f"run transaction store: {error}") from error
 
 
 def bound_identity(store: Path, state: dict[str, Any], run_id: str) -> RunIdentity:
@@ -228,8 +234,10 @@ def bound_identity(store: Path, state: dict[str, Any], run_id: str) -> RunIdenti
         raise StoreRefused("the run transaction store does not exist")
     try:
         subject = TransactionStore(store).load(transaction_id).subject
-    except TransactionError as error:
+    except UnknownTransaction as error:
         raise StoreRefused(f"run transaction store: {error}") from error
+    except TransactionError as error:
+        raise StoreFault(f"run transaction store: {error}") from error
     violation = subject_violation(subject)
     if violation is not None:
         raise StoreRefused(f"run transaction {transaction_id}: {violation}")
@@ -322,3 +330,141 @@ def indexed_direct_runs(store: Path, workflows_dir: Path, issue: int, *,
         if _path_status(run_dir / "state.json") is None:
             return
         yield sequence, run_id, run_dir
+
+
+def _inventory(superpowers: Path) -> list[str]:
+    """The ledgers `migrate` reads: non-dot, non-symlink directories of `workflows` that hold
+    a regular `state.json`, in name order. Nothing else is read."""
+    workflows = superpowers / "workflows"
+    status = _path_status(workflows)
+    if status is None or stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
+        raise StoreRefused("workflows must be an existing non-symlink directory")
+    ledgers = []
+    for name in sorted(os.listdir(workflows)):
+        if name.startswith("."):
+            continue
+        directory = _path_status(workflows / name)
+        if directory is None or stat.S_ISLNK(directory.st_mode) or not stat.S_ISDIR(
+                directory.st_mode):
+            continue
+        state = _path_status(workflows / name / "state.json")
+        if state is not None and stat.S_ISREG(state.st_mode):
+            ledgers.append(name)
+    return ledgers
+
+
+def _typed(document: Any, field: str, kind: type) -> Any:
+    value = document.get(field) if isinstance(document, dict) else None
+    return value if type(value) is kind else None
+
+
+def _recorded_issues(document: Any) -> list[int] | None:
+    issues = _typed(document, "issues", dict)
+    if issues is None or not all(key.isascii() and key.isdecimal() for key in issues):
+        return None
+    return sorted(int(key) for key in issues)
+
+
+def _prior_transaction_id(store: Path, prior_run: str | None) -> str | None:
+    """The run id a ledger's `prior_run` names: a core id itself, else the index's answer."""
+    if prior_run is None:
+        return None
+    dialect = classify(prior_run)
+    if dialect == "core":
+        return prior_run
+    if dialect == "direct":
+        prior = legacy_identity(prior_run)
+        return lookup_run(store, direct_key(prior.issue, prior.sequence))
+    return lookup_run(store, legacy_key(prior_run))
+
+
+def _row_verdict(row: dict, document: Any, store: Path, *, upgrade: Callable[..., dict],
+                 validate: Callable[..., dict], refusals: tuple[type[Exception], ...],
+                 migrated: bool) -> tuple[str, str | None]:
+    """The verdict and refusal reason of one parsed ledger; fills `transaction_id`."""
+    run_id, version = row["run_id"], row["schema_version"]
+    if schema_refusal(document) is not None:
+        return "refused", "unknown_schema"
+    if run_id is None:
+        return "refused", "invalid_state"
+    if run_id != row["ledger"]:
+        return "refused", "location_mismatch"
+    if version == BOUND_SCHEMA_VERSION:
+        try:
+            validate(document, run_id=run_id, identity=bound_identity(store, document, run_id))
+        except StoreFault:
+            raise
+        except (StoreRefused, *refusals):
+            return "refused", "invalid_state"
+        row["transaction_id"] = document["transaction_id"]
+        return ("migrated" if migrated else "current"), None
+    try:
+        _, plan = _upgraded(document, run_id=run_id, upgrade=upgrade)
+    except LedgerRefused as error:
+        return "refused", error.reason
+    except refusals:
+        return "refused", "invalid_state"
+    row["transaction_id"] = lookup_run(store, plan.creation_key)
+    return "migrate", None
+
+
+def migration_row(superpowers: Path, ledger: str, *, upgrade: Callable[..., dict],
+                  validate: Callable[..., dict], refusals: tuple[type[Exception], ...],
+                  migrated: bool = False) -> dict:
+    """One ledger's report row, read without a lock; creates no store, lock or directory.
+
+    `upgrade` and `validate` follow `locked_read`'s callback contract and `refusals` are the
+    caller's error types, which a row reports as `invalid_state`; a `StoreFault` propagates.
+    `migrated` turns a bound ledger's `current` into `migrated` (what an apply just bound).
+    """
+    store = store_root(superpowers)
+    row = dict.fromkeys(REPORT_ROW_FIELDS)
+    row["ledger"] = ledger
+    try:
+        document = json.loads(
+            (superpowers / "workflows" / ledger / "state.json").read_text(encoding="utf-8"))
+    except ValueError:
+        row["verdict"], row["reason"] = "refused", "invalid_state"
+        return row
+    row.update(run_id=_typed(document, "run_id", str),
+               schema_version=_typed(document, "schema_version", int),
+               prior_run=_typed(document, "prior_run", str), issues=_recorded_issues(document),
+               dialect=classify(_typed(document, "run_id", str)))
+    if row["dialect"] in LEGACY_DIALECTS:
+        row["alias"] = legacy_alias(row["run_id"])
+    # A core run id at schema 8 is a minted run, whose subject has no alias: alias stays null.
+    row["verdict"], row["reason"] = _row_verdict(
+        row, document, store, upgrade=upgrade, validate=validate, refusals=refusals,
+        migrated=migrated)
+    row["prior_transaction_id"] = _prior_transaction_id(store, row["prior_run"])
+    return row
+
+
+def migration_report(superpowers: Path, *, apply: bool, upgrade: Callable[..., dict],
+                     validate: Callable[..., dict], bind: Callable[[str], None],
+                     refusals: tuple[type[Exception], ...]) -> dict:
+    """The `attempt-migration-report/v1` of every ledger under `superpowers/workflows`.
+
+    A read-only dry run comes first. With `apply`, each `migrate` ledger is bound through the
+    caller's locked no-op write `bind(handle)` on bytes re-read under that ledger's lock, so a
+    refusal under the lock (`LedgerRefused`) replaces the advisory dry-run verdict, and the
+    rows are then recomputed. Refusals are reported data; a missing `workflows` directory
+    raises `StoreRefused`, and a `StoreFault` raises.
+    """
+    options = {"upgrade": upgrade, "validate": validate, "refusals": refusals}
+    rows = {ledger: migration_row(superpowers, ledger, **options)
+            for ledger in _inventory(superpowers)}
+    if apply:
+        bound = []
+        for ledger, row in rows.items():
+            if row["verdict"] != "migrate":
+                continue
+            try:
+                bind(ledger)
+            except LedgerRefused as error:
+                rows[ledger] = {**row, "verdict": "refused", "reason": error.reason}
+            else:
+                bound.append(ledger)
+        for ledger in bound:
+            rows[ledger] = migration_row(superpowers, ledger, migrated=True, **options)
+    return report("apply" if apply else "dry_run", list(rows.values()))
