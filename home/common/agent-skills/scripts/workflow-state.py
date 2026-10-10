@@ -5,6 +5,7 @@ import copy
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 import fcntl
+from functools import partial
 import importlib.util
 import json
 import math
@@ -18,8 +19,12 @@ import sys
 import tempfile
 from typing import Any, Callable, Iterator
 
+from agent_tools import attempt_store
+from agent_tools.attempt_identity import RunIdentity, classify, minted_plan, prior_run_violation
+from agent_tools.transaction_storage import is_id
 
-SCHEMA_VERSION = 7
+
+SCHEMA_VERSION = 8
 CONTROL_INTERFACE_VERSION = 3
 DIRECT_OWNER_INTERFACE_VERSION = 2
 ATTEMPT_STATES = frozenset(
@@ -85,9 +90,11 @@ PHASE_INPUT_FIELDS = (
     "remainder_self_contained",
 )
 STATE_FIELDS = frozenset(
-    {"schema_version", "run_id", "created_at", "updated_at", "prior_run", "issues",
-     "admission", "workers"}
+    {"schema_version", "run_id", "transaction_id", "created_at", "updated_at", "prior_run",
+     "issues", "admission", "workers"}
 )
+# A schema-7 ledger, as it is read before it is bound to a run transaction (#337).
+LEGACY_STATE_FIELDS = STATE_FIELDS - {"transaction_id"}
 # The run's worker registry (#222 D2): every writing agent a launch dispatched,
 # in registration order. A worker is live while it is unreleased and its launch
 # is still current, so a superseded launch fences its workers with no write.
@@ -517,7 +524,16 @@ def validate_result(value: Any, *, expected_issue: int | None = None) -> dict[st
 
 
 def artifact_budget_paths() -> tuple[list[str], Path | None]:
-    """Resolve the Task-1 CLI and its repository/installed policy."""
+    """Resolve the Task-1 CLI and its repository/installed policy.
+
+    In the source layout (`artifact_budget.py` beside the resolved script, the
+    policy in its parent directory) that module runs under this interpreter.
+    Otherwise the CLI is `artifact-budget` beside the script, else
+    `~/.agents/bin/artifact-budget`, and the policy is
+    `<script dir>/../share/artifact-budget-policy.json`, else
+    `~/.agents/share/artifact-budget-policy.json` (None when neither exists):
+    the store copy `workflow-state` runs from has neither beside it (#337 D38).
+    """
 
     def trusted_policy(path: Path) -> Path | None:
         """Resolve a policy path for an explicit ``--policy`` argument.
@@ -540,6 +556,8 @@ def artifact_budget_paths() -> tuple[list[str], Path | None]:
     installed_policy = Path(__file__).parent.parent / "share/artifact-budget-policy.json"
     if not installed_cli.is_file():
         installed_cli = Path.home() / ".agents/bin/artifact-budget"
+    if not installed_policy.is_file():
+        installed_policy = Path.home() / ".agents/share/artifact-budget-policy.json"
     return [str(installed_cli)], (
         trusted_policy(installed_policy) if installed_policy.is_file() else None
     )
@@ -599,7 +617,7 @@ def is_reserved_direct_run_id(run_id: str) -> bool:
 
 def select_phase_action(
     *,
-    run_id: str,
+    direct: bool,
     turn_count: int | None,
     context_tokens: int | None,
     turn_ceiling: int,
@@ -614,7 +632,7 @@ def select_phase_action(
 
     The phase budget is the turn and context ceilings with their headrooms; this
     function never sees the attempt budget's wall clock, and ``delegate`` does not
-    reset it. Reserved module-owned direct runs select a self-contained remainder
+    reset it. A ``direct`` run (by its identity) selects a self-contained remainder
     first, then an eligible ``fresh_start``, known near-ceiling usage, work that
     needs no context, and otherwise ``continue``. Every non-direct run retains the
     complete order: eligible ``fresh_start``, known near-ceiling usage, measured
@@ -625,7 +643,7 @@ def select_phase_action(
     ``handoff`` at its first phase gate, so an unknown count only withholds
     ``delegate`` -- which still requires usage measured below both ceilings.
     """
-    if is_reserved_direct_run_id(run_id):
+    if direct:
         if remainder_self_contained:
             return "delegate"
         if not next_needs_context and artifacts_sufficient:
@@ -733,7 +751,7 @@ def validate_attempt_lane(value: dict[str, Any], *, started_at: datetime) -> Non
 
 
 def validate_attempt(
-    value: Any, *, issue: int, expected_number: int, run_id: str
+    value: Any, *, issue: int, expected_number: int, direct: bool
 ) -> None:
     if not isinstance(value, dict) or set(value) != ATTEMPT_FIELDS:
         raise WorkflowError("invalid attempt schema")
@@ -832,24 +850,39 @@ def validate_attempt(
         ):
             raise WorkflowError("invalid phase action")
         phase_inputs = validate_phase_inputs(value["phase_inputs"])
-        if select_phase_action(run_id=run_id, **phase_inputs) != value["phase_action"]:
+        if select_phase_action(direct=direct, **phase_inputs) != value["phase_action"]:
             raise WorkflowError("phase action does not match persisted inputs")
     if value["state"] == "handed_off":
         if value["phase_action"] != "handoff" or value["handoff_path"] is None:
             raise WorkflowError("handed-off attempt requires a durable handoff")
 
 
-def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != STATE_FIELDS:
+def validate_state(value: Any, *, run_id: str, identity: RunIdentity,
+                   schema_version: int = SCHEMA_VERSION) -> dict[str, Any]:
+    """Validate one ledger at `schema_version` (8, or 7 for a document not yet bound).
+
+    `identity` is the run's identity: from its transaction's subject at schema 8, from its
+    legacy name before it is bound.
+    """
+    fields = STATE_FIELDS if schema_version == SCHEMA_VERSION else LEGACY_STATE_FIELDS
+    if not isinstance(value, dict) or set(value) != fields:
         raise WorkflowError("invalid workflow state schema")
-    if type(value["schema_version"]) is not int or value["schema_version"] != SCHEMA_VERSION:
+    if type(value["schema_version"]) is not int or value["schema_version"] != schema_version:
         raise WorkflowError(
             f"unsupported workflow state schema version: {value['schema_version']!r}"
         )
     if value["run_id"] != run_id:
         raise WorkflowError("workflow state run identity does not match requested run")
     prior_run = value["prior_run"]
-    if prior_run is not None:
+    if schema_version == SCHEMA_VERSION:
+        if not is_id(value["transaction_id"]):
+            raise WorkflowError("invalid transaction identity")
+        if classify(run_id) == "core" and run_id != value["transaction_id"]:
+            raise WorkflowError("workflow state run identity is not its transaction identity")
+        violation = prior_run_violation(identity, prior_run, run_id=run_id)
+        if violation is not None:
+            raise WorkflowError(f"invalid prior run identity: {violation}")
+    elif prior_run is not None:
         if not isinstance(prior_run, str) or not RUN_ID_PATTERN.fullmatch(prior_run):
             raise WorkflowError("invalid prior run identity")
         if prior_run == run_id:
@@ -883,7 +916,7 @@ def validate_state(value: Any, *, run_id: str) -> dict[str, Any]:
             validate_result(result, expected_issue=issue)
         for number, attempt in enumerate(attempts, start=1):
             validate_attempt(
-                attempt, issue=issue, expected_number=number, run_id=run_id
+                attempt, issue=issue, expected_number=number, direct=identity.direct
             )
             started_at = parse_utc(attempt["started_at"], "attempt start time")
             if started_at < created_at:
@@ -1372,10 +1405,14 @@ def ensure_gitignore(workflows_dir: Path) -> None:
     fsync_directory(workflows_dir)
 
 
-def upgrade_state(value, *, run_id, migration_contracts):
-    candidate = _call(None, _delivery().migrate, value,
-                              migration_contracts=migration_contracts)
-    return validate_state(candidate, run_id=run_id)
+def upgrade_state(value, *, run_id, identity, migration_contracts):
+    runtime = _delivery()
+    try:
+        candidate = _call(None, runtime.migrate, value,
+                          migration_contracts=migration_contracts)
+        return validate_state(candidate, run_id=run_id, identity=identity, schema_version=7)
+    except WorkflowError as error:
+        raise attempt_store.LedgerRefused("invalid_state", str(error)) from error
 
 def read_locked_state(state_path, run_id, *, migration_contracts):
     require_regular_path(state_path, "workflow state", allow_missing=False)
@@ -1385,9 +1422,10 @@ def read_locked_state(state_path, run_id, *, migration_contracts):
             value = json.load(source)
     except json.JSONDecodeError as error:
         raise WorkflowError(f"invalid workflow state JSON: {error}") from error
-    migrated = isinstance(value, dict) and value.get("schema_version") != SCHEMA_VERSION
-    return upgrade_state(value, run_id=run_id,
-                         migration_contracts=migration_contracts), migrated
+    return attempt_store.locked_read(
+        state_path, value, run_id=run_id,
+        upgrade=partial(upgrade_state, migration_contracts=migration_contracts),
+        validate=validate_state)
 
 
 def fsync_directory(directory: Path) -> None:
@@ -1432,24 +1470,31 @@ def atomic_write_state(run_dir: Path, state_path: Path, state: dict[str, Any]) -
 
 
 def commit_state(run_dir: Path, state_path: Path, state: dict[str, Any], *,
-                 run_id: str) -> None:
+                 run_id: str, identity: RunIdentity) -> None:
     """The one write boundary every committed state write passes (D5).
 
     It settles the admission block at the commit's ``updated_at``, validates
     the whole state, then publishes it atomically, in that order.
     """
     settle_admission(state, at=state["updated_at"])
-    validate_state(state, run_id=run_id)
+    validate_state(state, run_id=run_id, identity=identity)
     atomic_write_state(run_dir, state_path, state)
 
 
-Mutation = Callable[[dict[str, Any] | None], tuple[Any, bool]]
+Mutation = Callable[..., tuple[Any, bool]]
 
 
 def transact(
     repo_root: str, run_id: str, mutation: Mutation, *, allow_missing: bool = False,
-    migration_contracts: dict[int, Any] | None = None,
+    migration_contracts: dict[int, Any] | None = None, refuse_direct: bool = False,
+    new_identity: RunIdentity | None = None, with_identity: bool = False,
 ) -> Any:
+    """Run `mutation` on one ledger under its `state.lock` and commit what it changed.
+
+    A bind of the ledger by the locked read is committed too (#337 D14).
+    `with_identity` passes the run's `RunIdentity` to `mutation`; `new_identity` is that of a
+    run `allow_missing` creates; `refuse_direct` refuses a direct run first.
+    """
     _delivery()
     run_dir, state_path, lock_path = workflow_paths(repo_root, run_id)
     require_regular_path(state_path, "workflow state", allow_missing=True)
@@ -1462,23 +1507,28 @@ def transact(
             state_path, "workflow state", allow_missing=True
         )
         if state_exists:
-            current, migrated = read_locked_state(
+            current, identity, migrated = read_locked_state(
                 state_path, run_id, migration_contracts=migration_contracts or {},
             )
             state = copy.deepcopy(current)
         elif allow_missing:
+            if new_identity is None:
+                raise WorkflowError("internal error: a new run has no identity")
             state = None
+            identity = new_identity
             migrated = False
         else:
             raise WorkflowError(f"workflow run {run_id!r} is not initialized")
-        result, changed = mutation(state)
+        if refuse_direct and identity.direct:
+            raise WorkflowError("direct run identities are reserved for direct-owner")
+        result, changed = mutation(state, identity) if with_identity else mutation(state)
         if changed or migrated:
             if state is None:
                 if allow_missing and isinstance(result, dict):
                     state = result
                 else:
                     raise WorkflowError("internal error: changed transaction has no state")
-            commit_state(run_dir, state_path, state, run_id=run_id)
+            commit_state(run_dir, state_path, state, run_id=run_id, identity=identity)
         return result
 
 
@@ -1496,13 +1546,13 @@ def fence_owner_exit(
     only it is excused, never its descendants (per #222 D4, D11).
     """
 
-    def fenced(state: dict[str, Any] | None) -> tuple[Any, bool]:
+    def fenced(state: dict[str, Any] | None, *identity: RunIdentity) -> tuple[Any, bool]:
         assert state is not None
         live = live_worker_ids(runtime, state)
         if excused_worker is not None and excused_worker not in live:
             raise WorkflowError(
                 f"invalid --worker-id: {worker_verdict(runtime, state, excused_worker)[1]}")
-        result, changed = mutation(state)
+        result, changed = mutation(state, *identity)
         blocking = [worker for worker in live if worker != excused_worker
                     and worker_verdict(runtime, state, worker)[1] != "live"]
         if blocking:
@@ -1529,11 +1579,14 @@ def phase_notes_maximum() -> int:
 def new_run_state(
     *,
     run_id: str,
+    transaction_id: str,
     now: str,
     issues: dict[str, Any],
     prior_run: str | None = None,
 ) -> dict[str, Any]:
     """Create one run's durable state, linked to the run it succeeds.
+
+    ``transaction_id`` is the run's core transaction (a minted run's ``run_id``).
 
     ``prior_run`` is the identity of the run this one continues — only the
     direct-owner ``new_run`` escape hatch has a predecessor, and recording it
@@ -1544,6 +1597,7 @@ def new_run_state(
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
+        "transaction_id": transaction_id,
         "created_at": now,
         "updated_at": now,
         "prior_run": prior_run,
@@ -2119,21 +2173,46 @@ def reject_reserved_direct_run_id(run_id: str) -> None:
         raise WorkflowError("direct run identities are reserved for direct-owner")
 
 
+def command_migrate(args: argparse.Namespace) -> int:
+    """Exit 0 with refusals as data; exit 2 on usage, an unreadable workflows directory
+    or a store error."""
+    root = resolve_repo_root(args.repo_root)
+    print_json(attempt_store.migration_report(
+        root / ".superpowers", apply=args.apply,
+        upgrade=partial(upgrade_state, migration_contracts={}), validate=validate_state,
+        bind=lambda handle: transact(args.repo_root, handle, lambda state: (None, False)),
+        refusals=(WorkflowError,)))
+    return 0
+
+
 def command_init_run(args: argparse.Namespace) -> int:
+    """Mint a run (`--creation-key`) or re-bootstrap an existing one (`--run-id`, no create)."""
     _delivery()
-    reject_reserved_direct_run_id(args.run_id)
     supplied = supplied_time(args.now, "--now")
+    if args.creation_key is not None:
+        plan = attempt_store.creation_key_plan(args.creation_key)
+        run_id = attempt_store.mint_run(
+            attempt_store.store_root(resolve_repo_root(args.repo_root) / ".superpowers"), plan)
 
-    def initialize(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
-        if state is not None:
-            return state, False
-        now = format_utc(ledger_time(supplied))
-        state = new_run_state(run_id=args.run_id, now=now, issues={})
-        return state, True
+        def initialize(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+            if state is not None:
+                return state, False
+            now = format_utc(ledger_time(supplied))
+            state = new_run_state(run_id=run_id, transaction_id=run_id, now=now, issues={})
+            return state, True
 
-    state = transact(
-        args.repo_root, args.run_id, initialize, allow_missing=True,
-    )
+        state = transact(args.repo_root, run_id, initialize, allow_missing=True,
+                         new_identity=RunIdentity("orchestrated", None, None))
+    else:
+        reject_reserved_direct_run_id(args.run_id)
+        if not RUN_ID_PATTERN.fullmatch(args.run_id):
+            raise WorkflowError("invalid run_id")
+        state_path = (resolve_repo_root(args.repo_root) / ".superpowers" / "workflows"
+                      / args.run_id / "state.json")
+        if not require_regular_path(state_path, "workflow state", allow_missing=True):
+            raise WorkflowError(f"workflow run {args.run_id!r} is not initialized")
+        state = transact(args.repo_root, args.run_id, lambda state: (state, False),
+                         refuse_direct=True)
     print_json(bootstrap_response(state))
     return 0
 
@@ -2214,6 +2293,7 @@ def control_summary(
 
 def _apply_one_issue_policy(
     *,
+    issue: int,
     ledger_issue: dict[str, Any] | None,
     tracker: dict[str, Any] | None,
     worktree: dict[str, Any] | None,
@@ -2231,6 +2311,8 @@ def _apply_one_issue_policy(
     contract: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Derive and apply the shared lifecycle policy for exactly one issue.
+
+    ``issue`` is the one the caller decides for; an observation naming another is refused.
 
     ``forge`` carries the issue branch's pull-request observation, from direct
     and control alike. A merged one reconciles the latest attempt only when
@@ -2274,18 +2356,8 @@ def _apply_one_issue_policy(
     order the return would come before a merged pull request had ever been
     considered for an attempt nobody holds (per D3, D13).
     """
-    if ledger_issue is not None:
-        issue = ledger_issue["issue"]
-    elif tracker is not None:
-        issue = tracker["issue"]
-    elif worktree is not None:
-        issue = worktree["issue"]
-    else:
-        match = DIRECT_RUN_ID_PATTERN.fullmatch(run_dir.name)
-        if match is None:
-            raise WorkflowError("cannot derive issue identity for one-issue policy")
-        issue = int(match.group(1))
-
+    if ledger_issue is not None and ledger_issue["issue"] != issue:
+        raise WorkflowError("ledger issue does not match requested issue")
     if tracker is not None and tracker["issue"] != issue:
         raise WorkflowError("tracker observation does not match ledger issue")
     if worktree is not None and worktree["issue"] != issue:
@@ -2765,6 +2837,7 @@ def command_control(args: argparse.Namespace) -> int:
                 continue
             issue_state = state["issues"].get(str(issue))
             analysis[issue] = _apply_one_issue_policy(
+                issue=issue,
                 ledger_issue=copy.deepcopy(issue_state),
                 tracker=tracker_by_issue[issue],
                 worktree=worktree_by_issue.get(issue),
@@ -2898,6 +2971,7 @@ def command_control(args: argparse.Namespace) -> int:
                 return planned[issue]
             issue_state = state["issues"].get(str(issue))
             result = _apply_one_issue_policy(
+                issue=issue,
                 ledger_issue=copy.deepcopy(issue_state),
                 tracker=tracker_by_issue[issue],
                 worktree=worktree_by_issue.get(issue),
@@ -3247,7 +3321,7 @@ def command_control(args: argparse.Namespace) -> int:
         return reply, changed
 
     reply = transact(args.repo_root, args.run_id, control,
-                     migration_contracts=migration_contracts)
+                     migration_contracts=migration_contracts, refuse_direct=True)
     sys.stdout.buffer.write(reply)
     return 0
 
@@ -3320,7 +3394,6 @@ def command_direct_owner(args: argparse.Namespace) -> int:
         fcntl.flock(issue_lock.fileno(), fcntl.LOCK_EX)
         with ExitStack() as retained_locks:
             prefix = f"direct-{issue}-"
-            retained: list[tuple[int, str, Path, Path, dict[str, Any]]] = []
             claimed: list[tuple[int, str, Path]] = []
             for entry in os.scandir(workflows_dir):
                 if not entry.name.startswith(prefix):
@@ -3344,7 +3417,11 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     )
                 claimed.append((sequence, run_id, run_dir))
 
-            for sequence, run_id, run_dir in sorted(claimed):
+            attempts = attempt_store.store_root(repo_root / ".superpowers")
+
+            def retain(sequence: int, run_id: str, run_dir: Path,
+                       probed: bool) -> tuple[int, str, Path, Path]:
+                """Lock one run's ledger to the end of the call and check it read-only."""
                 lock_path = run_dir / "state.lock"
                 state_path = run_dir / "state.json"
                 require_regular_path(lock_path, "state lock", allow_missing=False)
@@ -3356,15 +3433,38 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     os.fdopen(lock_descriptor, "r+b")
                 )
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-                state, _ = read_locked_state(
-                    state_path, run_id, migration_contracts=migration_contracts,
-                )
-                if set(state["issues"]) != {str(issue)}:
+                checked = read_state_unlocked(state_path, run_id)
+                if set(checked["issues"]) != {str(issue)}:
                     raise WorkflowError(
                         "direct run state must contain exactly the requested issue"
                     )
+                if probed and attempt_store.bound_identity(
+                        attempts, checked, run_id) != RunIdentity("direct", issue, sequence):
+                    raise WorkflowError(
+                        "direct run state does not match its sequence in the index"
+                    )
+                return sequence, run_id, run_dir, state_path
+
+            # Preflight: every scanned and probed ledger is checked, none written, so a
+            # refused one refuses the call before any bind, index entry or mint (D23).
+            candidates = [retain(sequence, run_id, run_dir, False)
+                          for sequence, run_id, run_dir in sorted(claimed)]
+            sequence = candidates[-1][0] if candidates else 0
+            for sequence, probed_id, probed_dir in attempt_store.indexed_direct_runs(
+                    attempts, workflows_dir, issue, after=sequence):
+                candidates.append(retain(sequence, probed_id, probed_dir, True))
+
+            # Bind: a legacy ledger is committed as schema 8 at once, under its held lock.
+            retained: list[tuple[int, str, Path, Path, dict[str, Any], RunIdentity]] = []
+            for sequence, run_id, run_dir, state_path in candidates:
+                read = read_locked_state(
+                    state_path, run_id, migration_contracts=migration_contracts,
+                )
+                if read.changed:
+                    commit_state(run_dir, state_path, read.state, run_id=run_id,
+                                 identity=read.identity)
                 retained.append(
-                    (sequence, run_id, run_dir, state_path, state)
+                    (sequence, run_id, run_dir, state_path, read.state, read.identity)
                 )
             stamp_request(request)
             nonterminal = [
@@ -3438,31 +3538,36 @@ def command_direct_owner(args: argparse.Namespace) -> int:
             else:
                 retained_worktree = None
                 prior_run = None
+                new_sequence = None
                 if request["new_run"]:
                     assert greatest is not None
                     if greatest[0] >= 999999:
                         raise WorkflowError("direct run sequence exhausted")
-                    run_sequence = greatest[0] + 1
+                    new_sequence = greatest[0] + 1
                     terminal_issue = greatest[4]["issues"][str(issue)]
                     retained_worktree = terminal_issue["attempts"][-1]["worktree"]
                     prior_run = greatest[1]
-                    run_id = f"direct-{issue}-{run_sequence:06d}"
-                    run_dir = workflows_dir / run_id
-                    state_path = run_dir / "state.json"
-                    state = None
-                    issue_state = None
                 elif selected is None:
                     if retained:
                         raise WorkflowError("invalid direct run history")
-                    run_id = f"direct-{issue}-000001"
+                    new_sequence = 1
+                else:
+                    _, run_id, run_dir, state_path, current_state, identity = selected
+                    state = copy.deepcopy(current_state)
+                    issue_state = state["issues"][str(issue)]
+
+                if new_sequence is not None:
+                    # The run's transaction is minted before the policy runs, so every
+                    # reply that names the unallocated run names its final handle. The
+                    # mint lock is taken under the issue lock and the retained
+                    # `state.lock`s (D9); the same facts mint the same transaction.
+                    identity = RunIdentity("direct", issue, new_sequence)
+                    run_id = attempt_store.mint_run(attempts, minted_plan(
+                        identity=identity, prior_run=prior_run, caller_key=None))
                     run_dir = workflows_dir / run_id
                     state_path = run_dir / "state.json"
                     state = None
                     issue_state = None
-                else:
-                    _, run_id, run_dir, state_path, current_state = selected
-                    state = copy.deepcopy(current_state)
-                    issue_state = state["issues"][str(issue)]
 
                 if issue_state is not None and issue_state["attempts"]:
                     latest = issue_state["attempts"][-1]
@@ -3483,6 +3588,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                             "run updated_at", state["updated_at"])
 
                 policy = _apply_one_issue_policy(
+                    issue=issue,
                     ledger_issue=issue_state,
                     tracker=request["tracker"],
                     worktree=request["worktree"],
@@ -3519,7 +3625,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         assert state is not None
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
-                        commit_state(run_dir, state_path, state, run_id=run_id)
+                        commit_state(run_dir, state_path, state, run_id=run_id, identity=identity)
                     response = direct_observe(
                         issue,
                         run_id if selected is not None and not request["new_run"]
@@ -3536,7 +3642,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     assert state is not None
                     state["issues"][str(issue)] = policy["issue_state"]
                     state["updated_at"] = request["now"]
-                    commit_state(run_dir, state_path, state, run_id=run_id)
+                    commit_state(run_dir, state_path, state, run_id=run_id, identity=identity)
                     response = direct_terminal(
                         issue=issue, run_id=run_id, source="lifecycle",
                         reason="failed", blockers=[],
@@ -3547,7 +3653,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         assert state is not None
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
-                        commit_state(run_dir, state_path, state, run_id=run_id)
+                        commit_state(run_dir, state_path, state, run_id=run_id, identity=identity)
                     response = direct_terminal(
                         issue=issue,
                         run_id=(run_id if state is not None else None),
@@ -3565,7 +3671,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     if policy["changed"]:
                         state["issues"][str(issue)] = policy["issue_state"]
                         state["updated_at"] = request["now"]
-                        commit_state(run_dir, state_path, state, run_id=run_id)
+                        commit_state(run_dir, state_path, state, run_id=run_id, identity=identity)
                     response = direct_terminal(
                         issue=issue, run_id=run_id, source="lifecycle",
                         reason=policy["attempt"]["result"]["state"],
@@ -3575,7 +3681,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     assert state is not None
                     state["issues"][str(issue)] = policy["issue_state"]
                     state["updated_at"] = request["now"]
-                    commit_state(run_dir, state_path, state, run_id=run_id)
+                    commit_state(run_dir, state_path, state, run_id=run_id, identity=identity)
                     response = direct_terminal(
                         issue=issue, run_id=run_id, source="lifecycle",
                         reason="merged", blockers=[],
@@ -3598,7 +3704,7 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         )
                         fcntl.flock(new_lock.fileno(), fcntl.LOCK_EX)
                         state = new_run_state(
-                            run_id=run_id, now=request["now"],
+                            run_id=run_id, transaction_id=run_id, now=request["now"],
                             issues={str(issue): policy["issue_state"]},
                             prior_run=prior_run,
                         )
@@ -3610,9 +3716,9 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                         ledger_repo_root=str(repo_root), run_id=run_id,
                         reentry=reentry_command(issue))
                     if changed:
-                        commit_state(run_dir, state_path, state, run_id=run_id)
+                        commit_state(run_dir, state_path, state, run_id=run_id, identity=identity)
                     else:
-                        validate_state(state, run_id=run_id)
+                        validate_state(state, run_id=run_id, identity=identity)
                 else:
                     raise WorkflowError("invalid one-issue policy operation")
 
@@ -3705,13 +3811,15 @@ def command_progress(args: argparse.Namespace) -> int:
         "remainder_self_contained": args.remainder_self_contained,
     }
     validate_phase_inputs(phase_inputs)
-    action = select_phase_action(run_id=args.run_id, **phase_inputs)
-    if args.handoff_path is not None and action != "handoff":
-        raise WorkflowError("handoff path is only valid for a handoff action")
     run_dir, _, _ = workflow_paths(args.repo_root, args.run_id)
     runtime = _delivery()
 
-    def progress(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+    def progress(state: dict[str, Any] | None,
+                 identity: RunIdentity) -> tuple[dict[str, Any], bool]:
+        # The action depends on the run's identity, which only the locked read knows.
+        action = select_phase_action(direct=identity.direct, **phase_inputs)
+        if args.handoff_path is not None and action != "handoff":
+            raise WorkflowError("handoff path is only valid for a handoff action")
         now_value = ledger_time(supplied)
         now = format_utc(now_value)
         assert state is not None
@@ -3749,7 +3857,8 @@ def command_progress(args: argparse.Namespace) -> int:
                 "custody": runtime.custody_for_record(args.issue, "implementation", attempt),
                 "action": action, "handoff_path": handoff_path}, True
 
-    print_json(transact(args.repo_root, args.run_id, fence_owner_exit(runtime, progress)))
+    print_json(transact(args.repo_root, args.run_id, fence_owner_exit(runtime, progress),
+                        with_identity=True))
     return 0
 
 
@@ -3921,20 +4030,17 @@ def read_state_unlocked(state_path: Path, run_id: str) -> dict[str, Any]:
     check-launch and the build-delivery ledger lookup share this reader. No
     lock: `atomic_write_state` publishes by `os.replace`, so an unlocked reader
     sees either the whole prior file or the whole new one, never a torn one — and
-    taking the lock would mean creating `state.lock`, which is a write. Schemas
-    1–6 are migrated and validated on a detached copy; the document is returned
-    as stored.
+    taking the lock would mean creating `state.lock`, which is a write. The
+    document is checked by `attempt_store.check_unlocked` and returned as stored.
     """
     try:
         raw_state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise WorkflowError("invalid workflow state") from error
-    if isinstance(raw_state, dict) and raw_state.get("schema_version") in {1, 2, 3, 4, 5, 6}:
-        candidate = _call("invalid legacy workflow state",
-            _delivery().migrate, raw_state, migration_contracts={})
-        validate_state(candidate, run_id=run_id)
-        return raw_state
-    return validate_state(raw_state, run_id=run_id)
+    attempt_store.check_unlocked(
+        state_path, raw_state, run_id=run_id,
+        upgrade=partial(upgrade_state, migration_contracts={}), validate=validate_state)
+    return raw_state
 
 
 def _stored_contract_digest(raw_state: object, issue: str) -> object:
@@ -5107,8 +5213,20 @@ def build_parser() -> argparse.ArgumentParser:
             help="omit to use the clock; a supplied time may lead it by at most 60 seconds")
 
     init_run = subparsers.add_parser("init-run")
-    add_run_arguments(init_run)
+    init_run.add_argument("--repo-root", required=True)
+    init_run.add_argument(
+        "--now", default=None,
+        help="omit to use the clock; a supplied time may lead it by at most 60 seconds")
+    handle = init_run.add_mutually_exclusive_group(required=True)
+    handle.add_argument("--run-id", help="re-bootstrap an initialized run; never creates one")
+    handle.add_argument("--creation-key",
+                        help="mint the run for this key, or answer the one it already names")
     init_run.set_defaults(handler=command_init_run)
+
+    migrate = subparsers.add_parser("migrate")
+    migrate.add_argument("--repo-root", required=True)
+    migrate.add_argument("--apply", action="store_true")
+    migrate.set_defaults(handler=command_migrate)
 
     control = subparsers.add_parser("control")
     control.add_argument("--repo-root", required=True)
@@ -5269,7 +5387,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.handler(args)
-    except (WorkflowError, OSError) as error:
+    except (WorkflowError, OSError, attempt_store.StoreRefused) as error:
         print(f"workflow-state: {error}", file=sys.stderr)
         return 2
 
