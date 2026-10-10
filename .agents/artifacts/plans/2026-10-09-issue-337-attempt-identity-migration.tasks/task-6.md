@@ -70,8 +70,10 @@ class MigrationAcceptanceTest(MigrationFixtures, unittest.TestCase):
         self.assertEqual(rows["direct-41-000002"]["prior_transaction_id"],
                          rows["direct-41-000001"]["transaction_id"])
         _, again = self.migrate()
-        self.assertTrue(all(row["verdict"] in ("current", "refused")
-                            for row in again["ledgers"]))
+        again_rows = self.rows(again)
+        self.assertEqual(set(again_rows), set(rows))
+        self.assertEqual({handle: row["verdict"] for handle, row in again_rows.items()},
+                         {handle: "current" for handle in rows})
         self.assertEqual({handle: self.launch_bytes(handle) for handle in self.LEGACY}, before)
 
     def test_ac2_identity_never_comes_from_names(self):

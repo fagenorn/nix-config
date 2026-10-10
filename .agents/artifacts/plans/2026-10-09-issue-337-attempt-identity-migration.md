@@ -76,5 +76,6 @@ Task 8 — Installed `workflow-state`, skill text, READMEs and the final gate �
 - Reviewer: `Codex`, isolated read-only mode, no focus, no fallback.
 - Base: `eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7`.
 - Findings: 6 accepted (4 Blocking, 2 Should fix), 0 rejected, 0 deferred. Non-obvious ones are D23–D26; the Task 1 predecessor test and the Task 8 phrase pin were direct fixes.
+- Amendment review (attempt 2, commit 67e64f77): reviewer `Codex`, isolated read-only mode, focus the amendment and Tasks 4–8, no fallback. Findings: 2 accepted (1 Blocking, 1 Should fix), 0 rejected, 0 deferred. The Blocking one is D31; the Should fix (Task 6's AC1 second dry run requires every row `current`) was a direct fix.
 
 ---
