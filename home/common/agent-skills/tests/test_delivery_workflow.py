@@ -214,6 +214,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             initialized = run("init-run", "--repo-root", root, "--run-id", "admission",
                               "--now", NOW)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            minted = json.loads(initialized.stdout)["run_id"]
             direct_path = root / "direct.json"
             direct_path.write_text(json.dumps(self.direct_request()))
             direct = run("direct-owner", "--repo-root", root,
@@ -227,7 +228,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 "path": str(root / "worktree"), "state": "absent"}}]
             control_path = root / "control.json"
             control_path.write_text(json.dumps(control_request))
-            control = run("control", "--repo-root", root, "--run-id", "admission",
+            control = run("control", "--repo-root", root, "--run-id", minted,
                           "--request-file", control_path)
             self.assertEqual(control.returncode, 0, control.stderr)
             response = json.loads(control.stdout); summary = response["summaries"][0]
@@ -246,7 +247,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                  "--run-id", "legacy-contractless", "--now", NOW],
                 capture_output=True, text=True, check=False)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
-            state_path = root / ".superpowers/workflows/legacy-contractless/state.json"
+            minted = json.loads(initialized.stdout)["run_id"]
+            state_path = root / ".superpowers/workflows" / minted / "state.json"
             worktree = str(root / "worktree")
             state = json.loads(state_path.read_text())
             state["issues"]["151"] = {"issue": 151, "outcome": None, "attempts": [
@@ -262,7 +264,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             result_path.write_text(json.dumps(result), encoding="utf-8")
             finished = subprocess.run(
                 [sys.executable, str(WORKFLOW), "finish", "--repo-root", str(root),
-                 "--run-id", "legacy-contractless", "--issue", "151", "--attempt", "1",
+                 "--run-id", minted, "--issue", "151", "--attempt", "1",
                  "--result-file", str(result_path), "--now", NOW],
                 capture_output=True, text=True, check=False)
             self.assertEqual(finished.returncode, 0, finished.stderr)
@@ -288,13 +290,14 @@ class DeliveryAdmissionTest(unittest.TestCase):
         self.assertEqual(self.workflow._delivery().migrate(
             adjacent, migration_contracts={})["schema_version"], 7)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run = root / ".superpowers/workflows/admission"
+            root = Path(raw); run = root / ".superpowers/workflows/orchestrate-151"
             run.mkdir(parents=True)
-            (run / "state.json").write_text(json.dumps(self.legacy(2)))
+            (run / "state.json").write_text(
+                json.dumps({**self.legacy(2), "run_id": "orchestrate-151"}))
             with mock.patch.object(self.workflow, "atomic_write_state",
                                    wraps=self.workflow.atomic_write_state) as write:
                 result = self.workflow.transact(
-                    str(root), "admission", lambda state: (state, False),
+                    str(root), "orchestrate-151", lambda state: (state, False),
                     migration_contracts={151: contract})
             write.assert_called_once()
             self.assertEqual(write.call_args.args[2]["schema_version"], 7)
@@ -1118,8 +1121,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
             def store(value):
                 nonlocal serial; serial += 1
                 path = root / f"input-{serial}.json"; path.write_text(json.dumps(value)); return path
-            run_id = "orchestrated"
-            invoke("init-run", "--repo-root", root, "--run-id", run_id, "--now", NOW)
+            run_id = invoke("init-run", "--repo-root", root, "--run-id", "orchestrated",
+                            "--now", NOW)["run_id"]
             request = self.control_request(contract)
             request.update(tracker=[{"issue": 151, "state": "open", "open_blockers": [],
                 "decision_blockers": []}], worktrees=[{"issue": 151, "recorded": None,
@@ -1154,7 +1157,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual((action["custody"]["remainder"],
                               action["custody"]["launch"], action["deadline_at"]),
                              (1, 2, remainder["deadline_at"]))
-            state = json.loads((root / ".superpowers/workflows/orchestrated/state.json").read_text())
+            state = json.loads((root / f".superpowers/workflows/{run_id}/state.json").read_text())
             self.assertEqual(len(state["issues"]["151"]["attempts"]), 1)
 
     def test_a_refused_remainder_launch_parks_under_host_capacity(self):
@@ -1163,7 +1166,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
         home = make_home()
         self.addCleanup(shutil.rmtree, home, True)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); worktree = str(root / "worktree"); run_id = "refusal"
+            root = Path(raw); worktree = str(root / "worktree")
             def invoke(*args, stdin=None):
                 completed = subprocess.run(
                     [sys.executable, str(WORKFLOW), *map(str, args)],
@@ -1172,7 +1175,6 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     env={**os.environ, "HOME": str(home)})
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 return json.loads(completed.stdout)
-            run = ("--repo-root", root, "--run-id", run_id)
             def control(now, tracker, *, recorded, owners=()):
                 request = self.control_request(contract)
                 request.update(host_route="claude-code", now=now, owners=list(owners),
@@ -1185,7 +1187,9 @@ class DeliveryAdmissionTest(unittest.TestCase):
                                                             "state": "absent"}}])
                 request["authorization_intents"]["151"] = delivery["authorization_intents"]
                 return invoke("control", *run, "--request-file", "-", stdin=request)
-            invoke("init-run", *run, "--now", NOW)
+            run_id = invoke("init-run", "--repo-root", root, "--run-id", "refusal",
+                            "--now", NOW)["run_id"]
+            run = ("--repo-root", root, "--run-id", run_id)
             owner = control(NOW, "open", recorded=False)["actions"][0]
             failed = self.failed_summary(owner["custody"], digest)
             failed["delivery_observations"] = [observation(
@@ -1217,12 +1221,13 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(claims[action["custody"]["action_id"]]["release_event"],
                              "launch_refused")
 
-    def remainder_sweeps(self, root, home, run_id):
+    def remainder_sweeps(self, root, home, key):
         """Drive a claude-code run until remainder r1:1 is suspended on a denial (#190).
 
         Issue 151's owner spawns, fails after selecting its output, and an
         authority denial parks the minted remainder on ``human_gate``. Returns
-        ``(control, checkpoint)``. ``control(now, max_parallel=1)`` sweeps with
+        ``(control, checkpoint, run_id)``, the run id ``init-run --run-id key`` replies
+        with. ``control(now, max_parallel=1)`` sweeps with
         the recorded worktree observed as ``recorded`` (``matching_issue_branch``
         unless given) and returns the raw response bytes.
         ``checkpoint(custody, now)`` reports that custody again without progress
@@ -1230,7 +1235,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
         """
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
         digest = self.model.canonical_digest(contract)
-        worktree = str(root / "worktree"); run = ("--repo-root", root, "--run-id", run_id)
+        worktree = str(root / "worktree")
 
         def invoke(*args, stdin=None):
             completed = subprocess.run(
@@ -1259,7 +1264,9 @@ class DeliveryAdmissionTest(unittest.TestCase):
             return json.loads(invoke("checkpoint-delivery", *run, "--checkpoint-file",
                                      "-", "--now", now, stdin=report))
 
-        invoke("init-run", *run, "--now", NOW)
+        run_id = json.loads(invoke("init-run", "--repo-root", root, "--run-id", key,
+                                   "--now", NOW))["run_id"]
+        run = ("--repo-root", root, "--run-id", run_id)
         owner = json.loads(control(NOW, spawn=True))["actions"][0]
         failed = self.failed_summary(owner["custody"], digest)
         failed["delivery_observations"] = [observation(
@@ -1271,7 +1278,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
         denial["observed_at"] = "2026-09-21T00:00:02Z"; seal(self.model, denial)
         parked = checkpoint(remainder["custody"], "2026-09-21T00:00:02Z", denial)
         self.assertEqual((parked["state"], parked["blocked_on"]), ("suspended", "human_gate"))
-        return control, checkpoint
+        return control, checkpoint, run_id
 
     @staticmethod
     def remainder_launch(response):
@@ -1283,8 +1290,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
         """T1: a live remainder takes no free slot and the sweep does not crash."""
         home = make_home(); self.addCleanup(shutil.rmtree, home, True)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run_id = "live-remainder"
-            control, _ = self.remainder_sweeps(root, home, run_id)
+            root = Path(raw)
+            control, _, run_id = self.remainder_sweeps(root, home, "live-remainder")
             launch = self.remainder_launch(control("2026-09-21T00:00:03Z"))
             self.assertEqual((launch["custody"]["remainder"], launch["custody"]["launch"]),
                              (1, 2))
@@ -1308,8 +1315,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
         """T3: the reap that crosses the stall bound fails the remainder, dispatching nothing."""
         home = make_home(); self.addCleanup(shutil.rmtree, home, True)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run_id = "stalled-remainder"
-            control, checkpoint = self.remainder_sweeps(root, home, run_id)
+            root = Path(raw)
+            control, checkpoint, run_id = self.remainder_sweeps(root, home, "stalled-remainder")
             for launch, now, reported in (
                     (2, "2026-09-21T00:00:03Z", "2026-09-21T00:00:04Z"),
                     (3, "2026-09-21T00:00:05Z", "2026-09-21T00:00:06Z"),
@@ -1337,7 +1344,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
         """T4: baseline, a resumable human-gate remainder still resumes at a free slot."""
         home = make_home(); self.addCleanup(shutil.rmtree, home, True)
         with tempfile.TemporaryDirectory() as raw:
-            control, _ = self.remainder_sweeps(Path(raw), home, "suspended-remainder")
+            control, _, _ = self.remainder_sweeps(Path(raw), home, "suspended-remainder")
             action = self.remainder_launch(control("2026-09-21T00:00:03Z", max_parallel=2))
             self.assertEqual((action["custody"]["remainder"], action["custody"]["launch"]),
                              (1, 2))
@@ -1346,8 +1353,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
         """T3 (#194): a resumable remainder on an absent worktree is reported, not raised."""
         home = make_home(); self.addCleanup(shutil.rmtree, home, True)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run_id = "absent-remainder"
-            control, _ = self.remainder_sweeps(root, home, run_id)
+            root = Path(raw)
+            control, _, run_id = self.remainder_sweeps(root, home, "absent-remainder")
             state_path = root / f".superpowers/workflows/{run_id}/state.json"
             before = json.loads(state_path.read_text())["issues"]["151"]
             response = control("2026-09-21T00:00:03Z", max_parallel=2, recorded="absent")
@@ -1377,7 +1384,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                 "claude-code": {"support": "supported", "agent_slots": 4},
                 "codex": {"support": "unsupported"}}}), encoding="utf-8")
         with tempfile.TemporaryDirectory() as raw:
-            control, _ = self.remainder_sweeps(Path(raw), home, "short-slots")
+            control, _, _ = self.remainder_sweeps(Path(raw), home, "short-slots")
             self.remainder_launch(control("2026-09-21T00:00:03Z"))
             response = json.loads(control("2026-09-21T00:00:04Z", max_parallel=2))
             self.assertEqual(response["admission"]["waiting"], [])
@@ -1388,7 +1395,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
         contract, delivery, actual = contract_and_delivery_for_stage(self.model, "publish")
         digest = self.model.canonical_digest(contract)
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run_id = "recovery-control"; serial = 0
+            root = Path(raw); serial = 0
             def store(value):
                 nonlocal serial; serial += 1
                 path = root / f"control-recovery-{serial}.json"
@@ -1398,7 +1405,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     capture_output=True, text=True, check=False)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 return json.loads(completed.stdout)
-            invoke("init-run", "--repo-root", root, "--run-id", run_id, "--now", NOW)
+            run_id = invoke("init-run", "--repo-root", root, "--run-id", "recovery-control",
+                            "--now", NOW)["run_id"]
             request = self.control_request(contract)
             request.update(tracker=[{"issue": 151, "state": "open", "open_blockers": [],
                 "decision_blockers": []}], worktrees=[{"issue": 151, "recorded": None,
@@ -1493,16 +1501,17 @@ class DeliveryAdmissionTest(unittest.TestCase):
             return {str(issue): copy.deepcopy(value) for issue in issues}
 
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); run_id = "dispatch-wire"
+            root = Path(raw)
             home = make_home(); self.addCleanup(shutil.rmtree, home, True)
             env = {**os.environ, "HOME": str(home)}
             bound = {issue: self.issue_contract(issue, str(root / f"worktree-{issue}"))
                      for issue in issues}
             initialized = subprocess.run(
                 [sys.executable, str(WORKFLOW), "init-run", "--repo-root", str(root),
-                 "--run-id", run_id, "--now", NOW], capture_output=True, check=False,
-                env=env)
+                 "--run-id", "dispatch-wire", "--now", NOW], capture_output=True,
+                check=False, env=env)
             self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            run_id = json.loads(initialized.stdout)["run_id"]
             request = {"interface_version": 3, "host_route": "claude-code", "now": NOW,
                 "max_parallel": 2,
                 "attempt_budget_minutes": 30, "human_directed": True, "issues": issues,
@@ -1562,6 +1571,22 @@ class BuilderHarness:
         if ok:
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
         return completed
+
+    @property
+    def runs(self):
+        """The run id each test-local label names."""
+        return self.__dict__.setdefault("_runs", {})
+
+    def run_of(self, label):
+        return self.runs.get(label, label)
+
+    def mint_run(self, key, *, now=NOW):
+        """`init-run --run-id key`: sets `self.run_id` to the run id it replies with, labels it
+        `key`, and returns that run's `--repo-root` and `--run-id` arguments."""
+        self.run_id = self.runs[key] = json.loads(self.cli(
+            "init-run", "--repo-root", self.root, "--run-id", key,
+            "--now", now).stdout)["run_id"]
+        return ("--repo-root", self.root, "--run-id", self.run_id)
 
     def build(self, kind, value, *, ok=True):
         completed = self.cli("build-delivery", "--repo-root", self.root, "--kind", kind,
@@ -2128,8 +2153,8 @@ class HelperInputTest(BuilderHarness, unittest.TestCase):
                 self.assertEqual(refused.returncode, 2)
                 self.assertIn(b"file path must be absolute", refused.stderr)
 
-        self.cli("init-run", *run, "--now", NOW)
-        state = self.root / ".superpowers/workflows/inputs/state.json"
+        run = self.mint_run("inputs")
+        state = self.root / ".superpowers/workflows" / self.run_id / "state.json"
         candidate = {"issue": 151, "recorded": None, "candidate": {
             "path": str(self.root / ".worktrees/worktree-issue-151-inputs"), "state": "absent"}}
         stdout = self.assert_parity(state, ("control", *run), "--request-file", json.dumps(
@@ -2808,11 +2833,13 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         return json.loads(completed.stdout) if ok else completed
 
     def control(self, run_id, request, *, ok=True):
-        completed = self.cli("control", "--repo-root", self.root, "--run-id", run_id,
+        completed = self.cli("control", "--repo-root", self.root, "--run-id", self.run_of(run_id),
             "--request-file", "-", stdin=json.dumps(request).encode(), ok=ok)
         return json.loads(completed.stdout) if ok else completed
 
-    def write_run(self, run_id, attempts, *, schema=7):
+    def write_run(self, label, attempts, *, schema=7):
+        """A retained legacy ledger under `label`, which is its run id."""
+        run_id = self.runs[label] = label
         state = self.workflow.new_run_state(run_id=run_id, now=NOW, issues={})
         if schema < 7:
             attempts = [{name: value for name, value in attempt.items()
@@ -2860,6 +2887,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         return value
 
     def direct_runs(self, issue):
+        """The direct-run entries of `issue` under `workflows`."""
         return sorted((self.root / ".superpowers/workflows").glob(f"direct-{issue}-*"))
 
     FOLLOW_UP = "worktree-issue-172-chained-follow-up"
@@ -2989,7 +3017,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
     def test_a_contract_request_passes_the_workflow_response_boundary(self):
         """#221 D6: the T1 reply is what the adapter's pipe accepts, byte for byte."""
         _, request, _ = self.contract_chain()
-        raw = self.cli("control", "--repo-root", self.root, "--run-id", "chain",
+        raw = self.cli("control", "--repo-root", self.root, "--run-id", self.run_of("chain"),
                        "--request-file", "-", stdin=json.dumps(request).encode()).stdout
         self.assertEqual(json.loads(raw)["actions"][-1]["kind"], "delivery_contract")
         wire = subprocess.run([sys.executable, str(ARTIFACT_BUDGET), "validate-report",
@@ -3055,7 +3083,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
 
     def test_control_installs_a_built_contract_only_at_spawn_and_keeps_it(self):
         self.project()
-        self.cli("init-run", "--repo-root", self.root, "--run-id", "orch", "--now", NOW)
+        self.mint_run("orch")
         built = self.build("contract", self.contract_input())
         digest = self.model.canonical_digest(built["contract"])
         spawned = self.control("orch", self.control_request([171],
@@ -3065,12 +3093,13 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         action = spawned["actions"][0]
         self.assertEqual((action["kind"], action["contract"], action["worktree"]),
                          ("spawn", built["contract"], self.worktree))
-        boot = json.loads(self.cli("init-run", "--repo-root", self.root, "--run-id", "orch",
-                                   "--now", LATER).stdout)
+        boot = json.loads(self.cli("init-run", "--repo-root", self.root, "--run-id",
+                                   self.run_of("orch"), "--now", LATER).stdout)
         self.assertEqual([item["contract_digest"] for item in boot["requirements"]], [digest])
         governed = self.control("orch", self.control_request([171], now=LATER))
         self.assertEqual(governed["summaries"][0]["contract_digest"], digest)
-        state = self.root / ".superpowers/workflows/orch/state.json"; before = state.read_bytes()
+        state = self.root / ".superpowers/workflows" / self.run_of("orch") / "state.json"
+        before = state.read_bytes()
         other = self.build("contract", self.contract_input(now=LATER))
         refused = self.control("orch", self.control_request([171], now=LATER,
             contracts={"171": other["contract"]}, intents={"171": [other["initial_intent"]]}),
@@ -3085,7 +3114,8 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         for label, contracts, intents in (("null", None, None), ("supplied",
                 {"171": built["contract"]}, {"171": [built["initial_intent"]]})):
             with self.subTest(contract=label):
-                raw = self.cli("control", "--repo-root", self.root, "--run-id", "legacy",
+                raw = self.cli("control", "--repo-root", self.root, "--run-id",
+                               self.run_of("legacy"),
                     "--request-file", "-", stdin=json.dumps(self.control_request(
                         [171], now=LATER, contracts=contracts, intents=intents)).encode()).stdout
                 response = json.loads(raw); summary = response["summaries"][0]
@@ -3259,7 +3289,8 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
                 "detail_state": "none", "report_path": None, "notes": "merged"}
 
     def legacy_finish(self, run_id, issue, *, ok=True):
-        return self.cli("finish", "--repo-root", self.root, "--run-id", run_id, "--now", LATER,
+        return self.cli("finish", "--repo-root", self.root, "--run-id", self.run_of(run_id),
+                        "--now", LATER,
                         "--issue", issue, "--attempt", 1, "--result-file", "-",
                         stdin=json.dumps(self.merged(issue)).encode(), ok=ok)
 
@@ -3271,12 +3302,13 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         self.assertEqual((persisted, stored["outcome"], stored["attempts"][0]["state"],
                           stored["delivery"]["contract"]),
                          (self.merged(171), self.merged(171), "merged", None))
-        self.cli("init-run", "--repo-root", self.root, "--run-id", "v2", "--now", NOW)
+        self.mint_run("v2")
         built = self.build("contract", self.contract_input())
         self.control("v2", self.control_request([171], contracts={"171": built["contract"]},
             intents={"171": [built["initial_intent"]]}, worktrees=[{"issue": 171,
                 "recorded": None, "candidate": {"path": self.worktree, "state": "absent"}}]))
-        state = self.root / ".superpowers/workflows/v2/state.json"; before = state.read_bytes()
+        state = self.root / ".superpowers/workflows" / self.run_of("v2") / "state.json"
+        before = state.read_bytes()
         refused = self.legacy_finish("v2", 171, ok=False)
         self.assertEqual((refused.returncode, state.read_bytes()), (2, before))
         self.assertIn(b"contracted issue", refused.stderr)
@@ -3329,7 +3361,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
             "detail_state": "none", "report_path": None, "notes": "failed"}
 
     def spawn_contracted(self, run_id):
-        self.cli("init-run", "--repo-root", self.root, "--run-id", run_id, "--now", NOW)
+        self.mint_run(run_id)
         built = self.build("contract", self.contract_input())
         response = self.control(run_id, self.control_request([171],
             contracts={"171": built["contract"]}, intents={"171": [built["initial_intent"]]},
@@ -3372,23 +3404,25 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
     def test_contracted_reconciliation_mints_remainder_one(self):
         self.project()
         self.spawn_contracted("forge-v2")
-        self.cli("suspend", "--repo-root", self.root, "--run-id", "forge-v2", "--now", LATER,
+        self.cli("suspend", "--repo-root", self.root, "--run-id", self.run_of("forge-v2"),
+                 "--now", LATER,
                  "--issue", 171, "--attempt", 1, "--blocked-on", "external")
         response = self.control("forge-v2", self.forge_request())
         remainder = next(item for item in response["actions"]
                          if item["kind"] == "delivery_remainder")
         self.assertEqual((remainder["custody"]["action_id"], remainder["pending_stage_ids"][0]),
                          ("171:r1:1", "select_reviewed_output"))
-        path = self.root / ".superpowers/workflows/forge-v2/state.json"
+        path = self.root / ".superpowers/workflows" / self.run_of("forge-v2") / "state.json"
         self.assertEqual(self.latest(path)["result_source"], "superseded")
 
     def test_reconciled_remainder_waits_for_capacity(self):
         """A reconcile sweep without capacity persists the closeout; a later sweep mints r1."""
         self.project()
         self.spawn_contracted("forge-wait")
-        self.cli("suspend", "--repo-root", self.root, "--run-id", "forge-wait", "--now", LATER,
+        self.cli("suspend", "--repo-root", self.root, "--run-id", self.run_of("forge-wait"),
+                 "--now", LATER,
                  "--issue", 171, "--attempt", 1, "--blocked-on", "external")
-        path = self.root / ".superpowers/workflows/forge-wait/state.json"
+        path = self.root / ".superpowers/workflows" / self.run_of("forge-wait") / "state.json"
         state = json.loads(path.read_text())
         holder = self.workflow.new_control_attempt(issue=172, attempt_number=1,
             worktree=str(self.root / ".worktrees/holder"), now=NOW,
@@ -3411,7 +3445,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         self.project()
         contract, custody_value = self.spawn_contracted("orch-fail")
         digest = self.model.canonical_digest(contract)
-        run = ("--repo-root", self.root, "--run-id", "orch-fail", "--now", LATER)
+        run = ("--repo-root", self.root, "--run-id", self.run_of("orch-fail"), "--now", LATER)
         failed = json.loads(self.cli("finish", *run, "--summary-file", "-", stdin=json.dumps(
             self.failed_summary(custody_value, digest)).encode()).stdout)
         self.assertEqual(failed["kind"], "terminal_failed")
@@ -3637,7 +3671,7 @@ class LedgerClockTest(LifecycleHarness, unittest.TestCase):
             (refused.returncode, refused.stdout, refused.stderr),
             (2, "", SKEW.format(label="direct owner now", supplied=ahead, lead=900,
                                 clock=PINNED)))
-        self.assertFalse(self.direct_state_path("direct-73-000001").exists())
+        self.assertEqual(self.run_dirs(), [self.run_id])
 
     def test_a_present_null_now_is_still_refused(self):
         self.pin()
