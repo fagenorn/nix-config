@@ -1,14 +1,14 @@
-"""A path reference in a tracked tooling file and the edit that keeps it true.
+"""Path references in tracked tooling files, found and edited (#350).
 
-This module owns the model `adopt` uses to find a repository path written in
-a tracked, non-Markdown text file that a relocation would leave pointing at a
-path that moved (#350): the token grammar (`tokens`, `split_token`), the
-successors of a referenced path and the carried form of a successor
-(`successors`, `carried_form`), the occurrences with the shape of each and the
-answers each offers (`Occurrence`, `plan_references`), the edits an answer
-makes (`summary`, `rewritten`), and the reader that feeds the core a tree's
-text through git (`derive_references`, over `adopt_inspection.tree_records`
-and `blob_at`).
+This module provides what a relocation needs to find a repository path written
+in a tracked, non-Markdown text file that would be left pointing at a path
+that moved: the token grammar (`tokens`, `split_token`), the successors of a
+referenced path and the carried form of a successor (`successors`,
+`carried_form`), the occurrences, each with its shape and the answers it
+offers (`Occurrence`, `plan_references`), the report of those occurrences and
+the edits their answers make (`summary`, `rewritten`), and the reader that
+feeds the core a tree's text through git (`derive_references`, over
+`adopt_inspection.tree_records` and `blob_at`).
 
 It is imported and never run. It reads blobs only through git, never the
 working tree, writes nothing, and imports `adopt_inspection` and `adopt_links`
@@ -127,7 +127,7 @@ def successors(path: str, base: Tree, after: Tree, moved: dict[str, str]
                ) -> tuple[bool, list[tuple[str, bool]]]:
     """`(single, [(successor, is_directory), ...])` for a referenced path."""
     if path in base.paths:
-        return True, [(moved.get(path, path), False)]
+        return True, [(moved[path], False)]
     successor = _moved_directory(path, base, after, moved)
     if successor is not None:
         return True, [(successor, True)]
@@ -341,7 +341,7 @@ def derive_references(root: Path, revision: str,
         return References({}, ())
     sources = {source for source, _ in moves}
     segments = sorted({source.split("/")[0] for source in sources})
-    code, out = run_git(root, "grep", "-I", "-l", "-z", "-F",
+    code, out = run_git(root, "grep", "--no-color", "-I", "-l", "-z", "-F",
                         *[arg for segment in segments
                           for arg in ("-e", segment)], revision)
     if code == 1:

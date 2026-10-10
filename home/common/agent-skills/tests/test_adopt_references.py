@@ -266,6 +266,11 @@ class DerivationTest(unittest.TestCase):
                          [".claude/keep.json:1:10", "config/owners.txt:1:1",
                           "tools/check.py:1:29"])
 
+    def test_forced_colour_does_not_hide_the_candidates(self):
+        git(self.root, "config", "color.ui", "always")
+        self.assertEqual(self.subjects(["config/owners.txt"]),
+                         [".claude/keep.json:1:10", "tools/check.py:1:29"])
+
     def test_the_revision_is_read_not_the_working_tree(self):
         (self.root / "tools/check.py").write_text("nothing\n",
                                                   encoding="utf-8")
