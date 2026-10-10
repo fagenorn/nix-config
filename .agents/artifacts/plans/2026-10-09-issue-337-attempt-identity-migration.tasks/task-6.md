@@ -40,9 +40,11 @@ class LegacyOwnerCompatibilityTest(MigrationFixtures, unittest.TestCase):
         self.suspend(issue=14, attempt=1, blocked_on="usage_limit",
                      now="2026-08-13T20:04:00Z")
         self.resume(issue=14, worktree=worktree, now="2026-08-13T20:05:00Z")
+        bound = self.read_state()["transaction_id"]
         self.finish(1, self.merged_result(), now="2026-08-13T20:30:00Z")
         self.assertEqual(self.read_state()["issues"]["14"]["attempts"][-1]["state"], "merged")
-        self.assertEqual(self.read_state()["run_id"], "orchestrate-14")
+        self.assert_bound()  # finish ran on the schema-8 ledger and kept its binding (D25)
+        self.assertEqual(self.read_state()["transaction_id"], bound)
 
     def assert_bound(self):
         state = self.read_state()
@@ -76,26 +78,38 @@ class LegacyOwnerCompatibilityTest(MigrationFixtures, unittest.TestCase):
 
     def test_base_helper_refuses_schema_8_without_writing(self):
         self.live_legacy_owner()
-        self.progress(issue=14, phase=1, now="2026-08-13T20:00:30Z")
-        self.assert_bound()
-        snapshot = self.tree_snapshot()
         with tempfile.TemporaryDirectory() as scratch:
             script = self.base_helper(Path(scratch))
             env = {**self.cli_env, "PYTHONPATH": str(REPO / "python")}
+
+            def base(command, *rest):
+                return subprocess.run(
+                    [sys.executable, str(script), command, "--repo-root", str(self.root),
+                     "--run-id", "orchestrate-14", *rest],
+                    env=env, cwd=scratch, capture_output=True, text=True, timeout=120)
+
+            # Positive control (D26): the extracted helper reads the schema-7 ledger.
+            control = base("check-launch", "--action-id", "14:1:1")
+            self.assertEqual(control.returncode, 0, control.stderr)
+            self.progress(issue=14, phase=1, now="2026-08-13T20:00:30Z")
+            self.assert_bound()
+            snapshot = self.tree_snapshot()
             for args in (("check-launch", "--action-id", "14:1:1"),
                          ("progress", "--issue", "14", "--attempt", "1", "--phase", "2",
                           "--next-needs-context", "true", "--artifacts-sufficient", "false",
                           "--remainder-self-contained", "false")):
                 with self.subTest(command=args[0]):
-                    completed = subprocess.run(
-                        [sys.executable, str(script), args[0], "--repo-root", str(self.root),
-                         "--run-id", "orchestrate-14", *args[1:]],
-                        env=env, cwd=scratch, capture_output=True, text=True, timeout=120)
-                    self.assertNotEqual(completed.returncode, 0, completed.stdout)
+                    completed = base(*args)
+                    # Exit 2 with a schema refusal: check-launch rejects the unknown
+                    # `transaction_id` field, progress the chain's version 8 (D26).
+                    self.assertEqual(completed.returncode, 2, completed.stdout)
+                    self.assertTrue(completed.stderr.startswith("workflow-state: "),
+                                    completed.stderr)
+                    self.assertIn("workflow state schema", completed.stderr)
                     self.assertEqual(self.tree_snapshot(), snapshot)
 ```
 
-Add `import subprocess`, `import sys`, `import tempfile` and `from pathlib import Path` if Task 5 has not. The owner calls use the harness's existing `progress`, `register_worker`, `release_worker`, `suspend`, `resume` (a control sweep that returns the `resume` action), `finish` (the legacy result-file transport, which the harness drives on a schema-2 copy that `finish` itself migrates — still under `orchestrate-14`) and `merged_result`. If the control sweep in `test_control_migrates_under_a_live_owner` needs the worktree fact the harness's `resume` passes, pass the same `worktrees=[self.worktree_fact(14, recorded={...})]` it builds; the test's point is only that control's write is the migrating one.
+Add `import subprocess`, `import sys`, `import tempfile` and `from pathlib import Path` if Task 5 has not. The owner calls use the harness's existing `progress`, `register_worker`, `release_worker`, `suspend`, `resume` (a control sweep that returns the `resume` action), `finish` (the legacy result-file transport, which the harness runs directly on the migrated, contractless schema-8 ledger, keeping `orchestrate-14` and its `transaction_id` — Task 2's harness `finish`, D25) and `merged_result`. If the control sweep in `test_control_migrates_under_a_live_owner` needs the worktree fact the harness's `resume` passes, pass the same `worktrees=[self.worktree_fact(14, recorded={...})]` it builds; the test's point is only that control's write is the migrating one.
 
 - [ ] **Step 2: Run the tests**
 

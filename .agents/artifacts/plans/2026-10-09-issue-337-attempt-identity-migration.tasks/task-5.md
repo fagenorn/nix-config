@@ -36,11 +36,9 @@ class MigrationAcceptanceTest(MigrationFixtures, unittest.TestCase):
         return {row["ledger"]: row for row in report["ledgers"]}
 
     def install_all(self):
-        source = self.delivered_207()
-        minted = self.run_id
+        source = self.delivered_207()       # built in the driver's own root (D24)
         for handle in self.LEGACY:
             self.install_legacy(source, handle)
-        self.run_id = minted
         self.init_run(creation_key="fixture-337")
         self.spawn(issue=337, worktree=str(self.root / "wt-337"))
         self.install_legacy(self.read_state(), "run-20261009-337-338-339")

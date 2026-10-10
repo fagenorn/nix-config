@@ -9,7 +9,7 @@
 
 **Tech stack:** Python 3 standard library and `unittest`; `agent_tools` (`transaction_core`, `transaction_storage`); Nix (`lib/agent-tools.nix`, home-manager); `just`.
 
-Spec: `.agents/artifacts/specs/2026-10-09-issue-337-attempt-identity-migration-design.md`. Its `## Decision ledger` rows D1–D22 are cited by ID. D15–D22 were appended by this plan.
+Spec: `.agents/artifacts/specs/2026-10-09-issue-337-attempt-identity-migration-design.md`. Its `## Decision ledger` rows D1–D26 are cited by ID. D15–D22 were appended by this plan and D23–D26 by its plan review.
 
 ## Global Constraints
 
@@ -40,7 +40,7 @@ Estimates: about 16 changed files. `workflow-state.py` grows by about 450 lines 
 ## Task index
 
 Task 1 — Core `lookup` and the pure `attempt_identity` module — `python/agent_tools/transaction_core.py`, `python/agent_tools/attempt_identity.py`, `tests/test_transaction_core.py`, `tests/test_attempt_identity.py`, `justfile` — full — [task-1.md](2026-10-09-issue-337-attempt-identity-migration.tasks/task-1.md)
-Task 2 — Ledger schema 8: bind on locked reads, check on unlocked reads, `init-run` minting, identity-based direct reservation — `home/common/agent-skills/scripts/workflow-state.py`, `home/common/agent-skills/scripts/workflow_delivery.py`, `home/common/agent-skills/tests/test_workflow_state.py` (harness only), `home/common/agent-skills/tests/test_attempt_migration.py`, `python/agent_tools/launch_scope.py`, `tests/test_launch_scope.py` (one new test), `justfile` — full — [task-2.md](2026-10-09-issue-337-attempt-identity-migration.tasks/task-2.md)
+Task 2 — Ledger schema 8: bind on locked reads, check on unlocked reads, `init-run` minting, identity-based direct reservation — `home/common/agent-skills/scripts/workflow-state.py`, `home/common/agent-skills/scripts/workflow_delivery.py`, `home/common/agent-skills/tests/test_workflow_state.py` (harness only), `home/common/agent-skills/tests/test_delivered_control.py` (harness only), `home/common/agent-skills/tests/test_attempt_migration.py`, `python/agent_tools/launch_scope.py`, `tests/test_launch_scope.py` (one new test), `justfile` — full — [task-2.md](2026-10-09-issue-337-attempt-identity-migration.tasks/task-2.md)
 Task 3 — `direct-owner` on run transactions — `home/common/agent-skills/scripts/workflow-state.py`, `home/common/agent-skills/tests/test_workflow_state.py` (harness only), `home/common/agent-skills/tests/test_attempt_migration.py` — full — [task-3.md](2026-10-09-issue-337-attempt-identity-migration.tasks/task-3.md)
 Task 4 — Regression floor: the existing suites on minted and legacy-dialect runs — `home/common/agent-skills/tests/test_workflow_state.py`, `home/common/agent-skills/tests/test_delivery_workflow.py`, `home/common/agent-skills/tests/test_host_admission.py`, `home/common/agent-skills/tests/test_delivered_control.py`, `home/common/agent-skills/tests/test_admission_replay.py`, `tests/test_launch_scope.py`, `tests/test_launch_commit.py` — full — [task-4.md](2026-10-09-issue-337-attempt-identity-migration.tasks/task-4.md)
 Task 5 — `workflow-state migrate`: dry run, apply and report — `home/common/agent-skills/scripts/workflow-state.py`, `home/common/agent-skills/tests/test_attempt_migration.py` — full — [task-5.md](2026-10-09-issue-337-attempt-identity-migration.tasks/task-5.md)
@@ -64,5 +64,12 @@ Task 8 — Skill text, READMEs and the final gate — `home/common/claude-code/s
 - One package module plus the thin shell in workflow-state: D7. Exit codes and refusals as data: D8. Blocking mint lock: D9. No reverse transform: D10. Installed interpreter: D11, with `-I` settled by D16.
 - `init-run --run-id` re-bootstraps only, and the test run-id sweep is the floor's one declared change: D12. Old-helper test from the pinned commit: D13. Bind on every locked read and commit what was bound: D14.
 - Direct reservation from identity: D15. Direct-owner mints at handle computation and passes the issue explicitly: D17. `rel_` handles in launch-scope: D18. The sweep's declared change: D19. `RunIdentity` threading and empty migration contracts: D20. Fixture shapes: D21. Instruction ceilings unchanged: D22. D15–D22 were appended by this plan.
+- Plan-review dispositions: direct-owner preflights every retained ledger before binding any: D23. Migration fixtures on `LifecycleHarness` with the #220 driver in its own root: D24. Harness `finish` keeps schema-8 ledgers at schema 8: D25. The base-helper test's positive control and schema diagnostic: D26.
+
+## Standards review provenance
+
+- Reviewer: `Codex`, isolated read-only mode, no focus, no fallback.
+- Base: `eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7`.
+- Findings: 6 accepted (4 Blocking, 2 Should fix), 0 rejected, 0 deferred. Non-obvious ones are D23–D26; the Task 1 predecessor test and the Task 8 phrase pin were direct fixes.
 
 ---

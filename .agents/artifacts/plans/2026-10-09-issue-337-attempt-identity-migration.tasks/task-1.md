@@ -181,8 +181,9 @@ class SubjectTest(unittest.TestCase):
 
     def test_prior_run_rule(self):
         direct = ai.RunIdentity("direct", 41, 3)
+        successor = "rel_0190f0e0-0000-7000-8000-000000000001"  # a run other than CORE_ID
         for prior in (None, CORE_ID, "direct-41-000002"):
-            self.assertIsNone(ai.prior_run_violation(direct, prior, run_id=CORE_ID))
+            self.assertIsNone(ai.prior_run_violation(direct, prior, run_id=successor))
         for prior in ("direct-41-000003", "direct-40-000001", "orchestrate-41", 5):
             with self.subTest(prior=prior):
                 self.assertIsNotNone(ai.prior_run_violation(direct, prior, run_id="x"))

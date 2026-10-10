@@ -25,8 +25,9 @@ In `test_workflow_skill_contracts.py`, extend `ORCHESTRATE_MACHINE_TEXT[ORCHESTR
 ```python
         self.assertIn("workflow-state init-run --creation-key from-issue:<num>:<YYYYMMDD>",
                       durable)
-        self.assertNotIn("a stable run ID", durable)
 ```
+
+Pin only the argv (`docs/standards/agent-helpers.md` rule 6): no assertion on the removed English phrase.
 
 - [ ] **Step 2: Run the test and watch it fail**
 

@@ -5,7 +5,8 @@
 - Modify: `home/common/agent-skills/scripts/workflow_delivery.py` (`DeliveryRuntime.migrate` only)
 - Modify: `python/agent_tools/transaction_core.py` (module docstring sentence only: "No command and no caller until #125." becomes "Its first caller is `workflow-state`, which mints and binds attempt run transactions (#337).")
 - Modify: `python/agent_tools/launch_scope.py` (`SAFE_SEGMENT` only, D18)
-- Modify: `home/common/agent-skills/tests/test_workflow_state.py` (harness only: `LifecycleHarness.init_run`, `_as_legacy`, new `install_legacy`, `store_root`, `tree_snapshot`)
+- Modify: `home/common/agent-skills/tests/test_workflow_state.py` (harness only: `LifecycleHarness.init_run`, `_as_legacy`, `finish`, new `install_legacy`, `store_root`, `tree_snapshot`)
+- Modify: `home/common/agent-skills/tests/test_delivered_control.py` (harness only: `DeliveredControlHarness.setup_run`, D24)
 - Create: `home/common/agent-skills/tests/test_attempt_migration.py`
 - Modify: `tests/test_launch_scope.py` (one new test)
 - Modify: `justfile` (add `home/common/agent-skills/tests/test_attempt_migration.py` to `agent-workflow-tests`, right after `test_workflow_state.py`)
@@ -27,7 +28,8 @@
   - `transact(repo_root, run_id, mutation, *, allow_missing=False, migration_contracts=None, refuse_direct=False, new_identity: RunIdentity | None = None, with_identity=False)`.
   - `new_run_state(*, run_id, transaction_id, now, issues, prior_run=None)`.
   - `init-run` takes exactly one of `--run-id` and `--creation-key` (argparse mutually exclusive, required).
-- Produces (harness, `test_workflow_state.py`): `init_run(*, now=DEFAULT_NOW, creation_key="lifecycle-harness")` runs `init-run --creation-key <key>` and sets `self.run_id` to the reply's `run_id`; `_as_legacy(state, version, *, keep_delivery=False, handle=None)` also drops `transaction_id` and, given `handle`, sets `run_id` to it; `install_legacy(state, handle, version=7)` writes `_as_legacy(state, version, handle=handle)` to `workflows/<handle>/state.json` beside an empty `state.lock` (creating the directory, as a retained ledger has both) and sets `self.run_id = handle`; `store_root` property; `tree_snapshot()` returning `{relative path: bytes or "<dir>"}` under `<root>/.superpowers`.
+- Produces (harness, `test_workflow_state.py`): `init_run(*, now=DEFAULT_NOW, creation_key="lifecycle-harness")` runs `init-run --creation-key <key>` and sets `self.run_id` to the reply's `run_id`; `_as_legacy(state, version, *, keep_delivery=False, handle=None)` also drops `transaction_id` and, given `handle`, sets `run_id` to it; `install_legacy(state, handle, version=7)` writes `_as_legacy(state, version, handle=handle)` to `workflows/<handle>/state.json` beside an empty `state.lock` (creating the directory, as a retained ledger has both) and sets `self.run_id = handle`; `store_root` property; `tree_snapshot()` returning `{relative path: bytes or "<dir>"}` under `<root>/.superpowers`; `finish` keeps a schema-8 ledger at schema 8 (D25): when the stored ledger's `schema_version` is 8 it writes a copy with each issue's `delivery` set to `empty_delivery()` and `delivery_remainders` to `[]` — `run_id`, `transaction_id` and every other field kept — instead of today's `_as_legacy(..., 2)` copy, since legacy finish refuses only a contracted issue (`workflow-state.py:3839`); a schema ≤ 7 ledger keeps the schema-2 copy; the `_restore_deliveries` / restore-on-failure tail is unchanged. TODO (execute): if a pre-existing test needs another field the schema-2 copy dropped, extend this harness branch, never product code.
+- Produces (harness, `test_delivered_control.py`, D24): `setup_run` bootstraps with `init-run --repo-root <root> --creation-key delivered --now <at(0)>` and sets `self.run_args` and `self.ledger` from the reply's minted `run_id`; nothing else in the driver changes.
 
 **Invariants:**
 - Locked read order (spec § Migration transform; D14): `schema_refusal` → (schema 8) shape + `bound_identity` + `validate_state` → (schema ≤ 7) `DeliveryRuntime.migrate` to 7 (failure → `invalid_state`) → `validate_state(..., identity=legacy_identity(run_id) or orchestrated-placeholder, schema_version=7)` (failure → `invalid_state`) → `plan_migration` (→ its reason) → `mint_run` → set `transaction_id`, `schema_version: 8` → `validate_state` at 8. For an unknown dialect, validate the schema-7 candidate with `RunIdentity("orchestrated", None, None)` so the plan's `unknown_dialect` is the reason that surfaces. Every refusal raises `LedgerRefused` before any ledger write; a refused ledger gets no index entry.
@@ -59,22 +61,33 @@ from agent_tools import attempt_identity as ai
 from agent_tools.transaction_core import TransactionStore
 
 from .test_delivered_control import DeliveredControlHarness
-from .test_workflow_state import DEFAULT_NOW
+from .test_workflow_state import DEFAULT_NOW, LifecycleHarness
 
 CORE = re.compile(
     r"^rel_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
 
-class MigrationFixtures(DeliveredControlHarness):
-    """Legacy-dialect ledgers shaped like the retained ones (D21)."""
+class MigrationFixtures(LifecycleHarness):
+    """Legacy-dialect ledgers shaped like the retained ones (D21, D24).
+
+    The fixtures run on `LifecycleHarness` (its root, `run_cli`, `read_state`,
+    `control`). The issue-207 ledger comes from the #220 driver run in its own
+    root and HOME; only its parsed state crosses into this test's root.
+    """
 
     def store(self):
         return TransactionStore(self.store_root)
 
     def delivered_207(self):
-        self.init_run(creation_key="fixture-207")
-        self.deliver_through_remainder()
-        return self.read_state()
+        class Driver(DeliveredControlHarness, unittest.TestCase):
+            def runTest(self):
+                pass
+
+        Driver.setUpClass()
+        driver = Driver()
+        self.addCleanup(driver.doCleanups)
+        driver.deliver_through_remainder()
+        return json.loads(driver.ledger.read_text(encoding="utf-8"))
 
     def install_orchestrated(self, handle):
         source = self.delivered_207()
@@ -221,4 +234,4 @@ Then confirm the declared red window is the expected one, not a crash: `PYTHONPA
 
 - [ ] **Step 5: Commit**
 
-Stage exactly the eight files above, then `launch-commit … -- -m "feat(workflow-state): ledger schema 8 bound to a run transaction (#337)"` with the session trailers.
+Stage exactly the nine files above, then `launch-commit … -- -m "feat(workflow-state): ledger schema 8 bound to a run transaction (#337)"` with the session trailers.

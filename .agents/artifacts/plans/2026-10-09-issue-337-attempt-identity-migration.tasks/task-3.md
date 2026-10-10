@@ -12,8 +12,9 @@
   - Harness `direct_run_id(issue: int, sequence: int) -> str` — `TransactionStore(self.store_root).lookup(attempt_identity.direct_key(issue, sequence))`, failing the test when `None`.
 
 **Invariants:**
-- The legacy scan of `direct-<issue>-*` names stays exactly as today (malformed entry → the same refusals; #339 removes it). For each scanned run, in sequence order, under its own `state.lock` (taken as today): `read = read_locked_state(..., repo_root=repo_root, ...)`; when `read.changed`, `commit_state(run_dir, state_path, read.state, run_id=run_id, identity=read.identity)` at once, still under that lock (D14). A refused legacy ledger refuses the whole call before any write to any other ledger and before any mint (spec § Migration transform).
-- Index probe: after the scan, let `g` be the greatest scanned sequence (0 when none). For `s = g + 1, g + 2, …` read `lookup_run(repo_root, direct_key(issue, s))` until the first `None`. Each hit names `workflows/<id>`; if that directory has a `state.json`, lock and read it like a scanned run (identity from `bound_identity`) and append it as sequence `s`; if it has no ledger, stop: that entry is a reserved slot, not a retained run, and the probe ends there. The retained list is the union ordered by sequence; every later selection rule (nonterminal count, "below a newer terminal", greatest, selected) reads only that order, which is unchanged.
+- The legacy scan of `direct-<issue>-*` names stays exactly as today (malformed entry → the same refusals; #339 removes it).
+- Preflight, then bind (D23). **Preflight:** for each scanned run, in sequence order, take its `state.lock` as today (held, in `retained_locks`, to the end of the call) and check the ledger with Task 2's read-only checker `read_state_unlocked(state_path, run_id, repo_root=repo_root)`, which mints, creates and writes nothing. **Bind:** only after every scanned and probed ledger has passed, for each retained ledger in sequence order, `read = read_locked_state(..., repo_root=repo_root, ...)`; when `read.changed`, `commit_state(run_dir, state_path, read.state, run_id=run_id, identity=read.identity)` at once, still under its held lock (D14). A refused ledger therefore refuses the whole call before any ledger write, any index entry and any mint (spec § Migration transform); no ledger changes between the passes because its lock is held throughout.
+- Index probe (part of the preflight, before the bind pass): after the scan, let `g` be the greatest scanned sequence (0 when none). For `s = g + 1, g + 2, …` read `lookup_run(repo_root, direct_key(issue, s))` until the first `None`. Each hit names `workflows/<id>`; if that directory has a `state.json`, lock and check it like a scanned run (identity from `bound_identity`) and append it as sequence `s`; if it has no ledger, stop: that entry is a reserved slot, not a retained run, and the probe ends there. The retained list is the union ordered by sequence; every later selection rule (nonterminal count, "below a newer terminal", greatest, selected) reads only that order, which is unchanged.
 - The direct-owner `set(state["issues"]) != {str(issue)}` check applies to every retained run, scanned or probed.
 - New run handle (D17): when the call will need a new run (`selected is None`, or `request["new_run"]`), compute `sequence = greatest + 1` (or 1) and `prior_run = greatest`'s handle (or `None`) exactly as today, then `run_id = mint_run(repo_root, minted_plan(identity=RunIdentity("direct", issue, sequence), prior_run=prior_run, caller_key=None))` before the policy runs. `run_dir = workflows_dir / run_id`. The sequence cap (`>= 999999` → `"direct run sequence exhausted"`) is checked before minting. The mint lock is taken while `.direct-<issue>.lock` and the retained `state.lock`s are held, which is the D9 order.
 - Allocation (`spawn`/`resume`/`retry`/`refuse`/`recover` with no state) creates `workflows/<run_id>` and its `state.lock` exactly as today and writes `new_run_state(run_id=run_id, transaction_id=run_id, ..., prior_run=prior_run)`; its identity is `RunIdentity("direct", issue, sequence)`.
@@ -80,6 +81,20 @@ class DirectOwnerIdentityTest(MigrationFixtures, unittest.TestCase):
         for sequence in (1, 2, 3):
             self.assertIsNone(self.store().lookup(ai.direct_key(41, sequence)))
 
+    def test_a_valid_ledger_before_a_refused_one_stays_unbound(self):
+        self.install_terminal_legacy_direct("direct-41-000001")
+        first = self.workflows_dir / "direct-41-000001" / "state.json"
+        self.install_legacy({**json.loads(first.read_text()), "prior_run": "direct-42-000001"},
+                            "direct-41-000002")
+        second = self.workflows_dir / "direct-41-000002" / "state.json"
+        before = (first.read_bytes(), second.read_bytes())
+        refused = self.direct_owner_raw(issue=41, ok=False)
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("ambiguous_lineage", refused.stderr)
+        self.assertEqual((first.read_bytes(), second.read_bytes()), before)  # D23
+        for sequence in (1, 2, 3):
+            self.assertIsNone(self.store().lookup(ai.direct_key(41, sequence)))
+
     def test_control_refuses_a_minted_direct_run_under_its_lock(self):
         run_id = self.first_direct_run()
         self.run_id = run_id
@@ -89,7 +104,7 @@ class DirectOwnerIdentityTest(MigrationFixtures, unittest.TestCase):
         self.assertEqual(self.tree_snapshot(), before)
 ```
 
-Define two helpers in the same class from existing harness calls: `install_terminal_legacy_direct(handle)` — `run_id = self.first_direct_run(41)`, then drive it to a terminal with the same calls an existing direct-owner `new_run=True` test in `test_workflow_state.py` uses before its `new_run` request (grep `new_run=True`), read the state, `install_legacy(state, handle)`, then delete `workflows/<run_id>` and the `direct:41:1` index entry (`creation-keys/<sha256 of the key>.json`) so only the legacy ledger names sequence 1; and `new_run_fields(issue)` — the request fields of that same test's `new_run=True` call with `issue` substituted. Add no new request shape.
+Define two helpers in the same class from existing harness calls: `install_terminal_legacy_direct(handle)` — `run_id = self.first_direct_run(41)`, then drive it to a terminal with the same calls an existing direct-owner `new_run=True` test in `test_workflow_state.py` uses before its `new_run` request (grep `new_run=True`; its `fail_owner` → harness `finish` keeps the minted ledger at schema 8 and its `rel_` handle, D25), read the state, `install_legacy(state, handle)`, then delete `workflows/<run_id>` and the `direct:41:1` index entry (`creation-keys/<sha256 of the key>.json`) so only the legacy ledger names sequence 1; and `new_run_fields(issue)` — the request fields of that same test's `new_run=True` call with `issue` substituted. Add no new request shape.
 
 Harness: add `direct_run_id` (Interfaces), and change `acquire_direct`'s expected second-observe `"run_id": f"direct-{issue}-000001"` to `self.direct_run_id(issue, 1)` — the one harness expectation D17 changes.
 
