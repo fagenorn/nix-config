@@ -516,6 +516,8 @@ class RemoteRegistrationTest(VerifyTestCase):
         commit(root, "base")
         base = git(root, "rev-parse", "HEAD").strip()
         contract = fixture_contract()
+        # Opt out of the host-dependent release profile, as `verifiable_repo` does.
+        contract["release"] = "unsupported"
         scaffold(root, contract, self.home)
         for standards in contract["bindings"]["paths"]["standards"]:
             write(root, f"{standards}/bar.md", "# the bar\n")
