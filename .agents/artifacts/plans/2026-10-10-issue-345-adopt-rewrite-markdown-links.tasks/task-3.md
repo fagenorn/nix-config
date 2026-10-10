@@ -1,8 +1,9 @@
-# Task 3: `apply` commits the rewrites behind `no-new-broken-link`
+# Task 3: `apply` commits the rewrites behind `no-new-broken-link` and proves the commit's links
 
 **Files:**
 - Modify: `python/agent_tools/adopt_inspection.py` (`COMMIT_GATES`)
-- Modify: `python/agent_tools/adopt_apply.py` (`expected_status`, `fold_split_renames`, `gate_worktree_status_matches`, `gate_no_new_broken_link`, `COMMIT_GATE_CHECKS`)
+- Modify: `python/agent_tools/adopt_apply.py` (module docstring, `expected_status`, `fold_split_renames`, `gate_worktree_status_matches`, `new_broken_link_files`, `gate_no_new_broken_link`, `COMMIT_GATE_CHECKS`, `prove_commit_links`)
+- Modify: `python/agent_tools/adopt_project.py` (the `apply` commit path and the module docstring's `apply` paragraph)
 - Test: `home/common/agent-skills/tests/test_adopt_apply.py`
 
 **Interfaces:**
@@ -12,12 +13,17 @@
   - `adopt_inspection.COMMIT_GATES == ("worktree-status-matches-operations", "projections-in-sync", "no-unclassified-agent-path", "no-new-broken-link", "cold-clone-resolves", "resolve-capabilities-available", "workflow-verification-commands")` (D9).
   - `adopt_apply.expected_status(operations)` — a `write-file` whose target is the target of a `git-mv` in the same list contributes no record (D7).
   - `adopt_apply.fold_split_renames(actual: list[tuple], required: list[tuple]) -> list[tuple]` — for every required `("R ", (target, source))` absent from `actual` while both `("D ", (source,))` and `("A ", (target,))` are present, those two records are replaced by the `R ` record (at the `D ` record's position); everything else is returned unchanged and in order (D16).
+  - `adopt_apply.new_broken_link_files(worktree: Path, base: list[tuple[str, str, str]], result: list[tuple[str, str, str]], operations: list[dict]) -> list[str]` — the sorted result paths whose non-resolving relative link count exceeds their base counterpart's (the rule below); shared by the gate and the proof so they cannot disagree.
   - `adopt_apply.gate_no_new_broken_link(run: GateRun) -> bool`, registered in `COMMIT_GATE_CHECKS` under `"no-new-broken-link"`; a failure records repair id `adopt.gate.no-new-broken-link` through `run_commit_gates`' existing derivation.
+  - `adopt_apply.prove_commit_links(worktree: Path, commit: str, operations: list[dict]) -> None` — `new_broken_link_files(worktree, tree_records(worktree, commit + "^"), tree_records(worktree, commit), operations)`; non-empty raises `refuse("verification_failed", "adopt.commit.new_broken_link", "", "the adoption commit carries more non-resolving relative Markdown links in a file than its pre-move counterpart had")` (D17).
 
 **Invariants:**
 - `gate_worktree_status_matches` reads `actual = fold_split_renames(status_records(run.worktree), required)` and is otherwise unchanged.
-- `gate_no_new_broken_link`: the base is the worktree's `HEAD` tree (`tree_records(run.worktree, "HEAD")`), the result is its index (`index_records(run.worktree)`), each with a `Tree` of all its own paths and the `markdown_texts` of its records. With `origin = {op["targets"][0]: op["sources"][0] for op in run.operations if op["op"] == "git-mv"}`, it fails when any result file `p` has `broken_count(p, text, result_tree)` greater than `broken_count(origin.get(p, p), base_text, base_tree)`, the latter `0` when `origin.get(p, p)` has no base text (D9). It adds no `GateRun` member.
-- `expected_commit_paths`, `prove_commit_content`, `execute_operation` and `operation_result_matches` are unchanged (D7).
+- `new_broken_link_files`: base and result each get a `Tree` of all their own paths and the `markdown_texts` of their records. With `origin = {op["targets"][0]: op["sources"][0] for op in run.operations if op["op"] == "git-mv"}`, it fails when any result file `p` has `broken_count(p, text, result_tree)` greater than `broken_count(origin.get(p, p), base_text, base_tree)`, the latter `0` when `origin.get(p, p)` has no base text (D9).
+- `gate_no_new_broken_link` is `not new_broken_link_files(run.worktree, tree_records(run.worktree, "HEAD"), index_records(run.worktree), run.operations)` — the base is the worktree's `HEAD`, the result its index. It adds no `GateRun` member, and it stays a gate (D9): it refuses before a commit exists, while the proof covers what the later verification commands and a `pre-commit` hook stage (D17).
+- In `adopt_project`'s `apply`, `prove_commit_links(worktree, commit, changes)` runs directly after `prove_commit_content`, inside the same `try`, so its refusal retains the worktree and branch through `retain_failure` with its repair id, exactly like the content proof (D17); `prove_branch_carries_commit` still runs last.
+- Module docstrings: `adopt_apply`'s first paragraph says "the seven pre-commit gates" and "the three proofs taken over the commit once it exists — that it changes exactly the planned paths, that no Markdown file in it has more non-resolving relative links than its pre-move counterpart, and that the branch carries it and nothing else"; `adopt_project`'s `apply` paragraph names the same link proof among those worktree removal waits for.
+- `expected_commit_paths`, `prove_commit_content`, `execute_operation` and `operation_result_matches` are unchanged (D7). `CommitContentTest`'s docstring says "all seven" where it says "all six".
 - `assert_retained` moves from `CommitGateTest` to `ApplyTestCase` unchanged, so every apply test class can use it.
 
 - [ ] **Step 1: Write the failing tests**
@@ -25,9 +31,9 @@
 In `test_adopt_apply.py`: extend the import from `.test_adopt_project` with `LINKED_AFTER`, `LINKED_BASE`, `LINKED_SOURCES`, `LINKED_SUMMARY`, `write_dissolved_tree`, `write_linked_tree`; add `from agent_tools import adopt_apply, adopt_links, adopt_planning`; move `assert_retained` (body unchanged) from `CommitGateTest` into `ApplyTestCase` under the `-- running --` helpers. Add after `answered_repo`:
 
 ```python
-def linked_apply_repo(home: Path) -> Path:
+def linked_apply_repo(home: Path, **options) -> Path:
     """`apply_repo` plus #345's inbound and outbound relative links."""
-    root = apply_repo(home)
+    root = apply_repo(home, **options)
     write_linked_tree(root)
     return root
 ```
@@ -105,6 +111,47 @@ class LinkRewriteApplyTest(ApplyTestCase):
                          ["no-new-broken-link"])
 
 
+class CommitLinkProofTest(ApplyTestCase):
+    """#345 D17: a broken link staged after the gates, into a file the plan
+    already writes, changes no planned path set — only the commit's own
+    links show it."""
+
+    BREAK = "printf '\\n[gone](nope.md)\\n' >> README.md && git add README.md"
+
+    def assert_link_proof_refused(self, root: Path) -> None:
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        base = git(root, "rev-parse", "HEAD").strip()
+        code, payload, err = self.apply(plan_id)
+        self.assertEqual(code, 2, err or payload)
+        self.assertEqual(payload["error"]["code"], "verification_failed")
+        self.assertEqual(payload["error"]["repair_id"],
+                         "adopt.commit.new_broken_link")
+        self.assertEqual(git(root, "rev-parse", "HEAD").strip(), base)
+        self.assertTrue(self.worktree(plan_id).is_dir())
+        record = json.loads(self.state(
+            "adopt", "worktrees",
+            self.digest(plan_id) + ".failure.json").read_text("utf-8"))
+        self.assertEqual(record["repair_id"], "adopt.commit.new_broken_link")
+        # The pre-commit gate passed: it judged the index before the edit.
+        self.assertIn({"id": "no-new-broken-link", "status": "passed"},
+                      [{"id": gate["id"], "status": gate["status"]}
+                       for gate in record["gates"]])
+        branch = f"adopt-{self.digest(plan_id)[:12]}"
+        self.assertIn("[gone](nope.md)",
+                      git(root, "show", f"{branch}:README.md"))
+
+    def test_a_verification_command_that_breaks_a_planned_file(self):
+        self.assert_link_proof_refused(linked_apply_repo(
+            self.home, verification=("sh", "-c", self.BREAK)))
+
+    def test_a_pre_commit_hook_that_breaks_a_planned_file(self):
+        root = linked_apply_repo(self.home)
+        hook = root / ".git" / "hooks" / "pre-commit"
+        hook.write_text(f"#!/bin/sh\n{self.BREAK}\n", encoding="utf-8")
+        hook.chmod(0o755)
+        self.assert_link_proof_refused(root)
+
+
 class StatusFoldTest(unittest.TestCase):
     """A rewritten move may be reported as a deletion plus an addition."""
 
@@ -141,14 +188,15 @@ class StatusFoldTest(unittest.TestCase):
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run: `env PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_adopt_apply.py -k LinkRewriteApplyTest -k StatusFoldTest`
-Expected: FAIL — the linked fixtures refuse `verification_failed` / `adopt.gate.worktree-status-matches-operations` (the link writes add `M `/`A ` records the status gate does not expect), `expected_status` returns an extra `M ` record, and `fold_split_renames` and the gate id are missing.
+Expected: FAIL — the linked fixtures refuse `verification_failed` / `adopt.gate.worktree-status-matches-operations` (the link writes add `M `/`A ` records the status gate does not expect), `expected_status` returns an extra `M ` record, and `fold_split_renames` and the gate id are missing, and `CommitLinkProofTest` succeeds where it expects `adopt.commit.new_broken_link`.
 
 - [ ] **Step 3: Write the minimal implementation**
 
 1. `adopt_inspection.COMMIT_GATES`: insert `"no-new-broken-link"` before `"cold-clone-resolves"`.
 2. `adopt_apply.expected_status`: collect the `git-mv` targets first; skip a `write-file` whose target is one of them; docstring adds "a write onto a move's target is that move's content, so it is satisfied by the move's record".
 3. `adopt_apply.fold_split_renames` per Produces, and use it in `gate_worktree_status_matches`.
-4. `adopt_apply.gate_no_new_broken_link` per the invariant, with a docstring saying the base is the worktree's `HEAD` (the plan's base revision until the commit) and the result is the index, each counted against its own tree's tracked paths; register it in `COMMIT_GATE_CHECKS` in `COMMIT_GATES` order.
+4. `adopt_apply.new_broken_link_files` and `gate_no_new_broken_link` per the invariants, the gate's docstring saying the base is the worktree's `HEAD` (the plan's base revision until the commit) and the result is the index, each counted against its own tree's tracked paths; register it in `COMMIT_GATE_CHECKS` in `COMMIT_GATES` order.
+5. `adopt_apply.prove_commit_links` per Produces, with a docstring saying the verification commands run after this gate and a `pre-commit` hook after every gate, and either can edit a Markdown file the plan already writes without changing the path set `prove_commit_content` reads (D17). Call it from `adopt_project`'s `apply` per the invariant, and update both module docstrings.
 
 - [ ] **Step 4: Verify**
 
@@ -160,6 +208,6 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add python/agent_tools/adopt_inspection.py python/agent_tools/adopt_apply.py home/common/agent-skills/tests/test_adopt_apply.py
-launch-commit … -- -m "feat(adopt): commit link rewrites behind a no-new-broken-link gate (#345)"
+git add python/agent_tools/adopt_inspection.py python/agent_tools/adopt_apply.py python/agent_tools/adopt_project.py home/common/agent-skills/tests/test_adopt_apply.py
+launch-commit … -- -m "feat(adopt): commit link rewrites behind a no-new-broken-link gate and proof (#345)"
 ```

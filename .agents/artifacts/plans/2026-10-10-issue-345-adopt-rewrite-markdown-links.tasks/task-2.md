@@ -3,7 +3,7 @@
 **Files:**
 - Modify: `python/agent_tools/adopt_inspection.py` (`READY_GATES`)
 - Modify: `python/agent_tools/adopt_planning.py` (`evidence_record_members`, `generated_targets`, `check_markdown_writes`, `build_operations`, `bookkeeping_operations`, `evaluate_ready_gates`, `GATE_MESSAGES`, `compute_plan_id`)
-- Modify: `python/agent_tools/adopt_project.py` (`compose_plan`, `emit_human`)
+- Modify: `python/agent_tools/adopt_project.py` (`compose_plan`, `emit_human`, module docstring)
 - Test: `home/common/agent-skills/tests/test_adopt_project.py`
 
 **Interfaces:**
@@ -25,6 +25,7 @@
 - `GATE_MESSAGES["no-unrewritable-link"] == "a relative Markdown link into or out of a moved path cannot be rewritten to resolve to the same target"`.
 - `composed.overlap` is unchanged (D6). No new operation kind (D7).
 - `compute_plan_id`'s docstring says it digests seven inputs and names `link_rewrites` among them.
+- `adopt_project`'s module docstring (its first three paragraphs) matches: the document is eight-member with `link_rewrites` listed; the `plan_id` source set reads `{adopt_schema_version, project_id, base_revision, platform, evidence, decisions.answered, link_rewrites}`; and `plan` "reads tracked object ids, and the base revision's Markdown blobs through git, rather than the working tree's bytes" in place of "reads tracked object ids rather than tracked bytes".
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -257,7 +258,7 @@ Expected: FAIL — `KeyError: 'link_rewrites'` in the shape and identity tests, 
 
 1. `adopt_inspection.READY_GATES`: append `"no-unrewritable-link"`.
 2. `adopt_planning`: import `adopt_links` and `LinkRewrites`; add `evidence_record_members`, `generated_targets` and `check_markdown_writes` per Produces; route `bookkeeping_operations`' superseded list through `evidence_record_members` and add the `link_rewrites` member to its record; extend `compute_plan_id`, `evaluate_ready_gates` (the new gate is `READY_GATES[7]`), `GATE_MESSAGES` and `build_operations` per Produces. Update `build_operations`' docstring order sentence: "... then the living-reference rewrite, the Markdown link rewrites sorted by target, and finally the projection regenerations".
-3. `adopt_project.compose_plan`: derive `links` per the first invariant; pass `links.summary` to `compute_plan_id`, `evaluate_ready_gates` and `bookkeeping_operations`, and `links` to `build_operations`; for an appliable outcome call `check_markdown_writes(changes, set(links.files))` after `changes = head + bookkeeping + tail`; add `"link_rewrites": links.summary` to `document`. `emit_human`: append the `links:` line after the `changes:` line, read from `document["link_rewrites"]`.
+3. `adopt_project.compose_plan`: derive `links` per the first invariant; pass `links.summary` to `compute_plan_id`, `evaluate_ready_gates` and `bookkeeping_operations`, and `links` to `build_operations`; for an appliable outcome call `check_markdown_writes(changes, set(links.files))` after `changes = head + bookkeeping + tail`; add `"link_rewrites": links.summary` to `document`. `emit_human`: append the `links:` line after the `changes:` line, read from `document["link_rewrites"]`. Update the module docstring per the last invariant.
 
 - [ ] **Step 4: Verify**
 

@@ -21,6 +21,7 @@
   - `broken_count(container: str, text: str, tree: Tree) -> int` — relative links in `text` whose `resolve` is None.
   - `@dataclass(frozen=True) class RewrittenFile: source: str; before: str; after: str` — base path, base text, rewritten text.
   - `@dataclass(frozen=True) class LinkRewrites: summary: dict; files: dict[str, RewrittenFile]` — `files` keyed by the file's path after the moves, holding only files whose text changed.
+  - `ANGLE_ESCAPED = "%#?<>\r\n"` and `angle_target(path: str) -> str` — `path` with each character in `ANGLE_ESCAPED` replaced by its `%XX` (uppercase hex) and every other character raw (D18).
   - `plan_link_rewrites(texts: dict[str, str], paths: Iterable[str], moves: Iterable[tuple[str, str]], deleted: Iterable[str]) -> LinkRewrites` — pure (D4, D5, D8, D12, D14).
   - `tree_records(root: Path, revision: str) -> list[tuple[str, str, str]]` and `index_records(root: Path) -> list[tuple[str, str, str]]` — `(path, mode, object_id)`, sorted by path.
   - `markdown_texts(root: Path, records: list[tuple[str, str, str]]) -> dict[str, str]` — every `scanned` record's blob decoded as strict UTF-8; undecodable blobs are omitted.
@@ -30,6 +31,7 @@
 **Invariants:**
 - Standard library only; `adopt_links` imports `adopt_inspection` and nothing that imports the resolver (D3, #148 D26). It reads blobs only through git, never the working tree.
 - `plan_link_rewrites` replaces only target spans: for every file in `files`, `len(links(after)) == len(links(before))` and the text outside the replaced spans is identical.
+- Round trip: every rewritten link resolves, against `Tree` of the paths after the moves from its new containing file, to exactly the mapped target `T2` (D18).
 - `summary` is exactly `{"inbound": {"links": int, "files": [str]}, "outbound": {"links": int, "files": [str]}, "unrewritable": [{"path": str, "target": str}], "already_broken": int}`; `files` lists are sorted; `unrewritable` is de-duplicated and sorted by `(path, target)`; outbound files are named by their path after the move (D8).
 
 **Algorithm decisions (implement exactly):**
@@ -48,7 +50,7 @@ yields its one target and nothing else. Every other line is scanned inline: firs
 
 `resolve(container, target, tree)` — split at the first `?` or `#` (the suffix is discarded); `path = urllib.parse.unquote(raw)`; `joined = posixpath.normpath(posixpath.join(posixpath.dirname(container), path))`; None when `joined == ".."` or starts with `"../"`; `Resolved("", True)` when `joined == "."`; `Resolved(joined, False)` when `path` does not end with `/` and `joined in tree.paths`; `Resolved(joined, True)` when `joined in tree.directories`; None otherwise.
 
-`plan_link_rewrites` — `base = Tree(paths)`; `moved = dict(moves)`; `after = Tree((base.paths - moved.keys() - set(deleted)) | set(moved.values()))` (D12). For each `(F, text)` in sorted `texts`: `F2 = moved.get(F, F)`; direction is `outbound` when `F in moved`, else `inbound`. For each link with a relative target: `r = resolve(F, target, base)`; None → `already_broken += 1`. Map `r` to `T2`: a file → `moved[r.path]`, or unrewritable when `r.path in deleted`, else `r.path`; the root → `""`; a directory in `after.directories` → itself; otherwise every base member `m` under `r.path + "/"` must be moved with `moved[m].endswith(m[len(r.path):])`, and the prefixes `moved[m][:-len(m[len(r.path):])]` must be one non-empty value `N` → `N`; anything else is unrewritable, recorded as `{"path": F, "target": target}` and left untouched (D5). Re-emit (D4, D14): with `raw` the target's path part and `suffix` the rest, untouched when `posixpath.normpath(posixpath.join(posixpath.dirname(F2), unquote(raw))) == (T2 or ".")`; else `rel = posixpath.relpath(T2 or ".", posixpath.dirname(F2) or ".")`; prefix `./` when `raw` starts with `./`, `rel != "."` and `rel` does not start with `../`; append `/` when `r.directory` and `raw` ends with `/`; the new target is `rel` (angle) or `urllib.parse.quote(rel, safe="/")` (bare), plus `suffix`. Replace spans right to left; count each replaced link under its direction.
+`plan_link_rewrites` — `base = Tree(paths)`; `moved = dict(moves)`; `after = Tree((base.paths - moved.keys() - set(deleted)) | set(moved.values()))` (D12). For each `(F, text)` in sorted `texts`: `F2 = moved.get(F, F)`; direction is `outbound` when `F in moved`, else `inbound`. For each link with a relative target: `r = resolve(F, target, base)`; None → `already_broken += 1`. Map `r` to `T2`: a file → `moved[r.path]`, or unrewritable when `r.path in deleted`, else `r.path`; the root → `""`; a directory in `after.directories` → itself; otherwise every base member `m` under `r.path + "/"` must be moved with `moved[m].endswith(m[len(r.path):])`, and the prefixes `moved[m][:-len(m[len(r.path):])]` must be one non-empty value `N` → `N`; anything else is unrewritable, recorded as `{"path": F, "target": target}` and left untouched (D5). Re-emit (D4, D14): with `raw` the target's path part and `suffix` the rest, untouched when `posixpath.normpath(posixpath.join(posixpath.dirname(F2), unquote(raw))) == (T2 or ".")`; else `rel = posixpath.relpath(T2 or ".", posixpath.dirname(F2) or ".")`; prefix `./` when `raw` starts with `./`, `rel != "."` and `rel` does not start with `../`; append `/` when `r.directory` and `raw` ends with `/`; the new target is `angle_target(rel)` (angle) or `urllib.parse.quote(rel, safe="/")` (bare), plus `suffix` — both encode `%`, `#` and `?`, so the emitted path part never gains a suffix or a decoding its tracked name does not have (D18). Replace spans right to left; count each replaced link under its direction.
 
 `markdown_texts` — one `git cat-file --batch` (through `run_git(..., input=...)`) over the de-duplicated object ids of the `scanned` records; parse `<oid> <type> <size>\n<bytes>\n` frames; a `missing` frame or a short read refuses `adopt_failure` / `adopt.git.failed`. `tree_records` parses `git ls-tree -r -z <revision>` (`<mode> <type> <oid>\t<path>`, refusing `adopt.git.unparseable_tree` like `tree_inventory`); `index_records` parses `git ls-files -s -z` (`<mode> <oid> <stage>\t<path>`, stage `0` only, refusing `adopt.git.unparseable_index` like `tracked_inventory`).
 
@@ -57,7 +59,7 @@ yields its one target and nothing else. Every other line is scanned inline: firs
 Create `home/common/agent-skills/tests/test_adopt_links.py`:
 
 ```python
-"""Unit tables for `agent_tools.adopt_links` (#345 D3, D4, D5, D14, D15)."""
+"""Unit tables for `agent_tools.adopt_links` (#345 D3, D4, D5, D14, D15, D18)."""
 
 from __future__ import annotations
 
@@ -278,6 +280,30 @@ class RewriteTest(unittest.TestCase):
             moves=[("old/a b.md", "new dir/a b.md")])
         self.assertEqual(result.files["README.md"].after,
                          "[a](new%20dir/a%20b.md) [b](<new dir/a b.md>)\n")
+
+    def test_encoded_names_re_emit_to_the_same_referent(self):
+        names = ["a#b.md", "a?b.md", "100%.md", "a b.md"]
+        paths = ["README.md"] + [f"old/{name}" for name in names]
+        moves = [(f"old/{name}", f"new/{name}") for name in names]
+        before = ("[a](<old/a%23b.md>) [b](<old/a%3Fb.md#h>) "
+                  "[c](<old/100%25.md>) [d](<old/a b.md>)\n"
+                  "[e](old/a%23b.md) [f](old/a%3Fb.md?q) "
+                  "[g](old/100%25.md) [h](old/a%20b.md)\n")
+        after = ("[a](<new/a%23b.md>) [b](<new/a%3Fb.md#h>) "
+                 "[c](<new/100%25.md>) [d](<new/a b.md>)\n"
+                 "[e](new/a%23b.md) [f](new/a%3Fb.md?q) "
+                 "[g](new/100%25.md) [h](new/a%20b.md)\n")
+        result = rewrites({"README.md": before}, paths=paths, moves=moves)
+        self.assertEqual(result.files["README.md"].after, after)
+        after_tree = Tree(["README.md"] + [new for _, new in moves])
+        self.assertEqual(
+            [adopt_links.resolve("README.md", link.target, after_tree)
+             for link in adopt_links.links(after)],
+            [Resolved(f"new/{name}", False) for name in names * 2])
+
+    def test_angle_emission_escapes_only_what_changes_meaning(self):
+        self.assertEqual(adopt_links.angle_target("d ü/a#b?c%d<e>f\r\n.md"),
+                         "d ü/a%23b%3Fc%25d%3Ce%3Ef%0D%0A.md")
 
     def test_a_co_moved_non_ascii_link_stays_byte_identical(self):
         result = rewrites({"old/a.md": "[u](ü.md)\n"},

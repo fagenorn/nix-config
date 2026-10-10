@@ -35,7 +35,8 @@ use it:
    resolve to the same target fails a new ready gate, so the plan stays `draft`.
 2. **Apply** runs a new commit gate that re-reads the worktree's `HEAD` tree (the
    base) and its index (the result) through the same module and fails when any file
-   carries more broken relative links than its pre-move counterpart did.
+   carries more broken relative links than its pre-move counterpart did, and proves
+   the same count over the commit against its parent once the commit exists.
 
 Already-broken links, URLs, prose mentions and non-Markdown files are left
 byte-identical.
@@ -96,8 +97,9 @@ For each relative link that resolves at base: the containing file `F` maps to `F
 
 The new target is the POSIX relative path from `dirname(F')` to `T'`, re-emitted in
 the original's form: a leading `./` and a trailing slash are kept, the suffix and
-title are kept verbatim, an angle-bracket target stays angle-bracketed and raw, and a
-bare target is percent-encoded with `urllib.parse.quote(path, safe="/")`. A link whose
+title are kept verbatim, an angle-bracket target stays angle-bracketed with only `%`,
+`#`, `?`, `<`, `>`, CR and LF percent-encoded (per D18), and a bare target is
+percent-encoded with `urllib.parse.quote(path, safe="/")`. A link whose
 re-emitted text equals the original is untouched, so links between files that moved
 together stay byte-identical. A link that does not resolve at base is **already
 broken** and is never touched. Rewriting replaces only the target's bytes, so a file's
@@ -160,6 +162,12 @@ are still discovered (#148 D34). `--format human` prints one line,
   it is new), each counted against its own tree's tracked paths. The worktree's
   `HEAD` is the base revision until the commit, so the gate needs no new `GateRun`
   member.
+- **Commit proof `prove_commit_links`** (repair `adopt.commit.new_broken_link`, per
+  D17), beside `prove_commit_content`: the same per-file count over the commit's tree
+  against its parent's. The verification commands run after the gate and a
+  `pre-commit` hook after every gate; either can stage a broken link into a file the
+  plan already writes, which changes no path `prove_commit_content` reads. Its
+  refusal retains the worktree and branch like the content proof.
 
 `verify` gains no check: it has no base to compare against.
 
@@ -190,7 +198,9 @@ recipe's `PYTHONPATH`, plus one unit seam for the module:
   byte-identical; the evidence record carries the summary (AC1, AC3). The AC4
   fixture's stored plan with `plan.state` forced to `ready` refuses
   `verification_failed` / `adopt.gate.no-new-broken-link` and retains the worktree
-  (AC4, the inner check of D9).
+  (AC4, the inner check of D9). A verification command and a `pre-commit` hook that
+  each append a broken link to the planned `README.md` rewrite refuse
+  `adopt.commit.new_broken_link` with the gate recorded passed (D17).
 
 Existing key-set pins on `READY_GATES`, `COMMIT_GATES` and the evidence record are
 updated in the same commit. AC5 is `just agent-workflow-tests`.
@@ -224,3 +234,5 @@ updated in the same commit. AC5 is `just agent-workflow-tests`.
 | D14 | Refines D4: a link is untouched when its decoded original path, joined to the new containing directory, already normalises to the mapped target (a path comparison, not a text comparison); a kept leading `./` is dropped when the new path climbs (`../`) | Co-moved links stay byte-identical even when a bare target holds characters `quote` would re-encode; `./../x` is not a form any author writes | Comparing re-emitted text, which rewrites a co-moved `ü.md` link to `%C3%BC.md`; keeping `./` unconditionally |
 | D15 | Grammar refinements of D3: lines split at `\n` only (a `\r` stays on its line and never enters a target); a `[^label]:` footnote definition is not a reference definition; an unclosed fence runs to the end of the file; a backtick fence's info string carries no backtick; scanning resumes after each opening `[`, so an image inside link text is a link of its own | Footnote bodies are prose, not targets; `str.splitlines` splits on characters a Markdown line does not end at, which would shift offsets; one rule per case keeps plan and gate identical | Counting footnote bodies as broken links; CommonMark's full precedence rules, which need a parser the standard library lacks |
 | D16 | The status gate folds a reported `D <source>` plus `A <target>` pair onto any planned `R <target> <source>` record, not only onto moves a link rewrite edits; the commit gate reads each tree's Markdown through one `git cat-file --batch`, for which `adopt_inspection.run_git` gains an optional `input` | A planned move reported as a split pair still changes exactly the planned paths, and `prove_commit_content` proves them; an unedited move is 100% similar and never splits, so the wider fold changes no current outcome | Threading the set of rewritten moves into the gate, which adds state for no observable difference; a subprocess call outside `run_git`, which duplicates its refusal contract |
+| D17 | Refines D9: besides the commit gate, `apply` proves link health on the commit itself — `prove_commit_links` compares the commit's tree with its parent's under the gate's per-file count rule, runs directly after `prove_commit_content`, and refuses `verification_failed` / `adopt.commit.new_broken_link` with the worktree and branch retained (#148 D17); the gate stays | Plan review (PR-B1): `gate_workflow_verification_commands` runs project commands after the gate and a `pre-commit` hook runs after every gate, and `prove_commit_content` checks only the changed path set, so a broken link staged into an already-planned Markdown file lands while `apply` succeeds; the gate keeps the earlier, commit-free refusal (defense in depth) | The gate alone, which certifies an index the commit no longer matches; moving the gate after the verification commands, which still misses the hook; the proof alone, which leaves a commit behind for a failure the index already showed |
+| D18 | Refines D4/D14: an angle-bracket target is re-emitted with `%`, `#`, `?`, `<`, `>`, CR and LF percent-encoded and every other character raw; bare targets keep `quote(path, safe="/")`, which already encodes the first three; both are tested to resolve back to the mapped target | Plan review (PR-B2): resolution splits the suffix at the first raw `?` or `#` and percent-decodes the rest, so a raw re-emission of tracked `a#b.md` reads as `a` plus a fragment and `100%.md` decodes differently; `<`, `>` and line breaks end or invalidate the angle target (D3) | Raw emission, which changes the referent; `quote` for angle targets too, which re-encodes spaces and non-ASCII the author wrote raw |
