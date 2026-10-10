@@ -501,6 +501,39 @@ class RenewTest(CustodyCase):
         self.assertEqual((holder["executor_id"], holder["term"], holder["expires_at"]),
                          ("exec-b", 1, T0 + 2 * TTL))
 
+    def test_renew_with_a_ttl_refuses_a_key_taken_after_the_lock_free_check(self):
+        first = self.new("a")
+        custody = self.acquire(first)
+        successor = self.new("b", keys=("project:alpha", "target:beta"))
+        successor_store = TransactionStore(self.root, clock=FakeClock(T0 + TTL))
+        taken = []
+
+        class Root(type(self.root)):
+            """Runs the successor once, when renew joins `leases.lock`: after its lock-free
+            fenced check, before it takes the lease lock (pathlib's public subclass hook)."""
+            armed = False
+
+            def with_segments(root, *segments):
+                if Root.armed and segments[-1] == "leases.lock":
+                    Root.armed = False
+                    successor_store.acquire(successor, executor_id="exec-b",
+                                            subject_path="/work/beta", ttl_ms=TTL)
+                    taken.append(self.files())
+                return type(root)(*segments)
+
+        store = TransactionStore(Root(self.root), clock=self.clock)
+        self.clock.advance(TTL - 1)
+        Root.armed = True
+        with self.assertRaises(StaleCustody) as caught:
+            store.renew(custody, ttl_ms=90_000)
+        self.assertEqual(self.files(), taken[0])
+        self.assertIn(first, str(caught.exception))
+        self.assertIn("lapsed", str(caught.exception))
+        holder = self.store.inspect_lease("project:alpha")["holder"]
+        self.assertEqual(
+            (holder["executor_id"], holder["term"], holder["ttl_ms"], holder["expires_at"]),
+            ("exec-b", 1, TTL, T0 + 2 * TTL))
+
 
 class QuiesceTest(CustodyCase):
     def park(self):
