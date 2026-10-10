@@ -5,9 +5,18 @@ ordered conformance checks and the report they compose (R6.4, D34), the closed
 result set's exit codes and registration policy, and the one write to the
 user-scope fleet registry (D18, D19).
 
-It reads the *committed* state and nothing else: no working-tree bytes, no
-snapshot of a `ResolvedProject`, no capability verdict kept anywhere. What
-registration persists is exactly an identity and a location.
+It reads one pinned revision and nothing else, as a `VerificationSource`:
+plain `verify` reads `HEAD` (the resolver runs on the working tree, the
+inventory comes from the index, and every record is read at the `HEAD` commit
+it pins), while `--register` reads nothing from the checkout's branches or
+files. It lists `origin`, fetches the remote default branch and, when the
+contract there names another integration branch, that branch too, each into
+`refs/remotes/origin/<branch>` (the fetched objects and those remote-tracking
+refs are the only repository writes), exports the pinned commit with
+`git archive` into a temporary directory removed on every exit and runs every
+check there. No snapshot of a `ResolvedProject` and no capability verdict is
+kept anywhere. What registration persists is exactly an identity and a
+location: `{project_id, root}` with the real root (#148 D18).
 
 The resolver is not reached from this module. `adopt-project` owns the one
 seam it is consumed through — invoked as a child process through
@@ -21,26 +30,36 @@ from `adopt_inspection` is named in the `from` import below.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import contextlib
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
+import tempfile
 
 from agent_tools import agent_platform
 from agent_tools.adopt_inspection import (
     AdoptError,
     EVIDENCE_RECORD_DIR,
+    REMOTE,
     VERIFY_RESULTS,
-    blob_at_head,
+    blob_at,
     classify,
     commit_is_ancestor,
+    evidence_records_at,
+    export_commit,
+    fetch_pinned,
+    git_or_fail,
+    has_remote,
     introducing_commit,
     is_agent_path,
     parses_as_evidence_record,
     parses_as_migration_map,
     refuse,
+    remote_heads,
     resolver_error_code,
     resolver_violation_pointers,
-    tracked_evidence_records,
     tracked_inventory,
+    tree_inventory,
     verify_check_entry,
 )
 
@@ -48,7 +67,113 @@ from agent_tools.adopt_inspection import (
 # to the resolver's exit code and its parsed JSON, or an `AdoptError`.
 Resolver = Callable[..., tuple[int, object]]
 
-VERIFY_SCHEMA_VERSION = 1
+VERIFY_SCHEMA_VERSION = 2
+
+
+@dataclass(frozen=True)
+class VerificationSource:
+    """The one revision a verification reads, pinned once.
+
+    `ref` is the report's label for it and `commit` the 40-hex id every record
+    is read at. `resolver_root` is the directory the resolver is called on and
+    `inventory` the `(path, object id)` pairs the unclassified-path check
+    reads. `branch` is the fetched branch name; it is always `None` for `HEAD`.
+    """
+
+    ref: str
+    commit: str
+    resolver_root: Path
+    inventory: list[tuple[str, str]]
+    branch: str | None = None
+
+
+def head_source(root: Path) -> VerificationSource:
+    """The source plain `verify` reads: the checkout's own `HEAD` commit."""
+    commit = git_or_fail(root, "rev-parse", "--verify",
+                         "HEAD^{commit}").decode("ascii", "strict").strip()
+    return VerificationSource(
+        ref="HEAD", commit=commit, resolver_root=root,
+        inventory=tracked_inventory(root), branch=None)
+
+
+@contextlib.contextmanager
+def remote_source(root: Path,
+                  run_resolver: Resolver) -> Iterator[VerificationSource]:
+    """The source `--register` reads: the contract's integration branch.
+
+    Nothing is read from the checkout's branches or files. `origin` is listed,
+    its default branch `D` fetched into `refs/remotes/origin/D` and pinned to
+    its commit `R`, and `R` exported with `git archive` into a scratch
+    directory the resolver runs on. If the contract there names another
+    integration branch `B`, that is the one hop made: `B` must be listed by
+    `origin`, is fetched and pinned to `R2` the same way, exported, and its own
+    contract must still name `B`, so there is no second hop. Every later check
+    reads the one pinned commit, and the scratch directory lives as long as the
+    caller's `with` block and is removed on success and on every refusal.
+
+    No `origin` refuses `not_integrated` with `adopt.registration.no_remote`,
+    an `origin` that advertises no default branch with
+    `adopt.registration.remote_default_unknown`, and a `B` that `origin` does
+    not list, whose contract does not resolve or does not name `B` with
+    `adopt.registration.integration_branch_unresolved`. A default branch whose
+    contract does not resolve is yielded as it is: `contract-resolves` then
+    fails in the report.
+    """
+    if not has_remote(root):
+        raise refuse(
+            "not_integrated", "adopt.registration.no_remote", "",
+            "the repository has no `origin` remote to register against")
+    heads = remote_heads(root)
+    default = heads.default
+    if default is None:
+        raise refuse(
+            "not_integrated", "adopt.registration.remote_default_unknown", "",
+            "`origin` does not name a default branch it also lists")
+    with tempfile.TemporaryDirectory() as scratch:
+        branch = default
+        pinned = fetch_pinned(root, default)
+        exported = Path(scratch) / "default"
+        export_commit(root, pinned, exported)
+        exit_code, payload = run_resolver(exported, "resolve")
+        named = integration_branch(payload) if exit_code == 0 else None
+        if named is not None and named != default:
+            if named not in heads.branches:
+                raise unresolved_integration_branch(
+                    "the contract's integration branch is not a branch "
+                    "`origin` lists")
+            branch = named
+            pinned = fetch_pinned(root, branch)
+            exported = Path(scratch) / "integration"
+            export_commit(root, pinned, exported)
+            exit_code, payload = run_resolver(exported, "resolve")
+            if exit_code != 0 or integration_branch(payload) != branch:
+                raise unresolved_integration_branch(
+                    "the contract on the integration branch does not resolve "
+                    "or does not name that branch")
+        yield VerificationSource(
+            ref=f"refs/remotes/{REMOTE}/{branch}", commit=pinned,
+            resolver_root=exported, inventory=tree_inventory(root, pinned),
+            branch=branch)
+
+
+def unresolved_integration_branch(message: str) -> AdoptError:
+    return refuse(
+        "not_integrated", "adopt.registration.integration_branch_unresolved",
+        "", message)
+
+
+def require_integrated(verification: Verification) -> None:
+    """Refuse `not_integrated` when the pinned commit carries no adoption.
+
+    Called only under `--register`, before `registration_allowed`: a remote
+    revision with no adoption evidence record is not an integrated adoption
+    whatever else the report says (D7).
+    """
+    if not verification.evidence_candidates:
+        raise refuse(
+            "not_integrated", "adopt.registration.not_integrated", "",
+            "the remote integration branch carries no adoption evidence "
+            "record")
 
 
 def registration_allowed(result: str) -> bool:
@@ -142,15 +267,23 @@ class Verification:
 
     `report` is exactly what is printed. `resolve_payload` is kept beside it
     rather than folded in, because the integration branch registration checks
-    is contract policy the report has no business publishing.
+    is contract policy the report has no business publishing. `source` is the
+    pinned revision the report was read at, which registration walks ancestry
+    from, and `evidence_candidates` every adoption evidence record path found
+    in it, which `require_integrated` reads: an empty list is no adoption.
     """
 
-    def __init__(self, report: dict, resolve_payload: object) -> None:
+    def __init__(self, report: dict, resolve_payload: object,
+                 source: VerificationSource,
+                 evidence_candidates: list[str]) -> None:
         self.report = report
         self.resolve_payload = resolve_payload
+        self.source = source
+        self.evidence_candidates = evidence_candidates
 
 
-def verify_repository(root: Path, run_resolver: Resolver) -> Verification:
+def verify_repository(root: Path, source: VerificationSource,
+                      run_resolver: Resolver) -> Verification:
     """Run the ordered conformance checks and build the report.
 
     Every check runs where its inputs exist and is recorded as `not_run` where
@@ -164,7 +297,7 @@ def verify_repository(root: Path, run_resolver: Resolver) -> Verification:
         checks.append(verify_check_entry(
             check_id, status, detail))
 
-    exit_code, payload = run_resolver(root, "resolve")
+    exit_code, payload = run_resolver(source.resolver_root, "resolve")
     resolves = exit_code == 0 and isinstance(payload, dict)
     record("contract-resolves", "passed" if resolves else "failed",
            None if resolves else
@@ -173,10 +306,11 @@ def verify_repository(root: Path, run_resolver: Resolver) -> Verification:
     # Asked even when `resolve` refused, because the commonest reason it
     # refuses *is* projection drift: reporting the drift as "not run" would
     # hide the one check that names which projection went stale.
-    record("projections-in-sync", *projection_check(root, run_resolver))
+    record("projections-in-sync",
+           *projection_check(source.resolver_root, run_resolver))
 
     unclassified = sorted(
-        path for path, _ in tracked_inventory(root)
+        path for path, _ in source.inventory
         if classify(path) is None
         and is_agent_path(path))
     record("no-unclassified-agent-path",
@@ -185,7 +319,7 @@ def verify_repository(root: Path, run_resolver: Resolver) -> Verification:
            if unclassified else None)
 
     record_path, map_path = None, None
-    candidates = tracked_evidence_records(root)
+    candidates = evidence_records_at(root, source.commit)
     if not candidates:
         record("adoption-evidence-record", "failed",
                "no adoption evidence record is committed under "
@@ -196,7 +330,7 @@ def verify_repository(root: Path, run_resolver: Resolver) -> Verification:
                + ", ".join(candidates))
     else:
         found = parses_as_evidence_record(
-            blob_at_head(root, candidates[0]))
+            blob_at(root, source.commit, candidates[0]))
         if found is None:
             record("adoption-evidence-record", "failed",
                    "the committed file does not parse as an adoption "
@@ -211,7 +345,7 @@ def verify_repository(root: Path, run_resolver: Resolver) -> Verification:
         record("adoption-commit-derived", "not_run",
                "no adoption evidence record was discovered")
     else:
-        commit = introducing_commit(root, record_path)
+        commit = introducing_commit(root, source.commit, record_path)
         record("adoption-commit-derived",
                "failed" if commit is None else "passed",
                None if commit is not None else
@@ -227,7 +361,7 @@ def verify_repository(root: Path, run_resolver: Resolver) -> Verification:
                "the evidence record names no path migration map")
         map_path = None
     elif parses_as_migration_map(
-            blob_at_head(root, map_path)) is None:
+            blob_at(root, source.commit, map_path)) is None:
         record("path-migration-map", "failed",
                f"the path migration map is absent or does not parse: "
                f"{map_path}")
@@ -251,38 +385,48 @@ def verify_repository(root: Path, run_resolver: Resolver) -> Verification:
         "result": result,
         "project_id": resolved_project_id(payload),
         "root": str(root),
+        "revision": {"ref": source.ref, "commit": source.commit},
         "adoption_commit": commit,
         "evidence_record": record_path,
         "migration_map": map_path,
         "checks": checks,
         "blockers": blockers,
         "registered": False,
-    }, payload)
+    }, payload, source, candidates)
 
 
 def register_project(root: Path, verification: Verification) -> None:
     """Record `{project_id, root}` in the fleet, or refuse and change nothing.
 
-    The ancestry check comes first because it is the ordering #67 documents and
-    D19 makes checked: a commit that lives only on a feature branch names a
-    state the integration branch does not have. The duplicate check and the
+    The root is the real checkout's, not the temporary directory the checks ran
+    in. The ancestry check is the ordering #67 documents and D19 makes checked:
+    a commit that lives only on a feature branch names a state the integration
+    branch does not have. It is walked from the pinned commit id of the fetched
+    remote branch, never a branch name (D7); an adoption commit that is not its
+    ancestor refuses `not_integrated`. The duplicate check and the
     replacement then happen inside one exclusive lock over a registry reread
     underneath it, so two registrations racing under one `HOME` serialize
     instead of one overwriting the other.
     """
     report = verification.report
-    branch = integration_branch(verification.resolve_payload)
+    source = verification.source
     project_id = report["project_id"]
     commit = report["adoption_commit"]
+    branch = integration_branch(verification.resolve_payload)
     if branch is None or project_id is None or commit is None:
         raise refuse(
             "adopt_failure", "adopt.registration.incomplete", "",
             "registration needs a project id, an adoption commit and a "
             "declared integration branch")
-    if not commit_is_ancestor(root, commit, branch):
+    if source.branch is None or branch != source.branch:
+        raise refuse(
+            "not_integrated", "adopt.registration.integration_branch_unresolved",
+            "", "the contract's integration branch is not the remote branch "
+            "the verification read")
+    if not commit_is_ancestor(root, commit, source.commit):
         raise refuse(
             "not_integrated", "adopt.registration.not_integrated", "",
-            "the adoption commit is not reachable from the contract's "
+            "the adoption commit is not reachable from the remote "
             "integration branch")
     try:
         with agent_platform.registry_transaction() as entries:

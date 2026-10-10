@@ -22,6 +22,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from agent_tools import adopt_verify
+from agent_tools.adopt_inspection import AdoptError
 
 from .test_adopt_project import (
     EVIDENCE_RECORD_MEMBERS,
@@ -42,31 +46,59 @@ from .test_adopt_apply import apply_repo, readoption_repo
 
 VERIFY_MEMBERS = ["adoption_commit", "blockers", "checks", "evidence_record",
                   "migration_map", "project_id", "registered", "result",
-                  "root", "schema_version"]
+                  "revision", "root", "schema_version"]
 CHECK_IDS = ["contract-resolves", "projections-in-sync",
              "no-unclassified-agent-path", "adoption-evidence-record",
              "adoption-commit-derived", "path-migration-map"]
 
 
 def verifiable_repo(home: Path, *, project_id: str = "fixture/target",
-                    tracker_cli: str = "gh") -> Path:
+                    tracker_cli: str = "gh",
+                    integration_branch: str = "main") -> Path:
     """A conformant checkout carrying the two adoption records, on `main`.
 
-    The identity and the tracker binary are the two knobs the cases below
-    need: distinct ids for the registry, and a tracker CLI that cannot resolve
-    for the `adopted_with_blockers` verdict.
+    The identity, the tracker binary and the declared integration branch are
+    the knobs the cases below need: distinct ids for the registry, a tracker
+    CLI that cannot resolve for the `adopted_with_blockers` verdict, and a
+    contract that names a branch other than the remote default.
     """
     root = init_repo()
     contract = fixture_contract()
     contract["project"] = {"id": project_id, "name": project_id.split("/")[-1]}
     contract["bindings"]["tracker"]["cli"] = tracker_cli
+    contract["bindings"]["vcs"]["integration_branch"] = integration_branch
     scaffold(root, contract, home)
     write(root, ".agents/runtime/.gitignore", "*\n")
     git(root, "add", "-f", ".agents/runtime/.gitignore")
+    # A cold export carries tracked files only: an empty standards directory
+    # would read as a missing knowledge path under `--register`.
+    for standards in contract["bindings"]["paths"]["standards"]:
+        write(root, f"{standards}/bar.md", "# the bar\n")
     commit(root)
     write_adoption_records(root)
     commit(root, "adopt")
     return root
+
+
+def publish(root: Path, refs: tuple[str, ...] = ("main",), *,
+            default: str = "main") -> Path:
+    """A local bare `origin` holding `refs`, its `HEAD` naming `default`.
+
+    Each entry is `src` (pushed to the same-named branch) or `src:branch`,
+    where `src` is any local revision. `origin` is re-pointed when it exists:
+    plan identity derives from the GitHub URL the fixtures add (#148 D35), so
+    it is re-pointed only after `plan`/`apply`.
+    """
+    bare = Path(tempfile.mkdtemp()).resolve() / "origin.git"
+    git(bare.parent, "init", "--quiet", "--bare", "-b", default, str(bare))
+    verb = "set-url" if "origin" in git(root, "remote").split() else "add"
+    git(root, "remote", verb, "origin", str(bare))
+    specs = []
+    for ref in refs:
+        src, _, branch = ref.partition(":")
+        specs.append(f"{src}:refs/heads/{branch or src}")
+    git(root, "push", "--quiet", "origin", *specs)
+    return bare
 
 
 class VerifyTestCase(unittest.TestCase):
@@ -125,6 +157,17 @@ class VerifyTestCase(unittest.TestCase):
 
 
 class VerifyReadOnlyTest(VerifyTestCase):
+    def test_plain_verify_reads_the_committed_head_not_the_index(self):
+        root = adopted_repo(self.home)
+        head = git(root, "rev-parse", "HEAD").strip()
+        record = f".agents/artifacts/evidence/{'a1' * 32}.json"
+        git(root, "rm", "--quiet", "--cached", record)
+        report = self.report(root)
+        self.assertEqual(report["revision"]["commit"], head)
+        self.assertEqual(report["evidence_record"], record)
+        self.assertEqual(
+            self.check(report, "adoption-evidence-record")["status"], "passed")
+
     def test_a_conformant_checkout_is_adopted_and_writes_nothing(self):
         root = adopted_repo(self.home)
         before_status = git(root, "status", "--porcelain")
@@ -132,7 +175,11 @@ class VerifyReadOnlyTest(VerifyTestCase):
         report = self.report(root)
         self.assertEqual(report["result"], "adopted", report)
         self.assertEqual(sorted(report), VERIFY_MEMBERS)
-        self.assertEqual(report["schema_version"], 1)
+        self.assertEqual(report["schema_version"], 2)
+        self.assertEqual(report["revision"], {
+            "ref": "HEAD",
+            "commit": git(root, "rev-parse", "HEAD").strip(),
+        })
         self.assertEqual(report["project_id"], "fixture/target")
         self.assertEqual(report["root"], str(root))
         self.assertEqual(report["blockers"], [])
@@ -298,22 +345,6 @@ class AnsweredCandidateVerifyTest(VerifyTestCase):
 
 
 class RegistrationTest(VerifyTestCase):
-    def test_an_unintegrated_adoption_commit_refuses_not_integrated(self):
-        root = apply_repo(self.home)
-        code, out, err = run("plan", "--repo-root", str(root), home=self.home)
-        self.assertEqual(code, 0, err or out)
-        plan_id = json.loads(out)["plan"]["plan_id"]
-        code, out, err = run("apply", "--plan-id", plan_id, home=self.home)
-        self.assertEqual(code, 0, err or out)
-        branch = json.loads(out)["branch"]
-        # The adoption commit exists only on its own branch, which is exactly
-        # the pre-merge state D19 forbids registering from.
-        git(root, "checkout", "--quiet", branch)
-        report = self.report(root)
-        self.assertEqual(report["result"], "adopted", report)
-        self.refuse(root, "not_integrated", "--register")
-        self.assertFalse(self.registry_path().exists())
-
     def test_registration_after_the_merge_writes_exactly_two_members(self):
         root = apply_repo(self.home)
         code, out, err = run("plan", "--repo-root", str(root), home=self.home)
@@ -322,8 +353,10 @@ class RegistrationTest(VerifyTestCase):
         code, out, err = run("apply", "--plan-id", plan_id, home=self.home)
         self.assertEqual(code, 0, err or out)
         git(root, "merge", "--ff-only", "--quiet", json.loads(out)["branch"])
+        publish(root)
         report = self.report(root, "--register")
         self.assertEqual(report["result"], "adopted", report)
+        self.assertEqual(report["revision"]["ref"], "refs/remotes/origin/main")
         self.assertIs(report["registered"], True)
         self.assertEqual(self.registry(), {
             "schema_version": 1,
@@ -342,6 +375,7 @@ class RegistrationTest(VerifyTestCase):
         self.assertEqual(code, 0, err or out)
         second = json.loads(out)
         git(root, "merge", "--ff-only", "--quiet", second["branch"])
+        publish(root)
         report = self.report(root, "--register")
         self.assertEqual(report["result"], "adopted", report["checks"])
         self.assertEqual(report["evidence_record"], second["evidence_record"])
@@ -352,6 +386,7 @@ class RegistrationTest(VerifyTestCase):
 
     def test_a_second_identical_registration_is_byte_identical(self):
         root = verifiable_repo(self.home)
+        publish(root)
         self.report(root, "--register")
         first = self.registry_path().read_bytes()
         self.report(root, "--register")
@@ -359,15 +394,19 @@ class RegistrationTest(VerifyTestCase):
 
     def test_the_same_id_at_another_root_refuses_and_changes_nothing(self):
         root = verifiable_repo(self.home)
+        publish(root)
         self.report(root, "--register")
         before = self.registry_path().read_bytes()
         other = verifiable_repo(self.home)
+        publish(other)
         self.refuse(other, "duplicate_project_id", "--register")
         self.assertEqual(self.registry_path().read_bytes(), before)
 
     def test_registration_needs_a_conformant_checkout(self):
         root = verifiable_repo(self.home)
         write(root, "AGENTS.md", "hand-edited\n")
+        commit(root, "drift a projection")
+        publish(root)
         report = self.report(root, "--register")
         self.assertEqual(report["result"], "not_conformant", report)
         self.assertIs(report["registered"], False)
@@ -375,7 +414,9 @@ class RegistrationTest(VerifyTestCase):
 
     def test_two_projects_are_stored_ordered_by_project_id(self):
         beta = verifiable_repo(self.home, project_id="fixture/beta")
+        publish(beta)
         alpha = verifiable_repo(self.home, project_id="fixture/alpha")
+        publish(alpha)
         self.report(beta, "--register")
         self.report(alpha, "--register")
         self.assertEqual(
@@ -384,7 +425,9 @@ class RegistrationTest(VerifyTestCase):
 
     def test_two_concurrent_registrations_both_survive(self):
         alpha = verifiable_repo(self.home, project_id="fixture/alpha")
+        publish(alpha)
         beta = verifiable_repo(self.home, project_id="fixture/beta")
+        publish(beta)
         environment = {**os.environ, "HOME": str(self.home)}
         processes = [
             subprocess.Popen(
@@ -408,6 +451,7 @@ class RegistrationTest(VerifyTestCase):
 
     def test_the_resolver_lists_the_registered_project_as_compatible(self):
         root = verifiable_repo(self.home)
+        publish(root)
         self.report(root, "--register")
         self.assertEqual(self.fleet(), [{
             "project_id": "fixture/target",
@@ -419,6 +463,198 @@ class RegistrationTest(VerifyTestCase):
             "reason_code": None,
             "repair_id": None,
         }])
+
+
+class RemoteRegistrationTest(VerifyTestCase):
+    def refuse_with(self, root: Path, code: str, repair_id: str) -> None:
+        payload = self.refuse(root, code, "--register")
+        self.assertEqual(payload["error"]["repair_id"], repair_id, payload)
+        self.assertFalse(self.registry_path().exists())
+
+    def test_registration_follows_the_contracts_integration_branch(self):
+        root = verifiable_repo(self.home, integration_branch="dev")
+        adoption = git(root, "rev-parse", "HEAD").strip()
+        # The remote default carries the contract (naming `dev`) but not the
+        # adoption; `dev` carries both.
+        publish(root, ("HEAD~1:main", "main:dev"))
+        report = self.report(root, "--register")
+        self.assertEqual(report["result"], "adopted", report["checks"])
+        self.assertIs(report["registered"], True)
+        self.assertEqual(report["revision"], {
+            "ref": "refs/remotes/origin/dev", "commit": adoption})
+        self.assertEqual(
+            git(root, "rev-parse", "refs/remotes/origin/dev").strip(), adoption)
+        self.assertEqual(self.registry()["projects"], [
+            {"project_id": "fixture/target", "root": str(root)}])
+
+    def test_an_integration_branch_missing_on_origin_refuses(self):
+        root = verifiable_repo(self.home, integration_branch="dev")
+        publish(root, ("HEAD~1:main",))
+        self.refuse_with(root, "not_integrated",
+                         "adopt.registration.integration_branch_unresolved")
+
+    def test_a_second_branch_mismatch_refuses(self):
+        root = verifiable_repo(self.home, integration_branch="dev")
+        contract = json.loads(
+            (root / ".agents" / "project.json").read_text("utf-8"))
+        contract["bindings"]["vcs"]["integration_branch"] = "release"
+        write(root, ".agents/project.json", json.dumps(contract, indent=2) + "\n")
+        commit(root, "contract names release")
+        # origin/main names dev; origin/dev names release: no second hop.
+        publish(root, ("HEAD~2:main", "HEAD:dev", "HEAD:release"))
+        self.refuse_with(root, "not_integrated",
+                         "adopt.registration.integration_branch_unresolved")
+
+    def test_a_diverged_local_branch_registers_from_the_remote(self):
+        root = init_repo()
+        write(root, "README.md", "# before adoption\n")
+        commit(root, "base")
+        base = git(root, "rev-parse", "HEAD").strip()
+        contract = fixture_contract()
+        scaffold(root, contract, self.home)
+        for standards in contract["bindings"]["paths"]["standards"]:
+            write(root, f"{standards}/bar.md", "# the bar\n")
+        write(root, ".agents/runtime/.gitignore", "*\n")
+        git(root, "add", "-f", ".agents/runtime/.gitignore")
+        commit(root, "contract")
+        write_adoption_records(root)
+        commit(root, "adopt")
+        adoption = git(root, "rev-parse", "HEAD").strip()
+        # Freshness (PR-02): origin first holds only `base`, pushed from this
+        # checkout, so its `refs/remotes/origin/main` is stale; the adoption
+        # then advances on origin itself, never through a push that updates
+        # `root`'s remote-tracking ref.
+        bare = publish(root, ("HEAD~2:main",))
+        stale = git(root, "rev-parse", "refs/remotes/origin/main").strip()
+        git(root, "push", "--quiet", "origin", f"{adoption}:refs/staging/adopt")
+        git(bare, "update-ref", "refs/heads/main", adoption)
+        self.assertNotEqual(stale, adoption)
+        # Diverge: local main falls behind the adoption (no contract at all),
+        # gains unpushed work, an unstaged edit and an untracked file.
+        git(root, "reset", "--quiet", "--hard", base)
+        write(root, "user-work.md", "# unpushed\n")
+        commit(root, "unpushed user work")
+        write(root, "README.md", "# unstaged edit\n")
+        untracked = write(root, "scratch.txt", "untracked bytes\n")
+        local_main = git(root, "rev-parse", "refs/heads/main").strip()
+        status = git(root, "status", "--porcelain")
+        snapshot = tree_snapshot(root)
+
+        report = self.report(root, "--register")
+
+        self.assertEqual(report["result"], "adopted", report["checks"])
+        self.assertIs(report["registered"], True)
+        self.assertEqual(report["revision"], {
+            "ref": "refs/remotes/origin/main", "commit": adoption})
+        self.assertEqual(report["adoption_commit"], adoption)
+        self.assertEqual(report["evidence_record"],
+                         f".agents/artifacts/evidence/{'a1' * 32}.json")
+        self.assertEqual(report["root"], str(root))
+        self.assertEqual(self.registry()["projects"], [
+            {"project_id": "fixture/target", "root": str(root)}])
+        self.assertEqual(git(root, "rev-parse", "refs/heads/main").strip(),
+                         local_main)
+        self.assertEqual(git(root, "status", "--porcelain"), status)
+        self.assertEqual(tree_snapshot(root), snapshot)
+        self.assertEqual(untracked.read_text("utf-8"), "untracked bytes\n")
+        self.assertFalse((root / ".git" / "FETCH_HEAD").exists())
+        self.assertEqual(
+            git(root, "rev-parse", "refs/remotes/origin/main").strip(), adoption)
+        plain = self.report(root)
+        self.assertEqual(plain["result"], "not_conformant", plain)
+        self.assertEqual(plain["revision"]["ref"], "HEAD")
+
+    def test_an_unpushed_adoption_refuses_not_integrated(self):
+        root = verifiable_repo(self.home)
+        publish(root, ("HEAD~1:main",))
+        self.assertEqual(self.report(root)["result"], "adopted")
+        self.refuse_with(root, "not_integrated",
+                         "adopt.registration.not_integrated")
+
+    def test_an_adoption_only_on_its_apply_branch_refuses_not_integrated(self):
+        root = apply_repo(self.home)
+        code, out, err = run("plan", "--repo-root", str(root), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        plan_id = json.loads(out)["plan"]["plan_id"]
+        code, out, err = run("apply", "--plan-id", plan_id, home=self.home)
+        self.assertEqual(code, 0, err or out)
+        branch = json.loads(out)["branch"]
+        publish(root)
+        git(root, "checkout", "--quiet", branch)
+        self.assertEqual(self.report(root)["result"], "adopted")
+        self.refuse_with(root, "not_integrated",
+                         "adopt.registration.not_integrated")
+
+    def test_a_configured_fetch_mapping_cannot_move_a_local_branch(self):
+        # PR-01: `--refmap=` disables configured `remote.origin.fetch`
+        # mappings, so even one aimed at a local branch is not applied.
+        root = verifiable_repo(self.home)
+        publish(root)
+        git(root, "branch", "keep", "HEAD~1")
+        keep = git(root, "rev-parse", "refs/heads/keep").strip()
+        git(root, "config", "--add", "remote.origin.fetch",
+            "+refs/heads/main:refs/heads/keep")
+        report = self.report(root, "--register")
+        self.assertIs(report["registered"], True)
+        self.assertEqual(git(root, "rev-parse", "refs/heads/keep").strip(), keep)
+
+    def test_no_origin_refuses_not_integrated(self):
+        self.refuse_with(verifiable_repo(self.home), "not_integrated",
+                         "adopt.registration.no_remote")
+
+    def test_an_origin_without_a_default_branch_refuses_not_integrated(self):
+        root = verifiable_repo(self.home)
+        bare = Path(tempfile.mkdtemp()).resolve() / "empty.git"
+        git(bare.parent, "init", "--quiet", "--bare", "-b", "main", str(bare))
+        git(root, "remote", "add", "origin", str(bare))
+        self.refuse_with(root, "not_integrated",
+                         "adopt.registration.remote_default_unknown")
+
+    def test_an_unreachable_origin_refuses_adopt_failure(self):
+        root = verifiable_repo(self.home)
+        git(root, "remote", "add", "origin",
+            str(Path(tempfile.mkdtemp()).resolve() / "missing.git"))
+        self.refuse_with(root, "adopt_failure", "adopt.git.remote_unreachable")
+
+
+class RegisterProjectInnerCheckTest(VerifyTestCase):
+    """The inner checks of D7, which no CLI path reaches: walking from the
+    pinned commit already makes them hold for every CLI registration."""
+
+    def attempt(self, root: Path, adoption: str, contract_branch: str,
+                pinned: str) -> AdoptError:
+        source = adopt_verify.VerificationSource(
+            ref="refs/remotes/origin/main", commit=pinned,
+            resolver_root=root, inventory=[], branch="main")
+        verification = adopt_verify.Verification(
+            {"project_id": "fixture/target", "adoption_commit": adoption,
+             "registered": False},
+            {"bindings": {"vcs": {"integration_branch": contract_branch}}},
+            source, [f".agents/artifacts/evidence/{'a1' * 32}.json"])
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            with self.assertRaises(AdoptError) as caught:
+                adopt_verify.register_project(root, verification)
+        self.assertFalse(self.registry_path().exists())
+        return caught.exception
+
+    def test_an_adoption_commit_off_the_pinned_commit_refuses(self):
+        root = verifiable_repo(self.home)
+        pinned = git(root, "rev-parse", "HEAD").strip()
+        git(root, "checkout", "--quiet", "-b", "side", "HEAD~1")
+        write(root, "side.md", "# side\n")
+        commit(root, "side")
+        side = git(root, "rev-parse", "HEAD").strip()
+        error = self.attempt(root, side, "main", pinned)
+        self.assertEqual((error.code, error.repair_id),
+                         ("not_integrated", "adopt.registration.not_integrated"))
+
+    def test_a_contract_naming_another_branch_refuses(self):
+        root = verifiable_repo(self.home)
+        pinned = git(root, "rev-parse", "HEAD").strip()
+        error = self.attempt(root, pinned, "dev", pinned)
+        self.assertEqual(
+            (error.code, error.repair_id),
+            ("not_integrated", "adopt.registration.integration_branch_unresolved"))
 
 
 if __name__ == "__main__":

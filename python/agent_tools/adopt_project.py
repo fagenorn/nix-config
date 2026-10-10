@@ -27,14 +27,23 @@ worktree only after proving that the commit changes exactly the paths the plan
 declared and that the ref carries it. It never pushes, never merges and never
 writes the fleet registry.
 
-`verify` answers the conformance question read-only against the committed
-state — the contract resolves, every projection is in sync, no agent path is
-unclassified, and exactly one adoption evidence record is discoverable at
-`HEAD` with the migration map it names (D34). All three answers are reports on
-exit 0. `--register` is the one write to the user-scope fleet registry, and
-only once the adoption commit derived from that record is an ancestor of the
-contract's declared integration branch (D19); what it stores is an identity
-and a location and nothing else (D18).
+`verify` answers the conformance question read-only against one pinned
+revision — the contract resolves, every projection is in sync, no agent path is
+unclassified, and exactly one adoption evidence record is discoverable in it
+with the migration map it names (D34). Plain `verify` reads `HEAD`: the
+resolver runs on the working tree, the inventory comes from the index, and
+records are read at the `HEAD` commit it pins (D10). All three answers are
+reports on exit 0. `--register` is the one write to the user-scope fleet
+registry, and it reads nothing from the checkout's branches or files: it lists
+`origin`, fetches the remote default branch and, when the contract there names
+another integration branch, that branch too, each into
+`refs/remotes/origin/<branch>` (the fetched objects and those remote-tracking
+refs are the only repository writes), exports the pinned commit with
+`git archive` into a temporary directory removed on every exit, and runs every
+check there. It refuses `not_integrated` when that commit carries no evidence
+record or the adoption commit derived from it is not its ancestor (D19). What
+it stores is `{project_id, root}` with the real root and nothing else (#148
+D18).
 
 The resolver is consumed **only** as a child process, never imported (D26):
 `run_resolver` runs `agent_tools.resolve_project` under this process's own
@@ -577,10 +586,19 @@ def command_apply(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 # `verify`
 #
-# The conformance question, answered read-only against the *committed* state,
+# The conformance question, answered read-only against one pinned revision,
 # and — only with `--register` — the one write to the user-scope fleet
-# registry. The checks, the report and the registration transaction live in
-# `adopt_verify`; what is left here is the order they run in.
+# registry. Plain `verify` reads `HEAD` (resolver on the working tree,
+# inventory from the index, records at the `HEAD` commit it pins). `--register`
+# reads nothing from the checkout's branches or files: `adopt_verify.
+# remote_source` lists `origin`, fetches the remote default branch and, when
+# the contract there names another integration branch, that branch too, each
+# into `refs/remotes/origin/<branch>` (the fetched objects and those
+# remote-tracking refs are the only repository writes), and exports the pinned
+# commit with `git archive` into a temporary directory that is removed on every
+# exit, and every check runs there. The checks, the report and the
+# registration transaction live in `adopt_verify`; what is left here is the
+# order they run in.
 #
 # Every one of the three answers is a report on exit 0 (R6.4): exit 2 and the
 # D12 error object are reserved for the closed `ADOPT_ERROR_CODES`, so
@@ -594,10 +612,16 @@ def command_verify(args: argparse.Namespace) -> int:
     # as an adoption failure rather than as a non-conformant repository.
     require_manifest()
     root = adopt_inspection.require_repository(args.repo_root)
-    verification = adopt_verify.verify_repository(root, run_resolver)
-    if args.register and adopt_verify.registration_allowed(
-            verification.report["result"]):
-        adopt_verify.register_project(root, verification)
+    if not args.register:
+        verification = adopt_verify.verify_repository(
+            root, adopt_verify.head_source(root), run_resolver)
+    else:
+        with adopt_verify.remote_source(root, run_resolver) as source:
+            verification = adopt_verify.verify_repository(
+                root, source, run_resolver)
+        adopt_verify.require_integrated(verification)
+        if adopt_verify.registration_allowed(verification.report["result"]):
+            adopt_verify.register_project(root, verification)
     emit_json(verification.report)
     return adopt_verify.verify_exit_code(verification.report["result"])
 
@@ -644,8 +668,10 @@ def build_parser() -> argparse.ArgumentParser:
     # implicitly (R6.3).
     verify.add_argument("--register", action="store_true",
                         help="record the project in the user-scope fleet "
-                             "registry once its adoption commit is on the "
-                             "declared integration branch")
+                             "registry; conformance and integration are "
+                             "proven against the contract's integration "
+                             "branch fetched from origin, never the local "
+                             "checkout")
     return parser
 
 
