@@ -524,7 +524,13 @@ def validate_result(value: Any, *, expected_issue: int | None = None) -> dict[st
 
 
 def artifact_budget_paths() -> tuple[list[str], Path | None]:
-    """Resolve the Task-1 CLI and its repository/installed policy."""
+    """Resolve the Task-1 CLI and its repository/installed policy.
+
+    Installed, the CLI and the policy sit beside this script's `bin` directory
+    (`../share`), else under `~/.agents` (`bin/artifact-budget`,
+    `share/artifact-budget-policy.json`): the store copy `workflow-state` runs
+    from has neither beside it (#337 D38).
+    """
 
     def trusted_policy(path: Path) -> Path | None:
         """Resolve a policy path for an explicit ``--policy`` argument.
@@ -547,6 +553,8 @@ def artifact_budget_paths() -> tuple[list[str], Path | None]:
     installed_policy = Path(__file__).parent.parent / "share/artifact-budget-policy.json"
     if not installed_cli.is_file():
         installed_cli = Path.home() / ".agents/bin/artifact-budget"
+    if not installed_policy.is_file():
+        installed_policy = Path.home() / ".agents/share/artifact-budget-policy.json"
     return [str(installed_cli)], (
         trusted_policy(installed_policy) if installed_policy.is_file() else None
     )
