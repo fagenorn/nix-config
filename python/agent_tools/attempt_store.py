@@ -10,6 +10,7 @@ import fcntl
 import json
 import os
 import stat
+import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -132,26 +133,31 @@ def _open_stable_lock(lock_path: Path, label: str) -> int:
     return descriptor
 
 
-def _ensure_gitignore(directory: Path, label: str) -> None:
-    gitignore = directory / ".gitignore"
-    _require_regular_path(gitignore, label, allow_missing=True)
-    try:
-        descriptor = os.open(
-            gitignore, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            0o644)
-    except FileExistsError:
-        descriptor = _open_existing_regular(gitignore, label, os.O_RDONLY)
-        with os.fdopen(descriptor, encoding="utf-8") as source:
-            patterns = source.read().splitlines()
-        if "*" not in patterns:
-            raise StoreRefused(f"{label} must contain '*'")
-        return
-    with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-        _verify_open_file(gitignore, output.fileno(), label)
+def _publish_gitignore(directory: Path, gitignore: Path) -> None:
+    """Publish a complete `*` `.gitignore` by linking a fsynced temporary sibling into place,
+    so a concurrent reader sees no file or the whole file; a lost race keeps the winner's."""
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory,
+                                     prefix=".gitignore.", suffix=".tmp") as output:
+        os.fchmod(output.fileno(), 0o644)
         output.write("*\n")
         output.flush()
         os.fsync(output.fileno())
+        try:
+            os.link(output.name, gitignore)
+        except FileExistsError:
+            pass
     _fsync_directory(directory)
+
+
+def _ensure_gitignore(directory: Path, label: str) -> None:
+    gitignore = directory / ".gitignore"
+    if not _require_regular_path(gitignore, label, allow_missing=True):
+        _publish_gitignore(directory, gitignore)
+    descriptor = _open_existing_regular(gitignore, label, os.O_RDONLY)
+    with os.fdopen(descriptor, encoding="utf-8") as source:
+        patterns = source.read().splitlines()
+    if "*" not in patterns:
+        raise StoreRefused(f"{label} must contain '*'")
 
 
 def store_root(superpowers: Path) -> Path:
@@ -224,8 +230,8 @@ def bound_identity(store: Path, state: dict[str, Any], run_id: str) -> RunIdenti
     """The identity of the run transaction a schema-8 `state` names, read without a lock.
 
     Refuses a missing store, an unknown or invalid transaction, a subject that is not the
-    closed attempt-run subject, and a transaction whose handle is not `run_id`. Creates
-    nothing.
+    closed attempt-run subject, a transaction whose handle is not `run_id`, and a `state`
+    whose `prior_run` is not its subject's. Creates nothing.
     """
     transaction_id = state.get("transaction_id") if isinstance(state, dict) else None
     if not is_id(transaction_id):
@@ -243,6 +249,8 @@ def bound_identity(store: Path, state: dict[str, Any], run_id: str) -> RunIdenti
         raise StoreRefused(f"run transaction {transaction_id}: {violation}")
     if subject_handle(subject, transaction_id) != run_id:
         raise StoreRefused("workflow state run identity does not match its run transaction")
+    if state.get("prior_run") != subject["prior_run"]:
+        raise StoreRefused("workflow state prior_run does not match its run transaction")
     return identity_of(subject)
 
 

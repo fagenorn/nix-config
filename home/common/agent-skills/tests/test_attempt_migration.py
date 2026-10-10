@@ -435,6 +435,26 @@ class MigrationAcceptanceTest(MigrationFixtures, unittest.TestCase):
                                 completed.stderr)
                 self.assertEqual(self.tree_snapshot(), snapshot)
 
+    def test_ac3_a_prior_run_that_differs_from_its_run_transaction_is_refused(self):
+        owner = self.acquire_direct(issue=41)
+        self.run_id = owner["run_id"]
+        self.finish(1, {**self.merged_result(41), "state": "stopped", "pr_url": None,
+                        "merge_sha": None, "issue_closed": False, "notes": "semantic stop"},
+                    issue=41, now="2026-08-20T10:05:00Z")
+        self.terminal_worktree = owner["worktree"]
+        second = self.direct_owner(**self.new_run_fields(41))["run_id"]
+        self.assertEqual(self.store().load(second).subject["prior_run"], owner["run_id"])
+        self.edit_ledger(second, prior_run=None)
+        snapshot = self.tree_snapshot()
+        _, report = self.migrate()
+        self.assertEqual((self.rows(report)[second]["verdict"],
+                          self.rows(report)[second]["reason"]), ("refused", "invalid_state"))
+        refused = self.run_cli("check-launch", "--repo-root", self.root, "--run-id", second,
+                               "--action-id", "41:1:1", ok=False)
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("prior_run does not match its run transaction", refused.stderr)
+        self.assertEqual(self.tree_snapshot(), snapshot)
+
     def test_ac3_refusals_are_byte_identical(self):
         fixtures = self.install_refusal_fixtures()
         snapshot = self.tree_snapshot()
