@@ -309,6 +309,17 @@ def nix_config_shape_repo(home: Path) -> Path:
     return root
 
 
+def record_trees_repo(home: Path) -> Path:
+    """`nix_config_shape_repo` plus one tracked record under each of
+    `.claude/handoffs`, `.claude/notes` and `.claude/research` (#340)."""
+    root = nix_config_shape_repo(home)
+    write(root, ".claude/handoffs/h.md", "# handoff h\n")
+    write(root, ".claude/notes/n.md", "# note n\n")
+    write(root, ".claude/research/r.md", "# research r\n")
+    commit(root, "add agent records")
+    return root
+
+
 GITIGNORE_WITH_COMMENT = (
     "result\n"
     "__pycache__/\n"
@@ -962,6 +973,72 @@ class TypedOperationTest(AdoptTestCase):
         doc = self.ready_plan(root)
         for op in doc["changes"]:
             self.assertNotIn(".claude/other.config.json", op["targets"])
+
+
+class RecordTreeClassificationTest(AdoptTestCase):
+    """#340 AC1: the three record trees are classified centrally."""
+
+    def test_the_three_record_trees_plan_to_ready(self):
+        doc = self.ready_plan(record_trees_repo(self.home))
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["decisions"]["open"], [])
+        pairs = [(op["sources"][0], op["targets"][0])
+                 for op in doc["changes"] if op["op"] == "git-mv"]
+        for pair in ((".claude/handoffs/h.md",
+                      ".agents/artifacts/handoffs/h.md"),
+                     (".claude/notes/n.md", ".agents/artifacts/notes/n.md"),
+                     (".claude/research/r.md",
+                      ".agents/artifacts/specs/r.md")):
+            self.assertIn(pair, pairs)
+        entries = {entry["path"]: entry for entry in doc["evidence"]}
+        for group, target in (
+                (".claude/handoffs", ".agents/artifacts/handoffs"),
+                (".claude/notes", ".agents/artifacts/notes"),
+                (".claude/research", ".agents/artifacts/specs")):
+            with self.subTest(group=group):
+                entry = entries[group]
+                self.assertEqual(
+                    (entry["provenance"], entry["lifecycle_class"],
+                     entry["action"], entry["target"], entry["count"]),
+                    ("tracked", "durable-artifact", "move-canonical",
+                     target, 1))
+
+    def test_two_moves_into_one_destination_fail_the_destination_gate(self):
+        root = nix_config_shape_repo(self.home)
+        write(root, ".claude/research/x.md", "# research x\n")
+        commit(root, "collide with .claude/specs/x.md")
+        doc = self.ready_plan(root)
+        gate = next(gate for gate in doc["verification"]["ready_gates"]
+                    if gate["id"] == "no-existing-destination")
+        self.assertEqual(gate, {"id": "no-existing-destination",
+                                "status": "failed",
+                                "repair_id": "adopt.destination.occupied"})
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertIn("no-existing-destination",
+                      [blocker["id"] for blocker in doc["plan"]["blockers"]])
+
+    def test_a_destination_inside_another_fails_the_destination_gate(self):
+        root = nix_config_shape_repo(self.home)
+        # `.agents/artifacts/specs/x.md` is `.claude/specs/x.md`'s destination
+        # and this record's destination's parent: distinct paths, one of
+        # which would have to be both a file and a directory.
+        write(root, ".claude/research/x.md/r.md", "# research r\n")
+        commit(root, "nest a destination inside another")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
+    def test_a_destination_under_an_existing_file_fails_the_gate(self):
+        root = nix_config_shape_repo(self.home)
+        write(root, ".agents/artifacts/notes", "a file, not a directory\n")
+        write(root, ".claude/notes/n.md", "# note n\n")
+        commit(root, "put a file where a destination's parent goes")
+        self.assert_destination_gate_fails(self.ready_plan(root))
+
+    def assert_destination_gate_fails(self, doc: object) -> None:
+        gate = next(gate for gate in doc["verification"]["ready_gates"]
+                    if gate["id"] == "no-existing-destination")
+        self.assertEqual(gate["status"], "failed", gate)
+        self.assertEqual(doc["plan"]["state"], "draft")
 
 
 class GitignoreAmendmentTest(AdoptTestCase):

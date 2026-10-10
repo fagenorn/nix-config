@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
+from collections import Counter
+from pathlib import Path, PurePosixPath
 
 from agent_tools import agent_platform
 from agent_tools.adopt_inspection import (
@@ -565,8 +566,21 @@ def evaluate_ready_gates(root: Path, found: Candidates,
         READY_GATES[3], "failed" if untracked else "passed",
         "adopt.worktree.untracked_overlap" if untracked else None))
 
-    occupied = [new for _, new in found.moves
-                if (root / new).exists()]
+    # A planned destination that already exists or sits under an existing
+    # file, or that collides with another: the same path, or one inside the
+    # other.
+    destinations = [new for _, new in found.moves]
+    counts = Counter(destinations)
+    planned = set(destinations)
+    occupied = [
+        new for new in destinations
+        if (root / new).exists()
+        or any((root / str(parent)).exists()
+               and not (root / str(parent)).is_dir()
+               for parent in PurePosixPath(new).parents)
+        or counts[new] > 1
+        or any(str(parent) in planned
+               for parent in PurePosixPath(new).parents)]
     gates.append(gate_entry(
         READY_GATES[4], "failed" if occupied else "passed",
         "adopt.destination.occupied" if occupied else None))
