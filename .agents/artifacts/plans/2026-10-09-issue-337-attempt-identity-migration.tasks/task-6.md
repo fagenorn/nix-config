@@ -24,7 +24,7 @@
 - **Apply:** compute the dry-run rows; for each `migrate` row, call `bind(ledger)` (workflow-state's `transact(root, ledger, lambda state: (None, False))`) so the bind half runs on bytes re-read under that ledger's lock; on `LedgerRefused` record `refused` with its `reason` (the advisory dry-run verdict loses). Then recompute the row with `migrated=True`, which turns a now-`current` row into `migrated`. `current` and `refused` rows are never passed to `transact` (no lock file is created for them). Report `mode: "apply"`.
 - Idempotent: a second apply reports zero `migrated` and leaves the tree snapshot unchanged; two dry runs print identical bytes.
 - No clock value appears in the report.
-- Budget (D29): after the commit, `git diff -U10 eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7..HEAD -- home/common/agent-skills/scripts/workflow-state.py | wc -c` prints at most 60000, and the same measure of `home/common/agent-skills/tests/test_attempt_migration.py` at most 60000.
+- Budget (D29, measured from the merge base per D33): after the commit, `git diff -U10 907dba234933e1457c2883530bf5f1b83e07a0ec..HEAD -- home/common/agent-skills/scripts/workflow-state.py | wc -c` prints at most 60000, and the same measure of `home/common/agent-skills/tests/test_attempt_migration.py` at most 60000.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -184,4 +184,10 @@ Run: `just build` (timeout 3600 s; the package module changed) — succeeds.
 
 - [ ] **Step 5: Commit**
 
-Stage the three files, then `launch-commit … -- -m "feat(workflow-state): migrate dry run and apply (#337)"` with the session trailers. Then, on the new head, check the Invariants' two ceilings and the cumulative package: `review-package .agents/artifacts/plans/2026-10-09-issue-337-attempt-identity-migration.md eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7 "$(git rev-parse HEAD)" "$SCRATCH/review-task6.json" | artifact-budget validate-report --boundary producer --input -` reports `"state":"complete"`. A ceiling over its limit is a failed task: move logic from `workflow-state.py` into `attempt_store.py` until it holds.
+Stage the three files, then `launch-commit … -- -m "feat(workflow-state): migrate dry run and apply (#337)"` with the session trailers. Then, on the new head, check the Invariants' two ceilings and the cumulative package: `review-package .agents/artifacts/plans/2026-10-09-issue-337-attempt-identity-migration.md 907dba234933e1457c2883530bf5f1b83e07a0ec "$(git rev-parse HEAD)" "$SCRATCH/review-task6.json" | artifact-budget validate-report --boundary producer --input -` reports `"state":"complete"`. A ceiling over its limit is a failed task: move logic from `workflow-state.py` into `attempt_store.py` until it holds.
+
+## Review feasibility task
+
+```json
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64],"id":6,"records":[{"bounds":[{"added_lines":504,"boundary":"attempt-identity","deleted_lines":0,"record_bytes":21000,"support":{"covers":["t5-11","t6-1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t6-1","last_task":6,"owner":6,"path":"python/agent_tools/attempt_store.py"},{"bounds":[{"added_lines":216,"boundary":"attempt-identity","deleted_lines":96,"record_bytes":58000,"support":{"covers":["t5-1","t6-2"],"kind":"authored-cumulative/v1"}}],"change":"modify","id":"t6-2","last_task":6,"owner":6,"path":"home/common/agent-skills/scripts/workflow-state.py"},{"bounds":[{"added_lines":594,"boundary":"attempt-identity","deleted_lines":0,"record_bytes":32000,"support":{"covers":["t5-4","t6-3"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t6-3","last_task":6,"owner":6,"path":"home/common/agent-skills/tests/test_attempt_migration.py"}]}}
+```

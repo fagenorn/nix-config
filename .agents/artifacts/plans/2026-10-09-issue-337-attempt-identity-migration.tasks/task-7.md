@@ -11,7 +11,7 @@ Test-only task: it proves AC4 against the code Tasks 2–6 built. If a test can 
 
 **Invariants:**
 - The legacy owner uses only the legacy handle `orchestrate-14`, the action id `14:1:1` and worker id `14:1:1:w1` — never the transaction id.
-- The base generation is the real one: `git -C <repo root> archive eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7 home/common/agent-skills/scripts | tar -x -C <tmp>`; the commit's absence is a test **failure** (`self.fail`), never a skip (D13). `<repo root>` is `Path(__file__).resolve().parents[4]` (the checkout holding `home/`).
+- The base generation is the real one: `git -C <repo root> archive eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7 home/common/agent-skills/scripts | tar -x -C <tmp>`; the commit's absence is a test **failure** (`self.fail`), never a skip (D13; the pin stays per D34). `<repo root>` is `Path(__file__).resolve().parents[4]` (the checkout holding `home/`).
 - The base helper runs as a subprocess `[sys.executable, <tmp>/home/common/agent-skills/scripts/workflow-state.py, ...]` with `env = {**self.cli_env, "PYTHONPATH": <repo root>/python}` (it imports `agent_tools.host_admission` from source in its `scripts` layout) and `cwd=<tmp>`.
 - Every refusal leaves the `.superpowers` tree snapshot byte-identical.
 
@@ -120,8 +120,14 @@ Expected: OK, 3 tests. These pin behaviour Tasks 2–6 already built; to see eac
 
 Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_attempt_migration.py`
 Expected: OK, no skips (`grep -c "skipped"` on the captured output prints `0`).
-After the commit, `git diff -U10 eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7..HEAD -- home/common/agent-skills/tests/test_attempt_migration.py | wc -c` prints at most 60000 (D29); if not, factor the repeated fixture calls into `MigrationFixtures` helpers until it does.
+After the commit, `git diff -U10 907dba234933e1457c2883530bf5f1b83e07a0ec..HEAD -- home/common/agent-skills/tests/test_attempt_migration.py | wc -c` prints at most 60000 (D29, D33); if not, factor the repeated fixture calls into `MigrationFixtures` helpers until it does.
 
 - [ ] **Step 4: Commit**
 
 Stage the test file, then `launch-commit … -- -m "test: live legacy owners and the base helper on schema 8 (#337)"` with the session trailers.
+
+## Review feasibility task
+
+```json
+{"kind":"review-feasibility-task","schema_version":3,"task":{"actual_ranges":[],"commit_subject_bytes":[64],"id":7,"records":[{"bounds":[{"added_lines":824,"boundary":"attempt-identity","deleted_lines":0,"record_bytes":45000,"support":{"covers":["t5-4","t6-3","t7-1"],"kind":"authored-cumulative/v1"}}],"change":"add","id":"t7-1","last_task":7,"owner":7,"path":"home/common/agent-skills/tests/test_attempt_migration.py"}]}}
+```
