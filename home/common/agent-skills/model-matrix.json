@@ -174,7 +174,7 @@
       "id": "from-issue-phase-delegate",
       "path": "home/common/agent-skills/skills/from-issue/SKILL.md",
       "marker": "<!-- agent-dispatch: id=from-issue-phase-delegate role=issue-owner model=opus effort=high -->",
-      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\") delegates the entire remainder to a fresh issue owner with the lifecycle envelope and artifact paths.",
+      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\") delegates the remainder to a fresh issue owner with the lifecycle envelope and artifact paths.",
       "role": "issue-owner",
       "model": "opus",
       "effort": "high",
