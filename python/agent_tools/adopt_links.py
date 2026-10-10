@@ -339,8 +339,8 @@ def angle_target(path: str) -> str:
                    for c in path)
 
 
-def _directory_successor(directory: str, base: Tree, after: Tree,
-                         moved: dict[str, str]) -> str | None:
+def directory_successor(directory: str, base: Tree, after: Tree,
+                        moved: dict[str, str]) -> str | None:
     """Where a directory's contents went, or None when they went apart."""
     if directory in after.directories:
         return directory
@@ -366,7 +366,7 @@ def _successor(resolved: Resolved, base: Tree, after: Tree,
         return None if resolved.path in deleted else resolved.path
     if resolved.path == "":
         return ""
-    return _directory_successor(resolved.path, base, after, moved)
+    return directory_successor(resolved.path, base, after, moved)
 
 
 def _emitted(link: Link, resolved: Resolved, successor: str,
