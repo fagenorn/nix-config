@@ -18,7 +18,7 @@ import json
 from collections import Counter
 from pathlib import Path, PurePosixPath
 
-from agent_tools import agent_platform, release_profile
+from agent_tools import adopt_links, agent_platform, release_profile
 from agent_tools.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
     APPROVAL_CLASSES,
@@ -58,6 +58,7 @@ from agent_tools.adopt_inspection import (
     refuse,
     sha256_hash,
 )
+from agent_tools.adopt_links import LinkRewrites
 from agent_tools.release_bridge import project_legacy_deploy
 
 # --------------------------------------------------------------------------
@@ -387,10 +388,63 @@ def legacy_binding_operations(root: Path,
     return operations, contents
 
 
+def evidence_record_members(found: Candidates) -> list[tuple[str, str]]:
+    """Every adoption evidence record in the inspected tree, as sorted
+    `(path, object_id)` pairs: the records a re-adoption supersedes, and
+    paths the link derivation treats as deleted, so a link to one is
+    unrewritable."""
+    return sorted(
+        (path, object_id) for info in found.groups.values()
+        for path, object_id in info["members"]
+        if is_evidence_record_path(path))
+
+
+def generated_targets(contract_source: dict | None) -> set[str]:
+    """The `target` of every `generated_file` projection the contract names.
+
+    Those files are regenerated from their source rather than edited, so the
+    link rewriter leaves them alone (D13). A missing or malformed contract
+    names none."""
+    projections = (contract_source or {}).get("projections")
+    if not isinstance(projections, list):
+        return set()
+    return {entry["target"] for entry in projections
+            if isinstance(entry, dict)
+            and entry.get("kind") == "generated_file"
+            and isinstance(entry.get("target"), str)}
+
+
+def check_markdown_writes(changes: list[dict],
+                          link_targets: set[str]) -> None:
+    """Refuse an operation list whose Markdown handling is not the link
+    rewrite's alone (D7).
+
+    The `write-file` operations that target a Markdown path must be exactly
+    the link rewrites, one per target, and no `delete-file` may name a
+    Markdown path: a plan that rewrites a file's links and deletes it, or
+    writes it twice, would disagree with itself. This is a derivation bug,
+    never a repository condition, so it raises rather than gating."""
+    written = [op["targets"][0] for op in changes
+               if op["op"] == "write-file"
+               and adopt_links.is_markdown_path(op["targets"][0])]
+    if sorted(written) != sorted(link_targets) or len(set(written)) != len(
+            written):
+        raise ValueError(
+            "Markdown write-file operations do not match the link rewrites: "
+            f"{sorted(written)!r} against {sorted(link_targets)!r}")
+    deleted = [path for op in changes if op["op"] == "delete-file"
+               for path in op["sources"]
+               if adopt_links.is_markdown_path(path)]
+    if deleted:
+        raise ValueError(
+            f"a delete-file operation names Markdown: {sorted(deleted)!r}")
+
+
 def build_operations(root: Path, found: Candidates, manifest: dict,
                      contract_source: dict | None,
-                     plan_id: str) -> tuple[list[dict], list[dict],
-                                            dict[str, bytes]]:
+                     plan_id: str,
+                     links: LinkRewrites) -> tuple[list[dict], list[dict],
+                                                   dict[str, bytes]]:
     """The typed operations either side of the adoption's own bookkeeping.
 
     Returned as `(head, tail, contents)` rather than one list because
@@ -400,7 +454,8 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
     contract amendment, the relocations sorted by old path, the runtime
     sentinel and the `.gitignore` amendment, then the deletion of any
     superseded evidence record and the two records, then the living-reference
-    rewrite and finally the projection regenerations.
+    rewrite, the Markdown link rewrites sorted by target, and finally the
+    projection regenerations.
 
     `contents` maps each `write-file` target onto the exact bytes whose hash
     the operation publishes as `after`. The plan document carries the hash and
@@ -461,6 +516,17 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
         tail.extend(rewrites)
         contents.update(rewritten)
 
+    # One `write-file` per Markdown file whose relative links the moves
+    # change, at the path the file has after them: a moved file is written
+    # where `git-mv` left it, a retained one where it already is.
+    for target in sorted(links.files):
+        rewrite = links.files[target]
+        before = rewrite.before.encode("utf-8")
+        after = rewrite.after.encode("utf-8")
+        tail.append(operation("write-file", [target], [target],
+                              sha256_hash(before), sha256_hash(after)))
+        contents[target] = after
+
     projections = (amended or {}).get("projections")
     if isinstance(projections, list):
         rows = [entry for entry in projections if isinstance(entry, dict)
@@ -500,8 +566,9 @@ def adoption_records(plan_id: str) -> dict:
 def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
                            base_revision: str, platform_block: dict,
                            decisions: dict,
-                           ready_gates: list[dict]) -> tuple[list[dict],
-                                                            dict[str, bytes]]:
+                           ready_gates: list[dict],
+                           link_rewrites: dict) -> tuple[list[dict],
+                                                        dict[str, bytes]]:
     """The path-migration map and the adoption evidence record, preceded by
     the deletion of every evidence record an earlier adoption committed.
 
@@ -519,11 +586,9 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
     for the same reason: `apply` writes the very bytes this hashed.
     """
     records = adoption_records(plan_id)
-    superseded = sorted(
-        (path, object_id) for info in found.groups.values()
-        for path, object_id in info["members"]
-        if is_evidence_record_path(path)
-        and path != records["evidence_record"])
+    superseded = [(path, object_id)
+                  for path, object_id in evidence_record_members(found)
+                  if path != records["evidence_record"]]
     map_bytes = document_bytes({
         "schema_version": 1,
         "migration_id": plan_id,
@@ -543,6 +608,7 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
                      "after": entry["target"]} for entry in found.entries],
         "checks": [{"id": gate["id"], "status": gate["status"]}
                    for gate in ready_gates],
+        "link_rewrites": link_rewrites,
         "path_migration_map": records["migration_map"],
     })
     return [
@@ -629,7 +695,8 @@ def evaluate_ready_gates(root: Path, found: Candidates,
                          contract_resolves: bool,
                          unfixable_pointers: list[str],
                          untracked: list[str],
-                         decisions: dict) -> list[dict]:
+                         decisions: dict,
+                         link_rewrites: dict) -> list[dict]:
     """One entry per gate, in declaration order. All must pass for `ready`."""
     gates: list[dict] = []
 
@@ -691,6 +758,11 @@ def evaluate_ready_gates(root: Path, found: Candidates,
     gates.append(gate_entry(
         READY_GATES[6], "failed" if secret_moves else "passed",
         "adopt.move.secret_shaped" if secret_moves else None))
+
+    unrewritable = link_rewrites["unrewritable"]
+    gates.append(gate_entry(
+        READY_GATES[7], "failed" if unrewritable else "passed",
+        "adopt.link.unrewritable" if unrewritable else None))
     return gates
 
 
@@ -709,6 +781,9 @@ GATE_MESSAGES = {
     "move-sources-tracked": "a planned move source is not tracked",
     "no-secret-path-in-moves":
         "a secret-shaped path is a planned move source or target",
+    "no-unrewritable-link":
+        "a relative Markdown link into or out of a moved path cannot be "
+        "rewritten to resolve to the same target",
 }
 
 
@@ -725,8 +800,10 @@ def blockers_for(gates: list[dict]) -> list[dict]:
 
 def compute_plan_id(project_id: str | None, base_revision: str,
                     platform_block: dict, evidence: list[dict],
-                    answered: list[dict]) -> str:
-    """D15's content address over exactly six inputs.
+                    answered: list[dict], link_rewrites: dict) -> str:
+    """D15's content address over exactly seven inputs: the project id, the
+    base revision, the platform block, the evidence, the answered decisions,
+    the schema version and the `link_rewrites` summary (#345).
 
     The manifest's `migrations` array is deliberately *not* one of them (D36):
     it can only route toward `migration_required` or `repair_required`, and
@@ -742,6 +819,7 @@ def compute_plan_id(project_id: str | None, base_revision: str,
         "platform": platform_block,
         "evidence": evidence,
         "decisions_answered": answered,
+        "link_rewrites": link_rewrites,
     }
     return "sha256:" + hashlib.sha256(canonical_json(source)).hexdigest()
 

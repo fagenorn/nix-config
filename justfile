@@ -105,6 +105,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_adopt_project_boundaries.py \
     home/common/agent-skills/tests/test_adopt_apply.py \
     home/common/agent-skills/tests/test_adopt_verify.py \
+    home/common/agent-skills/tests/test_adopt_links.py \
     home/common/agent-skills/tests/test_artifact_budget.py \
     tests/test_agent_tools_canonical.py \
     tests/test_agent_tools_siblings.py \
