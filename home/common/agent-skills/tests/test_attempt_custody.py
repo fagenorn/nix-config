@@ -13,6 +13,7 @@ from agent_tools import attempt_custody as ac
 from agent_tools import attempt_store
 from agent_tools.transaction_core import TransactionStore
 
+from .test_delivered_control import DELIVERED, DISPATCH, LIVE, DeliveredControlHarness, at
 from .test_workflow_state import LifecycleHarness
 
 T = "2026-08-13T20:{:02d}:00Z".format
@@ -63,6 +64,21 @@ class LifecycleCustody(CustodyReads, LifecycleHarness):
         # The lifecycle harness keeps its request and result files beside `.superpowers`.
         return self.root / ".superpowers"
 
+    def legacy_owner_resumed_to_launch_2(self):
+        """A schema-8 ledger with a live owner on 14:1:1, bound by control's write, then
+        expired, reaped and resumed to 14:1:2."""
+        self.spawn_14()
+        self.install_legacy(self.read_state(), "orchestrate-14", version=8)
+        self.assertEqual(self.read_state()["schema_version"], 8)
+        recorded = [self.worktree_fact(14, recorded={
+            "path": os.path.abspath(self.worktree), "state": "matching_issue_branch"})]
+        self.control(now="2026-08-13T20:00:30Z", issues=[14], max_parallel=100,
+                     tracker=[self.tracker_fact(14)], worktrees=recorded)
+        self.assertEqual(self.custody(14).subject["bound_launch"], 1)
+        self.expire(issue=14, worktree=self.worktree, now=T(31))
+        self.resume(issue=14, worktree=self.worktree, now=T(32))
+        self.assertEqual(self.custody(14).custody.executor_id, "14:1:2")
+
     def spawn_14(self, minutes=30):
         self.init_run()
         self.worktree = str(self.root / "wt-14")
@@ -81,7 +97,7 @@ class LifecycleCustody(CustodyReads, LifecycleHarness):
             issue_state["delivery_remainders"] = []
         self.write_state(stored)
 
-    def finish_raw(self, attempt, result, *, issue=14, now, ok=True):
+    def finish_raw(self, attempt, result, *, issue=14, now, action_id=None, ok=True):
         """The legacy `finish` as an owner sends it. Unlike the harness's `finish`, it
         neither prepares the stored ledger nor restores it, so a test reads the bytes the
         command left (D26)."""
@@ -89,7 +105,8 @@ class LifecycleCustody(CustodyReads, LifecycleHarness):
         path.write_text(json.dumps(result), encoding="utf-8")
         completed = self.run_cli(
             "finish", "--repo-root", self.root, "--run-id", self.run_id, "--issue", issue,
-            "--attempt", attempt, "--result-file", path, "--now", now, ok=ok)
+            "--attempt", attempt, "--result-file", path, "--now", now,
+            *self.launch_arguments(issue, attempt, action_id), ok=ok)
         return json.loads(completed.stdout) if ok else completed
 
 
@@ -322,6 +339,139 @@ class CustodyRepairTest(LifecycleCustody, unittest.TestCase):
         self.assertEqual((second.subject["prior"], second.custody.executor_id),
                          (first.transaction_id, "14:2:1"))
         self.assertEqual(self.lease(self.worktree)["epoch"], 2)
+
+
+class LaunchFenceTest(LifecycleCustody, unittest.TestCase):
+    def test_ac5_attempt_keyed_progress_and_suspend_after_a_successor_launch(self):
+        self.legacy_owner_resumed_to_launch_2()
+        before = self.tree()
+        self.assert_fenced(self.progress(phase=1, now=T(33), action_id=False, ok=False),
+                           "superseded_launch", before)
+        self.assert_fenced(self.suspend(issue=14, attempt=1, blocked_on="transport",
+                                        now=T(33), action_id=False, ok=False),
+                           "superseded_launch", before)
+        self.progress(phase=1, now=T(33))  # the successor names its launch and is admitted
+
+    def test_ac5_an_attempt_created_at_schema_9_needs_its_launch_named(self):
+        self.spawn_14()
+        self.expire(issue=14, worktree=self.worktree, now=T(31))
+        self.resume(issue=14, worktree=self.worktree, now=T(32))
+        before = self.tree()
+        self.assert_fenced(self.progress(phase=1, now=T(33), action_id=False, ok=False),
+                           "launch_identity_required", before)
+        self.assert_fenced(self.progress(phase=1, now=T(33), action_id="14:1:1", ok=False),
+                           "superseded_launch", before)
+        self.assert_fenced(self.suspend(issue=14, attempt=1, blocked_on="transport",
+                                        now=T(33), action_id="14:1:1", ok=False),
+                           "superseded_launch", before)
+
+    def test_an_attempt_terminal_before_the_bind_keeps_the_engines_answers(self):
+        self.spawn_14()
+        self.finish(1, self.stopped(), now=T(5))
+        self.install_legacy(self.read_state(), "orchestrate-14", version=8)
+        replayed = self.finish(1, self.stopped(), now=T(6), action_id=False)
+        self.assertEqual(replayed["state"], "stopped")
+        self.assertEqual(self.read_state()["schema_version"], 9)
+        self.assertIsNone(self.custody(14))
+        conflict = self.finish(1, self.stopped("another"), now=T(7), action_id=False, ok=False)
+        self.assertEqual(conflict.returncode, 2)
+        self.assertIn("conflicting terminal result for issue 14 attempt 1", conflict.stderr)
+        self.assertIsNone(self.custody(14))
+
+
+class DeliveredCustody(CustodyReads, DeliveredControlHarness):
+    def ledger_path(self):
+        return self.ledger
+
+    def observed_root(self):
+        return Path(self.root)
+
+    def spawn(self, *issues):
+        """Spawn `issues` under contracts at minute 0; their implementation custodies."""
+        self.setup_run()
+        spawned = self.control(0, recorded=dict.fromkeys(issues), contracts=True)
+        return {action["issue"]: action["custody"] for action in spawned["actions"]
+                if action["kind"] in DISPATCH}
+
+    def summary(self, custody, historical_state, observations=(), authority=(), **result):
+        issue = custody["action_id"].partition(":")[0]
+        contract = self.built[int(issue)]["contract"]
+        historical = {"issue": int(issue), "state": historical_state, "pr_url": None,
+                      "merge_sha": None, "issue_closed": False, "discussion_items": [],
+                      "detail_state": "none", "report_path": None, "notes": "late", **result}
+        return self.validated("ship-summary", {
+            "interface_version": 2, "issue": int(issue), "state": "terminal_failed",
+            "custody": custody, "historical_owner_result": historical,
+            "delivery_contract_digest": self.model.canonical_digest(contract),
+            "delivery_observations": sorted(observations, key=lambda item: item["id"]),
+            "authority_observations": list(authority), "reevaluation_evidence": [],
+            "detail_state": "none", "report_path": None, "notes": "late"})
+
+
+class MisbindingTest(DeliveredCustody, unittest.TestCase):
+    def transports(self, custody):
+        issue, action = DELIVERED, custody["action_id"]
+        contract = self.built[issue]["contract"]
+        checkpoint = self.validated("ship-checkpoint", {
+            "interface_version": 2, "issue": issue, "custody": custody,
+            "contract_digest": self.model.canonical_digest(contract),
+            "delivery_observations": [], "authority_observations": [],
+            "reevaluation_evidence": [],
+            "requested_scope": self.build("scope", {"contract": contract,
+                                                    "stage_id": "merge_pr"}),
+            "detail_state": "none", "report_path": None, "notes": ""})
+        result = self.root / "result.json"
+        result.write_text(json.dumps({
+            "issue": issue, "state": "stopped", "pr_url": None, "merge_sha": None,
+            "issue_closed": False, "discussion_items": [], "detail_state": "none",
+            "report_path": None, "notes": "stop"}), encoding="utf-8")
+        keyed = ("--issue", issue, "--attempt", 1, "--action-id", action)
+        return {
+            "progress": (("progress", *self.run_args, *keyed, "--phase", 1, "--now", at(1),
+                          "--turn-ceiling", 120, "--context-ceiling", 150000,
+                          "--turn-headroom", 2, "--context-headroom", 10000,
+                          "--next-needs-context", "true", "--artifacts-sufficient", "false",
+                          "--remainder-self-contained", "false"), None),
+            "suspend": (("suspend", *self.run_args, *keyed, "--blocked-on", "transport",
+                         "--now", at(1)), None),
+            "finish": (("finish", *self.run_args, *keyed, "--result-file", result,
+                        "--now", at(1)), None),
+            "finish-summary": (("finish", *self.run_args, "--now", at(1), "--summary-file",
+                                "-"), self.summary(custody, "stopped")),
+            "checkpoint-delivery": (("checkpoint-delivery", *self.run_args, "--now", at(1),
+                                     "--checkpoint-file", "-"), checkpoint),
+            "mark-progress": (("mark-progress", *self.run_args, "--now", at(1),
+                               "--action-id", action), None),
+            "declare-lane": (("declare-lane", *self.run_args, "--now", at(1), "--action-id",
+                              action, "--lane", "light", "--budget-minutes", 20, "--reason",
+                              "triage"), None),
+            "register-worker": (("register-worker", *self.run_args, "--now", at(1),
+                                 "--action-id", action), None),
+            "release-worker": (("release-worker", *self.run_args, "--now", at(1),
+                                "--worker-id", f"{action}:w1", "--event", "returned"), None)}
+
+    def test_ac3_a_session_in_another_attempts_worktree_is_refused_before_any_write(self):
+        custodies = self.spawn(DELIVERED, LIVE)
+        for worktree in self.worktrees.values():
+            (Path(worktree) / "nested").mkdir(parents=True)
+        transports = self.transports(custodies[DELIVERED])
+        before = self.tree()
+        other = Path(self.worktrees[LIVE]) / "nested"
+        for name, (argv, stdin) in transports.items():
+            with self.subTest(transport=name):
+                refused = self.cli(*argv, stdin=stdin, ok=False, cwd=other)
+                self.assert_fenced(refused, "custody_misbound", before)
+                for path in (self.worktrees[DELIVERED], self.worktrees[LIVE]):
+                    self.assertIn(os.path.realpath(path).encode(), refused.stderr)
+        for standing in (self.root, self.worktrees[DELIVERED]):
+            for name in ("register-worker", "progress"):
+                with self.subTest(transport=name, standing=standing):
+                    argv, stdin = transports[name]
+                    self.cli(*argv, stdin=stdin, cwd=standing)
+        for name, (argv, stdin) in transports.items():
+            with self.subTest(admitted=name):
+                own = self.cli(*argv, stdin=stdin, ok=False, cwd=self.worktrees[DELIVERED])
+                self.assertNotIn(b"fencing violation", own.stderr)
 
 
 if __name__ == "__main__":

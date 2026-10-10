@@ -289,6 +289,19 @@ class LifecycleHarness:
                     action.pop(name, None)
         return value
 
+    def launch_arguments(self, issue, attempt, action_id):
+        """`--action-id` for an owner transport: the attempt's last launch unless the test
+        names one; `False` sends the transport attempt-keyed (#338 D9)."""
+        if action_id is False:
+            return ()
+        if action_id is None:
+            try:
+                record = self.read_state()["issues"][str(issue)]["attempts"][attempt - 1]
+            except (KeyError, IndexError, TypeError, ValueError, OSError):
+                return ()
+            action_id = f"{issue}:{attempt}:{len(record['launches'])}"
+        return ("--action-id", action_id)
+
     def progress(
         self,
         *,
@@ -306,6 +319,7 @@ class LifecycleHarness:
         artifacts_sufficient=False,
         remainder_self_contained=False,
         handoff_path=None,
+        action_id=None,
         ok=True,
     ):
         args = [
@@ -343,6 +357,7 @@ class LifecycleHarness:
             args.extend(("--context-tokens", context_tokens))
         if handoff_path is not None:
             args.extend(("--handoff-path", handoff_path))
+        args.extend(self.launch_arguments(issue, attempt, action_id))
         completed = self.run_cli(*args, ok=ok)
         return self.validated_response(completed.stdout) if ok else completed
 
@@ -394,7 +409,8 @@ class LifecycleHarness:
             issue_state["delivery_remainders"] = []
         return stripped
 
-    def finish(self, attempt, result, *, issue=14, now=DEFAULT_NOW, ok=True):
+    def finish(self, attempt, result, *, issue=14, now=DEFAULT_NOW, action_id=None, ok=True):
+        launch = self.launch_arguments(issue, attempt, action_id)
         current_bytes = self.state_path.read_bytes()
         self.write_state(self._legacy_finish_input(json.loads(current_bytes)))
         result_path = self.root / f"result-{issue}-{attempt}.json"
@@ -413,6 +429,7 @@ class LifecycleHarness:
             result_path,
             "--now",
             now,
+            *launch,
             ok=ok,
         )
         if ok:
@@ -892,7 +909,7 @@ class LifecycleHarness:
             encoding="utf-8",
         )
 
-    def suspend(self, *, issue, attempt, blocked_on, now, ok=True):
+    def suspend(self, *, issue, attempt, blocked_on, now, action_id=None, ok=True):
         completed = self.run_cli(
             "suspend",
             "--repo-root", self.root,
@@ -901,6 +918,7 @@ class LifecycleHarness:
             "--attempt", attempt,
             "--blocked-on", blocked_on,
             "--now", now,
+            *self.launch_arguments(issue, attempt, action_id),
             ok=ok,
         )
         return self.validated_response(completed.stdout) if ok else completed
@@ -1066,7 +1084,7 @@ class LifecycleHarness:
                 "finish", "--repo-root", str(self.root),
                 "--run-id", self.run_id, "--issue", str(issue),
                 "--attempt", str(attempt), "--result-file", str(result_path),
-                "--now", now,
+                "--now", now, *self.launch_arguments(issue, attempt, None),
             ]
             process = subprocess.Popen(
                 [sys.executable, "-c", wrapper, str(read_fd), str(SCRIPT), *args],
@@ -7895,7 +7913,8 @@ class OwnerExitFenceTest(LifecycleHarness, unittest.TestCase):
         def finish(now, ok):
             return self.run_cli("finish", "--repo-root", self.root, "--run-id",
                                 self.run_id, "--issue", 14, "--attempt", 1,
-                                "--result-file", result_path, "--now", now, ok=ok)
+                                "--result-file", result_path, "--now", now,
+                                "--action-id", "14:1:1", ok=ok)
 
         before = self.state_path.read_bytes()
         self.assert_refused(finish("2026-08-13T20:02:00Z", False), before, worker)

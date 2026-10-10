@@ -17,15 +17,17 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, NamedTuple
 
 from agent_tools import attempt_store
 from agent_tools.attempt_custody import (
     AUTO_RESUMABLE_BLOCKED_ON,
     BLOCKED_ON_VALUES,
+    LIVE_STATES,
     OWNER_BLOCKED_ON_VALUES,
     STALL_LIMIT,
     at_ms,
+    launch_id,
     stall_count,
     stalled,
 )
@@ -1491,6 +1493,127 @@ def commit_state(run_dir: Path, state_path: Path, state: dict[str, Any], *,
     attempt_store.seal_custody(store, pending, now_ms=now_ms)
 
 
+class OwnerCall(NamedTuple):
+    """What an owner transport tells `admit_owner_call` about itself (#338 D9, D20).
+
+    `action_id` is the launch it names, `None` for an attempt-keyed call; `keyed` is true for
+    `progress`, `suspend` and the legacy `finish`, the transports the launch fence refuses
+    from a superseded launch. `report` is an owner result the write submits, `supplied` the
+    parsed `--now` and `summary` whether the call is a version-2 `finish`; the last three
+    belong to owner-result intake, which no transport passes yet.
+    """
+
+    issue: int
+    attempt: int
+    action_id: str | None
+    keyed: bool
+    report: dict | None
+    supplied: datetime | None
+    summary: bool
+
+
+def admit_owner_call(state_path: Path, state: dict[str, Any],
+                     bound_launches: dict[tuple[int, int], int], call: OwnerCall) -> int | None:
+    """The launch fence of an owner transport, on the locked `state` and before its mutation
+    (#338 D9, D11, D20): the caller's launch ordinal, or None when no fence applies.
+
+    An unknown issue or attempt, and an attempt with no custody transaction that is not
+    about to get one, are left to the engine's own refusals. A named launch must belong to
+    the addressed attempt. An attempt-keyed call speaks for the attempt's bound launch, and
+    `launch_identity_required` refuses one whose attempt has none. A `keyed` call on an
+    active attempt whose last launch is not the caller's is a `superseded_launch`.
+    """
+    issue_state = state["issues"].get(str(call.issue))
+    if issue_state is None or call.attempt > len(issue_state["attempts"]):
+        return None
+    attempt = issue_state["attempts"][call.attempt - 1]
+    if call.action_id is not None:
+        issue, ordinal, launch = parse_action_id(call.action_id)
+        if ":r" in call.action_id or (issue, ordinal) != (call.issue, call.attempt):
+            raise WorkflowError("--action-id does not name this issue and attempt")
+    else:
+        custody = attempt_store.custody_of(
+            attempt_store.ledger_store(state_path), state["transaction_id"],
+            call.issue, call.attempt)
+        if custody is not None:
+            launch = custody.subject["bound_launch"]
+        elif (call.issue, call.attempt) in bound_launches:
+            launch = bound_launches[(call.issue, call.attempt)]
+        elif (call.attempt == len(issue_state["attempts"])
+              and attempt["state"] in LIVE_STATES):
+            launch = None
+        else:
+            return None
+        if launch is None:
+            raise attempt_store.FencingRefused(
+                "launch_identity_required",
+                f"issue {call.issue} attempt {call.attempt} has no bound launch; "
+                f"pass --action-id naming the launch you were started as")
+    last = len(attempt["launches"])
+    if call.keyed and attempt["state"] == "active" and launch != last:
+        raise attempt_store.FencingRefused(
+            "superseded_launch",
+            f"launch {launch_id(call.issue, call.attempt, launch)} is not the last launch "
+            f"of this attempt, {launch_id(call.issue, call.attempt, last)}")
+    return launch
+
+
+def refuse_misbound(repo_root_value: str, run_id: str, *, issue: int, remainder: bool,
+                    ordinal: int) -> None:
+    """Refuse a session standing in another attempt's worktree before any write (#338 D7).
+
+    The session's own physical working directory is looked up in the core's lease records
+    with `attempt_store.standing_worktree`; a directory in no attempt worktree is bound to
+    nothing. Otherwise the worktree recorded for the addressed attempt (or remainder, when
+    `remainder`) of `issue` in the run's ledger, read without a lock, must be that one. No
+    argument or environment variable supplies the directory. A ledger, issue or record that
+    cannot be found, or a run or root that cannot be resolved, is left to the engine's
+    own refusal.
+    """
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        return
+    try:
+        directory = os.path.normcase(os.path.realpath(os.getcwd()))
+        root = resolve_repo_root(repo_root_value)
+    except (OSError, WorkflowError):
+        return
+    standing = attempt_store.standing_worktree(
+        attempt_store.store_root(root / ".superpowers"), directory)
+    if standing is None:
+        return
+    state_path = root / ".superpowers" / "workflows" / run_id / "state.json"
+    if not require_regular_path(state_path, "workflow state", allow_missing=True):
+        return
+    state = read_state_unlocked(state_path, run_id)
+    issue_state = state.get("issues", {}).get(str(issue))
+    records = (issue_state or {}).get("delivery_remainders" if remainder else "attempts")
+    if not isinstance(records, list) or not 1 <= ordinal <= len(records):
+        return
+    recorded = canonical_worktree_path(records[ordinal - 1]["worktree"])
+    if recorded != standing:
+        name = f"remainder {ordinal}" if remainder else f"attempt {ordinal}"
+        raise attempt_store.FencingRefused(
+            "custody_misbound",
+            f"this session stands in {standing}, an attempt worktree, but issue {issue} "
+            f"{name} is recorded at {recorded}; run from {recorded}, or from outside "
+            f"every attempt worktree")
+
+
+def refuse_misbound_launch(repo_root_value: str, run_id: str, launch: str) -> None:
+    """`refuse_misbound` for the attempt or remainder the launch `launch` belongs to."""
+    issue, ordinal, _ = parse_action_id(launch)
+    refuse_misbound(repo_root_value, run_id, issue=issue, remainder=":r" in launch,
+                    ordinal=ordinal)
+
+
+def refuse_misbound_report(repo_root_value: str, run_id: str, report: dict) -> None:
+    """`refuse_misbound` for the custody a validated ship report names."""
+    custody = report["custody"]
+    remainder = custody["kind"] != "implementation"
+    refuse_misbound(repo_root_value, run_id, issue=report["issue"], remainder=remainder,
+                    ordinal=custody["remainder" if remainder else "attempt"])
+
+
 Mutation = Callable[..., tuple[Any, bool]]
 
 
@@ -1498,6 +1621,7 @@ def transact(
     repo_root: str, run_id: str, mutation: Mutation, *, allow_missing: bool = False,
     migration_contracts: dict[int, Any] | None = None, refuse_direct: bool = False,
     new_identity: RunIdentity | None = None, with_identity: bool = False,
+    owner_call: OwnerCall | None = None,
 ) -> Any:
     """Run `mutation` on one ledger under its `state.lock` and commit what it changed.
 
@@ -1505,7 +1629,8 @@ def transact(
     plan. A mutation that changed nothing still completes a seal an earlier write left
     undone, and writes no ledger byte (#338 D24).
     `with_identity` passes the run's `RunIdentity` to `mutation`; `new_identity` is that of a
-    run `allow_missing` creates; `refuse_direct` refuses a direct run first.
+    run `allow_missing` creates; `refuse_direct` refuses a direct run first. An `owner_call`
+    is admitted by `admit_owner_call` on the locked state before `mutation` runs.
     """
     _delivery()
     run_dir, state_path, lock_path = workflow_paths(repo_root, run_id)
@@ -1533,6 +1658,8 @@ def transact(
             raise WorkflowError(f"workflow run {run_id!r} is not initialized")
         if refuse_direct and identity.direct:
             raise WorkflowError("direct run identities are reserved for direct-owner")
+        if owner_call is not None and state_exists:
+            admit_owner_call(state_path, state, bound_launches, owner_call)
         result, changed = mutation(state, identity) if with_identity else mutation(state)
         if changed or migrated:
             if state is None:
@@ -3763,6 +3890,7 @@ def command_checkpoint_delivery(args):
     report = artifact_budget_validate(
         "validate-report", boundary="ship-checkpoint",
         input_bytes=read_input_bytes(args.checkpoint_file, "checkpoint"))
+    refuse_misbound_report(args.repo_root, args.run_id, report)
 
     def checkpoint(state):
         now = format_utc(ledger_time(supplied))
@@ -3832,6 +3960,8 @@ def command_progress(args: argparse.Namespace) -> int:
         "remainder_self_contained": args.remainder_self_contained,
     }
     validate_phase_inputs(phase_inputs)
+    refuse_misbound(args.repo_root, args.run_id, issue=args.issue, remainder=False,
+                    ordinal=args.attempt)
     run_dir, _, _ = workflow_paths(args.repo_root, args.run_id)
     runtime = _delivery()
 
@@ -3879,7 +4009,9 @@ def command_progress(args: argparse.Namespace) -> int:
                 "action": action, "handoff_path": handoff_path}, True
 
     print_json(transact(args.repo_root, args.run_id, fence_owner_exit(runtime, progress),
-                        with_identity=True))
+                        with_identity=True, owner_call=OwnerCall(
+                            issue=args.issue, attempt=args.attempt, action_id=args.action_id,
+                            keyed=True, report=None, supplied=supplied, summary=False)))
     return 0
 
 
@@ -3891,6 +4023,8 @@ def command_suspend(args: argparse.Namespace) -> int:
     resumes the run, so callers never compose it themselves (per D2, D14).
     """
     supplied = supplied_time(args.now, "--now")
+    refuse_misbound(args.repo_root, args.run_id, issue=args.issue, remainder=False,
+                    ordinal=args.attempt)
     runtime = _delivery()
 
     def suspend(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
@@ -3927,7 +4061,10 @@ def command_suspend(args: argparse.Namespace) -> int:
             "reentry": reentry_command(args.issue),
         }, True
 
-    print_json(transact(args.repo_root, args.run_id, fence_owner_exit(runtime, suspend)))
+    print_json(transact(args.repo_root, args.run_id, fence_owner_exit(runtime, suspend),
+                        owner_call=OwnerCall(
+                            issue=args.issue, attempt=args.attempt, action_id=args.action_id,
+                            keyed=True, report=None, supplied=supplied, summary=False)))
     return 0
 
 
@@ -3958,6 +4095,8 @@ def command_finish(args: argparse.Namespace) -> int:
     if result["detail_state"] == "present":
         assert isinstance(result["report_path"], str)
         validate_durable_detail(args.repo_root, result["report_path"])
+    refuse_misbound(args.repo_root, args.run_id, issue=args.issue, remainder=False,
+                    ordinal=args.attempt)
 
     def finish(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
         now_value = ledger_time(supplied)
@@ -4019,7 +4158,10 @@ def command_finish(args: argparse.Namespace) -> int:
         state["updated_at"] = now
         return result, True
 
-    persisted = transact(args.repo_root, args.run_id, fence_owner_exit(_delivery(), finish))
+    persisted = transact(
+        args.repo_root, args.run_id, fence_owner_exit(_delivery(), finish),
+        owner_call=OwnerCall(issue=args.issue, attempt=args.attempt, action_id=args.action_id,
+                             keyed=True, report=None, supplied=supplied, summary=False))
     print_json(persisted)
     return 0
 
@@ -4030,6 +4172,7 @@ def command_finish_delivery(args):
     report = artifact_budget_validate(
         "validate-report", boundary="ship-summary",
         input_bytes=read_input_bytes(args.summary_file, "summary"))
+    refuse_misbound_report(args.repo_root, args.run_id, report)
 
     def finish_delivery(state):
         assert state is not None
@@ -4465,6 +4608,7 @@ def command_register_worker(args: argparse.Namespace) -> int:
         raise WorkflowError("invalid run_id")
     parse_action_id(args.action_id)
     supplied = supplied_time(args.now, "--now")
+    refuse_misbound_launch(args.repo_root, args.run_id, args.action_id)
     runtime = _delivery()
 
     def register(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
@@ -4523,6 +4667,7 @@ def command_mark_progress(args: argparse.Namespace) -> int:
     if ":r" in args.action_id:
         raise WorkflowError(
             "mark-progress refused: a remainder launch keeps its own bound")
+    refuse_misbound_launch(args.repo_root, args.run_id, args.action_id)
     runtime = _delivery()
     repo_root = resolve_repo_root(args.repo_root)
     state_path = repo_root / ".superpowers" / "workflows" / args.run_id / "state.json"
@@ -4588,6 +4733,7 @@ def command_declare_lane(args: argparse.Namespace) -> int:
     budget = require_plain_int(args.budget_minutes, "--budget-minutes", minimum=1)
     if ":r" in args.action_id:
         raise WorkflowError("declare-lane refused: a remainder launch carries no lane")
+    refuse_misbound_launch(args.repo_root, args.run_id, args.action_id)
     runtime = _delivery()
 
     def declare(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
@@ -4690,8 +4836,9 @@ def command_release_worker(args: argparse.Namespace) -> int:
     """
     if not RUN_ID_PATTERN.fullmatch(args.run_id):
         raise WorkflowError("invalid run_id")
-    parse_worker_id(args.worker_id)
+    launch, _ = parse_worker_id(args.worker_id)
     supplied = supplied_time(args.now, "--now")
+    refuse_misbound_launch(args.repo_root, args.run_id, launch)
     runtime = _delivery()
 
     def release(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
@@ -5266,6 +5413,7 @@ def build_parser() -> argparse.ArgumentParser:
     finish.add_argument("--attempt", type=positive_int)
     finish.add_argument("--result-file")
     finish.add_argument("--summary-file")
+    finish.add_argument("--action-id")
     finish.set_defaults(handler=command_finish)
 
     checkpoint = subparsers.add_parser("checkpoint-delivery")
@@ -5313,6 +5461,7 @@ def build_parser() -> argparse.ArgumentParser:
     suspend.add_argument(
         "--blocked-on", required=True, choices=sorted(OWNER_BLOCKED_ON_VALUES)
     )
+    suspend.add_argument("--action-id")
     suspend.set_defaults(handler=command_suspend)
 
     progress = subparsers.add_parser("progress")
@@ -5332,6 +5481,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--remainder-self-contained", required=True, type=literal_boolean
     )
     progress.add_argument("--handoff-path")
+    progress.add_argument("--action-id")
     progress.set_defaults(handler=command_progress)
 
     check_launch = subparsers.add_parser("check-launch")

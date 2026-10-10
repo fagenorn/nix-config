@@ -272,7 +272,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             finished = subprocess.run(
                 [sys.executable, str(WORKFLOW), "finish", "--repo-root", str(root),
                  "--run-id", minted, "--issue", "151", "--attempt", "1",
-                 "--result-file", str(result_path), "--now", NOW],
+                 "--result-file", str(result_path), "--now", NOW, "--action-id", "151:1:1"],
                 capture_output=True, text=True, check=False)
             self.assertEqual(finished.returncode, 0, finished.stderr)
             # A failed result retains its worktree path in the notes (retain_worktree).
@@ -625,7 +625,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     suspended = invoke(
                         "suspend", "--repo-root", root, "--run-id", action["run_id"],
                         "--issue", 151, "--attempt", 1, "--blocked-on", "external",
-                        "--now", "2026-09-21T00:00:01Z")
+                        "--now", "2026-09-21T00:00:01Z",
+                        "--action-id", action["custody"]["action_id"])
                     self.assertEqual(suspended.returncode, 0, suspended.stderr.decode())
                 before_observation = (root / ".superpowers/workflows" /
                                       action["run_id"] / "state.json").read_bytes()
@@ -1575,10 +1576,10 @@ class BuilderHarness:
         self.worktree = str(self.root / ".worktrees" / WORKTREE_NAME)
         return self.root
 
-    def cli(self, *args, stdin=None, ok=True):
+    def cli(self, *args, stdin=None, ok=True, cwd=None):
         completed = subprocess.run(
             [sys.executable, str(WORKFLOW), *map(str, args)], input=stdin,
-            capture_output=True, check=False,
+            capture_output=True, check=False, cwd=cwd,
             env={**os.environ, "HOME": str(self.home), "PYTHONDONTWRITEBYTECODE": "1"})
         if ok:
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
@@ -3070,7 +3071,8 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         self.assertEqual((owner["kind"], owner["worktree"], owner["contract"]),
                          ("owner", self.worktree, built["contract"]))
         self.cli("suspend", "--repo-root", self.root, "--run-id", owner["run_id"], "--now",
-                 LATER, "--issue", 171, "--attempt", 1, "--blocked-on", "usage_limit")
+                 LATER, "--issue", 171, "--attempt", 1, "--blocked-on", "usage_limit",
+                 "--action-id", owner["custody"]["action_id"])
         resumed = self.direct(now=LATER, tracker=TRACKER, forge=NO_PR, worktree={
             "issue": 171, "recorded": {"path": self.worktree,
                                        "state": "matching_issue_branch"}, "candidate": None})
@@ -3320,6 +3322,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         return self.cli("finish", "--repo-root", self.root, "--run-id", self.run_of(run_id),
                         "--now", LATER,
                         "--issue", issue, "--attempt", 1, "--result-file", "-",
+                        "--action-id", f"{issue}:1:1",
                         stdin=json.dumps(self.merged(issue)).encode(), ok=ok)
 
     def test_legacy_finish_lands_only_on_contractless_issues(self):
@@ -3436,7 +3439,8 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         self.spawn_contracted("forge-v2")
         self.cli("suspend", "--repo-root", self.root, "--run-id", self.run_of("forge-v2"),
                  "--now", LATER,
-                 "--issue", 171, "--attempt", 1, "--blocked-on", "external")
+                 "--issue", 171, "--attempt", 1, "--blocked-on", "external",
+                 "--action-id", "171:1:1")
         response = self.control("forge-v2", self.forge_request())
         remainder = next(item for item in response["actions"]
                          if item["kind"] == "delivery_remainder")
@@ -3451,7 +3455,8 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         self.spawn_contracted("forge-wait")
         self.cli("suspend", "--repo-root", self.root, "--run-id", self.run_of("forge-wait"),
                  "--now", LATER,
-                 "--issue", 171, "--attempt", 1, "--blocked-on", "external")
+                 "--issue", 171, "--attempt", 1, "--blocked-on", "external",
+                 "--action-id", "171:1:1")
         path = self.root / ".superpowers/workflows" / self.run_of("forge-wait") / "state.json"
         state = json.loads(path.read_text())
         holder = self.workflow.new_control_attempt(issue=172, attempt_number=1,
@@ -3623,7 +3628,7 @@ class LedgerClockTest(LifecycleHarness, unittest.TestCase):
                                          "--action-id", "14:1:1").stdout)
         self.assertEqual(marked["outcome"], "baseline")
         self.assert_clock_stamp(self.read_state()["updated_at"])
-        self.run_cli("progress", *self.run_args, *PROGRESS_ARGS)
+        self.run_cli("progress", *self.run_args, *PROGRESS_ARGS, "--action-id", "14:1:1")
         self.assert_clock_stamp(
             self.read_state()["issues"]["14"]["attempts"][0]["last_progress_at"])
         report = {"interface_version": 2, "issue": 14, "custody": custody,
@@ -3648,7 +3653,7 @@ class LedgerClockTest(LifecycleHarness, unittest.TestCase):
         self.run_cli("finish", *self.run_args, "--summary-file", summary_path)
         self.assert_clock_stamp(self.read_state()["updated_at"])
         self.run_cli("suspend", *self.run_args, "--issue", 15, "--attempt", 1,
-                     "--blocked-on", "usage_limit")
+                     "--blocked-on", "usage_limit", "--action-id", "15:1:1")
         self.assert_clock_stamp(self.read_state()["updated_at"])
 
     def test_a_backward_refusal_names_the_wait(self):
@@ -3666,7 +3671,8 @@ class LedgerClockTest(LifecycleHarness, unittest.TestCase):
                  f"workflow-state: release-worker time must not move backward: {earlier} is "
                  f"before the run updated_at {PINNED}; it would succeed in 37 seconds\n"),
                 ("progress",
-                 ("progress", *self.run_args, "--now", earlier, *PROGRESS_ARGS),
+                 ("progress", *self.run_args, "--now", earlier, *PROGRESS_ARGS,
+                  "--action-id", "14:1:1"),
                  f"workflow-state: progress time must not move backward: {earlier} is "
                  f"before the attempt last_progress_at {PINNED}; it would succeed in "
                  f"37 seconds\n")):

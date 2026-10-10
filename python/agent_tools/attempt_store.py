@@ -421,6 +421,26 @@ def custody_of(store: Path, run: str, issue: int, attempt: int) -> Transaction |
         raise StoreFault(f"custody store: {error}") from error
 
 
+def standing_worktree(store: Path, directory: str) -> str | None:
+    """The attempt worktree `directory` stands in: the first of it and its ancestors, nearest
+    first, whose `attempt-worktree:<path>` key has a lease record, held or not (#338 D7).
+
+    None when no path has a record or the store directory does not exist. It takes no
+    lock, writes nothing and runs no child process; a core error is a `StoreFault`.
+    """
+    if _existing_store(store) is None:
+        return None
+    try:
+        core = TransactionStore(store)
+        path = Path(directory)
+        for candidate in (path, *path.parents):
+            if core.inspect_lease(custody_rules.worktree_key(str(candidate))) is not None:
+                return str(candidate)
+    except TransactionError as error:
+        raise StoreFault(f"custody store: {error}") from error
+    return None
+
+
 def _core(store: Path, now_ms: int) -> TransactionStore:
     """The store on a clock that reads `now_ms`, so one settle reads one instant (#338 D17)."""
     try:

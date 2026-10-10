@@ -170,7 +170,7 @@ class ClaimLedgerTest(LifecycleHarness, unittest.TestCase):
         result.write_text(json.dumps(self.merged_result(14)), encoding="utf-8")
         return self.run_cli("finish", "--repo-root", self.root, "--run-id", self.run_id,
                             "--issue", 14, "--attempt", 1, "--result-file", result,
-                            "--now", now, ok=ok)
+                            "--now", now, "--action-id", "14:1:1", ok=ok)
 
     def test_finish_releases_the_claim_in_its_own_write(self):
         self.admitted()
