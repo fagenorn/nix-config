@@ -1,5 +1,7 @@
 # Task 3: `direct-owner` on run transactions
 
+> **Status: complete** at commit `b5519a4b` (review-clean). Do not re-run this task. Task 4 moves the index probe into `agent_tools.attempt_store.indexed_direct_runs`.
+
 **Files:**
 - Modify: `home/common/agent-skills/scripts/workflow-state.py` (`command_direct_owner`, `_apply_one_issue_policy` and its three call sites)
 - Modify: `home/common/agent-skills/tests/test_workflow_state.py` (harness only: new `direct_run_id`)

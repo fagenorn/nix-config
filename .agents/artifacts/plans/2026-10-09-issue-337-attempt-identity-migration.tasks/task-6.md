@@ -1,126 +1,185 @@
-# Task 6: Live legacy owner and old-helper refusal
+# Task 6: `workflow-state migrate` — dry run, apply and report
 
 **Files:**
-- Modify: `home/common/agent-skills/tests/test_attempt_migration.py` (new `LegacyOwnerCompatibilityTest`)
-
-Test-only task: it proves AC4 against the code Tasks 2–5 built. If a test can only pass by changing product code, stop and report BLOCKED with the failing assertion; that is a defect in an earlier task.
+- Modify: `python/agent_tools/attempt_store.py` (inventory, row builder and report: `migration_row`, `migration_report`)
+- Modify: `home/common/agent-skills/scripts/workflow-state.py` (a thin `command_migrate` and its parser entry only, D27)
+- Modify: `home/common/agent-skills/tests/test_attempt_migration.py` (new `MigrationAcceptanceTest`)
 
 **Interfaces:**
-- Consumes: `MigrationFixtures` (`install_legacy`, `tree_snapshot`, `store`, `store_root`), harness `init_run(creation_key=)`, `spawn(issue=, worktree=)`, `progress(..., ok=)`, `control(...)`, `run_cli`, `cli_env`, `read_state`, `SCRIPT`; `attempt_identity.legacy_key`.
-- Produces: nothing.
+- Consumes (Task 1): `attempt_identity.schema_refusal`, `classify`, `legacy_alias`, `legacy_identity`, `plan_migration`, `direct_key`, `legacy_key`, `report`, `REPORT_ROW_FIELDS`, `MigrationRefused`, `RunIdentity`; `print_json` (workflow-state's existing sorted-key, compact rendering) for output. (Task 2): `transact(repo_root, run_id, mutation)`, `validate_state(value, *, run_id, identity, schema_version=8)`. (Task 4, `agent_tools.attempt_store`): `StoreRefused`, `LedgerRefused` (with `.reason`), `store_root`, `bound_identity`, `lookup_run`, `require_known_schema`, `plan_legacy_run`, and the callback contract of `locked_read`/`check_unlocked`; in `workflow-state.py`, `upgrade_state(value, *, run_id, identity, migration_contracts)`. (Tasks 2–3 harness / `MigrationFixtures`): `install_legacy`, `install_orchestrated`, `delivered_207`, `tree_snapshot`, `store`, `store_root`, `direct_run_id`, `acquire_direct`.
+- Produces:
+  - CLI: `workflow-state migrate --repo-root <root> [--apply]`. Stdout: one canonical JSON document (sorted keys, compact separators, trailing newline) — `attempt_identity.report(mode, rows)`. Exit 0 whenever every ledger got a verdict; exit 2 on usage, a missing or unreadable `<root>/.superpowers/workflows`, or a store error (D8).
+  - In `attempt_store`: `migration_row(superpowers: Path, ledger: str, *, upgrade, validate, refusals: tuple[type[Exception], ...], migrated: bool = False) -> dict` — one read-only row (below); and `migration_report(superpowers: Path, *, apply: bool, upgrade, validate, bind, refusals) -> dict` — the inventory, the rows, the apply loop and `attempt_identity.report`. `upgrade` and `validate` follow Task 4's callback contract; `bind(handle: str) -> None` is the caller's locked no-op write; `refusals` are the caller's own error types, which a row reports as `invalid_state`. A missing or non-directory `workflows` raises `StoreRefused`.
+  - In `workflow-state.py`: `command_migrate(args)` only — `root = resolve_repo_root(args.repo_root)`, then `print_json(attempt_store.migration_report(root / ".superpowers", apply=args.apply, upgrade=partial(upgrade_state, migration_contracts={}), validate=validate_state, bind=lambda handle: transact(args.repo_root, handle, lambda state: (None, False)), refusals=(WorkflowError,)))` and `return 0`, plus the `migrate` subparser (`--repo-root` required, `--apply` flag). No row logic lives in `workflow-state.py`.
 
 **Invariants:**
-- The legacy owner uses only the legacy handle `orchestrate-14`, the action id `14:1:1` and worker id `14:1:1:w1` — never the transaction id.
-- The base generation is the real one: `git -C <repo root> archive eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7 home/common/agent-skills/scripts | tar -x -C <tmp>`; the commit's absence is a test **failure** (`self.fail`), never a skip (D13). `<repo root>` is `Path(__file__).resolve().parents[4]` (the checkout holding `home/`).
-- The base helper runs as a subprocess `[sys.executable, <tmp>/home/common/agent-skills/scripts/workflow-state.py, ...]` with `env = {**self.cli_env, "PYTHONPATH": <repo root>/python}` (it imports `agent_tools.host_admission` from source in its `scripts` layout) and `cwd=<tmp>`.
-- Every refusal leaves the `.superpowers` tree snapshot byte-identical.
+- **Inventory:** the non-dot entries of `<root>/.superpowers/workflows` that are non-symlink directories holding a regular `state.json`, in name order. Nothing else is read.
+- **Row (read-only; never creates the store root, a lock or a directory):** parse the JSON (unparseable → `invalid_state`); `schema_refusal` → `unknown_schema`; `ledger` is the directory name; `run_id`, `schema_version`, `prior_run` and `issues` (sorted ints of the `issues` keys) are copied from the document when present and well-typed, else `null`; `dialect = classify(run_id)`; `alias = legacy_alias(run_id)` when the dialect is a legacy one, else the bound subject's `alias` for a schema-8 ledger, else `null`.
+  - recorded `run_id != ledger` → `refused` / `location_mismatch` (checked before the plan).
+  - schema 8 → `bound_identity` and `validate` succeed → `current`, `transaction_id` = recorded; a `StoreRefused` or one of `refusals` → `refused` / `invalid_state`.
+  - schema ≤ 7 → `upgrade` (the chain to 7 with empty migration contracts, D20, and schema-7 validation; its `LedgerRefused` → `invalid_state`), then `plan_legacy_run` (refusal → its reason) → `migrate`; `transaction_id = lookup_run(store, plan.creation_key)` (`null` when unindexed or the store is absent).
+  - `prior_transaction_id`: `null` when `prior_run` is `null`; the id itself when `prior_run` is `core`; `lookup_run(store, direct_key(issue, seq))` for a `direct` prior; `lookup_run(store, legacy_key(prior_run))` otherwise.
+  - `store` is `store_root(superpowers)`; nothing in a row creates it.
+  - `reason` is `null` unless the verdict is `refused`.
+- **Apply:** compute the dry-run rows; for each `migrate` row, call `bind(ledger)` (workflow-state's `transact(root, ledger, lambda state: (None, False))`) so the bind half runs on bytes re-read under that ledger's lock; on `LedgerRefused` record `refused` with its `reason` (the advisory dry-run verdict loses). Then recompute the row with `migrated=True`, which turns a now-`current` row into `migrated`. `current` and `refused` rows are never passed to `transact` (no lock file is created for them). Report `mode: "apply"`.
+- Idempotent: a second apply reports zero `migrated` and leaves the tree snapshot unchanged; two dry runs print identical bytes.
+- No clock value appears in the report.
+- Budget (D29): after the commit, `git diff -U10 eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7..HEAD -- home/common/agent-skills/scripts/workflow-state.py | wc -c` prints at most 60000, and the same measure of `home/common/agent-skills/tests/test_attempt_migration.py` at most 60000.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Write the failing tests**
 
 ```python
-BASE_COMMIT = "eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7"
-REPO = Path(__file__).resolve().parents[4]
+class MigrationAcceptanceTest(MigrationFixtures, unittest.TestCase):
+    LEGACY = ("orchestrate-21-24-r2", "issues-29-30-20260817-r2")
 
+    def migrate(self, *flags, ok=True):
+        completed = self.run_cli("migrate", "--repo-root", self.root, *flags, ok=ok)
+        return completed, (json.loads(completed.stdout) if ok else None)
 
-class LegacyOwnerCompatibilityTest(MigrationFixtures, unittest.TestCase):
-    def live_legacy_owner(self):
-        """A schema-7 `orchestrate-14` ledger with an active owner on 14:1:1."""
-        self.init_run(creation_key="fixture-14")
-        self.spawn(issue=14, worktree=str(self.root / "wt-14"))
-        self.install_legacy(self.read_state(), "orchestrate-14")
-        self.assertEqual(json.loads(self.state_path.read_text())["schema_version"], 7)
+    def rows(self, report):
+        return {row["ledger"]: row for row in report["ledgers"]}
 
-    def owner_lifecycle(self):
-        """progress, register-worker, release-worker, suspend, then finish — legacy ids only."""
-        worktree = self.root / "wt-14"
-        self.progress(issue=14, phase=1, now="2026-08-13T20:01:00Z")
-        self.register_worker(action_id="14:1:1", now="2026-08-13T20:02:00Z")
-        self.release_worker(worker_id="14:1:1:w1", event="returned",
-                            now="2026-08-13T20:03:00Z")
-        self.suspend(issue=14, attempt=1, blocked_on="usage_limit",
-                     now="2026-08-13T20:04:00Z")
-        self.resume(issue=14, worktree=worktree, now="2026-08-13T20:05:00Z")
-        bound = self.read_state()["transaction_id"]
-        self.finish(1, self.merged_result(), now="2026-08-13T20:30:00Z")
-        self.assertEqual(self.read_state()["issues"]["14"]["attempts"][-1]["state"], "merged")
-        self.assert_bound()  # finish ran on the schema-8 ledger and kept its binding (D25)
-        self.assertEqual(self.read_state()["transaction_id"], bound)
+    def install_all(self):
+        source = self.delivered_207()       # built in the driver's own root (D24)
+        for handle in self.LEGACY:
+            self.install_legacy(source, handle)
+        self.init_run(creation_key="fixture-337")
+        self.spawn(issue=337, worktree=str(self.root / "wt-337"))
+        self.install_legacy(self.read_state(), "run-20261009-337-338-339")
+        self.install_direct_pair()          # direct-41-000001 (terminal) and -000002 (D21)
+        return source
 
-    def assert_bound(self):
-        state = self.read_state()
-        self.assertEqual((state["schema_version"], state["run_id"]), (8, "orchestrate-14"))
-        self.assertEqual(self.store().lookup(ai.legacy_key("orchestrate-14")),
-                         state["transaction_id"])
+    def launch_bytes(self, handle):
+        return [self.run_cli(command, "--repo-root", self.root, "--run-id", handle,
+                             "--action-id", action).stdout
+                for command in ("check-launch", "current-launch")
+                for action in ("207:1:4", "207:r1:1")]
 
-    def test_control_migrates_under_a_live_owner(self):
-        self.live_legacy_owner()
-        self.control(now="2026-08-13T20:00:30Z", issues=[14],
-                     tracker=[self.tracker_fact(14)], max_parallel=100)
-        self.assert_bound()
-        self.owner_lifecycle()
+    def test_ac1_minted_runs_and_legacy_rows_with_lineage(self):
+        self.install_all()
+        before = {handle: self.launch_bytes(handle) for handle in self.LEGACY}
+        _, report = self.migrate("--apply")
+        rows = self.rows(report)
+        for handle in (*self.LEGACY, "run-20261009-337-338-339", "direct-41-000001",
+                       "direct-41-000002"):
+            with self.subTest(handle=handle):
+                self.assertEqual(rows[handle]["verdict"], "migrated")
+                key = (ai.direct_key(41, int(handle[-6:])) if handle.startswith("direct-")
+                       else ai.legacy_key(handle))
+                self.assertEqual(self.store().lookup(key), rows[handle]["transaction_id"])
+        self.assertEqual(rows["direct-41-000002"]["prior_transaction_id"],
+                         rows["direct-41-000001"]["transaction_id"])
+        _, again = self.migrate()
+        self.assertTrue(all(row["verdict"] in ("current", "refused")
+                            for row in again["ledgers"]))
+        self.assertEqual({handle: self.launch_bytes(handle) for handle in self.LEGACY}, before)
 
-    def test_owner_write_is_the_migrating_write(self):
-        self.live_legacy_owner()
-        self.progress(issue=14, phase=1, now="2026-08-13T20:00:30Z")
-        self.assert_bound()
-        self.owner_lifecycle()
+    def test_ac2_identity_never_comes_from_names(self):
+        self.install_all()
+        _, report = self.migrate()
+        grouped = self.rows(report)["run-20261009-337-338-339"]
+        self.assertEqual((grouped["alias"]["issues"], grouped["issues"]),
+                         ([337, 338, 339], [337]))
+        retried = self.rows(report)["orchestrate-21-24-r2"]
+        self.assertEqual((retried["alias"]["retry"], retried["prior_run"],
+                          retried["prior_transaction_id"]), (2, None, None))
+        self.migrate("--apply")
+        subject = self.store().load(self.store().lookup(
+            ai.legacy_key("run-20261009-337-338-339"))).subject
+        self.assertNotIn("issues", subject)
+        moved = self.workflows_dir / "orchestrate-99"
+        (self.workflows_dir / "issues-29-30-20260817-r2").rename(moved)
+        snapshot = self.tree_snapshot()
+        _, report = self.migrate()
+        self.assertEqual((self.rows(report)["orchestrate-99"]["verdict"],
+                          self.rows(report)["orchestrate-99"]["reason"]),
+                         ("refused", "location_mismatch"))
+        refused = self.run_cli("check-launch", "--repo-root", self.root, "--run-id",
+                               "orchestrate-99", "--action-id", "207:1:4", ok=False)
+        self.assertEqual(refused.returncode, 2)
+        self.assertEqual(self.tree_snapshot(), snapshot)
 
-    def base_helper(self, scratch):
-        found = subprocess.run(["git", "-C", str(REPO), "cat-file", "-e",
-                                f"{BASE_COMMIT}^{{commit}}"], capture_output=True)
-        if found.returncode != 0:
-            self.fail(f"base commit {BASE_COMMIT} is missing; fetch it, do not skip (D13)")
-        archive = subprocess.run(["git", "-C", str(REPO), "archive", BASE_COMMIT,
-                                  "home/common/agent-skills/scripts"],
-                                 capture_output=True, check=True)
-        subprocess.run(["tar", "-x", "-C", str(scratch)], input=archive.stdout, check=True)
-        return scratch / "home/common/agent-skills/scripts/workflow-state.py"
+    def test_ac3_dry_run_then_idempotent_apply(self):
+        self.install_all()
+        snapshot = self.tree_snapshot()
+        first, _ = self.migrate()
+        second, _ = self.migrate()
+        self.assertEqual(first.stdout, second.stdout)
+        self.assertEqual(self.tree_snapshot(), snapshot)
+        self.migrate("--apply")
+        applied = self.tree_snapshot()
+        _, again = self.migrate("--apply")
+        self.assertEqual(again["counts"]["migrated"], 0)
+        self.assertEqual(self.tree_snapshot(), applied)
 
-    def test_base_helper_refuses_schema_8_without_writing(self):
-        self.live_legacy_owner()
-        with tempfile.TemporaryDirectory() as scratch:
-            script = self.base_helper(Path(scratch))
-            env = {**self.cli_env, "PYTHONPATH": str(REPO / "python")}
+    def test_ac3_refusals_are_byte_identical(self):
+        fixtures = self.install_refusal_fixtures()
+        snapshot = self.tree_snapshot()
+        index = sorted((self.store_root / "creation-keys").iterdir())
+        _, report = self.migrate("--apply")
+        rows = self.rows(report)
+        after = self.tree_snapshot()
+        for handle, reason in fixtures.items():
+            with self.subTest(handle=handle):
+                self.assertEqual((rows[handle]["verdict"], rows[handle]["reason"]),
+                                 ("refused", reason))
+                prefix = f"workflows/{handle}/"
+                self.assertEqual({k: v for k, v in after.items() if k.startswith(prefix)},
+                                 {k: v for k, v in snapshot.items() if k.startswith(prefix)})
+        self.assertEqual(sorted((self.store_root / "creation-keys").iterdir()), index)
 
-            def base(command, *rest):
-                return subprocess.run(
-                    [sys.executable, str(script), command, "--repo-root", str(self.root),
-                     "--run-id", "orchestrate-14", *rest],
-                    env=env, cwd=scratch, capture_output=True, text=True, timeout=120)
+    def test_ac3_precreated_transaction_is_bound(self):
+        self.install_all()
+        plan = ai.plan_migration(json.loads(
+            (self.workflows_dir / "orchestrate-21-24-r2" / "state.json").read_text()))
+        reserved = self.store().create(plan.creation_key, plan.subject_json(),
+                                       **ai.creation_arguments(plan)).transaction_id
+        _, report = self.migrate("--apply")
+        self.assertEqual(self.rows(report)["orchestrate-21-24-r2"]["transaction_id"], reserved)
 
-            # Positive control (D26): the extracted helper reads the schema-7 ledger.
-            control = base("check-launch", "--action-id", "14:1:1")
-            self.assertEqual(control.returncode, 0, control.stderr)
-            self.progress(issue=14, phase=1, now="2026-08-13T20:00:30Z")
-            self.assert_bound()
-            snapshot = self.tree_snapshot()
-            for args in (("check-launch", "--action-id", "14:1:1"),
-                         ("progress", "--issue", "14", "--attempt", "1", "--phase", "2",
-                          "--next-needs-context", "true", "--artifacts-sufficient", "false",
-                          "--remainder-self-contained", "false")):
-                with self.subTest(command=args[0]):
-                    completed = base(*args)
-                    # Exit 2 with a schema refusal: check-launch rejects the unknown
-                    # `transaction_id` field, progress the chain's version 8 (D26).
-                    self.assertEqual(completed.returncode, 2, completed.stdout)
-                    self.assertTrue(completed.stderr.startswith("workflow-state: "),
-                                    completed.stderr)
-                    self.assertIn("workflow state schema", completed.stderr)
-                    self.assertEqual(self.tree_snapshot(), snapshot)
+    def test_ac3_held_mint_lock_makes_apply_wait(self):
+        self.install_all()
+        ledger = self.workflows_dir / "orchestrate-21-24-r2" / "state.json"
+        before = ledger.read_bytes()
+        with open(self.store_root / "attempt-runs.lock", "a+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            child = subprocess.Popen(
+                [sys.executable, str(SCRIPT), "migrate", "--repo-root", str(self.root),
+                 "--apply"], env=self.cli_env, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                child.wait(timeout=3)
+            self.assertEqual(ledger.read_bytes(), before)
+        stdout, stderr = child.communicate(timeout=120)
+        self.assertEqual(child.returncode, 0, stderr)
+        self.assertEqual(self.rows(json.loads(stdout))["orchestrate-21-24-r2"]["verdict"],
+                         "migrated")
 ```
 
-Add `import subprocess`, `import sys`, `import tempfile` and `from pathlib import Path` if Task 5 has not. The owner calls use the harness's existing `progress`, `register_worker`, `release_worker`, `suspend`, `resume` (a control sweep that returns the `resume` action), `finish` (the legacy result-file transport, which the harness runs directly on the migrated, contractless schema-8 ledger, keeping `orchestrate-14` and its `transaction_id` — Task 2's harness `finish`, D25) and `merged_result`. If the control sweep in `test_control_migrates_under_a_live_owner` needs the worktree fact the harness's `resume` passes, pass the same `worktrees=[self.worktree_fact(14, recorded={...})]` it builds; the test's point is only that control's write is the migrating one.
+Add `import fcntl`, `import subprocess`, `import sys` and `from .test_workflow_state import SCRIPT` to the module imports. Add the two fixture helpers to `MigrationFixtures`:
+- `install_direct_pair()` — per D21: `run_id = self.acquire_direct(issue=41)["run_id"]`, drive it to a terminal and request `new_run` with the same calls Task 3's `install_terminal_legacy_direct` uses, read both minted ledgers, `install_legacy(first, "direct-41-000001")` and `install_legacy({**second, "prior_run": "direct-41-000001"}, "direct-41-000002")`, then delete both minted run directories and both `direct:41:<n>` index entries, so only the legacy ledgers name issue 41.
+- `install_refusal_fixtures() -> dict[str, str]` — returns `{handle: expected reason}` after installing, all at schema 7 through `install_legacy` and then edited on disk:
+  - `issue-14-test`: the `delivered_207()` ledger as is → `unknown_dialect`;
+  - `orchestrate-90`: same, then its file's `schema_version` set to `9` → `unknown_schema`;
+  - `orchestrate-91`: same with `prior_run: "orchestrate-90"` → `ambiguous_lineage`;
+  - `direct-41-000002`: `install_direct_pair()`'s `direct-41-000002` ledger with `prior_run` rewritten to `"direct-42-000001"` (and `direct-41-000001` removed) → `ambiguous_lineage`;
+  - `orchestrate-92`: the 207 ledger written as `self._as_legacy(state, 1, handle="orchestrate-92")` with `"extra": 1` added to each issue object, which the 1 → 7 chain refuses ("invalid legacy issue schema") as it refuses the retained schema-1 ledgers → `invalid_state`.
 
-- [ ] **Step 2: Run the tests**
+- [ ] **Step 2: Run the tests and watch them fail**
 
-Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_attempt_migration.py -k LegacyOwnerCompatibility`
-Expected: OK, 3 tests. These pin behaviour Tasks 2–5 already built; to see each can fail, temporarily change `assert_bound`'s expected schema to `7` and watch both owner tests fail, then revert (do not commit the change).
+Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_attempt_migration.py -k MigrationAcceptance`
+Expected: FAIL — argparse rejects the `migrate` command (exit 2, `invalid choice: 'migrate'`).
 
-- [ ] **Step 3: Verify**
+- [ ] **Step 3: Write the minimal implementation**
+
+Add `migration_row` and `migration_report` to `attempt_store.py` per the invariants, then the thin `command_migrate` and the `migrate` subparser to `workflow-state.py` exactly as Interfaces gives them. Print with the existing `print_json`. `migration_report`'s docstring states: read-only dry run first; apply binds each `migrate` ledger through the caller's locked no-op write on its handle; refusals are reported data; a missing workflows directory or a store error raises. `command_migrate`'s one-line docstring states exit 0 with refusals as data and exit 2 on usage, an unreadable workflows directory or a store error.
+
+- [ ] **Step 4: Verify**
 
 Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_attempt_migration.py`
-Expected: OK, no skips (`grep -c "skipped"` on the captured output prints `0`).
+Expected: OK (every class so far).
+Run: `just build` (timeout 3600 s; the package module changed) — succeeds.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
-Stage the test file, then `launch-commit … -- -m "test: live legacy owners and the base helper on schema 8 (#337)"` with the session trailers.
+Stage the three files, then `launch-commit … -- -m "feat(workflow-state): migrate dry run and apply (#337)"` with the session trailers. Then, on the new head, check the Invariants' two ceilings and the cumulative package: `review-package .agents/artifacts/plans/2026-10-09-issue-337-attempt-identity-migration.md eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7 "$(git rev-parse HEAD)" "$SCRATCH/review-task6.json" | artifact-budget validate-report --boundary producer --input -` reports `"state":"complete"`. A ceiling over its limit is a failed task: move logic from `workflow-state.py` into `attempt_store.py` until it holds.

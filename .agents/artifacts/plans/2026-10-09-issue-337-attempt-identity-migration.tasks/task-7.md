@@ -1,86 +1,127 @@
-# Task 7: Installed `workflow-state` under the agent_tools interpreter
+# Task 7: Live legacy owner and old-helper refusal
 
 **Files:**
-- Modify: `lib/agent-tools.nix` (export a script launcher builder)
-- Modify: `home/common/agent-skills/default.nix` (`.agents/bin/workflow-state` becomes that launcher)
-- Modify: `tests/test_agent_tools_launchers.py`
+- Modify: `home/common/agent-skills/tests/test_attempt_migration.py` (new `LegacyOwnerCompatibilityTest`)
+
+Test-only task: it proves AC4 against the code Tasks 2–6 built. If a test can only pass by changing product code, stop and report BLOCKED with the failing assertion; that is a defect in an earlier task.
 
 **Interfaces:**
-- Consumes: `workflow-state.py`'s plain `import agent_tools.attempt_identity` / `agent_tools.transaction_core` (Task 2) — installed, those must resolve to the store package, never to a caller's `PYTHONPATH`.
-- Produces:
-  - `lib/agent-tools.nix` returns `{ launchers; scriptLauncher; }` where `scriptLauncher = name: script: pkgs.writeShellScript "agent-tools-${name}" ''unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\nexec ${env}/bin/python3 -I ${script} "$@"\n''` — the same environment and the same `unset` line as the `-m` launchers, running a store copy of `script` (D11, D16).
-  - `home/common/agent-skills/default.nix`: `".agents/bin/workflow-state".source = agentTools.scriptLauncher "workflow-state" ./scripts/workflow-state.py;` (the `executable = true` attribute goes; `writeShellScript` output is executable). The `.agents/lib/python/workflow_delivery*.py`, `delivery_model` and `host_admission.py` entries stay: the script still path-loads them from `~/.agents/lib/python` (D16).
-  - In `tests/test_agent_tools_launchers.py`: `SCRIPT_LAUNCHER` regex and a new test class `WorkflowStateLauncherTest`.
+- Consumes: `MigrationFixtures` (`install_legacy`, `tree_snapshot`, `store`, `store_root`), harness `init_run(creation_key=)`, `spawn(issue=, worktree=)`, `progress(..., ok=)`, `control(...)`, `run_cli`, `cli_env`, `read_state`, `SCRIPT`; `attempt_identity.legacy_key`.
+- Produces: nothing.
 
 **Invariants:**
-- Installed, `workflow-state` runs `python3 -I` from the agent_tools environment: `PYTHON*` variables, the working directory and the user site are ignored, and the launcher clears `NIX_PYTHON*` (D16).
-- The script's installed-mode branches still hold: `Path(__file__).parent.name != "scripts"` for a store copy (`/nix/store/<hash>-workflow-state.py` has parent `store`), so `_delivery()` loads `~/.agents/lib/python/workflow_delivery.py`, `_host_admission()` loads `~/.agents/lib/python/host_admission.py`, and `resolve_project_argv()` falls back to `~/.agents/bin/resolve-project`. Confirm this by reading those three functions at the task's head; if the store copy's parent name could be `scripts`, stop and report BLOCKED.
-- `NOT_LAUNCHERS = ("workflow-state",)` stays true: the new launcher is not an `-m agent_tools.<module>` launcher, so `LAUNCHER.fullmatch` must not match it; update the comment above `NOT_LAUNCHERS` to say `workflow-state` is a script launcher under the same interpreter, checked by `SCRIPT_LAUNCHER`.
-- Its interpreter path equals the `-m` launchers' interpreter path (one environment).
+- The legacy owner uses only the legacy handle `orchestrate-14`, the action id `14:1:1` and worker id `14:1:1:w1` — never the transaction id.
+- The base generation is the real one: `git -C <repo root> archive eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7 home/common/agent-skills/scripts | tar -x -C <tmp>`; the commit's absence is a test **failure** (`self.fail`), never a skip (D13). `<repo root>` is `Path(__file__).resolve().parents[4]` (the checkout holding `home/`).
+- The base helper runs as a subprocess `[sys.executable, <tmp>/home/common/agent-skills/scripts/workflow-state.py, ...]` with `env = {**self.cli_env, "PYTHONPATH": <repo root>/python}` (it imports `agent_tools.host_admission` from source in its `scripts` layout) and `cwd=<tmp>`.
+- Every refusal leaves the `.superpowers` tree snapshot byte-identical.
 
-- [ ] **Step 1: Write the failing tests**
-
-Add to `tests/test_agent_tools_launchers.py`, beside `LAUNCHER`:
+- [ ] **Step 1: Write the tests**
 
 ```python
-SCRIPT_LAUNCHER = re.compile(
-    rb"#![^\n]+\n"
-    rb"unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
-    rb"exec (?P<python>/nix/store/[^/\s]+/bin/python3)"
-    rb' -I (?P<script>/nix/store/[^/\s]+-workflow-state\.py) "\$@"\n*'
-)
+BASE_COMMIT = "eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7"
+REPO = Path(__file__).resolve().parents[4]
+
+
+class LegacyOwnerCompatibilityTest(MigrationFixtures, unittest.TestCase):
+    def live_legacy_owner(self):
+        """A schema-7 `orchestrate-14` ledger with an active owner on 14:1:1."""
+        self.init_run(creation_key="fixture-14")
+        self.spawn(issue=14, worktree=str(self.root / "wt-14"))
+        self.install_legacy(self.read_state(), "orchestrate-14")
+        self.assertEqual(json.loads(self.state_path.read_text())["schema_version"], 7)
+
+    def owner_lifecycle(self):
+        """progress, register-worker, release-worker, suspend, then finish — legacy ids only."""
+        worktree = self.root / "wt-14"
+        self.progress(issue=14, phase=1, now="2026-08-13T20:01:00Z")
+        self.register_worker(action_id="14:1:1", now="2026-08-13T20:02:00Z")
+        self.release_worker(worker_id="14:1:1:w1", event="returned",
+                            now="2026-08-13T20:03:00Z")
+        self.suspend(issue=14, attempt=1, blocked_on="usage_limit",
+                     now="2026-08-13T20:04:00Z")
+        self.resume(issue=14, worktree=worktree, now="2026-08-13T20:05:00Z")
+        bound = self.read_state()["transaction_id"]
+        self.finish(1, self.merged_result(), now="2026-08-13T20:30:00Z")
+        self.assertEqual(self.read_state()["issues"]["14"]["attempts"][-1]["state"], "merged")
+        self.assert_bound()  # finish ran on the schema-8 ledger and kept its binding (D25)
+        self.assertEqual(self.read_state()["transaction_id"], bound)
+
+    def assert_bound(self):
+        state = self.read_state()
+        self.assertEqual((state["schema_version"], state["run_id"]), (8, "orchestrate-14"))
+        self.assertEqual(self.store().lookup(ai.legacy_key("orchestrate-14")),
+                         state["transaction_id"])
+
+    def test_control_migrates_under_a_live_owner(self):
+        self.live_legacy_owner()
+        self.control(now="2026-08-13T20:00:30Z", issues=[14],
+                     tracker=[self.tracker_fact(14)], max_parallel=100)
+        self.assert_bound()
+        self.owner_lifecycle()
+
+    def test_owner_write_is_the_migrating_write(self):
+        self.live_legacy_owner()
+        self.progress(issue=14, phase=1, now="2026-08-13T20:00:30Z")
+        self.assert_bound()
+        self.owner_lifecycle()
+
+    def base_helper(self, scratch):
+        found = subprocess.run(["git", "-C", str(REPO), "cat-file", "-e",
+                                f"{BASE_COMMIT}^{{commit}}"], capture_output=True)
+        if found.returncode != 0:
+            self.fail(f"base commit {BASE_COMMIT} is missing; fetch it, do not skip (D13)")
+        archive = subprocess.run(["git", "-C", str(REPO), "archive", BASE_COMMIT,
+                                  "home/common/agent-skills/scripts"],
+                                 capture_output=True, check=True)
+        subprocess.run(["tar", "-x", "-C", str(scratch)], input=archive.stdout, check=True)
+        return scratch / "home/common/agent-skills/scripts/workflow-state.py"
+
+    def test_base_helper_refuses_schema_8_without_writing(self):
+        self.live_legacy_owner()
+        with tempfile.TemporaryDirectory() as scratch:
+            script = self.base_helper(Path(scratch))
+            env = {**self.cli_env, "PYTHONPATH": str(REPO / "python")}
+
+            def base(command, *rest):
+                return subprocess.run(
+                    [sys.executable, str(script), command, "--repo-root", str(self.root),
+                     "--run-id", "orchestrate-14", *rest],
+                    env=env, cwd=scratch, capture_output=True, text=True, timeout=120)
+
+            # Positive control (D26): the extracted helper reads the schema-7 ledger.
+            control = base("check-launch", "--action-id", "14:1:1")
+            self.assertEqual(control.returncode, 0, control.stderr)
+            self.progress(issue=14, phase=1, now="2026-08-13T20:00:30Z")
+            self.assert_bound()
+            snapshot = self.tree_snapshot()
+            for args in (("check-launch", "--action-id", "14:1:1"),
+                         ("progress", "--issue", "14", "--attempt", "1", "--phase", "2",
+                          "--next-needs-context", "true", "--artifacts-sufficient", "false",
+                          "--remainder-self-contained", "false")):
+                with self.subTest(command=args[0]):
+                    completed = base(*args)
+                    # Exit 2 with a schema refusal: check-launch rejects the unknown
+                    # `transaction_id` field, progress the chain's version 8 (D26).
+                    self.assertEqual(completed.returncode, 2, completed.stdout)
+                    self.assertTrue(completed.stderr.startswith("workflow-state: "),
+                                    completed.stderr)
+                    self.assertIn("workflow state schema", completed.stderr)
+                    self.assertEqual(self.tree_snapshot(), snapshot)
 ```
 
-and, in the class that defines `launchers()` (so `self.root`, `self.hostile`, `hostile_env()`, `dependency_env()` and `run_child()` are available), these tests:
+Add `import subprocess`, `import sys`, `import tempfile` and `from pathlib import Path` if Task 6 has not. The owner calls use the harness's existing `progress`, `register_worker`, `release_worker`, `suspend`, `resume` (a control sweep that returns the `resume` action), `finish` (the legacy result-file transport, which the harness runs directly on the migrated, contractless schema-8 ledger, keeping `orchestrate-14` and its `transaction_id` — Task 2's harness `finish`, D25) and `merged_result`. If the control sweep in `test_control_migrates_under_a_live_owner` needs the worktree fact the harness's `resume` passes, pass the same `worktrees=[self.worktree_fact(14, recorded={...})]` it builds; the test's point is only that control's write is the migrating one.
 
-```python
-    def workflow_state_launcher(self):
-        data = (self.root / ".agents/bin/workflow-state").read_bytes()
-        match = SCRIPT_LAUNCHER.fullmatch(data)
-        self.assertIsNotNone(match, data[:300])
-        return match
+- [ ] **Step 2: Run the tests**
 
-    def test_workflow_state_runs_under_the_package_interpreter(self):
-        match = self.workflow_state_launcher()
-        pythons = {python for python, _module in self.launchers().values()}
-        self.assertEqual(pythons, {match["python"].decode()})
+Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_attempt_migration.py -k LegacyOwnerCompatibility`
+Expected: OK, 3 tests. These pin behaviour Tasks 2–6 already built; to see each can fail, temporarily change `assert_bound`'s expected schema to `7` and watch both owner tests fail, then revert (do not commit the change).
 
-    def test_workflow_state_ignores_a_hostile_agent_tools(self):
-        completed = self.run_child(
-            [str(self.root / ".agents/bin/workflow-state"), "--help"],
-            self.hostile_env(), self.hostile)
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertTrue(completed.stdout.startswith("usage: workflow-state "))
-        self.assertNotIn(MARKER, completed.stdout + completed.stderr)
+- [ ] **Step 3: Verify**
 
-    def test_installed_workflow_state_mints_a_run_against_the_store_core(self):
-        with tempfile.TemporaryDirectory() as repo:
-            completed = self.run_child(
-                [str(self.root / ".agents/bin/workflow-state"), "init-run", "--repo-root",
-                 repo, "--creation-key", "installed-check"],
-                self.hostile_env(), self.hostile)
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertRegex(json.loads(completed.stdout)["run_id"], r"^rel_[0-9a-f-]{36}$")
-            self.assertNotIn(MARKER, completed.stdout + completed.stderr)
-            self.assertTrue((Path(repo) / ".superpowers/attempt-transactions").is_dir())
-```
+Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_attempt_migration.py`
+Expected: OK, no skips (`grep -c "skipped"` on the captured output prints `0`).
+After the commit, `git diff -U10 eca16cd85453dd290a9ab8ac66b8b3f2f7e697d7..HEAD -- home/common/agent-skills/tests/test_attempt_migration.py | wc -c` prints at most 60000 (D29); if not, factor the repeated fixture calls into `MigrationFixtures` helpers until it does.
 
-`hostile_env()` sets `HOME` to a directory whose `.agents` links to the built tree, so the installed delivery runtime and host-admission library resolve from the build. If `init-run` needs `~/.agents/share/host-declaration.json` and the built tree lacks it, the test creates nothing there: `init-run` does not read the declaration (only `control` and `host-route` do); confirm by running it.
+- [ ] **Step 4: Commit**
 
-- [ ] **Step 2: Run the tests and watch them fail**
-
-Run (≥ 3600 s timeout; it builds): `just agent-installed-skill-tests 2>&1 | tail -20`
-Expected: FAIL in `test_workflow_state_runs_under_the_package_interpreter` (the installed entry is the raw script, so `SCRIPT_LAUNCHER` does not match) and `test_installed_workflow_state_mints_a_run_against_the_store_core` (the raw script under `/usr/bin/env python3` cannot import `agent_tools.attempt_identity`).
-
-- [ ] **Step 3: Write the minimal implementation**
-
-Edit the two Nix files per Interfaces. Keep the comment block in `lib/agent-tools.nix` truthful: the file now builds the `-m` launchers from the command table and one script launcher, `workflow-state`, which runs a flat script under the same isolated interpreter until #178 moves it into the package.
-
-- [ ] **Step 4: Verify**
-
-Run: `just build` (≥ 3600 s) — succeeds.
-Run: `just agent-installed-skill-tests 2>&1 | tail -5` (≥ 3600 s) — ends with `OK`.
-
-- [ ] **Step 5: Commit**
-
-Stage the three files, then `launch-commit … -- -m "build: run installed workflow-state under the agent_tools interpreter (#337)"` with the session trailers.
+Stage the test file, then `launch-commit … -- -m "test: live legacy owners and the base helper on schema 8 (#337)"` with the session trailers.

@@ -1,5 +1,7 @@
 # Task 1: Core `lookup` and the pure `attempt_identity` module
 
+> **Status: complete** at commit `1701032a` (review-clean). Do not re-run this task.
+
 **Files:**
 - Modify: `python/agent_tools/transaction_core.py` (add `TransactionStore.lookup`; the module docstring's "No command and no caller until #125" sentence stays until Task 2 makes `workflow-state` a caller)
 - Create: `python/agent_tools/attempt_identity.py`

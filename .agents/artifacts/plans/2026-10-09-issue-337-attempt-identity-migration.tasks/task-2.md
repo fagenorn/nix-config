@@ -1,5 +1,7 @@
 # Task 2: Ledger schema 8 — bind on locked reads, check on unlocked reads, `init-run` minting, identity-based direct reservation
 
+> **Status: complete** at commit `aae76ba8` (review-clean). Do not re-run this task. Task 4 moves this task's store functions (`mint_run`, `lookup_run`, `bound_identity`, `LockedRead`, `LedgerRefused` and the read halves) from `workflow-state.py` into `agent_tools.attempt_store`; later tasks use Task 4's names.
+
 **Files:**
 - Modify: `home/common/agent-skills/scripts/workflow-state.py`
 - Modify: `home/common/agent-skills/scripts/workflow_delivery.py` (`DeliveryRuntime.migrate` only)
@@ -13,7 +15,7 @@
 
 **Interfaces:**
 - Consumes (Task 1): `TransactionStore.lookup`, and from `agent_tools.attempt_identity`: `RunIdentity`, `RunPlan`, `MigrationRefused`, `classify`, `legacy_identity`, `plan_migration`, `minted_plan`, `schema_refusal`, `subject_violation`, `identity_of`, `subject_handle`, `prior_run_violation`, `creation_arguments`.
-- Produces (in `workflow-state.py`; Tasks 3, 5, 6 rely on these names):
+- Produces (in `workflow-state.py`; Tasks 3, 4 and 6 rely on these names):
   - `SCHEMA_VERSION = 8`; `STATE_FIELDS` gains `"transaction_id"`.
   - `class LedgerRefused(WorkflowError)` with `reason: str` (a closed reason); message `"workflow state refused: <reason>: <detail>"`.
   - `class LockedRead(NamedTuple): state: dict; identity: RunIdentity; changed: bool`.
@@ -230,7 +232,7 @@ Implement the interfaces above in `workflow-state.py`. Non-obvious points:
 
 Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_attempt_migration.py tests/test_attempt_identity.py`
 Expected: OK. Then `PYTHONPATH="$PWD/python" python3 -m unittest tests/test_launch_scope.py -k minted_run_handle -k unsafe_ids` — OK.
-Then confirm the declared red window is the expected one, not a crash: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py 2>&1 | tail -3` ends with a `FAILED (failures=…, errors=…)` line, not an import error. Task 4 turns it green.
+Then confirm the declared red window is the expected one, not a crash: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_workflow_state.py 2>&1 | tail -3` ends with a `FAILED (failures=…, errors=…)` line, not an import error. Task 5 turns it green.
 
 - [ ] **Step 5: Commit**
 
