@@ -98,6 +98,34 @@ class ProfileInspectTest(ReleaseCommandCase):
         code, payload, _ = self.run_release("profile", "inspect", "github-release")
         self.assertEqual((code, payload["error"]["code"]), (2, "invalid_contract"))
 
+class PublicationFreeInspectTest(ReleaseCommandCase):
+    """A publication-free profile is a declared profile: reported, with nothing in it (#368 D7)."""
+
+    def test_reports_empty_graphs_and_no_handoff(self):
+        contract = self.contract()
+        profile = json.loads((REPO / "tests/fixtures/release/publication-free-profile.json")
+                             .read_text("utf-8"))
+        contract["release"] = {"profiles": {"forge-target": profile}}
+        self.write_contract(contract)
+        code, report, err = self.run_release("profile", "inspect", "forge-target")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(report), ["bindings", "conformance", "graphs", "profile",
+                                          "repairs", "schema_version", "subject"])
+        self.assertTrue(report["profile"]["admissible"])
+        self.assertEqual(report["profile"]["deadlines"], {})
+        self.assertEqual(report["graphs"], {
+            "phases": ["publication", "activation"], "publication": [], "activation": [],
+            "handoffs": [], "proof": [], "recovery": []})
+        self.assertEqual(report["bindings"]["targets"], profile["bindings"]["targets"])
+        self.assertEqual(report["bindings"]["adapters"]["forge"]["adapter"], "github-forge")
+        self.assertEqual(report["bindings"]["adapters"]["forge"]["config"], {})
+        self.assertEqual(report["conformance"]["adapters"]["forge"]["modes"], {})
+        self.assertEqual(report["conformance"]["findings"], [])
+        for check in report["conformance"]["checks"].values():
+            self.assertEqual(check, {"status": "passed", "reason_code": None})
+        code, payload, _ = self.run_release("profile", "inspect", "github-release")
+        self.assertEqual((code, payload["error"]["code"]), (2, "profile_unknown"))
+
 class AdapterInspectTest(ReleaseCommandCase):
     """`release adapter inspect` resolves no project, so it runs without `--repo-root`."""
 

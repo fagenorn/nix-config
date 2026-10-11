@@ -1261,6 +1261,42 @@ class ReleaseMemberTest(ResolverTestCase):
                          "release_profile_inadmissible")
         self.assertEqual(snap["release"]["targets"][0]["operations"], ["release", "tag"])
 
+    def test_a_publication_free_profile_exposes_its_target_and_no_capability(self):
+        snap = self.snapshot(self.declaring(forge_target=publication_free_profile()))
+        self.assertEqual(snap["release"], {"targets": [{
+            "profile": "forge-target", "adapter": "github-forge",
+            "target": self.REPOSITORY, "operations": []}]})
+        self.assertEqual(snap["capabilities"]["release"], self.UNSUPPORTED)
+        self.assertEqual(sorted(snap), ["bindings", "capabilities", "project", "release",
+                                        "schema_version"])
+
+    def test_a_publication_free_profile_needs_no_adapter_executable(self):
+        snap = self.snapshot(self.declaring(forge_target=publication_free_profile()),
+                             stubs=("just", "codex-companion"))
+        self.assertEqual(snap["capabilities"]["release"], self.UNSUPPORTED)
+
+    def test_a_publication_free_target_for_another_repository_is_refused(self):
+        for member, value in (("repository", "elsewhere/other"), ("branch", "dev")):
+            with self.subTest(member=member):
+                profile = publication_free_profile()
+                profile["bindings"]["targets"]["repository"][member] = value
+                code, payload, _ = self.resolve(
+                    self.make_root(self.declaring(forge_target=profile)))
+                error = self.assert_refusal(code, payload, "invalid_contract")
+                self.assertEqual(
+                    [v["pointer"] for v in error["violations"]],
+                    ["/release/profiles/forge-target/bindings/targets/repository/" + member])
+                self.assertEqual(error["repair_id"], "contract.release.same_repository")
+                self.assertNotIn("release", payload)
+
+    def test_one_publishing_profile_beside_a_publication_free_one_is_available(self):
+        free = publication_free_profile()
+        free["target"]["concurrency_keys"] = ["release/fagenorn/nix-config/target-only"]
+        snap = self.snapshot(self.declaring(forge_target=free, github_release=forge_profile()))
+        self.assertEqual(snap["capabilities"]["release"]["state"], "available")
+        self.assertEqual([(t["profile"], t["operations"]) for t in snap["release"]["targets"]],
+                         [("forge-target", []), ("github-release", ["release", "tag"])])
+
 
 class ContradictionTest(ResolverTestCase):
     def refuse(self, contract: dict) -> dict:

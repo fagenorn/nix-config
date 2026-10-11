@@ -7,7 +7,9 @@ bindings, the conformance verdicts and one repair per finding. It never calls an
 writes nothing and uses no network; the only child process is `git rev-parse HEAD` in the
 project root. An inadmissible profile is still reported in full (#69: diagnosis never
 mutates), so the report is built from the authored profile and the admissibility findings,
-not from `compile_profile`, which refuses what is inadmissible.
+not from `compile_profile`, which refuses what is inadmissible. A publication-free profile
+(one that authors no publication actions) is reported with empty graphs and no handoff, and
+the command still exits 0.
 
 `release adapter inspect <adapter> <operation> --parameters <json>` is the one adapter read
 the command exposes (D15): it resolves no project, calls the registered adapter's `inspect`
@@ -62,9 +64,9 @@ def _profile_error(source: dict, profile_id: str) -> ContractError | None:
 
 
 def _graphs(profile: dict[str, Any]) -> dict[str, Any]:
-    publication = release_profile.ordered_nodes(list(profile["publication"]["actions"]))
-    activation = [] if profile["activation"] == "none" \
-        else release_profile.ordered_nodes(list(profile["activation"]["units"]))
+    publication, activation = (
+        release_profile.ordered_nodes(release_profile.phase_nodes(profile, phase))
+        for phase in release_profile.PHASES)
 
     def node(entry: dict[str, Any]) -> dict[str, Any]:
         return {name: entry[name]
@@ -87,7 +89,8 @@ def _graphs(profile: dict[str, Any]) -> dict[str, Any]:
     return {"phases": ["publication", "activation"],
             "publication": [node(entry) for entry in publication],
             "activation": [node(entry) for entry in activation],
-            "handoffs": [{"from": "publication", "to": "activation", "receipt": receipt}],
+            "handoffs": [{"from": "publication", "to": "activation", "receipt": receipt}]
+            if publication else [],
             "proof": proof,
             "recovery": [{"unit": entry["id"], "posture": units[entry["id"]]["posture"],
                           "anchor": units[entry["id"]]["anchor"],
@@ -153,8 +156,8 @@ def inspect_profile(root: Path, source: dict, profile_id: str, manifest: dict,
     profile = source["release"]["profiles"][profile_id]
     graphs = _graphs(profile)
     nodes = release_profile.ordered_nodes(
-        list(profile["publication"]["actions"])
-        + ([] if profile["activation"] == "none" else list(profile["activation"]["units"])))
+        release_profile.phase_nodes(profile, "publication")
+        + release_profile.phase_nodes(profile, "activation"))
     findings = release_profile.admissibility_findings(profile_id, profile, source)
     conformance = _conformance(root, profile, nodes, findings)
     return {

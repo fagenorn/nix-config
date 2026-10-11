@@ -40,5 +40,27 @@ class PostInvocationObservationTest(CustodyCase):
         between = reads[target_reads[0] + 1:target_reads[1]]
         self.assertEqual(between, [ROWS["invoke.repository"]["argv"][1:], ROWS["tag.compare"]["argv"][1:]])
 
+class PublicationFreeBindingTest(unittest.TestCase):
+    """No request reaches the adapter through a publication-free profile (#368 D3, D8)."""
+
+    def test_every_request_is_refused_before_any_child_process(self):
+        world = ForgeWorld(self)
+        publishing = release_profile.compile_profile("github-release", support.forge_profile(),
+                                                     support.base_contract())
+        release = release_profile.bind_candidate(publishing, support.CANDIDATE)["proof"]["units"][1]
+        self.assertEqual(release["parameters"]["operation"], "release")
+        compiled = release_profile.compile_profile(
+            "forge-target", support.publication_free_profile(), support.base_contract())
+        binding = release_adapter.core_binding(forge_adapter, compiled, "forge")
+        requests = {"inspect": {"parameters": release["parameters"]},
+                    "invoke": {"parameters": release["parameters"]},
+                    "observe": {"predicate": "publication_visible",
+                                "parameters": {"parameters": release["parameters"]}}}
+        for name, request in requests.items():
+            with self.subTest(request=name):
+                with self.assertRaisesRegex(ValueError, "is not a node bound to this alias"):
+                    getattr(binding, name)(request)
+        self.assertEqual(world.calls(), [])
+
 if __name__ == "__main__":
     unittest.main()

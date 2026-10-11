@@ -27,6 +27,14 @@ core compilers' reasons verbatim. `compile_profile` returns the deep-frozen
 inputs `TransactionStore.create` takes. Every function here is pure: it reads no file,
 clock, network or environment.
 
+`publication` is `"none"` or `{actions}`; any other value is `contract.release.invalid`.
+A publication-free profile (`"publication": "none"`) must also author `activation` as
+`"none"` and `proof.obligations` as `[]`: a stray activation is one violation and is judged no
+further, a non-empty obligation list is one violation and each obligation is still judged. Its
+`recovery.units` must be empty, and the existing rule that a recovery key names no action or
+unit reports any entry as `contract.release.reference_unknown`. A publication-free profile
+compiles to empty graphs, and `bind_candidate` refuses it.
+
 `phase_nodes` is the one post-grammar reader of a phase's authored nodes: it returns the
 publication actions or activation units of a profile, and an empty list for a phase
 authored as `"none"`. `release_targets` lists the targets every profile binds, each with
@@ -170,6 +178,7 @@ class _Profile:
         self.principals: dict[str, Any] | None = None
         self.credentials: dict[str, Any] | None = None
         self.nodes: list[dict[str, Any]] = []
+        self.publication_free = False
 
     def at(self, *parts: object) -> str:
         return self.base + _pointer(*parts)
@@ -378,13 +387,21 @@ class _Profile:
         profile = self.profile
         if "publication" in profile:
             publication = profile["publication"]
-            if self.g.closed(publication, {"actions"}, self.at("publication"), "publication"):
+            if publication == "none":
+                self.publication_free = True
+            elif not isinstance(publication, dict):
+                self.g.add(self.at("publication"), 'publication must be "none" or {actions}',
+                           "invalid")
+            elif self.g.closed(publication, {"actions"}, self.at("publication"), "publication"):
                 self.node_list("publication", ("publication", "actions"), publication["actions"])
         if "activation" in profile:
             activation = profile["activation"]
             if activation == "none":
                 return
-            if not isinstance(activation, dict):
+            if self.publication_free:
+                self.g.add(self.at("activation"),
+                           'activation must be "none" when publication is "none"', "invalid")
+            elif not isinstance(activation, dict):
                 self.g.add(self.at("activation"), 'activation must be "none" or {units}',
                            "invalid")
             elif self.g.closed(activation, {"units"}, self.at("activation"), "activation"):
@@ -556,6 +573,9 @@ class _Profile:
         if not isinstance(obligations, list):
             self.g.add(here + "/obligations", "obligations must be a list", "invalid")
             return
+        if self.publication_free and obligations:
+            self.g.add(here + "/obligations", 'obligations must be [] when publication is "none"',
+                       "invalid")
         for index, obligation in enumerate(obligations):
             self.obligation(here + _pointer("obligations", index), obligation)
 
@@ -1040,9 +1060,15 @@ def _candidate_problem(candidate: object) -> str | None:
 
 
 def bind_candidate(compiled: ResolvedReleaseProfile, candidate: dict) -> dict[str, Any]:
-    """The exact `TransactionStore.create` inputs for one candidate, as plain values (D5)."""
+    """The exact `TransactionStore.create` inputs for one candidate, as plain values (D5).
+
+    A compiled profile with no publication node binds no candidate: it raises `ValueError`
+    naming the profile, before the candidate is read."""
     if not isinstance(compiled, ResolvedReleaseProfile):
         raise TypeError("bind_candidate takes a ResolvedReleaseProfile")
+    if not compiled["publication"]:
+        raise ValueError(f"profile {compiled['profile_id']!r} declares no publication, so no "
+                         "release candidate can be bound to it")
     problem = _candidate_problem(candidate)
     if problem is not None:
         raise ValueError(problem)

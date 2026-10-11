@@ -139,5 +139,69 @@ class GrammarRefusesTest(unittest.TestCase):
             with self.subTest(contract=contract):
                 violations(support.release_of("github-release", support.forge_profile()), contract)
 
+class PublicationFreeGrammarTest(unittest.TestCase):
+    """`"publication": "none"` and the rules that hold for it (#368 D1, D2, D11)."""
+    BASE = "/release/profiles/forge-target"
+
+    def found(self, mutate=None):
+        profile, contract = support.publication_free_profile(), support.base_contract()
+        if mutate is not None:
+            mutate(profile, contract)
+        return violations(support.release_of("forge-target", profile), contract)
+
+    def test_the_fixture_declares_a_target_and_has_no_violation(self):
+        profile = support.publication_free_profile()
+        self.assertEqual((profile["publication"], profile["activation"]), ("none", "none"))
+        self.assertEqual(profile["bindings"]["targets"], {"repository": {
+            "adapter": "forge", "kind": "github_repository",
+            "repository": "fagenorn/nix-config", "branch": "main"}})
+        self.assertEqual(self.found(), [])
+
+    def test_a_stray_activation_is_one_violation_and_is_judged_no_further(self):
+        action = support.forge_profile()["publication"]["actions"][0]
+        for activation in ({"units": [action]}, {"units": [{"id": "Bad Id"}, 7], "extra": 1},
+                           {"units": []}, "nothing", 7):
+            with self.subTest(activation=activation):
+                self.assertEqual(self.found(lambda p, c: p.update(activation=activation)), [{
+                    "pointer": self.BASE + "/activation", "repair_id": "contract.release.invalid",
+                    "message": 'activation must be "none" when publication is "none"'}])
+
+    def test_a_stray_obligation_is_one_violation(self):
+        obligation = {"id": "o", "semantic": "liveness", "form": "event", "predicate": "p",
+                      "collector": "forge", "required": True, "deps": [], "parameters": {}}
+        self.assertEqual(self.found(lambda p, c: p["proof"]["obligations"].append(obligation)), [{
+            "pointer": self.BASE + "/proof/obligations", "repair_id": "contract.release.invalid",
+            "message": 'obligations must be [] when publication is "none"'}])
+
+    def test_a_stray_recovery_unit_is_the_existing_unknown_reference(self):
+        unit = {"posture": "supersedable_only", "anchor": None, "compatibility": None, "edges": []}
+        self.assertEqual(self.found(lambda p, c: p["recovery"]["units"].update(tag=unit)), [{
+            "pointer": self.BASE + "/recovery/units/tag",
+            "repair_id": "contract.release.reference_unknown",
+            "message": "recovery key tag names no action or unit"}])
+
+    def test_the_publishing_form_and_the_same_repository_rule_are_unchanged(self):
+        cases = [
+            (lambda p, c: p.update(publication={"actions": []}), "invalid", "/publication/actions"),
+            (lambda p, c: p.pop("publication"), "invalid", ""),
+            (lambda p, c: p["bindings"]["targets"]["repository"].update(repository="x/y"),
+             "same_repository", "/bindings/targets/repository/repository"),
+            (lambda p, c: p["bindings"]["targets"]["repository"].update(branch="dev"),
+             "same_repository", "/bindings/targets/repository/branch"),
+            (lambda p, c: c["bindings"]["tracker"].update(kind="gitlab"),
+             "same_repository", "/bindings/targets/repository/kind"),
+        ]
+        for index, (mutate, repair, pointer) in enumerate(cases):
+            with self.subTest(index=index, pointer=pointer):
+                self.assertEqual([(v["repair_id"], v["pointer"]) for v in self.found(mutate)],
+                                 [("contract.release." + repair, self.BASE + pointer)])
+
+    def test_any_other_publication_value_names_the_two_forms(self):
+        for value in ("None", "unsupported", "", None, [], 0):
+            with self.subTest(value=value):
+                self.assertEqual(self.found(lambda p, c: p.update(publication=value)), [{
+                    "pointer": self.BASE + "/publication", "repair_id": "contract.release.invalid",
+                    "message": 'publication must be "none" or {actions}'}])
+
 if __name__ == "__main__":
     unittest.main()

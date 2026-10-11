@@ -209,5 +209,39 @@ class PublicationFreeReadersTest(unittest.TestCase):
         self.assertEqual(release_profile.release_targets("unsupported", D()), [])
 
 
+class PublicationFreeTest(unittest.TestCase):
+    """A publication-free profile compiles to an empty graph and is never bound (#368 D3)."""
+
+    def test_it_compiles_to_an_empty_graph(self):
+        compiled = compile_("forge-target", support.publication_free_profile())
+        self.assertEqual((compiled["schema"], compiled["profile_id"], compiled["profile_version"]),
+                         ("release-profile/v1", "forge-target", 1))
+        for member in ("publication", "activation"):
+            self.assertEqual(list(compiled[member]), [])
+        for member in ("deadlines", "candidate_members"):
+            self.assertEqual(dict(compiled[member]), {})
+        self.assertEqual(list(compiled["proof_declaration"]["units"]), [])
+        self.assertEqual(list(compiled["proof_declaration"]["obligations"]), [])
+        self.assertEqual(list(compiled["recovery_declaration"]["units"]), [])
+        self.assertEqual(release_profile.thaw(compiled["adapters"]["forge"])["adapter"],
+                         "github-forge")
+        self.assertEqual(compiled["digest"],
+                         release_profile.profile_digest(support.publication_free_profile(), D()))
+        self.assertNotEqual(compiled["digest"],
+                            compile_("forge-target", support.forge_profile())["digest"])
+
+    def test_bind_candidate_refuses_it_before_reading_the_candidate(self):
+        compiled = compile_("forge-target", support.publication_free_profile())
+        for candidate in (support.CANDIDATE, None):
+            with self.subTest(candidate=candidate), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                before = tree(root)
+                with self.assertRaisesRegex(ValueError, "'forge-target' declares no publication"):
+                    inputs = release_profile.bind_candidate(compiled, candidate)
+                    TransactionStore(root).create(
+                        "k", inputs["subject"], concurrency_keys=inputs["concurrency_keys"],
+                        proof=inputs["proof"], recovery=inputs["recovery"], authority_class="test")
+                self.assertEqual(tree(root), before)
+
 if __name__ == "__main__":
     unittest.main()
