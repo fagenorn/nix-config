@@ -46,6 +46,9 @@ FORCE_OVER_BUDGET = (
     '        ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\\n")\n'
     '    raise SystemExit(3)\n')
 
+FAIL_DESCRIBE = ('if sys.argv[1:2] == ["describe"]:\n'
+                 '    raise SystemExit(4)\n')
+
 
 def _harness():
     spec = importlib.util.spec_from_file_location("sdd_gate_harness", HARNESS_SOURCE)
@@ -282,6 +285,42 @@ class ReviewTest(GateCase):
                                          gate="failed", steps=["ledger"])
                 self.assertFalse(self.brief().exists())
                 self.assertTrue(root.exists())
+
+    def test_each_reuse_refusal_names_its_own_cause(self):
+        base, head = self.start_task(1, "src/app.py", "value = 2\n")
+        self.ready(self.review(1))
+        root = self.repo / self.package_root(base, head)
+        saved = root.with_name(root.stem + ".report.json")
+        manifest, report = root.read_bytes(), saved.read_bytes()
+
+        def no_saved_report():
+            saved.unlink()
+
+        def another_range():
+            changed = json.loads(manifest)
+            changed["range"]["head"] = "0" * 40
+            root.write_text(json.dumps(changed), encoding="utf-8")
+
+        def duplicate_keys():
+            root.write_text('{"range":1,"range":2}', encoding="utf-8")
+
+        details = {}
+        for arrange in (no_saved_report, another_range, duplicate_keys):
+            root.write_bytes(manifest)
+            saved.write_bytes(report)
+            arrange()
+            out = self.assert_gate_refused(self.review(1), command="review",
+                                           step="review-package", gate="failed", steps=["ledger"])
+            details[arrange.__name__] = out["detail"]
+        self.assertEqual(len(set(details.values())), len(details), details)
+
+    def test_a_failed_producer_refusal_carries_its_stderr_tail(self):
+        self.start_task(1, "src/app.py", "value = 2\n")
+        # The producer's own `describe` fails, so it exits 2 and says why on stderr.
+        self.write_budget_shim(FAIL_DESCRIBE)
+        out = self.assert_gate_refused(self.review(1), command="review", step="review-package",
+                                       gate="failed", steps=["ledger"])
+        self.assertIn("validator unavailable", out["detail"])
 
     def test_the_ledger_is_checked_before_anything_runs(self):
         header = self.ledger.read_text(encoding="utf-8")

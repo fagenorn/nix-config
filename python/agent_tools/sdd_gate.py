@@ -45,6 +45,7 @@ from agent_tools.siblings import sibling_argv
 
 INVALID = "sdd-gate: invalid invocation\n"
 DETAIL_LIMIT = 300
+TAIL_LIMIT = 120
 HEADER = re.compile(r"# SDD ledger — plan: (.+)")
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 TASK_NUMBER = re.compile(r"[1-9][0-9]*")
@@ -100,6 +101,12 @@ def _run(argv: Sequence[str]) -> subprocess.CompletedProcess:
     return subprocess.run(list(argv), capture_output=True, check=False)
 
 
+def _why(done: subprocess.CompletedProcess) -> str:
+    """The tail of a failed child's stderr as `: <tail>` on one line, or `` when it said nothing."""
+    tail = " ".join(done.stderr.decode("utf-8", "replace").split())[-TAIL_LIMIT:]
+    return f": {tail}" if tail else ""
+
+
 def _strict_json(raw: bytes) -> object:
     """Parse `raw` as UTF-8 JSON, refusing duplicate keys and non-finite constants."""
     return json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
@@ -126,9 +133,9 @@ def open_ledger(plan: Path) -> Ledger:
     except OSError as error:
         raise Refusal("ledger", f"cannot resolve the workspace: {error}") from None
     if found.returncode != 0 or not found.stdout.strip():
-        raise Refusal("ledger", f"sdd-workspace failed (exit {found.returncode})")
+        raise Refusal("ledger", f"sdd-workspace failed (exit {found.returncode}){_why(found)}")
     if shown.returncode != 0 or not shown.stdout.strip():
-        raise Refusal("ledger", f"git rev-parse failed (exit {shown.returncode})")
+        raise Refusal("ledger", f"git rev-parse failed (exit {shown.returncode}){_why(shown)}")
     workspace = Path(found.stdout.decode("utf-8", "replace").strip())
     top = Path(shown.stdout.decode("utf-8", "replace").strip())
     path = workspace / "progress.md"
@@ -186,7 +193,8 @@ def pinned_head() -> str:
         raise Refusal("review-package", f"cannot run git: {error}", gate="failed") from None
     head = done.stdout.decode("utf-8", "replace").strip()
     if done.returncode != 0 or FULL_SHA.fullmatch(head) is None:
-        raise Refusal("review-package", "cannot read HEAD", gate="failed")
+        raise Refusal("review-package", f"cannot read HEAD (exit {done.returncode}){_why(done)}",
+                      gate="failed")
     return head
 
 
@@ -201,8 +209,7 @@ def workflow_state(step: str, *argv: str) -> dict:
     except OSError as error:
         raise Refusal(step, f"cannot run workflow-state: {error}") from None
     if done.returncode != 0:
-        reason = done.stderr.decode("utf-8", "replace").strip()
-        raise Refusal(step, f"workflow-state exit {done.returncode}: {reason}")
+        raise Refusal(step, f"workflow-state exit {done.returncode}{_why(done)}")
     try:
         reply = _strict_json(done.stdout)
     except ValueError:
@@ -232,6 +239,14 @@ def _package_root(ledger: Ledger, base: str, head: str) -> Path:
     return ledger.workspace / f"review-{base[:7]}..{head[:7]}.json"
 
 
+def _errno(error: OSError) -> str:
+    return error.strerror or type(error).__name__
+
+
+def _reuse_refusal(root: Path, cause: str) -> Refusal:
+    return Refusal("review-package", f"cannot reuse {root.name}: {cause}", gate="failed")
+
+
 def _producer_report(plan: Path, root: Path, saved: Path, base: str, head: str) -> tuple[
         bytes, int | None]:
     """The package report's bytes and the producer's exit (`None` when reused)."""
@@ -242,19 +257,22 @@ def _producer_report(plan: Path, root: Path, saved: Path, base: str, head: str) 
             raise Refusal("review-package", f"cannot run review-package: {error}",
                           gate="failed") from None
         if done.returncode not in (0, 3):
-            raise Refusal("review-package", f"review-package failed (exit {done.returncode})",
+            raise Refusal("review-package",
+                          f"review-package failed (exit {done.returncode}){_why(done)}",
                           gate="failed")
         return done.stdout, done.returncode
     try:
         manifest = _strict_json(root.read_bytes())
-        reusable = isinstance(manifest, dict) and manifest.get("range") == {
-            "base": base, "head": head}
-        raw = saved.read_bytes() if reusable else b""
-    except (OSError, ValueError):
-        reusable = False
-    if not reusable:
-        raise Refusal("review-package", f"{root} exists but is not this range's package "
-                                        "with its saved report", gate="failed")
+    except OSError as error:
+        raise _reuse_refusal(root, f"cannot read the manifest ({_errno(error)})") from None
+    except ValueError:
+        raise _reuse_refusal(root, "the manifest is not strict JSON") from None
+    if not isinstance(manifest, dict) or manifest.get("range") != {"base": base, "head": head}:
+        raise _reuse_refusal(root, "the manifest's range is not this base and head")
+    try:
+        raw = saved.read_bytes()
+    except OSError as error:
+        raise _reuse_refusal(root, f"the saved report is unreadable ({_errno(error)})") from None
     return raw, None
 
 
@@ -351,7 +369,7 @@ def _touched(base: str, head: str) -> list[str]:
     """Paths changed between `base` and `head`; a rename counts as a deletion and an addition."""
     done = _run(["git", "diff", "--name-only", "--no-renames", "-z", base, head])
     if done.returncode != 0:
-        raise BriefError(f"git diff failed (exit {done.returncode})")
+        raise BriefError(f"git diff failed (exit {done.returncode}){_why(done)}")
     return [name for name in done.stdout.decode("utf-8", "replace").split("\0") if name]
 
 
