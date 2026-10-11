@@ -63,6 +63,7 @@ agent-workflow-tests:
   PYTHONPATH="{{agent_tools_path}}" python3 -m unittest -v \
     home/common/agent-skills/tests/test_workflow_state.py \
     home/common/agent-skills/tests/test_attempt_migration.py \
+    home/common/agent-skills/tests/test_attempt_custody.py \
     home/common/agent-skills/tests/test_host_admission.py \
     home/common/agent-skills/tests/test_admission_replay.py \
     home/common/agent-skills/tests/test_delivery_model.py \
@@ -119,6 +120,7 @@ agent-workflow-tests:
     tests/test_verified_tree.py \
     tests/test_transaction_core.py \
     tests/test_attempt_identity.py \
+    tests/test_attempt_custody.py \
     tests/test_transaction_custody.py \
     tests/test_transaction_invocation.py \
     tests/test_transaction_plan.py \

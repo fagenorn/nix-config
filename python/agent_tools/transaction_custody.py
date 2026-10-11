@@ -243,6 +243,27 @@ class LeaseAuthority:
                 "expires_at": now + holder["ttl_ms"]}})
         return True
 
+    def extend_to(self, fence: Mapping[str, Mapping[str, Any]], now: int, ttl_ms: int) -> bool:
+        """Whether the span still holds at `now` under `locked()`, rewriting it in place
+        to a declared TTL whatever the renewal margin says.
+
+        The caller holds `locked()`, has passed the lock-free fenced check and has
+        validated `ttl_ms` as an integer of at least 1. When `span_lapsed` holds at `now`
+        it returns False with nothing written. Otherwise every record keeps its epoch,
+        instance and `acquired_at`, takes `ttl_ms` as its TTL, gains one term and one
+        renewal, is renewed at `now` and expires at `now + ttl_ms`; it returns True.
+        """
+        if self.span_lapsed(fence, now):
+            return False
+        for key in fence:
+            record = self.record(key)
+            holder = record["holder"]
+            atomic_write(self.directory, self._path(key), {**record, "holder": {
+                **holder, "term": holder["term"] + 1, "ttl_ms": ttl_ms,
+                "renewal_count": holder["renewal_count"] + 1, "last_renewed_at": now,
+                "expires_at": now + ttl_ms}})
+        return True
+
     def clear(self, fence: Mapping[str, Mapping[str, Any]]) -> None:
         """Null the holder, keeping the epoch, on each record still naming the fence's
         instance; caller holds `locked()` (D24)."""
