@@ -43,22 +43,31 @@ MANIFEST_MEMBERS = (
 # D36: a `migrations` entry is closed on exactly these three members.
 MIGRATION_MEMBERS = ("id", "from_schema", "to_schema")
 
-# The fleet registry's members, and D18's closed entry: stable identity and
-# location, and nothing else. No version stamp and no cached verdict — the
-# preflight re-reads each project's live contract, so a stored one would be
-# stale by construction.
+# The fleet registry's members, and D18's closed entry: a stable identity and
+# a location, plus one optional record of how a registration reached its
+# branch (`branch_override`, issue 363 D3). No version stamp and no cached
+# verdict — the preflight re-reads each project's live contract, so a stored
+# one would be stale by construction — and no reader decides anything from
+# the optional member.
 REGISTRY_MEMBERS = ("schema_version", "projects")
 REGISTRY_ENTRY_MEMBERS = ("project_id", "root")
+REGISTRY_ENTRY_OPTIONAL_MEMBERS = ("branch_override",)
+# The optional record is closed on these members; `reason` is one of the
+# reasons below, and the validator's membership test is the only place its
+# value is read.
+BRANCH_OVERRIDE_MEMBERS = ("branch", "default_branch", "reason")
+BRANCH_OVERRIDE_REASONS = ("default_contract_unresolved",)
 REGISTRY_SCHEMA_VERSION = 1
 
 # The closed set of compatibility reasons, kept separate from the resolver's
 # capability `REASON_CODES` (D7). `interval_verdict` names the first two;
 # `project_schema_unsupported` belongs to the contract's schema check; and
 # `project_identity_mismatch` belongs to the fleet view alone — a registry
-# entry names an identity and a location and nothing else (D18), so the
-# preflight has to say when the live contract at that location no longer
-# declares the identity the registry recorded, rather than reporting the stale
-# one as compatible.
+# entry names an identity and a location, plus at most the optional record of
+# how its registration reached its branch, and carries no version fact or
+# verdict (D18), so the preflight has to say when the live contract at that
+# location no longer declares the identity the registry recorded, rather than
+# reporting the stale one as compatible.
 SCHEMA_REASON_CODES = (
     "platform_too_old",
     "platform_too_new",
@@ -437,12 +446,43 @@ def registry_path() -> Path:
     return state_root() / "fleet" / "registry.json"
 
 
+def _branch_override_violations(pointer: str, override: object) -> list[dict]:
+    """Every violation of one entry's `branch_override`, at `pointer`."""
+    if not isinstance(override, dict):
+        return [_registry_violation(
+            pointer, "must be an object",
+            "projects.branch_override.not_object")]
+    violations: list[dict] = []
+    for name in BRANCH_OVERRIDE_MEMBERS:
+        if name not in override:
+            violations.append(_registry_violation(
+                f"{pointer}/{name}", "required member is absent",
+                "projects.branch_override.member_missing"))
+        elif not (isinstance(override[name], str) and override[name]):
+            violations.append(_registry_violation(
+                f"{pointer}/{name}", "must be a non-empty string",
+                "projects.branch_override.not_string"))
+        elif name == "reason" and override[name] not in BRANCH_OVERRIDE_REASONS:
+            violations.append(_registry_violation(
+                f"{pointer}/{name}", "is not a known override reason",
+                "projects.branch_override.reason_unknown"))
+    for name in sorted(override):
+        if name not in BRANCH_OVERRIDE_MEMBERS:
+            violations.append(_registry_violation(
+                f"{pointer}/{name}", "member is not part of this schema",
+                "projects.branch_override.member_unexpected"))
+    return violations
+
+
 def validate_registry(source: object) -> list[dict]:
     """Every violation of the registry's shape, collected in one pass.
 
-    The entry shape is closed on `REGISTRY_ENTRY_MEMBERS` in both directions
-    (D18): an absent member and an extra one are equally violations, so a
-    cached verdict smuggled into an entry is refused rather than ignored.
+    The entry shape is closed on `REGISTRY_ENTRY_MEMBERS` plus the one
+    optional `REGISTRY_ENTRY_OPTIONAL_MEMBERS` member in both directions
+    (D18): an absent required member and an extra one are equally violations,
+    so a cached verdict smuggled into an entry is refused rather than ignored.
+    The optional `branch_override` is itself closed on
+    `BRANCH_OVERRIDE_MEMBERS`.
     """
     if not isinstance(source, dict):
         return [_registry_violation("", "must be a JSON object", "not_object")]
@@ -484,10 +524,14 @@ def validate_registry(source: object) -> list[dict]:
                     f"{pointer}/{name}", "must be a non-empty string",
                     "projects.not_string"))
         for name in sorted(entry):
-            if name not in REGISTRY_ENTRY_MEMBERS:
+            if name not in (REGISTRY_ENTRY_MEMBERS
+                            + REGISTRY_ENTRY_OPTIONAL_MEMBERS):
                 violations.append(_registry_violation(
                     f"{pointer}/{name}", "member is not part of this schema",
                     "projects.member_unexpected"))
+        if "branch_override" in entry:
+            violations.extend(_branch_override_violations(
+                f"{pointer}/branch_override", entry["branch_override"]))
     return violations
 
 
@@ -524,14 +568,16 @@ def write_registry(entries: list[dict]) -> None:
 
     The two cross-entry invariants the reader deliberately leaves alone are
     established here, because a writer is the only place they can be: an entry
-    is reduced to exactly `REGISTRY_ENTRY_MEMBERS` (D18) and `projects` is
-    sorted by `project_id`, so a caller cannot persist a stored order or an
-    extra member by handing one in. A repeated `project_id` refuses rather
+    is reduced to `REGISTRY_ENTRY_MEMBERS` plus its `branch_override` when it
+    has one (D18) and `projects` is sorted by `project_id`, so a caller cannot
+    persist a stored order or any other extra member by handing one in. A repeated `project_id` refuses rather
     than being deduplicated — which of the two roots to drop is not this
     function's decision to make.
     """
     projects = sorted(
-        ({name: entry[name] for name in REGISTRY_ENTRY_MEMBERS}
+        ({**{name: entry[name] for name in REGISTRY_ENTRY_MEMBERS},
+          **{name: entry[name] for name in REGISTRY_ENTRY_OPTIONAL_MEMBERS
+             if name in entry}}
          for entry in entries),
         key=lambda entry: entry["project_id"])
     identifiers = [entry["project_id"] for entry in projects]

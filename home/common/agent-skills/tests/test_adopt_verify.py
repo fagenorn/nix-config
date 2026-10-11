@@ -25,6 +25,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools import adopt_verify
+from agent_tools import agent_platform
 from agent_tools.adopt_inspection import AdoptError
 
 from .test_adopt_project import (
@@ -662,6 +663,364 @@ class RegisterProjectInnerCheckTest(VerifyTestCase):
         self.assertEqual(
             (error.code, error.repair_id),
             ("not_integrated", "adopt.registration.integration_branch_unresolved"))
+
+
+OVERRIDE = {"branch": "dev", "default_branch": "main",
+            "reason": "default_contract_unresolved"}
+
+
+class RegistryBranchOverrideTest(VerifyTestCase):
+    """The entry's one optional member (issue 363 D3), through the imported
+    validator and writer: no CLI path can hand them a malformed override."""
+
+    def document(self, **members: object) -> dict:
+        return {"schema_version": 1, "projects": [
+            {"project_id": "fixture/target", "root": "/checkout", **members}]}
+
+    def violations(self, **members: object) -> list[tuple[str, str]]:
+        return [(entry["pointer"], entry["repair_id"]) for entry in
+                agent_platform.validate_registry(self.document(**members))]
+
+    def test_an_entry_with_and_without_the_override_is_valid(self):
+        self.assertEqual(self.violations(), [])
+        self.assertEqual(self.violations(branch_override=dict(OVERRIDE)), [])
+
+    def test_a_malformed_override_is_refused_member_by_member(self):
+        pointer = "/projects/0/branch_override"
+        prefix = "platform.registry.projects.branch_override"
+        cases = {
+            "not_object": ("dev", [(pointer, f"{prefix}.not_object")]),
+            "member_missing": (
+                {"branch": "dev", "reason": "default_contract_unresolved"},
+                [(f"{pointer}/default_branch", f"{prefix}.member_missing")]),
+            "member_unexpected": (
+                {**OVERRIDE, "commit": "0" * 40},
+                [(f"{pointer}/commit", f"{prefix}.member_unexpected")]),
+            "not_string": (
+                {**OVERRIDE, "branch": 7},
+                [(f"{pointer}/branch", f"{prefix}.not_string")]),
+            "empty_string": (
+                {**OVERRIDE, "default_branch": ""},
+                [(f"{pointer}/default_branch", f"{prefix}.not_string")]),
+            "reason_unknown": (
+                {**OVERRIDE, "reason": "operator_said_so"},
+                [(f"{pointer}/reason", f"{prefix}.reason_unknown")]),
+        }
+        for name, (override, expected) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(
+                    self.violations(branch_override=override), expected)
+
+    def test_any_other_extra_entry_member_is_still_refused(self):
+        self.assertEqual(
+            self.violations(branch_override=dict(OVERRIDE), compatible=True),
+            [("/projects/0/compatible",
+              "platform.registry.projects.member_unexpected")])
+
+    def test_the_writer_keeps_the_override_and_strips_everything_else(self):
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            agent_platform.write_registry([
+                {"project_id": "fixture/beta", "root": "/beta",
+                 "compatible": True},
+                {"project_id": "fixture/alpha", "root": "/alpha",
+                 "branch_override": dict(OVERRIDE), "compatible": True},
+            ])
+            entries = agent_platform.read_registry()
+        self.assertEqual(entries, [
+            {"project_id": "fixture/alpha", "root": "/alpha",
+             "branch_override": OVERRIDE},
+            {"project_id": "fixture/beta", "root": "/beta"},
+        ])
+        self.assertEqual(self.registry(),
+                         {"schema_version": 1, "projects": entries})
+
+    def test_the_writer_refuses_a_malformed_override_and_writes_nothing(self):
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            with self.assertRaises(
+                    agent_platform.PlatformManifestError) as caught:
+                agent_platform.write_registry([
+                    {"project_id": "fixture/target", "root": "/checkout",
+                     "branch_override": {**OVERRIDE, "reason": "other"}}])
+        self.assertEqual(
+            caught.exception.repair_id,
+            "platform.registry.projects.branch_override.reason_unknown")
+        self.assertFalse(self.registry_path().exists())
+
+
+def stale_default_repo(home: Path, *, project_id: str = "fixture/target",
+                       contract: bool = True) -> Path:
+    """`verifiable_repo` naming `dev`, plus a local `stale` branch (issue 363 D7).
+
+    `main` is the adoption and `main~1` the same contract without it. `stale`
+    forks from `main~1` and is the lagging default branch a case publishes as
+    `stale:main`: its contract lacks the required top-level `release` member,
+    or, with `contract=False`, it has no contract at all.
+    """
+    root = verifiable_repo(home, project_id=project_id,
+                           integration_branch="dev")
+    git(root, "checkout", "--quiet", "-b", "stale", "HEAD~1")
+    if contract:
+        document = json.loads(
+            (root / ".agents" / "project.json").read_text("utf-8"))
+        del document["release"]
+        write(root, ".agents/project.json",
+              json.dumps(document, indent=2) + "\n")
+    else:
+        git(root, "rm", "--quiet", ".agents/project.json")
+    commit(root, "a default branch that lags")
+    git(root, "checkout", "--quiet", "main")
+    return root
+
+
+class IntegrationBranchOperandTest(VerifyTestCase):
+    """Issue 363: `--register --integration-branch` reaches the integration branch
+    when the default branch's contract does not resolve, and only then."""
+
+    def refuse_with(self, root: Path, code: str, repair_id: str,
+                    *extra: str) -> dict:
+        payload = self.refuse(root, code, "--register", *extra)
+        self.assertEqual(payload["error"]["repair_id"], repair_id, payload)
+        self.assertFalse(self.registry_path().exists())
+        return payload
+
+    def tracking(self, root: Path, branch: str) -> str:
+        return git(root, "for-each-ref", "--format=%(objectname)",
+                   f"refs/remotes/origin/{branch}").strip()
+
+    def assert_registered_through_the_operand(self, root: Path) -> None:
+        adoption = git(root, "rev-parse", "main").strip()
+        report = self.report(root, "--register", "--integration-branch", "dev")
+        self.assertEqual(report["result"], "adopted", report["checks"])
+        self.assertIs(report["registered"], True)
+        self.assertEqual(report["revision"], {
+            "ref": "refs/remotes/origin/dev", "commit": adoption})
+        self.assertEqual(report["branch_override"], OVERRIDE)
+        self.assertEqual(sorted(report),
+                         sorted([*VERIFY_MEMBERS, "branch_override"]))
+        self.assertEqual(report["schema_version"], 2)
+        self.assertEqual(self.registry(), {
+            "schema_version": 1,
+            "projects": [{"project_id": "fixture/target", "root": str(root),
+                          "branch_override": OVERRIDE}],
+        })
+
+    def test_the_stale_fixture_contract_is_refused_invalid_contract(self):
+        root = stale_default_repo(self.home)
+        git(root, "checkout", "--quiet", "stale")
+        detail = self.check(self.report(root), "contract-resolves")
+        self.assertEqual(detail["status"], "failed")
+        self.assertIn("invalid_contract", detail["detail"])
+
+    def test_the_operand_registers_against_the_integration_branch(self):
+        root = stale_default_repo(self.home)
+        publish(root, ("stale:main", "main:dev"))
+        self.assert_registered_through_the_operand(root)
+        self.assertEqual(self.fleet(), [{
+            "project_id": "fixture/target",
+            "root": str(root),
+            "project_schema_version": 1,
+            "platform_interval": {"min_inclusive": "1.0.0",
+                                  "max_exclusive": "2.0.0"},
+            "compatible": True,
+            "reason_code": None,
+            "repair_id": None,
+        }])
+
+    def test_a_default_branch_without_a_contract_takes_the_operand_too(self):
+        root = stale_default_repo(self.home, contract=False)
+        publish(root, ("stale:main", "main:dev"))
+        self.assert_registered_through_the_operand(root)
+
+    def test_an_operand_branch_without_the_record_refuses_not_integrated(self):
+        root = stale_default_repo(self.home)
+        publish(root, ("stale:main", "main~1:dev"))
+        payload = self.refuse_with(
+            root, "not_integrated", "adopt.registration.not_integrated",
+            "--integration-branch", "dev")
+        self.assertNotIn("--integration-branch",
+                         payload["error"]["violations"][0]["message"])
+
+    def test_a_stale_default_without_the_operand_refuses_and_names_it(self):
+        root = stale_default_repo(self.home)
+        publish(root, ("stale:main", "main:dev"))
+        payload = self.refuse_with(
+            root, "not_integrated", "adopt.registration.not_integrated")
+        self.assertIn("--integration-branch",
+                      payload["error"]["violations"][0]["message"])
+
+    def test_an_operand_the_remote_and_its_contract_do_not_confirm_refuses(self):
+        cases = {
+            "not listed by origin": (("stale:main", "main:dev"), "absent"),
+            "the default branch itself": (("stale:main", "main:dev"), "main"),
+            "a contract that does not resolve": (
+                ("stale:main", "main:dev", "stale:old"), "old"),
+            "a contract naming another branch": (
+                ("stale:main", "main:dev", "main:other"), "other"),
+        }
+        for name, (refs, operand) in cases.items():
+            with self.subTest(name):
+                root = stale_default_repo(self.home)
+                publish(root, refs)
+                self.refuse_with(
+                    root, "not_integrated",
+                    "adopt.registration.integration_branch_unresolved",
+                    "--integration-branch", operand)
+                if operand == "absent":
+                    # The unlisted name left no remote-tracking ref behind.
+                    self.assertEqual(self.tracking(root, "absent"), "")
+
+    def test_a_resolving_default_ignores_an_agreeing_operand(self):
+        root = verifiable_repo(self.home, integration_branch="dev")
+        publish(root, ("HEAD~1:main", "main:dev"))
+        plain = self.report(root, "--register")
+        stored = self.registry_path().read_bytes()
+        self.registry_path().unlink()
+        self.assertEqual(
+            self.report(root, "--register", "--integration-branch", "dev"),
+            plain)
+        self.assertEqual(self.registry_path().read_bytes(), stored)
+        self.assertNotIn("branch_override", plain)
+        self.assertEqual(self.registry()["projects"], [
+            {"project_id": "fixture/target", "root": str(root)}])
+
+    def test_a_resolving_default_refuses_a_disagreeing_operand(self):
+        root = verifiable_repo(self.home, integration_branch="dev")
+        publish(root, ("HEAD~1:main", "main:dev"))
+        git(root, "update-ref", "-d", "refs/remotes/origin/dev")
+        self.refuse_with(
+            root, "not_integrated",
+            "adopt.registration.integration_branch_unresolved",
+            "--integration-branch", "main")
+        # Refused before any further fetch: `dev` was never fetched.
+        self.assertEqual(self.tracking(root, "dev"), "")
+
+    def test_a_resolving_default_that_names_itself_accepts_its_own_name(self):
+        root = verifiable_repo(self.home)
+        publish(root)
+        report = self.report(root, "--register", "--integration-branch", "main")
+        self.assertIs(report["registered"], True)
+        self.assertEqual(sorted(report), VERIFY_MEMBERS)
+        self.assertEqual(self.registry()["projects"], [
+            {"project_id": "fixture/target", "root": str(root)}])
+
+    def test_the_operand_without_register_refuses_before_the_repository(self):
+        exit_code, payload, err = self.verify(
+            Path(tempfile.mkdtemp()), "--integration-branch", "dev")
+        self.assertEqual(exit_code, 2, err or payload)
+        self.assertEqual(
+            (payload["error"]["code"], payload["error"]["repair_id"]),
+            ("adopt_failure",
+             "adopt.verify.integration_branch_without_register"))
+
+    def test_a_repeated_operand_refuses(self):
+        exit_code, payload, err = self.verify(
+            Path(tempfile.mkdtemp()), "--register",
+            "--integration-branch", "dev", "--integration-branch", "dev")
+        self.assertEqual(exit_code, 2, err or payload)
+        self.assertEqual(
+            (payload["error"]["code"], payload["error"]["repair_id"]),
+            ("adopt_failure", "adopt.verify.integration_branch_repeated"))
+
+
+class IntegrationBranchOperandLifecycleTest(VerifyTestCase):
+    """Issue 363: what an operand-selected registration reads, and how its
+    registry entry lives beside later registrations."""
+
+    def register_through_the_operand(self, root: Path) -> dict:
+        return self.report(root, "--register", "--integration-branch", "dev")
+
+    def test_nothing_is_read_from_the_checkout(self):
+        root = stale_default_repo(self.home)
+        adoption = git(root, "rev-parse", "main").strip()
+        # Freshness: origin's `dev` first holds the commit before the
+        # adoption, and is advanced on origin itself, so the checkout's
+        # `refs/remotes/origin/dev` is stale when registration starts.
+        bare = publish(root, ("stale:main", "main~1:dev"))
+        git(root, "push", "--quiet", "origin",
+            f"{adoption}:refs/staging/adopt")
+        git(bare, "update-ref", "refs/heads/dev", adoption)
+        # A checkout that could answer nothing: unrelated local `main` and
+        # `dev`, no contract in the working tree, an unstaged edit and an
+        # untracked file.
+        git(root, "checkout", "--quiet", "--orphan", "elsewhere")
+        git(root, "rm", "--quiet", "-r", "-f", ".")
+        write(root, "README.md", "# unrelated\n")
+        commit(root, "unrelated history")
+        git(root, "branch", "--quiet", "-f", "dev", "HEAD")
+        write(root, "more.md", "# more\n")
+        commit(root, "more unrelated history")
+        git(root, "branch", "--quiet", "-f", "main", "HEAD")
+        write(root, "README.md", "# unstaged edit\n")
+        untracked = write(root, "scratch.txt", "untracked bytes\n")
+        self.assertFalse((root / ".agents" / "project.json").exists())
+        local = {name: git(root, "rev-parse", f"refs/heads/{name}").strip()
+                 for name in ("main", "dev")}
+        self.assertNotIn(adoption, local.values())
+        status = git(root, "status", "--porcelain")
+        snapshot = tree_snapshot(root)
+
+        report = self.register_through_the_operand(root)
+
+        self.assertEqual(report["result"], "adopted", report["checks"])
+        self.assertIs(report["registered"], True)
+        self.assertEqual(report["revision"], {
+            "ref": "refs/remotes/origin/dev", "commit": adoption})
+        self.assertEqual(report["branch_override"], OVERRIDE)
+        self.assertEqual(
+            {name: git(root, "rev-parse", f"refs/heads/{name}").strip()
+             for name in ("main", "dev")}, local)
+        self.assertEqual(git(root, "status", "--porcelain"), status)
+        self.assertEqual(tree_snapshot(root), snapshot)
+        self.assertEqual(untracked.read_text("utf-8"), "untracked bytes\n")
+        self.assertFalse((root / ".git" / "FETCH_HEAD").exists())
+
+    def test_a_repeated_operand_registration_is_byte_identical(self):
+        root = stale_default_repo(self.home)
+        publish(root, ("stale:main", "main:dev"))
+        self.register_through_the_operand(root)
+        first = self.registry_path().read_bytes()
+        self.register_through_the_operand(root)
+        self.assertEqual(self.registry_path().read_bytes(), first)
+        self.assertEqual(self.registry()["projects"][0]["branch_override"],
+                         OVERRIDE)
+
+    def test_a_later_registration_without_the_operand_drops_the_override(self):
+        root = stale_default_repo(self.home)
+        publish(root, ("stale:main", "main:dev"))
+        self.register_through_the_operand(root)
+        self.assertIn("branch_override", self.registry()["projects"][0])
+        # The default branch catches up: its contract now resolves and names
+        # `dev`, so the ordinary hop reaches it.
+        git(root, "push", "--quiet", "--force", "origin", "main:main")
+        report = self.report(root, "--register")
+        self.assertIs(report["registered"], True)
+        self.assertNotIn("branch_override", report)
+        self.assertEqual(self.registry()["projects"], [
+            {"project_id": "fixture/target", "root": str(root)}])
+
+    def test_another_projects_registration_keeps_the_override(self):
+        alpha = stale_default_repo(self.home, project_id="fixture/alpha")
+        publish(alpha, ("stale:main", "main:dev"))
+        self.register_through_the_operand(alpha)
+        beta = verifiable_repo(self.home, project_id="fixture/beta")
+        publish(beta)
+        self.report(beta, "--register")
+        self.assertEqual(self.registry()["projects"], [
+            {"project_id": "fixture/alpha", "root": str(alpha),
+             "branch_override": OVERRIDE},
+            {"project_id": "fixture/beta", "root": str(beta)},
+        ])
+
+    def test_a_non_conformant_operand_branch_reports_and_writes_nothing(self):
+        root = stale_default_repo(self.home)
+        write_adoption_records(root, digest="b2" * 32)
+        commit(root, "a second adoption record")
+        publish(root, ("stale:main", "main:dev"))
+        report = self.register_through_the_operand(root)
+        self.assertEqual(report["result"], "not_conformant", report)
+        self.assertEqual(report["branch_override"], OVERRIDE)
+        self.assertIs(report["registered"], False)
+        self.assertFalse(self.registry_path().exists())
 
 
 if __name__ == "__main__":
