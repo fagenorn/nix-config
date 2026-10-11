@@ -147,8 +147,9 @@ class IntegrationBranchOperandTest(VerifyTestCase):
                     root, "not_integrated",
                     "adopt.registration.integration_branch_unresolved",
                     "--integration-branch", operand)
-        # The unlisted name never reached a fetch.
-        self.assertEqual(self.tracking(root, "absent"), "")
+                if operand == "absent":
+                    # The unlisted name left no remote-tracking ref behind.
+                    self.assertEqual(self.tracking(root, "absent"), "")
 
     def test_a_resolving_default_ignores_an_agreeing_operand(self):
         root = verifiable_repo(self.home, integration_branch="dev")

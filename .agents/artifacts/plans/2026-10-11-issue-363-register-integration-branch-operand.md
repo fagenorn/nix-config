@@ -31,11 +31,11 @@ Spec: `.agents/artifacts/specs/2026-10-11-issue-363-register-integration-branch-
 
 ## Delivery estimate and boundaries
 
-Estimates: 5 changed files — `agent_platform.py`, `adopt_verify.py`, `adopt_project.py`, `test_adopt_verify.py`, `python/README.md` — about +130 production lines and +330 test lines, one review package. Task 1 is independently deliverable. The aggregate-growth risk is `test_adopt_verify.py` (668 lines at base, about 1000 after).
+Estimates: 6 changed files — `agent_platform.py`, `adopt_verify.py`, `adopt_project.py`, `test_adopt_verify.py`, `test_resolve_platform_status.py` (one docstring), `python/README.md` — about +130 production lines and +330 test lines, one review package. Task 1 is independently deliverable. The aggregate-growth risk is `test_adopt_verify.py` (668 lines at base, about 1000 after).
 
 ## Task index
 
-Task 1 — Registry entry admits the optional `branch_override` — `python/agent_tools/agent_platform.py`, `home/common/agent-skills/tests/test_adopt_verify.py` — full — [task-1.md](2026-10-11-issue-363-register-integration-branch-operand.tasks/task-1.md)
+Task 1 — Registry entry admits the optional `branch_override` — `python/agent_tools/agent_platform.py`, `home/common/agent-skills/tests/test_adopt_verify.py`, `home/common/agent-skills/tests/test_resolve_platform_status.py` — full — [task-1.md](2026-10-11-issue-363-register-integration-branch-operand.tasks/task-1.md)
 Task 2 — `--integration-branch` operand, branch reach, report and registration — `python/agent_tools/adopt_verify.py`, `python/agent_tools/adopt_project.py`, `home/common/agent-skills/tests/test_adopt_verify.py` — full — [task-2.md](2026-10-11-issue-363-register-integration-branch-operand.tasks/task-2.md)
 Task 3 — Checkout isolation, registry lifecycle cases and the documented contract — `home/common/agent-skills/tests/test_adopt_verify.py`, `python/README.md` — full — [task-3.md](2026-10-11-issue-363-register-integration-branch-operand.tasks/task-3.md)
 
@@ -59,3 +59,7 @@ Task 3 — Checkout isolation, registry lifecycle cases and the documented contr
 - The stale-default fixture and the seams: D7. How the fixture is built, where the new cases live, and the two substitutions the fixture forces: D10 (appended by this plan).
 
 ---
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`), isolated read-only mode, no fallback, no focus. Base SHA 96174d0ec1a6b4f507059bdcdff56f5532442bbf. Findings: 0 blocking, 2 should-fix, 0 discussion; 2 accepted, 0 rejected, 0 deferred. PR-01 (Task 2): the unlisted-branch tracking-ref assertion moved inside its own subtest and no longer claims that no fetch was attempted. PR-02 (Task 1): the two remaining "identity and a location and nothing else" prose sites are reworded. Neither is a ledger-level decision.

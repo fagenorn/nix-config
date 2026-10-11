@@ -2,6 +2,7 @@
 
 **Files:**
 - Modify: `python/agent_tools/agent_platform.py` (the registry constants near line 46, `validate_registry`, `write_registry`)
+- Modify (prose only): `home/common/agent-skills/tests/test_resolve_platform_status.py` (one docstring near line 324)
 - Test: `home/common/agent-skills/tests/test_adopt_verify.py`
 
 **Interfaces:**
@@ -126,6 +127,7 @@ def _branch_override_violations(pointer: str, override: object) -> list[dict]:
 
    Its contract, in this order: a non-dict returns the single violation code `projects.branch_override.not_object` at `pointer`. Otherwise, for each name in `BRANCH_OVERRIDE_MEMBERS` in order: absent is `projects.branch_override.member_missing` at `<pointer>/<name>`; present but not a non-empty `str` is `projects.branch_override.not_string`; for `reason` only, a non-empty string outside `BRANCH_OVERRIDE_REASONS` is `projects.branch_override.reason_unknown`. Then, for each other name in sorted order, `projects.branch_override.member_unexpected`. Build every violation with `_registry_violation`. Update the `validate_registry` docstring: the entry is closed on the required members plus the one optional member, and the override is closed on its own members.
 3. `write_registry`: the reduction keeps every name of `REGISTRY_ENTRY_MEMBERS` (a missing one still raises `KeyError` as today) and keeps `branch_override` exactly when the entry has that key; everything else is dropped. The existing `validate_registry(document)` call then refuses a malformed override before anything is written. Update the docstring sentence "an entry is reduced to exactly `REGISTRY_ENTRY_MEMBERS` (D18)" to say what the reduction now keeps.
+4. Stale registry-shape prose. Two more places still say an entry is "an identity and a location and nothing else": the comment above `SCHEMA_REASON_CODES` in `agent_platform.py` (near line 58) and the docstring of `test_a_registered_id_the_contract_no_longer_declares_is_incompatible` in `home/common/agent-skills/tests/test_resolve_platform_status.py` (near line 324). Reword each so that it stays true of the implemented code: an entry names an identity and a location, plus at most the optional record of how a registration reached its branch, and carries no version fact or verdict, which is why compatibility is recomputed live. Change prose only; no test body or assertion changes.
 
 - [ ] **Step 4: Verify**
 
