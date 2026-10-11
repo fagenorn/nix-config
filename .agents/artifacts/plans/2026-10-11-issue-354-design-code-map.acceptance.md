@@ -10,14 +10,14 @@
 
 ## Deferred measurement (AC1, AC2)
 
-Run once per issue, with jq installed: `bash measure.sh DESIGN.jsonl PLANNER.jsonl WORKTREE_ROOT`, where the first two are the design and planner subagent transcripts of that issue. Save the block below as `measure.sh`. A Bash call counts as a read only on a line that runs sed, rg, grep, cat, head or tail, and only its path-shaped tokens are taken. WORKTREE_ROOT is the absolute path of the issue's worktree as it appears in the transcripts, without a trailing slash. Known limits: a file named without any slash is not counted, a command on an indented line is not counted, and a sed expression that looks like a path (for example an `s/a.b/c.d/` substitution) is counted as a read path, which enlarges the total. The script writes design-files.txt and planner-reads.txt into the current directory.
+Run once per issue, with jq installed: `bash measure.sh DESIGN.jsonl PLANNER.jsonl WORKTREE_ROOT`, where the first two are the design and planner subagent transcripts of that issue. Save the block below as `measure.sh`. A Bash call counts as a read only on a line that runs sed, rg, grep, cat, head or tail, and only its path-shaped tokens are taken. WORKTREE_ROOT is the absolute path of the issue's worktree as it appears in the transcripts, without a trailing slash. Known limits: a file named without any slash is not counted, a command on an indented line is not counted, and a sed expression that looks like a path (for example an `s/a.b/c.d/` substitution) is counted as a read path, which enlarges the total. A Grep call that names a directory or no path is not counted and is reported on the `Unresolved` line, so a large count there means the AC1 ratio rests on few reads. The script writes design-files.txt and planner-reads.txt into the current directory.
 
 ```bash
 DESIGN=$1 PLANNER=$2 ROOT=$3
 paths() {
   jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use")
     | if .name=="Read" then .input.file_path
-      elif .name=="Grep" then (.input.path // empty)
+      elif .name=="Grep" then (.input.path // empty | select(test("[A-Za-z0-9_-]\\.[A-Za-z0-9]+$")))
       elif .name=="Bash" then (.input.command | split("\n")[]
         | select(test("(^|&& *|; *)(sed|rg|grep|cat|head|tail) "))
         | scan("[A-Za-z0-9_.~-]*/[A-Za-z0-9_./-]*[A-Za-z0-9_-]\\.[A-Za-z0-9]+"))
@@ -27,4 +27,6 @@ paths "$DESIGN" | sort -u > design-files.txt
 paths "$PLANNER" > planner-reads.txt
 echo "AC1: $(grep -cFxf design-files.txt planner-reads.txt) of $(grep -c . planner-reads.txt) planner read paths are files the design agent opened"
 echo "AC2: $(jq -s '[.[] | select(.type=="assistant") | .message.id] | unique | length' "$PLANNER") planner requests"
+echo "Unresolved: $(jq -s '[.[] | select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Grep")
+  | select(.input.path // "" | test("[A-Za-z0-9_-]\\.[A-Za-z0-9]+$") | not)] | length' "$PLANNER") planner Grep calls named a directory or no path and are not counted"
 ```
