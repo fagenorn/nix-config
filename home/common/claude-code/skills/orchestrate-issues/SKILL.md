@@ -48,8 +48,8 @@ never piped through `validate-report` or decoded; it goes verbatim into the owne
   `stall_minutes`, the owner stall bound of §2 rules (a) and (d); pass it only to
   `owner-liveness`. Absent or null, those rules arm no liveness check.
 - Resolve the dispatcher's absolute repository root once as `ledger_repo_root`; it stays the run's
-  exact immutable value, independent of any issue worktree. Then select `run_id` per §2's
-  run-reuse rule.
+  exact immutable value, independent of any issue worktree. Then take `run_id` from §2's
+  bootstrap.
 
 Before `init-run`, ask for the host route once and validate the answer at the boundary:
 
@@ -194,11 +194,9 @@ The adapter sends `[]` for every issue's `authority_observations`, `reevaluation
 delivery facts through `checkpoint-delivery`, and this adapter never proposes a scope or recovery.
 
 **Per-issue contract rule.** On the first sweep, build a delivery contract for every bootstrap
-requirement whose `contract_digest` is null, and for every requested issue without a bootstrap
-requirement only when this invocation created the run (it minted the run rather than reusing one;
-a restart counts as reuse). On a reused run, send null for an issue without a requirement
-until its latest summary carries `delivery_contract_required`, and build its contract then. Build
-each contract with one command:
+requirement whose `contract_digest` is null. For a requested issue without a bootstrap requirement,
+send null until its latest summary carries `delivery_contract_required`, and build its contract
+then. Build each contract with one command:
 
 ```text
 workflow-state build-delivery --repo-root <ledger_repo_root> --kind contract --input - <<'EOF'
