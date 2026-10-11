@@ -321,11 +321,13 @@ class PlatformStatusFleetTest(ResolverTestCase):
                          "invalid_contract")
 
     def test_a_registered_id_the_contract_no_longer_declares_is_incompatible(self):
-        """A registry entry is an identity and a location and nothing else
-        (D18), and the version facts beside it are read live. A root that has
-        been replaced — or whose contract renamed the project — leaves the
-        stale identity in the row, so reporting it compatible would pass the
-        stale half off as the fresh one. The preflight has to say so."""
+        """A registry entry names an identity and a location, plus at most
+        the optional record of how its registration reached its branch, and
+        carries no version fact or verdict (D18); the version facts are read
+        live. A root that has been replaced — or whose contract renamed the
+        project — leaves the stale identity in the row, so reporting it
+        compatible would pass the stale half off as the fresh one. The
+        preflight has to say so."""
         contract = source_contract()
         contract["project"]["id"] = "fagenorn/renamed"
         entry, _ = self.registered("fagenorn/original", contract)

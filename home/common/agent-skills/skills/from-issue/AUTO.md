@@ -25,8 +25,7 @@ at a `**CHECKPOINT**`:
    scope tight. When two options are both defensible, prefer the smaller, more reversible, more
    idiomatic one.
 3. **Log it** as a row in the spec's `## Decision ledger` (the C1 decision-ledger format; its file is
-   in `SKILL.md`'s index), applying the non-obvious-only filter — routine splits, commit boundaries,
-   and obvious verification commands are not rows. Plans and ADRs cite the ID.
+   in `SKILL.md`'s index), applying the non-obvious-only filter. Plans and ADRs cite the ID.
 4. **Continue.** Don't post the question. Don't wait.
 
 Auto-resolving a checkpoint never skips `workflow-state progress`: persist the gate decision at
@@ -72,7 +71,7 @@ There are no checkpoint gates, but two content-level stops still apply:
   it, and log the loop in the decision ledger.
 
 Should-fix findings: apply inline and log with the reviewer's rationale. Exception: a should-fix that
-implies a scope change ("the plan covers A but the spec promised A+B") — back up rather than
+implies a scope change — back up rather than
 scope-creep the plan. Everything else — option choices, scope boundary calls, ADR phrasing, plan task
 granularity — you decide and log.
 
@@ -143,8 +142,9 @@ Agent(subagent_type="general-purpose", model="opus", effort="xhigh") launches th
 Writes the implementation plan package under `bindings.paths.artifacts.plans`, committed in the worktree, with a `## Task index`
 carrying each task's risk lane; it cites decision-ledger rows by ID and appends new non-obvious
 plan-level decisions to the spec's ledger. Give it the validated spec artifact
-root and metrics plus notes — not a transcript. `SKILL.md`'s plan-prose ≠
-code-prose rule goes in the prompt.
+root and metrics plus notes — not a transcript. Name the spec's code map: the
+spec's file name with `.code-map.md` for `.md`, in the worktree's git directory. `SKILL.md`'s
+plan-prose ≠ code-prose rule goes in the prompt.
 
 When Phase 0 declared the issue `mechanical-only`, this dispatch also performs the Phase-5 self-grade
 (read issue, spec, plan, live files, standards; grade against Blocking / Should-fix / Discussion) and

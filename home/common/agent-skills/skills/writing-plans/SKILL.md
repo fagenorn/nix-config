@@ -5,11 +5,11 @@ description: Turns a spec into a task-by-task implementation plan. Use when requ
 
 # Writing Plans
 
-Write for a skilled engineer with no context on this codebase, toolset or domain, who reads exactly one task and none of the others. Every task names the files it touches, the exact interfaces and invariants it must satisfy, and how to test and verify it. DRY, YAGNI, test-first, frequent commits.
+Write for a skilled engineer with no context on this codebase, toolset or domain, who reads exactly one task and none of the others. DRY, YAGNI, test-first, frequent commits.
 
 **Resolve once at entry.** Run `resolve-project resolve --repo-root <the checkout you were called in>` and read the absolute `bindings.paths.artifacts.plans` from the snapshot it prints. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Never persist the snapshot or infer a policy value.
 
-**Save the package root to** `<bindings.paths.artifacts.plans>/YYYY-MM-DD-<feature-name>.md` and its task members to the sibling `<stem>.tasks/` directory (`<stem>.tasks/task-1.md` first), committed in the worktree you were called in. The root path is the public plan path (D3, D6).
+**Save the package root to** `<bindings.paths.artifacts.plans>/YYYY-MM-DD-<feature-name>.md` and its task members to the sibling `<stem>.tasks/` directory (`<stem>.tasks/task-1.md` first), committed in the worktree you were called in.
 
 ## Payload discipline
 
@@ -19,9 +19,11 @@ Sibling skills cite this section and plans embed it in tasks. Move information a
 
 A spec covering several independent subsystems gets one plan per subsystem, each yielding working, testable software; say so rather than fusing them.
 
+Before mapping files, look for the spec's **code map**: the path your caller named, else the spec's file name with `.code-map.md` for `.md` in the git directory (`git rev-parse --git-dir`). None is no error: plan as usual. Read it first and take its entries as leads: open a mapped file only where a task needs detail the entry lacks (an exact signature, the test to extend), and expect to read beyond it. Check every mapped path and symbol you write into a task against the current tree with a bounded search; drop a wrong entry and search afresh. Never cite, link or copy it into the plan: implementers and reviewers cannot see it.
+
 Before defining tasks, map the files to create or modify and each one's responsibility: one clear responsibility per file, files that change together kept together, split by responsibility rather than layer, existing patterns followed. Split a file you are already modifying when it helps; never restructure unilaterally.
 
-When the map depends on one bounded repository fact, keep the planning judgment here and delegate only the read-only lookup:
+When the file map depends on one bounded repository fact, keep the planning judgment here and delegate only the read-only lookup:
 
 <!-- agent-dispatch: id=planning-bounded-fact-lookup role=explorer model=sonnet effort=medium -->
 Agent(subagent_type="Explore", model="sonnet", effort="medium") performs one sharply bounded read-only repository lookup without choosing task boundaries.
@@ -30,11 +32,11 @@ If the lookup turns open-ended, ambiguous or judgment-bearing, stop the cheap-ti
 
 ## Task size
 
-A task is the smallest unit with its own test cycle that is worth a fresh reviewer's gate: fold setup, configuration, scaffolding and documentation into the task that needs them, and split only where a reviewer could reject one task while approving its neighbour. Every task ends in an independently testable deliverable. Steps are one action each: write the failing test, watch it fail, write the minimal implementation, run the tests, commit.
+A task is the smallest unit with its own test cycle that is worth a fresh reviewer's gate: fold setup, configuration, scaffolding and documentation into the task that needs them, and split only where a reviewer could reject one task while approving its neighbour. Every task ends in an independently testable deliverable.
 
 ## Plan root
 
-The root holds the header below and no numbered task bodies or copied ledger rationale; numbered tasks live only in members (D3).
+The root holds the header below and no numbered task bodies or copied ledger rationale.
 
 ```markdown
 # <Feature> Implementation Plan
@@ -113,7 +115,7 @@ merge related decisions into one.>
 
 ## Task members
 
-Write each task to exactly `<stem>.tasks/task-N.md`, self-contained for one implementer: exact interfaces, invariants, assertions, verification commands, and step-by-step decisions where an algorithm embodies one. Full implementation code appears only when it preserves a decision prose and interfaces cannot (a subtle algorithm, an exact wire format). Failing tests are always written out in full: they are the contract. Cite decision IDs instead of copying Global Constraints or rationale, and carry every task-specific value (D3).
+Write each task to exactly `<stem>.tasks/task-N.md`, self-contained for one implementer: exact interfaces, invariants, assertions, verification commands, and step-by-step decisions where an algorithm embodies one. Full implementation code appears only when it preserves a decision prose and interfaces cannot (a subtle algorithm, an exact wire format). Failing tests are always written out in full: they are the contract. Cite decision IDs instead of copying Global Constraints or rationale, and carry every task-specific value.
 
 ````markdown
 # Task N: <Component>
@@ -174,30 +176,30 @@ git commit -m "feat: add specific feature"
 
 ## No placeholders
 
-Never write "TBD", "TODO", "implement later", "fill in details"; "add appropriate error handling", "add validation", "handle edge cases"; "write tests for the above" without the tests; "similar to Task N" (tasks are read alone, so restate the interfaces, invariants and assertions); a step that does not pin its exact interface, invariants and assertions; or a type, function or method no task defines.
+Never write "TBD", "TODO", "implement later", "fill in details"; "add appropriate error handling", "add validation", "handle edge cases"; "write tests for the above" without the tests; "similar to Task N" (tasks are read alone); a step that does not pin its exact interface, invariants and assertions; or a type, function or method no task defines.
 
 ## Package budget
 
-Finish all content first, then run `artifact-budget check --kind implementation-plan --root <root-path> --format json`; the checker discovers the members and owns the thresholds. Never pass or report a member list (D5, D6, D8).
+Finish all content first, then run `artifact-budget check --kind implementation-plan --root <root-path> --format json`; the checker discovers the members and owns the thresholds. Never pass or report a member list.
 
 - Exit 0 with `within_budget`: measured.
 - Exit 2: `failed`, with no prose fallback.
-- First exit 3: compact repeated prose into root or spec references, keeping task-specific contracts, and check again. Still over: split only where both halves are independently testable, update the contiguous index and links, and check again. Any root, member, count or aggregate violation that persists returns `decompose_required`; `complete` is forbidden (D5).
+- First exit 3: compact repeated prose into root or spec references, keeping task-specific contracts, and check again. Still over: split only where both halves are independently testable, update the contiguous index and links, and check again. Any root, member, count or aggregate violation that persists returns `decompose_required`; `complete` is forbidden.
 
-Measure after the final mutation, and check the amended spec too when planning appended a ledger row. Any later writer, an accepted Phase-5 edit included, checks every artifact it changed before advancing (D5, D14).
+Any later writer, an accepted Phase-5 edit included, checks every artifact it changed before advancing.
 
 ## Self-review
 
 Reread the finished plan against the spec yourself (no dispatch) and fix inline:
 
 1. **Spec coverage**: every requirement maps to a task.
-2. **Type consistency**: later tasks use the names earlier tasks define (`clearLayers()` vs `clearFullLayers()` is a bug).
-3. **Members**: exact files, consumed and produced interfaces, invariants, complete failing tests, implementation actions, a scoped falsifiable gate, decision IDs and commit scope.
+2. **Type consistency**: later tasks use the names earlier tasks define.
+3. **Members**: every part of the member template, a scoped falsifiable gate, decision IDs and commit scope.
 4. **The rules above**: no placeholders; an index row per member with matching files and lane (a `mechanical` or `low-risk` lane for excluded work is a bug); a complete acceptance map; no numbered task body in the root.
 5. **Remeasure** the package after the last edit, and the spec if a ledger row was appended.
 
 ## Return control
 
-Build one producer report `{state, artifact, notes}` (D11, D14). `complete`: `kind: "implementation-plan"`, the root `path`, the checker's four `metrics` and `budget_status: "within_budget"`. `decompose_required`: the same with `budget_status: "over_budget"` and the checker's `violations`. `failed`: a null artifact, or only the known root `kind` and `path`. Notes may point to the root or spec, within shared policy; never artifact contents or member paths.
+Build one producer report `{state, artifact, notes}`. `complete`: `kind: "implementation-plan"`, the root `path`, the checker's four `metrics` and `budget_status: "within_budget"`. `decompose_required`: the same with `budget_status: "over_budget"` and the checker's `violations`. `failed`: a null artifact, or only the known root `kind` and `path`. Notes may point to the root or spec, within shared policy; never artifact contents or member paths.
 
 Write it to a candidate from `mktemp "${TMPDIR:-/tmp}/producer-report-XXXXXX.json"`, run `artifact-budget validate-report --boundary producer --input <report-candidate>`, and remove the candidate in a cleanup that runs on every outcome (a `trap` on `EXIT HUP INT TERM`, or `finally`). Return only the validated stdout; validator exit 2 is `failed`, with no fallback. Do not offer or start execution: the caller owns standards review and execution.

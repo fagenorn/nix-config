@@ -1,6 +1,6 @@
 {
   "skill_name": "writing-plans",
-  "notes": "Eval 1 is a pipeline run against the shared tinytask fixture: the well-specified issue file stands in for a spec (the skill's own trigger is 'you have requirements for multi-step work'). Assertions grade behavioral outcomes against the landed plan contract: the spec owns the `## Decision ledger` (`| ID | Choice | Grounding | Rejected alternative |` rows) and the plan cites rows by ID — so with no specification artifact in this fixture, the ledger may land under the retained specifications directory or be hosted in the plan, and the decision assert searches both. Legacy `### <decision>` entries are still accepted. Eval 2 is plan-only and guards gate-scoping behavior.",
+  "notes": "Eval 1 is a pipeline run against the shared tinytask fixture: the well-specified issue file stands in for a spec (the skill's own trigger is 'you have requirements for multi-step work'). Assertions grade behavioral outcomes against the landed plan contract: the spec owns the `## Decision ledger` (`| ID | Choice | Grounding | Rejected alternative |` rows) and the plan cites rows by ID — so with no specification artifact in this fixture, the ledger may land under the retained specifications directory or be hosted in the plan, and the decision assert searches both. Legacy `### <decision>` entries are still accepted. Eval 2 is plan-only and guards gate-scoping behavior. Eval 4 asks for the autonomous `from-issue` plan-subagent prompt and greps the transcript for the spec's code map file name (#354 D7); eval 1, which has no code map, is the check that an absent one changes nothing.",
   "evals": [
     {
       "id": 1,
@@ -58,6 +58,23 @@
       "mode": "plan-only",
       "prompt": "Plan a six-task change that is likely to touch many policy files and could exceed the cumulative review-package budget late in execution. Plan-only: show the compact plan-header section that addresses delivery size and explain how you would split it.",
       "expected_output": "The plan header gives an explicitly labeled estimate of expected changed files and aggregate-growth risks, then names independently testable and reviewable delivery slices where needed. It does not promise byte-accurate final size for unwritten code, raise the package caps, or defer all size discovery until final review. Each boundary leaves working behavior that can be tested and delivered independently."
+    },
+    {
+      "id": 4,
+      "name": "auto-plan-dispatch-names-the-code-map",
+      "mode": "pipeline",
+      "prompt": "Change nothing in this repository: no file edit, no commit, no worktree, and dispatch no subagent.\n\nYou are the `from-issue` controller in autonomous mode (`--auto`) for issue 3, at the start of Phase 4, with the retained ResolvedProject already resolved. The worktree is `.worktrees/worktree-issue-3-rename-flag`. The design subagent returned this validated producer report:\n\n{\"state\":\"complete\",\"artifact\":{\"kind\":\"design-spec\",\"path\":\".claude/specs/2026-10-07-issue-3-rename-flag-design.md\",\"metrics\":{\"root_bytes\":1520,\"total_bytes\":1520,\"file_count\":1,\"largest_member_bytes\":0},\"budget_status\":\"within_budget\"},\"notes\":\"Spec committed and grilled; no ADR.\"}\n\nRead the `from-issue` skill's autonomous-mode instructions for the plan subagent, then print, in full, the exact prompt you would dispatch to that subagent. Then stop.",
+      "expected_output": "The full plan-subagent prompt as the autonomous `from-issue` controller would dispatch it. It hands over the validated spec root, metrics and notes, and names the spec's code map by file name, `2026-10-07-issue-3-rename-flag-design.code-map.md`, as a file in the worktree's git directory. Nothing in the repository changes and no subagent is dispatched.",
+      "asserts": [
+        {
+          "name": "the printed plan prompt names the spec's code map file",
+          "shell": "out_matches '2026-10-07-issue-3-rename-flag-design\\.code-map\\.md'"
+        },
+        {
+          "name": "the repository is unchanged",
+          "shell": "[ -z \"$(git -C \"$REPO\" status --porcelain)\" ] || { fail \"the working tree changed: $(git -C \"$REPO\" status --porcelain | tr '\\n' ' ')\"; exit 1; }; [ \"$(git -C \"$REPO\" rev-parse HEAD)\" = \"$BASE_MAIN\" ] || { fail \"HEAD moved off $BASE_MAIN\"; exit 1; }; [ \"$WT_COUNT\" -eq 0 ] || fail \"created $WT_COUNT worktree(s)\""
+        }
+      ]
     }
   ]
 }
