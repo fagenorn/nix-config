@@ -38,7 +38,8 @@ invocation` on stderr, nothing on stdout, and exits 2.
 Every step is safe to repeat: a package is never deleted or overwritten, an
 existing one is reused only for the same range with its saved report beside it,
 the brief is replaced atomically, and releasing a released worker changes
-nothing. The command never resolves the project, reads the environment only
+nothing. `next --task` registers a fresh worker on every call, so it refuses
+while the worker its earlier brief of that task names is still live. The command never resolves the project, reads the environment only
 through `Path.home()` and reads Git only from the current checkout.
 """
 
@@ -70,6 +71,7 @@ TAIL_LIMIT = 120
 HEADER = re.compile(r"# SDD ledger — plan: (.+)")
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 TASK_NUMBER = re.compile(r"[1-9][0-9]*")
+WORKER_LINE = "Lifecycle worker: "
 GLOBAL_CONSTRAINTS = "## Global Constraints"
 TEST_SEAMS = "## Test seams"
 STATES = ("complete", "decompose_required")
@@ -511,6 +513,33 @@ def _write_refusal(error: OSError, args: argparse.Namespace, worker_id: str | No
                                   f"`{shlex.join(command)}` before calling next again")
 
 
+def _refuse_live_predecessor(brief: Path, args: argparse.Namespace) -> None:
+    """Refuse at `register-worker` while a worker an earlier dispatch of this task named in
+    its brief is still live: registering over it would leave it unreleased."""
+    try:
+        lines = brief.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return  # no earlier brief of this task to read
+    for line in lines:
+        if not line.startswith(WORKER_LINE):
+            continue
+        try:
+            flags = shlex.split(line[len(WORKER_LINE):])
+            earlier = flags[flags.index("--worker-id") + 1]
+        except (ValueError, IndexError):
+            continue
+        try:
+            checked = _run(["workflow-state", "check-worker", "--repo-root", args.repo_root,
+                            "--run-id", args.run_id, "--worker-id", earlier])
+            reply = _strict_json(checked.stdout) if checked.returncode == 0 else None
+        except (OSError, ValueError):
+            continue
+        if isinstance(reply, dict) and reply.get("live") is True:
+            raise Refusal("register-worker", f"worker {earlier} from an earlier dispatch of task "
+                                             f"{args.task} is still registered: release it "
+                                             "before calling next again")
+
+
 def _dispatch(plan: Path, ledger: Ledger, args: argparse.Namespace, entries: Sequence[Path],
               package: Package, base: str, record: bool, done: list[str]) -> tuple[
         list[Path], str | None]:
@@ -548,7 +577,9 @@ def _dispatch(plan: Path, ledger: Ledger, args: argparse.Namespace, entries: Seq
     done.append("prepare-brief")
 
     worker_id = None
+    brief = ledger.workspace / f"task-{task}-implementer-dispatch.md"
     if args.repo_root is not None:
+        _refuse_live_predecessor(brief, args)
         reply = workflow_state("register-worker", "register-worker", "--repo-root", args.repo_root,
                                "--run-id", args.run_id, "--action-id", args.action_id)
         worker_id = reply.get("worker_id")
@@ -558,8 +589,7 @@ def _dispatch(plan: Path, ledger: Ledger, args: argparse.Namespace, entries: Seq
         values["[LIFECYCLE_WORKER]"] = worker_block(args.repo_root, args.run_id, worker_id)
     text = render(template, IMPLEMENTER_TOKENS, values)
     try:
-        write_atomic(ledger.workspace / f"task-{task}-implementer-dispatch.md",
-                     text.encode("utf-8"))
+        write_atomic(brief, text.encode("utf-8"))
     except OSError as error:
         raise _write_refusal(error, args, worker_id) from None
     return documents, worker_id

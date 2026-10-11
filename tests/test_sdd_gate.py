@@ -527,9 +527,23 @@ class NextTest(GateCase):
         self.assertTrue(self.check_worker("14:1:1:w1")["live"])
         block = sdd_brief.worker_block(str(self.root), self.run_id, "14:1:1:w1")
         self.assertIn(f"## Worker\n\n{block}\n\nEnd.\n", self.brief().read_text(encoding="utf-8"))
+        self.run_tool("workflow-state", "release-worker", "--repo-root", str(self.root),
+                      "--run-id", self.run_id, "--worker-id", "14:1:1:w1", "--event", "returned")
         again = self.ready(self.next("--task", 1, *self.identity()))  # a re-dispatch of the task
         self.assertEqual((again["worker_id"], again["base_sha"], again["mark_progress"]),
                          ("14:1:1:w2", out["base_sha"], "unchanged"))
+
+    def test_a_repeated_dispatch_is_refused_while_the_earlier_worker_is_live(self):
+        self.launch()
+        self.ready(self.first(*self.identity()))
+        brief = self.brief().read_bytes()
+        out = self.assert_gate_refused(self.next("--task", 1, *self.identity()), command="next",
+                                       step="register-worker", gate=None, steps=NEXT_STEPS[:8])
+        self.assertEqual(out["detail"], "worker 14:1:1:w1 from an earlier dispatch of task 1 is "
+                                        "still registered: release it before calling next again")
+        self.assertEqual([(worker["worker_id"], worker["release_event"])
+                          for worker in self.workers()], [("14:1:1:w1", None)])
+        self.assertEqual(self.brief().read_bytes(), brief)
 
     def test_a_refused_progress_mark_does_not_stop_the_call(self):
         self.launch(worktree=self.root / "gone")
