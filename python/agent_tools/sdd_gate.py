@@ -15,7 +15,9 @@ package against the budget authority and writes the rendered reviewer brief
 into the plan's workspace.
 
 `next` closes task N and/or opens task M. It runs up to eleven steps in order
-and stops at the first that fails: `ledger`, `ledger-complete` (with
+and stops at the first that fails (a ledger that cannot be read or appended to
+refuses at the step that needs it, and the delivery gate line's write refuses
+at `metrics-match` with gate `failed`, not listed as passed): `ledger`, `ledger-complete` (with
 `--completed`), `mark-progress` (under an identity), `review-package`,
 `validate-report`, `budget-check`, `metrics-match` (the cumulative delivery
 package, delivery base to HEAD), then, with `--task`, `task-brief`,
@@ -39,6 +41,7 @@ through `Path.home()` and reads Git only from the current checkout.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -443,6 +446,16 @@ def review(args: argparse.Namespace, done: list[str]) -> dict:
             "standards": [str(document) for document in documents]}
 
 
+@contextlib.contextmanager
+def _ledger_io(step: str, ledger: Ledger, gate: str | None = None):
+    """Refuse with `step` (and `gate`) when reading or appending to the ledger fails."""
+    try:
+        yield
+    except (OSError, UnicodeDecodeError) as error:
+        cause = _errno(error) if isinstance(error, OSError) else "not UTF-8"
+        raise Refusal(step, f"cannot update {ledger.path.name}: {cause}", gate=gate) from None
+
+
 def _ledger_has(ledger: Ledger, matches) -> bool:
     """Whether the ledger file, read now, holds a line `matches` accepts."""
     return any(matches(line) for line in ledger.path.read_text(encoding="utf-8").splitlines())
@@ -560,15 +573,18 @@ def next_task(args: argparse.Namespace, done: list[str]) -> dict:
     ledger = open_ledger(plan)
     delivery_base, new_base, completed_base, dispatched = _ledger_reads(ledger, args)
     if new_base:
-        append_line(ledger, f"Delivery base: {delivery_base}")
+        with _ledger_io("ledger", ledger):
+            append_line(ledger, f"Delivery base: {delivery_base}")
     done.append("ledger")
 
     head = pinned_head()
     if args.completed:
         done_line = f"Task {args.completed}: complete"
-        if not _ledger_has(ledger, lambda line: line.startswith(done_line)):
-            ending = f"{args.parked} parked" if args.parked else "review clean"
-            append_line(ledger, f"{done_line} (commits {completed_base[:7]}..{head[:7]}, {ending})")
+        with _ledger_io("ledger-complete", ledger):
+            if not _ledger_has(ledger, lambda line: line.startswith(done_line)):
+                ending = f"{args.parked} parked" if args.parked else "review clean"
+                append_line(ledger,
+                            f"{done_line} (commits {completed_base[:7]}..{head[:7]}, {ending})")
         done.append("ledger-complete")
 
     progress = _mark_progress(args)
@@ -578,8 +594,13 @@ def next_task(args: argparse.Namespace, done: list[str]) -> dict:
     package = package_gate(plan, ledger, delivery_base, head, done)
     gate = f"Delivery gate: {delivery_base}..{head} " + " ".join(
         f"{key}={package.metrics[key]}" for key in METRIC_KEYS)
-    if not _ledger_has(ledger, gate.__eq__):
-        append_line(ledger, gate)
+    try:
+        with _ledger_io("metrics-match", ledger, "failed"):
+            if not _ledger_has(ledger, gate.__eq__):
+                append_line(ledger, gate)
+    except Refusal:
+        done.pop()  # the gate's result was not recorded, so `metrics-match` has not passed
+        raise
 
     out = {"command": "next", "outcome": "ready", "completed": args.completed, "task": None,
            "brief_path": None, "report_path": None, "base_sha": None, "worker_id": None,

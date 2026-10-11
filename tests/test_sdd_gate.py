@@ -565,6 +565,26 @@ class NextTest(GateCase):
         self.assertEqual([(worker["worker_id"], worker["release_event"])
                           for worker in self.workers()], [("14:1:1:w1", None)])
 
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores file modes")
+    def test_an_unwritable_ledger_is_refused_at_the_step_that_writes_to_it(self):
+        def set_ledger_mode(mode):
+            self.ledger.chmod(mode)
+
+        self.addCleanup(set_ledger_mode, 0o644)
+        set_ledger_mode(0o444)
+        self.assert_gate_refused(self.first(), command="next", step="ledger", gate=None, steps=[])
+        set_ledger_mode(0o644)
+        self.ready(self.first())
+        self.write("src/app.py", "value = 2\n")
+        self.repo_commit("task 1")
+        set_ledger_mode(0o444)
+        self.assert_gate_refused(self.next("--completed", 1, "--task", 2), command="next",
+                                 step="ledger-complete", gate=None, steps=["ledger"])
+        # The cumulative gate could not be recorded, so it has not passed: `failed`, not listed.
+        self.assert_gate_refused(
+            self.next("--task", 1), command="next", step="metrics-match", gate="failed",
+            steps=["ledger", "review-package", "validate-report", "budget-check"])
+
     def test_an_invalid_next_invocation_prints_one_stderr_line(self):
         base = ("next", self.plan, "--skill-dir", SKILL)
         cases = {
