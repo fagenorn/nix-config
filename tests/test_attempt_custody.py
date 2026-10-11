@@ -11,6 +11,7 @@ from agent_tools import attempt_custody as ac
 from agent_tools.attempt_identity import MigrationRefused
 from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_core import TransactionStore
+from agent_tools.transaction_storage import ProofRefused
 
 RUN = "rel_01890a5d-ac96-774b-bcce-b302099a8057"
 WORKTREE = "/work/wt-14"
@@ -350,7 +351,12 @@ class SettlePlanTest(unittest.TestCase):
     def test_a_sealed_transaction_is_final(self):
         self.store.advance(self.id, "abandoned", reason="owner:failed", external_state="known")
         merged = attempt("merged", source="superseded", result=result("merged", "b" * 40))
-        self.assertEqual(self.plan(merged), ())
+        self.assertEqual(self.plan(merged), (Op(
+            "supplement", reason="reconciled_merge",
+            reference=telemetry_digest(merged["result"])),))
+        self.assertEqual(self.plan(merged, delivered=True), self.plan(merged))
+        self.assertEqual(self.plan(attempt("failed", source="owner", result=result("failed"))),
+                         ())
         with self.assertRaises(ac.ProjectionMismatch):
             self.plan(attempt("active"))
 
@@ -507,6 +513,25 @@ class SettlePlanTest(unittest.TestCase):
         self.assertEqual(self.plan(attempt("active"), delivered=True), ())
         with self.assertRaises(ac.ProjectionMismatch):
             self.plan(attempt("active"))
+
+    def test_a_delivered_record_the_core_parked_unconverged_is_never_resumed(self):
+        seal = Op("seal_succeeded", executor_id="14:1:seal", reason="delivered")
+        self.store.advance(self.id, "attention_required", reason="expiry")
+        self.assertFalse(ac.unconverged(self.store.load(self.id)))
+        self.assertEqual(self.plan(attempt("active"), delivered=True), (seal,))
+        self.fresh()
+        held = self.store.acquire(self.id, executor_id="14:1:seal", subject_path=WORKTREE,
+                                  ttl_ms=240 * MINUTE).custody
+        for target in ac.FORWARD_STATES:
+            self.store.advance(self.id, target, reason="delivered", custody=held)
+        self.now = T0 + 180 * MINUTE  # past the convergence window the core caps at two hours
+        with self.assertRaises(ProofRefused) as refused:
+            self.store.start_cohort(held)
+        self.assertEqual(refused.exception.reason, "convergence_exhausted")
+        self.store.settle_proof(held)
+        parked = self.store.load(self.id)
+        self.assertEqual((parked.state, ac.unconverged(parked)), ("attention_required", True))
+        self.assertEqual(self.plan(attempt("active"), delivered=True), ())
 
     def test_a_cutover_plan_interrupted_after_any_operation_converges(self):
         resumed = attempt("active", launches=2, deadline="2026-08-13T21:01:00Z")

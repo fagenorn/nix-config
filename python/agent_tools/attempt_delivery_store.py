@@ -1,14 +1,17 @@
-"""The effectful half of the delivery transaction (#339 D2, D7, D17).
+"""The effectful half of the delivery transaction (#339 D2, D5-D7, D17).
 
 Each installed delivery contract has one core transaction whose subject is the contract and
 whose `event` evidence is every delivery object the ledger holds. `settle_delivery` creates
 the transaction of each installed contract that has none and appends the entries each lacks;
 `workflow-state` calls it from `commit_state` after `settle_custody` and before the ledger is
 published, so a write cut in between leaves entries the ledger lacks, which no reader
-consults. The module owns those two core effects: the creation, and the journal appends under
-a short span of the executor `delivery_executor(issue)`. It reaches the core only through
-`agent_tools.attempt_store`'s `reading` and `writing` seams, which own the store lock, the
-clock and the error mapping, and holds no other lock. A terminal transaction is left alone.
+consults. An entry a sealed transaction lacks is recorded as a supplement of its receipt. Once
+the ledger is published `seal_delivery` seals the transaction of each delivered issue
+`succeeded` on the contract's required postconditions, and returns the receipts the custody
+seals cite. The module owns those core effects: the creation, the journal appends under a
+short span of the executor `delivery_executor(issue)`, the supplements and the proof. It
+reaches the core only through `agent_tools.attempt_store`'s `reading` and `writing` seams,
+which own the store lock, the clock and the error mapping, and holds no other lock.
 `agent_tools.attempt_delivery` holds the pure rules.
 """
 
@@ -18,7 +21,9 @@ from typing import Any, NamedTuple
 
 from agent_tools import attempt_custody as custody_rules
 from agent_tools import attempt_delivery as delivery_rules
-from agent_tools.attempt_store import StoreRefused, reading, run_handle, writing
+from agent_tools.attempt_store import (
+    StoreRefused, helper_span, reach_proving, reading, run_handle, settle_sealed, supplement,
+    writing)
 from agent_tools.transaction_core import TransactionStore
 from agent_tools.transaction_history import TERMINALS, Transaction
 
@@ -31,11 +36,8 @@ class _Pending(NamedTuple):
     delivery: Mapping
     entries: tuple[delivery_rules.JournalEntry, ...]
 
-    def lacking(self, transaction: Transaction | None) -> tuple[delivery_rules.JournalEntry, ...]:
-        """The entries `transaction` does not hold; a terminal transaction lacks none here."""
-        if transaction is not None and transaction.state in TERMINALS:
-            return ()
-        held = () if transaction is None else delivery_rules.journaled(transaction)
+    def lacking(self, held: frozenset[str]) -> tuple[delivery_rules.JournalEntry, ...]:
+        """The entries whose ids are not in `held`."""
         return tuple(entry for entry in self.entries if entry.evidence_id not in held)
 
 
@@ -110,20 +112,22 @@ def _create(core: TransactionStore, run: str, ordinal: int, pending: _Pending) -
         subject, **delivery_rules.delivery_creation_arguments(subject))
 
 
+def _held(core: TransactionStore, transaction: Transaction) -> frozenset[str]:
+    """The journal ids `transaction` holds: its evidence and, once sealed, the supplements of
+    its receipt."""
+    supplements = () if transaction.terminal is None else core.post_terminal_observations(
+        transaction.terminal["receipt_digest"])
+    return delivery_rules.journaled(transaction, supplements)
+
+
 def _span(core: TransactionStore, store: Path, transaction: Transaction, issue: int,
           now_ms: int) -> Any:
-    """The custody the journal appends run under: the transaction's open span of this
-    executor that has not lapsed, else a new one. Over a lapsed span `acquire` is called
-    directly, and the core records the lapse."""
-    executor, span = delivery_rules.delivery_executor(issue), transaction.custody
-    if span is not None and span.executor_id == executor:
-        lease = core.inspect_lease(
-            delivery_rules.delivery_lease_key(transaction.subject["run"], issue))
-        if not custody_rules.span_lapsed(span, lease, now_ms):
-            return span
-    return core.acquire(
-        transaction.transaction_id, executor_id=executor, subject_path=str(store.parents[1]),
-        ttl_ms=delivery_rules.HELPER_TTL_MS).custody
+    """The custody the delivery helpers run under: the transaction's open span of this
+    executor that has not lapsed, else a new one."""
+    return helper_span(
+        core, transaction, executor=delivery_rules.delivery_executor(issue),
+        lease_key=delivery_rules.delivery_lease_key(transaction.subject["run"], issue),
+        subject_path=str(store.parents[1]), now_ms=now_ms)
 
 
 def _append(core: TransactionStore, store: Path, transaction: Transaction, issue: int,
@@ -139,7 +143,8 @@ def _append(core: TransactionStore, store: Path, transaction: Transaction, issue
 def settle_delivery(store: Path, state: dict, *, now_ms: int,
                     canonical_text: Callable[[Any], str]) -> None:
     """Create the delivery transaction of each installed contract of `state` that has
-    none, and append the journal entries each transaction lacks.
+    none, and append the journal entries each transaction lacks; a sealed transaction takes
+    each as a supplement of its receipt (#339 D6).
 
     The read phase takes no lock: with no contract, or no transaction missing and no entry
     lacking, nothing is created, not even the store. Otherwise the write phase runs under the
@@ -159,7 +164,7 @@ def settle_delivery(store: Path, state: dict, *, now_ms: int,
                 core, run, issue, delivery["contract_digest"])[1]
             work = _Pending(issue, delivery,
                             delivery_rules.journal_entries(delivery, canonical_text))
-            if transaction is None or work.lacking(transaction):
+            if transaction is None or work.lacking(_held(core, transaction)):
                 pending.append(work)
     if not pending:
         return
@@ -169,6 +174,106 @@ def settle_delivery(store: Path, state: dict, *, now_ms: int,
                                                work.delivery["contract_digest"])
             if transaction is None:
                 transaction = _create(core, run, ordinal, work)
-            lacking = work.lacking(transaction)
-            if lacking:
+            lacking = work.lacking(_held(core, transaction))
+            if lacking and transaction.state in TERMINALS:
+                for entry in lacking:
+                    supplement(core, transaction.terminal["receipt_digest"],
+                               outcome="satisfied", reason=entry.evidence_id,
+                               reference=entry.reference)
+            elif lacking:
                 _append(core, store, transaction, work.issue, lacking, now_ms)
+
+
+class _Observed:
+    """The observer `collect_obligation` calls: it reads nothing but the observation id the
+    ledger bound to each required postcondition."""
+
+    def __init__(self, observations: Mapping[str, str]) -> None:
+        self._observations = observations
+
+    def observe(self, request: Mapping[str, Any]) -> dict[str, str]:
+        return {"outcome": "satisfied", "reason": delivery_rules.OBSERVED,
+                "reference": self._observations[request["obligation_id"]]}
+
+
+def _sealing(core: TransactionStore, state: dict,
+             delivered: frozenset[int]) -> Iterator[tuple[int, Mapping, Transaction]]:
+    """Each delivered issue's delivery object and its transaction in this run, issues
+    ascending; an issue whose transaction does not exist yet is left out."""
+    run = state["transaction_id"]
+    for issue, delivery in _installed(state):
+        if issue in delivered:
+            transaction = delivery_of(core, run, issue, delivery["contract_digest"])[1]
+            if transaction is not None:
+                yield issue, delivery, transaction
+
+
+def _open(transaction: Transaction) -> bool:
+    """Whether a proof is still to be settled: not sealed, and not parked unconverged (D27)."""
+    return transaction.state not in TERMINALS and not custody_rules.unconverged(transaction)
+
+
+def delivery_pending(store: Path, state: dict, delivered: frozenset[int]) -> bool:
+    """Whether some delivered issue's delivery transaction has a proof left to settle, read
+    without a lock. One the core parked unconverged is not pending (#339 D27)."""
+    with reading(store, 0) as core:  # lookup and load read no clock
+        return core is not None and any(
+            _open(transaction) for _, _, transaction in _sealing(core, state, delivered))
+
+
+def unconverged_deliveries(store: Path, state: dict, delivered: frozenset[int]) -> frozenset[int]:
+    """The issues of `delivered` whose delivery transaction the core parked unconverged (D27),
+    read without a lock: the issues whose custody seals are not pending."""
+    with reading(store, 0) as core:
+        return frozenset() if core is None else frozenset(
+            issue for issue, _, transaction in _sealing(core, state, delivered)
+            if custody_rules.unconverged(transaction))
+
+
+def _seal(core: TransactionStore, store: Path, transaction: Transaction, issue: int,
+          delivery: Mapping, now_ms: int) -> Transaction:
+    """Prove one delivery transaction (#339 D5, D19): its forward states, then each required
+    obligation whose latest observation is not an admissible `satisfied`, then the cohort and
+    the settlement, in the core's order, all under one span."""
+    span = _span(core, store, transaction, issue, now_ms)
+    transaction = reach_proving(core, transaction, span)
+    observer = _Observed(dict(delivery_rules.collections(delivery)))
+    for entry in transaction.proof["obligations"]:
+        if not (entry["latest_outcome"] == "satisfied" and entry["latest_admissible"]):
+            core.collect_obligation(span, obligation_id=entry["obligation_id"],
+                                    observer=observer)
+    return settle_sealed(core, span)
+
+
+def seal_delivery(store: Path, state: dict, *, now_ms: int,
+                  delivered: frozenset[int]) -> dict[int, str]:
+    """Seal the delivery transaction of each delivered issue `succeeded` on the contract's
+    required postconditions, after the ledger is published (#339 D5).
+
+    The read phase takes no lock and, with nothing to prove, returns what it found. Otherwise
+    the write phase proves each transaction that is still open, issues ascending, a seal a
+    cut write left half done resuming from the state it reached. It returns the receipt
+    digest of every delivered issue whose transaction is `succeeded`, which the custody seals
+    cite; a proof the core parked unconverged yields none (D27).
+    """
+    receipts: dict[int, str] = {}
+    work = []
+    with reading(store, now_ms) as core:
+        if core is None:
+            return receipts
+        for issue, delivery, transaction in _sealing(core, state, delivered):
+            if transaction.state == "succeeded":
+                receipts[issue] = transaction.terminal["receipt_digest"]
+            elif _open(transaction):
+                work.append((issue, delivery))
+    if not work:
+        return receipts
+    with writing(store, now_ms) as core:
+        run = state["transaction_id"]
+        for issue, delivery in work:
+            transaction = delivery_of(core, run, issue, delivery["contract_digest"])[1]
+            if _open(transaction):
+                transaction = _seal(core, store, transaction, issue, delivery, now_ms)
+            if transaction.state == "succeeded":
+                receipts[issue] = transaction.terminal["receipt_digest"]
+    return receipts

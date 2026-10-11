@@ -66,6 +66,7 @@ agent-workflow-tests:
     home/common/agent-skills/tests/test_attempt_custody.py \
     home/common/agent-skills/tests/test_control_cutover.py \
     home/common/agent-skills/tests/test_control_decisions.py \
+    home/common/agent-skills/tests/test_delivery_sealing.py \
     home/common/agent-skills/tests/test_host_admission.py \
     home/common/agent-skills/tests/test_admission_replay.py \
     home/common/agent-skills/tests/test_delivery_model.py \

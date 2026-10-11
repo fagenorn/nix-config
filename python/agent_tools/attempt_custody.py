@@ -58,11 +58,16 @@ LIVE_STATES = ("active", "handed_off", "suspended")
 # the seal over a delivered issue (#339 D4, D5).
 CAPACITY_RELEASED = "capacity_released"
 DELIVERED = "delivered"
+# The reason of a supplement over an `abandoned` receipt whose record a reconcile found merged
+# (#339 D6), and the reserved reason with which the core parks a proof that cannot converge
+# (D27).
+RECONCILED_MERGE = "reconciled_merge"
+UNCONVERGED = "proof_did_not_converge"
 # The core states a `succeeded` seal passes through, in order; a delivered record may be found
 # in any of them by a seal that was cut partway (#339 D19b).
 FORWARD_STATES = ("awaiting_verification", "ready", "publishing", "published", "proving")
 OPERATIONS = ("create", "acquire", "release", "reap", "park", "unpark", "renew",
-              "record_result", "seal", "claim", "seal_succeeded")
+              "record_result", "seal", "claim", "seal_succeeded", "supplement")
 
 _CLAIM_KEYS = frozenset({"roles", "route"})
 _VERDICT_STATES = ("stopped", "failed", "merged")
@@ -329,6 +334,16 @@ def merge_recorded(issue_state: Mapping, attempt: Mapping) -> bool:
     return (postconditions.get("pr_merged") or {}).get("state") == "observed"
 
 
+def unconverged(transaction: Transaction) -> bool:
+    """Whether the core parked `transaction` because its proof did not converge (#339 D27): it
+    is `attention_required` and its last transition carries the reserved reason. Such a
+    transaction is never resumed."""
+    if transaction.state != "attention_required":
+        return False
+    last = next(event for event in reversed(transaction.events) if event["type"] == "transitioned")
+    return last["reason"] == UNCONVERGED
+
+
 def span_lapsed(custody: Any, lease: Mapping | None, now_ms: int) -> bool:
     """Whether the custody's span has lapsed at `now_ms`: true unless `lease` still names the
     custody's epoch and instance and `now_ms < expires_at`. This is the core's own lapse
@@ -345,8 +360,8 @@ class Operation:
     """One core operation of a settle plan; `kind` is one of `OPERATIONS`.
 
     `acquire`, `record_result`, `claim` and `seal_succeeded` carry `executor_id`; `acquire` and
-    `renew` carry `ttl_ms`; `reap`, `park`, `unpark`, `seal` and `seal_succeeded` carry
-    `reason`; `claim` carries `reference`; every other field is None.
+    `renew` carry `ttl_ms`; `reap`, `park`, `unpark`, `seal`, `seal_succeeded` and `supplement`
+    carry `reason`; `claim` and `supplement` carry `reference`; every other field is None.
     """
 
     kind: str
@@ -446,7 +461,11 @@ def settle_plan(issue_state: Mapping, attempt: Mapping, transaction: Transaction
     - `gate_open`: a release opened the `host_capacity` gate; a `host_capacity` suspension is
       woken with `capacity_released`.
     - `delivered`: the issue's delivery is complete; the record holds no launch span and the
-      plan ends with `seal_succeeded`, or is empty over a sealed transaction.
+      plan ends with `seal_succeeded`, or is empty over a sealed transaction or one the core
+      parked unconverged (D27).
+
+    A sealed `abandoned` transaction over a record a reconcile found `merged` plans one
+    `supplement` of that merge (D6, D24g), delivered or not.
 
     Raises only `ProjectionMismatch`.
     """
@@ -466,6 +485,12 @@ def settle_plan(issue_state: Mapping, attempt: Mapping, transaction: Transaction
                 raise ProjectionMismatch(
                     f"{current}: the custody transaction is {transaction.state} but the "
                     f"attempt is {state}")
+            if transaction.state == "abandoned" and state == "merged" \
+                    and attempt["result_source"] == "superseded":
+                return (Operation("supplement", reason=RECONCILED_MERGE,
+                                  reference=telemetry_digest(attempt["result"])),)
+            return ()
+        if delivered and unconverged(transaction):
             return ()
         if delivered and transaction.state in FORWARD_STATES:
             return (_seal_succeeded(current),)

@@ -32,7 +32,8 @@ from agent_tools.attempt_custody import (
     stall_count,
     stalled,
 )
-from agent_tools.attempt_delivery_store import installing_runs, settle_delivery
+from agent_tools.attempt_delivery_store import (
+    delivery_pending, installing_runs, seal_delivery, settle_delivery, unconverged_deliveries)
 from agent_tools.attempt_identity import (
     RunIdentity, classify, issue_set_caller_key, minted_plan, prior_run_violation)
 from agent_tools.transaction_storage import is_id
@@ -1491,23 +1492,40 @@ def commit_state(run_dir: Path, state_path: Path, state: dict[str, Any], *,
     ``bound_remainders`` the 9 -> 10 plan of a binding write, ``report`` an owner result it
     submits; the issues whose delivery is complete give up their launch spans; a refusal
     leaves the ledger untouched), then publishes the state atomically and applies the seals
-    the settle deferred, in that order (#338 D4, #339).
+    the settle deferred: the delivery proofs first, then the custody seals that cite their
+    receipts (#338 D4, #339 D5).
     """
     settle_admission(state, at=state["updated_at"])
     validate_state(state, run_id=run_id, identity=identity)
     now_ms = custody_clock(state)
     store = attempt_store.ledger_store(state_path)
-    runtime = _delivery()
-    delivered = frozenset(int(issue) for issue, issue_state in state["issues"].items()
-                          if runtime.delivery_complete(issue_state))
+    delivered = delivered_issues(state)
     pending = attempt_store.settle_custody(
         store, state, now_ms=now_ms, canonical=canonical_worktree_path,
         bound_launches=bound_launches or {}, bound_remainders=bound_remainders or {},
         report=report, delivered=delivered)
     settle_delivery(store, state, now_ms=now_ms, canonical_text=lambda value: (
-        runtime.model.canonical_bytes(value).decode("utf-8")))
+        _delivery().model.canonical_bytes(value).decode("utf-8")))
     atomic_write_state(run_dir, state_path, state)
-    attempt_store.seal_custody(store, pending, now_ms=now_ms)
+    receipts = seal_delivery(store, state, now_ms=now_ms, delivered=delivered)
+    attempt_store.seal_custody(store, pending, now_ms=now_ms, receipts=receipts)
+
+
+def delivered_issues(state: dict[str, Any]) -> frozenset[int]:
+    """The issues of `state` whose delivery is complete."""
+    runtime = _delivery()
+    return frozenset(int(issue) for issue, issue_state in state["issues"].items()
+                     if runtime.delivery_complete(issue_state))
+
+
+def seals_due(store: Path, state: dict[str, Any], now_ms: int) -> tuple[
+        frozenset[int], list[attempt_store.PendingSeal]]:
+    """The delivered issues of a stored `state` and the custody seals an earlier write left
+    undone, read without a lock. An issue whose delivery proof parked unconverged has no
+    seal pending (#339 D27)."""
+    delivered = delivered_issues(state)
+    sealable = delivered - unconverged_deliveries(store, state, delivered)
+    return delivered, attempt_store.pending_seals(store, state, now_ms=now_ms, delivered=sealable)
 
 
 class OwnerCall(NamedTuple):
@@ -1758,8 +1776,9 @@ def transact(
             # An identical repeat of a command whose seal never ran completes it (#338 D24).
             now_ms = custody_clock(state)
             store = attempt_store.ledger_store(state_path)
-            attempt_store.seal_custody(
-                store, attempt_store.pending_seals(store, state, now_ms=now_ms), now_ms=now_ms)
+            delivered, pending = seals_due(store, state, now_ms)
+            receipts = seal_delivery(store, state, now_ms=now_ms, delivered=delivered)
+            attempt_store.seal_custody(store, pending, now_ms=now_ms, receipts=receipts)
         return result
 
 
@@ -2428,11 +2447,26 @@ def command_migrate(args: argparse.Namespace) -> int:
     """Exit 0 with refusals as data; exit 2 on usage, an unreadable workflows directory
     or a store error."""
     root = resolve_repo_root(args.repo_root)
+    superpowers = root / ".superpowers"
+
+    def pending(handle: str) -> bool:
+        """Whether the stored ledger `handle` has a seal a crash left undone. An unreadable
+        document, or an `updated_at` that is not a UTC `...Z` stamp, has none to find."""
+        try:
+            state = json.loads(
+                (superpowers / "workflows" / handle / "state.json").read_text(encoding="utf-8"))
+            now_ms = at_ms(state["updated_at"])
+        except (ValueError, KeyError, TypeError):
+            return False
+        store = attempt_store.store_root(superpowers)
+        delivered, seals = seals_due(store, state, now_ms)
+        return bool(seals) or delivery_pending(store, state, delivered)
+
     print_json(attempt_store.migration_report(
-        root / ".superpowers", apply=args.apply,
+        superpowers, apply=args.apply,
         upgrade=partial(upgrade_state, migration_contracts={}), validate=validate_state,
         bind=lambda handle: transact(args.repo_root, handle, lambda state: (None, False)),
-        refusals=(WorkflowError,)))
+        pending=pending, refusals=(WorkflowError,)))
     return 0
 
 

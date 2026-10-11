@@ -22,6 +22,7 @@ import stat
 import tempfile
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, NamedTuple
 
 from agent_tools import attempt_custody as custody_rules
@@ -34,7 +35,8 @@ from agent_tools.attempt_identity import (
 from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_core import TransactionError, TransactionStore
 from agent_tools.transaction_history import TERMINALS, Transaction
-from agent_tools.transaction_storage import LeaseUnavailable, UnknownTransaction, is_id
+from agent_tools.transaction_storage import (
+    LeaseUnavailable, ProofRefused, UnknownTransaction, is_id)
 
 BOUND_SCHEMA_VERSION = 8  # bound to its run; custody not yet in the core
 CUSTODY_SCHEMA_VERSION = 9  # attempt custody is held in the core
@@ -407,15 +409,18 @@ def check_unlocked(state_path: Path, document: Any, *, run_id: str, upgrade: Cal
 
 
 class PendingSeal(NamedTuple):
-    """A seal not yet applied: the custody transaction to abandon and the seal's reason.
+    """A seal not yet applied: the custody transaction to seal and the seal's reason.
 
     `reap` is the reason of the reap `seal_custody` applies first, for a seal whose span
-    lapsed after its ledger write; None when the seal has no such prerequisite.
+    lapsed after its ledger write; None when the seal has no such prerequisite. A `succeeded`
+    seal carries the `issue` whose delivery receipt it cites and the `executor` of its span.
     """
 
     transaction_id: str
     reason: str
     reap: str | None = None
+    issue: int | None = None
+    executor: str | None = None
 
 
 class _Planned(NamedTuple):
@@ -658,8 +663,8 @@ def _read_plans(store: Path, state: dict, *, now_ms: int,
     whether the host reported its owner gone, whether its `host_capacity` gate is open) and
     whether the issue is in `delivered`. Nothing is created. With `canonical`, each live
     record that has a custody transaction is also held to its subject's worktree
-    (`_require_recorded_worktree`). A `seal_succeeded` operation is not applied by this
-    module, so a plan keeps none and a plan that held only that is dropped.
+    (`_require_recorded_worktree`). A `supplement` the receipt already holds is dropped, so a
+    settled ledger plans nothing.
     """
     plans, admission = [], state["admission"]
     for key in sorted(state["issues"], key=int):
@@ -690,8 +695,10 @@ def _read_plans(store: Path, state: dict, *, now_ms: int,
                     delivered=issue in delivered)
             except custody_rules.ProjectionMismatch as error:
                 raise StoreRefused(f"custody projection mismatch: {error}") from error
-            operations = tuple(operation for operation in operations
-                               if operation.kind != "seal_succeeded")
+            if operations and operations[0].kind == "supplement" and _recorded(
+                    _core(store, now_ms), transaction.terminal["receipt_digest"],
+                    operations[0].reason, operations[0].reference):
+                continue
             if operations:
                 plans.append(_Planned(issue, record, remainder, latest, transaction, operations))
     return plans
@@ -700,23 +707,34 @@ def _read_plans(store: Path, state: dict, *, now_ms: int,
 _SEAL_COMPLETIONS = (("seal",), ("reap", "seal"))
 
 
-def pending_seals(store: Path, state: dict, *, now_ms: int) -> list[PendingSeal]:
+def _succeeded_seal(transaction_id: str, plan: _Planned,
+                    operation: custody_rules.Operation) -> PendingSeal:
+    return PendingSeal(transaction_id, operation.reason, issue=plan.issue,
+                       executor=operation.executor_id)
+
+
+def pending_seals(store: Path, state: dict, *, now_ms: int,
+                  delivered: frozenset[int] = frozenset()) -> list[PendingSeal]:
     """The seals a write left undone (#338 D24), found lock-free; nothing is created.
 
-    These are the seals of every record whose settle plan, with no owner report, no bind and
-    no delivered issue, is a seal completion: one `seal`, or the `reap` of a span that has
-    lapsed (another transaction took the worktree once its window passed, say) and then the
-    `seal` (D16). They come in read order, in the shape `seal_custody` takes. Every other
-    plan is left to the settle step of a write that changes the ledger.
+    These are the seals of every record whose settle plan, with no owner report and no bind,
+    is a seal completion: one `seal`, or the `reap` of a span that has lapsed (another
+    transaction took the worktree once its window passed, say) and then the `seal` (D16), or
+    the one `seal_succeeded` of a record of an issue in `delivered`, which the caller limits to
+    those whose delivery proof has not parked unconverged (#339 D5, D27). They come in read
+    order, in the shape `seal_custody` takes. Every other plan is left to the next write.
     """
     pending = []
     for plan in _read_plans(store, state, now_ms=now_ms, bound_launches={}, bound_remainders={},
-                            report=None):
+                            report=None, delivered=delivered):
         operations = plan.operations
-        if tuple(operation.kind for operation in operations) in _SEAL_COMPLETIONS:
+        kinds = tuple(operation.kind for operation in operations)
+        if kinds in _SEAL_COMPLETIONS:
             pending.append(PendingSeal(
                 plan.transaction.transaction_id, operations[-1].reason,
                 operations[0].reason if len(operations) == 2 else None))
+        elif kinds == ("seal_succeeded",):
+            pending.append(_succeeded_seal(plan.transaction.transaction_id, plan, operations[0]))
     return pending
 
 
@@ -794,7 +812,7 @@ def _apply(core: TransactionStore, run: str, plan: _Planned, subject: dict | Non
     """Apply one plan's operations in order, each against the transaction's current snapshot.
 
     `created` maps the creation key of each transaction this settle created to its id. The
-    seal of an issue's latest record is returned, not applied (#338 D18).
+    seal of an issue's latest record and the `succeeded` seals are returned, not applied.
     """
     snapshot, seals = plan.transaction, []
     for operation in plan.operations:
@@ -839,6 +857,11 @@ def _apply(core: TransactionStore, run: str, plan: _Planned, subject: dict | Non
             else:
                 snapshot = core.advance(identifier, "abandoned", reason=operation.reason,
                                         external_state="known", custody=custody)
+        elif operation.kind == "seal_succeeded":
+            seals.append(_succeeded_seal(identifier, plan, operation))
+        elif operation.kind == "supplement":
+            supplement(core, snapshot.terminal["receipt_digest"], outcome="satisfied",
+                       reason=operation.reason, reference=operation.reference)
         else:
             raise ValueError(f"unknown custody operation {operation.kind!r}")
     return seals
@@ -861,14 +884,19 @@ def settle_custody(store: Path, state: dict, *, now_ms: int, canonical: Callable
     delivery is complete (their records give up their launch spans), `canonical` the worktree
     comparison identity: a new subject's worktree is made with it, and a live record whose
     existing custody subject names another worktree is a `custody projection mismatch` in the
-    read phase. It returns the seals of each issue's latest record, which `seal_custody`
-    applies after the ledger is replaced.
+    read phase. It returns the seals of each issue's latest record and the `succeeded` seals of
+    the delivered issues, which `seal_custody` applies after the ledger is replaced; a settle
+    that holds nothing else takes no lock.
     """
     planned = _read_plans(store, state, now_ms=now_ms, bound_launches=bound_launches,
                           bound_remainders=bound_remainders, report=report, delivered=delivered,
                           canonical=canonical)
     if not planned:
         return []
+    if all(operation.kind == "seal_succeeded" for plan in planned
+           for operation in plan.operations):
+        return [_succeeded_seal(plan.transaction.transaction_id, plan, plan.operations[0])
+                for plan in planned]
     run, seals, created = state["transaction_id"], [], {}
     with store_lock(store):
         core = _core(store, now_ms)
@@ -880,21 +908,104 @@ def settle_custody(store: Path, state: dict, *, now_ms: int, canonical: Callable
     return seals
 
 
-def seal_custody(store: Path, pending: list[PendingSeal], *, now_ms: int) -> None:
+def _recorded(core: TransactionStore, receipt_digest: str, reason: str, reference: str) -> bool:
+    return any(entry["reason"] == reason and entry["reference"] == reference
+               for entry in core.post_terminal_observations(receipt_digest))
+
+
+def supplement(core: TransactionStore, receipt_digest: str, *, outcome: str, reason: str,
+               reference: str) -> None:
+    """Record what arrived for a sealed transaction as a post-terminal observation of its
+    receipt (#339 D6), unless it is there already. The caller holds the store lock."""
+    if not _recorded(core, receipt_digest, reason, reference):
+        core.record_post_terminal(
+            receipt_digest, observation={"outcome": outcome, "reason": reason,
+                                         "reference": reference}, contradicts_ground=False)
+
+
+def helper_span(core: TransactionStore, transaction: Transaction, *, executor: str,
+                lease_key: str, subject_path: str, now_ms: int) -> Any:
+    """The custody a helper's writes run under (#339 D24b): the transaction's open span of
+    `executor` that has not lapsed, else a new one; a key another holds is `LeaseUnavailable`."""
+    span = transaction.custody
+    if span is not None and span.executor_id == executor and not custody_rules.span_lapsed(
+            span, core.inspect_lease(lease_key), now_ms):
+        return span
+    return core.acquire(transaction.transaction_id, executor_id=executor,
+                        subject_path=subject_path, ttl_ms=delivery_rules.HELPER_TTL_MS).custody
+
+
+def reach_proving(core: TransactionStore, transaction: Transaction, span: Any) -> Transaction:
+    """Take a transaction to `proving` under `span` (#339 D19b): out of a parking, then through
+    each of `FORWARD_STATES` it has not reached."""
+    identifier = transaction.transaction_id
+    if transaction.state == "attention_required":
+        transaction = core.advance(identifier, transaction.parked_from,
+                                   reason=custody_rules.DELIVERED, custody=span)
+    forward = custody_rules.FORWARD_STATES
+    reached = forward.index(transaction.state) + 1 if transaction.state in forward else 0
+    for target in forward[reached:]:
+        transaction = core.advance(identifier, target, reason=custody_rules.DELIVERED,
+                                   custody=span)
+    return transaction
+
+
+def settle_sealed(core: TransactionStore, span: Any) -> Transaction:
+    """Open a cohort under `span` and settle the proof (#339 D19, D27). A cohort a cut seal
+    left open is passed over, spent limits park the transaction unconverged, any other refusal
+    propagates; a transaction not sealed afterwards gives its span up."""
+    try:
+        core.start_cohort(span)
+    except ProofRefused as refusal:
+        if refusal.reason not in ("cohort_open", "convergence_exhausted"):
+            raise
+    settled = core.settle_proof(span)
+    if settled.state not in TERMINALS:
+        core.release(span)
+    return settled
+
+
+def _succeed(core: TransactionStore, snapshot: Transaction, seal: PendingSeal, receipt: str,
+             now_ms: int) -> None:
+    """Seal a custody transaction `succeeded` under the delivery `receipt` it cites (#339 D5);
+    a worktree another custody holds leaves the seal pending."""
+    if custody_rules.unconverged(snapshot):
+        return
+    worktree = snapshot.subject["worktree"]
+    try:
+        span = helper_span(core, snapshot, executor=seal.executor,
+                           lease_key=custody_rules.worktree_key(worktree),
+                           subject_path=worktree, now_ms=now_ms)
+    except LeaseUnavailable:
+        return
+    if delivery_rules.RECEIPT_EVIDENCE not in {e["evidence_id"] for e in snapshot.evidence}:
+        core.record_evidence(span, evidence_id=delivery_rules.RECEIPT_EVIDENCE, form="event",
+                             reference=receipt)
+    reach_proving(core, snapshot, span)
+    settle_sealed(core, span)
+
+
+def seal_custody(store: Path, pending: list[PendingSeal], *, now_ms: int,
+                 receipts: Mapping[int, str] = MappingProxyType({})) -> None:
     """Apply the seals `settle_custody` or `pending_seals` returned, after the ledger write.
 
     Does nothing for `[]`. Under the store lock, each seal's `reap`, when it names one, is
     applied before its `advance` to `abandoned` (the core's `reap` writes nothing unless the
-    span has lapsed). A transaction already sealed is left alone, so a repeat is safe.
+    span has lapsed). A `succeeded` seal waits for its issue's receipt in `receipts`. A
+    transaction already sealed is left alone, so a repeat is safe.
     """
-    if not pending:
+    due = [seal for seal in pending if seal.issue is None or seal.issue in receipts]
+    if not due:
         return
     with store_lock(store):
         core = _core(store, now_ms)
         with _core_errors():
-            for seal in pending:
+            for seal in due:
                 snapshot = core.load(seal.transaction_id)
                 if snapshot.state in TERMINALS:
+                    continue
+                if seal.issue is not None:
+                    _succeed(core, snapshot, seal, receipts[seal.issue], now_ms)
                     continue
                 if seal.reap is not None:
                     snapshot = core.reap(seal.transaction_id, reason=seal.reap)
@@ -909,16 +1020,22 @@ def retain_result(store: Path, run: str, *, issue: int, attempt: int, launch: in
     The report is recorded with `record_owner_result` against the fence of the latest span
     of `launch` (the launch ordinal of `attempt` of `issue` in `run`), under the store lock,
     on the clock `now_ms`. It returns False and writes nothing when the attempt has no custody
-    transaction, the transaction is terminal, the core issued no span for that launch, or
-    that span already holds a result with the same `telemetry_digest`.
+    transaction, the core issued no span for that launch, or that span already holds a result
+    with the same `telemetry_digest`. A sealed one takes it as a supplement (D6): True.
     """
     if custody_of(store, run, issue, attempt) is None:
         return False
     executor = custody_rules.launch_id(issue, attempt, launch)
     with store_lock(store):
         transaction = custody_of(store, run, issue, attempt)
-        if transaction is None or transaction.state in TERMINALS:
+        if transaction is None:
             return False
+        if transaction.state in TERMINALS:
+            with _core_errors():
+                supplement(_core(store, now_ms), transaction.terminal["receipt_digest"],
+                           outcome="unknown", reason=f"owner_result:{executor}",
+                           reference=telemetry_digest(report))
+            return True
         fence = custody_rules.launch_fence(transaction, executor)
         if fence is None or custody_rules.result_recorded(
                 transaction, executor, telemetry_digest(report)):
@@ -1098,22 +1215,9 @@ def migration_row(superpowers: Path, ledger: str, *, upgrade: Callable[..., dict
     return row
 
 
-def _seals_pending(superpowers: Path, ledger: str) -> bool:
-    """Whether the stored document of `ledger` has a seal a crash left undone (read-only).
-
-    An unreadable document or a `updated_at` that is not a UTC `...Z` stamp has none to find.
-    """
-    try:
-        document = json.loads(
-            (superpowers / "workflows" / ledger / "state.json").read_text(encoding="utf-8"))
-        now_ms = custody_rules.at_ms(document["updated_at"])
-    except (ValueError, KeyError, TypeError):
-        return False
-    return bool(pending_seals(store_root(superpowers), document, now_ms=now_ms))
-
-
 def migration_report(superpowers: Path, *, apply: bool, upgrade: Callable[..., dict],
                      validate: Callable[..., dict], bind: Callable[[str], None],
+                     pending: Callable[[str], bool],
                      refusals: tuple[type[Exception], ...]) -> dict:
     """The `attempt-migration-report/v1` of every ledger under `superpowers/workflows`.
 
@@ -1122,8 +1226,8 @@ def migration_report(superpowers: Path, *, apply: bool, upgrade: Callable[..., d
     ledger's lock, so a refusal under the lock (`LedgerRefused`) replaces the advisory dry-run
     verdict, and the rows are then recomputed. Any other `StoreRefused` of a ledger (a fencing
     refusal, a projection mismatch) is likewise its `invalid_state` row, and later ledgers are
-    still bound. A `current` ledger whose document has a seal
-    pending (`pending_seals`, #338 D24) gets the same `bind(handle)`, which completes the seal
+    still bound. A `current` ledger for which the caller's `pending(handle)` finds a seal
+    undone (#338 D24, #339 D5) gets the same `bind(handle)`, which completes the seal
     without rewriting the ledger; its verdict stays `current`, and one with nothing pending is
     not opened, locked or written. Refusals are reported data; a missing `workflows` directory
     raises `StoreRefused`, and a `StoreFault` raises.
@@ -1138,7 +1242,7 @@ def migration_report(superpowers: Path, *, apply: bool, upgrade: Callable[..., d
             if not binding and row["verdict"] != "current":
                 continue
             try:
-                if not binding and not _seals_pending(superpowers, ledger):
+                if not binding and not pending(ledger):
                     continue
                 bind(ledger)
             except StoreFault:
