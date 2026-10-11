@@ -346,3 +346,31 @@ class StoreReadTest(Cutover, unittest.TestCase):
         resumed = self.reply(4, recorded=BOTH)
         self.assertNotIn(LIVE, resumed["admission"]["waiting"])
         self.assertIn(f"{LIVE}:1:2", self.launched(resumed))
+
+    def test_a_remainders_occupancy_is_counted_from_the_store(self):
+        self.four_slots()
+        waiting = {**MATCHING, LIVE: None}
+        for minute in (31, 32):
+            self.reply(minute, recorded=waiting, contracts=True, forge={DELIVERED: MERGED})
+        held = f"{DELIVERED}:r1:1"
+        self.assertEqual(self.claim_ids(self.remainder(DELIVERED)),
+                         [f"admission-claim:{held}:2"])
+
+        def drop(document):
+            claims = document["admission"]["claims"]
+            claims[:] = [c for c in claims if c["holder"] != held]
+
+        self.rewrite(drop)
+        report = self.reply(33, recorded=waiting, contracts=True,
+                            forge={DELIVERED: MERGED})["admission"]
+        self.assertEqual((report["waiting"], report["reserved"], report["available"]),
+                         ([LIVE], {"controller": 1, **ROLES}, 0))
+        self.assertIsNone(self.custody(LIVE))
+
+    def test_a_parked_suspension_resumes_in_the_sweep_that_frees_capacity(self):
+        self.spawn(DELIVERED, LIVE)
+        self.reply(1, recorded=BOTH, owners=[self.held("launch_refused")])
+        self.assertEqual(self.custody(LIVE).state, "attention_required")
+        freed = self.reply(2, recorded=BOTH, owners=[self.held(issue=DELIVERED)])
+        self.assertNotIn(LIVE, freed["admission"]["waiting"])
+        self.assertIn(f"{LIVE}:1:2", self.launched(freed))
