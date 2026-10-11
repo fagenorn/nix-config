@@ -378,6 +378,55 @@ class LaunchFenceTest(LifecycleCustody, unittest.TestCase):
         self.assertIn("conflicting terminal result for issue 14 attempt 1", conflict.stderr)
         self.assertIsNone(self.custody(14))
 
+    def test_ac5_attempt_keyed_finish_is_refused_and_its_result_retained(self):
+        self.legacy_owner_resumed_to_launch_2()
+        self.contractless()
+        ledger = self.state_path.read_bytes()
+        launch_1 = ac.launch_fence(self.custody(14), "14:1:1")
+        refused = self.finish_raw(1, self.stopped(), now=T(33), action_id=False, ok=False)
+        self.assertEqual(refused.returncode, 2)
+        self.assertTrue(refused.stderr.startswith(PREFIX + "superseded_launch: "),
+                        refused.stderr)
+        self.assertEqual(self.state_path.read_bytes(), ledger)
+        results = self.events(14, "owner_result")
+        self.assertEqual(len(results), 1)
+        self.assertEqual((results[0]["executor_id"], results[0]["custody"],
+                          results[0]["fence"], results[0]["result"]),
+                         ("14:1:1", "stale", launch_1, self.stopped()))
+        self.assertEqual(self.custody(14).custody.executor_id, "14:1:2")
+        self.finish_raw(1, self.stopped(), now=T(33), action_id=False, ok=False)
+        self.assertEqual(len(self.events(14, "owner_result")), 1)
+        self.assertEqual(self.state_path.read_bytes(), ledger)
+
+    def test_an_earlier_launch_cannot_replace_its_successors_stalled_stop(self):
+        self.spawn_14(minutes=10)
+        for index in range(3):
+            self.suspend(issue=14, attempt=1, blocked_on="usage_limit", now=T(2 * index + 1))
+            self.resume(issue=14, worktree=self.worktree, now=T(2 * index + 2))
+        self.suspend(issue=14, attempt=1, blocked_on="usage_limit", now=T(8))
+        self.contractless()
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual((attempt["state"], attempt["result_source"], len(attempt["launches"])),
+                         ("stopped", "stalled", 4))
+        ledger = self.state_path.read_bytes()
+        refused = self.finish_raw(1, self.stopped("from launch 1"), now=T(9),
+                                  action_id="14:1:1", ok=False)
+        self.assertEqual(refused.returncode, 2)
+        self.assertTrue(refused.stderr.startswith(PREFIX + "superseded_launch: "),
+                        refused.stderr)
+        self.assertEqual(self.state_path.read_bytes(), ledger)
+        (kept,) = self.events(14, "owner_result")
+        self.assertEqual((kept["executor_id"], kept["custody"], kept["result"]),
+                         ("14:1:1", "stale", self.stopped("from launch 1")))
+        self.finish_raw(1, self.stopped("from launch 4"), now=T(9))
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual((attempt["state"], attempt["result_source"]), ("stopped", "owner"))
+        sealed = self.custody(14)
+        receipt = self.core().read_receipt(sealed.terminal["receipt_digest"])
+        self.assertEqual([result["executor_id"] for result in receipt["owner_results"]],
+                         ["14:1:1", "14:1:4"])
+        self.assertEqual(sealed.state, "abandoned")
+
 
 class DeliveredCustody(CustodyReads, DeliveredControlHarness):
     def ledger_path(self):
@@ -406,6 +455,57 @@ class DeliveredCustody(CustodyReads, DeliveredControlHarness):
             "delivery_observations": sorted(observations, key=lambda item: item["id"]),
             "authority_observations": list(authority), "reevaluation_evidence": [],
             "detail_state": "none", "report_path": None, "notes": "late"})
+
+    def reap(self, issue):
+        """Minute 31: the launch has expired and its worktree no longer matches, so the
+        sweep reaps without resuming."""
+        self.control(31, recorded={issue: "mismatch"})
+        attempt = self.records(issue)[0][0]
+        self.assertEqual((attempt["state"], attempt["blocked_on"], len(attempt["launches"])),
+                         ("suspended", "unknown", 1))
+
+    def finish(self, summary, minute, **options):
+        return self.cli("finish", *self.run_args, "--now", at(minute), "--summary-file", "-",
+                        stdin=summary, **options)
+
+    def merge_checkpoint(self, custody, minute):
+        """Select, publish, open and reach the merge stage at `minute`; returns the
+        observations and authority the finishing summary still has to carry."""
+        issue, when = DELIVERED, at(minute)
+        contract = self.built[issue]["contract"]
+        url, head = f"https://github.com/fagenorn/nix-config/pull/{issue}", "a" * 40
+        selection = self.build("selected-output", {
+            "contract": contract, "head": head, "tree": "c" * 40,
+            "acceptance_ref": f".claude/specs/issue-{issue}.md", "review_ref": "clean",
+            "test_ref": "checks"})
+        pending = [self.observed(contract, when, "selected_output", selection=selection),
+                   self.observed(contract, when, "branch_published", head=head),
+                   self.observed(contract, when, "pr_opened", pr_number=issue, pr_url=url,
+                                 head=head)]
+        scope = self.build("scope", {"contract": contract, "stage_id": "merge_pr"})
+        self.cli("checkpoint-delivery", *self.run_args, "--now", when, "--checkpoint-file",
+                 "-", stdin=self.validated("ship-checkpoint", {
+                     "interface_version": 2, "issue": issue, "custody": custody,
+                     "contract_digest": self.model.canonical_digest(contract),
+                     "delivery_observations": sorted(pending, key=lambda item: item["id"]),
+                     "authority_observations": [], "reevaluation_evidence": [],
+                     "requested_scope": scope, "detail_state": "none", "report_path": None,
+                     "notes": ""}))
+        authority = self.build("authority-observation", {
+            "contract": contract, "scope_id": scope["id"], "launch_id": custody["action_id"],
+            "authority_kind": "native_guard", "verdict": "allowed",
+            "reason_code": "guard_allowed", "observed_at": when, "evidence": "merge_pr"})
+        merged = self.observed(contract, when, "pr_merged", pr_number=issue, pr_url=url,
+                               head=head, merge_sha="b" * 40)
+        return [merged], [authority], {"pr_url": url, "merge_sha": "b" * 40}
+
+    def postconditions(self, issue):
+        delivery = self.ledger_document()["issues"][str(issue)]["delivery"]
+        return {name: item["state"] for name, item in delivery["postconditions"].items()}
+
+    def core_files(self):
+        return {path: content for path, content in self.tree().items()
+                if path.startswith(".superpowers/attempt-transactions/")}
 
 
 class MisbindingTest(DeliveredCustody, unittest.TestCase):
@@ -472,6 +572,132 @@ class MisbindingTest(DeliveredCustody, unittest.TestCase):
             with self.subTest(admitted=name):
                 own = self.cli(*argv, stdin=stdin, ok=False, cwd=self.worktrees[DELIVERED])
                 self.assertNotIn(b"fencing violation", own.stderr)
+
+
+class LateLegacyResultTest(LifecycleCustody, unittest.TestCase):
+    def reaped(self):
+        self.spawn_14()
+        self.expire(issue=14, worktree=self.worktree, now=T(31))
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual((attempt["state"], attempt["blocked_on"]), ("suspended", "unknown"))
+
+    def test_ac2_a_late_finish_supersedes_the_reapers_stop_in_the_receipt(self):
+        self.reaped()
+        self.assertEqual(self.finish(1, self.stopped(), now=T(32))["state"], "stopped")
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual((attempt["state"], attempt["result_source"]), ("stopped", "owner"))
+        sealed = self.custody(14)
+        self.assertEqual((sealed.state, sealed.terminal["outcome"]), ("abandoned", "abandoned"))
+        receipt = self.core().read_receipt(sealed.terminal["receipt_digest"])
+        (stop,), (result,) = receipt["stops"], receipt["owner_results"]
+        self.assertEqual((receipt["outcome"], stop["reason"], stop["executor_id"]),
+                         ("abandoned", "expiry", "14:1:1"))
+        self.assertEqual((stop["superseded_by"], result["supersedes"], result["custody"]),
+                         (result["seq"], stop["seq"], "stale"))
+
+    def test_ac2_a_late_merged_finish_is_recorded_and_left_unsealed(self):
+        self.reaped()
+        self.finish(1, self.merged_result(), now=T(32))
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual((attempt["state"], attempt["result_source"]), ("merged", "owner"))
+        open_ = self.custody(14)
+        (stop,) = self.events(14, "stop_synthesized")
+        (result,) = self.events(14, "owner_result")
+        self.assertEqual((result["supersedes"], result["custody"]), (stop["seq"], "stale"))
+        self.assertEqual((open_.state, open_.terminal, open_.custody),
+                         ("attention_required", None, None))
+
+    def test_an_on_time_finish_is_recorded_current_and_sealed(self):
+        self.spawn_14()
+        self.finish(1, self.stopped("on time"), now=T(5))
+        sealed = self.custody(14)
+        receipt = self.core().read_receipt(sealed.terminal["receipt_digest"])
+        (result,) = receipt["owner_results"]
+        self.assertEqual((receipt["outcome"], receipt["stops"], result["custody"],
+                          result["supersedes"]), ("abandoned", [], "current", None))
+        self.assertEqual(sealed.events[-3]["reason"], "owner:stopped")
+
+    def test_a_finish_refused_for_custody_is_retained_without_touching_the_ledger(self):
+        self.spawn_14()
+        self.progress(turn_count=118, context_tokens=20000, now=T(1),
+                      handoff_path=self.write_handoff(14))
+        self.contractless()
+        ledger = self.state_path.read_bytes()
+        refused = self.finish_raw(1, self.stopped(), now=T(2), ok=False)
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("finish requires an active attempt", refused.stderr)
+        self.assertEqual(self.state_path.read_bytes(), ledger)
+        (result,) = self.events(14, "owner_result")
+        self.assertEqual((result["custody"], result["supersedes"]), ("stale", None))
+
+    def test_the_repeat_of_an_interrupted_finish_seals_one_result(self):
+        self.spawn_14()
+        self.contractless()
+        with mock.patch.object(attempt_store, "seal_custody", side_effect=OSError("crash")):
+            self.finish_raw(1, self.stopped(), now=T(5), ok=False)
+        self.assertIsNone(self.custody(14).terminal)
+        self.finish_raw(1, self.stopped(), now=T(6))
+        sealed = self.custody(14)
+        receipt = self.core().read_receipt(sealed.terminal["receipt_digest"])
+        (result,) = receipt["owner_results"]
+        self.assertEqual((sealed.state, result["custody"]), ("abandoned", "current"))
+
+
+class LateSummaryTest(DeliveredCustody, unittest.TestCase):
+    def test_ac2_a_late_summary_supersedes_the_reapers_stop_in_the_receipt(self):
+        custody = self.spawn(DELIVERED)[DELIVERED]
+        self.reap(DELIVERED)
+        finished = json.loads(self.finish(self.summary(custody, "stopped"), 32).stdout)
+        self.assertEqual(finished["kind"], "terminal_failed")
+        attempt = self.records(DELIVERED)[0][0]
+        self.assertEqual((attempt["state"], attempt["result_source"]), ("stopped", "owner"))
+        sealed = self.custody(DELIVERED)
+        receipt = self.core().read_receipt(sealed.terminal["receipt_digest"])
+        (stop,), (result,) = receipt["stops"], receipt["owner_results"]
+        self.assertEqual((receipt["outcome"], stop["reason"], result["custody"]),
+                         ("abandoned", "expiry", "stale"))
+        self.assertEqual((stop["superseded_by"], result["supersedes"]),
+                         (result["seq"], stop["seq"]))
+
+    def test_a_late_summary_without_a_reap_or_from_an_earlier_launch_is_not_adopted(self):
+        custody = self.spawn(DELIVERED)[DELIVERED]
+        self.control(31, recorded={DELIVERED: "matching_issue_branch"})  # reap and resume
+        ledger = self.ledger.read_bytes()
+        refused = self.finish(self.summary(custody, "stopped"), 32, ok=False)
+        self.assertEqual((refused.returncode, refused.stderr),
+                         (2, b"workflow-state: delivery finish refused\n"))
+        self.assertEqual(self.ledger.read_bytes(), ledger)
+        (result,) = self.events(DELIVERED, "owner_result")
+        self.assertEqual((result["executor_id"], result["custody"]),
+                         (f"{DELIVERED}:1:1", "stale"))
+
+    def test_ac4_merged_and_closed_are_observed_apart_from_custody(self):
+        custody = self.spawn(DELIVERED)[DELIVERED]
+        observations, authority, merged = self.merge_checkpoint(custody, 5)
+        self.reap(DELIVERED)
+        self.finish(self.summary(custody, "merged", observations, authority, **merged), 32)
+        attempt = self.records(DELIVERED)[0][0]
+        self.assertEqual((attempt["state"], attempt["result_source"]), ("merged", "owner"))
+        held = self.custody(DELIVERED)
+        (stop,) = self.events(DELIVERED, "stop_synthesized")
+        (result,) = self.events(DELIVERED, "owner_result")
+        self.assertEqual((held.terminal, held.custody, result["supersedes"]),
+                         (None, None, stop["seq"]))
+        before = self.postconditions(DELIVERED)
+        self.assertEqual((before["pr_merged"], before["tracker_closed"]),
+                         ("observed", "pending"))
+        core = self.core_files()
+        contract = self.built[DELIVERED]["contract"]
+        request = json.loads(self.request(40, recorded={DELIVERED: "matching_issue_branch"},
+                                          contracts=True))
+        request["delivery_observations"][str(DELIVERED)] = [self.observed(
+            contract, at(40), "tracker_closed", close_reason="completed",
+            observation_identity=f"github:issue:{DELIVERED}:closed")]
+        self.cli("control", *self.run_args, "--request-file", "-",
+                 stdin=json.dumps(request).encode())
+        self.assertEqual(self.postconditions(DELIVERED),
+                         {**before, "tracker_closed": "observed"})
+        self.assertEqual(self.core_files(), core)
 
 
 if __name__ == "__main__":

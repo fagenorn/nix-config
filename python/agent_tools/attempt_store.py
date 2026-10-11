@@ -671,6 +671,34 @@ def seal_custody(store: Path, pending: list[PendingSeal], *, now_ms: int) -> Non
                                  external_state="known", custody=snapshot.custody)
 
 
+def retain_result(store: Path, run: str, *, issue: int, attempt: int, launch: int,
+                  report: dict, now_ms: int) -> bool:
+    """Record a refused owner `report` on the attempt's custody transaction (#338 D6, D20).
+
+    The report is recorded with `record_owner_result` against the fence of the latest span
+    of `launch` (the launch ordinal of `attempt` of `issue` in `run`), under the store lock,
+    on the clock `now_ms`. It returns False and writes nothing when the attempt has no custody
+    transaction, the transaction is terminal, the core issued no span for that launch, or
+    that span already holds a result with the same `telemetry_digest`.
+    """
+    if custody_of(store, run, issue, attempt) is None:
+        return False
+    executor = custody_rules.launch_id(issue, attempt, launch)
+    with store_lock(store):
+        transaction = custody_of(store, run, issue, attempt)
+        if transaction is None or transaction.state in TERMINALS:
+            return False
+        fence = custody_rules.launch_fence(transaction, executor)
+        if fence is None or custody_rules.result_recorded(
+                transaction, executor, telemetry_digest(report)):
+            return False
+        with _core_errors():
+            _core(store, now_ms).record_owner_result(
+                transaction.transaction_id, executor_id=executor,
+                subject_path=transaction.subject["worktree"], fence=fence, result=report)
+    return True
+
+
 def indexed_direct_runs(store: Path, workflows_dir: Path, issue: int, *,
                         after: int) -> Iterator[tuple[int, str, Path]]:
     """The minted direct runs of `issue` past sequence `after`, in order, found by index.
