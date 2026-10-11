@@ -3,13 +3,17 @@
     sdd-gate review PLAN_FILE --skill-dir DIR --task N [--standards PATH ...]
         [--repo-root R --run-id I --action-id A --worker-id W]
     sdd-gate next PLAN_FILE --skill-dir DIR [--standards PATH ...]
-        (--completed N [--parked K] | --task M [--context-file PATH]) [--delivery-base SHA]
+        [--completed N [--parked K]] [--task M [--context-file PATH]] [--delivery-base SHA]
         [--repo-root R --run-id I --action-id A]
+
+`next` needs at least one of `--completed` and `--task`, and takes both in one
+call.
 
 `review` runs seven steps in order and stops at the first that fails:
 `ledger`, `release-worker`, `review-package`, `validate-report`,
 `budget-check`, `metrics-match`, `render-brief`. It reads the task's base from
-the sdd ledger, releases the reviewing worker when a lifecycle identity is
+the sdd ledger, releases the worker `--worker-id` names (the implementer that
+just returned; reviewers are never registered) when a lifecycle identity is
 given, builds (or reuses) the review package for `base..HEAD`, checks the
 package against the budget authority and writes the rendered reviewer brief
 into the plan's workspace.

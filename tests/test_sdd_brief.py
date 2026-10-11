@@ -7,6 +7,7 @@ no test holds a copy of their prose (rule 6).
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
 import tempfile
 import unittest
 
@@ -255,6 +256,16 @@ class WorkerBlockTest(unittest.TestCase):
             f"`launch-scope exec {flags} -- <argv>`, still in the foreground.",
             "Create every scratch directory or scratch worktree under the path that "
             f"`launch-scope scratch {flags}` prints."]))
+
+    def test_a_repo_root_with_a_space_reaches_the_shell_as_one_argument(self):
+        flags = ["--repo-root", "/tmp/repo with spaces", "--run-id", "run-1",
+                 "--worker-id", "14:1:1:w1"]
+        worker, run, scratch = sdd_brief.worker_block(
+            "/tmp/repo with spaces", "run-1", "14:1:1:w1").split("\n")
+        self.assertEqual(shlex.split(worker.removeprefix("Lifecycle worker: ")), flags)
+        self.assertEqual(shlex.split(run.split("`")[1]),
+                         ["launch-scope", "exec", *flags, "--", "<argv>"])
+        self.assertEqual(shlex.split(scratch.split("`")[1]), ["launch-scope", "scratch", *flags])
 
 
 if __name__ == "__main__":

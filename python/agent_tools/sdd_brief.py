@@ -20,6 +20,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+import shlex
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -338,9 +339,11 @@ def worker_block(repo_root: str, run_id: str, worker_id: str) -> str:
     The `Lifecycle worker:` line carrying the three flags, then the sentence
     that runs each long command through `launch-scope exec` and the sentence
     that creates scratch directories under the `launch-scope scratch` path,
-    joined with a newline.
+    joined with a newline. The flags are spelled with `shlex.join`, so a value
+    a shell would split or expand is quoted and reaches `launch-scope` as one
+    argument, and a value that needs no quoting is written as given.
     """
-    flags = f"--repo-root {repo_root} --run-id {run_id} --worker-id {worker_id}"
+    flags = shlex.join(["--repo-root", repo_root, "--run-id", run_id, "--worker-id", worker_id])
     return "\n".join([
         f"Lifecycle worker: {flags}",
         "Run each long command, every verification command included, as "
