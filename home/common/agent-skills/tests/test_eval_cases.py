@@ -642,6 +642,10 @@ class CodeMapEvalCasesTest(unittest.TestCase):
             done = self.grade(self.MAP_PLACED, repo, env)
             self.assertNotEqual(done.returncode, 0, done.stdout)
             self.assertIn(stray.name, done.stdout)
+            for name in (self.SPEC_EXISTS, self.SPEC_FORMAT, self.MAP_EXISTS, self.MAP_VALID):
+                with self.subTest(name=name):
+                    done = self.grade(name, repo, env)
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
     def test_a_tracked_path_in_decisions_fails_the_spec_format_assert(self):
         with tempfile.TemporaryDirectory() as tmp:

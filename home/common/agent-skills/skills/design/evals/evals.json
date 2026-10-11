@@ -11,19 +11,19 @@
       "asserts": [
         {
           "name": "a spec exists under the retained specs directory and is committed",
-          "shell": "spec=$(first_file \"$SPEC_DIR\"/*.md) || { echo \"$spec\"; exit 1; }; [ -n \"$(git -C \"$REPO\" log --oneline origin/main..HEAD -- \"$spec\" 2>/dev/null)\" ] || { fail \"the spec is not committed on the current branch: $spec\"; exit 1; }; [ -z \"$(git -C \"$REPO\" status --porcelain -- \"$spec\")\" ] || fail \"the spec differs from its committed content: $spec\""
+          "shell": "spec=; for f in \"$SPEC_DIR\"/*.md; do case \"$f\" in *.code-map.md) ;; *) [ -e \"$f\" ] && { spec=$f; break; } ;; esac; done; [ -n \"$spec\" ] || { fail \"no spec under $SPEC_DIR\"; exit 1; }; [ -n \"$(git -C \"$REPO\" log --oneline origin/main..HEAD -- \"$spec\" 2>/dev/null)\" ] || { fail \"the spec is not committed on the current branch: $spec\"; exit 1; }; [ -z \"$(git -C \"$REPO\" status --porcelain -- \"$spec\")\" ] || fail \"the spec differs from its committed content: $spec\""
         },
         {
           "name": "the spec's Decisions section names no file path or line number",
-          "shell": "spec=$(first_file \"$SPEC_DIR\"/*.md) || { echo \"$spec\"; exit 1; }; spec_decisions_path_free \"$spec\" \"$REPO\""
+          "shell": "spec=; for f in \"$SPEC_DIR\"/*.md; do case \"$f\" in *.code-map.md) ;; *) [ -e \"$f\" ] && { spec=$f; break; } ;; esac; done; [ -n \"$spec\" ] || { fail \"no spec under $SPEC_DIR\"; exit 1; }; spec_decisions_path_free \"$spec\" \"$REPO\""
         },
         {
           "name": "the code map exists in the git directory, named after the spec",
-          "shell": "spec=$(first_file \"$SPEC_DIR\"/*.md) || { echo \"$spec\"; exit 1; }; map=\"$(git -C \"$REPO\" rev-parse --absolute-git-dir)/$(basename \"$spec\" .md).code-map.md\"; [ -f \"$map\" ] || fail \"no code map at $map\""
+          "shell": "spec=; for f in \"$SPEC_DIR\"/*.md; do case \"$f\" in *.code-map.md) ;; *) [ -e \"$f\" ] && { spec=$f; break; } ;; esac; done; [ -n \"$spec\" ] || { fail \"no spec under $SPEC_DIR\"; exit 1; }; map=\"$(git -C \"$REPO\" rev-parse --absolute-git-dir)/$(basename \"$spec\" .md).code-map.md\"; [ -f \"$map\" ] || fail \"no code map at $map\""
         },
         {
           "name": "the code map is well-formed and lists the three files the issue decides about",
-          "shell": "spec=$(first_file \"$SPEC_DIR\"/*.md) || { echo \"$spec\"; exit 1; }; map=\"$(git -C \"$REPO\" rev-parse --absolute-git-dir)/$(basename \"$spec\" .md).code-map.md\"; code_map_valid \"$map\" \"$REPO\" tinytask/cli.py tinytask/model.py tests/test_cli.py"
+          "shell": "spec=; for f in \"$SPEC_DIR\"/*.md; do case \"$f\" in *.code-map.md) ;; *) [ -e \"$f\" ] && { spec=$f; break; } ;; esac; done; [ -n \"$spec\" ] || { fail \"no spec under $SPEC_DIR\"; exit 1; }; map=\"$(git -C \"$REPO\" rev-parse --absolute-git-dir)/$(basename \"$spec\" .md).code-map.md\"; code_map_valid \"$map\" \"$REPO\" tinytask/cli.py tinytask/model.py tests/test_cli.py"
         },
         {
           "name": "no code map is tracked or present in the working tree",
