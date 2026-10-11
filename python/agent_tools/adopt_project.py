@@ -45,10 +45,14 @@ another integration branch, that branch too, each into
 `refs/remotes/origin/<branch>` (the fetched objects and those remote-tracking
 refs are the only repository writes), exports the pinned commit with
 `git archive` into a temporary directory removed on every exit, and runs every
-check there. It refuses `not_integrated` when that commit carries no evidence
-record or the adoption commit derived from it is not its ancestor (D19). What
-it stores is `{project_id, root}` with the real root and nothing else (#148
-D18).
+check there. When the default branch's contract does not resolve,
+`--integration-branch NAME` (accepted once, and only with `--register`) names
+the integration branch to read instead; `adopt_verify.remote_source` states
+its conditions, and the report then carries a `branch_override` member. It
+refuses `not_integrated` when that commit carries no evidence record or the
+adoption commit derived from it is not its ancestor (D19). What it stores is
+`{project_id, root}` with the real root (#148 D18), plus the `branch_override`
+member when the operand selected the branch.
 
 The resolver is consumed **only** as a child process, never imported (D26):
 `run_resolver` runs `agent_tools.resolve_project` under this process's own
@@ -638,9 +642,12 @@ def command_apply(args: argparse.Namespace) -> int:
 # into `refs/remotes/origin/<branch>` (the fetched objects and those
 # remote-tracking refs are the only repository writes), and exports the pinned
 # commit with `git archive` into a temporary directory that is removed on every
-# exit, and every check runs there. The checks, the report and the
-# registration transaction live in `adopt_verify`; what is left here is the
-# order they run in.
+# exit, and every check runs there. When the default branch's contract does not
+# resolve, `--integration-branch` names the branch to read instead, and the
+# report and the registry entry then carry a `branch_override` member. The
+# checks, the report and the registration transaction live in `adopt_verify`;
+# what is left here is the order they run in and the refusal of a misused
+# operand.
 #
 # Every one of the three answers is a report on exit 0 (R6.4): exit 2 and the
 # D12 error object are reserved for the closed `ADOPT_ERROR_CODES`, so
@@ -653,12 +660,23 @@ def command_verify(args: argparse.Namespace) -> int:
     # Before the target is touched, so a broken platform installation surfaces
     # as an adoption failure rather than as a non-conformant repository.
     require_manifest()
+    if len(args.integration_branch) > 1:
+        raise adopt_inspection.refuse(
+            "adopt_failure", "adopt.verify.integration_branch_repeated", "",
+            "`--integration-branch` may be given at most once")
+    if args.integration_branch and not args.register:
+        raise adopt_inspection.refuse(
+            "adopt_failure", "adopt.verify.integration_branch_without_register",
+            "", "`--integration-branch` is accepted only with `--register`")
     root = adopt_inspection.require_repository(args.repo_root)
     if not args.register:
         verification = adopt_verify.verify_repository(
             root, adopt_verify.head_source(root), run_resolver)
     else:
-        with adopt_verify.remote_source(root, run_resolver) as source:
+        operand = args.integration_branch[0] if args.integration_branch \
+            else None
+        with adopt_verify.remote_source(
+                root, run_resolver, operand) as source:
             verification = adopt_verify.verify_repository(
                 root, source, run_resolver)
         adopt_verify.require_integrated(verification)
@@ -714,6 +732,13 @@ def build_parser() -> argparse.ArgumentParser:
                              "proven against the contract's integration "
                              "branch fetched from origin, never the local "
                              "checkout")
+    verify.add_argument("--integration-branch", action="append", default=[],
+                        metavar="NAME",
+                        help="with --register, the integration branch on "
+                             "origin to register against when the default "
+                             "branch's contract does not resolve; origin "
+                             "must list it and its own contract must resolve "
+                             "and name it")
     return parser
 
 

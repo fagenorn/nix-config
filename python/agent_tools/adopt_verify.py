@@ -14,9 +14,16 @@ contract there names another integration branch, that branch too, each into
 `refs/remotes/origin/<branch>` (the fetched objects and those remote-tracking
 refs are the only repository writes), exports the pinned commit with
 `git archive` into a temporary directory removed on every exit and runs every
-check there. No snapshot of a `ResolvedProject` and no capability verdict is
-kept anywhere. What registration persists is exactly an identity and a
-location: `{project_id, root}` with the real root (#148 D18).
+check there. When the default branch's contract does not resolve, the
+`--integration-branch` operand names the integration branch to read instead,
+under the conditions `remote_source` states; the report then carries a
+`branch_override` member recording the branch read, the default branch passed
+over and the reason. No snapshot of a `ResolvedProject` and no capability
+verdict is kept anywhere. What registration persists is an identity and a
+location: `{project_id, root}` with the real root (#148 D18), plus the same
+`branch_override` member when, and only when, the run selected its branch
+through the operand; a later registration of the project without an override
+drops it (issue 363).
 
 The resolver is not reached from this module. `adopt-project` owns the one
 seam it is consumed through — invoked as a child process through
@@ -78,6 +85,11 @@ class VerificationSource:
     is read at. `resolver_root` is the directory the resolver is called on and
     `inventory` the `(path, object id)` pairs the unclassified-path check
     reads. `branch` is the fetched branch name; it is always `None` for `HEAD`.
+    `override_default` is the default branch the `--integration-branch` operand
+    passed over, and `override_reason` why it was passed over; both are `None`
+    unless the operand selected `branch`. `default_contract_resolved` records
+    whether the contract on the default branch resolved, which `HEAD` has no
+    default branch to ask about and so leaves `True`.
     """
 
     ref: str
@@ -85,6 +97,21 @@ class VerificationSource:
     resolver_root: Path
     inventory: list[tuple[str, str]]
     branch: str | None = None
+    override_default: str | None = None
+    override_reason: str | None = None
+    default_contract_resolved: bool = True
+
+
+def branch_override(source: VerificationSource) -> dict | None:
+    """The `branch_override` member for `source`, or `None` when it has none.
+
+    It names `source.branch`, so it cannot describe a branch other than the
+    pinned one the report was read at.
+    """
+    if source.override_default is None:
+        return None
+    return {"branch": source.branch, "default_branch": source.override_default,
+            "reason": source.override_reason}
 
 
 def head_source(root: Path) -> VerificationSource:
@@ -97,8 +124,8 @@ def head_source(root: Path) -> VerificationSource:
 
 
 @contextlib.contextmanager
-def remote_source(root: Path,
-                  run_resolver: Resolver) -> Iterator[VerificationSource]:
+def remote_source(root: Path, run_resolver: Resolver,
+                  operand: str | None = None) -> Iterator[VerificationSource]:
     """The source `--register` reads: the contract's integration branch.
 
     Nothing is read from the checkout's branches or files. `origin` is listed,
@@ -111,13 +138,24 @@ def remote_source(root: Path,
     reads the one pinned commit, and the scratch directory lives as long as the
     caller's `with` block and is removed on success and on every refusal.
 
+    `operand` is the `--integration-branch` value and is consulted only after
+    the default branch was fetched, exported and resolved. A default contract
+    that resolves keeps its own answer: an operand equal to the branch it names
+    (or to `D` when it names none) changes nothing and any other refuses. A
+    default contract that does not resolve takes the operand as the integration
+    branch `B` when `origin` lists `B` and `B` is not `D`: `B` is fetched,
+    pinned and exported like the hop above, and its own contract must resolve
+    and name `B`, so there is no further hop. The source then carries the
+    default branch and the reason, which `branch_override` reports.
+
     No `origin` refuses `not_integrated` with `adopt.registration.no_remote`,
     an `origin` that advertises no default branch with
     `adopt.registration.remote_default_unknown`, and a `B` that `origin` does
     not list, whose contract does not resolve or does not name `B` with
-    `adopt.registration.integration_branch_unresolved`. A default branch whose
-    contract does not resolve is yielded as it is: `contract-resolves` then
-    fails in the report.
+    `adopt.registration.integration_branch_unresolved`, as is an operand that
+    breaks any condition above. A default branch whose contract does not
+    resolve and that no operand replaces is yielded as it is:
+    `contract-resolves` then fails in the report.
     """
     if not has_remote(root):
         raise refuse(
@@ -135,7 +173,33 @@ def remote_source(root: Path,
         exported = Path(scratch) / "default"
         export_commit(root, pinned, exported)
         exit_code, payload = run_resolver(exported, "resolve")
-        named = integration_branch(payload) if exit_code == 0 else None
+        default_resolved = exit_code == 0
+        named = integration_branch(payload) if default_resolved else None
+        override_default = None
+        if default_resolved:
+            if operand is not None and operand != (named or default):
+                raise unresolved_integration_branch(
+                    "the default branch's contract resolves and names another "
+                    "integration branch than `--integration-branch`")
+        elif operand is not None:
+            if operand not in heads.branches:
+                raise unresolved_integration_branch(
+                    "`--integration-branch` names a branch `origin` does not "
+                    "list")
+            if operand == default:
+                raise unresolved_integration_branch(
+                    "`--integration-branch` names the default branch, whose "
+                    "contract does not resolve")
+            branch = operand
+            pinned = fetch_pinned(root, branch)
+            exported = Path(scratch) / "integration"
+            export_commit(root, pinned, exported)
+            exit_code, payload = run_resolver(exported, "resolve")
+            if exit_code != 0 or integration_branch(payload) != branch:
+                raise unresolved_integration_branch(
+                    "the contract on the `--integration-branch` branch does "
+                    "not resolve or does not name that branch")
+            override_default = default
         if named is not None and named != default:
             if named not in heads.branches:
                 raise unresolved_integration_branch(
@@ -153,7 +217,10 @@ def remote_source(root: Path,
         yield VerificationSource(
             ref=f"refs/remotes/{REMOTE}/{branch}", commit=pinned,
             resolver_root=exported, inventory=tree_inventory(root, pinned),
-            branch=branch)
+            branch=branch, override_default=override_default,
+            override_reason=(agent_platform.BRANCH_OVERRIDE_REASONS[0]
+                             if override_default is not None else None),
+            default_contract_resolved=default_resolved)
 
 
 def unresolved_integration_branch(message: str) -> AdoptError:
@@ -167,13 +234,23 @@ def require_integrated(verification: Verification) -> None:
 
     Called only under `--register`, before `registration_allowed`: a remote
     revision with no adoption evidence record is not an integrated adoption
-    whatever else the report says (D7).
+    whatever else the report says (D7). When that revision is a default branch
+    whose contract does not resolve and no operand replaced it, the message
+    names `--integration-branch`, the one repair that reaches the adoption;
+    every other missing record keeps the plain message.
     """
-    if not verification.evidence_candidates:
+    if verification.evidence_candidates:
+        return
+    source = verification.source
+    if not source.default_contract_resolved and source.override_default is None:
         raise refuse(
             "not_integrated", "adopt.registration.not_integrated", "",
-            "the remote integration branch carries no adoption evidence "
-            "record")
+            "the contract on the remote default branch does not resolve and "
+            "that branch carries no adoption evidence record; name the "
+            "integration branch with `--integration-branch`")
+    raise refuse(
+        "not_integrated", "adopt.registration.not_integrated", "",
+        "the remote integration branch carries no adoption evidence record")
 
 
 def registration_allowed(result: str) -> bool:
@@ -380,7 +457,7 @@ def verify_repository(root: Path, source: VerificationSource,
     if result not in VERIFY_RESULTS:
         raise ValueError(f"unknown verify result: {result!r}")
 
-    return Verification({
+    report = {
         "schema_version": VERIFY_SCHEMA_VERSION,
         "result": result,
         "project_id": resolved_project_id(payload),
@@ -392,21 +469,27 @@ def verify_repository(root: Path, source: VerificationSource,
         "checks": checks,
         "blockers": blockers,
         "registered": False,
-    }, payload, source, candidates)
+    }
+    override = branch_override(source)
+    if override is not None:
+        report["branch_override"] = override
+    return Verification(report, payload, source, candidates)
 
 
 def register_project(root: Path, verification: Verification) -> None:
-    """Record `{project_id, root}` in the fleet, or refuse and change nothing.
+    """Record the project in the fleet, or refuse and change nothing.
 
-    The root is the real checkout's, not the temporary directory the checks ran
-    in. The ancestry check is the ordering #67 documents and D19 makes checked:
-    a commit that lives only on a feature branch names a state the integration
-    branch does not have. It is walked from the pinned commit id of the fetched
-    remote branch, never a branch name (D7); an adoption commit that is not its
-    ancestor refuses `not_integrated`. The duplicate check and the
-    replacement then happen inside one exclusive lock over a registry reread
-    underneath it, so two registrations racing under one `HOME` serialize
-    instead of one overwriting the other.
+    The entry is `{project_id, root}`, plus the source's `branch_override` when
+    the operand selected its branch; an entry replaced by a run without one
+    loses the member it had. The root is the real checkout's, not the temporary
+    directory the checks ran in. The ancestry check is the ordering #67
+    documents and D19 makes checked: a commit that lives only on a feature
+    branch names a state the integration branch does not have. It is walked
+    from the pinned commit id of the fetched remote branch, never a branch name
+    (D7); an adoption commit that is not its ancestor refuses `not_integrated`.
+    The duplicate check and the replacement then happen inside one exclusive
+    lock over a registry reread underneath it, so two registrations racing
+    under one `HOME` serialize instead of one overwriting the other.
     """
     report = verification.report
     source = verification.source
@@ -428,6 +511,10 @@ def register_project(root: Path, verification: Verification) -> None:
             "not_integrated", "adopt.registration.not_integrated", "",
             "the adoption commit is not reachable from the remote "
             "integration branch")
+    registered = {"project_id": project_id, "root": str(root)}
+    override = branch_override(source)
+    if override is not None:
+        registered["branch_override"] = override
     try:
         with agent_platform.registry_transaction() as entries:
             for entry in entries:
@@ -442,7 +529,7 @@ def register_project(root: Path, verification: Verification) -> None:
             agent_platform.write_registry(
                 [entry for entry in entries
                  if entry["project_id"] != project_id]
-                + [{"project_id": project_id, "root": str(root)}])
+                + [registered])
     except agent_platform.PlatformManifestError as error:
         raise AdoptError(
             "adopt_failure", "adopt.registry.invalid",
