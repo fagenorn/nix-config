@@ -130,12 +130,12 @@ EOF
 
 Only after that durable write succeeds, send those canonical bytes — the validated `finish` reply — unchanged to the caller. A `delivery_remainder` reply is relayed unchanged too; the next acquisition or control sweep launches it. A new run never uses the legacy `--issue/--attempt/--result-file` transport. The earlier direct-autonomous controller that delegated at the Phase-5 rollover does not run this procedure: its only terminal work is the validate-and-relay stop in `rollover.md`.
 
-When acquisition returns a terminal replay (`kind: terminal`) rather than an owner, print that envelope's `reentry` field to the user verbatim on its own line before relaying the compact response unchanged; a replay writes no `finish`.
+When acquisition returns a terminal replay (`kind: terminal`) rather than an owner, print that envelope's `reentry` verbatim on its own line before relaying the compact response unchanged; a replay writes no `finish`.
 
 Failure to persist is a failure to finish: surface it and never report the issue as merged or completed. Without lifecycle identity, send the same compact schema directly.
 
 ## Suspension procedure
-Suspend — do not finish — when an environmental interruption pauses the work rather than resolving it: an imminent quota or session limit, a repeated transport failure, a permission prompt only a human can approve, an external wait (never a child's interim result), or a context that cannot launch the agents a phase needs. A suspension consumes no attempt and needs no authorization phrase.
+Suspend — do not finish — when an environmental interruption pauses the work: an imminent quota or session limit, a repeated transport failure, a permission prompt only a human can approve, an external wait (never a child's interim result), or a context that cannot launch the agents a phase needs. A suspension consumes no attempt and needs no authorization phrase.
 
 Release every worker this owner registered (the helper refuses with `live workers: <ids>` while one is live), run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`, and then call:
 
@@ -143,7 +143,7 @@ Release every worker this owner registered (the helper refuses with `live worker
 workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --issue <n> --attempt <k> --action-id <action_id> --blocked-on <value> | artifact-budget validate-report --boundary workflow-response --input -
 ```
 
-with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`, `agent_dispatch`, or sdd's `deadline` (the reaper alone owns `unknown`). A validated `kind: terminal` reply means the anti-zombie bound ended the attempt instead: handle it as the terminal replay in the terminal return procedure — print its `reentry`, relay it, and write no `finish` — and stop. Otherwise the reply is `kind: suspended`; print the canonical line as the final user-facing output:
+with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`, `agent_dispatch`, or sdd's `deadline` (the reaper alone owns `unknown`). A validated `kind: terminal` reply means the anti-zombie bound ended the attempt instead: handle it as the terminal replay in the terminal return procedure — print its `reentry`, relay it, and write no `finish` — and stop. Otherwise the reply is `kind: suspended`; print the canonical line as the final output:
 
 ```text
 Suspended (blocked_on=<value>). Resume: <reentry from the envelope>
