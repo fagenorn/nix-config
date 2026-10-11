@@ -1,159 +1,96 @@
-# Task 3: Resolver — `capabilities.release` and the `release.targets` member
+# Task 3: Documented contract and the nix-config byte-identity evidence
 
-Spec sections 3 and 4 (per D4, D5, D6, D9, D10). `resolve-project resolve` reports no release capability when no profile publishes, and its snapshot gains a fifth, always-present member `release` listing every bound target with the operations its profile declares on it.
+Spec section 7 and requirement R4 (per D9, D12, D13). `python/README.md` § Release profiles states the new form as the code now behaves, and the AC4 evidence is measured on the final head without persisting a snapshot.
 
 **Files:**
-- Modify: `python/agent_tools/release_profile.py` (new pure function `release_targets`)
-- Modify: `python/agent_tools/resolve_project.py` (`release_capability`, `build_snapshot`)
-- Test: `home/common/agent-skills/tests/test_resolve_project.py`, `home/common/agent-skills/tests/test_resolve_platform.py`
+- Modify: `python/README.md` (section `## Release profiles` only)
 
 **Interfaces:**
-- Consumes (Task 1): `release_profile.phase_nodes(profile, phase) -> list[dict]` (`[]` for a `"none"` phase); the private `_authored(profile)` and `_normalized_target(profile, descriptors, handle) -> {"handle", "kind", <kind members>}` already in `release_profile`; the fixture `tests/fixtures/release/publication-free-profile.json` (one `github_repository` target `repository` for `fagenorn/nix-config` on `main`, bound to adapter alias `forge` = `github-forge`).
-- Produces:
-  - `release_profile.release_targets(release: object, descriptors: Mapping[str, dict] = release_adapter.DESCRIPTORS) -> list[dict[str, Any]]` over a grammar-valid authored `release`.
-  - Snapshot member `release`: `{"targets": [{"profile": <profile id>, "adapter": <registered adapter name>, "target": <normalized target>, "operations": [<operation>, ...]}, ...]}`.
+- Consumes (Tasks 1–2, both merged before this task): the grammar form `"publication": "none"` and its rules in `release_profile._Profile`; `release_profile.phase_nodes`, `release_targets`, `bind_candidate`; `resolve_project.release_capability`, `build_snapshot`; `release._graphs`.
+- Produces: documentation and the measured values for acceptance-record rows `AC4` and `AC5` (handed to the caller in the task report; this task writes no acceptance file).
 
 **Invariants:**
-- `release_targets` is pure (no file, clock, network, environment) and returns plain new values: `[]` for `"unsupported"`; otherwise one entry per `bindings.targets` handle of every profile, ordered by profile id then handle (both `sorted`). `adapter` is `bindings.adapters[<the target's alias>]["adapter"]`. `operations` is the sorted, duplicate-free list of `operation` values of the publication actions and activation units whose `target` is that handle; `[]` when none.
-- It reads the grammar-valid authored profile only, never admissibility: an inadmissible profile's targets are listed.
-- `release_capability` returns `{"state": "unsupported", "reason_code": None, "repair_id": None}` when `release == "unsupported"` or when no profile has a publication node (`phase_nodes(profile, "publication")` empty for all); that check comes before admissibility and before any executable lookup. Otherwise the existing logic runs unchanged over all profiles, publication-free ones included.
-- The snapshot's `schema_version`, `project`, `bindings` and `capabilities` are built exactly as at base for any contract that was valid at base; `release` is added last and is present for every resolved project.
-- A refused contract prints only `{"error": ...}`: no `release` member (R6).
-- `CAPABILITY_STATES`, `REASON_CODES` and `resolved_schema_version` are unchanged.
+- Every sentence added to the README is true of the code at this task's commit: read each function named below before writing about it, and cite decisions as `#368 D<n>` the way the section cites `#124 D<n>`.
+- The README gains no sentence about the lifecycle guard reading the contract, about Nodo, or about any behaviour issue 126 or 367 owns.
+- No file outside `python/README.md` is changed by this task.
+- No resolved snapshot is written to any file, scratch included (`.agents/instructions/bootstrap.md`; D13): the AC4 comparison holds both snapshots in one process's memory and prints only its verdict.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Confirm the gate fails first**
 
-In `home/common/agent-skills/tests/test_resolve_project.py`, beside the module-level `forge_profile`:
-
-```python
-def publication_free_profile() -> dict:
-    return json.loads(
-        (RELEASE_FIXTURES / "publication-free-profile.json").read_text("utf-8"))
-```
-
-Append these members to the existing class `ReleaseMemberTest` (after `test_grammar_and_deploy_conflict_are_contract_errors`; the class already defines `STUBS` and `profiles`, and the module defines `source_contract`, `run_with_path`, `make_stub_bin`):
-
-```python
-    # Issue 368: a forge target without a publication, and the `release.targets` member.
-
-    UNSUPPORTED = {"state": "unsupported", "reason_code": None, "repair_id": None}
-    REPOSITORY = {"handle": "repository", "kind": "github_repository",
-                  "repository": "fagenorn/nix-config", "branch": "main"}
-
-    def declaring(self, **profiles):
-        contract = source_contract()
-        contract["release"] = {"profiles": {name.replace("_", "-"): profile
-                                            for name, profile in profiles.items()}}
-        return contract
-
-    def snapshot(self, contract, stubs=STUBS):
-        code, out, err = run_with_path(str(make_stub_bin(stubs)), "resolve", "--repo-root",
-                                       str(self.make_root(contract)), home=self.home)
-        self.assertEqual(code, 0, err or out)
-        return json.loads(out)
-
-    def test_a_publication_free_profile_exposes_its_target_and_no_capability(self):
-        snap = self.snapshot(self.declaring(forge_target=publication_free_profile()))
-        self.assertEqual(snap["release"], {"targets": [{
-            "profile": "forge-target", "adapter": "github-forge",
-            "target": self.REPOSITORY, "operations": []}]})
-        self.assertEqual(snap["capabilities"]["release"], self.UNSUPPORTED)
-        self.assertEqual(sorted(snap), ["bindings", "capabilities", "project", "release",
-                                        "schema_version"])
-
-    def test_a_publication_free_profile_needs_no_adapter_executable(self):
-        snap = self.snapshot(self.declaring(forge_target=publication_free_profile()),
-                             stubs=("just", "codex-companion"))
-        self.assertEqual(snap["capabilities"]["release"], self.UNSUPPORTED)
-
-    def test_a_publication_free_target_for_another_repository_is_refused(self):
-        for member, value in (("repository", "elsewhere/other"), ("branch", "dev")):
-            with self.subTest(member=member):
-                profile = publication_free_profile()
-                profile["bindings"]["targets"]["repository"][member] = value
-                code, payload, _ = self.resolve(
-                    self.make_root(self.declaring(forge_target=profile)))
-                error = self.assert_refusal(code, payload, "invalid_contract")
-                self.assertEqual(
-                    [v["pointer"] for v in error["violations"]],
-                    ["/release/profiles/forge-target/bindings/targets/repository/" + member])
-                self.assertEqual(error["repair_id"], "contract.release.same_repository")
-                self.assertNotIn("release", payload)
-
-    def test_a_publishing_profile_lists_its_target_with_its_operations(self):
-        snap = self.snapshot(self.profiles())
-        self.assertEqual(snap["release"], {"targets": [{
-            "profile": "github-release", "adapter": "github-forge",
-            "target": self.REPOSITORY, "operations": ["release", "tag"]}]})
-        self.assertEqual(snap["capabilities"]["release"]["state"], "available")
-
-    def test_unsupported_release_lists_no_target(self):
-        contract = source_contract()
-        contract["release"] = "unsupported"
-        self.assertEqual(self.snapshot(contract)["release"], {"targets": []})
-
-    def test_one_publishing_profile_beside_a_publication_free_one_is_available(self):
-        free = publication_free_profile()
-        free["target"]["concurrency_keys"] = ["release/fagenorn/nix-config/target-only"]
-        snap = self.snapshot(self.declaring(forge_target=free, github_release=forge_profile()))
-        self.assertEqual(snap["capabilities"]["release"]["state"], "available")
-        self.assertEqual([(t["profile"], t["operations"]) for t in snap["release"]["targets"]],
-                         [("forge-target", []), ("github-release", ["release", "tag"])])
-
-    def test_an_inadmissible_profile_still_lists_its_target(self):
-        profile = forge_profile()
-        del profile["publication"]["actions"][0]["observation_deadline_ms"]
-        snap = self.snapshot(self.profiles(profile))
-        self.assertEqual(snap["capabilities"]["release"]["reason_code"],
-                         "release_profile_inadmissible")
-        self.assertEqual(snap["release"]["targets"][0]["operations"], ["release", "tag"])
-```
-
-Three existing pins of the snapshot's member set move from four members to five (D10); these are edits to existing lines, in the resolver suites only:
-
-1. `test_resolve_project.py`, `SnapshotShapeTest.test_resolve_returns_exactly_four_top_level_members`: rename to `test_resolve_returns_exactly_five_top_level_members`, expect `sorted(snap) == ["bindings", "capabilities", "project", "release", "schema_version"]`, and add `self.assertEqual(sorted(snap["release"]), ["targets"])`.
-2. `test_resolve_project.py`, `WorkflowRefusalFixtureTest.SNAPSHOT_MEMBERS`: add `"release"` to the tuple, so every refusal that class drives is also asserted to print no `release` member.
-3. `home/common/agent-skills/tests/test_resolve_platform.py`, `test_a_supported_non_current_schema_resolves`: expect the same five-name list, and reword its docstring's "still four members" to five.
-
-- [ ] **Step 2: Run the tests and watch them fail**
-
-Run: `env PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_resolve_project.py home/common/agent-skills/tests/test_resolve_platform.py -k ReleaseMemberTest -k five_top_level -k non_current_schema`
-Expected: FAIL — `KeyError: 'release'` in the target tests, `available` (and, without the adapter stubs, `blocked`) where `unsupported` is expected, and the two key-set pins report the missing `release` name. `test_a_publication_free_target_for_another_repository_is_refused` and the five tests `ReleaseMemberTest` had at base pass already.
-
-- [ ] **Step 3: Implement**
-
-`python/agent_tools/release_profile.py`, beside `_normalized_target`:
-
-```python
-def release_targets(release: object,
-                    descriptors: Mapping[str, dict] = release_adapter.DESCRIPTORS
-                    ) -> list[dict[str, Any]]:
-```
-
-built from `_authored` (for each profile's nodes) and `_normalized_target` (for `target`), meeting the invariants above. Its docstring states the entry shape and ordering from the code.
-
-`python/agent_tools/resolve_project.py`:
-
-- `release_capability`: after the `"unsupported"` return, return the same unsupported entry when no profile in `release["profiles"]` has a publication node, using `release_profile.phase_nodes`; leave the rest of the function as it is. Rewrite its docstring's summary of the states from the code.
-- `build_snapshot`: add `"release": {"targets": release_profile.release_targets(source["release"])}` as the fifth member. Nothing else in the snapshot changes; `compute_capabilities` and `conformance_checks` (which calls `compute_capabilities` itself) are not edited.
-- Module docstring: where it describes the printed snapshot, add the `release.targets` member, written from the code.
-
-- [ ] **Step 4: Verify**
-
-Run: `env PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_resolve_project.py home/common/agent-skills/tests/test_resolve_platform.py`
-Expected: PASS, 0 failures, 0 errors (about 190 tests, under a minute).
-
-Run: `env PYTHONPATH="$PWD/python" python3 -m unittest tests/test_release_command.py home/common/agent-skills/tests/test_conformance_checks.py`
-Expected: PASS — the inspection command resolves through `resolve()` and conformance through `compute_capabilities`; neither may notice the new member.
-
-Run the never-edited gate of Global Constraints.
-
-- [ ] **Step 5: Commit**
+Run:
 
 ```bash
-git add python/agent_tools/release_profile.py python/agent_tools/resolve_project.py \
-  home/common/agent-skills/tests/test_resolve_project.py \
-  home/common/agent-skills/tests/test_resolve_platform.py
+if ! grep -q '"publication": "none"' python/README.md; then echo MISSING-FORM; fi
+if ! grep -q 'release\.targets' python/README.md; then echo MISSING-MEMBER; fi
 ```
 
-Commit through `launch-commit` with the message `feat(resolve-project): expose release.targets and report no capability without a publication (#368)`.
+Expected at this task's starting commit: both `MISSING-FORM` and `MISSING-MEMBER` are printed.
+
+- [ ] **Step 2: Write the documentation**
+
+In `python/README.md`, section `## Release profiles`, state these facts in the section's existing style (prose paragraphs, no new heading), each written from the implemented code:
+
+1. Where the grammar is described: a profile's `publication` is `"none"` or `{"actions": [...]}` with at least one action; a profile with `"publication": "none"` is a publication-free profile that declares its target, requirements and bindings like any other and passes the same same-repository rule.
+2. The rules the grammar holds a publication-free profile to, with the repair id each violation actually carries in `release_profile` (an activation other than `"none"`; a non-empty `proof.obligations`; a recovery unit).
+3. Where `capabilities.release` is described: it is also `unsupported` when no profile declares a publication, and otherwise the listed logic runs over all profiles.
+4. `compile_profile` returns such a profile with an empty graph, and `bind_candidate` refuses it, so it never reaches `TransactionStore.create`; `core_binding` refuses every request for it because it has no compiled node.
+5. The resolved snapshot's `release` member: `{"targets": [...]}`, one entry per bound target of every profile with `profile`, `adapter`, `target` (the normalized target) and `operations`, the ordering, `[]` for `"unsupported"`, and an empty `operations` for every target of a publication-free profile; built by `release_profile.release_targets`.
+6. In the `release profile inspect` paragraph: a publication-free profile is reported with exit 0, empty graphs and an empty `handoffs` list.
+
+- [ ] **Step 3: Verify the documentation gate**
+
+Run:
+
+```bash
+if ! grep -q '"publication": "none"' python/README.md; then exit 1; fi
+if ! grep -q 'release\.targets' python/README.md; then exit 1; fi
+git diff --stat 40fa1f82c5a5 -- python/README.md
+```
+
+Expected: exit 0 and one changed file in the stat.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add python/README.md
+```
+
+Commit through `launch-commit` with the message `docs(agent-tools): the publication-free release profile and release.targets (#368)`.
+
+- [ ] **Step 5: Measure AC4 on the committed head (per D9, D12, D13)**
+
+The installed `resolve-project` is neither the base nor the head code, and `project.root` is an absolute path, so both runs use this worktree as `--repo-root` and differ only in the `agent_tools` package they import. Only the base package source goes to scratch; the two snapshots stay in the comparing process. With `SCRATCH` the directory `launch-scope scratch` prints, and a clean tree (`git status --porcelain` empty):
+
+```bash
+mkdir -p "$SCRATCH/base"
+git archive 40fa1f82c5a50ab8da32d15f9bf7c1d71e82e76b python | tar -x -C "$SCRATCH/base"
+python3 - "$SCRATCH/base/python" "$PWD/python" "$PWD" <<'PY'
+import json, os, subprocess, sys
+base_package, head_package, root = sys.argv[1:4]
+
+def resolved(package):
+    done = subprocess.run(
+        [sys.executable, "-m", "agent_tools.resolve_project", "resolve", "--repo-root", root],
+        env=dict(os.environ, PYTHONPATH=package), capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+before, after = resolved(base_package), resolved(head_package)
+release = after.pop("release")
+dump = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":"))
+assert sorted(before) == ["bindings", "capabilities", "project", "schema_version"], sorted(before)
+assert dump(before) == dump(after), "the four existing members differ"
+assert release == {"targets": [{
+    "profile": "github-release", "adapter": "github-forge",
+    "target": {"handle": "repository", "kind": "github_repository",
+               "repository": "fagenorn/nix-config", "branch": "main"},
+    "operations": ["release", "tag"]}]}, release
+print("AC4 identical: four members equal; release.targets lists github-release with release, tag")
+PY
+git diff --quiet 40fa1f82c5a5 -- .agents/project.json tests/fixtures/release/github-release-profile.json
+git diff --numstat 40fa1f82c5a5 -- 'tests/test_release_*.py'
+```
+
+Expected: the script exits 0 and prints its one `AC4 identical: ...` line (an `AssertionError` or `KeyError` shows the criterion unmet); `git diff --quiet` exits 0; every numstat row has `0` in its second column. Report for acceptance-record row `AC4`: the printed line, the head commit, the OS and the clean-tree condition — never the snapshots.
+
+AC5 is measured by sdd's final gate on the final head, not here: `just agent-workflow-tests`, threshold exit code `0`, recorded in acceptance-record row `AC5` with the commit and conditions.
