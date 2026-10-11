@@ -477,5 +477,109 @@ class WritingPlansPipelineAssertsTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
 
+def fixture_sandbox(tmp):
+    """The tinytask fixture as a committed repo whose origin/main is its only commit."""
+    repo = Path(tmp) / "repo"
+    shutil.copytree(EVALS_DIR / "fixture-repo", repo, ignore=shutil.ignore_patterns("__pycache__"))
+    git = ["git", "-C", str(repo), "-c", "user.name=eval", "-c", "user.email=eval@example.invalid",
+           "-c", "commit.gpgsign=false"]
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(git + ["add", "-A"], check=True)
+    subprocess.run(git + ["commit", "-q", "-m", "base"], check=True)
+    subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+    return repo, git
+
+
+class SpecFormatCheckTest(unittest.TestCase):
+    """#354: spec_decisions_path_free reads only the Decisions section (D5)."""
+
+    def check(self, spec_text):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _ = fixture_sandbox(Path(tmp).resolve())
+            spec = Path(tmp).resolve() / "spec.md"
+            spec.write_text(spec_text, encoding="utf-8")
+            return run_assert('spec_decisions_path_free "$SPEC" "$REPO"', repo,
+                              SPEC=str(spec), REPO=str(repo))
+
+    def test_a_tracked_path_in_decisions_fails_and_is_named(self):
+        done = self.check("# S\n\n## Decisions\n\nThe filter lands in tinytask/cli.py.\n\n## Test seams\n")
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("tinytask/cli.py", done.stdout)
+
+    def test_the_same_path_under_test_seams_only_passes(self):
+        done = self.check("# S\n\n## Decisions\n\n### Command line\n\nThe list command gains a filter.\n\n"
+                          "## Test seams\n\nPrior art: tinytask/cli.py, tests/test_cli.py:12.\n")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_each_line_reference_form_fails(self):
+        for reference in ("see parser.py:12", "the anchor #L33", "at line 40", "Lines 3 to 5"):
+            with self.subTest(reference=reference):
+                done = self.check(f"# S\n\n## Decisions\n\nThe filter, {reference}.\n")
+                self.assertNotEqual(done.returncode, 0, done.stdout)
+                self.assertIn("line reference", done.stdout)
+
+    def test_a_spec_without_a_decisions_section_fails(self):
+        done = self.check("# S\n\n## Problem\n\nNo way to list done tasks.\n")
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("## Decisions", done.stdout)
+
+
+class CodeMapCheckTest(unittest.TestCase):
+    """#354: code_map_valid grades a code map's form, its paths and its coverage (D6)."""
+
+    REQUIRED = ("tinytask/cli.py", "tinytask/model.py", "tests/test_cli.py")
+    GOOD = ("# Code map: 2026-10-11-list-state-design.md\n\n"
+            "## The list command\n"
+            "- Why: it gains the state filter\n"
+            "- Code: `tinytask/cli.py` (`build_parser()`, `main`); `tinytask/model.py` (`STATES`)\n"
+            "- Tests: `tests/test_cli.py` (`CliTest`)\n\n"
+            "## The task store\n"
+            "- Why: the filter reads tasks through it\n"
+            "- Code: `tinytask/store.py`\n"
+            "- Tests: none read\n")
+
+    def check(self, map_text, *required):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _ = fixture_sandbox(Path(tmp).resolve())
+            code_map = Path(tmp).resolve() / "spec.code-map.md"
+            if map_text is not None:
+                code_map.write_text(map_text, encoding="utf-8")
+            return run_assert('code_map_valid "$MAP" "$REPO" $REQUIRED', repo,
+                              MAP=str(code_map), REPO=str(repo), REQUIRED=" ".join(required))
+
+    def test_a_valid_map_passes(self):
+        done = self.check(self.GOOD, *self.REQUIRED)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_missing_file_fails(self):
+        done = self.check(None)
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("not a file", done.stdout)
+
+    def test_a_map_with_no_entry_fails(self):
+        done = self.check("# Code map: 2026-10-11-list-state-design.md\n")
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("no `## ` entry", done.stdout)
+
+    def test_an_entry_without_a_code_line_fails_and_is_named(self):
+        done = self.check(self.GOOD + "\n## The help text\n- Why: it lists the option\n- Tests: none read\n")
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("## The help text", done.stdout)
+
+    def test_an_untracked_listed_path_fails_and_is_named(self):
+        done = self.check(self.GOOD.replace("`tinytask/store.py`", "`tinytask/filters.py`"))
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("tinytask/filters.py", done.stdout)
+
+    def test_an_absent_required_path_fails_and_is_named(self):
+        done = self.check(self.GOOD, *self.REQUIRED, "tests/test_store.py")
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("tests/test_store.py", done.stdout)
+
+    def test_a_symbol_in_parentheses_is_not_read_as_a_path(self):
+        done = self.check(self.GOOD.replace("(`STATES`)", "(`STATES`, `not/a/tracked/file.py`)"))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
