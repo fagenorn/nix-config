@@ -32,6 +32,7 @@ from agent_tools.attempt_custody import (
     stall_count,
     stalled,
 )
+from agent_tools.attempt_delivery_store import settle_delivery
 from agent_tools.attempt_identity import RunIdentity, classify, minted_plan, prior_run_violation
 from agent_tools.transaction_storage import is_id
 
@@ -1501,6 +1502,8 @@ def commit_state(run_dir: Path, state_path: Path, state: dict[str, Any], *,
         store, state, now_ms=now_ms, canonical=canonical_worktree_path,
         bound_launches=bound_launches or {}, bound_remainders=bound_remainders or {},
         report=report, delivered=delivered)
+    settle_delivery(store, state, now_ms=now_ms, canonical_text=lambda value: (
+        runtime.model.canonical_bytes(value).decode("utf-8")))
     atomic_write_state(run_dir, state_path, state)
     attempt_store.seal_custody(store, pending, now_ms=now_ms)
 

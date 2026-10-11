@@ -574,6 +574,30 @@ def _core_errors() -> Iterator[None]:
         raise StoreRefused(f"custody store: {error}") from error
 
 
+@contextlib.contextmanager
+def reading(store: Path, now_ms: int) -> Iterator[TransactionStore | None]:
+    """The core on a clock that reads `now_ms`, for lock-free reads; None when the store
+    directory does not exist. Creates nothing; a core error is a `StoreFault`."""
+    if _existing_store(store) is None:
+        yield None
+        return
+    core = _core(store, now_ms)
+    try:
+        yield core
+    except TransactionError as error:
+        raise StoreFault(f"custody store: {error}") from error
+
+
+@contextlib.contextmanager
+def writing(store: Path, now_ms: int) -> Iterator[TransactionStore]:
+    """The core on a clock that reads `now_ms`, under the store lock (which creates the
+    store); core errors are raised as the refusals `_core_errors` maps them to."""
+    with store_lock(store):
+        core = _core(store, now_ms)
+        with _core_errors():
+            yield core
+
+
 def _require_recorded_worktree(issue: int, label: str, record: Mapping,
                                transaction: Transaction, canonical: Callable[[str], str]) -> None:
     """Refuse a live `record` (`label` names it: `attempt 2`, `remainder 1`) recorded at another

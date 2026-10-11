@@ -570,10 +570,6 @@ class DeliveredCustody(CustodyReads, DeliveredControlHarness):
         delivery = self.ledger_document()["issues"][str(issue)]["delivery"]
         return {name: item["state"] for name, item in delivery["postconditions"].items()}
 
-    def core_files(self):
-        return {path: content for path, content in self.tree().items()
-                if path.startswith(".superpowers/attempt-transactions/")}
-
 
 class MisbindingTest(DeliveredCustody, unittest.TestCase):
     def transports(self, custody):
@@ -768,7 +764,7 @@ class LateSummaryTest(DeliveredCustody, unittest.TestCase):
         before = self.postconditions(DELIVERED)
         self.assertEqual((before["pr_merged"], before["tracker_closed"]),
                          ("observed", "pending"))
-        core = self.core_files()
+        events = self.events(DELIVERED)
         contract = self.built[DELIVERED]["contract"]
         request = json.loads(self.request(40, recorded={DELIVERED: "matching_issue_branch"},
                                           contracts=True))
@@ -779,7 +775,7 @@ class LateSummaryTest(DeliveredCustody, unittest.TestCase):
                  stdin=json.dumps(request).encode())
         self.assertEqual(self.postconditions(DELIVERED),
                          {**before, "tracker_closed": "observed"})
-        self.assertEqual(self.core_files(), core)
+        self.assertEqual(self.events(DELIVERED), events)
 
 
 class CompatibilityTest(LifecycleCustody, unittest.TestCase):

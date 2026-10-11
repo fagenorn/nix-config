@@ -374,3 +374,45 @@ class StoreReadTest(Cutover, unittest.TestCase):
         freed = self.reply(2, recorded=BOTH, owners=[self.held(issue=DELIVERED)])
         self.assertNotIn(LIVE, freed["admission"]["waiting"])
         self.assertIn(f"{LIVE}:1:2", self.launched(freed))
+
+
+class DeliveryJournalTest(Cutover, unittest.TestCase):
+    def expected(self):
+        delivery = self.ledger_document()["issues"][str(DELIVERED)]["delivery"]
+        return {f"{kind}:{item['id']}": ("event", self.model.canonical_bytes(item).decode())
+                for kind in ad.JOURNAL_KINDS for item in delivery[kind]}
+
+    def journal(self):
+        return {entry["evidence_id"]: (entry["form"], entry["reference"])
+                for entry in self.delivery(DELIVERED).evidence}
+
+    def test_an_installed_contract_has_a_transaction_holding_every_delivery_object(self):
+        custody = self.spawn(DELIVERED)[DELIVERED]
+        document = self.ledger_document()
+        delivery = document["issues"][str(DELIVERED)]["delivery"]
+        held = self.delivery(DELIVERED)
+        self.assertIsNotNone(held)
+        self.assertEqual(dict(held.subject), ad.delivery_subject(
+            run=document["transaction_id"], issue=DELIVERED,
+            contract_digest=delivery["contract_digest"], contract=delivery["contract"]))
+        self.assertEqual(
+            (held.state, held.custody, [o["obligation_id"] for o in held.proof["obligations"]]),
+            ("created", None, list(ad.POSTCONDITIONS)))
+        first = self.expected()
+        self.assertTrue(first)
+        self.assertEqual(self.journal(), first)
+        self.merge_checkpoint(custody, 5)
+        self.assertGreater(len(self.expected()), len(first))
+        self.assertEqual(self.journal(), self.expected())
+        lease = self.core().inspect_lease(
+            ad.delivery_lease_key(document["transaction_id"], DELIVERED))
+        self.assertEqual((lease["holder"], self.delivery(DELIVERED, 2)), (None, None))
+
+    def test_the_bind_journals_the_delivery_of_a_schema_9_ledger(self):
+        self.generation = "base"
+        self.merge_checkpoint(self.spawn(DELIVERED)[DELIVERED], 5)
+        self.generation = "head"
+        self.assertIsNone(self.delivery(DELIVERED))
+        self.cli("migrate", "--repo-root", self.root, "--apply")
+        self.assertIsNotNone(self.delivery(DELIVERED))
+        self.assertEqual(self.journal(), self.expected())

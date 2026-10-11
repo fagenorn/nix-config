@@ -66,6 +66,8 @@ class DecisionTest(Cutover, unittest.TestCase):
         (claim,) = [e for e in held.evidence if e["evidence_id"].startswith("admission-")]
         self.assertEqual((claim["form"], json.loads(claim["reference"])),
                          ("snapshot", {"roles": ROLES, "route": "claude-code"}))
+        journal = self.delivery(DELIVERED)
+        self.assertTrue(journal is not None and journal.evidence)
 
     def test_02_resume(self):
         reply = self.twin(lambda: [self.spawned(DELIVERED), self.sweep(31, recorded=MATCHING)])[-1]
@@ -166,6 +168,10 @@ class DecisionTest(Cutover, unittest.TestCase):
         held = self.custody(DELIVERED)
         self.assertEqual((held.state, held.custody, held.terminal, self.events(DELIVERED)[-1]),
                          ("created", None, None, "lease_released"))
+        journal = self.delivery(DELIVERED)
+        self.assertIsNotNone(journal)
+        self.assertFalse([entry for entry in journal.evidence
+                          if entry["evidence_id"].startswith("delivery_observations:")])
 
     def test_08_terminal(self):
         def scenario():
