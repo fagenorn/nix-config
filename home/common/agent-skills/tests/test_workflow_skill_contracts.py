@@ -208,8 +208,7 @@ ORCHESTRATE_MACHINE_TEXT = {
     ORCHESTRATE: (
         "workflow-state host-route --route claude-code", '`host_route: "claude-code"`',
         "--boundary workflow-response", "workflow_bootstrap", "workflow-state init-run",
-        "workflow-state init-run --repo-root <ledger_repo_root> --creation-key "
-        "orchestrate-issues:<unix-ts>:",
+        "workflow-state init-run --repo-root <ledger_repo_root> --issue-set <issues>",
         "workflow-state control", "workflow-state build-delivery", "--request-file -",
         "matching_issue_branch | absent | mismatch", "`worktree_fact`",
         "`recorded_worktree_absent`", "`recorded_worktree_mismatch`",

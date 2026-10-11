@@ -65,13 +65,13 @@ repeats a rejected launch, and reads the response's `admission` report as render
 
 ## 2. Bootstrap and observe
 
-Before `init-run`, reuse the id of a run in `<ledger_repo_root>/.superpowers/workflows/` covering the
-same issue set with a non-final attempt or missing outcome; otherwise mint one with `--creation-key`
-(`<unix-ts>`: Unix-second invocation start, same on retry; `<issues>`: caller-ordered numbers
-joined by `-`) and take `run_id` from the validated bootstrap. Call at run start or after restart:
+`init-run --issue-set` returns the run covering the same issue set with a non-final attempt or
+missing outcome, or mints one (`<issues>`: the numbers joined by `-`, in any order); take `run_id`
+from the validated bootstrap. Call at run start or after restart; a run started with a creation
+key is re-entered with `--run-id`:
 
 ```text
-workflow-state init-run --repo-root <ledger_repo_root> --creation-key orchestrate-issues:<unix-ts>:<issues> | artifact-budget validate-report --boundary workflow-response --input -
+workflow-state init-run --repo-root <ledger_repo_root> --issue-set <issues> | artifact-budget validate-report --boundary workflow-response --input -
 workflow-state init-run --repo-root <ledger_repo_root> --run-id <run-id> | artifact-budget validate-report --boundary workflow-response --input -
 ```
 
