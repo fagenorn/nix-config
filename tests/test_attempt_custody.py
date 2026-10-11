@@ -52,6 +52,38 @@ class VocabularyTest(unittest.TestCase):
             "custody_misbound", "superseded_launch", "launch_identity_required",
             "custody_unavailable"))
 
+    def test_the_cutover_vocabulary(self):
+        self.assertEqual(ac.SUSPENSION_CAUSES - ac.BLOCKED_ON_VALUES, {"owner_unavailable"})
+        self.assertNotIn("owner_unavailable", ac.OWNER_BLOCKED_ON_VALUES)
+        self.assertEqual(ac.blocked_on_of(ac.suspension_reason("owner_unavailable")),
+                         "owner_unavailable")
+        roles = {"worker": 1, "owner": 1}
+        reference = ac.claim_reference(roles, "claude-code")
+        self.assertEqual(reference, '{"roles":{"owner":1,"worker":1},"route":"claude-code"}')
+        self.assertEqual((ac.claim_roles(reference), ac.claim_id("14:r1:2", 3),
+                          ac.seal_executor("14:1:3"), ac.seal_executor("14:r2:1")),
+                         (roles, "admission-claim:14:r1:2:3", "14:1:seal", "14:r2:seal"))
+        with self.assertRaises(ValueError):
+            ac.claim_roles('{"roles":{"owner":"1"},"route":"x"}')
+
+        def claim(holder, event=None, seq=None):
+            return {"holder": holder, "roles": roles, "release_event": event,
+                    "release_seq": seq, "released_at": None if event is None else "t"}
+
+        claims = [claim("12:1:1"), claim("14:1:1", "launch_refused", 2),
+                  claim("16:1:1", "owner_unavailable", 1), claim("18:1:1", "launch_refused", 3)]
+        block = {"route": "claude-code", "claims": claims}
+        self.assertEqual((ac.held_claim(block, "12:1:1"), ac.held_claim(block, "14:1:1"),
+                          ac.held_claim(None, "12:1:1")), (reference, None, None))
+        self.assertEqual((ac.owner_gone(block, "16:1:1"), ac.owner_gone(block, "12:1:1"),
+                          ac.owner_gone(None, "16:1:1")), (True, False, False))
+        # Only a later release that is not itself a refusal opens the gate.
+        self.assertEqual((ac.gate_open(claims, "14:1:1"), ac.gate_open(claims, "12:1:1")),
+                         (False, False))
+        claims.append(claim("20:1:1", "finished", 4))
+        self.assertEqual((ac.gate_open(claims, "14:1:1"), ac.gate_open(claims, "18:1:1")),
+                         (True, True))
+
     def test_stall_arithmetic(self):
         self.assertEqual(ac.stall_count(phase=2, suspend_phase=None, stalled_resumes=0), 0)
         self.assertEqual(ac.stall_count(phase=2, suspend_phase=1, stalled_resumes=2), 0)
@@ -139,12 +171,12 @@ class SettlePlanTest(unittest.TestCase):
                                   subject_path=WORKTREE, ttl_ms=minutes * MINUTE).custody
 
     def plan(self, attempt_, *, issue_=None, latest=True, digest=None, bare=False,
-             bound=False):
+             bound=False, **facts):
         transaction = None if bare else self.store.load(self.id)
         lease = None if bare else self.store.inspect_lease(ac.worktree_key(WORKTREE))
         return ac.settle_plan(issue_ or issue(), attempt_, transaction, lease=lease,
                               now_ms=self.now, latest=latest, report_digest=digest,
-                              bound=bound)
+                              bound=bound, **facts)
 
     def apply(self, operations, report):
         """Apply `operations` to the store the way the settle step maps them."""
@@ -157,6 +189,10 @@ class SettlePlanTest(unittest.TestCase):
                 self.store.release(held)
             elif op.kind == "reap":
                 self.store.reap(self.id, reason=op.reason)
+            elif op.kind == "claim":
+                self.store.record_evidence(
+                    held, evidence_id=ac.claim_id(op.executor_id, ac.span_epoch(held)),
+                    form="snapshot", reference=op.reference)
             elif op.kind in ("park", "unpark"):
                 target = "attention_required" if op.kind == "park" else "created"
                 self.store.advance(self.id, target, reason=op.reason, custody=held)
@@ -366,6 +402,136 @@ class SettlePlanTest(unittest.TestCase):
                     self.apply(self.plan(attempt_, digest=digest), report)
                     self.assertEqual(self.held(), reached)
                     self.assertEqual(self.plan(attempt_, digest=digest), ())
+
+    def test_a_claimed_launch_records_its_claim_once_per_span(self):
+        claim = ac.claim_reference({"owner": 1}, "claude-code")
+        entry = Op("claim", executor_id="14:1:1", reference=claim)
+        self.assertEqual(self.plan(attempt("active"), bare=True, claim=claim), (
+            Op("create"), Op("acquire", executor_id="14:1:1", ttl_ms=30 * MINUTE), entry))
+        custody = self.acquire()
+        # An open span the store holds without a claim gets one (the route's first sweep).
+        self.assertEqual(self.plan(attempt("active"), claim=claim), (entry,))
+        self.store.record_evidence(
+            custody, evidence_id=ac.claim_id("14:1:1", ac.span_epoch(custody)),
+            form="snapshot", reference=claim)
+        self.assertEqual(ac.claimed(self.store.load(self.id), "14:1:1"), claim)
+        self.assertEqual(self.plan(attempt("active"), claim=claim), ())
+        self.now = T0 + 31 * MINUTE
+        resumed = attempt("active", launches=2, deadline="2026-08-13T21:01:00Z")
+        # A resume claims its new span, as the plan's last operation.
+        self.assertEqual([op.kind for op in self.plan(resumed, claim=claim)],
+                         ["reap", "acquire", "unpark", "claim"])
+        self.assertEqual(self.plan(resumed, claim=claim)[-1],
+                         Op("claim", executor_id="14:1:2", reference=claim))
+        # An expired launch that is not reacquired claims nothing.
+        self.assertEqual(self.plan(attempt("active"), claim=claim), ())
+        self.assertIsNone(ac.claimed(self.store.load(self.id), "14:1:2"))
+
+    def test_an_unavailable_owner_gives_the_span_up(self):
+        self.assertEqual(self.plan(attempt("active"), bare=True, owner_gone=True),
+                         (Op("create"),))
+        self.acquire()
+        self.assertEqual(self.plan(attempt("active"), owner_gone=True, claim="c"),
+                         (Op("release"),))
+        self.now = T0 + 31 * MINUTE
+        self.assertEqual(self.plan(attempt("active"), owner_gone=True),
+                         (Op("reap", reason="expiry"), Op("unpark", reason="resumed")))
+
+    def test_the_capacity_gate_parks_and_a_release_wakes(self):
+        refused = attempt("suspended", blocked_on="host_capacity")
+        park, wake = (Op("park", reason="suspended:host_capacity"),
+                      Op("unpark", reason="capacity_released"))
+        self.acquire()
+        # A refusal and a later release in one write keep their order.
+        self.assertEqual(self.plan(refused, gate_open=True), (park, Op("release"), wake))
+        self.assertEqual(self.plan(refused), (park, Op("release")))
+        self.apply(self.plan(refused), None)
+        self.assertEqual(self.plan(refused), ())
+        self.assertEqual(self.plan(refused, gate_open=True), (wake,))
+        self.apply(self.plan(refused, gate_open=True), None)
+        self.assertEqual((self.held()[0], self.plan(refused, gate_open=True)), ("created", ()))
+        # The gate is read from the block: closed again, the transaction parks again.
+        self.assertEqual(self.plan(refused), (park,))
+        # No other suspension is woken by an open gate.
+        self.assertEqual(self.plan(attempt("suspended", blocked_on="transport"),
+                                   gate_open=True), (Op("park", reason="suspended:transport"),))
+
+    def test_a_remainder_record_is_planned_by_the_same_rows(self):
+        remainder = {"remainder": 1, "state": "active", "worktree": WORKTREE,
+                     "launches": [{"kind": "fresh"}], "deadline_at": DEADLINE,
+                     "blocked_on": None, "result_source": None, "result": None}
+        self.assertEqual(self.plan(remainder, bare=True, current="14:r1:1", claim="c"), (
+            Op("create"), Op("acquire", executor_id="14:r1:1", ttl_ms=30 * MINUTE),
+            Op("claim", executor_id="14:r1:1", reference="c")))
+        gone = {**remainder, "state": "suspended", "blocked_on": "owner_unavailable"}
+        self.assertEqual(self.plan(gone, bare=True, current="14:r1:1"), (
+            Op("create"), Op("park", reason="suspended:owner_unavailable")))
+        failed = {**remainder, "state": "failed", "result_source": "owner",
+                  "result": result("failed")}
+        self.assertEqual(self.plan(failed, bare=True, bound=True, current="14:r1:1"),
+                         (Op("create"), Op("seal", reason="owner:failed")))
+
+    def test_a_delivered_issue_gives_up_launch_spans_and_plans_the_succeeded_seal(self):
+        seal = Op("seal_succeeded", executor_id="14:1:seal", reason="delivered")
+        merged = attempt("merged", source="owner", result=result("merged", "b" * 40))
+        self.assertEqual(self.plan(attempt("active"), bare=True, delivered=True),
+                         (Op("create"), seal))
+        self.assertEqual(self.plan(merged, bare=True, delivered=True, latest=False), ())
+        self.acquire()
+        self.assertEqual(self.plan(attempt("active"), delivered=True, claim="c"),
+                         (Op("release"), seal))
+        self.assertEqual(self.plan(merged, delivered=True, digest="sha256:" + "1" * 64),
+                         (Op("record_result", executor_id="14:1:1"), Op("release"), seal))
+        self.now = T0 + 31 * MINUTE
+        self.assertEqual(self.plan(attempt("active"), delivered=True),
+                         (Op("reap", reason="expiry"), seal))
+        self.assertEqual(self.plan(
+            {"remainder": 2, "state": "active", "launches": [{}], "deadline_at": DEADLINE,
+             "blocked_on": None, "result_source": None, "result": None},
+            delivered=True, current="14:r2:1")[-1],
+            Op("seal_succeeded", executor_id="14:r2:seal", reason="delivered"))
+
+    def test_only_a_delivered_record_may_be_in_the_seals_forward_states(self):
+        seal = Op("seal_succeeded", executor_id="14:1:seal", reason="delivered")
+        held = self.store.acquire(self.id, executor_id="14:1:seal", subject_path=WORKTREE,
+                                  ttl_ms=MINUTE).custody
+        # The seal's own span is left open, at every state the seal passes.
+        self.assertEqual(self.plan(attempt("active"), delivered=True), (seal,))
+        for target in ac.FORWARD_STATES:
+            self.store.advance(self.id, target, reason="delivered", custody=held)
+            self.assertEqual(self.plan(attempt("active"), delivered=True), (seal,), target)
+            with self.assertRaises(ac.ProjectionMismatch):
+                self.plan(attempt("active"))
+        self.store.settle_proof(self.store.start_cohort(held).custody)
+        self.assertEqual(self.store.load(self.id).state, "succeeded")
+        self.assertEqual(self.plan(attempt("active"), delivered=True), ())
+        with self.assertRaises(ac.ProjectionMismatch):
+            self.plan(attempt("active"))
+
+    def test_a_cutover_plan_interrupted_after_any_operation_converges(self):
+        resumed = attempt("active", launches=2, deadline="2026-08-13T21:01:00Z")
+        refused = attempt("suspended", blocked_on="host_capacity")
+        for lapsed, attempt_, facts, length in (
+                (True, resumed, {"claim": "c"}, 4), (False, refused, {"gate_open": True}, 3),
+                (True, attempt("active"), {"owner_gone": True}, 2)):
+            def start():
+                self.fresh()
+                self.acquire()
+                self.now = T0 + (31 * MINUTE if lapsed else 0)
+
+            start()
+            whole = self.plan(attempt_, **facts)
+            self.assertEqual(len(whole), length, facts)
+            self.apply(whole, None)
+            reached = self.held()
+            self.assertEqual(self.plan(attempt_, **facts), (), facts)
+            for cut in range(1, length):
+                with self.subTest(facts=facts, applied=cut):
+                    start()
+                    self.apply(self.plan(attempt_, **facts)[:cut], None)
+                    self.apply(self.plan(attempt_, **facts), None)
+                    self.assertEqual((self.held(), self.plan(attempt_, **facts)),
+                                     (reached, ()))
 
 
 if __name__ == "__main__":

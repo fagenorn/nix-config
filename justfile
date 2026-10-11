@@ -121,6 +121,7 @@ agent-workflow-tests:
     tests/test_transaction_core.py \
     tests/test_attempt_identity.py \
     tests/test_attempt_custody.py \
+    tests/test_attempt_delivery.py \
     tests/test_transaction_custody.py \
     tests/test_transaction_invocation.py \
     tests/test_transaction_plan.py \
