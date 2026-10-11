@@ -108,7 +108,8 @@ def registry(*entries: dict) -> dict:
     """The fleet registry document naming `entries`, in the order given.
 
     The file's shape is the design's, not the reader's: two members, and each
-    entry exactly `{project_id, root}` (D18). `adopt-project verify --register`
+    entry closed on `{project_id, root}` plus the one optional
+    `branch_override` (D18; issue 363 D3). `adopt-project verify --register`
     writes it; the suite stages this file by hand so the read side is
     exercised apart from its writer.
     """
