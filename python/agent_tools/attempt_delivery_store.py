@@ -18,7 +18,7 @@ from typing import Any, NamedTuple
 
 from agent_tools import attempt_custody as custody_rules
 from agent_tools import attempt_delivery as delivery_rules
-from agent_tools.attempt_store import StoreRefused, reading, writing
+from agent_tools.attempt_store import StoreRefused, reading, run_handle, writing
 from agent_tools.transaction_core import TransactionStore
 from agent_tools.transaction_history import TERMINALS, Transaction
 
@@ -57,6 +57,38 @@ def delivery_of(core: TransactionStore, run: str, issue: int,
                 f"delivery projection mismatch: {transaction.transaction_id}: {violation}")
         if transaction.subject["run"] == run:
             return ordinal, transaction
+
+
+def installing_runs(store: Path, issue: int, digest: str) -> list[str]:
+    """The handles of the runs whose delivery transaction for `issue` carries the contract
+    `digest`, in ordinal order, read without a lock.
+
+    Probes `delivery_key(issue, digest, n)` from 1 to the first miss, so a store that does
+    not exist, or a contract with no delivery transaction, answers an empty list. Only the
+    transaction is consulted: a ledger a cut write has not yet published matches later, at
+    the caller's check of the ledger itself. A transaction that is not the closed delivery
+    subject, or whose run transaction is not an attempt run, is a `StoreRefused`.
+    """
+    runs: list[str] = []
+    with reading(store, 0) as core:  # lookup and load read no clock
+        if core is None:
+            return runs
+        ordinal = 0
+        while True:
+            ordinal += 1
+            identity = core.lookup(delivery_rules.delivery_key(issue, digest, ordinal))
+            if identity is None:
+                return runs
+            transaction = core.load(identity)
+            violation = delivery_rules.delivery_subject_violation(transaction.subject)
+            if violation is not None:
+                raise StoreRefused(
+                    f"delivery projection mismatch: {transaction.transaction_id}: {violation}")
+            run = transaction.subject["run"]
+            handle = run_handle(store, run)
+            if handle is None:
+                raise StoreRefused(f"delivery run {run} is not an attempt run transaction")
+            runs.append(handle)
 
 
 def _installed(state: dict) -> list[tuple[int, Mapping]]:

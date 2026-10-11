@@ -4588,11 +4588,13 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         ambiguous = self.direct_owner_raw(ok=False)
         self.assertIn("nonterminal", ambiguous.stderr)
         self.assertEqual({path: path.read_bytes() for path in snapshots}, snapshots)
-        malformed = self.workflows_dir / "direct-73-bad"
-        malformed.mkdir()
+        # A directory no index entry names is not read, so it changes no answer (D22).
+        stray = self.workflows_dir / "direct-73-bad"
+        stray.mkdir()
         rejected = self.direct_owner_raw(ok=False)
-        self.assertIn("malformed", rejected.stderr)
+        self.assertEqual(rejected.stderr, ambiguous.stderr)
         self.assertEqual({path: path.read_bytes() for path in snapshots}, snapshots)
+        self.assertEqual(list(stray.iterdir()), [])
 
     def test_concurrent_first_direct_calls_create_one_run_and_one_attempt(self):
         request_path = self.root / "concurrent-direct.json"
@@ -4711,6 +4713,8 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                 )
                 self.assertEqual(rejected.returncode, 2)
                 self.assertEqual(rejected.stdout, "")
+                self.assertEqual(rejected.stderr, "workflow-state: unmigrated direct run: "
+                                                  "run workflow-state migrate --apply\n")
                 if label == "symlink issue lock":
                     self.assertEqual(
                         (root / "issue-lock-target").read_bytes(),
@@ -4735,6 +4739,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
+        self.run_cli("migrate", "--repo-root", self.root, "--apply")
         first = self.direct_owner()
         self.assertEqual(first["run_id"], run_id)
         self.assertEqual(first["requirements"], [{"kind": "tracker"}])
@@ -4775,31 +4780,31 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertIn("newer terminal", rejected.stderr)
         self.assertEqual({path: path.read_bytes() for path in snapshots}, snapshots)
 
-    def test_direct_sequence_exhaustion_fails_without_overwriting_terminal_history(self):
+    def test_a_stray_last_sequence_directory_is_not_direct_history(self):
+        """Sequence 999999 is reachable only through the index entries below it (D22), so a
+        directory with that name is not a run and `new_run` finds no history to extend."""
         owner = self.acquire_direct()
         self.run_id = owner["run_id"]
         self.finish(1, self.merged_result(73), issue=73,
                     now="2026-08-20T10:01:00Z")
         source = self.workflows_dir / owner["run_id"]
-        exhausted = self.workflows_dir / "direct-73-999999"
-        source.rename(exhausted)
-        state_path = exhausted / "state.json"
+        stray = self.workflows_dir / "direct-73-999999"
+        source.rename(stray)
+        state_path = stray / "state.json"
         state = self._as_legacy(json.loads(state_path.read_text()), 7, handle="direct-73-999999")
         state_path.write_text(
             json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
+        before = state_path.read_bytes()
         rejected = self.direct_owner_raw(
             new_run=True, tracker=self.tracker_fact(73),
             worktree=self.worktree_fact(73, recorded={
                 "path": owner["worktree"], "state": "matching_issue_branch",
             }), ok=False,
         )
-        self.assertIn("exhaust", rejected.stderr)
-        # The locked read binds the legacy ledger (D14); its history is otherwise untouched.
-        self.assertEqual(json.loads(state_path.read_text()), {
-            **state, "schema_version": 10, "transaction_id": TransactionStore(
-                self.store_root).lookup(attempt_identity.direct_key(73, 999999))})
+        self.assertEqual(rejected.stderr, "workflow-state: new_run is not applicable\n")
+        self.assertEqual(state_path.read_bytes(), before)
 
     def test_direct_authorization_flags_fail_when_not_applicable(self):
         for field in ("new_run", "owner_unavailable"):

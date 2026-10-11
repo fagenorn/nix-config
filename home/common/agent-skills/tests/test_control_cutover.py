@@ -16,7 +16,7 @@ from pathlib import Path
 from agent_tools import attempt_custody as ac
 from agent_tools import attempt_delivery as ad
 
-from .test_attempt_custody import DeliveredCustody
+from .test_attempt_custody import DeliveredCustody, LifecycleCustody
 from .test_delivered_control import DELIVERED, DISPATCH, LIVE, at
 from .test_delivery_workflow import WORKFLOW
 
@@ -416,3 +416,151 @@ class DeliveryJournalTest(Cutover, unittest.TestCase):
         self.cli("migrate", "--repo-root", self.root, "--apply")
         self.assertIsNotNone(self.delivery(DELIVERED))
         self.assertEqual(self.journal(), self.expected())
+
+
+class IndexResolutionTest(Cutover, unittest.TestCase):
+    @property
+    def workflows(self):
+        return self.root / ".superpowers/workflows"
+
+    def adopt(self, bootstrap):
+        """Address the run a bootstrap reply names; returns its id."""
+        minted = json.loads(bootstrap.stdout)["run_id"]
+        self.run_args = ("--repo-root", self.root, "--run-id", minted)
+        self.ledger = self.workflows / minted / "state.json"
+        return minted
+
+    def issue_set(self, text, minute=0, ok=True):
+        return self.cli("init-run", "--repo-root", self.root, "--issue-set", text, "--now",
+                        at(minute), ok=ok)
+
+    def direct(self, minute=0, ok=True):
+        """`direct-owner` for issue 41 with every fact a first launch needs."""
+        worktree = str(self.root / ".worktrees/worktree-issue-41-direct")
+        built = self.build("contract", self.contract_input(
+            issue=41, worktree=worktree, now=at(0), source_reference="invocation:/from-issue 41"))
+        request = self.direct_request(
+            issue=41, now=at(minute), delivery_contract=built["contract"],
+            authorization_intents=[built["initial_intent"]],
+            forge={"state": "none", "url": None, "merge_sha": None},
+            tracker={"issue": 41, "state": "open", "open_blockers": [], "decision_blockers": []},
+            worktree={"issue": 41, "recorded": None,
+                      "candidate": {"path": worktree, "state": "absent"}})
+        return self.cli("direct-owner", "--repo-root", self.root, "--request-file", "-",
+                        stdin=json.dumps(request).encode(), ok=ok)
+
+    def current_selection(self, ok=True):
+        return self.cli("build-delivery", "--repo-root", self.root, "--kind",
+                        "current-selection", "--input", "-", ok=ok, stdin=json.dumps(
+                            {"contract": self.built[DELIVERED]["contract"]}).encode())
+
+    def script(self, unlistable):
+        """Every control-plane command once over a root whose `workflows` holds only the
+        `.gitignore` a used root has (D23); returns each stdout with run ids replaced."""
+        shutil.rmtree(self.root / ".superpowers", ignore_errors=True)
+        self.workflows.mkdir(parents=True)
+        (self.workflows / ".gitignore").write_text("*\n", encoding="utf-8")
+        if unlistable:
+            os.chmod(self.workflows, 0o300)
+            self.addCleanup(os.chmod, self.workflows, 0o700)
+            with self.assertRaises(PermissionError):
+                os.listdir(self.workflows)
+        boot = self.issue_set(f"{LIVE}-{DELIVERED}")
+        self.adopt(boot)
+        outputs = [
+            boot, self.sweep(0, recorded={DELIVERED: None, LIVE: None}, contracts=True),
+            self.select(1),
+            self.cli("progress", *self.run_args, "--issue", DELIVERED, "--attempt", 1,
+                     "--phase", 1, "--now", at(2), "--turn-count", 10, "--context-tokens",
+                     20000, "--next-needs-context", "true", "--artifacts-sufficient", "false",
+                     "--remainder-self-contained", "false", "--action-id", f"{DELIVERED}:1:1"),
+            self.cli("check-launch", *self.run_args, "--action-id", f"{DELIVERED}:1:1"),
+            self.direct(), self.current_selection(),
+            self.issue_set(f"{DELIVERED}-{LIVE}", 3)]
+        return [RUN_ID.sub(b"RUN", done.stdout) for done in outputs]
+
+    def test_ac1_no_control_plane_command_lists_the_workflows_directory(self):
+        self.setup_run()
+        readable = self.script(False)
+        self.assertEqual(self.script(True), readable)
+
+    def test_ac1_a_stray_or_copied_directory_is_not_a_run(self):
+        self.setup_run()
+        clean = RUN_ID.sub(b"RUN", self.direct().stdout)
+        shutil.rmtree(self.root / ".superpowers")
+        strays = [self.workflows / name / "state.json"
+                  for name in ("direct-41-000009", "direct-41-bad")]
+        for path in strays:
+            path.parent.mkdir(parents=True)
+            path.write_text("{}\n", encoding="utf-8")
+        self.assertEqual(RUN_ID.sub(b"RUN", self.direct().stdout), clean)
+        self.assertEqual([path.read_text(encoding="utf-8") for path in strays],
+                         ["{}\n", "{}\n"])
+        indexed = self.adopt(self.issue_set(f"{DELIVERED}-{LIVE}"))
+        self.sweep(0, recorded={DELIVERED: None}, contracts=True)
+        self.select(1)
+        served = self.current_selection().stdout
+        shutil.copytree(self.ledger.parent, self.workflows / "zz-copy")
+        self.assertEqual(self.current_selection().stdout, served)
+        self.assertEqual(json.loads(self.issue_set(f"{LIVE}-{DELIVERED}", 2).stdout)["run_id"],
+                         indexed)
+
+    def test_ac1_an_index_entry_without_a_ledger_is_reused(self):
+        self.setup_run()
+        first = json.loads(self.direct().stdout)["run_id"]
+        shutil.rmtree(self.workflows / first)
+        self.assertEqual(json.loads(self.direct().stdout)["run_id"], first)
+        minted = json.loads(self.issue_set("9-7").stdout)["run_id"]
+        shutil.rmtree(self.workflows / minted)
+        self.assertEqual(json.loads(self.issue_set("7-9-7", 1).stdout)["run_id"], minted)
+
+    def test_a_finished_run_is_not_reused_and_a_live_one_is(self):
+        self.setup_run()
+        live = self.adopt(self.issue_set(str(DELIVERED)))
+        self.sweep(0, recorded={DELIVERED: None}, contracts=True)
+        self.assertEqual(json.loads(self.issue_set(str(DELIVERED), 1).stdout)["run_id"], live)
+        self.failing(f"{DELIVERED}:1:1", 2)
+        fresh = json.loads(self.issue_set(str(DELIVERED), 3).stdout)["run_id"]
+        self.assertNotEqual(fresh, live)
+        self.assertEqual(
+            self.core().lookup(f"attempt-run/v1:run:issue-set:{DELIVERED}:2"), fresh)
+        for text in ("207-x", "0", "", "207--209"):
+            refused = self.issue_set(text, ok=False)
+            self.assertEqual((refused.returncode, refused.stdout), (2, b""), text)
+
+    def test_two_runs_installing_one_contract_keep_the_refusal_in_install_order(self):
+        self.spawn(DELIVERED)
+        self.select(1)
+        first = self.run_args[3]
+        second = self.adopt(self.cli("init-run", "--repo-root", self.root, "--creation-key",
+                                     "second", "--now", at(31)))
+        self.sweep(31, recorded={DELIVERED: None}, contracts=True)
+        refused = self.current_selection(ok=False)
+        self.assertEqual((refused.returncode, refused.stderr), (
+            2, b"workflow-state: build-delivery refused: the contract is installed by more "
+               b"than one ledger: " + f"{first}, {second}\n".encode()))
+        later = self.delivery(DELIVERED, 2)
+        self.assertIsNotNone(later)
+        self.assertEqual(later.subject["run"], second)
+
+
+class UnmigratedDirectTest(LifecycleCustody, unittest.TestCase):
+    def test_ac1_an_unbound_legacy_direct_ledger_is_refused_until_it_is_migrated(self):
+        owner = self.acquire_direct()
+        legacy = self.workflows_dir / "direct-73-000001"
+        (self.workflows_dir / owner["run_id"]).rename(legacy)
+        state = self._as_legacy(json.loads((legacy / "state.json").read_text()), 7,
+                                handle="direct-73-000001")
+        (legacy / "state.json").write_text(
+            json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        shutil.rmtree(self.store_root)  # no index entry names the ledger
+        before = self.tree()
+        facts = {"tracker": self.tracker_fact(73), "worktree": self.worktree_fact(73, recorded={
+            "path": owner["worktree"], "state": "matching_issue_branch"})}
+        refused = self.direct_owner_raw(**facts, ok=False)
+        self.assertEqual((refused.returncode, refused.stderr), (
+            2, "workflow-state: unmigrated direct run: run workflow-state migrate --apply\n"))
+        self.assertEqual(self.tree(), before)
+        self.run_cli("migrate", "--repo-root", self.root, "--apply")
+        taken = self.direct_owner(owner_unavailable=True, **facts)
+        self.assertEqual((taken["kind"], taken["run_id"]), ("owner", "direct-73-000001"))

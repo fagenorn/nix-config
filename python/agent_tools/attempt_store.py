@@ -930,21 +930,36 @@ def retain_result(store: Path, run: str, *, issue: int, attempt: int, launch: in
     return True
 
 
-def indexed_direct_runs(store: Path, workflows_dir: Path, issue: int, *,
-                        after: int) -> Iterator[tuple[int, str, Path]]:
-    """The minted direct runs of `issue` past sequence `after`, in order, found by index.
+def run_handle(store: Path, run_id: str) -> str | None:
+    """The handle of the run transaction `run_id`, read without a lock: the legacy alias's id
+    a migrated ledger keeps, else the transaction id. None when its subject is not the closed
+    attempt-run subject."""
+    try:
+        subject = TransactionStore(store).load(run_id).subject
+    except UnknownTransaction as error:
+        raise StoreRefused(f"run transaction store: {error}") from error
+    except TransactionError as error:
+        raise StoreFault(f"run transaction store: {error}") from error
+    return None if subject_violation(subject) is not None else subject_handle(subject, run_id)
 
-    Lazy: the caller locks and checks each run before the next lookup.
+
+def direct_runs(store: Path, workflows_dir: Path, issue: int) -> Iterator[tuple[int, str, Path]]:
+    """The minted direct runs of `issue` as `(sequence, handle, run_dir)`, from sequence 1, in
+    order, found by index and never by listing `workflows`.
+
+    Lazy: the caller locks and checks each run before the next lookup. A miss ends the list;
+    so does a missing `run_dir` or `state.json`, which is the reserved id of the next mint.
     """
-    sequence = after
+    sequence = 0
     while True:
         sequence += 1
         run_id = lookup_run(store, direct_key(issue, sequence))
         if run_id is None:
             return
-        if classify(run_id) != "core":
+        handle = run_handle(store, run_id)
+        if handle is None:
             raise StoreRefused("direct run index entry is not a run transaction")
-        run_dir = workflows_dir / run_id
+        run_dir = workflows_dir / handle
         status = _path_status(run_dir)
         if status is None:
             return
@@ -952,7 +967,19 @@ def indexed_direct_runs(store: Path, workflows_dir: Path, issue: int, *,
             raise StoreRefused("direct run entry must be a non-symlink directory")
         if _path_status(run_dir / "state.json") is None:
             return
-        yield sequence, run_id, run_dir
+        yield sequence, handle, run_dir
+
+
+def unmigrated_direct(store: Path, workflows_dir: Path, issue: int) -> bool:
+    """Whether a legacy `direct-<issue>-<sequence>` directory sits at the first sequence the
+    index has no entry for: a direct run `migrate --apply` has not bound yet.
+
+    Takes no lock and creates nothing.
+    """
+    sequence = 1
+    while lookup_run(store, direct_key(issue, sequence)) is not None:
+        sequence += 1
+    return _path_status(workflows_dir / f"direct-{issue}-{sequence:06d}") is not None
 
 
 def _inventory(superpowers: Path) -> list[str]:

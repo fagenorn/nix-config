@@ -255,6 +255,7 @@ class DirectOwnerIdentityTest(MigrationFixtures, unittest.TestCase):
 
     def test_a_new_run_after_a_legacy_terminal_links_the_legacy_handle(self):
         self.install_terminal_legacy_direct("direct-41-000001")
+        self.run_cli("migrate", "--repo-root", self.root, "--apply")
         reply = self.direct_owner(**self.new_run_fields(41))
         self.assertRegex(reply["run_id"], CORE)
         self.run_id = reply["run_id"]
@@ -273,22 +274,21 @@ class DirectOwnerIdentityTest(MigrationFixtures, unittest.TestCase):
         self.store_root.mkdir(parents=True, exist_ok=True)
         reserved = self.store().create(plan.creation_key, plan.subject_json(),
                                        **ai.creation_arguments(plan)).transaction_id
+        self.run_cli("migrate", "--repo-root", self.root, "--apply")
         reply = self.direct_owner(**self.new_run_fields(41))
         self.assertEqual(reply["run_id"], reserved)
         self.assertIsNone(self.store().lookup(ai.direct_key(41, 3)))
 
-    def test_a_refused_legacy_ledger_refuses_the_call_and_mints_nothing(self):
+    def test_a_legacy_ledger_the_index_never_reaches_is_not_read(self):
         self.init_run()
         state = {**self.read_state(), "prior_run": "direct-42-000001"}
         self.install_legacy(state, "direct-41-000002")
         ledger = self.workflows_dir / "direct-41-000002" / "state.json"
         before = ledger.read_bytes()
-        refused = self.direct_owner_raw(issue=41, ok=False)
-        self.assertEqual(refused.returncode, 2)
-        self.assertIn("ambiguous_lineage", refused.stderr)
+        reply = self.direct_owner(issue=41, tracker=self.tracker_fact(41))
+        self.assertRegex(reply["run_id"], CORE)
+        self.assertEqual(self.store().lookup(ai.direct_key(41, 1)), reply["run_id"])
         self.assertEqual(ledger.read_bytes(), before)
-        for sequence in (1, 2, 3):
-            self.assertIsNone(self.store().lookup(ai.direct_key(41, sequence)))
 
     def test_a_valid_ledger_before_a_refused_one_stays_unbound(self):
         self.install_terminal_legacy_direct("direct-41-000001")
@@ -299,7 +299,7 @@ class DirectOwnerIdentityTest(MigrationFixtures, unittest.TestCase):
         before = (first.read_bytes(), second.read_bytes())
         refused = self.direct_owner_raw(issue=41, ok=False)
         self.assertEqual(refused.returncode, 2)
-        self.assertIn("ambiguous_lineage", refused.stderr)
+        self.assertIn("unmigrated direct run", refused.stderr)
         self.assertEqual((first.read_bytes(), second.read_bytes()), before)  # D23
         for sequence in (1, 2, 3):
             self.assertIsNone(self.store().lookup(ai.direct_key(41, sequence)))

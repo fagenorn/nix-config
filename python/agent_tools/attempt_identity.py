@@ -10,7 +10,7 @@ and `load`, and the mint lock); `workflow-state` owns the ledgers, their locks a
 import copy
 import datetime
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
@@ -165,6 +165,24 @@ def run_key(caller_key: str) -> str:
     if type(caller_key) is not str or _CALLER_KEY.fullmatch(caller_key) is None:
         raise ValueError(f"run key {caller_key!r} is not {_CALLER_KEY.pattern}")
     return f"{SUBJECT_SCHEMA}:run:{caller_key}"
+
+
+def issue_set_caller_key(issues: Iterable[int], ordinal: int) -> str:
+    """The caller key of the `ordinal`th run for a set of issues (`init-run --issue-set`).
+
+    Sorted, unique issue numbers joined by `-`, then the ordinal. A `ValueError` for no
+    issue, a member that is not an int in 1 to `_MAX_ISSUE`, an ordinal below 1, or a key
+    the caller-key grammar refuses.
+    """
+    numbers = sorted(set(issues))
+    if not numbers or not all(_is_int(number, 1, _MAX_ISSUE) for number in numbers):
+        raise ValueError("an issue set needs issue numbers in 1 to 9999999")
+    if type(ordinal) is not int or ordinal < 1:
+        raise ValueError(f"issue set ordinal {ordinal!r} is not a positive integer")
+    key = f"issue-set:{'-'.join(map(str, numbers))}:{ordinal}"
+    if _CALLER_KEY.fullmatch(key) is None:
+        raise ValueError(f"issue set key {key!r} is not {_CALLER_KEY.pattern}")
+    return key
 
 
 def _direct_predecessor(identity: RunIdentity, prior_run: object) -> bool:

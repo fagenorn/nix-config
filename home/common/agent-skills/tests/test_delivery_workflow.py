@@ -2489,7 +2489,7 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
     def test_only_a_contract_that_does_not_re_derive_reads_a_ledger(self):
         self.project()
         built = self.build("contract", self.contract_input())
-        contract, _ = self.hand_built(built)
+        contract, intent = self.hand_built(built)
         workflows = self.root / ".superpowers" / "workflows"
         matching = json.dumps({"schema_version": 4, "issues": {"171": {
             "delivery": {"contract_digest": self.model.canonical_digest(
@@ -2497,33 +2497,65 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
         outside = self.root / "outside"
         outside.mkdir()
         (outside / "state.json").write_bytes(matching)
-        for run_id, raw in (
-                ("-bad", matching),
-                ("a-unparsable", b"{"),
-                # Too deeply nested to parse: json.loads raises RecursionError (D14).
-                ("a-deep", b"[" * 100000),
-                ("run-blocked", b"{}"),
-                ("run-derived", json.dumps({"schema_version": 4, "issues": {"171": {
-                    "delivery": {"contract_digest": self.model.canonical_digest(
-                        built["contract"])}}}}).encode()),
-                ("run-legacy", matching)):
+        # Directories no delivery transaction names are never candidates, whatever they hold (D13).
+        for run_id, raw in (("-bad", matching), ("a-unparsable", b"{"), ("run-blocked", b"{}"),
+                            ("run-legacy", matching)):
             (workflows / run_id).mkdir(parents=True)
             (workflows / run_id / "state.json").write_bytes(raw)
-        # A symlinked run directory and a symlinked state file, both reaching the
-        # matching bytes outside the root, sort before run-legacy (D13).
         (workflows / "run-a-linked").symlink_to(outside, target_is_directory=True)
-        (workflows / "run-b-file").mkdir()
-        (workflows / "run-b-file" / "state.json").symlink_to(outside / "state.json")
-        # No search permission: lstat(state.json) raises PermissionError (D14).
-        os.chmod(workflows / "run-blocked", 0)
-        self.addCleanup(os.chmod, workflows / "run-blocked", 0o700)
-        invalid = (b"workflow-state: build-delivery refused: installing ledger "
-                   b"run-legacy is invalid\n")
         refused = self.build("initial-intent", {"contract": contract}, ok=False)
         self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
-                         (2, b"", invalid))
+                         (2, b"", self.NOT_INSTALLED))
+        owner = self.acquire(contract, intent)
+        run_dir = workflows / owner["run_id"]
+        ledger = run_dir / "state.json"
+        genuine = ledger.read_bytes()
+        self.assertEqual(self.build("initial-intent", {"contract": contract}), intent)
+        derived = json.dumps({"schema_version": 4, "issues": {"171": {"delivery": {
+            "contract_digest": self.model.canonical_digest(built["contract"])}}}}).encode()
         self.assertEqual(self.build("initial-intent", {"contract": built["contract"]}),
                          built["initial_intent"])
+        # Each damage to the one candidate skips it: the ledger is read only when it is a
+        # regular, parsable file that records the digest (D14).
+        held = run_dir.with_name("held")
+        damage = {
+            "unparsable": lambda: ledger.write_bytes(b"{"),
+            # Too deeply nested to parse: json.loads raises RecursionError.
+            "too deep": lambda: ledger.write_bytes(b"[" * 100000),
+            "absent": lambda: ledger.unlink(),
+            "another digest": lambda: ledger.write_bytes(derived),
+            "linked state": lambda: (ledger.unlink(), ledger.symlink_to(outside / "state.json")),
+            "linked run": lambda: (run_dir.rename(held),
+                                   run_dir.symlink_to(held, target_is_directory=True)),
+            # No search permission: lstat(state.json) raises PermissionError (D14).
+            "blocked": lambda: os.chmod(run_dir, 0),
+        }
+        for label, break_it in damage.items():
+            with self.subTest(label=label):
+                break_it()
+                try:
+                    refused = self.build("initial-intent", {"contract": contract}, ok=False)
+                finally:
+                    if run_dir.is_symlink():
+                        run_dir.unlink()
+                        held.rename(run_dir)
+                    os.chmod(run_dir, 0o700)
+                    ledger.unlink(missing_ok=True)
+                    ledger.write_bytes(genuine)
+                self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                 (2, b"", self.NOT_INSTALLED))
+        # A ledger that records the digest but no longer validates refuses, naming its run.
+        invalid = (b"workflow-state: build-delivery refused: installing ledger "
+                   + owner["run_id"].encode() + b" is invalid\n")
+        before = sorted(path.name for path in run_dir.iterdir())
+        for raw in (matching, json.dumps({"schema_version": [], "issues": {"171": {"delivery": {
+                "contract_digest": self.model.canonical_digest(contract)}}}}).encode()):
+            ledger.write_bytes(raw)
+            refused = self.build("initial-intent", {"contract": contract}, ok=False)
+            self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                             (2, b"", invalid))
+        self.assertEqual(sorted(path.name for path in run_dir.iterdir()), before)
+        ledger.write_bytes(genuine)
         # A lone surrogate has no canonical bytes, so no ledger can record it (D14).
         uncanonical = copy.deepcopy(contract)
         uncanonical["provenance"]["reference"] = "\ud800"
@@ -2536,14 +2568,6 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
         self.assertEqual((refused.returncode, refused.stdout), (2, b""))
         self.assertTrue(refused.stderr.startswith(b"workflow-state: build-delivery refused: "))
         self.assertEqual(refused.stderr.count(b"\n"), 1)
-        (workflows / "run-legacy" / "state.json").write_bytes(json.dumps({
-            "schema_version": [], "issues": {"171": {"delivery": {
-                "contract_digest": self.model.canonical_digest(contract)}}}}).encode())
-        refused = self.build("initial-intent", {"contract": contract}, ok=False)
-        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
-                         (2, b"", invalid))
-        self.assertEqual([path.name for path in (workflows / "run-legacy").iterdir()],
-                         ["state.json"])
         (self.root / ".superpowers").rename(self.root / "elsewhere")
         (self.root / ".superpowers").symlink_to(self.root / "elsewhere")
         self.assertEqual(self.build("initial-intent", {"contract": contract}, ok=False).stderr,
@@ -2739,8 +2763,7 @@ class DeliveryLoopTest(BuilderHarness, unittest.TestCase):
         self.sync_checkpoint(self.at_head(h1), [], self.scope_of("merge_pr"))
         self.assertEqual(self.current(), h1)
         shutil.copytree(self.ledger.parent, self.ledger.parent.with_name("zz-copy"))
-        refused(b"the contract is installed by more than one ledger: "
-                + self.ledger.parent.name.encode() + b", zz-copy")
+        self.assertEqual(self.current(), h1)  # a copy no index entry names is not a ledger
 
     def test_a_remainder_merges_after_a_post_selection_sync(self):
         """T7: the remainder reads H0 from the ledger; publish, open and merge follow H1."""
@@ -2850,6 +2873,11 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         completed = self.cli("control", "--repo-root", self.root, "--run-id", self.run_of(run_id),
             "--request-file", "-", stdin=json.dumps(request).encode(), ok=ok)
         return json.loads(completed.stdout) if ok else completed
+
+    def bind_legacy(self):
+        """Bind the hand-written legacy ledgers into the index; `direct-owner` refuses an
+        unbound direct ledger (#339 D22)."""
+        self.cli("migrate", "--repo-root", self.root, "--apply")
 
     def write_run(self, label, attempts, *, schema=7):
         """A retained legacy ledger under `label`: a direct label is its own run id, any other
@@ -3084,12 +3112,14 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         merged = self.workflow.reconciled_result(172, "https://example.invalid/pr/1", "b" * 40)
         self.write_run("direct-172-000001", [self.attempt(172, state="merged", result=merged,
             result_source="superseded", finished_at=NOW)], schema=2)
+        self.bind_legacy()
         replay = self.direct(issue=172)
         self.assertEqual((replay["kind"], replay["reason"], replay["result"]),
                          ("terminal", "merged", merged))
         suspended = self.attempt(173)
         self.workflow.suspend_attempt(suspended, blocked_on="external", now=NOW)
         path = self.write_run("direct-173-000001", [suspended], schema=2)
+        self.bind_legacy()
         recorded = {"issue": 173, "recorded": {"path": self.worktree,
                     "state": "matching_issue_branch"}, "candidate": None}
         tracker = {**TRACKER, "issue": 173}
@@ -3214,6 +3244,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
     def test_contractless_direct_retry_on_an_absent_path_asks_for_its_contract(self):
         self.project()
         self.write_run("direct-171-000001", [self.failed_attempt(171)])
+        self.bind_legacy()
         facts = {"tracker": TRACKER, "forge": NO_PR, "worktree": {"issue": 171,
                  "recorded": {"path": self.worktree, "state": "absent"}, "candidate": None}}
         self.assertEqual(self.direct(**facts), {"interface_version": 2, "kind": "observe",
@@ -3257,6 +3288,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         self.write_run("direct-171-000001", [self.attempt(
             171, worktree=path, state="failed", result_source="owner", finished_at=NOW,
             result=self.workflow.terminal_result(171, "failed", "one"))], schema=2)
+        self.bind_legacy()
         facts = {"tracker": TRACKER, "forge": NO_PR, "worktree": {"issue": 171,
                  "recorded": {"path": path, "state": "matching_issue_branch"},
                  "candidate": None}}
@@ -3273,15 +3305,8 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         return {"issue": 171, "recorded": {"path": self.worktree, "state": "mismatch"},
                 "candidate": other if candidate else None}
 
-    def assert_mismatch_refused(self, refused, path, before, *, bound=False):
-        """A refusal leaves the ledger as it was; `bound` is a retained legacy direct ledger
-        that the call's locked read committed as schema 10 first (#337 D14)."""
-        if bound:
-            self.assertEqual(json.loads(path.read_bytes()), {**json.loads(before),
-                "schema_version": 10, "transaction_id": TransactionStore(
-                    self.root / ".superpowers/attempt-transactions").lookup(
-                        attempt_identity.direct_key(171, 1))})
-            before = path.read_bytes()
+    def assert_mismatch_refused(self, refused, path, before):
+        """A refusal leaves the ledger as it was."""
         self.assertEqual((refused.returncode, refused.stdout, path.read_bytes()), (2, b"", before))
         self.assertIn(b"recorded custody worktree does not match the issue branch", refused.stderr)
 
@@ -3297,20 +3322,22 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
                     path, before)
             with self.subTest(lane="direct", candidate=candidate):
                 path = self.write_run("direct-171-000001", [self.failed_attempt(171)])
+                self.bind_legacy()
                 before = path.read_bytes()
                 self.assert_mismatch_refused(self.direct(ok=False, tracker=TRACKER, forge=NO_PR,
-                    worktree=self.mismatched(candidate)), path, before, bound=True)
+                    worktree=self.mismatched(candidate)), path, before)
 
     def test_contractless_new_run_on_a_mismatched_retained_path_refuses_at_once(self):
         self.project()
         path = self.write_run("direct-171-000001", [self.attempt(171, state="failed",
             result_source="refused", finished_at=NOW,
             result=self.workflow.terminal_result(171, "failed", "refused"))])
+        self.bind_legacy()
         before = path.read_bytes()
         for candidate in (True, False):
             with self.subTest(candidate=candidate):
                 self.assert_mismatch_refused(self.direct(ok=False, new_run=True, tracker=TRACKER,
-                    forge=NO_PR, worktree=self.mismatched(candidate)), path, before, bound=True)
+                    forge=NO_PR, worktree=self.mismatched(candidate)), path, before)
                 self.assertEqual(self.direct_runs(171), [path.parent])
 
     def merged(self, issue):

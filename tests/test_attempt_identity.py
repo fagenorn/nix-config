@@ -191,3 +191,15 @@ class StoreRoundTripTest(unittest.TestCase):
                                    **ai.creation_arguments(plan))
             self.assertEqual(store.lookup(plan.creation_key), created.transaction_id)
             self.assertEqual(created.state, "created")
+
+
+class IssueSetKeyTest(unittest.TestCase):
+    def test_the_key_is_the_sorted_unique_issue_numbers_and_an_ordinal(self):
+        self.assertEqual(ai.issue_set_caller_key([14, 12, 14], 2), "issue-set:12-14:2")
+        self.assertEqual(ai.run_key(ai.issue_set_caller_key((7,), 1)),
+                         "attempt-run/v1:run:issue-set:7:1")
+        for issues, ordinal in (([], 1), ([0], 1), ([True], 1), (["7"], 1), ([7], 0),
+                                (list(range(1, 60)), 1)):
+            with self.subTest(issues=issues, ordinal=ordinal):
+                with self.assertRaises(ValueError):
+                    ai.issue_set_caller_key(issues, ordinal)
