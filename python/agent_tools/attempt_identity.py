@@ -41,7 +41,7 @@ _PATTERNS = {
 _CALLER_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _SUBJECT_KEYS = frozenset({"schema", "kind", "issue", "sequence", "prior_run", "alias"})
 _KINDS = ("direct", "orchestrated")
-_MAX_SCHEMA_VERSION = 9
+_MAX_SCHEMA_VERSION = 10
 _MAX_ISSUE = 9_999_999
 _MAX_SEQUENCE = 999_999
 
@@ -191,7 +191,7 @@ def prior_run_violation(identity: RunIdentity, prior_run: object, *,
 
 
 def schema_refusal(document: object) -> str | None:
-    """"unknown_schema" unless `document` is a dict whose schema_version is an int in 1-9."""
+    """"unknown_schema" unless `document` is a dict whose schema_version is an int in 1-10."""
     version = document.get("schema_version") if type(document) is dict else None
     if type(version) is int and 1 <= version <= _MAX_SCHEMA_VERSION:
         return None

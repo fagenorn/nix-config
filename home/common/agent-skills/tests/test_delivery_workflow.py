@@ -308,8 +308,8 @@ class DeliveryAdmissionTest(unittest.TestCase):
                     str(root), "orchestrate-151", lambda state: (state, False),
                     migration_contracts={151: contract})
             write.assert_called_once()
-            self.assertEqual(write.call_args.args[2]["schema_version"], 9)
-            self.assertEqual((result["schema_version"], result["transaction_id"]), (9,
+            self.assertEqual(write.call_args.args[2]["schema_version"], 10)
+            self.assertEqual((result["schema_version"], result["transaction_id"]), (10,
                 TransactionStore(root / ".superpowers/attempt-transactions").lookup(
                     attempt_identity.legacy_key("orchestrate-151"))))
 
@@ -2895,7 +2895,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
             claims.append({"holder": "controller", "roles": {"controller": 1}, **held})
         expected = json.loads(before)
         expected.update(updated_at=now, admission={
-            "route": "claude-code", "releases": 0, "claims": claims}, schema_version=9,
+            "route": "claude-code", "releases": 0, "claims": claims}, schema_version=10,
             transaction_id=TransactionStore(self.root / ".superpowers/attempt-transactions")
             .lookup(attempt_identity.legacy_key(expected["run_id"])))
         self.assertEqual(json.loads(path.read_bytes()), expected)
@@ -3275,10 +3275,10 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
 
     def assert_mismatch_refused(self, refused, path, before, *, bound=False):
         """A refusal leaves the ledger as it was; `bound` is a retained legacy direct ledger
-        that the call's locked read committed as schema 9 first (#337 D14)."""
+        that the call's locked read committed as schema 10 first (#337 D14)."""
         if bound:
             self.assertEqual(json.loads(path.read_bytes()), {**json.loads(before),
-                "schema_version": 9, "transaction_id": TransactionStore(
+                "schema_version": 10, "transaction_id": TransactionStore(
                     self.root / ".superpowers/attempt-transactions").lookup(
                         attempt_identity.direct_key(171, 1))})
             before = path.read_bytes()
@@ -3364,7 +3364,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         boot = json.loads(self.cli("init-run", *run, "--now", NOW).stdout)
         self.assertEqual([(item["issue"], item["contract_digest"]) for item in boot["requirements"]],
                          [(151, None), (152, None)])
-        self.assertEqual(json.loads(path.read_text())["schema_version"], 9)
+        self.assertEqual(json.loads(path.read_text())["schema_version"], 10)
         swept = self.control("survive", self.control_request([151, 152]))
         self.assertEqual([action["kind"] for action in swept["actions"]], ["wait"])
         self.cli("progress", *run, "--now", LATER, "--issue", 151, "--attempt", 1,
