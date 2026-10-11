@@ -144,7 +144,7 @@ def remote_source(root: Path, run_resolver: Resolver,
     (or to `D` when it names none) changes nothing and any other refuses. A
     default contract that does not resolve takes the operand as the integration
     branch `B` when `origin` lists `B` and `B` is not `D`: `B` is fetched,
-    pinned and exported like the hop above, and its own contract must resolve
+    pinned and confirmed like the hop above, and its own contract must resolve
     and name `B`, so there is no further hop. The source then carries the
     default branch and the reason, which `branch_override` reports.
 
@@ -191,14 +191,10 @@ def remote_source(root: Path, run_resolver: Resolver,
                     "`--integration-branch` names the default branch, whose "
                     "contract does not resolve")
             branch = operand
-            pinned = fetch_pinned(root, branch)
-            exported = Path(scratch) / "integration"
-            export_commit(root, pinned, exported)
-            exit_code, payload = run_resolver(exported, "resolve")
-            if exit_code != 0 or integration_branch(payload) != branch:
-                raise unresolved_integration_branch(
-                    "the contract on the `--integration-branch` branch does "
-                    "not resolve or does not name that branch")
+            pinned, exported = pin_integration_branch(
+                root, run_resolver, branch, Path(scratch) / "integration",
+                "the contract on the `--integration-branch` branch does not "
+                "resolve or does not name that branch")
             override_default = default
         if named is not None and named != default:
             if named not in heads.branches:
@@ -206,14 +202,10 @@ def remote_source(root: Path, run_resolver: Resolver,
                     "the contract's integration branch is not a branch "
                     "`origin` lists")
             branch = named
-            pinned = fetch_pinned(root, branch)
-            exported = Path(scratch) / "integration"
-            export_commit(root, pinned, exported)
-            exit_code, payload = run_resolver(exported, "resolve")
-            if exit_code != 0 or integration_branch(payload) != branch:
-                raise unresolved_integration_branch(
-                    "the contract on the integration branch does not resolve "
-                    "or does not name that branch")
+            pinned, exported = pin_integration_branch(
+                root, run_resolver, branch, Path(scratch) / "integration",
+                "the contract on the integration branch does not resolve or "
+                "does not name that branch")
         yield VerificationSource(
             ref=f"refs/remotes/{REMOTE}/{branch}", commit=pinned,
             resolver_root=exported, inventory=tree_inventory(root, pinned),
@@ -221,6 +213,28 @@ def remote_source(root: Path, run_resolver: Resolver,
             override_reason=(agent_platform.BRANCH_OVERRIDE_REASONS[0]
                              if override_default is not None else None),
             default_contract_resolved=default_resolved)
+
+
+def pin_integration_branch(root: Path, run_resolver: Resolver, branch: str,
+                           destination: Path,
+                           unconfirmed: str) -> tuple[str, Path]:
+    """Fetch `branch`, export its pinned commit and require it to name itself.
+
+    Returns the pinned commit id and the directory it was exported to. The
+    contract exported there must resolve and name `branch` as its integration
+    branch, or the run refuses `not_integrated` with
+    `adopt.registration.integration_branch_unresolved` and `unconfirmed` as its
+    message. This is the one confirmation both ways of reaching an integration
+    branch other than the default go through, so neither can admit a branch the
+    other would refuse; checking that `origin` lists `branch` stays with the
+    caller, whose refusal wording differs.
+    """
+    pinned = fetch_pinned(root, branch)
+    export_commit(root, pinned, destination)
+    exit_code, payload = run_resolver(destination, "resolve")
+    if exit_code != 0 or integration_branch(payload) != branch:
+        raise unresolved_integration_branch(unconfirmed)
+    return pinned, destination
 
 
 def unresolved_integration_branch(message: str) -> AdoptError:
