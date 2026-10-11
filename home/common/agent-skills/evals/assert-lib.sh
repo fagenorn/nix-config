@@ -266,3 +266,84 @@ acceptance_map_covers() {
     }
   ' "$plan"
 }
+
+# spec_decisions_path_free <spec> <repo> — the spec's `## Decisions` section names no
+# tracked file of <repo> by its repository-relative path and holds no line reference: a
+# file name followed by `:<number>`, a `#L<number>` anchor, or the word `line` or `lines`
+# followed by a number. Each offender is printed. A spec without the section fails; the
+# other sections are not read. The heading matches case-insensitively.
+spec_decisions_path_free() {
+  local spec="$1" repo="$2" section tracked hits hit bad=0
+  [ -f "$spec" ] || fail "not a file: $spec" || return 1
+  tracked=$(git -C "$repo" ls-files) || fail "cannot list tracked files of: $repo" || return 1
+  section=$(awk '
+    tolower($0) == "## decisions" { inside = 1; found = 1; next }
+    inside && /^## / { inside = 0 }
+    inside { print }
+    END { if (!found) exit 3 }
+  ' "$spec") || fail "heading not found: ## Decisions" || return 1
+  if [ -n "$tracked" ]; then
+    hits=$(grep -oF -e "$tracked" <<<"$section" | sort -u)
+    if [ -n "$hits" ]; then
+      while IFS= read -r hit; do printf 'tracked path in Decisions: %s\n' "$hit"; done <<<"$hits"
+      bad=1
+    fi
+  fi
+  hits=$(grep -oiE -e '[[:alnum:]_./-]+\.[[:alpha:]][[:alnum:]]*:[0-9]+' -e '#L[0-9]+' \
+    -e '(^|[^[:alpha:]])lines?[[:space:]]+[0-9]+' <<<"$section" | sort -u)
+  if [ -n "$hits" ]; then
+    while IFS= read -r hit; do printf 'line reference in Decisions: %s\n' "$hit"; done <<<"$hits"
+    bad=1
+  fi
+  return "$bad"
+}
+
+# code_map_valid <map> <repo> [required-path...] — the code map is a file with at least
+# one `## ` entry; every entry has a `Why:` line and a `Code:` line naming at least one
+# path; every path on a `Code:` or `Tests:` line is a tracked file of <repo>; and every
+# required path is listed. A path is a backticked token outside parentheses, so the
+# symbols and test names in parentheses, call parentheses included, are never read as
+# paths, and `Tests: none read` lists nothing.
+code_map_valid() {
+  local map="$1" repo="$2" tracked parsed listed path bad=0
+  shift 2
+  [ -f "$map" ] || fail "not a file: $map" || return 1
+  tracked=$(git -C "$repo" ls-files) || fail "cannot list tracked files of: $repo" || return 1
+  parsed=$(awk '
+    function emit(line,    i, c, depth, open, token, count) {
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (!open && c == "(") { depth++; continue }
+        if (!open && c == ")") { if (depth > 0) depth--; continue }
+        if (depth > 0) continue
+        if (c != "`") { if (open) token = token c; continue }
+        if (open) { if (token != "") { print "@path " token; count++ } token = "" }
+        open = !open
+      }
+      return count
+    }
+    function close_entry() {
+      if (!entries) return
+      if (!why) print "@bad entry without a Why: line: " title
+      if (!code) print "@bad entry without a Code: line naming a path: " title
+    }
+    /^## / { close_entry(); entries++; title = $0; why = 0; code = 0; next }
+    !entries { next }
+    /^[-*]?[[:space:]]*Why:/ { why = 1 }
+    /^[-*]?[[:space:]]*Code:/ { if (emit($0) > 0) code = 1 }
+    /^[-*]?[[:space:]]*Tests:/ { emit($0) }
+    END { close_entry(); if (!entries) print "@bad the code map has no `## ` entry" }
+  ' "$map")
+  if grep -q '^@bad ' <<<"$parsed"; then
+    grep '^@bad ' <<<"$parsed" | sed 's/^@bad //'; bad=1
+  fi
+  listed=$(grep '^@path ' <<<"$parsed" | sed 's/^@path //' | sort -u)
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    grep -qxF -- "$path" <<<"$tracked" || { echo "listed path is not a tracked file: $path"; bad=1; }
+  done <<<"$listed"
+  for path in "$@"; do
+    grep -qxF -- "$path" <<<"$listed" || { echo "required path is not listed: $path"; bad=1; }
+  done
+  return "$bad"
+}
