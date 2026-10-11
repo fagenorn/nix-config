@@ -1,6 +1,6 @@
 # Task 4: The delivery transaction and its journal
 
-Each installed delivery contract gets one core transaction whose subject is the contract and whose `event` evidence is every delivery object the ledger holds, appended by the settle step as the last core operations before the ledger is published. Nothing reads the journal as a decision and nothing seals yet (Task 6). Read the root's Global Constraints first. Decisions: D2, D7, D14, D17, D21, D22.
+Each installed delivery contract gets one core transaction whose subject is the contract and whose `event` evidence is every delivery object the ledger holds, appended by the settle step as the last core operations before the ledger is published. Nothing reads the journal as a decision and nothing seals yet (Task 6). Decisions: D2, D7, D14, D17, D21, D22.
 
 **Files:**
 - Create: `python/agent_tools/attempt_delivery_store.py`
@@ -126,14 +126,14 @@ The two seams, the new module and the call in `commit_state`. The module docstri
 
 - [ ] **Step 4: Apply the declared floor change**
 
-Package 2's `LateSummaryTest.test_ac4_merged_and_closed_are_observed_apart_from_custody` compared every core file across a control write that adds a tracker observation; that write now appends a journal entry. Compare the attempt's custody events (`self.events(DELIVERED)`) instead and keep the postcondition assertions (D22). No other pre-existing test changes.
+Package 2's `LateSummaryTest.test_ac4_merged_and_closed_are_observed_apart_from_custody` compared every core file across a control write that adds a tracker observation; that write now appends a journal entry. Compare the attempt's custody events (`self.events(DELIVERED)`) instead and keep the postcondition assertions (D22).
 
 - [ ] **Step 5: Verify**
 
 Run: `PYTEST T/test_control_cutover.py T/test_control_decisions.py T/test_attempt_custody.py T/test_delivered_control.py T/test_admission_replay.py tests/test_transaction_core_sweep.py`
-Expected: `OK`; `test_control_cutover.py` runs 11 tests.
+Expected: `OK`; `test_control_cutover.py` runs 12 tests.
 
-Run: `PYTEST T/test_delivery_workflow.py T/test_workflow_state.py` (timeout 1800 s)
+Run: `PYTEST T/test_delivery_workflow.py T/test_workflow_state.py`
 Expected: `OK`.
 
 Run: `if grep -n "attempt_store\._" python/agent_tools/attempt_delivery_store.py; then exit 1; fi`

@@ -21,13 +21,13 @@ Spec: `.agents/artifacts/specs/2026-10-11-issue-339-control-plane-cutover-design
 - Every reply and refusal text `workflow-state` prints today is unchanged and no reply field is added. The new texts are `workflow-state: unmigrated direct run: run workflow-state migrate --apply` and Task 5's `init-run --issue-set` refusals (exit 2).
 - Lock order is package 2's: `.direct-<issue>.lock` → ledger `state.lock`s → the store lock → the core's own locks. Every core write runs under the store lock, which is never requested while held. Lock-free readers take none.
 - `check-launch`, `current-launch`, `owner-liveness`, `resume-pack` and `build-delivery` stay read-only: no lock, no core write, the same bytes.
-- Each task leaves the suite green. A failing pre-existing test outside D16 and D22 is a defect in the new code or a conflict with the spec: stop and report it. Never weaken an assertion to pass.
-- New helper code follows `docs/standards/agent-helpers.md`: package modules, plain imports, no `sys.path` or `importlib` use, digests through `agent_tools.canonical.telemetry_digest`.
+- Each task leaves the suite green. A failing pre-existing test outside a task's declared floor change (D16, D22) is a defect in the new code or a conflict with the spec: stop and report it. Never weaken an assertion to pass.
+- New helper code follows `docs/standards/agent-helpers.md`.
 - Prose a task writes into code or docs describes the code as it is at that task's head. Where a task gives content points instead of text, the implementer writes the sentences from the implemented code.
-- Every long command, each test command included, runs in the foreground from the worktree root as `launch-scope exec --repo-root <ledger repo root> --run-id <run-id> --worker-id <worker-id> -- <argv>` with an explicit timeout above its duration. Commits go through `launch-commit … -- <git commit args>`, signed, with the session's trailers. Scratch files live under `launch-scope scratch`'s root.
-- Abbreviations in task commands, to expand before running: `PYTEST` is `PYTHONPATH="$PWD/python" python3 -m unittest`, `T/` is `home/common/agent-skills/tests/` and `BASE` is the delivery base SHA. Timeout at least 900 s; a whole lifecycle suite (`test_workflow_state.py`, `test_delivery_workflow.py`) needs 1800 s.
-- Review-package budget (D21): after every task, `git diff -U10 079b835c54fabe6baf550097c40debc595a81bda -- <file> | wc -c` is at most 60000 for every changed code or test file. A file about to pass it stops the task: report, do not split on your own.
-- Final gate, run once on the final head by Task 7: `just build`, `just agent-workflow-tests`, `just agent-installed-skill-tests` (timeout 3600 s each) and `just agent-instruction-budget` with no `--raise-label`. No agent applies the `instruction-budget-raise` label.
+- Every long command, each test command included, runs in the foreground from the worktree root through `launch-scope exec` with an explicit timeout above its duration. Commits go through `launch-commit … -- <git commit args>`, signed, with the session's trailers. Scratch files live under `launch-scope scratch`'s root.
+- Abbreviations in task commands, to expand before running: `PYTEST` is `PYTHONPATH="$PWD/python" python3 -m unittest`, `T/` is `home/common/agent-skills/tests/` and `BASE` is the delivery base SHA. Timeout at least 900 s, and 1800 s for any run that includes `test_workflow_state.py`, `test_delivery_workflow.py` or more than four test files.
+- Review-package budget (D21): after every task, `git diff -U10 BASE -- <file> | wc -c` is at most 60000 for every changed code or test file. A file about to pass it stops the task: report, do not split on your own.
+- Final gate: Task 7's Step 6, run once on the final head. No agent applies the `instruction-budget-raise` label.
 
 ## Test seams
 
@@ -36,7 +36,7 @@ Spec: `.agents/artifacts/specs/2026-10-11-issue-339-control-plane-cutover-design
 
 ## Delivery estimate and boundaries
 
-All numbers are estimates (`git diff -U10` bytes). Measured on a scratch prototype of the pure half and on the new test files, which were run at the base: `attempt_custody.py` 17000; `tests/test_attempt_custody.py` 19000; `attempt_delivery.py` 10000; `tests/test_attempt_delivery.py` 8000; `test_control_cutover.py` 27000; `test_control_decisions.py` 15000; `test_delivery_sealing.py` 7000. Not prototyped, so wider: `attempt_store.py` 30000; `attempt_delivery_store.py` 14000; `workflow-state.py` 30000; floor fixtures 25000 across four files. About 22 files and 3,300 lines; D21 puts the file count above Phase 0's 12 to 18.
+The per-file estimates are in the spec's `## Delivery estimate`.
 
 Aggregate risk is `attempt_store.py` and `workflow-state.py`, each touched by five tasks, and the floor sweeps of Tasks 2 and 5. Fallback slices, each leaving the suite green: Tasks 1–5 (the cutover) and Tasks 6–7 (seals, supplements, prose). A split is the caller's to authorize (D18).
 
@@ -59,10 +59,12 @@ Task 7 — Skill argv, contract prose and the final gate — `home/common/claude
 | AC3 | code | Task 2 | `home/common/agent-skills/tests/test_control_decisions.py`: `DecisionTest.test_01_spawn` to `test_19_finalize`, one per row of the spec's decision table, kept green by every later task (Task 4 completes rows 1 and 7); with Task 1's planner cases in `tests/test_attempt_custody.py` |
 | AC4 | code | Task 7 | `just agent-workflow-tests` green at the final head with D16 and D22 as the only edits to pre-existing tests; `just build`; `just agent-installed-skill-tests`; `just agent-instruction-budget`; with Task 2's `SchemaTenTest.test_ac4_the_bind_is_dry_run_first_and_the_base_helper_refuses_schema_10` and Task 6's `SealingTest.test_ac4_a_delivery_through_a_remainder_seals_its_proof_then_its_custody` |
 
+## Standards review provenance
+
+Reviewer: Codex, isolated and read-only, no fallback; base `079b835c`, plan head `d3af6009`. Accepted 3 (B1: Task 3, D26; B2: Task 6, D27; S1: Task 2), rejected 0, deferred 0. Their new tests are unrun.
+
 ## Decisions
 
-- What control reads from the store: D12. Claims as spans and `owner_unavailable`: D1, D15, D17. Wakes and the gate: D4, D23.
-- Delivery transaction, journal and its module: D2, D14, D21. Remainder custody: D3. Seals and supplements, kept in this package: D5, D6, D18, D19.
-- Run resolution: D9, D10, D11. Schema 10 and the bind: D7. The decision table and its twin run: D13, D20. The unreadable fixture: D8, D23. Floor changes: D16, D22. Plan-level interfaces and the test harness: D24, D25.
+Each task's `Decisions:` line cites its rows of the spec's `## Decision ledger` (D1–D27).
 
 ---

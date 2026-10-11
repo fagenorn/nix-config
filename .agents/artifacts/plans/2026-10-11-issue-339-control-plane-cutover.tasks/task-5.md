@@ -1,6 +1,6 @@
 # Task 5: Runs by index: `direct-owner`, `build-delivery` and `init-run --issue-set`
 
-The three places where the control plane found a run by listing `.superpowers/workflows/` become keyed lookups in the creation-key index: `direct-owner`'s prefix scan, `build-delivery`'s installing-ledger scan, and the orchestrator's run reuse, which moves from skill prose into `init-run --issue-set`. Read the root's Global Constraints first. Decisions: D8–D11, D16, D22–D24.
+The three places where the control plane found a run by listing `.superpowers/workflows/` become keyed lookups in the creation-key index: `direct-owner`'s prefix scan, `build-delivery`'s installing-ledger scan, and the orchestrator's run reuse, which moves from skill prose into `init-run --issue-set`. Decisions: D8–D11, D16, D22–D24.
 
 **Files:**
 - Modify: `python/agent_tools/attempt_identity.py`, `python/agent_tools/attempt_store.py`, `python/agent_tools/attempt_delivery_store.py`
@@ -210,14 +210,12 @@ Only these (D16, D22):
 - the sequence-exhaustion test becomes such a stray-directory case (sequence 999999 is reachable only through the index entries below it);
 - an installing-ledger test built by copying a run directory (`zz-copy`) asserts that the copy is not found (the more-than-one refusal is covered by the new two-run test), and a `build-delivery` lookup test over a hand-written ledger binds it with `migrate --apply` first.
 
-Any other failing pre-existing test stops the task.
-
 - [ ] **Step 5: Verify**
 
 Run: `PYTEST T/test_control_cutover.py T/test_control_decisions.py tests/test_attempt_identity.py T/test_attempt_migration.py T/test_attempt_custody.py T/test_delivered_control.py`
-Expected: `OK`; `test_control_cutover.py` runs 17 tests.
+Expected: `OK`; `test_control_cutover.py` runs 18 tests.
 
-Run: `PYTEST T/test_workflow_state.py T/test_delivery_workflow.py` (timeout 1800 s)
+Run: `PYTEST T/test_workflow_state.py T/test_delivery_workflow.py`
 Expected: `OK`.
 
 Run: `grep -n "os.scandir\|\.iterdir()\|os.listdir\|glob(" home/common/agent-skills/scripts/workflow-state.py python/agent_tools/attempt_store.py python/agent_tools/attempt_delivery_store.py`

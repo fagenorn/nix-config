@@ -1,6 +1,6 @@
 # Task 6: Delivery proof, the `succeeded` seals and receipt supplements
 
-A complete delivery seals its transaction `succeeded` on the contract's required postconditions; every unsealed custody transaction of that issue then seals `succeeded` citing the delivery receipt; and what arrives for a sealed transaction becomes a post-terminal observation of its receipt. Seals run after the ledger is published. Read the root's Global Constraints first. Decisions: D5–D7, D18, D19, D22, D24.
+A complete delivery seals its transaction `succeeded` on the contract's required postconditions; every unsealed custody transaction of that issue then seals `succeeded` citing the delivery receipt; and what arrives for a sealed transaction becomes a post-terminal observation of its receipt. Seals run after the ledger is published. Decisions: D5–D7, D18, D19, D22, D24, D27.
 
 **Files:**
 - Modify: `python/agent_tools/attempt_custody.py`, `python/agent_tools/attempt_store.py`, `python/agent_tools/attempt_delivery_store.py`
@@ -13,7 +13,7 @@ A complete delivery seals its transaction `succeeded` on the contract's required
 **Interfaces:**
 - Consumes: Task 1's planner and constants; Task 4's `reading`, `writing`, `delivery_of`, `settle_delivery`; the core's `collect_obligation`, `start_cohort`, `settle_proof`, `record_post_terminal`, `post_terminal_observations`.
 - Produces:
-  - `attempt_custody`: `RECONCILED_MERGE = "reconciled_merge"`; `OPERATIONS` gains `"supplement"`; `settle_plan` returns `(Operation("supplement", reason="reconciled_merge", reference=telemetry_digest(result)),)` for an `abandoned` transaction whose record is `merged` with `result_source` `superseded`, checked before the `delivered` rows
+  - `attempt_custody`: `RECONCILED_MERGE = "reconciled_merge"`; `OPERATIONS` gains `"supplement"`; `settle_plan` returns `(Operation("supplement", reason="reconciled_merge", reference=telemetry_digest(result)),)` for an `abandoned` transaction whose record is `merged` with `result_source` `superseded`, checked before the `delivered` rows; and `()` for a `delivered` record parked `proof_did_not_converge` (D27)
   - `attempt_store.PendingSeal(transaction_id, reason, reap=None, issue=None, executor=None)`: a `succeeded` seal carries `issue` and `executor`, and `settle_custody` returns one per `seal_succeeded` operation
   - `attempt_store.seal_custody(store, pending, *, now_ms, receipts: Mapping[int, str] = MappingProxyType({})) -> None`
   - `attempt_store.pending_seals(store, state, *, now_ms, delivered: frozenset[int] = frozenset()) -> list[PendingSeal]`
@@ -22,9 +22,9 @@ A complete delivery seals its transaction `succeeded` on the contract's required
 
 **Invariants:**
 - **Order in `commit_state`:** `settle_custody` → `settle_delivery` → `atomic_write_state` → `receipts = seal_delivery(...)` → `seal_custody(..., receipts=receipts)`. Each takes the store lock for itself, and none when it has nothing to do.
-- **Delivery seal.** For each delivered issue whose delivery transaction of this run is not terminal: take the delivery span (reuse or acquire as in Task 4), advance through the `FORWARD_STATES` it has not reached (reason `delivered`), collect each obligation whose latest observation is not an admissible `satisfied` with an observer that returns `{"outcome": "satisfied", "reason": "observed", "reference": <observation id>}` from `collections(delivery)`, then `start_cohort`, then `settle_proof`. The order is collect, cohort, settle: the core refuses a cohort before every required obligation is satisfied (D19). A `ProofRefused` from `start_cohort` whose `reason` is `cohort_open` means a cut seal left one open under this span, and is passed over; any other refusal propagates. `seal_delivery` returns the receipt digest of every delivered issue whose transaction is `succeeded` when it returns.
-- **Custody seal.** A pending seal with an `issue` is applied only when `receipts` has that issue; otherwise it stays pending. A terminal transaction is skipped. An `attention_required` one is first advanced to its `parked_from` (reason `delivered`, no custody). The seal span (`executor`, the subject's worktree, `HELPER_TTL_MS`) is reused when open and unlapsed, else acquired; a `LeaseUnavailable` leaves this seal pending without failing the others. One `event` evidence entry `delivery-receipt` with the receipt digest is recorded unless present, the transaction is advanced through the `FORWARD_STATES` it has not reached, and `start_cohort` (the same `cohort_open` rule) and `settle_proof` seal it. Package 2's `abandoned` seals are applied as before.
-- A seal cut after any of its core operations is completed by a later call from the state it reached. `pending_seals` also returns the `succeeded` seal of a record whose whole plan is one `seal_succeeded`. `transact`'s unchanged-repeat path computes `delivered` and calls `pending_seals`, `seal_delivery` and `seal_custody`; it writes nothing when nothing is pending.
+- **Delivery seal.** For each delivered issue whose delivery transaction of this run is not terminal: take the delivery span (reuse or acquire as in Task 4), advance through the `FORWARD_STATES` it has not reached (reason `delivered`), collect each obligation whose latest observation is not an admissible `satisfied` with an observer that returns `{"outcome": "satisfied", "reason": "observed", "reference": <observation id>}` from `collections(delivery)`, then `start_cohort`, then `settle_proof`. The order is collect, cohort, settle: the core refuses a cohort before every required obligation is satisfied (D19). A `ProofRefused` from `start_cohort` whose `reason` is `cohort_open` means a cut seal left one open under this span, and is passed over; `convergence_exhausted` is settled per D27 (`settle_proof` parks it); any other refusal propagates. `seal_delivery` returns the receipt digest of every delivered issue whose transaction is `succeeded` when it returns.
+- **Custody seal.** A pending seal with an `issue` is applied only when `receipts` has that issue; otherwise it stays pending. A terminal transaction is skipped. One parked `proof_did_not_converge` is skipped too (D27); any other `attention_required` one is first advanced to its `parked_from` (reason `delivered`, no custody). The seal span (`executor`, the subject's worktree, `HELPER_TTL_MS`) is reused when open and unlapsed, else acquired; a `LeaseUnavailable` leaves this seal pending without failing the others. One `event` evidence entry `delivery-receipt` with the receipt digest is recorded unless present, the transaction is advanced through the `FORWARD_STATES` it has not reached, and `start_cohort` (the same `cohort_open` and `convergence_exhausted` rules) and `settle_proof` seal it. Package 2's `abandoned` seals are applied as before.
+- A seal cut after any of its core operations is completed by a later call from the state it reached, inside the core's convergence limits (D27); `pending_seals` and `delivery_pending` leave out what D27 calls not pending. `pending_seals` also returns the `succeeded` seal of a record whose whole plan is one `seal_succeeded`. `transact`'s unchanged-repeat path computes `delivered` and calls `pending_seals`, `seal_delivery` and `seal_custody`; it writes nothing when nothing is pending.
 - `command_migrate`'s `pending` reads the stored document as `_seals_pending` did and answers `pending_seals(..., delivered=…)` non-empty or `delivery_pending(...)`. A schema-9 ledger that is already delivery-complete seals at its bind.
 - **Supplements** are `record_post_terminal(receipt_digest, observation={"outcome", "reason", "reference"}, contradicts_ground=False)`; one with the same reason and reference is never recorded twice:
   - a journal entry a *terminal* delivery transaction lacks (`settle_delivery`, by `journaled(transaction, post_terminal_observations(...))`): outcome `satisfied`, reason the entry's evidence id, reference its text;
@@ -45,6 +45,7 @@ Run: just agent-workflow-tests
 
 import unittest
 
+from agent_tools import attempt_custody as ac
 from agent_tools import attempt_delivery as ad
 from agent_tools.canonical import telemetry_digest
 
@@ -109,21 +110,25 @@ class SealingTest(Cutover, unittest.TestCase):
         self.assertEqual((len(self.core().post_terminal_observations(digest)), self.receipts()),
                          (1, sealed))
 
-    def test_a_schema_9_ledger_that_is_already_delivered_seals_at_its_bind(self):
+    def cut(self, *reached, cohort=False):
+        """A delivered schema-9 ledger whose attempt's custody seal was cut at the last of
+        `reached` (after opening its cohort, with `cohort`)."""
         self.generation = "base"
         self.delivered()
         self.generation = "head"
-        self.assertEqual((self.ledger_document()["schema_version"], self.delivery(DELIVERED)),
-                         (9, None))
-        # An earlier seal of the attempt's custody was cut after it reached `ready`.
         attempt = self.custody(DELIVERED)
         core = self.core(at(33))
         core.advance(attempt.transaction_id, "created", reason="delivered")
         held = core.acquire(attempt.transaction_id, executor_id=f"{DELIVERED}:1:seal",
                             subject_path=attempt.subject["worktree"],
                             ttl_ms=ad.HELPER_TTL_MS).custody
-        for target in ("awaiting_verification", "ready"):
+        for target in reached:
             core.advance(attempt.transaction_id, target, reason="delivered", custody=held)
+        if cohort:
+            core.start_cohort(held)
+
+    def test_a_schema_9_ledger_that_is_already_delivered_seals_at_its_bind(self):
+        self.cut("awaiting_verification", "ready")
         self.cli("migrate", "--repo-root", self.root, "--apply")
         self.assertEqual(self.ledger_document()["schema_version"], 10)
         self.assert_sealed()
@@ -131,6 +136,25 @@ class SealingTest(Cutover, unittest.TestCase):
         bound = self.tree()
         self.cli("migrate", "--repo-root", self.root, "--apply")
         self.assertEqual(self.tree(), bound)
+
+    def test_a_seal_cut_after_its_cohort_resumes(self):
+        self.cut(*ac.FORWARD_STATES, cohort=True)
+        self.cli("migrate", "--repo-root", self.root, "--apply")
+        self.assert_sealed()
+
+    def test_a_seal_past_the_window_parks(self):
+        self.cut(*ac.FORWARD_STATES)
+        late = self.observed(self.built[DELIVERED]["contract"], at(70), "worktree_absent")
+        self.sweep(70, recorded=ABSENT, closed={DELIVERED}, contracts=True,
+                   observations={DELIVERED: [late]})
+        attempt = self.custody(DELIVERED)
+        self.assertEqual(
+            (attempt.state, attempt.custody, self.reason(attempt),
+             self.delivery(DELIVERED).state, self.remainder(DELIVERED).state),
+            ("attention_required", None, "proof_did_not_converge", "succeeded", "succeeded"))
+        parked = self.tree()
+        self.cli("migrate", "--repo-root", self.root, "--apply")
+        self.assertEqual(self.tree(), parked)
 
     def test_a_merge_reconciled_after_an_abandoned_seal_is_a_supplement(self):
         self.spawn(DELIVERED)
@@ -181,7 +205,7 @@ In `tests/test_attempt_custody.py`, `SettlePlanTest.test_a_sealed_transaction_is
 - [ ] **Step 2: Run them and watch them fail**
 
 Run: `PYTEST T/test_delivery_sealing.py tests/test_attempt_custody.py`
-Expected: FAIL. The two delivered `SealingTest` cases fail with `'created' != 'succeeded'`; the two supplement cases with `[] != [...]`; `test_a_sealed_transaction_is_final` with `() != (Operation(kind='supplement', …),)`.
+Expected: FAIL. The delivered `SealingTest` cases fail on a state that is not `succeeded` or not parked; the two supplement cases with `[] != [...]`; `test_a_sealed_transaction_is_final` with `() != (Operation(kind='supplement', …),)`.
 
 - [ ] **Step 3: Implement the seals**
 
@@ -193,14 +217,14 @@ The planner row; the read-phase filter and `_apply` branch in `attempt_store`; t
 
 - [ ] **Step 5: Apply the declared floor change**
 
-A package-2 CLI test that asserted an unsealed or silent core over a delivered issue or over a sealed transaction now reads the `succeeded` receipt or the supplement (D22). Any other failing pre-existing test stops the task.
+A package-2 CLI test that asserted an unsealed or silent core over a delivered issue or over a sealed transaction now reads the `succeeded` receipt or the supplement (D22).
 
 - [ ] **Step 6: Verify**
 
-Run: `PYTEST T/test_delivery_sealing.py T/test_control_cutover.py T/test_control_decisions.py T/test_attempt_custody.py T/test_attempt_migration.py T/test_delivered_control.py T/test_admission_replay.py tests/test_attempt_custody.py` (timeout 1800 s)
-Expected: `OK`; `test_delivery_sealing.py` runs 4 tests.
+Run: `PYTEST T/test_delivery_sealing.py T/test_control_cutover.py T/test_control_decisions.py T/test_attempt_custody.py T/test_attempt_migration.py T/test_delivered_control.py T/test_admission_replay.py tests/test_attempt_custody.py`
+Expected: `OK`; `test_delivery_sealing.py` runs 6 tests.
 
-Run: `PYTEST T/test_workflow_state.py T/test_delivery_workflow.py` (timeout 1800 s)
+Run: `PYTEST T/test_workflow_state.py T/test_delivery_workflow.py`
 Expected: `OK`.
 
 Run the root's review-package budget command for `python/agent_tools/attempt_store.py`, `python/agent_tools/attempt_delivery_store.py` and `home/common/agent-skills/scripts/workflow-state.py`.

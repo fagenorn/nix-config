@@ -1,6 +1,6 @@
 # Task 1: Pure rules: delivery subject, journal, remainder subject and the planner's new rows
 
-The pure half of the cutover: a new module for the delivery transaction and remainder custody, and the settle planner's new inputs. No effect is added, and with the new inputs at their defaults every package-2 plan is unchanged. Read the root's Global Constraints first. Decisions: D1–D5, D14, D15, D17, D19, D24.
+The pure half of the cutover: a new module for the delivery transaction and remainder custody, and the settle planner's new inputs. No effect is added, and with the new inputs at their defaults every package-2 plan is unchanged. Decisions: D1–D5, D14, D15, D17, D19, D24.
 
 **Files:**
 - Create: `python/agent_tools/attempt_delivery.py`, `tests/test_attempt_delivery.py`

@@ -1,6 +1,6 @@
 # Task 7: Skill argv, contract prose and the final gate
 
-The orchestrator's bootstrap text stops telling the dispatcher to look through `.superpowers/workflows/` and calls `init-run --issue-set`; the two READMEs state the contracts Tasks 1 to 6 built; and the whole declared verification runs once on the final head. Read the root's Global Constraints first. Decisions: D7, D11, D16, D22.
+The orchestrator's bootstrap text stops telling the dispatcher to look through `.superpowers/workflows/` and calls `init-run --issue-set`; the two READMEs state the contracts Tasks 1 to 6 built; and the whole declared verification runs once on the final head. Decisions: D7, D11, D16, D22.
 
 **Files:**
 - Modify: `home/common/claude-code/skills/orchestrate-issues/SKILL.md` (`## 2. Bootstrap and observe`: its first paragraph and code block)
@@ -74,6 +74,6 @@ Run each from the worktree root, timeout 3600 s; expected exit 0 and, for the tw
 
 Then three review facts:
 
-- `git diff --stat BASE -- T/fixtures 'python/agent_tools/transaction_*.py' 'home/common/agent-skills/scripts/workflow_delivery*.py' home/common/agent-skills/scripts/delivery_model python/agent_tools/host_admission.py home/common/claude-code/lifecycle_guard.py CLAUDE.md home/common/agent-skills/instruction-load.json` — expected: empty output.
+- `git diff --stat BASE -- 'python/agent_tools/transaction_*.py'` and every path of the root's not-edited list — expected: empty output.
 - `git diff --name-only BASE -- T/ tests | sort` — expected: four new test files and only these pre-existing ones: `test_workflow_state.py`, `test_attempt_migration.py`, `test_attempt_custody.py`, `test_delivery_workflow.py`, `test_host_admission.py`, `test_workflow_skill_contracts.py`, `tests/test_attempt_custody.py`, `tests/test_attempt_identity.py`. The task report lists each changed pre-existing test with its class from D16 or D22.
-- `for f in $(git diff --name-only BASE -- '*.py'); do printf '%s %s\n' "$(git diff -U10 BASE -- "$f" | wc -c)" "$f"; done | sort -n | tail -3` — expected: the largest is at most 60000.
+- The root's review-package budget command over every file of `git diff --name-only BASE -- '*.py'` — expected: the largest is at most 60000.

@@ -1,6 +1,6 @@
 # Task 2: Schema 10: remainder custody, span claims, the capacity wake and the decision cases
 
-The settle step of `commit_state` starts feeding the planner Task 1's inputs: remainders get custody, a held claim becomes a claim entry on its launch's span, an `owner_unavailable` release closes the span, the write that frees capacity wakes a `host_capacity` suspension, and a record of a delivered issue gives its launch span up. The schema becomes 10 and the 9 → 10 bind is that same step. Control still decides from the ledger (Task 3) and no new seal is applied (Task 6). The task also adds AC3's check, one twin-run case per control decision, which every later task keeps green. Read the root's Global Constraints first. Decisions: D1, D3, D4, D7, D12, D13, D15–D17, D19, D20, D22, D23, D25.
+The settle step of `commit_state` starts feeding the planner Task 1's inputs: remainders get custody, a held claim becomes a claim entry on its launch's span, an `owner_unavailable` release closes the span, the write that frees capacity wakes a `host_capacity` suspension, and a record of a delivered issue gives its launch span up. The schema becomes 10 and the 9 → 10 bind is that same step. Control still decides from the ledger (Task 3) and no new seal is applied (Task 6). The task also adds AC3's check, one twin-run case per control decision, which every later task keeps green. Decisions: D1, D3, D4, D7, D12, D13, D15–D17, D19, D20, D22, D23, D25.
 
 **Files:**
 - Modify: `python/agent_tools/attempt_store.py`
@@ -431,12 +431,14 @@ class DecisionTest(Cutover, unittest.TestCase):
                           if e["evidence_id"].startswith("admission-")], [False, True])
 
     def test_03_retry(self):
-        reply = self.twin(lambda: self.unsealed_retry()[:3])[-1]
+        reply = self.twin(lambda: [self.spawned(DELIVERED), self.failing(FIRST, 3),
+                                   self.sweep(4, recorded=MATCHING)])[-1]
         self.assertEqual((self.dispatched(reply), self.deltas(reply)), (
             [("retry", f"{DELIVERED}:2:1")], [(DELIVERED, "retried", "active")]))
         first, second = self.custody(DELIVERED), self.custody(DELIVERED, 2)
-        self.assertEqual((first.state, second.subject["prior"], self.claim_ids(second)),
-                         ("abandoned", first.transaction_id,
+        self.assertEqual((first.state, second.subject["prior"], second.state,
+                          second.custody.executor_id, self.claim_ids(second)),
+                         ("abandoned", first.transaction_id, "created", f"{DELIVERED}:2:1",
                           [f"admission-claim:{DELIVERED}:2:1:2"]))
 
     def test_04_remainder_launch(self):
@@ -640,7 +642,7 @@ The schema step first; `transact` and the bind site of `command_direct_owner` ha
 
 - [ ] **Step 4: Apply the declared floor changes**
 
-Only these (D16, D22): the current schema number where a test pins it (9 becomes 10) and the unknown-schema fixtures (11); and package 2's custody tests that pin event positions or a whole event list on a slot route, where one `evidence_recorded` now follows each acquisition of a claimed launch. Any other failing pre-existing test stops the task.
+Only these (D16, D22): the current schema number where a test pins it (9 becomes 10) and the unknown-schema fixtures (11); and package 2's custody tests that pin event positions or a whole event list on a slot route, where one `evidence_recorded` now follows each acquisition of a claimed launch.
 
 - [ ] **Step 5: Show that the twin comparison can fail**
 
@@ -651,7 +653,7 @@ In `twin`, temporarily append `b" "` to each head reply before the comparison an
 Run: `PYTEST T/test_control_cutover.py T/test_control_decisions.py T/test_attempt_custody.py T/test_attempt_migration.py T/test_admission_replay.py T/test_delivered_control.py T/test_host_admission.py tests/test_attempt_identity.py tests/test_attempt_custody.py`
 Expected: `OK`; `test_control_cutover.py` runs 7 tests and `test_control_decisions.py` 19.
 
-Run: `PYTEST T/test_workflow_state.py T/test_delivery_workflow.py` (timeout 1800 s)
+Run: `PYTEST T/test_workflow_state.py T/test_delivery_workflow.py`
 Expected: `OK`.
 
 Run: `git diff --stat BASE -- T/fixtures T/test_admission_replay.py`

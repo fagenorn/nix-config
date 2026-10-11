@@ -1,6 +1,6 @@
 # Task 3: Control reads occupancy and the capacity gate from the store
 
-`command_control` stops deciding slot occupancy and the `host_capacity` gate from the ledger's `admission` block alone: it takes one lock-free view of the store at its locked read, and the store wins a disagreement. Replies are the base's whenever the two agree. Read the root's Global Constraints first. Decisions: D1, D4, D12, D23.
+`command_control` stops deciding slot occupancy and the `host_capacity` gate from the ledger's `admission` block alone: it takes one lock-free view of the store at its locked read, and the store wins a disagreement. Replies are the base's whenever the two agree. Decisions: D1, D4, D12, D23, D26.
 
 **Files:**
 - Modify: `python/agent_tools/attempt_store.py`
@@ -32,7 +32,7 @@ def launch_views(store: Path, state: dict, *, now_ms: int) -> dict[str, LaunchVi
 
 **Invariants:**
 - `command_control` calls `launch_views` once, on the state as read, after `stamp_request` and before it changes `state`, with `now_ms=at_ms(request["now"])`.
-- **Occupancy.** A launch occupies only while it is the current launch of an `active` record in the sweep's own state and the request does not report its owner unavailable, so a launch this sweep refuses, reaps or supersedes frees its slot in the same sweep, as at the base. For such a launch: when its view is `spanned` and not (`open` with `roles` None), the store decides, and it occupies with `view.roles` exactly when `view.open`. Otherwise (no view, a launch the store never gave a span, an open span with no claim entry) the ledger decides as at the base: it occupies with the block's held claim for it when `runtime.live_launches` names it. `available` before the lanes and `reserved`/`available` in the reply both use this rule, plus the controller's claim, which stays a block fact.
+- **Occupancy.** A launch occupies only while it is the current launch of an `active` record in the sweep's own state and the request does not report its owner unavailable, so a launch this sweep refuses, reaps or supersedes frees its slot in the same sweep, as at the base. For such a launch: when its view is `spanned` and not (`open` with `roles` None), the store decides, and it occupies with `view.roles` when `view.open`; when not open, with the block's held claim exactly when the block holds one for it and the record's `deadline_at` is after `now` (D26: this commit reacquires it). Otherwise (no view, a launch the store never gave a span, an open span with no claim entry) the ledger decides as at the base: it occupies with the block's held claim for it when `runtime.live_launches` names it. `available` before the lanes and `reserved`/`available` in the reply both use this rule, plus the controller's claim, which stays a block fact.
 - **The gate.** For a record suspended on `host_capacity` with current launch `holder`: when this sweep recorded the refusal, or `holder` has no view, the base's rule applies unchanged (`gate_open` over the block, with the `internal error` for a missing refused claim). Otherwise the store decides: not `parked` means it may resume; `parked` means it waits unless this sweep itself released a claim by an event other than `launch_refused` (a `release_seq` above the block's `releases` at the start of the sweep).
 - `waiting`, the lane order, `max_parallel`, the claims this sweep acquires and every reply field are computed as before. A sweep that changes nothing writes nothing.
 
@@ -52,6 +52,14 @@ class StoreReadTest(Cutover, unittest.TestCase):
         self.rewrite(drop)
         report = self.reply(1, recorded={DELIVERED: "matching_issue_branch", LIVE: None},
                             contracts=True)["admission"]
+        self.assertEqual((report["waiting"], report["reserved"], report["available"]),
+                         ([LIVE], {"controller": 1, **ROLES}, 0))
+        self.assertIsNone(self.custody(LIVE))
+
+    def test_a_cut_suspension_keeps_its_slot(self):
+        self.four_slots()
+        self.core(at(1)).release(self.custody(DELIVERED).custody)
+        report = self.reply(2, recorded={**MATCHING, LIVE: None}, contracts=True)["admission"]
         self.assertEqual((report["waiting"], report["reserved"], report["available"]),
                          ([LIVE], {"controller": 1, **ROLES}, 0))
         self.assertIsNone(self.custody(LIVE))
@@ -76,7 +84,7 @@ class StoreReadTest(Cutover, unittest.TestCase):
 - [ ] **Step 2: Run them and watch them fail**
 
 Run: `PYTEST T/test_control_cutover.py -k StoreReadTest`
-Expected: FAIL, 2 tests: `([], {...}, 0) != ([209], {...}, 0)` (209 is admitted into a slot the store shows taken) and `209 unexpectedly found in [209]` (the block gates a suspension the store shows woken).
+Expected: the cut-suspension test passes as a pin; the other 2 FAIL: `([], {...}, 0) != ([209], {...}, 0)` (209 is admitted into a slot the store shows taken) and `209 unexpectedly found in [209]` (the block gates a suspension the store shows woken).
 
 - [ ] **Step 3: Implement**
 
@@ -85,9 +93,9 @@ Add `LaunchView` and `launch_views`; replace the three ledger-only computations 
 - [ ] **Step 4: Verify**
 
 Run: `PYTEST T/test_control_cutover.py T/test_control_decisions.py T/test_admission_replay.py T/test_host_admission.py T/test_delivered_control.py`
-Expected: `OK`; `test_control_cutover.py` runs 9 tests.
+Expected: `OK`; `test_control_cutover.py` runs 10 tests.
 
-Run: `PYTEST T/test_workflow_state.py` (timeout 1800 s)
+Run: `PYTEST T/test_workflow_state.py`
 Expected: `OK`.
 
 Run: `git diff --stat BASE -- T/fixtures T/test_admission_replay.py`
