@@ -170,4 +170,4 @@ Subagent (reviewer, Opus/high as selected above):
     **Reasoning:** [1-2 sentence technical assessment]
 ```
 
-**Placeholders:** every bracketed capital token above is filled before dispatch.
+**Placeholders:** `sdd-gate review` fills every bracketed capital token above.

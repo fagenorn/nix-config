@@ -1,0 +1,6 @@
+# Acceptance record — issue #353
+
+| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |
+|----|-----------|------|------------------|----------|--------|------------|---------|
+| AC1 | [evidence] Owner turns per task in the task loop are ≤ 6 — measured: owner transcript of the next orchestrated nodocom issue with ≥ 4 tasks, counting requests between consecutive implementer dispatches; baseline 7.5–13.7. | evidence | Count the owner's requests between consecutive implementer dispatches in the owner transcript; threshold: ≤ 6 per task (baseline 7.5–13.7). | not measured — post-merge | — | the next orchestrated nodocom issue with at least 4 tasks, run with the merged `sdd-gate` installed on the orchestrating host | unverified |
+| AC2 | [evidence] Median implementer and task-review dispatch prompt is ≤ 1,000 characters — measured: `prompt` length of the owner's Agent calls in that transcript; baseline 8.0k and 7.8k. | evidence | Median `prompt` length of the owner's implementer and task-review `Agent` calls in that transcript; threshold: ≤ 1,000 characters (baseline 8.0k and 7.8k). | not measured — post-merge | — | the same transcript as AC1 | unverified |
