@@ -41,8 +41,8 @@ governs, before execution begins; a clean scan proceeds without comment. A
 missing or unreadable member is a contract error. Afterwards hold only the plan root **header** (summary, Global
 Constraints, Test seams, Delivery estimate and boundaries, and the `## Task index`
 with ID, title, files touched, risk lane and member link per task), its checker
-metrics, and the current task's brief from `scripts/task-brief`. Build the todo
-list from the Task index.
+metrics, and the current task's `sdd-gate` output. Build the todo list from the
+Task index.
 
 ### Cumulative delivery gate
 
@@ -50,15 +50,15 @@ Resolve the integration branch from the project bindings, then pin
 `DELIVERY_BASE` once to the full SHA printed by `git merge-base HEAD
 origin/<integration-branch>`. Never derive it from an independently advanced
 local integration branch. Before the first implementer, and after each completed
-task before any next dispatch, pin `DELIVERY_HEAD` to the full `git rev-parse
-HEAD` SHA and run `review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD`, then
-apply the review-package gate.
+task before any next dispatch, `sdd-gate next` pins `DELIVERY_HEAD` to the full
+`git rev-parse HEAD` SHA, runs `review-package PLAN_FILE DELIVERY_BASE
+DELIVERY_HEAD` and applies the review-package gate.
 
 A validated existing package satisfies a gate only when its manifest's full
 `range.base` and `range.head` equal the intended full SHAs, its retained producer
 report still validates, and a fresh independent artifact check agrees with all
 four metrics. Seven-character path prefixes never establish range identity.
-Record both full SHAs and the four checked metrics in the ledger. A non-passing
+The helper records both full SHAs and the four checked metrics in the ledger. A non-passing
 gate cannot advance: preserve completed work and identify an independently
 deliverable split for the caller instead of dispatching more work.
 
@@ -125,7 +125,8 @@ still in the foreground." and "Create every scratch directory or scratch worktre
 When that agent returns, run
 `workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> --event returned`.
 A resumed agent is registered again and gets a fresh `worker_id`.
-Read-only reviewers are not registered.
+Read-only reviewers are not registered. `sdd-gate` makes the register, release
+and progress calls for the two dispatches it renders.
 
 A report of `BLOCKED` with `launch fence refused: <reason>` means that
 worker's launch fence refused its commit. Release that worker, retry and
@@ -140,11 +141,6 @@ on this launch:
   suspension procedure with `blocked_on=transport`.
 
 Without a lifecycle identity none of this applies and workers commit with plain `git`.
-
-Under a lifecycle identity, run
-`workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
-before dispatching the first task this session executes and after each task's `complete` line (step 5).
-A refusal changes nothing and never stops the task loop.
 
 With the attempt's `deadline_at` also handed over, check headroom at each
 task boundary: before dispatching a task, and after the last `complete` line,
@@ -165,31 +161,39 @@ follow from-issue's expired-deadline route, with no retry.
 
 ### 1. Dispatch the implementer
 
-Record BASE (`git rev-parse HEAD`) first.
+Run `sdd-gate next PLAN_FILE --skill-dir <skill-dir> --task N`
+(`<skill-dir>` is this file's directory), adding:
 
-- `scripts/task-brief PLAN_FILE N` revalidates the package, copies exactly one
-  convention-linked member byte-for-byte and prints the brief path. Checker exit
-  2/3 or a missing, unreadable, duplicate or nonconventional member link stops
-  before replacing an existing brief. The brief is the single source of
-  task-specific requirements; never make a subagent read the whole plan package.
-- The dispatch contains: one line on where the task fits; the plan root path and
-  all four metrics; the brief path ("read this first — it is your requirements,
-  with the exact values to use verbatim"); interfaces and decisions from earlier
-  tasks the brief cannot know; your resolution of any ambiguity you noticed; the
-  report-file path (brief `…/task-N-brief.md` → `…/task-N-report.md`) and report
-  contract. Never member lists, task contents or prior-task history.
-- If an earlier task parked a finding in this task's area, carry a pointer to that ledger entry.
-- Record the implementer's agent identity — fix rounds 1–3 resume it.
+- `--completed <previous-task>` after that task's review, with `--parked <K>`
+  for parked findings (step 5);
+- `--delivery-base <DELIVERY_BASE>` on the run's first call;
+- one `--standards <path>` per retained `bindings.paths.standards` entry;
+- `--context-file <file>`, written with the file-writing tool: where the task
+  fits, interfaces and decisions from earlier tasks the brief cannot know, your
+  resolution of any ambiguity, a pointer to the ledger entry of a finding parked
+  in this area. Never member lists, task contents or prior-task history;
+- `--repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
+  under a lifecycle identity.
+
+It prints one JSON object. On `outcome: ready` the whole prompt is
+`Read the dispatch brief at <brief_path> and follow it exactly.`
+
+On `outcome: refused` dispatch nothing: `gate: decompose_required` and
+`gate: failed` are the review-package gate's second and third exits; step
+`release-worker` or `register-worker` is a lifecycle failure under
+`### Lifecycle workers`; any other `step` is a contract error: stop.
+
+- Record the implementer's agent identity and `worker_id`: fix rounds 1–3 resume it.
 - Never dispatch multiple implementers in parallel (conflicts).
 
 Template: [implementer-prompt.md](implementer-prompt.md)
 
 ### 2. Handle the report
 
-- **DONE** → run `review-package PLAN_FILE BASE HEAD` (BASE from step 1 — never `HEAD~1`) and apply the review-package gate before step 3.
+- **DONE** → run `sdd-gate review PLAN_FILE --skill-dir <skill-dir> --task N` with step 1's `--standards` and lifecycle flags plus `--worker-id <worker_id>`. A refusal routes as in step 1.
 - **DONE_WITH_CONCERNS** → correctness/scope concerns get addressed before review; observations get noted, review proceeds.
-- **NEEDS_CONTEXT** → provide it, re-dispatch.
-- **BLOCKED** → a `launch fence refused` report follows `### Lifecycle workers` and is never re-dispatched. Otherwise: context problem: add context, re-dispatch at the same tier. Reasoning problem: escalate to a fresh Opus/high implementer carrying the brief path, the report path and the blocker:
+- **NEEDS_CONTEXT** → release the worker, then repeat step 1's call with the context added.
+- **BLOCKED** → a `launch fence refused` report follows `### Lifecycle workers` and is never re-dispatched. Otherwise: context problem: re-dispatch as for NEEDS_CONTEXT, at the same tier. Reasoning problem: the same, with the blocker and the report path in the context, to a fresh Opus/high implementer:
 
 <!-- agent-dispatch: id=sdd-blocked-reasoning-escalation role=implementer model=opus effort=high -->
 Agent(subagent_type="implementer", model="opus", effort="high") takes over a task whose implementer reported BLOCKED on a reasoning problem.
@@ -205,7 +209,7 @@ If the implementer asks questions — before or during — answer completely.
 Per-task review is never skipped, and a report missing either verdict (spec compliance AND quality) is not accepted; implementer self-review never substitutes. Its **form** follows the task's risk lane from the plan's task index:
 
 - **full lane** — the full first-pass reviewer below, always.
-- **mechanical / low-risk lane** — scoped verification: dispatch reviewer-lite with the declared lane and the bounded task diff. For a mechanical microtask whose verify commands are deterministic, the controller may instead verify inline (run the commands, inspect the diff) and ledger `Task <N>: verified inline (mechanical)`.
+- **mechanical / low-risk lane** — scoped verification: dispatch reviewer-lite with the declared lane and the `manifest_root` and `metrics` `sdd-gate review` printed. For a mechanical microtask whose verify commands are deterministic, the controller may instead verify inline (run the commands, inspect the diff) and ledger `Task <N>: verified inline (mechanical)`.
 - **Batching** — adjacent same-lane microtasks in the same file neighborhood may share one verification context when isolation adds nothing; ledger the batch.
 - A lane verification that surfaces ambiguity, semantic doubt, or anything beyond its lane escalates to the full reviewer; never adjudicate inside the cheap gate or route a lane the plan didn't declare.
 
@@ -214,11 +218,8 @@ Agent(subagent_type="reviewer-lite", model="sonnet", effort="medium") verifies t
 
 For the full-lane review:
 
-- The reviewer gets the plan root path and all four metrics, then the brief and
-  report paths plus the review-package manifest root path and all four metrics.
-  It never gets a member list, shard list, artifact contents, diff contents, or
-  another task body.
-- No open-ended directives ("check all uses") without a concrete task-specific reason, no asking it to re-run tests the implementer ran, and never pre-judge: a prompt containing "do not flag" or "at most Minor" is wrong; adjudication happens in the loop.
+- The whole prompt is step 1's sentence with `sdd-gate review`'s `brief_path`:
+  adjudication happens in the loop.
 - **⚠️ Cannot-verify items** (requirements in unchanged code or spanning tasks) don't block the review, but you resolve each yourself before marking the task complete. A confirmed gap enters the fix loop as a failed spec review.
 
 Template: [task-reviewer-prompt.md](task-reviewer-prompt.md)
@@ -236,7 +237,7 @@ Never fix findings yourself in the controller session.
 
 ### 5. Complete the task
 
-Clean review — or everything parked-with-ruling at the cap — appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)`; mark the todo, run the cumulative delivery gate, then move on only when it passes. Never advance past open Critical/Important findings that are neither fixed nor parked.
+Clean review — or everything parked-with-ruling at the cap — is recorded by the next `sdd-gate next --completed N` (step 1's call; without `--task` after the last task or before a headroom stop): it appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)` and runs the cumulative delivery gate. Mark the todo and move on only on `outcome: ready`. Never advance past open Critical/Important findings that are neither fixed nor parked.
 
 ## Final review — two axes
 

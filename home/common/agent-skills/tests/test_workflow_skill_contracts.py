@@ -130,7 +130,8 @@ SDD_MACHINE_TEXT = {
     SDD: (
         "validate-report --boundary sdd", 'detail_state: "none"', "report_path: null",
         "validate-detail-input", 'detail_state: "unpublished"',
-        "scripts/task-brief PLAN_FILE N", PRODUCER_VALIDATION,
+        "sdd-gate next PLAN_FILE --skill-dir <skill-dir> --task N",
+        "sdd-gate review PLAN_FILE --skill-dir <skill-dir> --task N", PRODUCER_VALIDATION,
         "`<primary-checkout>/.superpowers/sdd/<checkout-bucket>/<plan-basename>/`",
         "workflow-state register-worker --repo-root <ledger_repo_root> --run-id <run-id> "
         "--action-id <action_id>",
@@ -1603,6 +1604,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn('"review-package"', command_table)
         self.assertNotIn('".agents/bin/review-package" =', nix_module)
         self.assertIn('".agents/bin/sdd-workspace"', nix_module)
+        self.assertIn('".agents/bin/task-brief"', nix_module)
         with self.subTest(skill="ship-issue detail producer"):
             self.assertIn("~/.agents/bin/review-package", self.ship_issue)
 

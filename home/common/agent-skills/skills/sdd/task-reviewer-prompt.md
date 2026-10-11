@@ -16,6 +16,7 @@ Subagent (reviewer, Opus/high as selected above):
     ## What Was Requested
 
     Read the task brief: [BRIEF_FILE]
+    Plan root: [PLAN_ROOT] ([PLAN_ROOT_BYTES], [PLAN_TOTAL_BYTES], [PLAN_FILE_COUNT], [PLAN_LARGEST_MEMBER_BYTES])
 
     Global constraints from the spec/design that bind this task:
     [GLOBAL_CONSTRAINTS]
@@ -108,6 +109,16 @@ Subagent (reviewer, Opus/high as selected above):
     file:line, or a check you ran — no preamble, no process narration, no
     closing summary.
 
+    ## Standards
+
+    The code under review is held to the documents below; the most specific
+    layer wins.
+
+    [STANDARDS]
+
+    Also read the stack document under [STACKS_DIR] that matches the file
+    types in the diff.
+
     ## Calibration
 
     Categorize by actual severity; not everything is Critical. Important means
@@ -159,14 +170,4 @@ Subagent (reviewer, Opus/high as selected above):
     **Reasoning:** [1-2 sentence technical assessment]
 ```
 
-**Placeholders:**
-- `[BRIEF_FILE]` — REQUIRED: the task brief file (`scripts/task-brief PLAN N`)
-- `[GLOBAL_CONSTRAINTS]` — the binding requirements copied verbatim from the
-  plan's Global Constraints or the spec: exact values, formats, and stated
-  relationships between components (not process rules)
-- `[REPORT_FILE]` — REQUIRED: the implementer's report file
-- `[BASE_SHA]` — commit before this task
-- `[HEAD_SHA]` — current commit
-- `[MANIFEST_ROOT]` and `[ROOT_BYTES]`, `[TOTAL_BYTES]`,
-  `[FILE_COUNT]`, `[LARGEST_MEMBER_BYTES]` — REQUIRED: the manifest root path
-  and all four metrics from the validated producer report
+**Placeholders:** `sdd-gate review` fills every bracketed capital token above.
