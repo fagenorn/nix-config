@@ -5,8 +5,6 @@ description: 'Delivers a finished feature-branch worktree: integration-branch sy
 
 # Ship Issue
 
-Merges a finished worktree branch into the integration branch, closes or holds its issue, cleans up.
-
 ## Project bindings (resolve first)
 
 Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. The only sanctioned exception is `workflow-state build-delivery`, which performs its own sealed, read-only resolution when it builds a delivery object; this skill still never resolves again itself. Use `bindings.tracker`, `bindings.vcs`, `bindings.commands`, `bindings.workflow.review.code`, and `bindings.workflow.verification`; dereference verification IDs through `bindings.commands`.
@@ -65,7 +63,7 @@ Guarded: the Phase-4 push, the Phase-4 PR create, every push in REVIEW.md's
 five-step apply/push flow, and the Phase-7 merge. There is no post-merge
 exemption: under lifecycle identity each post-merge effect is a `## Delivery loop`
 cycle — the remote branch delete, and Phase 8's issue close or hold, `git worktree
-remove` and `git branch -d` — fenced by `current-launch` before and after the
+remove` and the branch delete — fenced by `current-launch` before and after the
 effect exactly like the merge. Local commits are fenced separately
 (### Local commits).
 
@@ -95,8 +93,8 @@ Before any user-facing question mid-flow, invoke `doc-grounded-questions`, read 
 
 ## gh hygiene
 
-Prefix a forge invocation only with the names in `bindings.tracker.credential_env.unset_before_invocation`; for example, an exhaustive list containing `GITHUB_TOKEN` yields `unset GITHUB_TOKEN && gh ...` when a harness token lacks access to the target org. When `bindings.tracker.cli` is `glab`, substitute the equivalent `glab` verbs.
-Throughout, follow `writing-plans`' Payload discipline: targeted `rg` over whole-file reads, bounded reads, summarized command output, logs on disk, artifacts handed over as paths.
+Run the push, the merge and a branch delete each as its own Bash call, spelled exactly as shown: no `cd`, chain, pipe, redirection or wrapper. Read the result from that call's output or a follow-up call, never through a pipe or an appended `echo`. The only prefix unsets exactly the names in `bindings.tracker.credential_env.unset_before_invocation` (`GITHUB_TOKEN` yields `unset GITHUB_TOKEN && `) and goes only on a forge or `origin` call, never on the local branch delete. Text that only mentions one of these commands goes in one quoted argument. When `bindings.tracker.cli` is `glab`, substitute the equivalent `glab` verbs.
+Throughout, follow `writing-plans`' Payload discipline: targeted `rg`, bounded reads, summarized output, logs on disk, artifacts as paths.
 
 ## Phase 0 — Pre-flight
 
@@ -137,7 +135,7 @@ A blocked verification capability stops and reports its `reason_code` and `repai
    `verification reused: tree <id>` in the PR body's Summary.
 3. **Otherwise run and record.** Run every id's `bindings.commands` argv and cwd; when all pass, run `verified-tree record --tree <the checked tree>` with the same `--verification` ids. `record` exit 3 `tree_changed` is a failing verification; `check` exit 2 means run anyway and leave the pass unrecorded; `record` exit 2 leaves it unrecorded.
 
-On a failing verification command, pause, ground and surface; never invent a fix command outside retained `bindings.commands`. Tell *environmental* test failures (container connectivity, missing network, sandbox limits) from *real* ones with a baseline of the same project in a scratch worktree on `origin/<integration>`: the same failures are pre-existing (continue; note the baseline diff in the PR body), different ones are real (pause, ground, surface).
+On a failing verification command, pause, ground and surface; never invent a fix command outside retained `bindings.commands`. Tell *environmental* test failures (container connectivity, missing network, sandbox limits) from *real* ones with a baseline run in a scratch worktree on `origin/<integration>`: the same failures are pre-existing (continue; note the baseline diff in the PR body), different ones are real (pause, ground, surface).
 
 ## Phase 3 — Consolidate learnings
 
@@ -145,7 +143,7 @@ On a failing verification command, pause, ground and surface; never invent a fix
 
 ## Phase 4 — Open PR
 
-Skip it when the tracker capability is unsupported (push the branch and stop, or merge locally per the user's request). Without a standing grant for these actions, enter `HUMAN-GATE.md`'s Gate 1 before anything below; never use a gate to retry an actual denial. Run `check-launch`; on anything but `current: true`, stop without pushing. Then:
+Skip it when the tracker capability is unsupported (push the branch and stop, or merge locally per the user's request). Without a standing grant for these actions, enter `HUMAN-GATE.md`'s Gate 1 before anything below; never use a gate to retry an actual denial. Run `check-launch`; on anything but `current: true`, stop without pushing. Then (`## gh hygiene`):
 
 ```
 git push -u origin <branch>
@@ -173,7 +171,7 @@ Acceptance record: <record-path or none>
 Closes #<num>"
 ```
 
-This is the one form the lifecycle guard accepts: one command, those five flags in that order, `<resolved-repository>` the retained `bindings.tracker.repo_slug`, and the body a single double-quoted argument that may span lines but contains no `"`, `$`, backtick or backslash. A body written to a file, a heredoc or a command substitution is refused, so render the body in place.
+This is the one form the lifecycle guard accepts: one command, those five flags in that order, `<resolved-repository>` the retained `bindings.tracker.repo_slug`, and the body a single double-quoted argument that may span lines but contains no `"`, `$`, backtick or backslash. A body from a file, a heredoc or a command substitution is refused: render it in place.
 
 The `## Acceptance` section always appears. `Acceptance state:` carries Phase 0's
 effective value, and `Acceptance record:` carries the record's repository-relative
@@ -188,7 +186,7 @@ Title: the issue title verbatim unless the implementation deviated meaningfully.
 
 GitHub auto-close on merge fires only when the PR base equals the **default branch**; when retained integration and default branches differ, the real close mechanism is Phase 8's explicit `gh issue close <num>` — on the close branch keep the `Closes #<num>` trailer for traceability, don't rely on it.
 
-**Use full URLs, not bare `#N`**, in PR bodies, comments, and commit-message references (`https://github.com/<resolved-repository>/issues/<n>`) — GitHub resolves bare `#N` against the source repo context, which under cross-references lands on unrelated refs. The `Closes #<num>` trailer is the one exception.
+**Use full URLs, not bare `#N`**, in PR bodies, comments, and commit-message references (`https://github.com/<resolved-repository>/issues/<n>`) — a bare `#N` resolves against the source repo and can land on unrelated refs. The `Closes #<num>` trailer is the one exception.
 
 ## Phase 5 — Review the PR
 
@@ -240,7 +238,7 @@ If the fix changes unrelated behavior or the finding cannot be checked in that b
 
 ## Phase 6 — Wait for CI
 
-**Docs-only changes never wait for CI.** `git diff --name-only <base>..HEAD` — every path ends in `.md` → skip straight to Phase 7 (a markdown-only diff cannot break a build); anything else → the phase runs normally.
+**Docs-only changes never wait for CI.** `git diff --name-only <base>..HEAD` — every path ends in `.md` → skip straight to Phase 7; anything else → the phase runs normally.
 
 Before blocking, `gh pr view <pr-num> --json headRefOid` must equal the reviewed `HEAD_SHA` (fixed in Phase 5, re-fixed by REVIEW.md's step 5 after each applied fix), never `git rev-parse HEAD` read afresh: two attempts of one issue share this checkout, so live local HEAD is not evidence. Diverged → the PR head carries **unreviewed commits**: never resolve it by re-pushing, resetting, re-reviewing or merging, except for a head POST-SELECTION-SYNC.md admits. In `--auto` this is the genuinely-blocked stop: before the CI wait and the merge, make no further forge write, run no cleanup, keep the worktree and the branch, and return a truthful `stopped` ship summary naming the reviewed `HEAD_SHA` and the observed `headRefOid`. Interactive, surface and wait at the same point.
 
@@ -256,22 +254,22 @@ Exit `0` → list advisory states, then Phase 7. `124` → one short narration t
 
 With an unsupported tracker capability, merge into the integration branch locally per the user. Without a standing grant for the merge and cleanup chain, enter `HUMAN-GATE.md`'s Gate 2 before anything below; never use a gate to retry an actual denial. Then, immediately before the merge and whatever Phase 6's tip check showed, run `check-launch`; on anything but `current: true`, refuse the merge and take the no-write stop. Under lifecycle identity this effect is a `## Delivery loop` cycle.
 
-Build the subject from retained `bindings.tracker.repo_slug` and `bindings.vcs` values. Pass `--subject` only when the rendered subject is non-empty and contains none of `"`, `$`, backtick, backslash, NUL, LF or CR; otherwise omit it. Never pass `--no-ff`.
+Build the subject from retained `bindings.tracker.repo_slug` and `bindings.vcs` values. Pass `--subject` only when the rendered subject is non-empty and contains none of `"`, `$`, backtick, backslash, NUL, LF or CR; otherwise omit it. Never pass `--no-ff`. Then (`## gh hygiene`):
 
 ```
 gh pr merge <pr-num> --repo <resolved-repository> --merge --subject "<rendered subject>" --delete-branch
 ```
 
-**Judge success by the verify, never by the exit code** (CI-MERGE.md): `gh pr view <pr-num> --json state,mergeCommit` → `MERGED` plus a non-null `mergeCommit.oid`. Then ask the REMOTE whether the branch still exists, `git ls-remote --heads origin <branch>`; PR metadata like `headRefName` proves nothing. Non-empty output → `git push origin --delete <branch>`.
+**Judge success by the verify, never by the exit code** (CI-MERGE.md): `gh pr view <pr-num> --json state,mergeCommit` → `MERGED` plus a non-null `mergeCommit.oid`. Then ask the REMOTE whether the branch still exists, `git ls-remote --heads origin <branch>`; PR metadata proves nothing. Non-empty output → `git push origin --delete <branch>` (`## gh hygiene`).
 
 ## Phase 8 — Cleanup
 
 Before cleanup, invoke review-package (`~/.agents/bin/review-package`) in `delivery-detail` mode over every non-empty Minor/Discussion finding retained per REVIEW.md, independently run `artifact-budget check --kind review-package` on the returned durable root and compare metrics, and record the checked `detail_state` and single `report_path`, constructing no `merged` summary yet. A publication failure may return `unpublished` only as REVIEW.md's durable detail allows, keeping the worktree; otherwise fail closed. Only `none` or a checker-valid `present` detail proceeds to remove the worktree. Under lifecycle identity this effect is a `## Delivery loop` cycle.
 
 1. Close or hold, per Phase 0's effective acceptance state.
-   - **Close** (`met` or `not_applicable`): `gh issue view <num> --json state`; if `OPEN`, `gh issue close <num>` (the real close mechanism when retained integration and default branches differ — see Phase 4).
+   - **Close** (`met` or `not_applicable`): `gh issue view <num> --json state`; if `OPEN`, `gh issue close <num>` (see Phase 4).
    - **Hold** (`unmet` or `human_pending`), in this order: `gh issue view <num> --json state,comments`; if `CLOSED` (a commit's closing keyword can close it), `gh issue reopen <num>`. When `gh label list --repo <resolved-repository> --search needs-verification --json name` shows no name exactly `needs-verification`, run `gh label create needs-verification --repo <resolved-repository> --description "Merged, acceptance criteria await verification"` — never `--force`, which would overwrite a user's label. Then `gh issue edit <num> --add-label needs-verification`. The hold comment's first line is `Held for verification: <PR URL>`; the rest gives the effective acceptance state, the PR body's three-column table and the record's link at the merge SHA (`https://github.com/<resolved-repository>/blob/<merge-sha>/<record-path>`). When the earlier view already shows one or more comments with that first line, reuse the earliest one's URL; otherwise post it with `gh issue comment <num> --body "<hold comment>"`, whose stdout is the comment URL. Finally `gh issue view <num> --json state,labels` must show `OPEN` with `needs-verification`; anything else keeps ownership and retries, as for any failed post-merge action.
-2. Remove the worktree from the main repo root, never from inside the worktree:
+2. Remove the worktree from the main repo root, never from inside the worktree (branch delete: `## gh hygiene`):
    ```
    MAIN_ROOT=$(git -C "$(git rev-parse --git-common-dir)/.." rev-parse --show-toplevel)
    BUCKET="$MAIN_ROOT/.superpowers/sdd/wt-$(basename "$(git -C <worktree-path> rev-parse --path-format=absolute --git-dir)")"
@@ -289,7 +287,7 @@ The final ship-summary contains only `issue`, `state`, `pr_url`, full `merge_sha
 ## Notes
 
 - Merge commits, learning-doc updates, and blocker fixes fall under standing local-commit authorization. Don't re-confirm each. The `Co-Authored-By` trailer follows retained `bindings.vcs.commit.co_authored_by`.
-- If a phase reveals an earlier one was wrong (review surfaces a misaligned spec, say), back up to the appropriate `from-issue` phase. Don't paper over.
+- If a phase shows an earlier one was wrong (a review finds a misaligned spec, say), back up to that `from-issue` phase. Don't paper over.
 - Absent sibling skills (`from-issue`, `sdd`, `worktrees`) degrade to no-ops; this skill still runs.
 
 ## Delivery loop

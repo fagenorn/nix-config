@@ -2,21 +2,23 @@
 
 `plan` inspects a target checkout inside a bounded, read-only boundary,
 classifies every candidate it finds under one closed action set, routes the
-repository to exactly one of five closed outcomes, and emits the eight-member
+repository to exactly one of five closed outcomes, and emits the nine-member
 adoption plan document: `schema_version`, `plan`, `evidence`, `decisions`,
-`changes`, `link_rewrites`, `verification`, `handoff` (R4.3).
+`changes`, `link_rewrites`, `path_references`, `verification`, `handoff`
+(R4.3).
 
 The document is content-addressed. `plan_id` is the SHA-256 of canonical JSON
 over exactly `{adopt_schema_version, project_id, base_revision, platform,
-evidence, decisions.answered, link_rewrites}` (D15), so two checkouts of one
-revision on one platform produce one identifier and any change to a source
-byte, the base revision or a platform input produces another. The absolute
-checkout path is deliberately outside that source and appears only in
-`handoff`.
+evidence, decisions.answered, link_rewrites, path_references}` (D15), so two
+checkouts of one revision on one platform produce one identifier and any
+change to a source byte, the base revision or a platform input produces
+another. The absolute checkout path is deliberately outside that source and
+appears only in `handoff`.
 
 `plan` mutates nothing: it runs `git` and the resolver as child processes,
-reads tracked object ids, and the base revision's Markdown blobs through git,
-rather than the working tree's bytes, and writes only under
+reads tracked object ids, and through git, rather than the working tree's
+bytes, the base revision's Markdown blobs and its non-Markdown text blobs that
+name a moved path's first segment, and writes only under
 `~/.agents/state/` (R4.1, D14).
 
 `apply` takes a stored `ready` plan by that id, refuses on any drift, and
@@ -69,7 +71,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from agent_tools import adopt_apply, adopt_inspection, adopt_links, adopt_planning, adopt_verify, agent_platform
+from agent_tools import adopt_apply, adopt_inspection, adopt_links, adopt_planning, adopt_references, adopt_verify, agent_platform
 from agent_tools.siblings import sibling_argv
 
 
@@ -186,12 +188,20 @@ def compose_plan(root: Path, manifest: dict,
     `apply` re-runs exactly this to recompute the input digest and regenerate
     the canonical operation list (D33), so a second, subtly different
     derivation cannot exist to disagree with it. It writes nothing.
-    `answered` is the operator's answers to open `candidate-class` questions,
-    applied before anything else is derived, so they enter `plan_id`.
+    `answered` is the operator's answers to open `candidate-class` and
+    `path-reference` questions, applied before anything else is derived, so
+    they enter `plan_id`.
     """
     inventory = inspect_repository(root)
     found = adopt_inspection.classify_inventory(root, inventory)
-    answered = adopt_planning.apply_answers(found, inventory, answered)
+    contract_source = load_contract_source(root)
+    answered, references = adopt_planning.apply_answers(
+        root, found, inventory, answered,
+        adopt_planning.reference_excluded(contract_source))
+    reference_answers = adopt_planning.reference_answers(answered)
+    path_references = adopt_references.summary(references, reference_answers)
+    reference_files = adopt_references.rewritten(references,
+                                                 reference_answers)
     untracked = adopt_inspection.untracked_under(
         root, adopt_inspection.overlap_targets(found))
     for path in untracked:
@@ -202,7 +212,6 @@ def compose_plan(root: Path, manifest: dict,
     evidence = sorted(found.entries,
                       key=lambda entry: (entry["path"], entry["provenance"]))
 
-    contract_source = load_contract_source(root)
     links = adopt_links.derive_link_rewrites(
         root, inventory.base_revision, found.moves,
         [path for path, _ in adopt_planning.evidence_record_members(found)],
@@ -244,6 +253,8 @@ def compose_plan(root: Path, manifest: dict,
         key=lambda entry: (
             adopt_inspection.QUESTION_IDS.index(entry["id"]),
             entry.get("subject", "")))
+    open_questions += adopt_planning.reference_questions(references,
+                                                         reference_answers)
     decisions = {"recommended": recommended, "answered": answered,
                  "open": open_questions}
 
@@ -254,13 +265,14 @@ def compose_plan(root: Path, manifest: dict,
     }
     plan_id = adopt_planning.compute_plan_id(
         project_id, inventory.base_revision, platform_block, evidence,
-        decisions["answered"], links.summary)
+        decisions["answered"], links.summary, path_references)
 
     ready_gates = adopt_planning.evaluate_ready_gates(
         root, found, contract_source, contract_resolves, unfixable, untracked,
         decisions, links.summary)
     head, tail, contents = adopt_planning.build_operations(
-        root, found, manifest, contract_source, plan_id, links)
+        root, found, manifest, contract_source, plan_id, links,
+        reference_files)
 
     agent_surface = any(
         entry["lifecycle_class"] != "runtime-residue"
@@ -287,10 +299,11 @@ def compose_plan(root: Path, manifest: dict,
         records = adopt_planning.adoption_records(plan_id)
         bookkeeping, written = adopt_planning.bookkeeping_operations(
             found, plan_id, outcome, inventory.base_revision, platform_block,
-            decisions, ready_gates, links.summary)
+            decisions, ready_gates, links.summary, path_references)
         contents.update(written)
         changes = head + bookkeeping + tail
         adopt_planning.check_markdown_writes(changes, set(links.files))
+        adopt_planning.check_reference_writes(changes, set(reference_files))
         evidence_record = records["evidence_record"]
         migration_map = records["migration_map"]
     else:
@@ -328,6 +341,7 @@ def compose_plan(root: Path, manifest: dict,
         "decisions": decisions,
         "changes": changes,
         "link_rewrites": links.summary,
+        "path_references": path_references,
         "verification": {
             "ready_gates": ready_gates,
             "commit_gates": [adopt_inspection.gate_entry(gate, "not_run", None)
@@ -388,6 +402,11 @@ def emit_human(document: dict) -> int:
     plan = document["plan"]
     rewrites = document["link_rewrites"]
     inbound, outbound = rewrites["inbound"], rewrites["outbound"]
+    rows = document["path_references"]
+
+    def count(answer: str | None) -> int:
+        return sum(1 for row in rows if row["answer"] == answer)
+
     lines = [
         f"outcome: {plan['outcome']}",
         f"state:   {plan['state']}",
@@ -400,6 +419,9 @@ def emit_human(document: dict) -> int:
         f"files, outbound {outbound['links']} in {len(outbound['files'])} "
         f"files, unrewritable {len(rewrites['unrewritable'])}, "
         f"already broken {rewrites['already_broken']}",
+        f"references: {len(rows)} occurrences, "
+        f"extended {count('extend')}, rewritten {count('rewrite')}, "
+        f"retained {count('retain')}, open {count(None)}",
     ]
     for entry in document["decisions"]["recommended"]:
         lines.append(f"recommended {entry['id']}: {entry['value']}")
@@ -411,6 +433,10 @@ def emit_human(document: dict) -> int:
             answer = "none" if entry["value"] is None else entry["value"]
             lines.append(f"open {entry['id']} {entry['subject']} "
                          f"(answer: {answer}): {entry['recommendation']}")
+        elif entry["id"] == "path-reference":
+            lines.append(f"open {entry['id']} {entry['subject']} (answers: "
+                         f"{'|'.join(entry['answers'])}): "
+                         f"{entry['recommendation']}")
         else:
             lines.append(f"open {entry['id']}: {entry['recommendation']}")
     for blocker in plan["blockers"]:
@@ -662,8 +688,8 @@ def build_parser() -> argparse.ArgumentParser:
                            "is the same either way")
     plan.add_argument("--answer", action="append", nargs=3, default=[],
                       metavar=("QUESTION", "SUBJECT", "VALUE"),
-                      help="settle one open candidate-class question; "
-                           "repeatable")
+                      help="settle one open candidate-class or "
+                           "path-reference question; repeatable")
     apply_plan = subparsers.add_parser(
         "apply", help="carry out a stored ready plan in an isolated worktree")
     # Two flags and no more: naming the content-addressed id is the exact-plan

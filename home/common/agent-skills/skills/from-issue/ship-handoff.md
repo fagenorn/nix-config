@@ -1,7 +1,5 @@
 # Phase 7 detail — ship handoff and inline fallback
 
-Loaded from `SKILL.md` at Phase 7.
-
 ## Contents
 
 - Ship-owner subagent prompt
@@ -134,7 +132,7 @@ Items 1-3 are alternatives, in order; any other report runs items 4-6 in order.
 
 ## Dispatch-gap fallback
 
-It is the one exception to shipping through a fresh ship owner, and the one allowed departure from a rollover Phase-6 `delegate`. With lifecycle identity, first run the same `check-launch` fence with this owner's `action_id`; on `current: false` or any helper failure, write nothing, print the canonical re-entry line `/from-issue <num> --auto` on its own line, and stop. Ledger-free, skip the fence. Then invoke `ship-issue` through your `Skill` tool with the same validated handoff bytes and carry out the ship-owner prompt's task list yourself: every phase, the auto-mode rules and, with a `ship-handoff/v2`, the `## Delivery loop`, writing only `checkpoint-delivery` inside it. Handle its return as § Ship report handling does, except case 2; a human gate reached inside the run is `ship-issue/HUMAN-GATE.md`'s case of an owner running that path itself. A `capability_gap: agent_dispatch` line returned by the inline run is the genuine gap and never starts a second inline run: with lifecycle identity follow the suspension procedure with `<value>` = `agent_dispatch`, making no `finish` call; ledger-free, report the gap to the user and stop, keeping the worktree. A `delivery_remainder` launch never takes this fallback: remainder mode never returns the gap line.
+A generic delegated owner never takes it. With lifecycle identity, first run the same `check-launch` fence with this owner's `action_id`; on `current: false` or any helper failure, write nothing, print the canonical re-entry line `/from-issue <num> --auto` on its own line, and stop. Ledger-free, skip the fence. Then invoke `ship-issue` through your `Skill` tool with the same validated handoff bytes and carry out the ship-owner prompt's task list yourself: every phase, the auto-mode rules and, with a `ship-handoff/v2`, the `## Delivery loop`, writing only `checkpoint-delivery` inside it. Handle its return as § Ship report handling does, except case 2; a human gate reached inside the run is `ship-issue/HUMAN-GATE.md`'s case of an owner running that path itself. A `capability_gap: agent_dispatch` line returned by the inline run is the genuine gap and never starts a second inline run: with lifecycle identity follow the suspension procedure with `<value>` = `agent_dispatch`, making no `finish` call; ledger-free, report the gap to the user and stop, keeping the worktree. A `delivery_remainder` launch never takes this fallback: remainder mode never returns the gap line.
 
 ## Inline fallback (no ship-issue skill)
 

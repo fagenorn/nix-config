@@ -1018,6 +1018,41 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                     expect_allowed = authorized or row["kind"] == "read"
                     self.assertEqual(0 if expect_allowed else 2, result.returncode, result.stderr)
 
+    # Guarded command shapes (#351): the forms ship-issue spells and the dressed
+    # shapes agents reach for, from the fixture the shell-example suite also reads.
+    SHAPES = json.loads((Path(__file__).parent / "fixtures/guarded-command-shapes.json")
+                        .read_text(encoding="utf-8"))
+    TOKEN_PREFIX = "unset GITHUB_TOKEN && "
+
+    def shape_command(self, template):
+        for placeholder, value in self.SHAPES["values"].items():
+            template = template.replace(placeholder, value)
+        return template
+
+    def assert_shape_verdict(self, command, repo, label, verdict):
+        result = self.run_guard(command, cwd=repo)
+        self.assertEqual(verdict["exit"], result.returncode, (command, result.stderr))
+        if verdict["exit"] == 2:
+            self.assertIn(f"lifecycle guard: unsafe {label}:", result.stderr)
+            self.assertIn(verdict["reason"], result.stderr)
+
+    def test_every_guarded_command_shape_gets_its_verdict(self):
+        """#351 AC3, D6: the skill's literal forms and the refused dressed shapes."""
+        slug = self.SHAPES["values"]["<resolved-repository>"]
+        repo = self.make_repo(f"git@github.com:{slug}.git")
+        forms = {form["id"]: form for form in self.SHAPES["skill_forms"]}
+        for form in forms.values():
+            command = self.shape_command(form["template"])
+            for variant, text in (("bare", command), ("prefixed", self.TOKEN_PREFIX + command)):
+                with self.subTest(form=form["id"], variant=variant):
+                    self.assert_shape_verdict(text, repo, form["label"], form[variant])
+        for shape in self.SHAPES["refused_shapes"]:
+            command = (shape["before"] + self.shape_command(forms[shape["form"]]["template"])
+                       + shape["after"])
+            with self.subTest(shape=shape["id"]):
+                self.assert_shape_verdict(
+                    command, repo, shape["label"], {"exit": 2, "reason": shape["reason"]})
+
     def test_tag_push_near_misses_are_refused(self):
         repo = self.tagged_repo("fagenorn/nix-config")
         lightweight = self.tagged_repo("fagenorn/nix-config", tag="v2.0.0", annotated=False)
