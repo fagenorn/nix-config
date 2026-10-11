@@ -14,7 +14,7 @@ Agent(subagent_type="implementer", model="sonnet", effort="high") executes the t
 Subagent (the explicitly selected implementer or mechanic above):
   description: "Implement Task N: [task name]"
   prompt: |
-    You are implementing Task N: [task name]
+    You are implementing Task [TASK_NUMBER]: [TASK_NAME]
 
     ## Task Description
 
@@ -26,8 +26,24 @@ Subagent (the explicitly selected implementer or mechanic above):
 
     ## Context
 
-    [Scene-setting: where this fits, interfaces and decisions from earlier
-    tasks, the plan's Global Constraints, and the plan's agreed test seams]
+    [CONTEXT]
+
+    Plan root: [PLAN_ROOT] ([PLAN_ROOT_BYTES], [PLAN_TOTAL_BYTES], [PLAN_FILE_COUNT], [PLAN_LARGEST_MEMBER_BYTES])
+
+    Global Constraints:
+    [GLOBAL_CONSTRAINTS]
+
+    Test seams:
+    [TEST_SEAMS]
+
+    ## Standards
+
+    Your work is held to the documents below; the most specific layer wins.
+
+    [STANDARDS]
+
+    Also read the stack document under [STACKS_DIR] that matches the file
+    types you touch.
 
     ## Test Discipline
 
@@ -96,6 +112,8 @@ Subagent (the explicitly selected implementer or mechanic above):
     once.
 
     ## Lifecycle Worker
+
+    [LIFECYCLE_WORKER]
 
     Only when this prompt carries a `Lifecycle worker:` line: create every
     commit as
