@@ -1631,8 +1631,8 @@ def refuse_misbound(repo_root_value: str, run_id: str, *, issue: int, remainder:
     nothing. Otherwise the worktree recorded for the addressed attempt (or remainder, when
     `remainder`) of `issue` in the run's ledger, read without a lock, must be that one. No
     argument or environment variable supplies the directory. A ledger, issue or record that
-    cannot be found, or a run or root that cannot be resolved, is left to the engine's
-    own refusal.
+    cannot be found, a ledger the unlocked read refuses as a `WorkflowError`, or a run or
+    root that cannot be resolved, is left to the engine's own refusal.
     """
     if not RUN_ID_PATTERN.fullmatch(run_id):
         return
@@ -1648,7 +1648,10 @@ def refuse_misbound(repo_root_value: str, run_id: str, *, issue: int, remainder:
     state_path = root / ".superpowers" / "workflows" / run_id / "state.json"
     if not require_regular_path(state_path, "workflow state", allow_missing=True):
         return
-    state = read_state_unlocked(state_path, run_id)
+    try:
+        state = read_state_unlocked(state_path, run_id)
+    except WorkflowError:
+        return  # the locked read prints the engine's own text for this ledger (#338 D13)
     issue_state = state.get("issues", {}).get(str(issue))
     records = (issue_state or {}).get("delivery_remainders" if remainder else "attempts")
     if not isinstance(records, list) or not 1 <= ordinal <= len(records):
@@ -4165,9 +4168,11 @@ def command_finish(args: argparse.Namespace) -> int:
     may keep working, not whether the work it finished is real. A *synthetic*
     record on the issue's latest attempt — one the lifecycle wrote about the
     environment (``expiry``, ``stalled``), not about the work — is therefore
-    provisional and is replaced wholesale by the owner's own report, whatever it
-    says. An ``owner``, ``refused`` or ``superseded`` record is a verdict and is
-    never overwritten, which is where write-once means something (per D3, D11).
+    provisional and is replaced wholesale by the report of the attempt's last
+    launch, whatever it says; a report from an earlier launch is fenced as
+    ``superseded_launch`` and retained instead (#338 D23). An ``owner``,
+    ``refused`` or ``superseded`` record is a verdict and is never overwritten,
+    which is where write-once means something (per D3, D11).
     Legacy ``expiry`` records only reach this ledger from a pre-suspension run
     (per D2, D15).
 

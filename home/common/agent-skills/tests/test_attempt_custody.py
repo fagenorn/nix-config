@@ -639,6 +639,21 @@ class MisbindingTest(DeliveredCustody, unittest.TestCase):
                 own = self.cli(*argv, stdin=stdin, ok=False, cwd=self.worktrees[DELIVERED])
                 self.assertNotIn(b"fencing violation", own.stderr)
 
+    def test_a_corrupt_ledger_keeps_the_engines_refusal_inside_an_attempt_worktree(self):
+        custody = self.spawn(DELIVERED)[DELIVERED]
+        Path(self.worktrees[DELIVERED]).mkdir(parents=True, exist_ok=True)
+        transports = self.transports(custody)
+        del transports["mark-progress"]  # it read the ledger unlocked before this fence
+        self.ledger.write_bytes(b"{")
+        with self.assertRaises(json.JSONDecodeError) as corrupt:
+            json.loads("{")
+        engine = f"workflow-state: invalid workflow state JSON: {corrupt.exception}\n"
+        for name, (argv, stdin) in transports.items():
+            with self.subTest(transport=name):
+                refused = self.cli(*argv, stdin=stdin, ok=False, cwd=self.worktrees[DELIVERED])
+                self.assertEqual((refused.returncode, refused.stderr),
+                                 (2, engine.encode()))
+
 
 class LateLegacyResultTest(LifecycleCustody, unittest.TestCase):
     def reaped(self):

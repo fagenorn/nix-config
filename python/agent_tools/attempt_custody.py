@@ -28,11 +28,11 @@ FENCING_REASONS = ("custody_misbound", "superseded_launch", "launch_identity_req
                    "custody_unavailable")
 # ``host_capacity`` is written only by control, from a ``launch_refused`` owner
 # observation; it is auto-resumable, but its resume is gated until some other
-# claim is released after the refused launch's own claim (per D7, D26).
+# claim is released after the refused launch's own claim (per #150 D7, D26).
 # ``agent_dispatch`` is written only by an owner, through ``suspend``, when its
 # own context cannot launch the agents a phase needs. It is not auto-resumable:
 # the ledger cannot see how deep a relaunch would run, and blind resumes would
-# spend ``STALL_LIMIT``, so only a human-directed re-entry clears it (per D6).
+# spend ``STALL_LIMIT``, so only a human-directed re-entry clears it (per #198 D6).
 # ``deadline`` is an owner value: sdd's headroom rule writes it through
 # ``suspend`` when too little time is left before the attempt's
 # ``deadline_at`` for its next task. It is auto-resumable, like ``transport``,

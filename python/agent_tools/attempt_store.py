@@ -266,7 +266,8 @@ def lookup_run(store: Path, creation_key: str) -> str | None:
 
 
 def bound_identity(store: Path, state: dict[str, Any], run_id: str) -> RunIdentity:
-    """The identity of the run transaction a schema-8 `state` names, read without a lock.
+    """The identity of the run transaction a schema-8 or schema-9 `state` names, read
+    without a lock.
 
     Refuses a missing store, an unknown or invalid transaction, a subject that is not the
     closed attempt-run subject, a transaction whose handle is not `run_id`, and a `state`
@@ -877,7 +878,8 @@ def migration_row(superpowers: Path, ledger: str, *, upgrade: Callable[..., dict
                dialect=classify(_typed(document, "run_id", str)))
     if row["dialect"] in LEGACY_DIALECTS:
         row["alias"] = legacy_alias(row["run_id"])
-    # A core run id at schema 8 is a minted run, whose subject has no alias: alias stays null.
+    # A core run id (schema 8 or 9) is a minted run, whose subject has no alias: alias stays
+    # null.
     row["verdict"], row["reason"] = _row_verdict(
         row, document, store, upgrade=upgrade, validate=validate, refusals=refusals,
         migrated=migrated)
