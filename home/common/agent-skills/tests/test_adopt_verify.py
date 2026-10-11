@@ -25,6 +25,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools import adopt_verify
+from agent_tools import agent_platform
 from agent_tools.adopt_inspection import AdoptError
 
 from .test_adopt_project import (
@@ -662,6 +663,88 @@ class RegisterProjectInnerCheckTest(VerifyTestCase):
         self.assertEqual(
             (error.code, error.repair_id),
             ("not_integrated", "adopt.registration.integration_branch_unresolved"))
+
+
+OVERRIDE = {"branch": "dev", "default_branch": "main",
+            "reason": "default_contract_unresolved"}
+
+
+class RegistryBranchOverrideTest(VerifyTestCase):
+    """The entry's one optional member (issue 363 D3), through the imported
+    validator and writer: no CLI path can hand them a malformed override."""
+
+    def document(self, **members: object) -> dict:
+        return {"schema_version": 1, "projects": [
+            {"project_id": "fixture/target", "root": "/checkout", **members}]}
+
+    def violations(self, **members: object) -> list[tuple[str, str]]:
+        return [(entry["pointer"], entry["repair_id"]) for entry in
+                agent_platform.validate_registry(self.document(**members))]
+
+    def test_an_entry_with_and_without_the_override_is_valid(self):
+        self.assertEqual(self.violations(), [])
+        self.assertEqual(self.violations(branch_override=dict(OVERRIDE)), [])
+
+    def test_a_malformed_override_is_refused_member_by_member(self):
+        pointer = "/projects/0/branch_override"
+        prefix = "platform.registry.projects.branch_override"
+        cases = {
+            "not_object": ("dev", [(pointer, f"{prefix}.not_object")]),
+            "member_missing": (
+                {"branch": "dev", "reason": "default_contract_unresolved"},
+                [(f"{pointer}/default_branch", f"{prefix}.member_missing")]),
+            "member_unexpected": (
+                {**OVERRIDE, "commit": "0" * 40},
+                [(f"{pointer}/commit", f"{prefix}.member_unexpected")]),
+            "not_string": (
+                {**OVERRIDE, "branch": 7},
+                [(f"{pointer}/branch", f"{prefix}.not_string")]),
+            "empty_string": (
+                {**OVERRIDE, "default_branch": ""},
+                [(f"{pointer}/default_branch", f"{prefix}.not_string")]),
+            "reason_unknown": (
+                {**OVERRIDE, "reason": "operator_said_so"},
+                [(f"{pointer}/reason", f"{prefix}.reason_unknown")]),
+        }
+        for name, (override, expected) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(
+                    self.violations(branch_override=override), expected)
+
+    def test_any_other_extra_entry_member_is_still_refused(self):
+        self.assertEqual(
+            self.violations(branch_override=dict(OVERRIDE), compatible=True),
+            [("/projects/0/compatible",
+              "platform.registry.projects.member_unexpected")])
+
+    def test_the_writer_keeps_the_override_and_strips_everything_else(self):
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            agent_platform.write_registry([
+                {"project_id": "fixture/beta", "root": "/beta",
+                 "compatible": True},
+                {"project_id": "fixture/alpha", "root": "/alpha",
+                 "branch_override": dict(OVERRIDE), "compatible": True},
+            ])
+            entries = agent_platform.read_registry()
+        self.assertEqual(entries, [
+            {"project_id": "fixture/alpha", "root": "/alpha",
+             "branch_override": OVERRIDE},
+            {"project_id": "fixture/beta", "root": "/beta"},
+        ])
+        self.assertEqual(self.registry(),
+                         {"schema_version": 1, "projects": entries})
+
+    def test_the_writer_refuses_a_malformed_override_and_writes_nothing(self):
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            with self.assertRaises(
+                    agent_platform.PlatformManifestError) as caught:
+                agent_platform.write_registry([
+                    {"project_id": "fixture/target", "root": "/checkout",
+                     "branch_override": {**OVERRIDE, "reason": "other"}}])
+        self.assertEqual(
+            caught.exception.repair_id,
+            "platform.registry.projects.branch_override.reason_unknown")
+        self.assertFalse(self.registry_path().exists())
 
 
 if __name__ == "__main__":
