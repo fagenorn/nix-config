@@ -1424,7 +1424,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertIn(
             "workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> "
-            "--issue <n> --attempt <k> --blocked-on <value>",
+            "--issue <n> --attempt <k> --action-id <action_id> --blocked-on <value>",
             suspension,
         )
         self.assertIn(
@@ -1442,7 +1442,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertIn(
             "workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> "
-            "--issue <n> --attempt <k> --blocked-on <value> "
+            "--issue <n> --attempt <k> --action-id <action_id> --blocked-on <value> "
             "| artifact-budget validate-report --boundary workflow-response --input -\n",
             suspension,
         )
