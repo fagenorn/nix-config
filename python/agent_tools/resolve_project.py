@@ -10,6 +10,10 @@ an implied value. Readiness observes the machine but never executes anything:
 the subcommand opens no file for writing, creates no directory, and starts no
 child process.
 
+The snapshot's `release` member is derived, not authored: its `targets` list
+the targets the authored `release` member binds, with the operations each one
+runs (`release_profile.release_targets`).
+
 `check-projections` judges each declared target against its source and
 refuses on drift; `resolve` runs the same check before it builds anything, so
 a hand-edited target is a structural refusal rather than a stale snapshot
@@ -1068,7 +1072,9 @@ def release_capability(release: object, source: dict, root: Path) -> dict:
     """The derived `capabilities.release` entry (D1, D23).
 
     `release` is the authored member and the grammar has already accepted it,
-    which `admissibility_findings` assumes. Profiles are read in sorted id
+    which `admissibility_findings` assumes. It is `unsupported` when authored
+    as `"unsupported"` or when no profile has a publication node, before any
+    admissibility or executable check. Otherwise profiles are read in sorted id
     order: the first with an admissibility finding blocks as
     `release_profile_inadmissible`; failing that, the first executable some
     bound adapter's descriptor names that does not resolve blocks as
@@ -1077,6 +1083,9 @@ def release_capability(release: object, source: dict, root: Path) -> dict:
     if release == "unsupported":
         return {"state": "unsupported", "reason_code": None, "repair_id": None}
     profiles = release["profiles"]
+    if not any(release_profile.phase_nodes(profile, "publication")
+               for profile in profiles.values()):
+        return {"state": "unsupported", "reason_code": None, "repair_id": None}
     reason_code = None
     for profile_id in sorted(profiles):
         if release_profile.admissibility_findings(
@@ -1151,6 +1160,7 @@ def build_snapshot(root: Path, source: dict, manifest: dict) -> dict:
         "bindings": bindings,
         "capabilities": compute_capabilities(
             bindings, root, source["capabilities"], source["release"], source),
+        "release": {"targets": release_profile.release_targets(source["release"])},
     }
 
 

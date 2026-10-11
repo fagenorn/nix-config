@@ -1,0 +1,53 @@
+{
+  "profile_version": 1,
+  "target": {
+    "environment": "github-main",
+    "concurrency_keys": [
+      "release/fagenorn/nix-config"
+    ]
+  },
+  "requirements": {
+    "adapters": {
+      "forge": {
+        "min_inclusive": "1.0.0",
+        "max_exclusive": "2.0.0"
+      }
+    }
+  },
+  "bindings": {
+    "adapters": {
+      "forge": {
+        "adapter": "github-forge"
+      }
+    },
+    "targets": {
+      "repository": {
+        "adapter": "forge",
+        "kind": "github_repository",
+        "repository": "fagenorn/nix-config",
+        "branch": "main"
+      }
+    },
+    "principals": {
+      "maintainer": {
+        "class": "forge_write"
+      }
+    },
+    "credentials": {
+      "forge-keyring": {
+        "adapter": "forge",
+        "class": "gh_keyring"
+      }
+    }
+  },
+  "publication": "none",
+  "activation": "none",
+  "proof": {
+    "convergence_window_ms": 1800000,
+    "obligations": []
+  },
+  "recovery": {
+    "units": {}
+  },
+  "limits": {}
+}

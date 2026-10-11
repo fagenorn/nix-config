@@ -26,6 +26,11 @@ core compilers' reasons verbatim. `compile_profile` returns the deep-frozen
 `ResolvedReleaseProfile`, and `bind_candidate` turns it plus one candidate into exactly the
 inputs `TransactionStore.create` takes. Every function here is pure: it reads no file,
 clock, network or environment.
+
+`phase_nodes` is the one post-grammar reader of a phase's authored nodes: it returns the
+publication actions or activation units of a profile, and an empty list for a phase
+authored as `"none"`. `release_targets` lists the targets every profile binds, each with
+the operations its nodes run against it.
 """
 
 import copy
@@ -81,6 +86,8 @@ VERSION_PATTERN = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 TITLE_FORBIDDEN = frozenset('"$`\\\0\r\n')
 CANDIDATE_KEYS = frozenset(("version", "commit", "title", "notes"))
+PHASES = ("publication", "activation")
+_PHASE_MEMBER = MappingProxyType({"publication": "actions", "activation": "units"})
 PHASE_MODES = {"publication": release_adapter.PUBLICATION_MODES,
                "activation": release_adapter.ACTIVATION_MODES}
 
@@ -738,14 +745,18 @@ def _pointer_base(profile_id: str) -> str:
     return _pointer("release", "profiles", profile_id)
 
 
+def phase_nodes(profile: Mapping[str, Any], phase: str) -> list[dict[str, Any]]:
+    """The authored publication actions or activation units of a grammar-valid profile, in
+    authored order, as a new list; empty when the phase is authored as `"none"`."""
+    if profile[phase] == "none":
+        return []
+    return list(profile[phase][_PHASE_MEMBER[phase]])
+
+
 def _authored(profile: Mapping[str, Any]) -> list[tuple[str, int, dict[str, Any]]]:
     """`(phase, authored index, node)` for every publication action, then activation unit."""
-    found = [("publication", index, node)
-             for index, node in enumerate(profile["publication"]["actions"])]
-    if profile["activation"] != "none":
-        found += [("activation", index, node)
-                  for index, node in enumerate(profile["activation"]["units"])]
-    return found
+    return [(phase, index, node) for phase in PHASES
+            for index, node in enumerate(phase_nodes(profile, phase))]
 
 
 def _descriptor(profile: Mapping[str, Any], descriptors: Mapping[str, dict],
@@ -761,7 +772,7 @@ def _operation(profile: Mapping[str, Any], descriptors: Mapping[str, dict],
 def _rule_observation_deadline(profile_id, profile, contract, descriptors):
     base, found = _pointer_base(profile_id), []
     for phase, index, node in _authored(profile):
-        here = base + _pointer(phase, "actions" if phase == "publication" else "units", index)
+        here = base + _pointer(phase, _PHASE_MEMBER[phase], index)
         if "observation_deadline_ms" not in node:
             found.append(_finding("observation_deadline", here, "observation_deadline_optional",
                                   f"node {node['id']} declares no observation_deadline_ms"))
@@ -913,16 +924,41 @@ def _normalized_target(profile: Mapping[str, Any], descriptors: Mapping[str, dic
     return {"handle": handle, "kind": target["kind"], **{m: target[m] for m in members}}
 
 
+def release_targets(release: object, descriptors: Mapping[str, dict] = release_adapter.DESCRIPTORS
+                    ) -> list[dict[str, Any]]:
+    """The targets an authored `release` member binds, as new plain values.
+
+    `[]` for `"unsupported"`. Otherwise one entry per `bindings.targets` handle of every
+    profile, ordered by profile id then handle: `{"profile", "adapter", "target",
+    "operations"}`, where `adapter` is the registered adapter the target's alias binds,
+    `target` is the normalized target and `operations` is the sorted, duplicate-free list
+    of operations the profile's publication actions and activation units run against that
+    handle. Only the authored profile is read, so a profile that fails admissibility is
+    listed all the same.
+    """
+    if release == "unsupported":
+        return []
+    found = []
+    for profile_id in sorted(release["profiles"]):
+        profile = release["profiles"][profile_id]
+        for handle in sorted(profile["bindings"]["targets"]):
+            alias = profile["bindings"]["targets"][handle]["adapter"]
+            found.append({
+                "profile": profile_id,
+                "adapter": profile["bindings"]["adapters"][alias]["adapter"],
+                "target": _normalized_target(profile, descriptors, handle),
+                "operations": sorted({node["operation"] for _, _, node in _authored(profile)
+                                      if node["target"] == handle})})
+    return found
+
+
 def lower(profile_id: str, profile: Mapping[str, Any],
           descriptors: Mapping[str, dict] = release_adapter.DESCRIPTORS
           ) -> tuple[dict[str, Any], dict[str, Any]]:
     """The candidate-independent proof and recovery declarations of a grammar-valid profile."""
-    publication = ordered_nodes(list(profile["publication"]["actions"]))
-    activation = [] if profile["activation"] == "none" \
-        else ordered_nodes(list(profile["activation"]["units"]))
     proof_units, recovery_units = [], []
-    for phase, nodes in (("publication", publication), ("activation", activation)):
-        for node in nodes:
+    for phase in PHASES:
+        for node in ordered_nodes(phase_nodes(profile, phase)):
             parameters = {"action": node["id"], "operation": node["operation"],
                           "target": _normalized_target(profile, descriptors, node["target"])}
             unit = profile["recovery"]["units"][node["id"]]
@@ -971,9 +1007,7 @@ def compile_profile(profile_id: str, profile: Mapping[str, Any], contract: objec
     if findings:
         raise ProfileInadmissible(findings)
     proof, recovery = lower(profile_id, profile, descriptors)
-    nodes = {phase: ordered_nodes(list(profile[phase]["actions" if phase == "publication"
-                                                  else "units"]))
-             if profile[phase] != "none" else [] for phase in ("publication", "activation")}
+    nodes = {phase: ordered_nodes(phase_nodes(profile, phase)) for phase in PHASES}
     everything = nodes["publication"] + nodes["activation"]
     return ResolvedReleaseProfile({
         "schema": SCHEMA, "profile_id": profile_id,

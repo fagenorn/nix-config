@@ -160,5 +160,54 @@ class FrozenAndBoundTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     release_profile.bind_candidate(compiled, {**support.CANDIDATE, **bad})
 
+class PublicationFreeReadersTest(unittest.TestCase):
+    """The readers below the grammar over a profile whose publication is `"none"` (#368 D3, D6, D14)."""
+
+    def test_phase_nodes_is_empty_for_none_and_authored_order_otherwise(self):
+        free, forge = support.publication_free_profile(), support.forge_profile()
+        self.assertEqual(release_profile.PHASES, ("publication", "activation"))
+        self.assertEqual([release_profile.phase_nodes(free, phase)
+                          for phase in release_profile.PHASES], [[], []])
+        self.assertEqual([n["id"] for n in release_profile.phase_nodes(forge, "publication")],
+                         ["tag", "github-release"])
+        self.assertEqual(release_profile.phase_nodes(forge, "activation"), [])
+        self.assertIsNot(release_profile.phase_nodes(forge, "publication"),
+                         forge["publication"]["actions"])
+
+    def test_the_four_rules_find_nothing_and_lowering_has_no_unit(self):
+        profile = support.publication_free_profile()
+        self.assertEqual(release_profile.admissibility_findings(
+            "forge-target", profile, support.base_contract(), D()), [])
+        proof, recovery = release_profile.lower("forge-target", profile, D())
+        self.assertEqual((proof["units"], proof["obligations"], recovery["units"]), ([], [], []))
+
+    def test_release_targets_orders_entries_and_scopes_operations_to_their_handle(self):
+        repository = {"adapter": "forge", "kind": "github_repository",
+                      "repository": "fagenorn/nix-config", "branch": "main"}
+        publishing = support.forge_profile()
+        publishing["bindings"]["targets"] = {"zeta": dict(repository),
+                                             "repository": dict(repository),
+                                             "alpha": dict(repository)}
+        tag, release = publishing["publication"]["actions"]
+        release["target"] = "alpha"
+        publishing["publication"]["actions"].append(dict(tag, id="tag-again", deps=["tag"]))
+        publishing["recovery"]["units"]["tag-again"] = dict(publishing["recovery"]["units"]["tag"])
+        authored = {"profiles": {"zulu": publishing,
+                                 "alpha": support.publication_free_profile()}}
+        self.assertEqual(release_profile.grammar_violations(
+            {"profiles": {"zulu": publishing}}, support.base_contract(), D()), [])
+
+        def entry(profile, handle, operations):
+            return {"profile": profile, "adapter": "github-forge", "operations": operations,
+                    "target": {"handle": handle, "kind": "github_repository",
+                               "repository": "fagenorn/nix-config", "branch": "main"}}
+        self.assertEqual(release_profile.release_targets(authored, D()), [
+            entry("alpha", "repository", []),
+            entry("zulu", "alpha", ["release"]),
+            entry("zulu", "repository", ["tag"]),
+            entry("zulu", "zeta", [])])
+        self.assertEqual(release_profile.release_targets("unsupported", D()), [])
+
+
 if __name__ == "__main__":
     unittest.main()
