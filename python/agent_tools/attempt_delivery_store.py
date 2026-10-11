@@ -12,7 +12,7 @@ clock and the error mapping, and holds no other lock. A terminal transaction is 
 `agent_tools.attempt_delivery` holds the pure rules.
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -39,56 +39,55 @@ class _Pending(NamedTuple):
         return tuple(entry for entry in self.entries if entry.evidence_id not in held)
 
 
-def delivery_of(core: TransactionStore, run: str, issue: int,
-                digest: str) -> tuple[int, Transaction | None]:
-    """Probe `delivery_key(issue, digest, n)` for n = 1, 2, ...: the first ordinal whose
-    transaction names `run`, with that transaction, or the first unused ordinal with None.
-    A probed subject that is not the closed delivery subject is a `StoreRefused`."""
+def _probe(core: TransactionStore, issue: int, digest: str) -> Iterator[tuple[int, Transaction]]:
+    """Probe `delivery_key(issue, digest, n)` for n = 1, 2, ... to the first unused ordinal:
+    each existing transaction with its ordinal. A probed subject that is not the closed
+    delivery subject is a `StoreRefused`."""
     ordinal = 0
     while True:
         ordinal += 1
         identity = core.lookup(delivery_rules.delivery_key(issue, digest, ordinal))
         if identity is None:
-            return ordinal, None
+            return
         transaction = core.load(identity)
         violation = delivery_rules.delivery_subject_violation(transaction.subject)
         if violation is not None:
             raise StoreRefused(
                 f"delivery projection mismatch: {transaction.transaction_id}: {violation}")
+        yield ordinal, transaction
+
+
+def delivery_of(core: TransactionStore, run: str, issue: int,
+                digest: str) -> tuple[int, Transaction | None]:
+    """The first ordinal of the probe whose transaction names `run`, with that transaction,
+    or the first unused ordinal with None."""
+    ordinal = 0
+    for ordinal, transaction in _probe(core, issue, digest):
         if transaction.subject["run"] == run:
             return ordinal, transaction
+    return ordinal + 1, None
 
 
 def installing_runs(store: Path, issue: int, digest: str) -> list[str]:
     """The handles of the runs whose delivery transaction for `issue` carries the contract
     `digest`, in ordinal order, read without a lock.
 
-    Probes `delivery_key(issue, digest, n)` from 1 to the first miss, so a store that does
-    not exist, or a contract with no delivery transaction, answers an empty list. Only the
-    transaction is consulted: a ledger a cut write has not yet published matches later, at
-    the caller's check of the ledger itself. A transaction that is not the closed delivery
-    subject, or whose run transaction is not an attempt run, is a `StoreRefused`.
+    A store that does not exist, or a contract with no delivery transaction, answers an empty
+    list. Only the transaction is consulted: a ledger a cut write has not yet published
+    matches later, at the caller's check of the ledger itself. A transaction whose run
+    transaction is not an attempt run is a `StoreRefused`.
     """
     runs: list[str] = []
     with reading(store, 0) as core:  # lookup and load read no clock
         if core is None:
             return runs
-        ordinal = 0
-        while True:
-            ordinal += 1
-            identity = core.lookup(delivery_rules.delivery_key(issue, digest, ordinal))
-            if identity is None:
-                return runs
-            transaction = core.load(identity)
-            violation = delivery_rules.delivery_subject_violation(transaction.subject)
-            if violation is not None:
-                raise StoreRefused(
-                    f"delivery projection mismatch: {transaction.transaction_id}: {violation}")
+        for _, transaction in _probe(core, issue, digest):
             run = transaction.subject["run"]
             handle = run_handle(store, run)
             if handle is None:
                 raise StoreRefused(f"delivery run {run} is not an attempt run transaction")
             runs.append(handle)
+    return runs
 
 
 def _installed(state: dict) -> list[tuple[int, Mapping]]:
