@@ -5,6 +5,9 @@ Run: just agent-workflow-tests
 
 import json
 import os
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -18,6 +21,8 @@ from .test_workflow_state import LifecycleHarness
 
 T = "2026-08-13T20:{:02d}:00Z".format
 PREFIX = "workflow-state: fencing violation: "
+REPO = Path(__file__).resolve().parents[4]
+BASE_COMMIT = "5bd914e199f3e57217780596beefe69838f4efd4"
 
 
 class CustodyReads:
@@ -698,6 +703,60 @@ class LateSummaryTest(DeliveredCustody, unittest.TestCase):
         self.assertEqual(self.postconditions(DELIVERED),
                          {**before, "tracker_closed": "observed"})
         self.assertEqual(self.core_files(), core)
+
+
+class CompatibilityTest(LifecycleCustody, unittest.TestCase):
+    def base_helper(self, scratch):
+        found = subprocess.run(["git", "-C", str(REPO), "cat-file", "-e",
+                                f"{BASE_COMMIT}^{{commit}}"], capture_output=True)
+        if found.returncode != 0:
+            self.fail(f"base commit {BASE_COMMIT} is missing; fetch it, do not skip (D14)")
+        archive = subprocess.run(
+            ["git", "-C", str(REPO), "archive", BASE_COMMIT, "python/agent_tools",
+             "home/common/agent-skills/scripts",
+             "home/common/agent-skills/artifact-budget-policy.json"],
+            capture_output=True, check=True)
+        subprocess.run(["tar", "-x", "-C", str(scratch)], input=archive.stdout, check=True)
+        script = scratch / "home/common/agent-skills/scripts/workflow-state.py"
+        env = {**self.cli_env, "PYTHONPATH": str(scratch / "python")}
+        return lambda command, *rest: subprocess.run(
+            [sys.executable, str(script), command, "--repo-root", str(self.root),
+             "--run-id", self.run_id, "--action-id", "14:1:1", *rest],
+            env=env, cwd=scratch, capture_output=True, text=True, timeout=120)
+
+    def test_ac6_the_base_helper_refuses_a_schema_9_ledger_without_writing(self):
+        self.spawn_14()
+        self.install_legacy(self.read_state(), "orchestrate-14", version=8)
+        with tempfile.TemporaryDirectory() as scratch:
+            base = self.base_helper(Path(scratch))
+            control = base("check-launch")  # positive control: it reads schema 8
+            self.assertEqual((control.returncode, json.loads(control.stdout)["reason"]),
+                             (0, "current"), control.stderr)
+            self.register_worker(action_id="14:1:1", now=T(1))
+            self.assertEqual(self.read_state()["schema_version"], 9)
+            before = self.tree()
+            for command, rest in (("check-launch", ()),
+                                  ("register-worker", ("--now", T(2)))):
+                with self.subTest(command=command):
+                    refused = base(command, *rest)
+                    self.assertEqual(refused.returncode, 2, refused.stdout)
+                    self.assertIn("unknown_schema", refused.stderr)
+                    self.assertEqual(self.tree(), before)
+
+    def test_ac6_launch_projections_print_the_same_bytes_across_the_bind(self):
+        self.spawn_14()
+        self.install_legacy(self.read_state(), "orchestrate-14", version=8)
+
+        def projections():
+            return [self.run_cli(command, "--repo-root", self.root, "--run-id", self.run_id,
+                                 "--action-id", action).stdout
+                    for command in ("check-launch", "current-launch")
+                    for action in ("14:1:1", "14:1:2", "14:r1:1")]
+
+        before = projections()
+        self.register_worker(action_id="14:1:1", now=T(1))
+        self.assertEqual(self.read_state()["schema_version"], 9)
+        self.assertEqual(projections(), before)
 
 
 if __name__ == "__main__":
