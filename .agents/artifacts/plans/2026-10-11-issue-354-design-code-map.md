@@ -49,8 +49,8 @@ Task 4 — Run the three evals in tree mode and write the acceptance record — 
 
 | AC | Kind | Task | Check |
 |----|------|------|-------|
-| AC1 | evidence | Task 4 | Not measurable before merge (D9). Command: compare the file paths in the read, grep and sed calls of the design and planner transcripts. Conditions: the next three orchestrated nodocom issues, run with the merged skills installed. Threshold: at most 30% of the planner's read calls touch a file the design agent opened (baseline median about 64%). Task 4 fills acceptance-record row AC1 as not measured. |
-| AC2 | evidence | Task 4 | Not measurable before merge (D9). Command: request count per planner transcript. Conditions: the same three issues as AC1. Threshold: median ≤ 55 (baseline median 79 over ten issues). Task 4 fills acceptance-record row AC2 as not measured. |
+| AC1 | evidence | Task 4 | Not measurable before merge (D9). Command: `bash measure.sh DESIGN.jsonl PLANNER.jsonl WORKTREE_ROOT`, the script Task 4 records under `Deferred measurement` in the acceptance record, reading its `AC1` line (D12). Conditions: the next three orchestrated nodocom issues, run with the merged skills installed. Threshold: at most 30% of the planner's read calls touch a file the design agent opened (baseline median about 64%). Task 4 fills acceptance-record row AC1 as not measured. |
+| AC2 | evidence | Task 4 | Not measurable before merge (D9). Command: the `AC2` line of the same `bash measure.sh` run per planner transcript (D12). Conditions: the same three issues as AC1. Threshold: median ≤ 55 (baseline median 79 over ten issues). Task 4 fills acceptance-record row AC2 as not measured. |
 | AC3 | code | Task 4 | `env EVAL_TREE=. EVAL_MODEL=sonnet just evals design 1` and `… just evals writing-plans 4`, each with a `PASS` row in `results.jsonl` for the final skill text (D11): for `design` 1 the asserts `the code map exists in the git directory, named after the spec` and `the code map is well-formed and lists the three files the issue decides about`; for `writing-plans` 4 the assert `the printed plan prompt names the spec's code map file`. `writing-plans` 1 passes in the same mode. |
 | AC4 | code | Task 4 | The same `design` 1 run: the assert `the spec's Decisions section names no file path or line number` passes in its `PASS` row. |
 | AC5 | human | Task 4 | The maintainer compares plan-review findings on those three issues against the prior ten: no increase in findings that cite a wrong file, symbol or test (D9). Task 4 writes row AC5 with `—` evidence. |
@@ -61,3 +61,11 @@ Task 4 — Run the three evals in tree mode and write the acceptance record — 
 - Appended by this plan: D10 (what the cuts are, the compressed rule with the README as its long form, "the file map"), D11 (assert count and path derivation, how a code map path and a line reference are read, case-assert tests, what a `PASS` row for the revision is).
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, model gpt-6-astra, effort xhigh), isolated read-only mode, no fallback, no focus. Base SHA `bff1d1d4905405587fccc33decc2803b78babea6`.
+- Findings: 1 blocking, 2 should-fix, 0 discussion. Accepted 3, rejected 0, deferred 0; each was verified against the live plan, the review contract and the assert library first.
+- B1 (AC1 and AC2 named prose, not commands): accepted; the rows now name a concrete script that Task 4 records (D12).
+- S1 (the committed-spec assert passed a spec edited after its commit): accepted in Task 3, with a failing case.
+- S2 (the not-started assert missed untracked files): accepted in Task 3, with a failing case.

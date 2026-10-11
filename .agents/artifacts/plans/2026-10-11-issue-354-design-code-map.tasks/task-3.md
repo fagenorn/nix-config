@@ -13,12 +13,12 @@ Issue 354 has the `design` skill leave a **code map** in the git directory, name
 - Consumes, from Task 1: `spec_decisions_path_free <spec> <repo>` and `code_map_valid <map> <repo> [required-path...]` in `assert-lib.sh`; `fixture_sandbox(tmp) -> (repo, git)` in `test_eval_cases.py`. Existing: `run_assert`, `case_assert(skill, case_id, name)`, `find_case(skill, case_id)`, and the helpers `first_file`, `fail`, `out_matches`, `path_unchanged_since`.
 - Produces, for Task 4:
   - `design` case 1, `design-leaves-a-code-map`, `mode: pipeline`, exactly six asserts in this order (the spec's numbering, which AC3 and AC4 cite):
-    1. `a spec exists under the retained specs directory and is committed`
+    1. `a spec exists under the retained specs directory and is committed` (it also fails when the spec differs from its committed content)
     2. `the spec's Decisions section names no file path or line number`
     3. `the code map exists in the git directory, named after the spec`
     4. `the code map is well-formed and lists the three files the issue decides about`
     5. `no code map is tracked or present in the working tree`
-    6. `the implementation was not started`
+    6. `the implementation was not started` (it also fails on an uncommitted or untracked file under the source or test directory)
   - `writing-plans` case 4, `auto-plan-dispatch-names-the-code-map`, `mode: pipeline`, two asserts: `the printed plan prompt names the spec's code map file`, `the repository is unchanged`.
 
 **Invariants:**
@@ -56,6 +56,7 @@ class CodeMapEvalCasesTest(unittest.TestCase):
     MAP_EXISTS = "the code map exists in the git directory, named after the spec"
     MAP_VALID = "the code map is well-formed and lists the three files the issue decides about"
     MAP_PLACED = "no code map is tracked or present in the working tree"
+    NOT_STARTED = "the implementation was not started"
     PROMPT_NAMES = "the printed plan prompt names the spec's code map file"
     UNCHANGED = "the repository is unchanged"
 
@@ -115,6 +116,24 @@ class CodeMapEvalCasesTest(unittest.TestCase):
             self.assertNotEqual(done.returncode, 0, done.stdout)
             self.assertIn("tinytask/cli.py", done.stdout)
 
+    def test_a_spec_edited_after_its_commit_fails_the_committed_assert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.design_sandbox(Path(tmp).resolve())
+            spec = repo / ".claude/specs" / self.SPEC
+            spec.write_text(spec.read_text(encoding="utf-8") + "\nA later draft.\n", encoding="utf-8")
+            done = self.grade(self.SPEC_EXISTS, repo, env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn("differs from its committed content", done.stdout)
+
+    def test_an_untracked_source_file_fails_the_not_started_assert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.design_sandbox(Path(tmp).resolve())
+            self.assertEqual(self.grade(self.NOT_STARTED, repo, env).returncode, 0)
+            (repo / "tinytask" / "extra.py").write_text("STATE = 1\n", encoding="utf-8")
+            done = self.grade(self.NOT_STARTED, repo, env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn("tinytask/extra.py", done.stdout)
+
     def dispatch_env(self, tmp, transcript):
         repo, _ = fixture_sandbox(tmp)
         out = Path(tmp) / "output.txt"
@@ -150,7 +169,7 @@ class CodeMapEvalCasesTest(unittest.TestCase):
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_eval_cases.py -k CodeMapEvalCasesTest 2>&1 | tail -n 3`
-Expected: FAIL — `Ran 6 tests` and `FAILED (failures=7, errors=1)`, none passing: the four `design` tests raise `AssertionError: no evals.json for design` (one of them in three subtests), and the two dispatch tests raise `StopIteration` or `has no assert named`, because `writing-plans` has no case 4.
+Expected: FAIL — `Ran 8 tests` and a `FAILED (…)` line, none passing: the six `design` tests raise `AssertionError: no evals.json for design` (one of them in three subtests), and the two dispatch tests raise `StopIteration` or `has no assert named`, because `writing-plans` has no case 4.
 
 - [ ] **Step 3: Add the cases**
 
@@ -208,7 +227,9 @@ DESIGN = {
         "asserts": [
             {"name": "a spec exists under the retained specs directory and is committed",
              "shell": SPEC + '[ -n "$(git -C "$REPO" log --oneline origin/main..HEAD -- "$spec" 2>/dev/null)" ] '
-                             '|| fail "the spec is not committed on the current branch: $spec"'},
+                             '|| { fail "the spec is not committed on the current branch: $spec"; exit 1; }; '
+                             '[ -z "$(git -C "$REPO" status --porcelain -- "$spec")" ] '
+                             '|| fail "the spec differs from its committed content: $spec"'},
             {"name": "the spec's Decisions section names no file path or line number",
              "shell": SPEC + 'spec_decisions_path_free "$spec" "$REPO"'},
             {"name": "the code map exists in the git directory, named after the spec",
@@ -220,7 +241,9 @@ DESIGN = {
                       "find \"$REPO\" -name .git -prune -o -name '*.code-map.md' -print); "
                       '[ -z "$found" ] || fail "a code map outside the git directory: $found"'},
             {"name": "the implementation was not started",
-             "shell": 'path_unchanged_since "$REPO" origin/main tinytask tests'},
+             "shell": 'path_unchanged_since "$REPO" origin/main tinytask tests || exit 1; '
+                      'extra=$(git -C "$REPO" status --porcelain -- tinytask tests); '
+                      '[ -z "$extra" ] || fail "uncommitted or untracked files under tinytask or tests: $extra"'},
         ],
     }],
 }
@@ -281,7 +304,7 @@ print("wrote", design_path, "and case 4 of", plans_path)
 - [ ] **Step 4: Verify**
 
 Run: `PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_eval_cases.py 2>&1 | tail -n 3`
-Expected: PASS — `Ran 36 tests` and `OK`. A count below 36 means the test block was not inserted; any failure means the task is incomplete.
+Expected: PASS — `Ran 38 tests` and `OK`. A count below 38 means the test block was not inserted; any failure means the task is incomplete.
 
 Run: `jq -e '.evals | length == 1 and .[0].id == 1 and (.[0].asserts | length == 6)' home/common/agent-skills/skills/design/evals/evals.json && jq -e '[.evals[].id] == [1,2,3,4] and (.evals[3].asserts | length == 2)' home/common/agent-skills/skills/writing-plans/evals/evals.json && git diff --stat -- home/common/agent-skills/skills/writing-plans/evals/evals.json | tail -n 1`
 Expected: `true`, `true`, then `1 file changed, 18 insertions(+), 1 deletion(-)` — the one deleted line is the `notes` line, so cases 1 to 3 are untouched.
