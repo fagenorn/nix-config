@@ -181,12 +181,7 @@ ship-issue remainder mode per `SKILL.md`.
 
 ## Other Phase 5–7 routes
 
-A direct autonomous controller hands Phases 6–7 to a fresh owner at the Phase-5 rollover, mechanical-only runs included; every other route keeps the behavior below, and its mechanical-only ordering and ownership are unchanged.
-
-Dispatcher-owned autonomous, explicitly durable interactive, and ledger-free
-interactive owners retain their existing behavior: Phase 5 dispatches the
-reviewer (or `codex-collaboration`) with `REVIEW-CONTRACT.md`'s path, Phase 6
-runs `sdd`, and Phase 7 dispatches `ship-issue` with the appropriate handoff.
+A direct autonomous controller hands Phases 6–7 to a fresh owner at the Phase-5 rollover, mechanical-only runs included. Elsewhere Phase 5's reviewer gets `REVIEW-CONTRACT.md`'s path.
 
 At every Phase-6 or Phase-7 push, PR-open, or merge gate, first apply repository
 policy or an explicit user grant covering the concrete action, target, and
