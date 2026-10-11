@@ -435,6 +435,35 @@ class RenewTest(CustodyCase):
                 self.store.renew(custody)
                 self.assertEqual(self.store.inspect_lease(key)["holder"]["term"], 2)
 
+    def test_renew_with_a_ttl_rebases_the_lease_in_place_whatever_the_margin(self):
+        transaction_id = self.new()
+        custody = self.acquire(transaction_id)
+        state = (self.root / transaction_id / "state.json").read_bytes()
+        self.clock.advance(1)  # far outside the renewal margin
+        after = self.store.renew(custody, ttl_ms=90_000)
+        self.assertEqual((after.custody, after.revision), (custody, 2))
+        for key in KEYS:
+            record = self.store.inspect_lease(key)
+            holder = record["holder"]
+            self.assertEqual(record["epoch"], 1)
+            self.assertEqual(
+                (holder["instance"], holder["term"], holder["renewal_count"],
+                 holder["ttl_ms"], holder["last_renewed_at"], holder["expires_at"],
+                 holder["acquired_at"]),
+                (custody.fence[key]["instance"], 2, 1, 90_000, self.clock.now,
+                 self.clock.now + 90_000, T0))
+        self.assertEqual((self.root / transaction_id / "state.json").read_bytes(), state)
+
+    def test_renew_with_a_ttl_refuses_a_bad_ttl_and_a_lapsed_span(self):
+        custody = self.acquire(self.new())
+        for ttl in (0, -1, True, 1.5, "1"):
+            with self.subTest(ttl=ttl):
+                self.assertRefusedUnchanged(
+                    StateInvalid, lambda: self.store.renew(custody, ttl_ms=ttl))
+        self.clock.advance(TTL)
+        self.assertRefusedUnchanged(
+            StaleCustody, lambda: self.store.renew(custody, ttl_ms=90_000))
+
     def test_a_lapsed_lease_is_never_renewed(self):
         custody = self.acquire(self.new())
         self.clock.advance(TTL)
@@ -471,6 +500,39 @@ class RenewTest(CustodyCase):
         holder = self.store.inspect_lease("project:alpha")["holder"]
         self.assertEqual((holder["executor_id"], holder["term"], holder["expires_at"]),
                          ("exec-b", 1, T0 + 2 * TTL))
+
+    def test_renew_with_a_ttl_refuses_a_key_taken_after_the_lock_free_check(self):
+        first = self.new("a")
+        custody = self.acquire(first)
+        successor = self.new("b", keys=("project:alpha", "target:beta"))
+        successor_store = TransactionStore(self.root, clock=FakeClock(T0 + TTL))
+        taken = []
+
+        class Root(type(self.root)):
+            """Runs the successor once, when renew joins `leases.lock`: after its lock-free
+            fenced check, before it takes the lease lock (pathlib's public subclass hook)."""
+            armed = False
+
+            def with_segments(root, *segments):
+                if Root.armed and segments[-1] == "leases.lock":
+                    Root.armed = False
+                    successor_store.acquire(successor, executor_id="exec-b",
+                                            subject_path="/work/beta", ttl_ms=TTL)
+                    taken.append(self.files())
+                return type(root)(*segments)
+
+        store = TransactionStore(Root(self.root), clock=self.clock)
+        self.clock.advance(TTL - 1)
+        Root.armed = True
+        with self.assertRaises(StaleCustody) as caught:
+            store.renew(custody, ttl_ms=90_000)
+        self.assertEqual(self.files(), taken[0])
+        self.assertIn(first, str(caught.exception))
+        self.assertIn("lapsed", str(caught.exception))
+        holder = self.store.inspect_lease("project:alpha")["holder"]
+        self.assertEqual(
+            (holder["executor_id"], holder["term"], holder["ttl_ms"], holder["expires_at"]),
+            ("exec-b", 1, TTL, T0 + 2 * TTL))
 
 
 class QuiesceTest(CustodyCase):

@@ -1,29 +1,38 @@
-"""The effectful half of attempt run identity (#337 D27).
+"""The effectful half of attempt run identity and attempt custody (#337 D27, #338).
 
-The store root beside `workflows`, the blocking mint lock, mint and lookup, the binding
+The store root beside `workflows`, the blocking store lock, mint and lookup, the binding
 check, the locked-read and unlocked-check transform under the caller's lock, and the direct
-index probe. `workflow-state` keeps the ledger lock, the ledger read and commit, the delivery
-chain and `validate_state`; it passes the last two to this module as callbacks.
+index probe. From schema 9 it also applies `agent_tools.attempt_custody`'s settle plan to
+`TransactionStore` under the store lock: `settle_custody` before a ledger write,
+`seal_custody` after it, and `pending_seals` to find a seal a crash left undone.
+`workflow-state` keeps the ledger lock, the ledger read and commit, the delivery chain and
+`validate_state`; it passes the last two to this module as callbacks.
 """
 
+import contextlib
+import copy
 import fcntl
 import json
 import os
 import stat
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from agent_tools import attempt_custody as custody_rules
 from agent_tools.attempt_identity import (
     LEGACY_DIALECTS, REFUSAL_REASONS, REPORT_ROW_FIELDS, MigrationRefused, RunIdentity,
     RunPlan, classify, creation_arguments, direct_key, identity_of, legacy_alias,
     legacy_identity, legacy_key, minted_plan, plan_migration, report, schema_refusal,
     subject_handle, subject_violation)
+from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_core import TransactionError, TransactionStore
-from agent_tools.transaction_storage import UnknownTransaction, is_id
+from agent_tools.transaction_history import TERMINALS, Transaction
+from agent_tools.transaction_storage import LeaseUnavailable, UnknownTransaction, is_id
 
-BOUND_SCHEMA_VERSION = 8
+BOUND_SCHEMA_VERSION = 8  # bound to its run; custody not yet in the core
+CUSTODY_SCHEMA_VERSION = 9  # attempt custody is held in the core
 
 
 class StoreRefused(Exception):
@@ -44,16 +53,36 @@ class LedgerRefused(StoreRefused):
         self.reason = reason
 
 
-class LockedRead(NamedTuple):
-    """A ledger as a locked read yields it: bound to its run transaction at schema 8.
+class FencingRefused(StoreRefused):
+    """A write the custody fence refuses; `reason` is one of `FENCING_REASONS` (#338 D13)."""
 
-    `changed` is true when the stored file is still a schema-7 or older document, so the
-    caller's commit is also the migration write.
+    def __init__(self, reason: str, detail: str) -> None:
+        if reason not in custody_rules.FENCING_REASONS:
+            raise ValueError(f"unknown fencing reason {reason!r}")
+        super().__init__(f"fencing violation: {reason}: {detail}")
+        self.reason = reason
+
+
+class OwnerReport(NamedTuple):
+    """An owner result a write submits: the `report` of attempt `attempt` of issue `issue`."""
+
+    issue: int
+    attempt: int
+    report: dict
+
+
+class LockedRead(NamedTuple):
+    """A ledger as a locked read yields it: bound to its run transaction at schema 9.
+
+    `changed` is true when the stored file is still a schema-8 or older document, so the
+    caller's commit is also the migration write. `bound_launches` is then the 8 -> 9 plan,
+    `(issue, attempt) -> launch count` for each attempt that was live; otherwise `{}`.
     """
 
     state: dict
     identity: RunIdentity
     changed: bool
+    bound_launches: dict[tuple[int, int], int]
 
 
 def _path_status(path: Path) -> os.stat_result | None:
@@ -197,17 +226,27 @@ def creation_key_plan(caller_key: str) -> RunPlan:
         raise StoreRefused("invalid creation key") from error
 
 
-def mint_run(store: Path, plan: RunPlan) -> str:
-    """The id of `plan`'s run transaction, created if its creation key is new (#337 D9).
+@contextlib.contextmanager
+def store_lock(store: Path) -> Iterator[None]:
+    """Hold the blocking exclusive lock `<store>/attempt-runs.lock`, creating the store first.
 
-    Every `create` runs under the exclusive mint lock, which is taken after any ledger
-    `state.lock` and before the core's own locks, and never while a `state.lock` is
-    requested.
+    Every core write `workflow-state` makes runs under it (#338 D15). It is taken after any
+    ledger `state.lock` and before the core's own locks, never while a `state.lock` is
+    requested, and never while it is already held.
     """
     ensure_store(store)
     descriptor = _open_stable_lock(store / "attempt-runs.lock", "attempt mint lock")
     with os.fdopen(descriptor, "r+b") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        yield
+
+
+def mint_run(store: Path, plan: RunPlan) -> str:
+    """The id of `plan`'s run transaction, created if its creation key is new (#337 D9).
+
+    The `create` runs under the store lock.
+    """
+    with store_lock(store):
         try:
             transaction = TransactionStore(store).create(
                 plan.creation_key, plan.subject_json(), **creation_arguments(plan))
@@ -227,7 +266,8 @@ def lookup_run(store: Path, creation_key: str) -> str | None:
 
 
 def bound_identity(store: Path, state: dict[str, Any], run_id: str) -> RunIdentity:
-    """The identity of the run transaction a schema-8 `state` names, read without a lock.
+    """The identity of the run transaction a schema-8 or schema-9 `state` names, read
+    without a lock.
 
     Refuses a missing store, an unknown or invalid transaction, a subject that is not the
     closed attempt-run subject, a transaction whose handle is not `run_id`, and a `state`
@@ -268,6 +308,14 @@ def plan_legacy_run(document: dict[str, Any]) -> RunPlan:
         raise LedgerRefused(error.reason, str(error).partition(": ")[2]) from error
 
 
+def plan_custody(candidate: dict[str, Any]) -> dict[tuple[int, int], int]:
+    """The 8 -> 9 plan of a validated `candidate`, or a `LedgerRefused` for a refused ledger."""
+    try:
+        return custody_rules.plan_custody_migration(candidate)
+    except MigrationRefused as error:
+        raise LedgerRefused(error.reason, str(error).partition(": ")[2]) from error
+
+
 def _upgraded(document: Any, *, run_id: str, upgrade: Callable[..., dict]) -> tuple[
         dict[str, Any], RunPlan]:
     """A schema 1-7 document as a validated schema-7 candidate with its run plan.
@@ -283,36 +331,419 @@ def _upgraded(document: Any, *, run_id: str, upgrade: Callable[..., dict]) -> tu
     return candidate, plan_legacy_run(candidate)
 
 
+def _schema_nine(document: dict[str, Any], identity: RunIdentity, *, run_id: str,
+                 validate: Callable[..., dict]) -> tuple[dict[str, Any], dict]:
+    """A schema-8 `document` as the validated schema-9 candidate and its 8 -> 9 plan."""
+    candidate = copy.deepcopy(document)
+    candidate["schema_version"] = CUSTODY_SCHEMA_VERSION
+    validated = validate(candidate, run_id=run_id, identity=identity)
+    return validated, plan_custody(validated)
+
+
 def locked_read(state_path: Path, document: Any, *, run_id: str, upgrade: Callable[..., dict],
                 validate: Callable[..., dict]) -> LockedRead:
     """A ledger read under its `state.lock`, bound to a run transaction.
 
-    A schema-8 `document` is bound to the transaction it names. An older one is upgraded,
-    its transaction minted (the caller holds the ledger lock, the mint lock nests inside it,
-    #337 D9) and the candidate returned as schema 8 with `changed` set.
+    A schema-9 `document` is bound to the transaction it names. A schema-8 one is bound the
+    same way, copied as schema 9 and planned (`bound_launches`), with `changed` set. An older
+    one is upgraded, planned, its transaction minted (the caller holds the ledger lock, the
+    store lock nests inside it, #337 D9) and the candidate returned as schema 9 with
+    `changed` set. A refused ledger mints nothing.
     """
     store = ledger_store(state_path)
     require_known_schema(document)
-    if document["schema_version"] == BOUND_SCHEMA_VERSION:
+    version = document["schema_version"]
+    if version == CUSTODY_SCHEMA_VERSION:
         identity = bound_identity(store, document, run_id)
-        return LockedRead(validate(document, run_id=run_id, identity=identity), identity, False)
+        return LockedRead(validate(document, run_id=run_id, identity=identity), identity,
+                          False, {})
+    if version == BOUND_SCHEMA_VERSION:
+        identity = bound_identity(store, document, run_id)
+        validated, bound = _schema_nine(document, identity, run_id=run_id, validate=validate)
+        return LockedRead(validated, identity, True, bound)
     candidate, plan = _upgraded(document, run_id=run_id, upgrade=upgrade)
+    bound = plan_custody(candidate)
     candidate["transaction_id"] = mint_run(store, plan)
-    candidate["schema_version"] = BOUND_SCHEMA_VERSION
+    candidate["schema_version"] = CUSTODY_SCHEMA_VERSION
     identity = identity_of(plan.subject)
-    return LockedRead(validate(candidate, run_id=run_id, identity=identity), identity, True)
+    return LockedRead(validate(candidate, run_id=run_id, identity=identity), identity, True,
+                      bound)
 
 
 def check_unlocked(state_path: Path, document: Any, *, run_id: str, upgrade: Callable[..., dict],
                    validate: Callable[..., dict]) -> None:
-    """Check a ledger without a lock or a write: schema 8 against its run transaction, an
-    older one through `upgrade` and `plan_migration`. No store or directory is created."""
+    """Check a ledger without a lock or a write: schema 9 against its run transaction, schema 8
+    the same way and as the schema-9 candidate its next write binds, an older one through
+    `upgrade`, `plan_migration` and `plan_custody`. No store or directory is created."""
     require_known_schema(document)
-    if document["schema_version"] == BOUND_SCHEMA_VERSION:
+    version = document["schema_version"]
+    if version == CUSTODY_SCHEMA_VERSION:
         identity = bound_identity(ledger_store(state_path), document, run_id)
         validate(document, run_id=run_id, identity=identity)
         return
-    _upgraded(document, run_id=run_id, upgrade=upgrade)
+    if version == BOUND_SCHEMA_VERSION:
+        identity = bound_identity(ledger_store(state_path), document, run_id)
+        _schema_nine(document, identity, run_id=run_id, validate=validate)
+        return
+    candidate, _ = _upgraded(document, run_id=run_id, upgrade=upgrade)
+    plan_custody(candidate)
+
+
+class PendingSeal(NamedTuple):
+    """A seal not yet applied: the custody transaction to abandon and the seal's reason.
+
+    `reap` is the reason of the reap `seal_custody` applies first, for a seal whose span
+    lapsed after its ledger write; None when the seal has no such prerequisite.
+    """
+
+    transaction_id: str
+    reason: str
+    reap: str | None = None
+
+
+class _Planned(NamedTuple):
+    """One attempt's settle plan with what the write phase needs to apply it."""
+
+    issue: int
+    attempt: dict
+    latest: bool
+    transaction: Transaction | None
+    operations: tuple[custody_rules.Operation, ...]
+
+
+def custody_of(store: Path, run: str, issue: int, attempt: int) -> Transaction | None:
+    """The custody transaction of `attempt` of `issue` in `run`, read without a lock.
+
+    None when the store directory or the creation key's index entry is missing; creates
+    nothing. A core error is a `StoreFault`.
+    """
+    if _existing_store(store) is None:
+        return None
+    try:
+        core = TransactionStore(store)
+        identity = core.lookup(custody_rules.creation_key(run, issue, attempt))
+        return None if identity is None else core.load(identity)
+    except TransactionError as error:
+        raise StoreFault(f"custody store: {error}") from error
+
+
+def standing_worktree(store: Path, directory: str) -> str | None:
+    """The attempt worktree `directory` stands in: the first of it and its ancestors, nearest
+    first, whose `attempt-worktree:<path>` key has a lease record, held or not (#338 D7).
+
+    None when no path has a record or the store directory does not exist. It takes no
+    lock, writes nothing and runs no child process; a core error is a `StoreFault`.
+    """
+    if _existing_store(store) is None:
+        return None
+    try:
+        core = TransactionStore(store)
+        path = Path(directory)
+        for candidate in (path, *path.parents):
+            if core.inspect_lease(custody_rules.worktree_key(str(candidate))) is not None:
+                return str(candidate)
+    except TransactionError as error:
+        raise StoreFault(f"custody store: {error}") from error
+    return None
+
+
+def _core(store: Path, now_ms: int) -> TransactionStore:
+    """The store on a clock that reads `now_ms`, so one settle reads one instant (#338 D17)."""
+    try:
+        return TransactionStore(store, clock=lambda: now_ms)
+    except TransactionError as error:
+        raise StoreFault(f"custody store: {error}") from error
+
+
+@contextlib.contextmanager
+def _core_errors() -> Iterator[None]:
+    """Core errors as the refusals `workflow-state` prints (#338 D13)."""
+    try:
+        yield
+    except LeaseUnavailable as error:
+        raise FencingRefused("custody_unavailable", str(error)) from error
+    except TransactionError as error:
+        raise StoreRefused(f"custody store: {error}") from error
+
+
+def _require_recorded_worktree(issue: int, attempt: Mapping, transaction: Transaction,
+                               canonical: Callable[[str], str]) -> None:
+    """Refuse a live `attempt` recorded at another worktree than its custody subject's.
+
+    The subject fixes the worktree when the transaction is created (#338 D1, D19), so a
+    transaction that a write cut before its ledger was published left behind is not taken
+    up by a repeat naming a different worktree: the ledger would name one path while the
+    lease protects the other. `canonical` is the identity the subject was created with.
+    An attempt that is not in `LIVE_STATES` is not compared. Raises `ProjectionMismatch`.
+    """
+    if attempt["state"] not in custody_rules.LIVE_STATES:
+        return
+    recorded, bound = canonical(attempt["worktree"]), transaction.subject["worktree"]
+    if recorded != bound:
+        raise custody_rules.ProjectionMismatch(
+            f"issue {issue} attempt {attempt['attempt']} is recorded at {recorded} but its "
+            f"custody transaction {transaction.transaction_id} is bound to {bound}")
+
+
+def _read_plans(store: Path, state: dict, *, now_ms: int,
+                bound_launches: Mapping[tuple[int, int], int], report: OwnerReport | None,
+                canonical: Callable[[str], str] | None = None) -> list[_Planned]:
+    """The settle plans of every attempt that has operations, in read order, without a lock.
+
+    Issues ascend by number and each issue's attempts run in order. Nothing is created.
+    With `canonical`, each live attempt that has a custody transaction is also held to its
+    subject's worktree (`_require_recorded_worktree`).
+    """
+    plans = []
+    for key in sorted(state["issues"], key=int):
+        issue, issue_state = int(key), state["issues"][key]
+        attempts = issue_state["attempts"]
+        for index, attempt in enumerate(attempts):
+            number = attempt["attempt"]
+            transaction = custody_of(store, state["transaction_id"], issue, number)
+            lease = None
+            if transaction is not None:
+                violation = custody_rules.subject_violation(transaction.subject)
+                if violation is not None:
+                    raise StoreRefused(f"custody projection mismatch: "
+                                       f"{transaction.transaction_id}: {violation}")
+                try:
+                    lease = _core(store, now_ms).inspect_lease(
+                        custody_rules.worktree_key(transaction.subject["worktree"]))
+                except TransactionError as error:
+                    raise StoreFault(f"custody store: {error}") from error
+            named = report is not None and (report.issue, report.attempt) == (issue, number)
+            try:
+                if transaction is not None and canonical is not None:
+                    _require_recorded_worktree(issue, attempt, transaction, canonical)
+                operations = custody_rules.settle_plan(
+                    issue_state, attempt, transaction, lease=lease, now_ms=now_ms,
+                    latest=index == len(attempts) - 1,
+                    report_digest=telemetry_digest(report.report) if named else None,
+                    bound=(issue, number) in bound_launches)
+            except custody_rules.ProjectionMismatch as error:
+                raise StoreRefused(f"custody projection mismatch: {error}") from error
+            if operations:
+                plans.append(_Planned(issue, attempt, index == len(attempts) - 1,
+                                      transaction, operations))
+    return plans
+
+
+_SEAL_COMPLETIONS = (("seal",), ("reap", "seal"))
+
+
+def pending_seals(store: Path, state: dict, *, now_ms: int) -> list[PendingSeal]:
+    """The seals a write left undone (#338 D24), found lock-free; nothing is created.
+
+    These are the seals of every attempt whose settle plan, with no owner report and no
+    bind, is a seal completion: one `seal`, or the `reap` of a span that has lapsed (another
+    transaction took the worktree once its window passed, say) and then the `seal` (D16).
+    They come in read order, in the shape `seal_custody` takes. Every other plan is left to
+    the settle step of a write that changes the ledger.
+    """
+    pending = []
+    for plan in _read_plans(store, state, now_ms=now_ms, bound_launches={}, report=None):
+        operations = plan.operations
+        if tuple(operation.kind for operation in operations) in _SEAL_COMPLETIONS:
+            pending.append(PendingSeal(
+                plan.transaction.transaction_id, operations[-1].reason,
+                operations[0].reason if len(operations) == 2 else None))
+    return pending
+
+
+def _new_subject(core: TransactionStore, run: str, plan: _Planned, *, canonical:
+                 Callable[[str], str], bound_launches: Mapping[tuple[int, int], int]) -> dict:
+    """The custody subject of the attempt `plan` creates; `prior` is the previous attempt's
+    transaction in the store now. A subject the rules refuse is a `StoreRefused`."""
+    number = plan.attempt["attempt"]
+    with _core_errors():
+        prior = None if number == 1 else core.lookup(
+            custody_rules.creation_key(run, plan.issue, number - 1))
+    try:
+        return custody_rules.subject(
+            run=run, issue=plan.issue, attempt=number,
+            worktree=canonical(plan.attempt["worktree"]), prior=prior,
+            bound_launch=bound_launches.get((plan.issue, number)))
+    except ValueError as error:
+        raise StoreRefused(f"custody subject of issue {plan.issue} attempt {number}: "
+                           f"{error}") from error
+
+
+def _ends_span(plan: _Planned) -> bool:
+    """Whether the plan, applied in the write phase, leaves its transaction without a span:
+    the last of its span operations is a release, a reap or the seal of an earlier attempt."""
+    ended = None
+    for operation in plan.operations:
+        if operation.kind == "acquire":
+            ended = False
+        elif operation.kind in ("release", "reap") or (operation.kind == "seal"
+                                                       and not plan.latest):
+            ended = True
+    return bool(ended)
+
+
+def _preflight(core: TransactionStore, run: str, planned: list[_Planned], *, now_ms: int,
+               canonical: Callable[[str], str],
+               bound_launches: Mapping[tuple[int, int], int]) -> dict[int, dict]:
+    """The subject of every plan that creates, and the refusal of a live holder before any
+    write (#338 D19).
+
+    Every plan that acquires is checked, a new attempt's and an existing one's alike, so a
+    refused sweep has written nothing. A live holder of the worktree key is no refusal when
+    it is the plan's own transaction or when its own plan, earlier in the read order, ends
+    its span (D24): a predecessor's interrupted seal is applied first.
+    """
+    subjects, ending = {}, set()
+    for position, plan in enumerate(planned):
+        creating = plan.operations[0].kind == "create"
+        if creating:
+            subjects[position] = _new_subject(core, run, plan, canonical=canonical,
+                                              bound_launches=bound_launches)
+        if any(operation.kind == "acquire" for operation in plan.operations):
+            worktree = (subjects[position] if creating else plan.transaction.subject)["worktree"]
+            with _core_errors():
+                lease = core.inspect_lease(custody_rules.worktree_key(worktree))
+            holder = None if lease is None else lease["holder"]
+            own = None if creating else plan.transaction.transaction_id
+            if holder is not None and now_ms < holder["expires_at"] \
+                    and holder["transaction_id"] not in ending | {own}:
+                raise FencingRefused(
+                    "custody_unavailable",
+                    f"worktree {worktree} is held by executor {holder['executor_id']} "
+                    f"of transaction {holder['transaction_id']}")
+        if plan.transaction is not None and _ends_span(plan):
+            ending.add(plan.transaction.transaction_id)
+    return subjects
+
+
+def _apply(core: TransactionStore, run: str, plan: _Planned, subject: dict | None,
+           created: dict[tuple[int, int], str], report: OwnerReport | None) -> list[PendingSeal]:
+    """Apply one plan's operations in order, each against the transaction's current snapshot.
+
+    The seal of an issue's latest attempt is returned, not applied (#338 D18).
+    """
+    number, snapshot, seals = plan.attempt["attempt"], plan.transaction, []
+    for operation in plan.operations:
+        if operation.kind == "create":
+            prior = created.get((plan.issue, number - 1), subject["prior"])
+            subject = {**subject, "prior": prior}
+            snapshot = core.create(custody_rules.creation_key(run, plan.issue, number), subject,
+                                   **custody_rules.creation_arguments(subject))
+            created[(plan.issue, number)] = snapshot.transaction_id
+            continue
+        identifier, custody = snapshot.transaction_id, snapshot.custody
+        path = snapshot.subject["worktree"]
+        if operation.kind == "acquire":
+            snapshot = core.acquire(identifier, executor_id=operation.executor_id,
+                                    subject_path=path, ttl_ms=operation.ttl_ms)
+        elif operation.kind == "release":
+            if custody is not None:
+                snapshot = core.release(custody)
+        elif operation.kind == "reap":
+            snapshot = core.reap(identifier, reason=operation.reason)
+        elif operation.kind == "park":
+            snapshot = core.advance(identifier, "attention_required", reason=operation.reason,
+                                    custody=custody)
+        elif operation.kind == "unpark":
+            snapshot = core.advance(identifier, "created", reason=operation.reason,
+                                    custody=custody)
+        elif operation.kind == "renew":
+            snapshot = core.renew(custody, ttl_ms=operation.ttl_ms)
+        elif operation.kind == "record_result":
+            snapshot = core.record_owner_result(
+                identifier, executor_id=operation.executor_id, subject_path=path,
+                fence=custody_rules.launch_fence(snapshot, operation.executor_id),
+                result=report.report)
+        elif operation.kind == "seal":
+            if plan.latest:
+                seals.append(PendingSeal(identifier, operation.reason))
+            else:
+                snapshot = core.advance(identifier, "abandoned", reason=operation.reason,
+                                        external_state="known", custody=custody)
+        else:
+            raise ValueError(f"unknown custody operation {operation.kind!r}")
+    return seals
+
+
+def settle_custody(store: Path, state: dict, *, now_ms: int, canonical: Callable[[str], str],
+                   bound_launches: Mapping[tuple[int, int], int],
+                   report: OwnerReport | None = None) -> list[PendingSeal]:
+    """Bring the core's custody to the projection of `state`, before its ledger write (#338 D4).
+
+    Every core call reads the clock `now_ms`. The read phase takes no lock and plans every
+    attempt (`custody projection mismatch` is a `StoreRefused`); with nothing to do it returns
+    `[]` and creates no directory, lock file or store. Otherwise, under the store lock, a
+    live holder of a new attempt's worktree is `FencingRefused("custody_unavailable")` before
+    anything is created, then the plans are applied in the order read. `bound_launches` is
+    the 8 -> 9 plan, `report` an owner result this write submits, `canonical` the worktree
+    comparison identity: a new subject's worktree is made with it, and a live attempt whose
+    existing custody subject names another worktree is a `custody projection mismatch` in
+    the read phase. It returns the seals of each issue's latest attempt, which
+    `seal_custody` applies after the ledger is replaced.
+    """
+    planned = _read_plans(store, state, now_ms=now_ms, bound_launches=bound_launches,
+                          report=report, canonical=canonical)
+    if not planned:
+        return []
+    run, seals, created = state["transaction_id"], [], {}
+    with store_lock(store):
+        core = _core(store, now_ms)
+        subjects = _preflight(core, run, planned, now_ms=now_ms, canonical=canonical,
+                              bound_launches=bound_launches)
+        with _core_errors():
+            for position, plan in enumerate(planned):
+                seals.extend(_apply(core, run, plan, subjects.get(position), created, report))
+    return seals
+
+
+def seal_custody(store: Path, pending: list[PendingSeal], *, now_ms: int) -> None:
+    """Apply the seals `settle_custody` or `pending_seals` returned, after the ledger write.
+
+    Does nothing for `[]`. Under the store lock, each seal's `reap`, when it names one, is
+    applied before its `advance` to `abandoned` (the core's `reap` writes nothing unless the
+    span has lapsed). A transaction already sealed is left alone, so a repeat is safe.
+    """
+    if not pending:
+        return
+    with store_lock(store):
+        core = _core(store, now_ms)
+        with _core_errors():
+            for seal in pending:
+                snapshot = core.load(seal.transaction_id)
+                if snapshot.state in TERMINALS:
+                    continue
+                if seal.reap is not None:
+                    snapshot = core.reap(seal.transaction_id, reason=seal.reap)
+                core.advance(seal.transaction_id, "abandoned", reason=seal.reason,
+                             external_state="known", custody=snapshot.custody)
+
+
+def retain_result(store: Path, run: str, *, issue: int, attempt: int, launch: int,
+                  report: dict, now_ms: int) -> bool:
+    """Record a refused owner `report` on the attempt's custody transaction (#338 D6, D20).
+
+    The report is recorded with `record_owner_result` against the fence of the latest span
+    of `launch` (the launch ordinal of `attempt` of `issue` in `run`), under the store lock,
+    on the clock `now_ms`. It returns False and writes nothing when the attempt has no custody
+    transaction, the transaction is terminal, the core issued no span for that launch, or
+    that span already holds a result with the same `telemetry_digest`.
+    """
+    if custody_of(store, run, issue, attempt) is None:
+        return False
+    executor = custody_rules.launch_id(issue, attempt, launch)
+    with store_lock(store):
+        transaction = custody_of(store, run, issue, attempt)
+        if transaction is None or transaction.state in TERMINALS:
+            return False
+        fence = custody_rules.launch_fence(transaction, executor)
+        if fence is None or custody_rules.result_recorded(
+                transaction, executor, telemetry_digest(report)):
+            return False
+        with _core_errors():
+            _core(store, now_ms).record_owner_result(
+                transaction.transaction_id, executor_id=executor,
+                subject_path=transaction.subject["worktree"], fence=fence, result=report)
+    return True
 
 
 def indexed_direct_runs(store: Path, workflows_dir: Path, issue: int, *,
@@ -397,17 +828,24 @@ def _row_verdict(row: dict, document: Any, store: Path, *, upgrade: Callable[...
         return "refused", "invalid_state"
     if run_id != row["ledger"]:
         return "refused", "location_mismatch"
-    if version == BOUND_SCHEMA_VERSION:
+    if version in (BOUND_SCHEMA_VERSION, CUSTODY_SCHEMA_VERSION):
         try:
-            validate(document, run_id=run_id, identity=bound_identity(store, document, run_id))
+            identity = bound_identity(store, document, run_id)
+            if version == BOUND_SCHEMA_VERSION:
+                _schema_nine(document, identity, run_id=run_id, validate=validate)
+            else:
+                validate(document, run_id=run_id, identity=identity)
         except StoreFault:
             raise
         except (StoreRefused, *refusals):
             return "refused", "invalid_state"
         row["transaction_id"] = document["transaction_id"]
+        if version == BOUND_SCHEMA_VERSION:
+            return "migrate", None
         return ("migrated" if migrated else "current"), None
     try:
-        _, plan = _upgraded(document, run_id=run_id, upgrade=upgrade)
+        candidate, plan = _upgraded(document, run_id=run_id, upgrade=upgrade)
+        plan_custody(candidate)
     except LedgerRefused as error:
         return "refused", error.reason
     except refusals:
@@ -440,7 +878,8 @@ def migration_row(superpowers: Path, ledger: str, *, upgrade: Callable[..., dict
                dialect=classify(_typed(document, "run_id", str)))
     if row["dialect"] in LEGACY_DIALECTS:
         row["alias"] = legacy_alias(row["run_id"])
-    # A core run id at schema 8 is a minted run, whose subject has no alias: alias stays null.
+    # A core run id (schema 8 or 9) is a minted run, whose subject has no alias: alias stays
+    # null.
     row["verdict"], row["reason"] = _row_verdict(
         row, document, store, upgrade=upgrade, validate=validate, refusals=refusals,
         migrated=migrated)
@@ -448,15 +887,34 @@ def migration_row(superpowers: Path, ledger: str, *, upgrade: Callable[..., dict
     return row
 
 
+def _seals_pending(superpowers: Path, ledger: str) -> bool:
+    """Whether the stored document of `ledger` has a seal a crash left undone (read-only).
+
+    An unreadable document or a `updated_at` that is not a UTC `...Z` stamp has none to find.
+    """
+    try:
+        document = json.loads(
+            (superpowers / "workflows" / ledger / "state.json").read_text(encoding="utf-8"))
+        now_ms = custody_rules.at_ms(document["updated_at"])
+    except (ValueError, KeyError, TypeError):
+        return False
+    return bool(pending_seals(store_root(superpowers), document, now_ms=now_ms))
+
+
 def migration_report(superpowers: Path, *, apply: bool, upgrade: Callable[..., dict],
                      validate: Callable[..., dict], bind: Callable[[str], None],
                      refusals: tuple[type[Exception], ...]) -> dict:
     """The `attempt-migration-report/v1` of every ledger under `superpowers/workflows`.
 
-    A read-only dry run comes first. With `apply`, each `migrate` ledger is bound through the
-    caller's locked no-op write `bind(handle)` on bytes re-read under that ledger's lock, so a
-    refusal under the lock (`LedgerRefused`) replaces the advisory dry-run verdict, and the
-    rows are then recomputed. Refusals are reported data; a missing `workflows` directory
+    A read-only dry run comes first and completes no seal. With `apply`, each `migrate` ledger
+    is bound through the caller's locked no-op write `bind(handle)` on bytes re-read under that
+    ledger's lock, so a refusal under the lock (`LedgerRefused`) replaces the advisory dry-run
+    verdict, and the rows are then recomputed. Any other `StoreRefused` of a ledger (a fencing
+    refusal, a projection mismatch) is likewise its `invalid_state` row, and later ledgers are
+    still bound. A `current` ledger whose document has a seal
+    pending (`pending_seals`, #338 D24) gets the same `bind(handle)`, which completes the seal
+    without rewriting the ledger; its verdict stays `current`, and one with nothing pending is
+    not opened, locked or written. Refusals are reported data; a missing `workflows` directory
     raises `StoreRefused`, and a `StoreFault` raises.
     """
     options = {"upgrade": upgrade, "validate": validate, "refusals": refusals}
@@ -465,14 +923,21 @@ def migration_report(superpowers: Path, *, apply: bool, upgrade: Callable[..., d
     if apply:
         bound = []
         for ledger, row in rows.items():
-            if row["verdict"] != "migrate":
+            binding = row["verdict"] == "migrate"
+            if not binding and row["verdict"] != "current":
                 continue
             try:
+                if not binding and not _seals_pending(superpowers, ledger):
+                    continue
                 bind(ledger)
-            except LedgerRefused as error:
-                rows[ledger] = {**row, "verdict": "refused", "reason": error.reason}
+            except StoreFault:
+                raise
+            except StoreRefused as error:
+                reason = error.reason if isinstance(error, LedgerRefused) else "invalid_state"
+                rows[ledger] = {**row, "verdict": "refused", "reason": reason}
             else:
-                bound.append(ledger)
+                if binding:
+                    bound.append(ledger)
         for ledger in bound:
             rows[ledger] = migration_row(superpowers, ledger, migrated=True, **options)
     return report("apply" if apply else "dry_run", list(rows.values()))
