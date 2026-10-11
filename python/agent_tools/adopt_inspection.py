@@ -117,8 +117,9 @@ LIFECYCLE_CLASSES = (
 
 # D35: the public question contract. An id is a literal, never formatted at
 # emission, so a caller can dispatch over the set exhaustively. A
-# `candidate-class` entry is keyed by its `subject`, the candidate path.
-QUESTION_IDS = ("project-id", "candidate-class")
+# `candidate-class` entry is keyed by its `subject`, the candidate path, and a
+# `path-reference` entry by its `subject`, `<path>:<line>:<column>`.
+QUESTION_IDS = ("project-id", "candidate-class", "path-reference")
 
 # The archive bucket for adopted agent records.
 ARCHIVE_ADOPTED_DIR = ".agents/knowledge/archive/adopted"
@@ -126,6 +127,11 @@ ARCHIVE_ADOPTED_DIR = ".agents/knowledge/archive/adopted"
 # The fixed basis of every `candidate-class` question (D8): it never names the
 # candidate, which the entry's `subject` carries.
 CANDIDATE_BASIS = "no classification row settles this agent path"
+
+# The fixed basis of every `path-reference` question (#350): like the
+# candidate's, it never names the file or the literal, which the entry's
+# `subject` carries.
+PATH_REFERENCE_BASIS = "a tracked non-Markdown file names a path this plan moves"
 
 READY_GATES = (
     "contract-valid-after-amendment",
@@ -360,6 +366,10 @@ def question_impact(question_id: str) -> str:
         return ("the candidate keeps the needs-decision action, so the "
                 "no-needs-decision and no-open-decisions gates fail and the "
                 "plan stays draft")
+    if question_id == "path-reference":
+        return ("the file keeps naming the old path and nothing in it is "
+                "edited until the reference is answered, so the "
+                "no-open-decisions gate fails and the plan stays draft")
     raise ValueError(f"unknown question id: {question_id!r}")
 
 
@@ -377,6 +387,14 @@ def question_recommendation(question_id: str) -> str:
                 "no answer: add a central classification row for a "
                 "secret-shaped path, or remove either from the repository in "
                 "its own commit, then plan again")
+    if question_id == "path-reference":
+        return ("answer it with plan --answer path-reference <subject> "
+                "<value>, using this entry's subject and one of its "
+                "answers, and apply the plan id that run prints: extend "
+                "adds the additions this occurrence's path_references row "
+                "lists beside the literal, rewrite replaces the literal "
+                "with that row's replacement, and retain leaves the file "
+                "unchanged")
     raise ValueError(f"unknown question id: {question_id!r}")
 
 

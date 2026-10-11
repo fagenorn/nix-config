@@ -48,8 +48,8 @@ PROVENANCES = ("tracked", "targeted-ignored",
                "targeted-ignored-metadata-only", "git-worktree-metadata-only",
                "untracked-explicit-paths")
 TOP_LEVEL_MEMBERS = ["changes", "decisions", "evidence", "handoff",
-                     "link_rewrites", "plan", "schema_version",
-                     "verification"]
+                     "link_rewrites", "path_references", "plan",
+                     "schema_version", "verification"]
 PLAN_MEMBERS = ["base_revision", "blockers", "input_digest", "outcome",
                 "plan_id", "platform", "project_id", "state"]
 HANDOFF_MEMBERS = ["evidence_record", "migration_map", "next_command",
@@ -401,6 +401,76 @@ def linked_repo(home: Path) -> Path:
     return root
 
 
+CHECK_LINKS = "tools/check_links.py"
+UNRELATED_SCRIPT = "tools/list_docs.py"
+# A repository's own link check (#350): it exempts `.claude/`, where the
+# already-broken link of `REFERENCE_TREE` lives. Line 7 holds the one path
+# reference; every other token names nothing the plan moves.
+CHECK_LINKS_SCRIPT = r'''#!/usr/bin/env python3
+# Fail when a Markdown file outside the exempt trees has a broken relative link.
+import os
+import re
+import sys
+
+EXEMPT = ("docs/archive/", ".claude/")
+LINK = re.compile(r"\]\(([^)#\s]+)")
+
+
+def main(root):
+    broken = []
+    for folder, _, names in sorted(os.walk(root)):
+        for name in sorted(names):
+            path = os.path.relpath(os.path.join(folder, name), root)
+            if not path.endswith(".md") or path.startswith(EXEMPT):
+                continue
+            with open(os.path.join(root, path), encoding="utf-8") as handle:
+                text = handle.read()
+            for target in LINK.findall(text):
+                if "://" not in target and not os.path.exists(
+                        os.path.join(root, os.path.dirname(path), target)):
+                    broken.append(f"{path}: {target}")
+    print("\n".join(broken) or "ok")
+    return 1 if broken else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1]))
+'''
+CHECK_LINKS_EXTENDED = CHECK_LINKS_SCRIPT.replace(
+    '".claude/")',
+    '".claude/", ".agents/artifacts/plans/", ".agents/artifacts/specs/")')
+REFERENCE_SUBJECT = f"{CHECK_LINKS}:7:29"
+REFERENCE_ROW = {
+    "subject": REFERENCE_SUBJECT, "path": CHECK_LINKS, "line": 7,
+    "column": 29, "literal": ".claude/", "answers": ["extend", "retain"],
+    "answer": None,
+    "additions": [".agents/artifacts/plans/", ".agents/artifacts/specs/"],
+    "replacement": None}
+REFERENCE_TREE = {
+    "README.md": "# readme\n\nSee [spec x](.claude/specs/x.md).\n",
+    ".claude/specs/x.md": "# spec x\n\nGone: [gone](missing.md).\n",
+    ".claude/rules/r.md": "# rule r\n",
+    UNRELATED_SCRIPT: 'ROOTS = ("docs/standards/", "home/")\nprint(ROOTS)\n',
+}
+
+
+def write_reference_tree(root: Path, *, script: bool = True) -> None:
+    """An inbound link, an already-broken link inside a moved tree, retained
+    `.claude/` content, an unrelated script and, with `script`, the link
+    check, over any fixture carrying `.claude/specs` and `.claude/plans`."""
+    for path, text in REFERENCE_TREE.items():
+        write(root, path, text)
+    if script:
+        write(root, CHECK_LINKS, CHECK_LINKS_SCRIPT)
+    commit(root, "reference the agent trees")
+
+
+def referenced_repo(home: Path, *, script: bool = True) -> Path:
+    root = nix_config_shape_repo(home)
+    write_reference_tree(root, script=script)
+    return root
+
+
 def write_dissolved_tree(root: Path) -> None:
     """`.claude/` loses its last retained file and gains a research record,
     so its members move under two different prefixes and a link to the
@@ -699,7 +769,7 @@ class ProjectIdentityTest(AdoptTestCase):
 
 
 class DocumentShapeTest(AdoptTestCase):
-    def test_exactly_eight_top_level_members(self):
+    def test_exactly_nine_top_level_members(self):
         for name, build in (("bootstrap", bootstrap_repo),
                             ("reconcile", reconcile_repo),
                             ("adopted", adopted_repo),
@@ -798,7 +868,7 @@ class DocumentShapeTest(AdoptTestCase):
 def documented_plan_id(doc: object) -> str:
     """D15's digest, recomputed here from the document's own inputs.
 
-    The formula is the spec's, not the implementation's: the seven named
+    The formula is the spec's, not the implementation's: the eight named
     members, canonical JSON, SHA-256. Nothing is pasted from a previous
     run.
     """
@@ -810,6 +880,7 @@ def documented_plan_id(doc: object) -> str:
         "evidence": doc["evidence"],
         "decisions_answered": doc["decisions"]["answered"],
         "link_rewrites": doc["link_rewrites"],
+        "path_references": doc["path_references"],
     }
     payload = json.dumps(source, sort_keys=True,
                          separators=(",", ":")).encode("utf-8")
@@ -1063,6 +1134,7 @@ class TypedOperationTest(AdoptTestCase):
             "checks": [{"id": gate["id"], "status": gate["status"]}
                        for gate in doc["verification"]["ready_gates"]],
             "link_rewrites": doc["link_rewrites"],
+            "path_references": doc["path_references"],
             "path_migration_map": doc["handoff"]["migration_map"],
         }
         expected = json.dumps(record, sort_keys=True, indent=2,
@@ -1300,7 +1372,7 @@ class CandidateQuestionTest(AdoptTestCase):
 
     def test_the_question_set_is_closed(self):
         self.assertEqual(adopt_inspection.QUESTION_IDS,
-                         ("project-id", "candidate-class"))
+                         ("project-id", "candidate-class", "path-reference"))
         for function in (adopt_inspection.question_impact,
                          adopt_inspection.question_recommendation):
             with self.subTest(function=function.__name__):
@@ -1542,12 +1614,15 @@ class LinkRewritePlanTest(AdoptTestCase):
                   doc["plan"]["platform"], doc["evidence"],
                   doc["decisions"]["answered"])
         self.assertEqual(
-            adopt_planning.compute_plan_id(*inputs, doc["link_rewrites"]),
+            adopt_planning.compute_plan_id(*inputs, doc["link_rewrites"],
+                                           doc["path_references"]),
             doc["plan"]["plan_id"])
         other = json.loads(json.dumps(LINKED_SUMMARY))
         other["inbound"] = {"links": 4, "files": ["README.md"]}
-        self.assertNotEqual(adopt_planning.compute_plan_id(*inputs, other),
-                            doc["plan"]["plan_id"])
+        self.assertNotEqual(
+            adopt_planning.compute_plan_id(*inputs, other,
+                                           doc["path_references"]),
+            doc["plan"]["plan_id"])
 
     def test_the_human_view_prints_one_link_line(self):
         code, out, err = run("plan", "--repo-root",
@@ -1595,6 +1670,252 @@ class LinkRewritePlanTest(AdoptTestCase):
             with self.subTest(changes=changes, targets=targets):
                 with self.assertRaises(ValueError):
                     adopt_planning.check_markdown_writes(changes, targets)
+
+
+class PathReferencePlanTest(AdoptTestCase):
+    """#350: `plan` asks about every path literal naming a moved tree."""
+
+    def answered(self, root: Path, value: str,
+                 subject: str = REFERENCE_SUBJECT) -> object:
+        code, doc, err = self.plan(root, "--answer", "path-reference",
+                                   subject, value)
+        self.assertEqual(code, 0, err or doc)
+        return doc
+
+    def stored_plans(self) -> list[str]:
+        store = self.home / ".agents" / "state" / "adopt" / "plans"
+        return sorted(path.name for path in store.iterdir()) \
+            if store.is_dir() else []
+
+    def naming(self, doc: object, path: str) -> list[dict]:
+        return [op for op in doc["changes"]
+                if path in op["sources"] + op["targets"]]
+
+    def test_an_open_reference_keeps_the_plan_draft_with_a_stable_question(self):
+        root = referenced_repo(self.home)
+        doc = self.ready_plan(root)
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(
+            [gate["id"] for gate in doc["verification"]["ready_gates"]
+             if gate["status"] != "passed"], ["no-open-decisions"])
+        (question,) = [entry for entry in doc["decisions"]["open"]
+                       if entry["id"] == "path-reference"]
+        self.assertEqual(sorted(question), ["answers", "basis", "id", "impact",
+                                            "recommendation", "subject"])
+        self.assertEqual(question["subject"], REFERENCE_SUBJECT)
+        self.assertEqual(question["answers"], ["extend", "retain"])
+        for member in ("basis", "impact", "recommendation"):
+            self.assertNotIn("tools/", question[member])
+        self.assertEqual(doc["path_references"], [REFERENCE_ROW])
+        self.assertEqual(self.naming(doc, CHECK_LINKS), [])
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+        again = self.ready_plan(root)
+        self.assertEqual(again["decisions"]["open"], doc["decisions"]["open"])
+        self.assertEqual(again["plan"]["plan_id"], doc["plan"]["plan_id"])
+
+    def test_answering_extend_reaches_ready_with_one_write(self):
+        doc = self.answered(referenced_repo(self.home), "extend")
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["decisions"]["open"], [])
+        self.assertEqual(doc["decisions"]["answered"],
+                         [{"id": "path-reference",
+                           "subject": REFERENCE_SUBJECT, "value": "extend"}])
+        self.assertEqual(doc["path_references"],
+                         [{**REFERENCE_ROW, "answer": "extend"}])
+        (write_op,) = self.naming(doc, CHECK_LINKS)
+        self.assertEqual(write_op["op"], "write-file")
+        self.assertEqual(write_op["sources"], [CHECK_LINKS])
+        self.assertEqual(write_op["targets"], [CHECK_LINKS])
+        self.assertEqual(write_op["before"],
+                         sha256_hash(CHECK_LINKS_SCRIPT.encode("utf-8")))
+        self.assertEqual(write_op["after"],
+                         sha256_hash(CHECK_LINKS_EXTENDED.encode("utf-8")))
+        order = [(op["op"], op["targets"][0] if op["targets"] else None)
+                 for op in doc["changes"]]
+        script = order.index(("write-file", CHECK_LINKS))
+        self.assertLess(order.index(("write-file", "README.md")), script)
+        self.assertLess(script, min(
+            index for index, (kind, _) in enumerate(order)
+            if kind == "regenerate-projection"))
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+
+    def test_retain_reaches_ready_and_writes_nothing(self):
+        doc = self.answered(referenced_repo(self.home), "retain")
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["path_references"],
+                         [{**REFERENCE_ROW, "answer": "retain"}])
+        self.assertEqual(self.naming(doc, CHECK_LINKS), [])
+
+    def test_the_answer_is_covered_by_the_plan_id(self):
+        root = referenced_repo(self.home)
+        opened = self.ready_plan(root)
+        extended = self.answered(root, "extend")
+        retained = self.answered(root, "retain")
+        self.assertEqual(len({doc["plan"]["plan_id"]
+                              for doc in (opened, extended, retained)}), 3)
+        inputs = (extended["plan"]["project_id"],
+                  extended["plan"]["base_revision"],
+                  extended["plan"]["platform"], extended["evidence"],
+                  extended["decisions"]["answered"],
+                  extended["link_rewrites"])
+        self.assertEqual(
+            adopt_planning.compute_plan_id(*inputs,
+                                           extended["path_references"]),
+            extended["plan"]["plan_id"])
+        other = [{**extended["path_references"][0],
+                  "additions": [".agents/artifacts/specs/"]}]
+        self.assertNotEqual(adopt_planning.compute_plan_id(*inputs, other),
+                            extended["plan"]["plan_id"])
+
+    def test_markdown_rewriting_is_unchanged_and_other_files_are_untouched(self):
+        def markdown_writes(doc: object) -> list[tuple]:
+            return [(op["targets"], op["before"], op["after"])
+                    for op in doc["changes"] if op["op"] == "write-file"
+                    and adopt_links.is_markdown_path(op["targets"][0])]
+
+        with_script = self.answered(referenced_repo(self.home), "extend")
+        without = self.ready_plan(referenced_repo(self.home, script=False))
+        self.assertEqual(without["plan"]["state"], "ready",
+                         without["plan"]["blockers"])
+        self.assertEqual(without["path_references"], [])
+        self.assertTrue(markdown_writes(without))
+        self.assertEqual(markdown_writes(with_script),
+                         markdown_writes(without))
+        self.assertEqual(with_script["link_rewrites"],
+                         without["link_rewrites"])
+        self.assertEqual(self.naming(with_script, UNRELATED_SCRIPT), [])
+        self.assertEqual(
+            [op["targets"] for op in with_script["changes"]
+             if op["op"] == "write-file"
+             and op["targets"][0].startswith("tools/")], [[CHECK_LINKS]])
+
+    def test_invalid_reference_answers_refuse_and_store_nothing(self):
+        root = referenced_repo(self.home)
+        ok = ("path-reference", REFERENCE_SUBJECT, "extend")
+        for triples, repair_id in (
+                ((("path-reference", f"{CHECK_LINKS}:1:1", "retain"),),
+                 "adopt.decisions.unmatched_answer"),
+                ((("path-reference", REFERENCE_SUBJECT, "rewrite"),),
+                 "adopt.decisions.invalid_answer"),
+                ((ok, ("path-reference", REFERENCE_SUBJECT, "retain")),
+                 "adopt.decisions.invalid_answer"),
+                ((ok, ("path-ref", REFERENCE_SUBJECT, "retain")),
+                 "adopt.decisions.invalid_answer")):
+            with self.subTest(triples=triples):
+                before = self.stored_plans()
+                code, payload, err = self.plan(root, *[
+                    token for triple in triples
+                    for token in ("--answer", *triple)])
+                self.assertEqual(code, 2, err or payload)
+                self.assertEqual(payload["error"]["code"], "adopt_failure")
+                self.assertEqual(payload["error"]["repair_id"], repair_id)
+                self.assertEqual(
+                    payload["error"]["violations"][0]["pointer"],
+                    "/decisions/answered")
+                self.assertEqual(self.stored_plans(), before)
+
+    def test_the_human_view_prints_the_references(self):
+        root = referenced_repo(self.home)
+        code, out, err = run("plan", "--repo-root", str(root), "--format",
+                             "human", home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertIn("\nreferences: 1 occurrences, extended 0, rewritten 0, "
+                      "retained 0, open 1\n", out)
+        self.assertIn(f"\nopen path-reference {REFERENCE_SUBJECT} "
+                      "(answers: extend|retain): ", out)
+        code, out, err = run("plan", "--repo-root", str(root), "--format",
+                             "human", "--answer", "path-reference",
+                             REFERENCE_SUBJECT, "extend", home=self.home)
+        self.assertEqual(code, 0, err)
+        self.assertIn("\nreferences: 1 occurrences, extended 1, rewritten 0, "
+                      "retained 0, open 0\n", out)
+
+    def test_a_reference_to_an_answered_candidate_is_asked_in_either_answer_order(self):
+        # Line 1 of the file holds `PATHS = [".claude/odd.md"]`: the quote
+        # opens in column 10, so the literal starts in column 11.
+        naming_file = "tools/odd_paths.py"
+        subject = f"{naming_file}:1:11"
+        root = candidate_repo(self.home, ODD)
+        write(root, naming_file, f'PATHS = ["{ODD}"]\n')
+        commit(root, "name the candidate")
+        candidate = ("candidate-class", ODD, "archive-history")
+        reference = ("path-reference", subject, "rewrite")
+
+        def questions(doc: object, question_id: str) -> list[dict]:
+            return [entry for entry in doc["decisions"]["open"]
+                    if entry["id"] == question_id]
+
+        unanswered = self.ready_plan(root)
+        self.assertEqual(len(questions(unanswered, "candidate-class")), 1)
+        self.assertEqual(questions(unanswered, "path-reference"), [])
+        self.assertEqual(unanswered["path_references"], [])
+
+        code, archived, err = self.plan(root, "--answer", *candidate)
+        self.assertEqual(code, 0, err or archived)
+        self.assertEqual(archived["plan"]["state"], "draft")
+        (question,) = questions(archived, "path-reference")
+        self.assertEqual(question["subject"], subject)
+        self.assertEqual(question["answers"],
+                         ["extend", "rewrite", "retain"])
+        self.assertEqual(len(archived["decisions"]["open"]), 1)
+        (row,) = archived["path_references"]
+        self.assertEqual((row["subject"], row["literal"], row["answer"]),
+                         (subject, ODD, None))
+
+        results = []
+        for triples in ((candidate, reference), (reference, candidate)):
+            code, doc, err = self.plan(root, *[
+                token for triple in triples
+                for token in ("--answer", *triple)])
+            self.assertEqual(code, 0, err or doc)
+            self.assertEqual(doc["plan"]["state"], "ready",
+                             doc["plan"]["blockers"])
+            results.append(doc)
+        first, second = results
+        self.assertEqual(first["path_references"], second["path_references"])
+        self.assertEqual(first["path_references"][0]["answer"], "rewrite")
+        self.assertEqual(first["plan"]["plan_id"], second["plan"]["plan_id"])
+        (write_op,) = self.naming(first, naming_file)
+        self.assertEqual(write_op["after"], sha256_hash(
+            f'PATHS = ["{ARCHIVED}"]\n'.encode("utf-8")))
+
+    def test_a_reference_target_any_other_operation_names_is_a_derivation_bug(self):
+        op = adopt_planning.operation
+        target = "tools/check_links.py"
+        write_op = op("write-file", [target], [target],
+                      "sha256:" + "0" * 64, "sha256:" + "1" * 64)
+        adopt_planning.check_reference_writes([write_op], {target})
+        delete = op("delete-file", [target], [],
+                    "git-object:" + "0" * 40, None)
+        move = op("git-mv", [target], ["tools/moved.py"],
+                  "git-object:" + "0" * 40, "git-object:" + "0" * 40)
+        different = op("write-file", ["tools/other.py"], [target],
+                       "sha256:" + "0" * 64, "sha256:" + "1" * 64)
+        for changes in ([], [write_op, write_op], [write_op, delete],
+                        [write_op, move], [different]):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    adopt_planning.check_reference_writes(changes, {target})
+
+    def test_a_projection_reading_a_reference_target_is_not_a_second_writer(self):
+        op = adopt_planning.operation
+        target = "tools/agents.tmpl"
+        write_op = op("write-file", [target], [target],
+                      "sha256:" + "0" * 64, "sha256:" + "1" * 64)
+        reads = op("regenerate-projection", [target], ["AGENTS.md"],
+                   "sha256:" + "2" * 64, None)
+        adopt_planning.check_reference_writes([write_op, reads], {target})
+        adopt_planning.check_reference_writes([reads, write_op, reads],
+                                              {target})
+        regenerates = op("regenerate-projection", ["tools/other.tmpl"],
+                         [target], "sha256:" + "0" * 64, None)
+        for changes in ([reads], [write_op, regenerates],
+                        [write_op, reads, write_op]):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    adopt_planning.check_reference_writes(changes, {target})
 
 
 class GitignoreAmendmentTest(AdoptTestCase):

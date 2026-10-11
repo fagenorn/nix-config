@@ -7891,6 +7891,107 @@ class OwnerExitFenceTest(LifecycleHarness, unittest.TestCase):
                          now="2026-08-13T20:02:00Z")["kind"], "suspended")
 
 
+class DelegatedShipLaunchTest(LifecycleHarness, unittest.TestCase):
+    """#352: a delegated owner returns after Phase 6 and its delegator ships.
+
+    The ledger records no delegation, so both owners act under one launch.
+    """
+
+    def return_from_the_delegated_owner(self):
+        self.init_run()
+        spawned = self.spawn(issue=14, worktree=str(self.root / "wt-14"))
+        self.assertEqual(spawned["id"], "14:1:1")
+        gate = self.progress(issue=14, phase=5, now="2026-08-13T20:01:00Z",
+                             remainder_self_contained=True)
+        self.assertEqual(gate["action"], "delegate")
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual(attempt["phase_action"], "delegate")
+        implementer = self.register_worker(action_id="14:1:1",
+                                           now="2026-08-13T20:02:00Z")["worker_id"]
+        self.release_worker(worker_id=implementer, event="returned",
+                            now="2026-08-13T20:03:00Z")
+        self.progress(issue=14, phase=6, now="2026-08-13T20:04:00Z",
+                      remainder_self_contained=True)
+        return implementer
+
+    def finish_with_summary(self, now, ok):
+        """`finish --summary-file` of a `terminal_failed` ship-summary/v2.
+
+        The installed delivery contract stays; the summary is bound to the
+        launch's custody and to that contract's digest, as a real owner's is.
+        """
+        digest = self.read_state()["issues"]["14"]["delivery"]["contract_digest"]
+        historical = {"issue": 14, "state": "failed", "pr_url": None,
+                      "merge_sha": None, "issue_closed": False,
+                      "discussion_items": [], "detail_state": "none",
+                      "report_path": None, "notes": "owner failed"}
+        summary = {"interface_version": 2, "issue": 14, "state": "terminal_failed",
+                   "custody": {"kind": "implementation", "attempt": 1, "launch": 1,
+                               "action_id": "14:1:1"},
+                   "historical_owner_result": historical,
+                   "delivery_contract_digest": digest, "delivery_observations": [],
+                   "authority_observations": [], "reevaluation_evidence": [],
+                   "detail_state": "none", "report_path": None,
+                   "notes": "owner failed"}
+        summary_path = self.root / "summary-14-1.json"
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+        return self.run_cli("finish", "--repo-root", self.root, "--run-id",
+                            self.run_id, "--summary-file", summary_path, "--now",
+                            now, ok=ok)
+
+    def test_the_delegator_registers_the_ship_owner_under_the_same_launch(self):
+        implementer = self.return_from_the_delegated_owner()
+        ship_owner = self.register_worker(action_id="14:1:1",
+                                          now="2026-08-13T20:05:00Z")
+        self.assertEqual(ship_owner, {"worker_id": "14:1:1:w2", "launch": "14:1:1",
+                                      "parent": None})
+        attempts = self.read_state()["issues"]["14"]["attempts"]
+        self.assertEqual((len(attempts), len(attempts[0]["launches"])), (1, 1))
+        self.assertEqual(
+            [w["worker_id"] for w in self.read_state()["workers"]
+             if w["released_at"] is None], ["14:1:1:w2"])
+        self.assertEqual(self.check_worker(implementer)["reason"], "released")
+        self.assertEqual(self.check_worker("14:1:1:w2"), {
+            "worker_id": "14:1:1:w2", "live": True,
+            "current_action_id": "14:1:1", "reason": "live"})
+        self.assertIs(self.check_launch(action_id="14:1:1")["current"], True)
+
+    def test_finish_waits_for_the_ship_owner_and_then_ends_the_launch(self):
+        self.return_from_the_delegated_owner()
+        ship_owner = self.register_worker(action_id="14:1:1",
+                                          now="2026-08-13T20:05:00Z")["worker_id"]
+        before = self.state_path.read_bytes()
+        refused = self.finish_with_summary("2026-08-13T20:06:00Z", False)
+        self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+        self.assertIn("live workers: " + ship_owner, refused.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.release_worker(worker_id=ship_owner, event="returned",
+                            now="2026-08-13T20:07:00Z")
+        finished = json.loads(
+            self.finish_with_summary("2026-08-13T20:07:00Z", True).stdout)
+        self.assertEqual(finished["kind"], "terminal_failed")
+        self.assertEqual(self.check_launch(action_id="14:1:1")["reason"],
+                         "inactive_attempt")
+        late = self.register_worker(action_id="14:1:1", now="2026-08-13T20:08:00Z",
+                                    ok=False)
+        self.assertEqual(late.returncode, 2)
+        self.assertIn("inactive_attempt", late.stderr)
+
+    def test_a_relaunch_fences_the_earlier_owners_ship_registration(self):
+        self.return_from_the_delegated_owner()
+        resumed = self.resume(issue=14, worktree=str(self.root / "wt-14"),
+                              now="2026-08-13T20:06:00Z", owner_unavailable=True)
+        self.assertEqual(resumed["id"], "14:1:2")
+        before = self.state_path.read_bytes()
+        stale = self.register_worker(action_id="14:1:1", now="2026-08-13T20:07:00Z",
+                                     ok=False)
+        self.assertEqual((stale.returncode, stale.stdout), (2, ""))
+        self.assertIn("superseded_launch", stale.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(self.check_launch(action_id="14:1:1")["reason"],
+                         "superseded_launch")
+
+
 class PhaseGateReplyTest(LifecycleHarness, unittest.TestCase):
     """#191 D5: `progress` replies with one closed, validated `phase_gate`."""
 
