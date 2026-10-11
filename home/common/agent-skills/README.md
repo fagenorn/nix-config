@@ -143,3 +143,7 @@ The delegating owner takes the first alternative that matches the return:
 Without lifecycle identity the same three alternatives apply with the legacy handoff, and the `progress` call, the worker registration and the `check-launch` fence are skipped, as everywhere else on the ledger-free route.
 
 A Phase-6 `delegate` is the Phase-7 ship-owner dispatch, never a second issue owner: `delegated-owner.md` says so for the rollover's owner, `SKILL.md` for every other. Under orchestrate-issues the ship owner therefore sits two levels below the orchestrator, where it can still launch its reviewers; launched by the delegated owner it sat three levels below and shipped inline through the dispatch-gap fallback. The ledger records neither the delegation nor a worker's role. Whichever of the two owners makes the exit that ends the launch reaps it: the delegated owner on its own `handoff`, suspension or terminal failure, the delegating owner otherwise. The direct-autonomous rollover is unchanged (#352).
+
+### task-brief on PATH
+
+`~/.agents/bin/task-brief` is the sdd skill's `scripts/task-brief`, installed unedited beside `sdd-workspace`. `sdd-gate next` runs it by name because a packaged command reaches an executable outside the package by its name on `PATH` (`docs/standards/agent-helpers.md` rule 3). The script finds `sdd-workspace` next to itself (`dirname "$0"`), which holds in the skill's `scripts/` directory and in `~/.agents/bin/` alike.
