@@ -389,10 +389,15 @@ def check_unlocked(state_path: Path, document: Any, *, run_id: str, upgrade: Cal
 
 
 class PendingSeal(NamedTuple):
-    """A seal not yet applied: the custody transaction to abandon and the parking reason."""
+    """A seal not yet applied: the custody transaction to abandon and the seal's reason.
+
+    `reap` is the reason of the reap `seal_custody` applies first, for a seal whose span
+    lapsed after its ledger write; None when the seal has no such prerequisite.
+    """
 
     transaction_id: str
     reason: str
+    reap: str | None = None
 
 
 class _Planned(NamedTuple):
@@ -460,12 +465,33 @@ def _core_errors() -> Iterator[None]:
         raise StoreRefused(f"custody store: {error}") from error
 
 
+def _require_recorded_worktree(issue: int, attempt: Mapping, transaction: Transaction,
+                               canonical: Callable[[str], str]) -> None:
+    """Refuse a live `attempt` recorded at another worktree than its custody subject's.
+
+    The subject fixes the worktree when the transaction is created (#338 D1, D19), so a
+    transaction that a write cut before its ledger was published left behind is not taken
+    up by a repeat naming a different worktree: the ledger would name one path while the
+    lease protects the other. `canonical` is the identity the subject was created with.
+    An attempt that is not in `LIVE_STATES` is not compared. Raises `ProjectionMismatch`.
+    """
+    if attempt["state"] not in custody_rules.LIVE_STATES:
+        return
+    recorded, bound = canonical(attempt["worktree"]), transaction.subject["worktree"]
+    if recorded != bound:
+        raise custody_rules.ProjectionMismatch(
+            f"issue {issue} attempt {attempt['attempt']} is recorded at {recorded} but its "
+            f"custody transaction {transaction.transaction_id} is bound to {bound}")
+
+
 def _read_plans(store: Path, state: dict, *, now_ms: int,
-                bound_launches: Mapping[tuple[int, int], int],
-                report: OwnerReport | None) -> list[_Planned]:
+                bound_launches: Mapping[tuple[int, int], int], report: OwnerReport | None,
+                canonical: Callable[[str], str] | None = None) -> list[_Planned]:
     """The settle plans of every attempt that has operations, in read order, without a lock.
 
     Issues ascend by number and each issue's attempts run in order. Nothing is created.
+    With `canonical`, each live attempt that has a custody transaction is also held to its
+    subject's worktree (`_require_recorded_worktree`).
     """
     plans = []
     for key in sorted(state["issues"], key=int):
@@ -487,6 +513,8 @@ def _read_plans(store: Path, state: dict, *, now_ms: int,
                     raise StoreFault(f"custody store: {error}") from error
             named = report is not None and (report.issue, report.attempt) == (issue, number)
             try:
+                if transaction is not None and canonical is not None:
+                    _require_recorded_worktree(issue, attempt, transaction, canonical)
                 operations = custody_rules.settle_plan(
                     issue_state, attempt, transaction, lease=lease, now_ms=now_ms,
                     latest=index == len(attempts) - 1,
@@ -500,15 +528,26 @@ def _read_plans(store: Path, state: dict, *, now_ms: int,
     return plans
 
 
+_SEAL_COMPLETIONS = (("seal",), ("reap", "seal"))
+
+
 def pending_seals(store: Path, state: dict, *, now_ms: int) -> list[PendingSeal]:
     """The seals a write left undone (#338 D24), found lock-free; nothing is created.
 
     These are the seals of every attempt whose settle plan, with no owner report and no
-    bind, is exactly one `seal`, in read order, in the shape `seal_custody` takes.
+    bind, is a seal completion: one `seal`, or the `reap` of a span that has lapsed (another
+    transaction took the worktree once its window passed, say) and then the `seal` (D16).
+    They come in read order, in the shape `seal_custody` takes. Every other plan is left to
+    the settle step of a write that changes the ledger.
     """
-    return [PendingSeal(plan.transaction.transaction_id, plan.operations[0].reason)
-            for plan in _read_plans(store, state, now_ms=now_ms, bound_launches={}, report=None)
-            if len(plan.operations) == 1 and plan.operations[0].kind == "seal"]
+    pending = []
+    for plan in _read_plans(store, state, now_ms=now_ms, bound_launches={}, report=None):
+        operations = plan.operations
+        if tuple(operation.kind for operation in operations) in _SEAL_COMPLETIONS:
+            pending.append(PendingSeal(
+                plan.transaction.transaction_id, operations[-1].reason,
+                operations[0].reason if len(operations) == 2 else None))
+    return pending
 
 
 def _new_subject(core: TransactionStore, run: str, plan: _Planned, *, canonical:
@@ -636,11 +675,13 @@ def settle_custody(store: Path, state: dict, *, now_ms: int, canonical: Callable
     live holder of a new attempt's worktree is `FencingRefused("custody_unavailable")` before
     anything is created, then the plans are applied in the order read. `bound_launches` is
     the 8 -> 9 plan, `report` an owner result this write submits, `canonical` the worktree
-    comparison identity. It returns the seals of each issue's latest attempt, which
+    comparison identity: a new subject's worktree is made with it, and a live attempt whose
+    existing custody subject names another worktree is a `custody projection mismatch` in
+    the read phase. It returns the seals of each issue's latest attempt, which
     `seal_custody` applies after the ledger is replaced.
     """
     planned = _read_plans(store, state, now_ms=now_ms, bound_launches=bound_launches,
-                          report=report)
+                          report=report, canonical=canonical)
     if not planned:
         return []
     run, seals, created = state["transaction_id"], [], {}
@@ -657,7 +698,9 @@ def settle_custody(store: Path, state: dict, *, now_ms: int, canonical: Callable
 def seal_custody(store: Path, pending: list[PendingSeal], *, now_ms: int) -> None:
     """Apply the seals `settle_custody` or `pending_seals` returned, after the ledger write.
 
-    Does nothing for `[]`. A transaction already sealed is left alone, so a repeat is safe.
+    Does nothing for `[]`. Under the store lock, each seal's `reap`, when it names one, is
+    applied before its `advance` to `abandoned` (the core's `reap` writes nothing unless the
+    span has lapsed). A transaction already sealed is left alone, so a repeat is safe.
     """
     if not pending:
         return
@@ -666,9 +709,12 @@ def seal_custody(store: Path, pending: list[PendingSeal], *, now_ms: int) -> Non
         with _core_errors():
             for seal in pending:
                 snapshot = core.load(seal.transaction_id)
-                if snapshot.state not in TERMINALS:
-                    core.advance(seal.transaction_id, "abandoned", reason=seal.reason,
-                                 external_state="known", custody=snapshot.custody)
+                if snapshot.state in TERMINALS:
+                    continue
+                if seal.reap is not None:
+                    snapshot = core.reap(seal.transaction_id, reason=seal.reap)
+                core.advance(seal.transaction_id, "abandoned", reason=seal.reason,
+                             external_state="known", custody=snapshot.custody)
 
 
 def retain_result(store: Path, run: str, *, issue: int, attempt: int, launch: int,

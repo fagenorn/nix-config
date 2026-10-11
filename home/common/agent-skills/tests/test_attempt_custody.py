@@ -222,6 +222,38 @@ class CustodyLeaseTest(LifecycleCustody, unittest.TestCase):
         self.assert_fenced(refused, "custody_unavailable", before)
         self.assertIsNone(self.custody(14))
 
+    def test_an_interrupted_spawn_is_not_repeated_into_another_worktree(self):
+        self.init_run()
+        first, other = (os.path.abspath(self.root / name) for name in ("wt-14", "wt-14b"))
+        settle = attempt_store.settle_custody
+
+        def sweep(path, **options):
+            return self.control_raw(
+                now=T(0), issues=[14], max_parallel=100, tracker=[self.tracker_fact(14)],
+                worktrees=[self.worktree_fact(14, candidate={"path": path, "state": "absent"})],
+                **options)
+
+        def cut_before_the_ledger(*args, **options):
+            settle(*args, **options)
+            raise OSError("crash")
+
+        with mock.patch.object(attempt_store, "settle_custody",
+                               side_effect=cut_before_the_ledger):
+            self.assertNotEqual(sweep(first, ok=False).returncode, 0)
+        self.assertNotIn("14", self.read_state()["issues"])
+        self.assertEqual(self.custody(14).subject["worktree"], os.path.realpath(first))
+        before = self.tree()
+        refused = sweep(other, ok=False)
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertTrue(refused.stderr.startswith(
+            "workflow-state: custody projection mismatch: "), refused.stderr)
+        self.assertEqual(self.tree(), before)
+        sweep(first)
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual((attempt["worktree"], self.custody(14).custody.executor_id,
+                          self.lease(first)["epoch"], self.lease(other)),
+                         (first, "14:1:1", 1, None))
+
 
 class CustodyMigrationTest(LifecycleCustody, unittest.TestCase):
     def migrate(self, *flags):
@@ -344,6 +376,35 @@ class CustodyRepairTest(LifecycleCustody, unittest.TestCase):
         self.assertEqual((second.subject["prior"], second.custody.executor_id),
                          (first.transaction_id, "14:2:1"))
         self.assertEqual(self.lease(self.worktree)["epoch"], 2)
+
+    def taken_by_another_run(self):
+        """The interrupted seal's window passes and another run takes the worktree, so
+        the unsealed transaction's span has lapsed; returns the first ledger's bytes."""
+        self.interrupted_seal()
+        first = self.run_id
+        self.init_run(creation_key="second-run")
+        self.spawn(issue=30, worktree=self.worktree, now=T(31))
+        self.run_id = first
+        return self.state_path.read_bytes()
+
+    def assert_reaped_then_sealed(self, ledger):
+        self.assertEqual(self.state_path.read_bytes(), ledger)
+        self.assert_sealed()
+        receipt = self.core().read_receipt(self.custody(14).terminal["receipt_digest"])
+        self.assertEqual([(stop["reason"], stop["executor_id"]) for stop in receipt["stops"]],
+                         [("expiry", "14:1:1")])
+        lease = self.lease(self.worktree)
+        self.assertEqual((lease["epoch"], lease["holder"]["executor_id"]), (2, "30:1:1"))
+
+    def test_the_identical_finish_reaps_a_lapsed_span_before_its_interrupted_seal(self):
+        ledger = self.taken_by_another_run()
+        self.assertEqual(self.finish_raw(1, self.failed(), now=T(32))["state"], "failed")
+        self.assert_reaped_then_sealed(ledger)
+
+    def test_migrate_apply_reaps_a_lapsed_span_before_an_interrupted_seal(self):
+        ledger = self.taken_by_another_run()
+        self.run_cli("migrate", "--repo-root", self.root, "--apply")
+        self.assert_reaped_then_sealed(ledger)
 
 
 class LaunchFenceTest(LifecycleCustody, unittest.TestCase):
