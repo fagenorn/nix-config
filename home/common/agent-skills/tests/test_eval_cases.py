@@ -582,5 +582,123 @@ class CodeMapCheckTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
 
+class CodeMapEvalCasesTest(unittest.TestCase):
+    """#354: the design case and the writing-plans dispatch case grade a crafted sandbox."""
+
+    SPEC = "2026-10-11-list-state-design.md"
+    SPEC_EXISTS = "a spec exists under the retained specs directory and is committed"
+    SPEC_FORMAT = "the spec's Decisions section names no file path or line number"
+    MAP_EXISTS = "the code map exists in the git directory, named after the spec"
+    MAP_VALID = "the code map is well-formed and lists the three files the issue decides about"
+    MAP_PLACED = "no code map is tracked or present in the working tree"
+    NOT_STARTED = "the implementation was not started"
+    PROMPT_NAMES = "the printed plan prompt names the spec's code map file"
+    UNCHANGED = "the repository is unchanged"
+
+    def design_sandbox(self, tmp, *, decisions="The list command gains a state filter.", with_map=True):
+        """The fixture after a good design run: a committed spec and its code map in .git."""
+        repo, git = fixture_sandbox(tmp)
+        spec_dir = repo / ".claude/specs"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / self.SPEC).write_text(
+            f"# Design\n\n## Problem\n\nNo done-only view.\n\n## Decisions\n\n{decisions}\n\n"
+            "## Test seams\n\nThe command line, as tests/test_cli.py drives it.\n", encoding="utf-8")
+        subprocess.run(git + ["add", "-A"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "docs: spec"], check=True)
+        if with_map:
+            (repo / ".git" / self.SPEC.replace(".md", ".code-map.md")).write_text(
+                f"# Code map: {self.SPEC}\n\n## The list command\n- Why: it gains the state filter\n"
+                "- Code: `tinytask/cli.py` (`main`); `tinytask/model.py` (`STATES`)\n"
+                "- Tests: `tests/test_cli.py` (`CliTest`)\n", encoding="utf-8")
+        return repo, {"REPO": str(repo), "SPEC_DIR": str(spec_dir)}
+
+    def grade(self, name, repo, env):
+        return run_assert(case_assert("design", 1, name), repo, **env)
+
+    def test_every_design_assert_passes_on_a_good_run(self):
+        case = find_case("design", 1)
+        self.assertEqual(case["mode"], "pipeline")
+        self.assertEqual(len(case["asserts"]), 6)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.design_sandbox(Path(tmp).resolve())
+            for check in case["asserts"]:
+                with self.subTest(name=check["name"]):
+                    done = run_assert(check["shell"], repo, **env)
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_the_code_map_asserts_fail_without_a_code_map(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.design_sandbox(Path(tmp).resolve(), with_map=False)
+            for name in (self.MAP_EXISTS, self.MAP_VALID):
+                with self.subTest(name=name):
+                    self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
+            self.assertEqual(self.grade(self.SPEC_EXISTS, repo, env).returncode, 0)
+
+    def test_a_code_map_in_the_working_tree_fails_the_placement_assert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.design_sandbox(Path(tmp).resolve())
+            stray = repo / ".claude/specs" / self.SPEC.replace(".md", ".code-map.md")
+            stray.write_text("# Code map\n", encoding="utf-8")
+            done = self.grade(self.MAP_PLACED, repo, env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn(stray.name, done.stdout)
+
+    def test_a_tracked_path_in_decisions_fails_the_spec_format_assert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.design_sandbox(
+                Path(tmp).resolve(), decisions="The filter lands in tinytask/cli.py.")
+            done = self.grade(self.SPEC_FORMAT, repo, env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn("tinytask/cli.py", done.stdout)
+
+    def test_a_spec_edited_after_its_commit_fails_the_committed_assert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.design_sandbox(Path(tmp).resolve())
+            spec = repo / ".claude/specs" / self.SPEC
+            spec.write_text(spec.read_text(encoding="utf-8") + "\nA later draft.\n", encoding="utf-8")
+            done = self.grade(self.SPEC_EXISTS, repo, env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn("differs from its committed content", done.stdout)
+
+    def test_an_untracked_source_file_fails_the_not_started_assert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.design_sandbox(Path(tmp).resolve())
+            self.assertEqual(self.grade(self.NOT_STARTED, repo, env).returncode, 0)
+            (repo / "tinytask" / "extra.py").write_text("STATE = 1\n", encoding="utf-8")
+            done = self.grade(self.NOT_STARTED, repo, env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn("tinytask/extra.py", done.stdout)
+
+    def dispatch_env(self, tmp, transcript):
+        repo, _ = fixture_sandbox(tmp)
+        out = Path(tmp) / "output.txt"
+        out.write_text(transcript, encoding="utf-8")
+        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        return repo, {"REPO": str(repo), "OUT": str(out), "BASE_MAIN": head, "WT_COUNT": "0"}
+
+    def test_the_dispatch_case_greps_the_transcript_for_the_code_map_name(self):
+        case = find_case("writing-plans", 4)
+        self.assertEqual(case["mode"], "pipeline")
+        self.assertEqual([check["name"] for check in case["asserts"]],
+                         [self.PROMPT_NAMES, self.UNCHANGED])
+        named = "Read `2026-10-07-issue-3-rename-flag-design.code-map.md` in the worktree's git directory.\n"
+        for transcript, passes in ((named, True), ("Give it the spec root and metrics.\n", False)):
+            with self.subTest(passes=passes), tempfile.TemporaryDirectory() as tmp:
+                repo, env = self.dispatch_env(Path(tmp).resolve(), transcript)
+                done = run_assert(case_assert("writing-plans", 4, self.PROMPT_NAMES), repo, **env)
+                self.assertEqual(done.returncode == 0, passes, done.stdout + done.stderr)
+
+    def test_the_dispatch_case_fails_on_a_changed_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, env = self.dispatch_env(Path(tmp).resolve(), "")
+            shell = case_assert("writing-plans", 4, self.UNCHANGED)
+            self.assertEqual(run_assert(shell, repo, **env).returncode, 0)
+            (repo / "NOTES.md").write_text("scratch\n", encoding="utf-8")
+            done = run_assert(shell, repo, **env)
+            self.assertNotEqual(done.returncode, 0, done.stdout)
+            self.assertIn("NOTES.md", done.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
