@@ -78,17 +78,23 @@ FAIL_THEN_CONTINUE = re.compile(
     r'\|\|\s*fail\b(?:"(?:[^"\\]|\\.)*"|[^;{}"])*;\s*(?!(?:fi|done|esac)\b|[};])\S')
 
 
-def writing_plans_fixture(tmp, *, with_plan=True):
-    """A repo shaped like writing-plans eval 1's sandbox after a good run (D7)."""
-    repo = Path(tmp) / "repo"
-    (repo / "issues").mkdir(parents=True)
-    shutil.copy(EVALS_DIR / "fixture-repo/issues/001-well-specified.md", repo / "issues")
+def base_commit(repo):
+    """Commit the repo once on main as the eval identity, origin/main at it; return the git argv."""
     git = ["git", "-C", str(repo), "-c", "user.name=eval", "-c", "user.email=eval@example.invalid",
            "-c", "commit.gpgsign=false"]
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
     subprocess.run(git + ["add", "-A"], check=True)
     subprocess.run(git + ["commit", "-q", "-m", "base"], check=True)
     subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+    return git
+
+
+def writing_plans_fixture(tmp, *, with_plan=True):
+    """A repo shaped like writing-plans eval 1's sandbox after a good run (D7)."""
+    repo = Path(tmp) / "repo"
+    (repo / "issues").mkdir(parents=True)
+    shutil.copy(EVALS_DIR / "fixture-repo/issues/001-well-specified.md", repo / "issues")
+    git = base_commit(repo)
     spec_dir, plan_dir = repo / ".claude/specs", repo / ".claude/plans"
     if with_plan:
         issue = (repo / "issues/001-well-specified.md").read_text(encoding="utf-8")
@@ -481,12 +487,7 @@ def fixture_sandbox(tmp):
     """The tinytask fixture as a committed repo whose origin/main is its only commit."""
     repo = Path(tmp) / "repo"
     shutil.copytree(EVALS_DIR / "fixture-repo", repo, ignore=shutil.ignore_patterns("__pycache__"))
-    git = ["git", "-C", str(repo), "-c", "user.name=eval", "-c", "user.email=eval@example.invalid",
-           "-c", "commit.gpgsign=false"]
-    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
-    subprocess.run(git + ["add", "-A"], check=True)
-    subprocess.run(git + ["commit", "-q", "-m", "base"], check=True)
-    subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+    git = base_commit(repo)
     return repo, git
 
 
