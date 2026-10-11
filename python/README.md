@@ -70,7 +70,7 @@ The [#117 attempt-lifecycle decision](../.agents/artifacts/specs/2026-09-20-issu
 
 The decision governs the planned single-store migration, immutable subject/identity, fenced custody and terminal evidence, and maps the already-delivered agent-slot admission (#150) and delivery contracts, remainders and authorization continuity (#151/#171) onto that core.
 
-The decision is an architecture decision: runtime core delivery belongs to the open #123/#125, and the lifecycle paths and behavior that `home/common/agent-skills/README.md` describes remain the shipped implementation until that cutover.
+The decision is an architecture decision, and its runtime is the code described above: #123 delivered the core, and #125 moves the attempt lifecycle onto it in three packages, run identity (#337), attempt custody and receipts (#338) and the control-plane cutover (#339). `workflow-state` still writes each run's ledger, whose attempt fields are the projection of the custody transactions, and `home/common/agent-skills/README.md` holds the helper-facing contract of that lifecycle.
 
 ## Release profiles
 

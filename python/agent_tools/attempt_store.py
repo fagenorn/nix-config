@@ -498,12 +498,10 @@ def remainder_custody_of(store: Path, run: str, issue: int, remainder: int) -> T
 
 
 class LaunchView(NamedTuple):
-    """The store's view of one record's current launch. `spanned`: the core ever gave it
-    a span. `open`: that span is the transaction's open span and has not lapsed. `roles`:
-    the claim entry's role set, None when not open or unclaimed. `parked`: the
-    transaction is `attention_required`."""
+    """The store's view of one record's current launch. `open`: the transaction's open span
+    is that launch's and has not lapsed. `roles`: the claim entry's role set, None when not
+    open or unclaimed. `parked`: the transaction is `attention_required`."""
 
-    spanned: bool
     open: bool
     roles: dict[str, int] | None
     parked: bool
@@ -533,7 +531,6 @@ def launch_views(store: Path, state: dict, *, now_ms: int) -> dict[str, LaunchVi
             held = span is not None and span.executor_id == launch and not lapsed
             reference = custody_rules.claimed(transaction, launch) if held else None
             views[launch] = LaunchView(
-                spanned=custody_rules.launch_fence(transaction, launch) is not None,
                 open=held,
                 roles=None if reference is None else custody_rules.claim_roles(reference),
                 parked=transaction.state == "attention_required")
@@ -1030,15 +1027,16 @@ def retain_result(store: Path, run: str, *, issue: int, attempt: int, launch: in
         transaction = custody_of(store, run, issue, attempt)
         if transaction is None:
             return False
+        fence = custody_rules.launch_fence(transaction, executor)
+        if fence is None:
+            return False
         if transaction.state in TERMINALS:
             with _core_errors():
                 supplement(_core(store, now_ms), transaction.terminal["receipt_digest"],
                            outcome="unknown", reason=f"owner_result:{executor}",
                            reference=telemetry_digest(report))
             return True
-        fence = custody_rules.launch_fence(transaction, executor)
-        if fence is None or custody_rules.result_recorded(
-                transaction, executor, telemetry_digest(report)):
+        if custody_rules.result_recorded(transaction, executor, telemetry_digest(report)):
             return False
         with _core_errors():
             _core(store, now_ms).record_owner_result(

@@ -150,3 +150,16 @@ class LateResultTest(LifecycleCustody, unittest.TestCase):
              self.core().post_terminal_observations(sealed.terminal["receipt_digest"])],
             [("unknown", "owner_result:14:1:1", telemetry_digest(late))])
         self.assertEqual(self.state_path.read_bytes(), ledger)
+
+    def test_a_finish_naming_a_launch_that_never_held_a_span_leaves_no_supplement(self):
+        self.spawn_14()
+        self.contractless()
+        self.finish_raw(1, self.stopped(), now=T(5), action_id="14:1:1")
+        digest = self.custody(14).terminal["receipt_digest"]
+        late, store = self.stopped("a different report"), self.core()
+        self.finish_raw(1, late, now=T(6), action_id="14:1:999", ok=False)
+        self.assertEqual(store.post_terminal_observations(digest), ())
+        self.finish_raw(1, late, now=T(7), action_id="14:1:1", ok=False)
+        self.assertEqual([(s["reason"], s["reference"])
+                          for s in store.post_terminal_observations(digest)],
+                         [("owner_result:14:1:1", telemetry_digest(late))])
