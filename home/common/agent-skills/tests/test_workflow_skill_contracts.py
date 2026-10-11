@@ -1553,6 +1553,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn('"review-package"', command_table)
         self.assertNotIn('".agents/bin/review-package" =', nix_module)
         self.assertIn('".agents/bin/sdd-workspace"', nix_module)
+        self.assertIn('".agents/bin/task-brief"', nix_module)
         with self.subTest(skill="ship-issue detail producer"):
             self.assertIn("~/.agents/bin/review-package", self.ship_issue)
 

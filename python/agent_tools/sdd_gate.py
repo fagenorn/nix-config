@@ -2,6 +2,9 @@
 
     sdd-gate review PLAN_FILE --skill-dir DIR --task N [--standards PATH ...]
         [--repo-root R --run-id I --action-id A --worker-id W]
+    sdd-gate next PLAN_FILE --skill-dir DIR [--standards PATH ...]
+        (--completed N [--parked K] | --task M [--context-file PATH]) [--delivery-base SHA]
+        [--repo-root R --run-id I --action-id A]
 
 `review` runs seven steps in order and stops at the first that fails:
 `ledger`, `release-worker`, `review-package`, `validate-report`,
@@ -10,6 +13,16 @@ the sdd ledger, releases the reviewing worker when a lifecycle identity is
 given, builds (or reuses) the review package for `base..HEAD`, checks the
 package against the budget authority and writes the rendered reviewer brief
 into the plan's workspace.
+
+`next` closes task N and/or opens task M. It runs up to eleven steps in order
+and stops at the first that fails: `ledger`, `ledger-complete` (with
+`--completed`), `mark-progress` (under an identity), `review-package`,
+`validate-report`, `budget-check`, `metrics-match` (the cumulative delivery
+package, delivery base to HEAD), then, with `--task`, `task-brief`,
+`prepare-brief`, `register-worker` (under an identity) and `write-brief`. A
+step that does not apply does not run. It appends the ledger's delivery base,
+completion, delivery gate and dispatch lines, each once, and writes the
+implementer brief into the plan's workspace.
 
 Stdout is one compact JSON object and a newline: the ready object (exit 0) or
 the refusal object (exit 3 when the package must be decomposed, exit 2 for
@@ -29,6 +42,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -38,8 +52,8 @@ from pathlib import Path
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.review_budget import BudgetAuthority, BudgetError, describe
 from agent_tools.sdd_brief import (
-    REVIEWER_TEMPLATE, REVIEWER_TOKENS, BriefError, plan_section, render, select_standards,
-    standards_value,
+    IMPLEMENTER_TEMPLATE, IMPLEMENTER_TOKENS, REVIEWER_TEMPLATE, REVIEWER_TOKENS, BriefError,
+    plan_section, render, select_standards, standards_value, task_row, worker_block,
 )
 from agent_tools.siblings import sibling_argv
 
@@ -50,6 +64,7 @@ HEADER = re.compile(r"# SDD ledger — plan: (.+)")
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 TASK_NUMBER = re.compile(r"[1-9][0-9]*")
 GLOBAL_CONSTRAINTS = "## Global Constraints"
+TEST_SEAMS = "## Test seams"
 STATES = ("complete", "decompose_required")
 PRODUCER_EXIT = {"complete": 0, "decompose_required": 3}
 # The budget metrics, in the order a brief names them, and the token each fills.
@@ -165,9 +180,14 @@ def recorded_sha(ledger: Ledger, pattern: str) -> str | None:
     return next(iter(found), None)
 
 
+def _dispatched(ledger: Ledger, task: int) -> str | None:
+    """The base commit the ledger's `dispatched` line records for `task`, if it has one."""
+    return recorded_sha(ledger, rf"Task {task}: dispatched \(base ([0-9a-f]{{40}})\)")
+
+
 def task_base(ledger: Ledger, task: int) -> str:
     """The base commit the ledger's `dispatched` line records for `task`; refuses without one."""
-    base = recorded_sha(ledger, rf"Task {task}: dispatched \(base ([0-9a-f]{{40}})\)")
+    base = _dispatched(ledger, task)
     if base is None:
         raise Refusal("ledger", f"{ledger.path} has no dispatched line for task {task}")
     return base
@@ -175,14 +195,13 @@ def task_base(ledger: Ledger, task: int) -> str:
 
 def append_line(ledger: Ledger, line: str) -> None:
     """Append `line` and a newline to the ledger, first ending a last line that lacks one."""
-    with ledger.path.open("rb+") as handle:
+    with ledger.path.open("ab+") as handle:
         size = handle.seek(0, os.SEEK_END)
         lead = b""
         if size:
             handle.seek(size - 1)
             lead = b"" if handle.read(1) == b"\n" else b"\n"
-        handle.seek(0, os.SEEK_END)
-        handle.write(lead + line.encode("utf-8") + b"\n")
+        handle.write(lead + line.encode("utf-8") + b"\n")  # append mode: it lands at the end
 
 
 def pinned_head() -> str:
@@ -424,6 +443,161 @@ def review(args: argparse.Namespace, done: list[str]) -> dict:
             "standards": [str(document) for document in documents]}
 
 
+def _ledger_has(ledger: Ledger, matches) -> bool:
+    """Whether the ledger file, read now, holds a line `matches` accepts."""
+    return any(matches(line) for line in ledger.path.read_text(encoding="utf-8").splitlines())
+
+
+def _ledger_reads(ledger: Ledger, args: argparse.Namespace) -> tuple[
+        str, bool, str | None, str | None]:
+    """What step `ledger` reads: the delivery base, whether it is new, and the bases of the
+    completed task and of the task to dispatch (`None` when not asked for or not recorded)."""
+    recorded = recorded_sha(ledger, r"Delivery base: ([0-9a-f]{40})")
+    if recorded is None and args.delivery_base is None:
+        raise Refusal("ledger", f"{ledger.path} records no delivery base: pass --delivery-base")
+    if recorded is not None and args.delivery_base not in (None, recorded):
+        raise Refusal("ledger", f"{ledger.path} records delivery base {recorded[:7]}, "
+                                f"not {args.delivery_base[:7]}")
+    completed = task_base(ledger, args.completed) if args.completed else None
+    dispatched = _dispatched(ledger, args.task) if args.task else None
+    return recorded or args.delivery_base, recorded is None, completed, dispatched
+
+
+def _mark_progress(args: argparse.Namespace) -> str:
+    """The `mark-progress` outcome under an identity (`refused` on any failure), else `skipped`."""
+    if args.repo_root is None:
+        return "skipped"
+    try:
+        done = _run(["workflow-state", "mark-progress", "--repo-root", args.repo_root,
+                     "--run-id", args.run_id, "--action-id", args.action_id])
+        reply = _strict_json(done.stdout) if done.returncode == 0 else None
+    except (OSError, ValueError):
+        return "refused"
+    outcome = reply.get("outcome") if isinstance(reply, dict) else None
+    return outcome if isinstance(outcome, str) else "refused"
+
+
+def _write_refusal(error: OSError, args: argparse.Namespace, worker_id: str | None) -> Refusal:
+    """The `write-brief` refusal, after releasing the worker this call registered (D15)."""
+    detail = f"cannot write the brief: {_errno(error)}"
+    if worker_id is None:
+        return Refusal("write-brief", detail)
+    command = ["workflow-state", "release-worker", "--repo-root", args.repo_root, "--run-id",
+               args.run_id, "--worker-id", worker_id, "--event", "stopped"]
+    try:
+        released = _run(command).returncode == 0
+    except OSError:
+        released = False
+    if released:
+        return Refusal("write-brief", detail)
+    return Refusal("write-brief", f"{detail}; worker {worker_id} is still registered: run "
+                                  f"`{shlex.join(command)}` before calling next again")
+
+
+def _dispatch(plan: Path, ledger: Ledger, args: argparse.Namespace, entries: Sequence[Path],
+              package: Package, base: str, record: bool, done: list[str]) -> tuple[
+        list[Path], str | None]:
+    """Steps `task-brief` to `write-brief`: the task's standards and the worker id.
+
+    `base` is the task's base; `record` says the ledger does not hold it yet.
+    """
+    task = args.task
+    try:
+        made = _run(["task-brief", str(plan), str(task)])
+    except OSError as error:
+        raise Refusal("task-brief", f"cannot run task-brief: {error}") from None
+    if made.returncode != 0:
+        raise Refusal("task-brief", f"task-brief exit {made.returncode}{_why(made)}")
+    done.append("task-brief")
+
+    try:
+        if record:
+            append_line(ledger, f"Task {task}: dispatched (base {base})")
+        plan_text = plan.read_text(encoding="utf-8")
+        row = task_row(plan_text, task)
+        documents = select_standards(_global_standards(), entries, list(row.paths))
+        context = args.context_file.read_bytes().decode("utf-8").rstrip("\n") \
+            if args.context_file else ""
+        values = {
+            **shared_values(plan, ledger, task, package.authority, documents),
+            "[TASK_NUMBER]": str(task), "[TASK_NAME]": row.title, "[CONTEXT]": context,
+            "[GLOBAL_CONSTRAINTS]": plan_section(plan_text, GLOBAL_CONSTRAINTS),
+            "[TEST_SEAMS]": plan_section(plan_text, TEST_SEAMS), "[LIFECYCLE_WORKER]": "",
+        }
+        template = (args.skill_dir / IMPLEMENTER_TEMPLATE).read_text(encoding="utf-8")
+        render(template, IMPLEMENTER_TOKENS, values)  # proves it renders before any worker exists
+    except (BriefError, BudgetError, OSError, UnicodeDecodeError) as error:
+        raise Refusal("prepare-brief", f"cannot prepare the brief: {error}") from None
+    done.append("prepare-brief")
+
+    worker_id = None
+    if args.repo_root is not None:
+        reply = workflow_state("register-worker", "register-worker", "--repo-root", args.repo_root,
+                               "--run-id", args.run_id, "--action-id", args.action_id)
+        worker_id = reply.get("worker_id")
+        if not isinstance(worker_id, str):
+            raise Refusal("register-worker", "workflow-state did not name the worker")
+        done.append("register-worker")
+        values["[LIFECYCLE_WORKER]"] = worker_block(args.repo_root, args.run_id, worker_id)
+    text = render(template, IMPLEMENTER_TOKENS, values)
+    try:
+        write_atomic(ledger.workspace / f"task-{task}-implementer-dispatch.md",
+                     text.encode("utf-8"))
+    except OSError as error:
+        raise _write_refusal(error, args, worker_id) from None
+    return documents, worker_id
+
+
+def next_task(args: argparse.Namespace, done: list[str]) -> dict:
+    """Run the `next` steps and return the ready object.
+
+    Each step that passes is appended to `done`; the first that fails raises
+    `Refusal` with its step name. The ledger gains its lines one write each, and
+    only after step `ledger` has read everything it checks.
+    """
+    plan = Path(os.path.abspath(args.plan_file))
+    entries = [Path(os.path.abspath(value)) for value in args.standards]
+    ledger = open_ledger(plan)
+    delivery_base, new_base, completed_base, dispatched = _ledger_reads(ledger, args)
+    if new_base:
+        append_line(ledger, f"Delivery base: {delivery_base}")
+    done.append("ledger")
+
+    head = pinned_head()
+    if args.completed:
+        done_line = f"Task {args.completed}: complete"
+        if not _ledger_has(ledger, lambda line: line.startswith(done_line)):
+            ending = f"{args.parked} parked" if args.parked else "review clean"
+            append_line(ledger, f"{done_line} (commits {completed_base[:7]}..{head[:7]}, {ending})")
+        done.append("ledger-complete")
+
+    progress = _mark_progress(args)
+    if args.repo_root is not None:
+        done.append("mark-progress")
+
+    package = package_gate(plan, ledger, delivery_base, head, done)
+    gate = f"Delivery gate: {delivery_base}..{head} " + " ".join(
+        f"{key}={package.metrics[key]}" for key in METRIC_KEYS)
+    if not _ledger_has(ledger, gate.__eq__):
+        append_line(ledger, gate)
+
+    out = {"command": "next", "outcome": "ready", "completed": args.completed, "task": None,
+           "brief_path": None, "report_path": None, "base_sha": None, "worker_id": None,
+           "mark_progress": progress,
+           "delivery": {"base_sha": delivery_base, "head_sha": head,
+                        "manifest_root": package.manifest_root, "metrics": package.metrics},
+           "standards": []}
+    if args.task:
+        base = dispatched or head
+        documents, worker_id = _dispatch(plan, ledger, args, entries, package, base,
+                                         dispatched is None, done)
+        out.update(task=args.task, base_sha=base, worker_id=worker_id,
+                   brief_path=str(ledger.workspace / f"task-{args.task}-implementer-dispatch.md"),
+                   report_path=str(ledger.workspace / f"task-{args.task}-report.md"),
+                   standards=[str(document) for document in documents])
+    return out
+
+
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise InvocationError(message)
@@ -433,6 +607,12 @@ def _task(value: str) -> int:
     if TASK_NUMBER.fullmatch(value) is None:
         raise argparse.ArgumentTypeError("not a task number")
     return int(value)
+
+
+def _full_sha(value: str) -> str:
+    if FULL_SHA.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError("not a full lowercase commit id")
+    return value
 
 
 def _parser() -> _Parser:
@@ -447,6 +627,19 @@ def _parser() -> _Parser:
     review_parser.add_argument("--standards", action="append", default=[])
     for flag in ("--repo-root", "--run-id", "--action-id", "--worker-id"):
         review_parser.add_argument(flag)
+
+    next_parser = commands.add_parser("next", help="close a task, open the next and render "
+                                                   "the implementer brief")
+    next_parser.add_argument("plan_file", metavar="PLAN_FILE")
+    next_parser.add_argument("--skill-dir", required=True, type=Path)
+    next_parser.add_argument("--standards", action="append", default=[])
+    next_parser.add_argument("--completed", type=_task)
+    next_parser.add_argument("--parked", type=_task)
+    next_parser.add_argument("--task", type=_task)
+    next_parser.add_argument("--context-file", type=Path)
+    next_parser.add_argument("--delivery-base", type=_full_sha)
+    for flag in ("--repo-root", "--run-id", "--action-id"):
+        next_parser.add_argument(flag)
     return parser
 
 
@@ -455,8 +648,14 @@ def _parse(argv: Sequence[str] | None) -> argparse.Namespace:
     identity = (args.repo_root, args.run_id, args.action_id)
     if any(value is not None for value in identity) and any(value is None for value in identity):
         raise InvocationError("a lifecycle identity is all three flags or none")
-    if (args.worker_id is not None) != (args.repo_root is not None):
-        raise InvocationError("--worker-id goes with a lifecycle identity")
+    if args.command == "review":
+        if (args.worker_id is not None) != (args.repo_root is not None):
+            raise InvocationError("--worker-id goes with a lifecycle identity")
+    elif (args.completed is None and args.task is None) \
+            or (args.parked is not None and args.completed is None) \
+            or (args.context_file is not None and args.task is None):
+        raise InvocationError("next takes --completed and/or --task, --parked with "
+                              "--completed and --context-file with --task")
     return args
 
 
@@ -479,7 +678,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     done: list[str] = []
     try:
-        _print(review(args, done))
+        _print({"review": review, "next": next_task}[args.command](args, done))
     except Refusal as refusal:
         _print(_refusal_object(args.command, refusal, done))
         return 3 if refusal.gate == "decompose_required" else 2

@@ -16,6 +16,8 @@ import subprocess
 import sys
 import unittest
 
+from agent_tools import sdd_brief
+
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/fixtures/sdd-gate"
 SKILL = FIXTURES / "skill"
@@ -368,6 +370,215 @@ class ReviewTest(GateCase):
         done = self.gate("--help")
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertTrue(done.stdout.startswith("usage: sdd-gate "), done.stdout[:80])
+
+
+NEXT_STEPS = ["ledger", "mark-progress", "review-package", "validate-report", "budget-check",
+              "metrics-match", "task-brief", "prepare-brief", "register-worker"]
+
+# A `workflow-state` shim that refuses `release-worker` and passes every other subcommand on.
+FAIL_RELEASE = ('#!/bin/sh\ncase "$1" in\n  release-worker) echo "release refused" >&2; exit 1 ;;\n'
+                'esac\nexec {python} {workflow} "$@"\n')
+
+
+class NextTest(GateCase):
+    def brief(self, task=1):
+        return self.workspace / f"task-{task}-implementer-dispatch.md"
+
+    def next(self, *args, skill=SKILL):
+        return self.gate("next", self.plan, "--skill-dir", skill,
+                         "--standards", PROJECT_STANDARDS, *args)
+
+    def first(self, *args, skill=SKILL):
+        """The run's first call: it carries the delivery base."""
+        return self.next("--task", 1, "--delivery-base", self.delivery_base, *args, skill=skill)
+
+    def head(self):
+        return self.repo_git("rev-parse", "HEAD")
+
+    def delivery(self, head):
+        """(manifest root, metrics, ledger line) of the cumulative gate at `head`."""
+        root = self.package_root(self.delivery_base, head)
+        metrics = self.budget_metrics("review-package", self.repo / root)
+        return root, metrics, (
+            f"Delivery gate: {self.delivery_base}..{head} root_bytes={metrics['root_bytes']} "
+            f"total_bytes={metrics['total_bytes']} file_count={metrics['file_count']} "
+            f"largest_member_bytes={metrics['largest_member_bytes']}")
+
+    def workers(self):
+        return json.loads(self.state_path.read_text(encoding="utf-8"))["workers"]
+
+    def test_the_first_call_records_both_bases_and_renders_the_implementer_brief(self):
+        head = self.head()
+        context = self.root / "context.md"
+        context.write_text("Fits after setup.\nUse `value`.\n\n", encoding="utf-8")
+        out = self.ready(self.first("--context-file", context))
+        root, metrics, line = self.delivery(head)
+        self.assertEqual(out, {
+            "command": "next", "outcome": "ready", "completed": None, "task": 1,
+            "brief_path": str(self.brief()),
+            "report_path": str(self.workspace / "task-1-report.md"),
+            "base_sha": head, "worker_id": None, "mark_progress": "skipped",
+            "delivery": {"base_sha": self.delivery_base, "head_sha": head,
+                         "manifest_root": root, "metrics": metrics},
+            "standards": [str(self.bar), str(PROJECT_STANDARDS / "python-rules.md")]})
+        self.assertEqual(self.ledger_lines()[1:], [
+            f"Delivery base: {self.delivery_base}", line, f"Task 1: dispatched (base {head})"])
+        self.assertEqual(self.brief().read_bytes(), self.golden("golden-implementer-brief.md"))
+        self.assertEqual((self.workspace / "task-1-brief.md").read_bytes(),
+                         (FIXTURES / "plan.tasks/task-1.md").read_bytes())
+
+    def test_a_repeated_call_writes_no_second_ledger_line(self):
+        first = self.first()
+        self.ready(first)
+        lines = self.ledger_lines()
+        again = self.next("--task", 1)  # the ledger holds the delivery base now
+        self.assertEqual((again.returncode, again.stdout), (0, first.stdout))
+        self.assertEqual(self.ledger_lines(), lines)
+        # No context: the [CONTEXT] line and the empty line after it are gone.
+        self.assertIn("task-1-report.md\n\nPlan: ", self.brief().read_text(encoding="utf-8"))
+
+    def test_the_delivery_base_must_be_known_and_must_not_change(self):
+        header = self.ledger_lines()
+        self.assert_gate_refused(self.next("--task", 1), command="next", step="ledger",
+                                 gate=None, steps=[])
+        self.assertEqual(self.ledger_lines(), header)
+        self.ready(self.first())
+        lines = self.ledger_lines()
+        self.assert_gate_refused(self.next("--task", 1, "--delivery-base", self.head()),
+                                 command="next", step="ledger", gate=None, steps=[])
+        self.assertEqual(self.ledger_lines(), lines)
+
+    def test_completing_a_task_appends_its_line_once(self):
+        self.ready(self.first())
+        base = self.head()
+        self.write("src/app.py", "value = 2\n")
+        head = self.repo_commit("task 1")
+        out = self.ready(self.next("--completed", 1, "--task", 2))
+        self.assertEqual(self.ledger_lines()[-3:], [
+            f"Task 1: complete (commits {base[:7]}..{head[:7]}, review clean)",
+            self.delivery(head)[2], f"Task 2: dispatched (base {head})"])
+        self.assertEqual((out["completed"], out["task"], out["base_sha"]), (1, 2, head))
+        self.assertEqual(out["standards"], [str(self.bar)])  # Task 2's row names notes.txt only
+        lines = self.ledger_lines()
+        self.ready(self.next("--completed", 1, "--task", 2))
+        self.assertEqual(self.ledger_lines(), lines)
+
+    def test_parked_findings_are_counted_and_the_last_call_renders_nothing(self):
+        self.ready(self.next("--task", 2, "--delivery-base", self.delivery_base))
+        base = self.head()
+        self.write("notes.txt", "note\n")
+        head = self.repo_commit("task 2")
+        out = self.ready(self.next("--completed", 2, "--parked", 3))
+        self.assertEqual(self.ledger_lines()[-2:], [
+            f"Task 2: complete (commits {base[:7]}..{head[:7]}, 3 parked)", self.delivery(head)[2]])
+        self.assertEqual([out[key] for key in ("task", "brief_path", "report_path", "base_sha",
+                                               "worker_id")], [None] * 5)
+        self.assertEqual((out["completed"], out["standards"]), (2, []))
+
+    def test_completing_an_undispatched_task_is_refused_before_any_write(self):
+        header = self.ledger_lines()
+        self.assert_gate_refused(
+            self.next("--completed", 2, "--delivery-base", self.delivery_base),
+            command="next", step="ledger", gate=None, steps=[])
+        self.assertEqual(self.ledger_lines(), header)
+
+    def test_an_over_budget_delivery_stops_before_the_next_dispatch(self):
+        self.write("large.txt", "small\n")
+        self.repo_commit("small")
+        self.ready(self.first())
+        self.write("large.txt", "X" * 70_000 + "\n")
+        self.repo_commit("task 1")
+        out = self.assert_gate_refused(
+            self.next("--completed", 1, "--task", 2), command="next", step="validate-report",
+            gate="decompose_required", steps=["ledger", "ledger-complete", "review-package"],
+            code=3)
+        self.assertEqual(out["report"]["state"], "decompose_required")
+        self.assertTrue(self.ledger_lines()[-1].startswith("Task 1: complete ("))
+        self.assertFalse(self.brief(2).exists())
+
+    def test_a_task_without_an_index_row_is_refused_at_task_brief(self):
+        self.assert_gate_refused(
+            self.next("--task", 9, "--delivery-base", self.delivery_base), command="next",
+            step="task-brief", gate=None,
+            steps=["ledger", "review-package", "validate-report", "budget-check", "metrics-match"])
+        self.assertFalse(any(line.startswith("Task 9") for line in self.ledger_lines()))
+
+    def test_a_brief_that_cannot_be_prepared_is_refused_before_a_worker_is_registered(self):
+        self.launch()
+        drifted = self.root / "drifted"
+        shutil.copytree(SKILL, drifted)
+        template = drifted / "implementer-prompt.md"
+        template.write_text(template.read_text(encoding="utf-8").replace(
+            "    End.\n", "    End [SURPRISE].\n"), encoding="utf-8")
+        cases = {"template drift": lambda: self.first(*self.identity(), skill=drifted),
+                 "an unreadable context file": lambda: self.first(
+                     "--context-file", self.root / "absent.md", *self.identity())}
+        for name, call in cases.items():
+            with self.subTest(case=name):
+                self.assert_gate_refused(call(), command="next", step="prepare-brief", gate=None,
+                                         steps=NEXT_STEPS[:7])
+        self.assertEqual(self.workers(), [])
+        self.assertFalse(self.brief().exists())
+
+    def test_under_an_identity_the_worker_is_registered_and_named_in_the_brief(self):
+        self.launch()
+        out = self.ready(self.first(*self.identity()))
+        self.assertEqual((out["worker_id"], out["mark_progress"]), ("14:1:1:w1", "baseline"))
+        self.assertTrue(self.check_worker("14:1:1:w1")["live"])
+        block = sdd_brief.worker_block(str(self.root), self.run_id, "14:1:1:w1")
+        self.assertIn(f"## Worker\n\n{block}\n\nEnd.\n", self.brief().read_text(encoding="utf-8"))
+        again = self.ready(self.next("--task", 1, *self.identity()))  # a re-dispatch of the task
+        self.assertEqual((again["worker_id"], again["base_sha"], again["mark_progress"]),
+                         ("14:1:1:w2", out["base_sha"], "unchanged"))
+
+    def test_a_refused_progress_mark_does_not_stop_the_call(self):
+        self.launch(worktree=self.root / "gone")
+        out = self.ready(self.first(*self.identity()))
+        self.assertEqual((out["mark_progress"], out["worker_id"]), ("refused", "14:1:1:w1"))
+
+    def test_a_refused_registration_leaves_no_brief(self):
+        self.launch()
+        head = self.head()
+        self.assert_gate_refused(self.first(*self.identity("14:1:9")), command="next",
+                                 step="register-worker", gate=None, steps=NEXT_STEPS[:8])
+        self.assertFalse(self.brief().exists())
+        self.assertEqual(self.workers(), [])
+        self.assertEqual(self.ledger_lines()[-1], f"Task 1: dispatched (base {head})")
+
+    def test_a_failed_write_releases_the_worker_it_registered(self):
+        self.launch()
+        (self.brief() / "occupied").mkdir(parents=True)  # a rename cannot replace this directory
+        self.assert_gate_refused(self.first(*self.identity()), command="next", step="write-brief",
+                                 gate=None, steps=NEXT_STEPS)
+        self.assertEqual([(worker["worker_id"], worker["release_event"])
+                          for worker in self.workers()], [("14:1:1:w1", "stopped")])
+
+    def test_a_failed_write_names_the_worker_it_could_not_release(self):
+        self.launch()
+        (self.brief() / "occupied").mkdir(parents=True)
+        self.write_executable("workflow-state", FAIL_RELEASE.format(
+            python=shlex.quote(sys.executable), workflow=shlex.quote(str(WORKFLOW))))
+        out = self.assert_gate_refused(self.first(*self.identity()), command="next",
+                                       step="write-brief", gate=None, steps=NEXT_STEPS)
+        self.assertIn("14:1:1:w1", out["detail"])
+        self.assertIn("release-worker", out["detail"])
+        self.assertEqual([(worker["worker_id"], worker["release_event"])
+                          for worker in self.workers()], [("14:1:1:w1", None)])
+
+    def test_an_invalid_next_invocation_prints_one_stderr_line(self):
+        base = ("next", self.plan, "--skill-dir", SKILL)
+        cases = {
+            "neither --completed nor --task": base,
+            "--parked without --completed": (*base, "--task", "1", "--parked", "1"),
+            "--context-file without --task": (*base, "--completed", "1", "--context-file", "c.md"),
+            "a short delivery base": (*base, "--task", "1", "--delivery-base", "abc1234"),
+            "a worker id": (*base, "--task", "1", *self.identity(), "--worker-id", "14:1:1:w1"),
+            "the stdin flag the design dropped": (*base, "--task", "1", "--context-stdin"),
+        }
+        for name, argv in cases.items():
+            with self.subTest(case=name):
+                done = self.gate(*argv)
+                self.assertEqual((done.returncode, done.stdout, done.stderr), (2, "", INVALID))
 
 
 if __name__ == "__main__":
