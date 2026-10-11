@@ -2965,7 +2965,7 @@ def command_control(args: argparse.Namespace) -> int:
     request, migration_contracts = load_control_request(args.request_file)
     now: str | None = None
     now_value: datetime | None = None
-    run_dir, _, _ = workflow_paths(args.repo_root, args.run_id)
+    run_dir, state_path, _ = workflow_paths(args.repo_root, args.run_id)
     tracker_by_issue = {item["issue"]: item for item in request["tracker"]}
     worktree_by_issue = {item["issue"]: item for item in request["worktrees"]}
     library = _host_admission()
@@ -2994,6 +2994,10 @@ def command_control(args: argparse.Namespace) -> int:
         if now_value < parse_utc(state["updated_at"], "run update time"):
             raise backward_refusal("control time must not move backward", now_value,
                                    "run updated_at", state["updated_at"])
+        # The store's one lock-free view of every current launch, taken before this
+        # sweep changes `state` and read for occupancy and the capacity gate (D12).
+        views = attempt_store.launch_views(
+            attempt_store.ledger_store(state_path), state, now_ms=at_ms(now))
         # A null request contract means "none supplied": an installed contract
         # governs, and a supplied one must equal it before anything is written
         # (per D10).
@@ -3026,6 +3030,8 @@ def command_control(args: argparse.Namespace) -> int:
                 f"control host route {route!r} does not match the run's bound route "
                 f"{state['admission']['route']!r}")
         admission = state["admission"]
+        releases_at_start = admission["releases"]
+        refused_here: set[str] = set()
         # Park every refused launch on `host_capacity` before the settle below
         # releases its claim `launch_refused` — or `finished`, when the refusal
         # trips the anti-zombie bound (D7, D19, D22).
@@ -3041,6 +3047,7 @@ def command_control(args: argparse.Namespace) -> int:
                                and claim["released_at"] is None
                                for claim in admission["claims"])):
                 raise WorkflowError("launch_refused is not applicable")
+            refused_here.add(custody["action_id"])
             if kind == "implementation":
                 if not suspend_attempt(record, blocked_on="host_capacity", now=now):
                     issue_state["outcome"] = copy.deepcopy(record["result"])
@@ -3101,8 +3108,39 @@ def command_control(args: argparse.Namespace) -> int:
         occupied = runtime.occupied_count(state, at_time=now, unavailable=unavailable)
         capacity = max(0, request["max_parallel"] - occupied)
 
-        # The controller's own role, then every held claim still occupying a
-        # live launch, come off the declared slots before any lane admits (D4).
+        def occupying_roles() -> list[dict[str, int]]:
+            """The role set of each claim now occupying a slot: the controller's, and one per
+            launch that is the current launch of an `active` record whose owner the request
+            does not report unavailable (D4, D12, D23, D26).
+
+            A launch whose span the store holds open with a claim entry occupies with the
+            role set that entry records, whatever the block says. Any other such launch,
+            whether the store holds no transaction for it, never gave it a span, holds its
+            span open with no claim entry or has closed it, occupies with the block's held
+            claim exactly while the record's deadline has not passed (`live_launches`): the
+            commit reacquires a closed span of an unexpired `active` record, and its claim
+            with it, so counting it free would admit a second owner into a slot the same
+            commit takes back.
+            """
+            live = runtime.live_launches(state, at_time=now, unavailable=unavailable)
+            held = {claim["holder"]: claim["roles"] for claim in admission["claims"]
+                    if claim["released_at"] is None}
+            roles = [held[CONTROLLER_HOLDER]] if CONTROLLER_HOLDER in held else []
+            for issue_state in state["issues"].values():
+                custody, record = runtime.current_custody(issue_state["issue"], issue_state)
+                if (record is None or record["state"] != "active"
+                        or runtime.owner_is_unavailable(issue_state, unavailable)):
+                    continue
+                holder = custody["action_id"]
+                view = views.get(holder)
+                if view is not None and view.open and view.roles is not None:
+                    roles.append(view.roles)
+                elif holder in live and holder in held:
+                    roles.append(held[holder])
+            return roles
+
+        # The controller's own role, then every claim still occupying a live
+        # launch, come off the declared slots before any lane admits (D4).
         controller_claim = None
         new_controller = False
         available = 0
@@ -3115,11 +3153,8 @@ def command_control(args: argparse.Namespace) -> int:
                 controller_claim = new_claim(CONTROLLER_HOLDER, library.CONTROLLER_ROLES)
                 admission["claims"].append(controller_claim)
                 new_controller = True
-            live = runtime.live_launches(state, at_time=now, unavailable=unavailable)
             available = declared_slots - sum(
-                sum(claim["roles"].values()) for claim in admission["claims"]
-                if claim["released_at"] is None
-                and (claim["holder"] == CONTROLLER_HOLDER or claim["holder"] in live))
+                sum(roles.values()) for roles in occupying_roles())
         waiting: set[int] = set()
         acquired = False
 
@@ -3131,27 +3166,38 @@ def command_control(args: argparse.Namespace) -> int:
             return True
 
         def refusal_gated(issue: int) -> bool:
-            """Whether a `host_capacity` custody still awaits a later release (D7, D26).
+            """Whether a `host_capacity` custody still awaits a later release (D7, D12, D26).
 
-            It waits until some other claim is released after the
-            `launch_refused` claim naming its current launch, by any event but
-            `launch_refused`: another custody's refusal frees no capacity, so two
-            refused owners never wake each other (D31).
+            For a refusal this sweep recorded, or a launch the store has no view of, it
+            waits until some other claim is released after the `launch_refused` claim naming
+            its current launch, by any event but `launch_refused`: another custody's refusal
+            frees no capacity, so two refused owners never wake each other (D31). Otherwise
+            the store decides: a transaction not parked has been woken, so the custody may
+            resume, and a parked one waits unless this sweep itself released a claim by an
+            event other than `launch_refused`.
             """
             issue_state = state["issues"].get(str(issue))
             custody, record = runtime.current_custody(issue, issue_state)
             if (record is None or record["state"] != "suspended"
                     or record["blocked_on"] != "host_capacity"):
                 return False
-            refused_claim = next(
-                (claim for claim in admission["claims"]
-                 if claim["holder"] == custody["action_id"]
-                 and claim["release_event"] == "launch_refused"), None)
-            if refused_claim is None:
-                raise WorkflowError("internal error: refused launch holds no refused claim")
-            if any(claim["release_event"] not in (None, "launch_refused")
-                   and claim["release_seq"] > refused_claim["release_seq"]
-                   for claim in admission["claims"]):
+            holder = custody["action_id"]
+            view = views.get(holder)
+            if holder in refused_here or view is None:
+                refused_claim = next(
+                    (claim for claim in admission["claims"]
+                     if claim["holder"] == holder
+                     and claim["release_event"] == "launch_refused"), None)
+                if refused_claim is None:
+                    raise WorkflowError("internal error: refused launch holds no refused claim")
+                if any(claim["release_event"] not in (None, "launch_refused")
+                       and claim["release_seq"] > refused_claim["release_seq"]
+                       for claim in admission["claims"]):
+                    return False
+            elif not view.parked or any(
+                    claim["release_event"] not in (None, "launch_refused")
+                    and claim["release_seq"] > releases_at_start
+                    for claim in admission["claims"]):
                 return False
             waiting.add(issue)
             return True
@@ -3539,12 +3585,9 @@ def command_control(args: argparse.Namespace) -> int:
             "route": route, "declared_slots": None, "reserved": reserved,
             "available": None, "waiting": []}
         if not direct:
-            live = runtime.live_launches(state, at_time=now, unavailable=unavailable)
-            for claim in admission["claims"]:
-                if claim["released_at"] is None and (
-                        claim["holder"] == CONTROLLER_HOLDER or claim["holder"] in live):
-                    for role, count in claim["roles"].items():
-                        reserved[role] += count
+            for roles in occupying_roles():
+                for role, count in roles.items():
+                    reserved[role] += count
             report.update(
                 declared_slots=declared_slots,
                 available=max(0, declared_slots - sum(reserved.values())),

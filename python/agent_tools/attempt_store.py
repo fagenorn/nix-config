@@ -6,7 +6,9 @@ index probe. From schema 9 it also applies `agent_tools.attempt_custody`'s settl
 `TransactionStore` under the store lock: `settle_custody` before a ledger write,
 `seal_custody` after it, and `pending_seals` to find a seal a crash left undone. From schema
 10 the plan covers every delivery remainder as well as every attempt, records a held owner
-claim on its launch's span, and wakes a `host_capacity` suspension.
+claim on its launch's span, and wakes a `host_capacity` suspension; `launch_views` reads,
+without a lock, what the store says of each current launch for a control sweep's occupancy and
+capacity gate.
 `workflow-state` keeps the ledger lock, the ledger read and commit, the delivery chain and
 `validate_state`; it passes the last two to this module as callbacks.
 """
@@ -490,6 +492,49 @@ def remainder_custody_of(store: Path, run: str, issue: int, remainder: int) -> T
     return _custody_under(store, delivery_rules.remainder_key(run, issue, remainder))
 
 
+class LaunchView(NamedTuple):
+    """The store's view of one record's current launch. `spanned`: the core ever gave it
+    a span. `open`: that span is the transaction's open span and has not lapsed. `roles`:
+    the claim entry's role set, None when not open or unclaimed. `parked`: the
+    transaction is `attention_required`."""
+
+    spanned: bool
+    open: bool
+    roles: dict[str, int] | None
+    parked: bool
+
+
+def launch_views(store: Path, state: dict, *, now_ms: int) -> dict[str, LaunchView]:
+    """A view per current launch of each issue's last attempt and last remainder that has a
+    custody transaction, keyed by launch id. Lock-free and read-only; a core error is a
+    `StoreFault`."""
+    views = {}
+    for key in sorted(state["issues"], key=int):
+        issue, issue_state = int(key), state["issues"][key]
+        for records, remainder in ((issue_state["attempts"], False),
+                                   (issue_state["delivery_remainders"], True)):
+            if not records:
+                continue
+            record = records[-1]
+            ordinal = record["remainder" if remainder else "attempt"]
+            read = remainder_custody_of if remainder else custody_of
+            transaction = read(store, state["transaction_id"], issue, ordinal)
+            if transaction is None:
+                continue
+            launch = _current_launch(issue, record, remainder=remainder)
+            span = transaction.custody
+            lapsed = span is None or custody_rules.span_lapsed(
+                span, _lease_of(store, transaction, remainder=remainder, now_ms=now_ms), now_ms)
+            held = span is not None and span.executor_id == launch and not lapsed
+            reference = custody_rules.claimed(transaction, launch) if held else None
+            views[launch] = LaunchView(
+                spanned=custody_rules.launch_fence(transaction, launch) is not None,
+                open=held,
+                roles=None if reference is None else custody_rules.claim_roles(reference),
+                parked=transaction.state == "attention_required")
+    return views
+
+
 def standing_worktree(store: Path, directory: str) -> str | None:
     """The attempt worktree `directory` stands in: the first of it and its ancestors, nearest
     first, whose `attempt-worktree:<path>` key has a lease record, held or not (#338 D7).
@@ -549,6 +594,33 @@ def _require_recorded_worktree(issue: int, label: str, record: Mapping,
             f"custody transaction {transaction.transaction_id} is bound to {bound}")
 
 
+def _current_launch(issue: int, record: Mapping, *, remainder: bool) -> str:
+    """The launch id of `record`'s current launch: its last, by the record's launch count."""
+    make = delivery_rules.remainder_launch_id if remainder else custody_rules.launch_id
+    return make(issue, record["remainder" if remainder else "attempt"], len(record["launches"]))
+
+
+def _lease_of(store: Path, transaction: Transaction, *, remainder: bool,
+              now_ms: int) -> Mapping | None:
+    """The lease record of the worktree key of `transaction`, a custody transaction of an
+    attempt or, with `remainder`, of a delivery remainder, read without a lock.
+
+    A subject that is not the closed custody subject of its kind is a `StoreRefused`
+    projection mismatch; a core error is a `StoreFault`.
+    """
+    check = (delivery_rules.remainder_subject_violation if remainder
+             else custody_rules.subject_violation)
+    violation = check(transaction.subject)
+    if violation is not None:
+        raise StoreRefused(f"custody projection mismatch: "
+                           f"{transaction.transaction_id}: {violation}")
+    try:
+        return _core(store, now_ms).inspect_lease(
+            custody_rules.worktree_key(transaction.subject["worktree"]))
+    except TransactionError as error:
+        raise StoreFault(f"custody store: {error}") from error
+
+
 def _read_plans(store: Path, state: dict, *, now_ms: int,
                 bound_launches: Mapping[tuple[int, int], int],
                 bound_remainders: Mapping[tuple[int, int], int], report: OwnerReport | None,
@@ -575,24 +647,11 @@ def _read_plans(store: Path, state: dict, *, now_ms: int,
             label = f"{'remainder' if remainder else 'attempt'} {ordinal}"
             transaction = _custody_under(
                 store, _custody_key(state["transaction_id"], issue, ordinal, remainder=remainder))
-            lease = None
-            if transaction is not None:
-                check = (delivery_rules.remainder_subject_violation if remainder
-                         else custody_rules.subject_violation)
-                violation = check(transaction.subject)
-                if violation is not None:
-                    raise StoreRefused(f"custody projection mismatch: "
-                                       f"{transaction.transaction_id}: {violation}")
-                try:
-                    lease = _core(store, now_ms).inspect_lease(
-                        custody_rules.worktree_key(transaction.subject["worktree"]))
-                except TransactionError as error:
-                    raise StoreFault(f"custody store: {error}") from error
+            lease = (None if transaction is None
+                     else _lease_of(store, transaction, remainder=remainder, now_ms=now_ms))
             named = (not remainder and report is not None
                      and (report.issue, report.attempt) == (issue, ordinal))
-            current = (delivery_rules.remainder_launch_id(issue, ordinal, len(record["launches"]))
-                       if remainder else
-                       custody_rules.launch_id(issue, ordinal, len(record["launches"])))
+            current = _current_launch(issue, record, remainder=remainder)
             try:
                 if transaction is not None and canonical is not None:
                     _require_recorded_worktree(issue, label, record, transaction, canonical)

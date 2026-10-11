@@ -306,3 +306,43 @@ class SchemaTenTest(Cutover, unittest.TestCase):
         self.assertEqual((held.subject["bound_launch"], held.custody.executor_id, held.state),
                          (1, f"{DELIVERED}:r1:1", "created"))
         self.assertEqual(self.claim_ids(held), [f"admission-claim:{DELIVERED}:r1:1:2"])
+
+
+class StoreReadTest(Cutover, unittest.TestCase):
+    def test_ac1_occupancy_is_counted_from_the_store(self):
+        self.four_slots()
+
+        def drop(document):
+            claims = document["admission"]["claims"]
+            claims[:] = [c for c in claims if c["holder"] != f"{DELIVERED}:1:1"]
+
+        self.rewrite(drop)
+        report = self.reply(1, recorded={DELIVERED: "matching_issue_branch", LIVE: None},
+                            contracts=True)["admission"]
+        self.assertEqual((report["waiting"], report["reserved"], report["available"]),
+                         ([LIVE], {"controller": 1, **ROLES}, 0))
+        self.assertIsNone(self.custody(LIVE))
+
+    def test_a_cut_suspension_keeps_its_slot(self):
+        self.four_slots()
+        self.core(at(1)).release(self.custody(DELIVERED).custody)
+        report = self.reply(2, recorded={**MATCHING, LIVE: None}, contracts=True)["admission"]
+        self.assertEqual((report["waiting"], report["reserved"], report["available"]),
+                         ([LIVE], {"controller": 1, **ROLES}, 0))
+        self.assertIsNone(self.custody(LIVE))
+
+    def test_the_capacity_gate_is_read_from_the_store(self):
+        self.spawn(DELIVERED, LIVE)
+        self.reply(1, recorded=BOTH, owners=[self.held("launch_refused")])
+        self.failing(f"{DELIVERED}:1:1", 3)
+
+        def swap(document):  # by the block alone, the refusal now came last
+            claims = {c["holder"]: c for c in document["admission"]["claims"]}
+            freed, refused = claims[f"{DELIVERED}:1:1"], claims[f"{LIVE}:1:1"]
+            freed["release_seq"], refused["release_seq"] = (refused["release_seq"],
+                                                            freed["release_seq"])
+
+        self.rewrite(swap)
+        resumed = self.reply(4, recorded=BOTH)
+        self.assertNotIn(LIVE, resumed["admission"]["waiting"])
+        self.assertIn(f"{LIVE}:1:2", self.launched(resumed))
