@@ -1,19 +1,22 @@
-"""The pure half of attempt custody (#338): the vocabulary, the subject and the settle planner.
+"""The pure half of attempt custody (#338, #339): the vocabulary, the subject and the settle planner.
 
 Every rule here needs no file, lock, clock or environment variable. It holds the closed sets of
 suspension causes and the stall bound (their one home; `workflow-state` imports them), the
 fencing refusal reasons, the keys and the closed `attempt-custody/v1` subject a custody
 transaction is created under, the pure 8 -> 9 migration plan, the readers that answer from a
 custody transaction's events (a launch's fence, whether it was reaped, whether a result is
-recorded), and `settle_plan`, which turns one ledger attempt, its custody `Transaction` and its
-lease record into the ordered `Operation`s that bring the core to the spec's projection table.
+recorded), the readers that answer a launch's admission claim from the same events, and
+`settle_plan`, which turns one ledger attempt (or delivery remainder), its custody `Transaction`
+and its lease record into the ordered `Operation`s that bring the core to the spec's projection
+table.
 `agent_tools.attempt_store` owns the effects: it applies a plan to `TransactionStore` under the
 store lock, and `workflow-state` owns the ledgers and the clock.
 """
 
 import datetime
+import json
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,15 +45,31 @@ BLOCKED_ON_VALUES = frozenset({
     "agent_dispatch", "deadline",
 })
 OWNER_BLOCKED_ON_VALUES = BLOCKED_ON_VALUES - {"unknown", "host_capacity"}
+# ``owner_unavailable`` is the one cause only a delivery remainder takes: control writes it when
+# the host reports the remainder's owner gone (#339 D15, D24). It is not an attempt cause, so the
+# vocabularies that `suspend` and attempt validation read keep their members.
+REMAINDER_BLOCKED_ON_VALUES = frozenset({"owner_unavailable"})
+SUSPENSION_CAUSES = BLOCKED_ON_VALUES | REMAINDER_BLOCKED_ON_VALUES
 AUTO_RESUMABLE_BLOCKED_ON = frozenset(
     {"usage_limit", "transport", "unknown", "host_capacity", "deadline"})
 STALL_LIMIT = 3
 LIVE_STATES = ("active", "handed_off", "suspended")
+# The unparking reason of a `host_capacity` suspension a later release woke, and the reason of
+# the seal over a delivered issue (#339 D4, D5).
+CAPACITY_RELEASED = "capacity_released"
+DELIVERED = "delivered"
+# The reason of a supplement over an `abandoned` receipt whose record a reconcile found merged
+# (#339 D6), and the reserved reason with which the core parks a proof that cannot converge
+# (D27).
+RECONCILED_MERGE = "reconciled_merge"
+UNCONVERGED = "proof_did_not_converge"
+# The core states a `succeeded` seal passes through, in order; a delivered record may be found
+# in any of them by a seal that was cut partway (#339 D19b).
+FORWARD_STATES = ("awaiting_verification", "ready", "publishing", "published", "proving")
 OPERATIONS = ("create", "acquire", "release", "reap", "park", "unpark", "renew",
-              "record_result", "seal")
+              "record_result", "seal", "claim", "seal_succeeded", "supplement")
 
-_SUBJECT_KEYS = frozenset({"schema", "run", "issue", "attempt", "worktree", "prior",
-                           "bound_launch"})
+_CLAIM_KEYS = frozenset({"roles", "route"})
 _VERDICT_STATES = ("stopped", "failed", "merged")
 _SYNTHETIC_SOURCES = ("stalled", "expiry")
 _SUSPENDED = "suspended:"
@@ -69,20 +88,20 @@ def stalled(count: int) -> bool:
 
 
 def suspension_reason(blocked_on: str) -> str:
-    """The parking reason `suspended:<blocked_on>`; ValueError outside `BLOCKED_ON_VALUES`."""
-    if type(blocked_on) is not str or blocked_on not in BLOCKED_ON_VALUES:
-        raise ValueError(f"blocked_on {blocked_on!r} is not one of {sorted(BLOCKED_ON_VALUES)}")
+    """The parking reason `suspended:<blocked_on>`; ValueError outside `SUSPENSION_CAUSES`."""
+    if type(blocked_on) is not str or blocked_on not in SUSPENSION_CAUSES:
+        raise ValueError(f"blocked_on {blocked_on!r} is not one of {sorted(SUSPENSION_CAUSES)}")
     return _SUSPENDED + blocked_on
 
 
 def blocked_on_of(reason: str) -> str | None:
     """The cause a parking reason records: "unknown" for `expiry`, the cause of a
-    `suspended:<cause>` reason in `BLOCKED_ON_VALUES`, else None."""
+    `suspended:<cause>` reason in `SUSPENSION_CAUSES`, else None."""
     if reason == "expiry":
         return "unknown"
     if type(reason) is str and reason.startswith(_SUSPENDED):
         cause = reason[len(_SUSPENDED):]
-        if cause in BLOCKED_ON_VALUES:
+        if cause in SUSPENSION_CAUSES:
             return cause
     return None
 
@@ -110,20 +129,23 @@ def launch_id(issue: int, attempt: int, launch: int) -> str:
     return f"{issue}:{attempt}:{launch}"
 
 
-def _is_ordinal(value: object) -> bool:
+def is_ordinal(value: object) -> bool:
+    """Whether `value` is an integer (not a bool) of at least 1."""
     return type(value) is int and value >= 1
 
 
-def subject_violation(value: object) -> str | None:
-    """Why `value` is not the closed attempt-custody/v1 subject, else None."""
-    if not isinstance(value, Mapping) or set(value) != _SUBJECT_KEYS:
-        return f"subject is not the closed {SUBJECT_SCHEMA} object"
-    if value["schema"] != SUBJECT_SCHEMA:
-        return f"subject schema is not {SUBJECT_SCHEMA}"
+def custody_subject_violation(value: object, *, schema: str, ordinal: str) -> str | None:
+    """Why `value` is not the closed custody subject of `schema`, whose record is numbered by
+    the member `ordinal` (`attempt` or `remainder`), else None."""
+    keys = {"schema", "run", "issue", ordinal, "worktree", "prior", "bound_launch"}
+    if not isinstance(value, Mapping) or set(value) != keys:
+        return f"subject is not the closed {schema} object"
+    if value["schema"] != schema:
+        return f"subject schema is not {schema}"
     if not is_id(value["run"]):
         return "subject run is not a transaction id"
-    for name in ("issue", "attempt"):
-        if not _is_ordinal(value[name]):
+    for name in ("issue", ordinal):
+        if not is_ordinal(value[name]):
             return f"subject {name} is not an integer of at least 1"
     worktree = value["worktree"]
     if type(worktree) is not str or not os.path.isabs(worktree) \
@@ -131,9 +153,14 @@ def subject_violation(value: object) -> str | None:
         return "subject worktree is not a normalized absolute path"
     if value["prior"] is not None and not is_id(value["prior"]):
         return "subject prior is not null or a transaction id"
-    if value["bound_launch"] is not None and not _is_ordinal(value["bound_launch"]):
+    if value["bound_launch"] is not None and not is_ordinal(value["bound_launch"]):
         return "subject bound_launch is not null or an integer of at least 1"
     return None
+
+
+def subject_violation(value: object) -> str | None:
+    """Why `value` is not the closed attempt-custody/v1 subject, else None."""
+    return custody_subject_violation(value, schema=SUBJECT_SCHEMA, ordinal="attempt")
 
 
 def subject(*, run: str, issue: int, attempt: int, worktree: str, prior: str | None,
@@ -214,6 +241,89 @@ def result_recorded(transaction: Transaction, executor_id: str, digest: str) -> 
         for event in transaction.events)
 
 
+def claim_reference(roles: Mapping, route: str) -> str:
+    """The reference of an admission-claim entry: the sorted, compact JSON of the claim's
+    `roles` and `route`."""
+    return json.dumps({"roles": dict(roles), "route": route}, sort_keys=True,
+                      separators=(",", ":"))
+
+
+def claim_roles(reference: str) -> dict:
+    """The role counts a claim entry's `reference` records; ValueError when `reference` is
+    not the JSON `claim_reference` writes, with `roles` a mapping of names to integers."""
+    try:
+        value = json.loads(reference)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"claim reference is not JSON: {error}") from error
+    if not isinstance(value, dict) or set(value) != _CLAIM_KEYS \
+            or not isinstance(value["roles"], dict) \
+            or any(type(role) is not str or type(count) is not int
+                   for role, count in value["roles"].items()):
+        raise ValueError("claim reference is not an object of roles and a route")
+    return value["roles"]
+
+
+def claim_id(executor_id: str, epoch: int) -> str:
+    """The evidence id of the claim a span records: `admission-claim:<executor id>:<epoch>`.
+    The epoch is part of it because a launch can reacquire and evidence ids are single-use."""
+    return f"admission-claim:{executor_id}:{epoch}"
+
+
+def span_epoch(custody: Any) -> int:
+    """The epoch of the span `custody` holds (the greatest across its fenced keys)."""
+    return max(entry["epoch"] for entry in custody.fence.values())
+
+
+def claimed(transaction: Transaction, executor_id: str) -> str | None:
+    """The reference of the claim entry recorded under the fence of `executor_id`'s latest
+    span, else None: a claim recorded under an earlier span of the launch does not count."""
+    fence = launch_fence(transaction, executor_id)
+    if fence is None:
+        return None
+    wanted = claim_id(executor_id, max(entry["epoch"] for entry in fence.values()))
+    for event in transaction.events:
+        if event["type"] == "evidence_recorded" and event["evidence_id"] == wanted \
+                and _plain(event["fence"]) == fence:
+            return event["reference"]
+    return None
+
+
+def held_claim(admission: Mapping | None, holder: str) -> str | None:
+    """The claim reference of the unreleased claim the `admission` block holds for `holder`,
+    else None (also for no block)."""
+    if admission is None:
+        return None
+    for claim in admission["claims"]:
+        if claim["holder"] == holder and claim["released_at"] is None:
+            return claim_reference(claim["roles"], admission["route"])
+    return None
+
+
+def owner_gone(admission: Mapping | None, holder: str) -> bool:
+    """Whether the `admission` block shows `holder`'s claim released as `owner_unavailable`."""
+    return admission is not None and any(
+        claim["holder"] == holder and claim["release_event"] == "owner_unavailable"
+        for claim in admission["claims"])
+
+
+def gate_open(claims: Sequence[Mapping], holder: str) -> bool:
+    """Whether the `host_capacity` gate of `holder`'s refused launch is open: `claims` holds a
+    `launch_refused` claim naming `holder`, and some claim released by any other event has a
+    greater `release_seq`. Another launch's refusal frees no capacity, so two refused owners
+    never wake each other."""
+    refused = next((claim for claim in claims if claim["holder"] == holder
+                    and claim["release_event"] == "launch_refused"), None)
+    return refused is not None and any(
+        claim["release_event"] not in (None, "launch_refused")
+        and claim["release_seq"] > refused["release_seq"] for claim in claims)
+
+
+def seal_executor(launch: str) -> str:
+    """The executor of the span a `succeeded` seal takes over a record: the record's launch
+    id with its launch number replaced by `seal`."""
+    return launch.rpartition(":")[0] + ":seal"
+
+
 def merge_recorded(issue_state: Mapping, attempt: Mapping) -> bool:
     """Whether a merge is on record: the attempt's result is `merged` or names a
     `merge_sha`, or the issue's delivery has observed `pr_merged`."""
@@ -222,6 +332,16 @@ def merge_recorded(issue_state: Mapping, attempt: Mapping) -> bool:
         return True
     postconditions = (issue_state.get("delivery") or {}).get("postconditions") or {}
     return (postconditions.get("pr_merged") or {}).get("state") == "observed"
+
+
+def unconverged(transaction: Transaction) -> bool:
+    """Whether the core parked `transaction` because its proof did not converge (#339 D27): it
+    is `attention_required` and its last transition carries the reserved reason. Such a
+    transaction is never resumed."""
+    if transaction.state != "attention_required":
+        return False
+    last = next(event for event in reversed(transaction.events) if event["type"] == "transitioned")
+    return last["reason"] == UNCONVERGED
 
 
 def span_lapsed(custody: Any, lease: Mapping | None, now_ms: int) -> bool:
@@ -239,14 +359,16 @@ def span_lapsed(custody: Any, lease: Mapping | None, now_ms: int) -> bool:
 class Operation:
     """One core operation of a settle plan; `kind` is one of `OPERATIONS`.
 
-    `acquire` and `record_result` carry `executor_id`; `acquire` and `renew` carry `ttl_ms`;
-    `reap`, `park`, `unpark` and `seal` carry `reason`; every other field is None.
+    `acquire`, `record_result`, `claim` and `seal_succeeded` carry `executor_id`; `acquire` and
+    `renew` carry `ttl_ms`; `reap`, `park`, `unpark`, `seal`, `seal_succeeded` and `supplement`
+    carry `reason`; `claim` and `supplement` carry `reference`; every other field is None.
     """
 
     kind: str
     executor_id: str | None = None
     ttl_ms: int | None = None
     reason: str | None = None
+    reference: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in OPERATIONS:
@@ -259,12 +381,14 @@ class ProjectionMismatch(ValueError):
 
 
 class _Settling:
-    """The two facts a plan tracks while it emits operations: the transaction's open span
-    (`holder`, the executor that holds it, and whether it has `lapsed`) and whether the
-    transaction is `parked`. Each emitting method updates them as the core would."""
+    """The facts a plan tracks while it emits operations: the transaction's open span
+    (`holder`, the executor that holds it, and whether it has `lapsed`), whether the
+    transaction is `parked` and whether this plan has `acquired` a span. Each emitting method
+    updates them as the core would."""
 
     def __init__(self, *, holder: str | None, lapsed: bool, parked: bool, current: str) -> None:
         self.holder, self.lapsed, self.parked, self.current = holder, lapsed, parked, current
+        self.acquired = False
         self.operations: list[Operation] = []
 
     def create(self) -> None:
@@ -272,7 +396,7 @@ class _Settling:
 
     def acquire(self, ttl_ms: int) -> None:
         self.operations.append(Operation("acquire", executor_id=self.current, ttl_ms=ttl_ms))
-        self.holder, self.lapsed = self.current, False
+        self.holder, self.lapsed, self.acquired = self.current, False, True
 
     def release(self) -> None:
         self.operations.append(Operation("release"))
@@ -286,8 +410,8 @@ class _Settling:
         self.operations.append(Operation("park", reason=reason))
         self.parked = True
 
-    def unpark(self) -> None:
-        self.operations.append(Operation("unpark", reason="resumed"))
+    def unpark(self, reason: str = "resumed") -> None:
+        self.operations.append(Operation("unpark", reason=reason))
         self.parked = False
 
     def close(self, reason: str) -> None:
@@ -313,21 +437,43 @@ class _Settling:
 
 def settle_plan(issue_state: Mapping, attempt: Mapping, transaction: Transaction | None, *,
                 lease: Mapping | None, now_ms: int, latest: bool,
-                report_digest: str | None = None, bound: bool = False) -> tuple[Operation, ...]:
-    """The ordered operations that bring `attempt`'s custody transaction to the projection
-    table, for one ledger attempt of `issue_state`.
+                report_digest: str | None = None, bound: bool = False,
+                current: str | None = None, claim: str | None = None,
+                owner_gone: bool = False, gate_open: bool = False,
+                delivered: bool = False) -> tuple[Operation, ...]:
+    """The ordered operations that bring a record's custody transaction to the projection
+    table, for one ledger attempt (or delivery remainder) of `issue_state`.
 
-    `transaction` is the attempt's custody snapshot or None; `lease` is the record
-    `inspect_lease` returns for its worktree key; `latest` says the attempt is its issue's
-    last; `report_digest` is the digest of an owner report this write submits; `bound` says
-    this write is the attempt's 8 -> 9 bind. The plan tracks the open span and the parking
-    separately and updates both as it emits, so a plan resumed after any of its operations
-    emits only what is still missing. Raises only `ProjectionMismatch`.
+    `transaction` is the record's custody snapshot or None; `lease` is the record
+    `inspect_lease` returns for its worktree key; `latest` says the record is the last of its
+    issue; `report_digest` is the digest of an owner report this write submits; `bound` says
+    this write is the record's bind. `current` is the launch id of the record's current launch
+    (default: the attempt's `launch_id`, a remainder passes its own). The plan tracks the open
+    span and the parking separately and updates both as it emits, so a plan resumed after any
+    of its operations emits only what is still missing. The five remaining keywords are the
+    cutover's facts and default to the earlier plan:
+
+    - `claim`: the admission-claim reference of an `active` launch; the plan ends with a
+      `claim` operation when the launch holds an unlapsed span this plan acquired or that
+      carries no claim.
+    - `owner_gone`: the host reports the launch's owner unavailable; an `active` record's span
+      is closed and never acquired.
+    - `gate_open`: a release opened the `host_capacity` gate; a `host_capacity` suspension is
+      woken with `capacity_released`.
+    - `delivered`: the issue's delivery is complete; the record holds no launch span and the
+      plan ends with `seal_succeeded`, or is empty over a sealed transaction or one the core
+      parked unconverged (D27).
+
+    A sealed `abandoned` transaction over a record a reconcile found `merged` plans one
+    `supplement` of that merge (D6, D24g), delivered or not.
+
+    Raises only `ProjectionMismatch`.
     """
     state = attempt["state"]
     if state not in LIVE_STATES + _VERDICT_STATES:
         raise ProjectionMismatch(f"attempt state {state!r} has no custody projection")
-    current = launch_id(attempt["issue"], attempt["attempt"], len(attempt["launches"]))
+    if current is None:
+        current = launch_id(attempt["issue"], attempt["attempt"], len(attempt["launches"]))
     if transaction is None:
         if not (bound or (latest and state in LIVE_STATES)):
             return ()
@@ -335,11 +481,19 @@ def settle_plan(issue_state: Mapping, attempt: Mapping, transaction: Transaction
         settling.create()
     else:
         if transaction.state in TERMINALS:
-            if state in LIVE_STATES:
+            if state in LIVE_STATES and not delivered:
                 raise ProjectionMismatch(
                     f"{current}: the custody transaction is {transaction.state} but the "
                     f"attempt is {state}")
+            if transaction.state == "abandoned" and state == "merged" \
+                    and attempt["result_source"] == "superseded":
+                return (Operation("supplement", reason=RECONCILED_MERGE,
+                                  reference=telemetry_digest(attempt["result"])),)
             return ()
+        if delivered and unconverged(transaction):
+            return ()
+        if delivered and transaction.state in FORWARD_STATES:
+            return (_seal_succeeded(current),)
         if transaction.state not in ("created", "attention_required"):
             raise ProjectionMismatch(
                 f"{current}: custody transaction state {transaction.state!r} is not one "
@@ -349,18 +503,33 @@ def settle_plan(issue_state: Mapping, attempt: Mapping, transaction: Transaction
             holder=None if span is None else span.executor_id,
             lapsed=span is not None and span_lapsed(span, lease, now_ms),
             parked=transaction.state == "attention_required", current=current)
-    if state == "active":
+    if delivered:
+        _plan_delivered(settling, attempt, transaction, report_digest)
+    elif state == "active" and owner_gone:
+        settling.close("expiry")
+        if settling.parked:
+            settling.unpark()
+    elif state == "active":
         _plan_active(settling, attempt, lease, now_ms)
+        if claim is not None and _wants_claim(settling, transaction):
+            settling.operations.append(
+                Operation("claim", executor_id=current, reference=claim))
     elif state == "handed_off":
         settling.close("expiry")
         if settling.parked:
             settling.unpark()
     elif state == "suspended":
         cause = attempt["blocked_on"]
-        if type(cause) is not str or cause not in BLOCKED_ON_VALUES:
+        if type(cause) is not str or cause not in SUSPENSION_CAUSES:
             raise ProjectionMismatch(f"{current}: suspension cause {cause!r} is not known")
         reason = suspension_reason(cause)
-        settling.park_with(reason, "expiry" if cause == "unknown" else reason)
+        if cause == "host_capacity" and gate_open:
+            if settling.holder is not None:
+                settling.park_with(reason, reason)
+            if settling.parked:
+                settling.unpark(CAPACITY_RELEASED)
+        else:
+            settling.park_with(reason, "expiry" if cause == "unknown" else reason)
     else:
         source = attempt["result_source"]
         if source in _SYNTHETIC_SOURCES:
@@ -370,6 +539,18 @@ def settle_plan(issue_state: Mapping, attempt: Mapping, transaction: Transaction
         else:
             raise ProjectionMismatch(f"{current}: result source {source!r} is not known")
     return tuple(settling.operations)
+
+
+def _seal_succeeded(current: str) -> Operation:
+    return Operation("seal_succeeded", executor_id=seal_executor(current), reason=DELIVERED)
+
+
+def _wants_claim(settling: _Settling, transaction: Transaction | None) -> bool:
+    """Whether the plan ends with the current launch holding an unlapsed span that has no
+    claim yet: one this plan acquired, or one the store holds without a claim entry."""
+    if settling.holder != settling.current or settling.lapsed:
+        return False
+    return settling.acquired or claimed(transaction, settling.current) is None
 
 
 def _plan_active(settling: _Settling, attempt: Mapping, lease: Mapping | None,
@@ -396,18 +577,37 @@ def _plan_active(settling: _Settling, attempt: Mapping, lease: Mapping | None,
         settling.unpark()
 
 
-def _plan_verdict(settling: _Settling, issue_state: Mapping, attempt: Mapping,
-                  transaction: Transaction | None, report_digest: str | None) -> None:
-    if settling.holder is not None and settling.lapsed:
-        settling.reap("expiry")
+def _record_owner_result(settling: _Settling, attempt: Mapping,
+                         transaction: Transaction | None, report_digest: str | None) -> None:
+    """An owner report this write submits is recorded once, on the current launch's span."""
     current = settling.current
     if (attempt["result_source"] == "owner" and report_digest is not None
             and transaction is not None and launch_fence(transaction, current) is not None
             and not result_recorded(transaction, current, report_digest)):
         settling.operations.append(Operation("record_result", executor_id=current))
+
+
+def _plan_verdict(settling: _Settling, issue_state: Mapping, attempt: Mapping,
+                  transaction: Transaction | None, report_digest: str | None) -> None:
+    if settling.holder is not None and settling.lapsed:
+        settling.reap("expiry")
+    _record_owner_result(settling, attempt, transaction, report_digest)
     if merge_recorded(issue_state, attempt):
         if settling.holder is not None:
             settling.release()
     else:
         settling.operations.append(
             Operation("seal", reason=f"{attempt['result_source']}:{attempt['state']}"))
+
+
+def _plan_delivered(settling: _Settling, attempt: Mapping, transaction: Transaction | None,
+                    report_digest: str | None) -> None:
+    """A delivered issue's record gives up its launch span, then is sealed `succeeded`. The
+    seal's own span, left open by a seal that was cut, is kept."""
+    if settling.holder != seal_executor(settling.current):
+        if settling.holder is not None and settling.lapsed:
+            settling.reap("expiry")
+        _record_owner_result(settling, attempt, transaction, report_digest)
+        if settling.holder is not None:
+            settling.release()
+    settling.operations.append(_seal_succeeded(settling.current))

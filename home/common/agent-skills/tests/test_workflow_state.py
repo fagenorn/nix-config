@@ -216,8 +216,8 @@ class LifecycleHarness:
         self.write_state(document)
 
     def assert_bound(self, state):
-        """`state` is schema 9 and bound to the transaction its legacy handle's key names."""
-        self.assertEqual(state["schema_version"], 9)
+        """`state` is schema 10 and bound to the transaction its legacy handle's key names."""
+        self.assertEqual(state["schema_version"], 10)
         self.assertEqual(state["transaction_id"], TransactionStore(self.store_root).lookup(
             attempt_identity.legacy_key(state["run_id"])))
 
@@ -399,9 +399,9 @@ class LifecycleHarness:
         return root
 
     def _legacy_finish_input(self, stored):
-        """The ledger the legacy `finish` runs on: a schema-9 ledger keeps its binding and
+        """The ledger the legacy `finish` runs on: a schema-10 ledger keeps its binding and
         loses only its deliveries, as legacy finish refuses only a contracted issue (D25)."""
-        if stored["schema_version"] != 9:
+        if stored["schema_version"] != 10:
             return self._as_legacy(stored, 2)
         stripped = copy.deepcopy(stored)
         for issue_state in stripped["issues"].values():
@@ -2607,7 +2607,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         stdout_json = self.finish(1, merged, now="2026-08-13T20:20:00Z")
         state = self.read_state()
         attempt = state["issues"]["14"]["attempts"][0]
-        self.assertEqual(state["schema_version"], 9)
+        self.assertEqual(state["schema_version"], 10)
         self.assert_bound(state)
         self.assertIsNone(attempt["blocked_on"])
         self.assertEqual(attempt["stalled_resumes"], 0)
@@ -3005,7 +3005,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                     "lane": None, "lane_budget_minutes": None, "lane_history": [],
                 }
                 expected_state = {
-                    "schema_version": 9, "run_id": self.run_id, "workers": [],
+                    "schema_version": 10, "run_id": self.run_id, "workers": [],
                     "transaction_id": self.run_id, "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
                     "prior_run": None, "admission": self.spawned_admission(14),
                     "issues": {"14": {
@@ -3054,7 +3054,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             "lane": None, "lane_budget_minutes": None, "lane_history": [],
         }
         expected_state = {
-            "schema_version": 9, "run_id": self.run_id, "workers": [],
+            "schema_version": 10, "run_id": self.run_id, "workers": [],
             "transaction_id": self.run_id, "created_at": DEFAULT_NOW, "updated_at": DEFAULT_NOW,
             "prior_run": None, "admission": self.spawned_admission(14),
             "issues": {"14": {
@@ -4588,11 +4588,13 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         ambiguous = self.direct_owner_raw(ok=False)
         self.assertIn("nonterminal", ambiguous.stderr)
         self.assertEqual({path: path.read_bytes() for path in snapshots}, snapshots)
-        malformed = self.workflows_dir / "direct-73-bad"
-        malformed.mkdir()
+        # A directory no index entry names is not read, so it changes no answer (D22).
+        stray = self.workflows_dir / "direct-73-bad"
+        stray.mkdir()
         rejected = self.direct_owner_raw(ok=False)
-        self.assertIn("malformed", rejected.stderr)
+        self.assertEqual(rejected.stderr, ambiguous.stderr)
         self.assertEqual({path: path.read_bytes() for path in snapshots}, snapshots)
+        self.assertEqual(list(stray.iterdir()), [])
 
     def test_concurrent_first_direct_calls_create_one_run_and_one_attempt(self):
         request_path = self.root / "concurrent-direct.json"
@@ -4636,47 +4638,66 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(len(state["issues"]["73"]["attempts"][0]["launches"]), 1)
 
     def test_direct_discovery_rejects_every_unsafe_retained_entry(self):
+        """Each row damages one thing about an indexed run, so the refusal is that guard's
+        own; the unindexed and non-run rows are the two refusals the index adds (D22)."""
         owner = self.acquire_direct()
-        valid_state = (json.dumps(self._as_legacy(json.loads(
-            self.direct_state_path(owner["run_id"]).read_bytes()), 7, handle="direct-73-000001"),
-            sort_keys=True, separators=(",", ":")) + "\n").encode()
+        run = owner["run_id"]
+        valid_state = self.direct_state_path(run).read_bytes()
+        refusals = {
+            "unmigrated": "unmigrated direct run: run workflow-state migrate --apply",
+            "directory": "direct run entry must be a non-symlink directory",
+            "issue lock": "direct issue lock must be a non-symlink regular file",
+            "missing lock": "state lock does not exist",
+            "state lock": "state lock must be a non-symlink regular file",
+            "state file": "workflow state must be a non-symlink regular file",
+            "corrupt": "invalid workflow state",
+            "issue": "direct run state must contain exactly the requested issue",
+            "not a run": "direct run index entry is not a run transaction",
+        }
 
-        def materialize(root, *, directory="real", issue_lock="missing",
-                        lock="file", state="file", state_bytes=valid_state):
+        def materialize(root, *, directory="real", issue_lock="file", lock="file",
+                        state="file", state_bytes=valid_state):
+            """An indexed copy of the acquired run under `root`, damaged as named."""
+            shutil.copytree(self.root / ".superpowers", root / ".superpowers")
             workflows = root / ".superpowers" / "workflows"
-            workflows.mkdir(parents=True)
+            run_dir = workflows / run
             if issue_lock == "symlink":
                 target = root / "issue-lock-target"
                 target.write_bytes(b"external issue lock sentinel")
+                (workflows / ".direct-73.lock").unlink()
                 (workflows / ".direct-73.lock").symlink_to(target)
             elif issue_lock == "directory":
+                (workflows / ".direct-73.lock").unlink()
                 (workflows / ".direct-73.lock").mkdir()
-            run = workflows / "direct-73-000001"
             if directory == "file":
-                run.write_bytes(b"claimed namespace sentinel")
+                shutil.rmtree(run_dir)
+                run_dir.write_bytes(b"claimed namespace sentinel")
                 return
             if directory == "symlink":
+                shutil.rmtree(run_dir)
                 target = root / "run-target"
                 target.mkdir()
-                run.symlink_to(target, target_is_directory=True)
+                run_dir.symlink_to(target, target_is_directory=True)
                 return
-            run.mkdir()
-            if lock == "file":
-                (run / "state.lock").write_bytes(b"")
+            if lock == "missing":
+                (run_dir / "state.lock").unlink()
             elif lock == "symlink":
                 target = root / "lock-target"
                 target.write_bytes(b"")
-                (run / "state.lock").symlink_to(target)
-            if state == "file":
-                (run / "state.json").write_bytes(state_bytes)
-            elif state == "symlink":
+                (run_dir / "state.lock").unlink()
+                (run_dir / "state.lock").symlink_to(target)
+            if state == "symlink":
                 target = root / "state-target"
                 target.write_bytes(state_bytes)
-                (run / "state.json").symlink_to(target)
+                (run_dir / "state.json").unlink()
+                (run_dir / "state.json").symlink_to(target)
+            else:
+                (run_dir / "state.json").write_bytes(state_bytes)
 
         wrong_issue = json.loads(valid_state)
-        issue_state = wrong_issue["issues"].pop("73")
+        issue_state = copy.deepcopy(wrong_issue["issues"]["73"])
         issue_state["issue"] = 74
+        issue_state["delivery"] = self.empty_delivery()  # 73's contract names issue 73
         for attempt in issue_state["attempts"]:
             attempt["issue"] = 74
             attempt["owner"] = attempt["owner"].replace("73:", "74:")
@@ -4687,18 +4708,24 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             wrong_issue, sort_keys=True, separators=(",", ":")
         ) + "\n").encode()
         cases = {
-            "regular-file run entry": {"directory": "file"},
-            "symlink directory": {"directory": "symlink"},
-            "symlink issue lock": {"issue_lock": "symlink"},
-            "non-regular issue lock": {"issue_lock": "directory"},
-            "missing lock": {"lock": "missing"},
-            "symlink lock": {"lock": "symlink"},
-            "missing state": {"state": "missing"},
-            "symlink state": {"state": "symlink"},
-            "corrupt state": {"state_bytes": b"{not-json\n"},
-            "wrong issue": {"state_bytes": wrong_bytes},
+            "regular-file run entry": ({"directory": "file"}, "directory"),
+            "symlink directory": ({"directory": "symlink"}, "directory"),
+            "symlink issue lock": ({"issue_lock": "symlink"}, "issue lock"),
+            "non-regular issue lock": ({"issue_lock": "directory"}, "issue lock"),
+            "missing lock": ({"lock": "missing"}, "missing lock"),
+            "symlink lock": ({"lock": "symlink"}, "state lock"),
+            "symlink state": ({"state": "symlink"}, "state file"),
+            "corrupt state": ({"state_bytes": b"{not-json\n"}, "corrupt"),
+            "wrong issue": ({"state_bytes": wrong_bytes}, "issue"),
         }
-        for label, kwargs in cases.items():
+
+        def refused(root, reason):
+            rejected = self.direct_owner_at_root(root, self.direct_request(), ok=False)
+            self.assertEqual(
+                (rejected.returncode, rejected.stdout, rejected.stderr),
+                (2, "", f"workflow-state: {refusals[reason]}\n"))
+
+        for label, (kwargs, reason) in cases.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as raw:
                 root = Path(raw)
                 materialize(root, **kwargs)
@@ -4706,11 +4733,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                     path: path.read_bytes()
                     for path in root.rglob("state.json") if path.is_file()
                 }
-                rejected = self.direct_owner_at_root(
-                    root, self.direct_request(), ok=False,
-                )
-                self.assertEqual(rejected.returncode, 2)
-                self.assertEqual(rejected.stdout, "")
+                refused(root, reason)
                 if label == "symlink issue lock":
                     self.assertEqual(
                         (root / "issue-lock-target").read_bytes(),
@@ -4719,6 +4742,36 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
                 self.assertEqual(
                     {path: path.read_bytes() for path in before}, before,
                 )
+        with self.subTest(label="state file missing"), tempfile.TemporaryDirectory() as raw:
+            # No ledger yet: the reserved id of the run the call mints (D22).
+            root = Path(raw)
+            materialize(root)
+            (root / ".superpowers/workflows" / run / "state.json").unlink()
+            reply = self.direct_owner_at_root(
+                root, self.direct_request(tracker=self.tracker_fact(73)))
+            self.assertEqual(json.loads(reply.stdout)["run_id"], run)
+        with self.subTest(label="unindexed legacy ledger"), tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            legacy = root / ".superpowers/workflows/direct-73-000001"
+            legacy.mkdir(parents=True)
+            (legacy / "state.lock").write_bytes(b"")
+            (legacy / "state.json").write_text(json.dumps(self._as_legacy(
+                json.loads(valid_state), 7, handle="direct-73-000001"),
+                sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+            before = (legacy / "state.json").read_bytes()
+            refused(root, "unmigrated")
+            self.assertEqual((legacy / "state.json").read_bytes(), before)
+            self.assertFalse((root / ".superpowers/workflows/.direct-73.lock").exists())
+        with self.subTest(label="index entry that is not a run"), \
+                tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            store = attempt_store.ensure_store(attempt_store.store_root(root / ".superpowers"))
+            plan = attempt_identity.minted_plan(
+                identity=attempt_identity.RunIdentity("direct", 73, 1),
+                prior_run=None, caller_key=None)
+            TransactionStore(store).create(
+                plan.creation_key, {"bogus": True}, **attempt_identity.creation_arguments(plan))
+            refused(root, "not a run")
 
     def test_direct_discovery_adopts_an_empty_retained_run_as_nonterminal(self):
         run_id = "direct-73-000001"
@@ -4735,6 +4788,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
+        self.run_cli("migrate", "--repo-root", self.root, "--apply")
         first = self.direct_owner()
         self.assertEqual(first["run_id"], run_id)
         self.assertEqual(first["requirements"], [{"kind": "tracker"}])
@@ -4775,31 +4829,31 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
         self.assertIn("newer terminal", rejected.stderr)
         self.assertEqual({path: path.read_bytes() for path in snapshots}, snapshots)
 
-    def test_direct_sequence_exhaustion_fails_without_overwriting_terminal_history(self):
+    def test_a_stray_last_sequence_directory_is_not_direct_history(self):
+        """Sequence 999999 is reachable only through the index entries below it (D22), so a
+        directory with that name is not a run and `new_run` finds no history to extend."""
         owner = self.acquire_direct()
         self.run_id = owner["run_id"]
         self.finish(1, self.merged_result(73), issue=73,
                     now="2026-08-20T10:01:00Z")
         source = self.workflows_dir / owner["run_id"]
-        exhausted = self.workflows_dir / "direct-73-999999"
-        source.rename(exhausted)
-        state_path = exhausted / "state.json"
+        stray = self.workflows_dir / "direct-73-999999"
+        source.rename(stray)
+        state_path = stray / "state.json"
         state = self._as_legacy(json.loads(state_path.read_text()), 7, handle="direct-73-999999")
         state_path.write_text(
             json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
+        before = state_path.read_bytes()
         rejected = self.direct_owner_raw(
             new_run=True, tracker=self.tracker_fact(73),
             worktree=self.worktree_fact(73, recorded={
                 "path": owner["worktree"], "state": "matching_issue_branch",
             }), ok=False,
         )
-        self.assertIn("exhaust", rejected.stderr)
-        # The locked read binds the legacy ledger (D14); its history is otherwise untouched.
-        self.assertEqual(json.loads(state_path.read_text()), {
-            **state, "schema_version": 9, "transaction_id": TransactionStore(
-                self.store_root).lookup(attempt_identity.direct_key(73, 999999))})
+        self.assertEqual(rejected.stderr, "workflow-state: new_run is not applicable\n")
+        self.assertEqual(state_path.read_bytes(), before)
 
     def test_direct_authorization_flags_fail_when_not_applicable(self):
         for field in ("new_run", "owner_unavailable"):
@@ -5623,7 +5677,7 @@ class WorkflowStateLifecycleTest(LifecycleHarness, unittest.TestCase):
             self.assertEqual(state, self._as_legacy(baseline, version, handle="orchestrate-151"))
             self.assert_bound(value)
             write.assert_called_once()
-            self.assertEqual(write.call_args.args[2]["schema_version"], 9)
+            self.assertEqual(write.call_args.args[2]["schema_version"], 10)
 
     def test_locked_loader_requires_keyword_migration_context(self):
         self.init_run()
@@ -6533,7 +6587,7 @@ class WorkerRegistryTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(self.check_worker("14:1:1:w9")["reason"], "unknown_worker")
         self.assertEqual(self.state_path.read_bytes(), before)
         state = self.read_state()
-        self.assertEqual(state["schema_version"], 9)
+        self.assertEqual(state["schema_version"], 10)
         self.assertEqual(state["workers"][0], {
             "worker_id": "14:1:1:w1", "launch": "14:1:1", "parent": None,
             "registered_at": "2026-08-13T20:01:00Z", "released_at": None,
@@ -6726,7 +6780,7 @@ class ProgressMarkerSchemaTest(LifecycleHarness, unittest.TestCase):
 
     def test_a_new_attempt_starts_with_a_null_marker_at_schema_six(self):
         self.spawn_16()
-        self.assertEqual(self.read_state()["schema_version"], 9)
+        self.assertEqual(self.read_state()["schema_version"], 10)
         self.assertIsNone(self.attempt()["progress_marker"])
 
     def test_a_schema_five_ledger_keeps_its_stall_count_and_upgrades_on_first_write(self):
@@ -6751,7 +6805,7 @@ class ProgressMarkerSchemaTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(
             (upgraded["schema_version"], attempt["progress_marker"],
              attempt["stalled_resumes"], attempt["suspend_phase"]),
-            (9, None, 1, 0))
+            (10, None, 1, 0))
 
     def test_a_schema_five_hybrid_is_refused_without_a_write(self):
         self.spawn_16()
@@ -6818,7 +6872,7 @@ class LaneSchemaTest(LifecycleHarness, unittest.TestCase):
 
     def test_a_new_attempt_starts_without_a_lane_at_schema_seven(self):
         self.spawn_16()
-        self.assertEqual(self.read_state()["schema_version"], 9)
+        self.assertEqual(self.read_state()["schema_version"], 10)
         self.assertEqual(self.lane_of(self.attempt()), (None, None, []))
 
     def test_a_retry_attempt_does_not_inherit_its_predecessors_lane(self):
@@ -6853,7 +6907,7 @@ class LaneSchemaTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(
             (upgraded["schema_version"],
              self.lane_of(upgraded["issues"]["16"]["attempts"][0])),
-            (9, (None, None, [])))
+            (10, (None, None, [])))
 
     def test_a_schema_six_hybrid_is_refused_without_a_write(self):
         self.spawn_16()
@@ -7332,7 +7386,7 @@ class ProgressMarkerTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(
             (state["schema_version"],
              state["issues"]["16"]["attempts"][0]["progress_marker"]),
-            (9, self.base))
+            (10, self.base))
 
     def race(self, module_name, interleave, *, now="2026-08-13T20:09:00Z"):
         """Run `mark-progress` in-process with `interleave()` between its probe and

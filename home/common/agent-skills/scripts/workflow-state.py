@@ -32,11 +32,14 @@ from agent_tools.attempt_custody import (
     stall_count,
     stalled,
 )
-from agent_tools.attempt_identity import RunIdentity, classify, minted_plan, prior_run_violation
+from agent_tools.attempt_delivery_store import (
+    delivery_pending, installing_runs, seal_delivery, settle_delivery, unconverged_deliveries)
+from agent_tools.attempt_identity import (
+    RunIdentity, classify, issue_set_caller_key, minted_plan, prior_run_violation)
 from agent_tools.transaction_storage import is_id
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 CONTROL_INTERFACE_VERSION = 3
 DIRECT_OWNER_INTERFACE_VERSION = 2
 ATTEMPT_STATES = frozenset(
@@ -57,6 +60,7 @@ RESULT_FIELDS = (
     "notes",
 )
 
+ISSUE_SET_PATTERN = re.compile(r"[1-9][0-9]{0,6}(-[1-9][0-9]{0,6})*")
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # Each ordinal is bounded at 18 digits. No real lifecycle identity is remotely
 # that large, and an unbounded digit run would hand `int()` a value past
@@ -857,9 +861,9 @@ def validate_attempt(
 
 def validate_state(value: Any, *, run_id: str, identity: RunIdentity,
                    schema_version: int = SCHEMA_VERSION) -> dict[str, Any]:
-    """Validate one ledger at `schema_version` (9, or 7 for a document not yet bound).
+    """Validate one ledger at `schema_version` (10, or 7 for a document not yet bound).
 
-    `identity` is the run's identity: from its transaction's subject at schema 9, from its
+    `identity` is the run's identity: from its transaction's subject at schema 10, from its
     legacy name before it is bound.
     """
     fields = STATE_FIELDS if schema_version == SCHEMA_VERSION else LEGACY_STATE_FIELDS
@@ -1479,24 +1483,49 @@ def custody_clock(state: dict[str, Any]) -> int:
 def commit_state(run_dir: Path, state_path: Path, state: dict[str, Any], *,
                  run_id: str, identity: RunIdentity,
                  bound_launches: dict[tuple[int, int], int] | None = None,
+                 bound_remainders: dict[tuple[int, int], int] | None = None,
                  report: attempt_store.OwnerReport | None = None) -> None:
     """The one write boundary every committed state write passes (D5).
 
     It settles the admission block at the commit's ``updated_at``, validates the whole
-    state, settles attempt custody in the core (``bound_launches`` is the 8 -> 9 plan of a
-    binding write, ``report`` an owner result it submits; a refusal leaves the ledger
-    untouched), then publishes the state atomically and applies the seals the settle
-    deferred, in that order (#338 D4).
+    state, settles custody in the core (``bound_launches`` is the 8 -> 9 plan and
+    ``bound_remainders`` the 9 -> 10 plan of a binding write, ``report`` an owner result it
+    submits; the issues whose delivery is complete give up their launch spans; a refusal
+    leaves the ledger untouched), then publishes the state atomically and applies the seals
+    the settle deferred: the delivery proofs first, then the custody seals that cite their
+    receipts (#338 D4, #339 D5).
     """
     settle_admission(state, at=state["updated_at"])
     validate_state(state, run_id=run_id, identity=identity)
     now_ms = custody_clock(state)
     store = attempt_store.ledger_store(state_path)
+    delivered = delivered_issues(state)
     pending = attempt_store.settle_custody(
         store, state, now_ms=now_ms, canonical=canonical_worktree_path,
-        bound_launches=bound_launches or {}, report=report)
+        bound_launches=bound_launches or {}, bound_remainders=bound_remainders or {},
+        report=report, delivered=delivered)
+    settle_delivery(store, state, now_ms=now_ms, canonical_text=lambda value: (
+        _delivery().model.canonical_bytes(value).decode("utf-8")))
     atomic_write_state(run_dir, state_path, state)
-    attempt_store.seal_custody(store, pending, now_ms=now_ms)
+    receipts = seal_delivery(store, state, now_ms=now_ms, delivered=delivered)
+    attempt_store.seal_custody(store, pending, now_ms=now_ms, receipts=receipts)
+
+
+def delivered_issues(state: dict[str, Any]) -> frozenset[int]:
+    """The issues of `state` whose delivery is complete."""
+    runtime = _delivery()
+    return frozenset(int(issue) for issue, issue_state in state["issues"].items()
+                     if runtime.delivery_complete(issue_state))
+
+
+def seals_due(store: Path, state: dict[str, Any], now_ms: int) -> tuple[
+        frozenset[int], list[attempt_store.PendingSeal]]:
+    """The delivered issues of a stored `state` and the custody seals an earlier write left
+    undone, read without a lock. An issue whose delivery proof parked unconverged has no
+    seal pending (#339 D27)."""
+    delivered = delivered_issues(state)
+    sealable = delivered - unconverged_deliveries(store, state, delivered)
+    return delivered, attempt_store.pending_seals(store, state, now_ms=now_ms, delivered=sealable)
 
 
 class OwnerCall(NamedTuple):
@@ -1693,7 +1722,7 @@ def transact(
     """Run `mutation` on one ledger under its `state.lock` and commit what it changed.
 
     A bind of the ledger by the locked read is committed too (#337 D14), with its 8 -> 9
-    plan. A mutation that changed nothing still completes a seal an earlier write left
+    and 9 -> 10 plans. A mutation that changed nothing still completes a seal an earlier write left
     undone, and writes no ledger byte (#338 D24).
     `with_identity` passes the run's `RunIdentity` to `mutation`; `new_identity` is that of a
     run `allow_missing` creates; `refuse_direct` refuses a direct run first. An `owner_call`
@@ -1711,7 +1740,7 @@ def transact(
             state_path, "workflow state", allow_missing=True
         )
         if state_exists:
-            current, identity, migrated, bound_launches = read_locked_state(
+            current, identity, migrated, bound_launches, bound_remainders = read_locked_state(
                 state_path, run_id, migration_contracts=migration_contracts or {},
             )
             state = copy.deepcopy(current)
@@ -1720,7 +1749,7 @@ def transact(
                 raise WorkflowError("internal error: a new run has no identity")
             state = None
             identity = new_identity
-            migrated, bound_launches = False, {}
+            migrated, bound_launches, bound_remainders = False, {}, {}
         else:
             raise WorkflowError(f"workflow run {run_id!r} is not initialized")
         if refuse_direct and identity.direct:
@@ -1741,14 +1770,15 @@ def transact(
                 else:
                     raise WorkflowError("internal error: changed transaction has no state")
             commit_state(run_dir, state_path, state, run_id=run_id, identity=identity,
-                         bound_launches=bound_launches,
+                         bound_launches=bound_launches, bound_remainders=bound_remainders,
                          report=submitted_report(state, owner_call, launch))
         elif state_exists:
             # An identical repeat of a command whose seal never ran completes it (#338 D24).
             now_ms = custody_clock(state)
             store = attempt_store.ledger_store(state_path)
-            attempt_store.seal_custody(
-                store, attempt_store.pending_seals(store, state, now_ms=now_ms), now_ms=now_ms)
+            delivered, pending = seals_due(store, state, now_ms)
+            receipts = seal_delivery(store, state, now_ms=now_ms, delivered=delivered)
+            attempt_store.seal_custody(store, pending, now_ms=now_ms, receipts=receipts)
         return result
 
 
@@ -2417,32 +2447,103 @@ def command_migrate(args: argparse.Namespace) -> int:
     """Exit 0 with refusals as data; exit 2 on usage, an unreadable workflows directory
     or a store error."""
     root = resolve_repo_root(args.repo_root)
+    superpowers = root / ".superpowers"
+
+    def pending(handle: str) -> bool:
+        """Whether the stored ledger `handle` has a seal a crash left undone. An unreadable
+        document, or an `updated_at` that is not a UTC `...Z` stamp, has none to find."""
+        try:
+            state = json.loads(
+                (superpowers / "workflows" / handle / "state.json").read_text(encoding="utf-8"))
+            now_ms = at_ms(state["updated_at"])
+        except (ValueError, KeyError, TypeError):
+            return False
+        store = attempt_store.store_root(superpowers)
+        delivered, seals = seals_due(store, state, now_ms)
+        return bool(seals) or delivery_pending(store, state, delivered)
+
     print_json(attempt_store.migration_report(
-        root / ".superpowers", apply=args.apply,
+        superpowers, apply=args.apply,
         upgrade=partial(upgrade_state, migration_contracts={}), validate=validate_state,
         bind=lambda handle: transact(args.repo_root, handle, lambda state: (None, False)),
-        refusals=(WorkflowError,)))
+        pending=pending, refusals=(WorkflowError,)))
     return 0
 
 
+def bootstrap_orchestrated(args: argparse.Namespace, run_id: str, supplied: Any) -> dict[str, Any]:
+    """The state of the orchestrated run `run_id`, initialized empty if its ledger is absent."""
+    def initialize(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        if state is not None:
+            return state, False
+        now = format_utc(ledger_time(supplied))
+        state = new_run_state(run_id=run_id, transaction_id=run_id, now=now, issues={})
+        return state, True
+
+    return transact(args.repo_root, run_id, initialize, allow_missing=True,
+                    new_identity=RunIdentity("orchestrated", None, None))
+
+
+def issue_set_reusable(state: dict[str, Any], issues: list[int]) -> bool:
+    """Whether an orchestrator may carry on in a ledger for `issues`: some issue has no entry,
+    no outcome yet, or a last attempt or delivery remainder that is still live."""
+    for issue in issues:
+        entry = state["issues"].get(str(issue))
+        if entry is None or entry["outcome"] is None:
+            return True
+        if any(records and records[-1]["state"] in {"active", "handed_off", "suspended"}
+               for records in (entry["attempts"], entry["delivery_remainders"])):
+            return True
+    return False
+
+
+def issue_set_run(args: argparse.Namespace, supplied: Any) -> dict[str, Any]:
+    """The state of the first run for `--issue-set` that is absent or reusable, by index key.
+
+    Takes the run under `run_key(issue_set_caller_key(issues, k))` for `k` from 1; a ledger
+    that is finished moves on to `k + 1`, and `workflows` is never listed.
+    """
+    if ISSUE_SET_PATTERN.fullmatch(args.issue_set) is None:
+        raise WorkflowError("invalid issue set")
+    issues = [int(token) for token in args.issue_set.split("-")]
+    superpowers = resolve_repo_root(args.repo_root) / ".superpowers"
+    store = attempt_store.store_root(superpowers)
+    ordinal = 0
+    while True:
+        ordinal += 1
+        try:
+            plan = attempt_store.creation_key_plan(issue_set_caller_key(issues, ordinal))
+        except (ValueError, attempt_store.StoreRefused) as error:
+            raise WorkflowError("invalid issue set") from error
+        run_id = attempt_store.lookup_run(store, plan.creation_key)
+        if run_id is None:
+            run_id = attempt_store.mint_run(store, plan)
+        state_path = superpowers / "workflows" / run_id / "state.json"
+        if path_status(state_path) is None:
+            return bootstrap_orchestrated(args, run_id, supplied)
+        try:
+            state = read_state_unlocked(state_path, run_id)
+        except attempt_store.StoreFault:
+            raise
+        except (WorkflowError, attempt_store.StoreRefused) as error:
+            raise WorkflowError(f"init-run refused: run {run_id} is invalid") from error
+        if issue_set_reusable(state, issues):
+            return transact(args.repo_root, run_id, lambda current: (current, False),
+                            refuse_direct=True)
+
+
 def command_init_run(args: argparse.Namespace) -> int:
-    """Mint a run (`--creation-key`) or re-bootstrap an existing one (`--run-id`, no create)."""
+    """Mint a run (`--creation-key`), take the first reusable run for a set of issues
+    (`--issue-set`, minting one if none is) or re-bootstrap an existing one (`--run-id`, no
+    create)."""
     _delivery()
     supplied = supplied_time(args.now, "--now")
-    if args.creation_key is not None:
+    if args.issue_set is not None:
+        state = issue_set_run(args, supplied)
+    elif args.creation_key is not None:
         plan = attempt_store.creation_key_plan(args.creation_key)
         run_id = attempt_store.mint_run(
             attempt_store.store_root(resolve_repo_root(args.repo_root) / ".superpowers"), plan)
-
-        def initialize(state: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
-            if state is not None:
-                return state, False
-            now = format_utc(ledger_time(supplied))
-            state = new_run_state(run_id=run_id, transaction_id=run_id, now=now, issues={})
-            return state, True
-
-        state = transact(args.repo_root, run_id, initialize, allow_missing=True,
-                         new_identity=RunIdentity("orchestrated", None, None))
+        state = bootstrap_orchestrated(args, run_id, supplied)
     else:
         reject_reserved_direct_run_id(args.run_id)
         if not RUN_ID_PATTERN.fullmatch(args.run_id):
@@ -2959,7 +3060,7 @@ def command_control(args: argparse.Namespace) -> int:
     request, migration_contracts = load_control_request(args.request_file)
     now: str | None = None
     now_value: datetime | None = None
-    run_dir, _, _ = workflow_paths(args.repo_root, args.run_id)
+    run_dir, state_path, _ = workflow_paths(args.repo_root, args.run_id)
     tracker_by_issue = {item["issue"]: item for item in request["tracker"]}
     worktree_by_issue = {item["issue"]: item for item in request["worktrees"]}
     library = _host_admission()
@@ -2988,6 +3089,10 @@ def command_control(args: argparse.Namespace) -> int:
         if now_value < parse_utc(state["updated_at"], "run update time"):
             raise backward_refusal("control time must not move backward", now_value,
                                    "run updated_at", state["updated_at"])
+        # The store's one lock-free view of every current launch, taken before this
+        # sweep changes `state` and read for occupancy and the capacity gate (D12).
+        views = attempt_store.launch_views(
+            attempt_store.ledger_store(state_path), state, now_ms=at_ms(now))
         # A null request contract means "none supplied": an installed contract
         # governs, and a supplied one must equal it before anything is written
         # (per D10).
@@ -3020,6 +3125,8 @@ def command_control(args: argparse.Namespace) -> int:
                 f"control host route {route!r} does not match the run's bound route "
                 f"{state['admission']['route']!r}")
         admission = state["admission"]
+        releases_at_start = admission["releases"]
+        refused_here: set[str] = set()
         # Park every refused launch on `host_capacity` before the settle below
         # releases its claim `launch_refused` — or `finished`, when the refusal
         # trips the anti-zombie bound (D7, D19, D22).
@@ -3035,6 +3142,7 @@ def command_control(args: argparse.Namespace) -> int:
                                and claim["released_at"] is None
                                for claim in admission["claims"])):
                 raise WorkflowError("launch_refused is not applicable")
+            refused_here.add(custody["action_id"])
             if kind == "implementation":
                 if not suspend_attempt(record, blocked_on="host_capacity", now=now):
                     issue_state["outcome"] = copy.deepcopy(record["result"])
@@ -3095,8 +3203,39 @@ def command_control(args: argparse.Namespace) -> int:
         occupied = runtime.occupied_count(state, at_time=now, unavailable=unavailable)
         capacity = max(0, request["max_parallel"] - occupied)
 
-        # The controller's own role, then every held claim still occupying a
-        # live launch, come off the declared slots before any lane admits (D4).
+        def occupying_roles() -> list[dict[str, int]]:
+            """The role set of each claim now occupying a slot: the controller's, and one per
+            launch that is the current launch of an `active` record whose owner the request
+            does not report unavailable (D4, D12, D23, D26).
+
+            A launch whose span the store holds open with a claim entry occupies with the
+            role set that entry records, whatever the block says. Any other such launch,
+            whether the store holds no transaction for it, never gave it a span, holds its
+            span open with no claim entry or has closed it, occupies with the block's held
+            claim exactly while the record's deadline has not passed (`live_launches`): the
+            commit reacquires a closed span of an unexpired `active` record, and its claim
+            with it, so counting it free would admit a second owner into a slot the same
+            commit takes back.
+            """
+            live = runtime.live_launches(state, at_time=now, unavailable=unavailable)
+            held = {claim["holder"]: claim["roles"] for claim in admission["claims"]
+                    if claim["released_at"] is None}
+            roles = [held[CONTROLLER_HOLDER]] if CONTROLLER_HOLDER in held else []
+            for issue_state in state["issues"].values():
+                custody, record = runtime.current_custody(issue_state["issue"], issue_state)
+                if (record is None or record["state"] != "active"
+                        or runtime.owner_is_unavailable(issue_state, unavailable)):
+                    continue
+                holder = custody["action_id"]
+                view = views.get(holder)
+                if view is not None and view.open and view.roles is not None:
+                    roles.append(view.roles)
+                elif holder in live and holder in held:
+                    roles.append(held[holder])
+            return roles
+
+        # The controller's own role, then every claim still occupying a live
+        # launch, come off the declared slots before any lane admits (D4).
         controller_claim = None
         new_controller = False
         available = 0
@@ -3109,11 +3248,8 @@ def command_control(args: argparse.Namespace) -> int:
                 controller_claim = new_claim(CONTROLLER_HOLDER, library.CONTROLLER_ROLES)
                 admission["claims"].append(controller_claim)
                 new_controller = True
-            live = runtime.live_launches(state, at_time=now, unavailable=unavailable)
             available = declared_slots - sum(
-                sum(claim["roles"].values()) for claim in admission["claims"]
-                if claim["released_at"] is None
-                and (claim["holder"] == CONTROLLER_HOLDER or claim["holder"] in live))
+                sum(roles.values()) for roles in occupying_roles())
         waiting: set[int] = set()
         acquired = False
 
@@ -3125,27 +3261,38 @@ def command_control(args: argparse.Namespace) -> int:
             return True
 
         def refusal_gated(issue: int) -> bool:
-            """Whether a `host_capacity` custody still awaits a later release (D7, D26).
+            """Whether a `host_capacity` custody still awaits a later release (D7, D12, D26).
 
-            It waits until some other claim is released after the
-            `launch_refused` claim naming its current launch, by any event but
-            `launch_refused`: another custody's refusal frees no capacity, so two
-            refused owners never wake each other (D31).
+            For a refusal this sweep recorded, or a launch the store has no view of, it
+            waits until some other claim is released after the `launch_refused` claim naming
+            its current launch, by any event but `launch_refused`: another custody's refusal
+            frees no capacity, so two refused owners never wake each other (D31). Otherwise
+            the store decides: a transaction not parked has been woken, so the custody may
+            resume, and a parked one waits unless this sweep itself released a claim by an
+            event other than `launch_refused`.
             """
             issue_state = state["issues"].get(str(issue))
             custody, record = runtime.current_custody(issue, issue_state)
             if (record is None or record["state"] != "suspended"
                     or record["blocked_on"] != "host_capacity"):
                 return False
-            refused_claim = next(
-                (claim for claim in admission["claims"]
-                 if claim["holder"] == custody["action_id"]
-                 and claim["release_event"] == "launch_refused"), None)
-            if refused_claim is None:
-                raise WorkflowError("internal error: refused launch holds no refused claim")
-            if any(claim["release_event"] not in (None, "launch_refused")
-                   and claim["release_seq"] > refused_claim["release_seq"]
-                   for claim in admission["claims"]):
+            holder = custody["action_id"]
+            view = views.get(holder)
+            if holder in refused_here or view is None:
+                refused_claim = next(
+                    (claim for claim in admission["claims"]
+                     if claim["holder"] == holder
+                     and claim["release_event"] == "launch_refused"), None)
+                if refused_claim is None:
+                    raise WorkflowError("internal error: refused launch holds no refused claim")
+                if any(claim["release_event"] not in (None, "launch_refused")
+                       and claim["release_seq"] > refused_claim["release_seq"]
+                       for claim in admission["claims"]):
+                    return False
+            elif not view.parked or any(
+                    claim["release_event"] not in (None, "launch_refused")
+                    and claim["release_seq"] > releases_at_start
+                    for claim in admission["claims"]):
                 return False
             waiting.add(issue)
             return True
@@ -3533,12 +3680,9 @@ def command_control(args: argparse.Namespace) -> int:
             "route": route, "declared_slots": None, "reserved": reserved,
             "available": None, "waiting": []}
         if not direct:
-            live = runtime.live_launches(state, at_time=now, unavailable=unavailable)
-            for claim in admission["claims"]:
-                if claim["released_at"] is None and (
-                        claim["holder"] == CONTROLLER_HOLDER or claim["holder"] in live):
-                    for role, count in claim["roles"].items():
-                        reserved[role] += count
+            for roles in occupying_roles():
+                for role, count in roles.items():
+                    reserved[role] += count
             report.update(
                 declared_slots=declared_slots,
                 available=max(0, declared_slots - sum(reserved.values())),
@@ -3616,6 +3760,12 @@ def direct_terminal(
     }
 
 
+def refuse_unmigrated_direct(attempts: Path, workflows_dir: Path, issue: int) -> None:
+    """Refuse a direct run whose legacy ledger the index does not name yet; writes nothing."""
+    if attempt_store.unmigrated_direct(attempts, workflows_dir, issue):
+        raise WorkflowError("unmigrated direct run: run workflow-state migrate --apply")
+
+
 def command_direct_owner(args: argparse.Namespace) -> int:
     runtime = _delivery()
     request, migration_contracts = load_direct_owner_request(args.request_file)
@@ -3623,7 +3773,12 @@ def command_direct_owner(args: argparse.Namespace) -> int:
     if not Path(args.repo_root).is_absolute():
         raise WorkflowError("repository root path must be absolute")
     repo_root = resolve_repo_root(args.repo_root)
-    workflows_dir = ensure_workflows_directory(repo_root)
+    attempts = attempt_store.store_root(repo_root / ".superpowers")
+    workflows_dir = repo_root / ".superpowers" / "workflows"
+    # Refused before anything is created: a legacy ledger no index entry names is bound by
+    # `migrate --apply`, not on the spot (D22).
+    refuse_unmigrated_direct(attempts, workflows_dir, issue)
+    ensure_workflows_directory(repo_root)
     issue_lock_path = workflows_dir / f".direct-{issue}.lock"
     issue_lock_descriptor = open_stable_lock(
         issue_lock_path, "direct issue lock", allow_missing=True
@@ -3633,34 +3788,10 @@ def command_direct_owner(args: argparse.Namespace) -> int:
     with os.fdopen(issue_lock_descriptor, "r+b") as issue_lock:
         fcntl.flock(issue_lock.fileno(), fcntl.LOCK_EX)
         with ExitStack() as retained_locks:
-            prefix = f"direct-{issue}-"
-            claimed: list[tuple[int, str, Path]] = []
-            for entry in os.scandir(workflows_dir):
-                if not entry.name.startswith(prefix):
-                    continue
-                suffix = entry.name[len(prefix):]
-                if len(suffix) != 6 or not suffix.isascii() or not suffix.isdecimal():
-                    raise WorkflowError("malformed direct run namespace entry")
-                sequence = int(suffix)
-                if sequence < 1:
-                    raise WorkflowError("malformed direct run namespace entry")
-                run_id = entry.name
-                run_dir = workflows_dir / run_id
-                run_status = path_status(run_dir)
-                if (
-                    run_status is None
-                    or stat.S_ISLNK(run_status.st_mode)
-                    or not stat.S_ISDIR(run_status.st_mode)
-                ):
-                    raise WorkflowError(
-                        "direct run entry must be a non-symlink directory"
-                    )
-                claimed.append((sequence, run_id, run_dir))
+            refuse_unmigrated_direct(attempts, workflows_dir, issue)
 
-            attempts = attempt_store.store_root(repo_root / ".superpowers")
-
-            def retain(sequence: int, run_id: str, run_dir: Path,
-                       probed: bool) -> tuple[int, str, Path, Path]:
+            def retain(sequence: int, run_id: str,
+                       run_dir: Path) -> tuple[int, str, Path, Path]:
                 """Lock one run's ledger to the end of the call and check it read-only."""
                 lock_path = run_dir / "state.lock"
                 state_path = run_dir / "state.json"
@@ -3678,23 +3809,19 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                     raise WorkflowError(
                         "direct run state must contain exactly the requested issue"
                     )
-                if probed and attempt_store.bound_identity(
+                if attempt_store.bound_identity(
                         attempts, checked, run_id) != RunIdentity("direct", issue, sequence):
                     raise WorkflowError(
                         "direct run state does not match its sequence in the index"
                     )
                 return sequence, run_id, run_dir, state_path
 
-            # Preflight: every scanned and probed ledger is checked, none written, so a
-            # refused one refuses the call before any bind, index entry or mint (D23).
-            candidates = [retain(sequence, run_id, run_dir, False)
-                          for sequence, run_id, run_dir in sorted(claimed)]
-            sequence = candidates[-1][0] if candidates else 0
-            for sequence, probed_id, probed_dir in attempt_store.indexed_direct_runs(
-                    attempts, workflows_dir, issue, after=sequence):
-                candidates.append(retain(sequence, probed_id, probed_dir, True))
+            # Preflight: every indexed ledger is checked, none written, so a refused one
+            # refuses the call before any bind, index entry or mint (D23).
+            candidates = [retain(sequence, run_id, run_dir) for sequence, run_id, run_dir
+                          in attempt_store.direct_runs(attempts, workflows_dir, issue)]
 
-            # Bind: a legacy ledger is committed as schema 9 at once, under its held lock.
+            # Bind: a legacy ledger is committed as schema 10 at once, under its held lock.
             retained: list[tuple[int, str, Path, Path, dict[str, Any], RunIdentity]] = []
             for sequence, run_id, run_dir, state_path in candidates:
                 read = read_locked_state(
@@ -3702,7 +3829,8 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                 )
                 if read.changed:
                     commit_state(run_dir, state_path, read.state, run_id=run_id,
-                                 identity=read.identity, bound_launches=read.bound_launches)
+                                 identity=read.identity, bound_launches=read.bound_launches,
+                                 bound_remainders=read.bound_remainders)
                 retained.append(
                     (sequence, run_id, run_dir, state_path, read.state, read.identity)
                 )
@@ -4337,14 +4465,24 @@ def _non_symlink(path: Path, kind: Callable[[int], bool]) -> bool:
 
 
 def _installing_runs(repo_root: Path, issue: str, digest: str) -> Iterator[Path]:
-    """Each run under repo_root whose raw state records digest for issue, sorted (#193 D3)."""
-    workflows = repo_root / ".superpowers" / "workflows"
-    if not all(_non_symlink(path, stat.S_ISDIR) for path in (workflows.parent, workflows)):
+    """Each run under repo_root whose delivery transaction and raw state both record digest
+    for issue, in install order (#193 D3, #339 D24).
+
+    The store names the candidates (`installing_runs`), so `workflows` is never listed. A
+    candidate whose name is not a run id, whose path is not a non-symlink directory or whose
+    state file is absent, unreadable, unparsable or records another digest is skipped, so a
+    delivery transaction a cut write left ahead of its ledger matches nothing.
+    """
+    superpowers = repo_root / ".superpowers"
+    workflows = superpowers / "workflows"
+    if not (issue.isascii() and issue.isdecimal()) or not all(
+            _non_symlink(path, stat.S_ISDIR) for path in (superpowers, workflows)):
         return
-    for run_dir in sorted(workflows.iterdir(), key=lambda path: path.name):
+    for handle in installing_runs(attempt_store.store_root(superpowers), int(issue), digest):
+        run_dir = workflows / handle
         state_path = run_dir / "state.json"
         try:
-            if (not RUN_ID_PATTERN.fullmatch(run_dir.name)
+            if (not RUN_ID_PATTERN.fullmatch(handle)
                     or not _non_symlink(run_dir, stat.S_ISDIR)
                     or not _non_symlink(state_path, stat.S_ISREG)):
                 continue
@@ -4376,10 +4514,11 @@ def installed_initial_intent(runtime: Any, repo_root_value: str,
 
     Read-only like check-launch: no lock, no clock and no write (#193 D3, D4).
     A contract with no canonical bytes has no digest a ledger could record, so
-    it answers None and meets the builder's own refusal. Runs are scanned in sorted order. A run that is not a run-id-named
-    non-symlink directory, or whose state file is absent, not a non-symlink
-    regular file, uninspectable, unreadable, unparsable, or records another
-    contract digest for the issue, is skipped. The first match is re-read
+    it answers None and meets the builder's own refusal. Runs are taken in
+    install order from the store's delivery transactions. A run that is not a
+    run-id-named non-symlink directory, or whose state file is absent, not a
+    non-symlink regular file, uninspectable, unreadable, unparsable, or records
+    another contract digest for the issue, is skipped. The first match is re-read
     through ``read_state_unlocked``; a match that fails validation in any way,
     or whose validated contract does not carry the digest, refuses naming its
     run (D14).
@@ -4408,7 +4547,7 @@ def installing_ledger_delivery(runtime: Any, repo_root_value: str,
                                contract: object) -> dict[str, Any] | None:
     """The validated delivery the one ledger that installed ``contract`` holds, or None.
 
-    Read-only like ``installed_initial_intent``, over the same scan (#192 D25).
+    Read-only like ``installed_initial_intent``, over the same lookup (#192 D25).
     A selection can differ between ledgers where a root intent cannot, so two
     raw matches refuse naming both runs instead of taking the first. A value
     with no canonical bytes or issue matches no ledger and meets the builder's
@@ -5505,6 +5644,9 @@ def build_parser() -> argparse.ArgumentParser:
     handle.add_argument("--run-id", help="re-bootstrap an initialized run; never creates one")
     handle.add_argument("--creation-key",
                         help="mint the run for this key, or answer the one it already names")
+    handle.add_argument("--issue-set",
+                        help="issue numbers joined by '-': the first reusable run for the set, "
+                             "minted if none is")
     init_run.set_defaults(handler=command_init_run)
 
     migrate = subparsers.add_parser("migrate")

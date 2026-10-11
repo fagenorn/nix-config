@@ -129,7 +129,7 @@ class CustodyLeaseTest(LifecycleCustody, unittest.TestCase):
         lease = self.lease(self.worktree)
         self.assertEqual((lease["epoch"], lease["holder"]["term"],
                           lease["holder"]["expires_at"]), (1, 1, ac.at_ms(T(30))))
-        self.assertEqual(self.read_state()["schema_version"], 9)
+        self.assertEqual(self.read_state()["schema_version"], 10)
 
     def test_ac1_declare_lane_renews_in_place_and_reacquires_after_the_window(self):
         self.spawn_14()
@@ -140,34 +140,35 @@ class CustodyLeaseTest(LifecycleCustody, unittest.TestCase):
         self.assertEqual((self.lease(self.worktree)["epoch"], holder["instance"],
                           holder["term"], holder["expires_at"]),
                          (1, instance, 2, ac.at_ms(T(10))))
-        self.assertEqual(self.events(14), ["created", "lease_acquired"])
+        self.assertEqual(self.events(14), ["created", "lease_acquired", "evidence_recorded"])
         self.declare_lane(action_id="14:1:1", now=T(15), lane="full", budget_minutes=60,
                           reason="light_deadline")
         lease = self.lease(self.worktree)
         self.assertEqual((lease["epoch"], lease["holder"]["term"],
                           lease["holder"]["expires_at"]), (2, 1, ac.at_ms("2026-08-13T21:00:00Z")))
         self.assertNotEqual(lease["holder"]["instance"], instance)
-        self.assertEqual(self.events(14)[2:], ["lease_lapse_detected", "lease_reacquired"])
+        self.assertEqual(self.events(14)[3:], ["lease_lapse_detected", "lease_reacquired",
+                                               "evidence_recorded"])
         self.assertEqual(self.custody(14).custody.executor_id, "14:1:1")
 
     def test_ac1_a_reap_then_a_resume_advance_the_epoch_and_void_snapshot_evidence(self):
         self.spawn_14()
         self.core(T(1)).record_evidence(self.custody(14).custody, evidence_id="probe",
                                         form="snapshot", reference="ref")
-        self.assertTrue(self.custody(14).evidence[0]["admissible"])
+        self.assertTrue(self.custody(14).evidence[1]["admissible"])
         self.expire(issue=14, worktree=self.worktree, now=T(31))
-        self.assertEqual(self.events(14)[3:], [
+        self.assertEqual(self.events(14)[4:], [
             "lease_lapse_detected", "stop_synthesized", "transitioned"])
         parked = self.custody(14)
-        self.assertEqual((parked.state, parked.custody, parked.events[4]["reason"]),
+        self.assertEqual((parked.state, parked.custody, parked.events[5]["reason"]),
                          ("attention_required", None, "expiry"))
         self.resume(issue=14, worktree=self.worktree, now=T(32))
         resumed = self.custody(14)
-        reacquired = resumed.events[6]
+        reacquired = resumed.events[7]
         self.assertEqual((reacquired["type"], reacquired["reason"], reacquired["executor_id"]),
                          ("lease_reacquired", "expired", "14:1:2"))
         self.assertEqual((resumed.state, self.lease(self.worktree)["epoch"]), ("created", 2))
-        evidence = resumed.evidence[0]
+        evidence = resumed.evidence[1]
         self.assertEqual((evidence["admissible"], evidence["void_reason"]),
                          (False, "fence_changed"))
 
@@ -271,7 +272,7 @@ class CustodyMigrationTest(LifecycleCustody, unittest.TestCase):
                          ("migrate", None, 8))
         self.assertEqual(self.tree(), before)
         self.register_worker(action_id="14:1:1", now=T(1))
-        self.assertEqual(self.read_state()["schema_version"], 9)
+        self.assertEqual(self.read_state()["schema_version"], 10)
         bound = self.custody(14)
         self.assertEqual((bound.subject["bound_launch"], bound.custody.executor_id),
                          (1, "14:1:1"))
@@ -310,7 +311,7 @@ class CustodyMigrationTest(LifecycleCustody, unittest.TestCase):
         self.install_legacy(self.read_state(), "orchestrate-14", version=8)
         self.contractless()
         self.assertEqual(self.finish_raw(1, self.stopped(), now=T(5))["state"], "stopped")
-        self.assertEqual(self.read_state()["schema_version"], 9)
+        self.assertEqual(self.read_state()["schema_version"], 10)
         bound = self.custody(14)
         self.assertEqual((bound.state, bound.custody, bound.subject["bound_launch"]),
                          ("abandoned", None, 1))
@@ -437,7 +438,7 @@ class LaunchFenceTest(LifecycleCustody, unittest.TestCase):
         self.install_legacy(self.read_state(), "orchestrate-14", version=8)
         replayed = self.finish(1, self.stopped(), now=T(6), action_id=False)
         self.assertEqual(replayed["state"], "stopped")
-        self.assertEqual(self.read_state()["schema_version"], 9)
+        self.assertEqual(self.read_state()["schema_version"], 10)
         self.assertIsNone(self.custody(14))
         conflict = self.finish(1, self.stopped("another"), now=T(7), action_id=False, ok=False)
         self.assertEqual(conflict.returncode, 2)
@@ -568,10 +569,6 @@ class DeliveredCustody(CustodyReads, DeliveredControlHarness):
     def postconditions(self, issue):
         delivery = self.ledger_document()["issues"][str(issue)]["delivery"]
         return {name: item["state"] for name, item in delivery["postconditions"].items()}
-
-    def core_files(self):
-        return {path: content for path, content in self.tree().items()
-                if path.startswith(".superpowers/attempt-transactions/")}
 
 
 class MisbindingTest(DeliveredCustody, unittest.TestCase):
@@ -767,7 +764,7 @@ class LateSummaryTest(DeliveredCustody, unittest.TestCase):
         before = self.postconditions(DELIVERED)
         self.assertEqual((before["pr_merged"], before["tracker_closed"]),
                          ("observed", "pending"))
-        core = self.core_files()
+        events = self.events(DELIVERED)
         contract = self.built[DELIVERED]["contract"]
         request = json.loads(self.request(40, recorded={DELIVERED: "matching_issue_branch"},
                                           contracts=True))
@@ -778,7 +775,7 @@ class LateSummaryTest(DeliveredCustody, unittest.TestCase):
                  stdin=json.dumps(request).encode())
         self.assertEqual(self.postconditions(DELIVERED),
                          {**before, "tracker_closed": "observed"})
-        self.assertEqual(self.core_files(), core)
+        self.assertEqual(self.events(DELIVERED), events)
 
 
 class CompatibilityTest(LifecycleCustody, unittest.TestCase):
@@ -809,7 +806,7 @@ class CompatibilityTest(LifecycleCustody, unittest.TestCase):
             self.assertEqual((control.returncode, json.loads(control.stdout)["reason"]),
                              (0, "current"), control.stderr)
             self.register_worker(action_id="14:1:1", now=T(1))
-            self.assertEqual(self.read_state()["schema_version"], 9)
+            self.assertEqual(self.read_state()["schema_version"], 10)
             before = self.tree()
             for command, rest in (("check-launch", ()),
                                   ("register-worker", ("--now", T(2)))):
@@ -831,7 +828,7 @@ class CompatibilityTest(LifecycleCustody, unittest.TestCase):
 
         before = projections()
         self.register_worker(action_id="14:1:1", now=T(1))
-        self.assertEqual(self.read_state()["schema_version"], 9)
+        self.assertEqual(self.read_state()["schema_version"], 10)
         self.assertEqual(projections(), before)
 
 

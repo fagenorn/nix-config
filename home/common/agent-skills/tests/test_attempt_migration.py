@@ -95,7 +95,7 @@ class MigrationFixtures(LifecycleHarness):
         source = self.delivered_207()
         self.install_legacy(source, "issue-14-test")
         self.install_legacy(source, "orchestrate-90")
-        self.edit_ledger("orchestrate-90", schema_version=10)
+        self.edit_ledger("orchestrate-90", schema_version=11)
         self.install_legacy({**source, "prior_run": "orchestrate-90"}, "orchestrate-91")
         self.install_direct_pair()
         shutil.rmtree(self.workflows_dir / "direct-41-000001")
@@ -122,7 +122,7 @@ class InitRunMintTest(MigrationFixtures, unittest.TestCase):
         self.assertRegex(first["run_id"], CORE)
         self.run_id = first["run_id"]
         state = self.read_state()
-        self.assertEqual((state["schema_version"], state["transaction_id"]), (9, first["run_id"]))
+        self.assertEqual((state["schema_version"], state["transaction_id"]), (10, first["run_id"]))
         self.assertEqual(self.store().lookup(ai.run_key("k-337")), first["run_id"])
         runs = [p.name for p in self.workflows_dir.iterdir() if not p.name.startswith(".")]
         self.assertEqual(runs, [first["run_id"]])
@@ -155,7 +155,7 @@ class MigrateOnWriteTest(MigrationFixtures, unittest.TestCase):
         # A no-op locked command: its only write is the migration (D14).
         self.run_cli("init-run", "--repo-root", self.root, "--run-id", self.run_id)
         state = self.read_state()
-        self.assertEqual((state["schema_version"], state["run_id"]), (9, "orchestrate-21-24-r2"))
+        self.assertEqual((state["schema_version"], state["run_id"]), (10, "orchestrate-21-24-r2"))
         key = ai.legacy_key("orchestrate-21-24-r2")
         self.assertEqual(self.store().lookup(key), state["transaction_id"])
         subject = self.store().load(state["transaction_id"]).subject
@@ -255,6 +255,7 @@ class DirectOwnerIdentityTest(MigrationFixtures, unittest.TestCase):
 
     def test_a_new_run_after_a_legacy_terminal_links_the_legacy_handle(self):
         self.install_terminal_legacy_direct("direct-41-000001")
+        self.run_cli("migrate", "--repo-root", self.root, "--apply")
         reply = self.direct_owner(**self.new_run_fields(41))
         self.assertRegex(reply["run_id"], CORE)
         self.run_id = reply["run_id"]
@@ -262,7 +263,7 @@ class DirectOwnerIdentityTest(MigrationFixtures, unittest.TestCase):
         self.assertEqual(self.store().load(reply["run_id"]).subject["sequence"], 2)
         legacy = json.loads((self.workflows_dir / "direct-41-000001" / "state.json")
                             .read_text())
-        self.assertEqual(legacy["schema_version"], 9)  # bound and committed (D14)
+        self.assertEqual(legacy["schema_version"], 10)  # bound and committed (D14)
         self.assertEqual(self.store().lookup(ai.direct_key(41, 1)),
                          legacy["transaction_id"])
 
@@ -273,22 +274,21 @@ class DirectOwnerIdentityTest(MigrationFixtures, unittest.TestCase):
         self.store_root.mkdir(parents=True, exist_ok=True)
         reserved = self.store().create(plan.creation_key, plan.subject_json(),
                                        **ai.creation_arguments(plan)).transaction_id
+        self.run_cli("migrate", "--repo-root", self.root, "--apply")
         reply = self.direct_owner(**self.new_run_fields(41))
         self.assertEqual(reply["run_id"], reserved)
         self.assertIsNone(self.store().lookup(ai.direct_key(41, 3)))
 
-    def test_a_refused_legacy_ledger_refuses_the_call_and_mints_nothing(self):
+    def test_a_legacy_ledger_the_index_never_reaches_is_not_read(self):
         self.init_run()
         state = {**self.read_state(), "prior_run": "direct-42-000001"}
         self.install_legacy(state, "direct-41-000002")
         ledger = self.workflows_dir / "direct-41-000002" / "state.json"
         before = ledger.read_bytes()
-        refused = self.direct_owner_raw(issue=41, ok=False)
-        self.assertEqual(refused.returncode, 2)
-        self.assertIn("ambiguous_lineage", refused.stderr)
+        reply = self.direct_owner(issue=41, tracker=self.tracker_fact(41))
+        self.assertRegex(reply["run_id"], CORE)
+        self.assertEqual(self.store().lookup(ai.direct_key(41, 1)), reply["run_id"])
         self.assertEqual(ledger.read_bytes(), before)
-        for sequence in (1, 2, 3):
-            self.assertIsNone(self.store().lookup(ai.direct_key(41, sequence)))
 
     def test_a_valid_ledger_before_a_refused_one_stays_unbound(self):
         self.install_terminal_legacy_direct("direct-41-000001")
@@ -299,7 +299,7 @@ class DirectOwnerIdentityTest(MigrationFixtures, unittest.TestCase):
         before = (first.read_bytes(), second.read_bytes())
         refused = self.direct_owner_raw(issue=41, ok=False)
         self.assertEqual(refused.returncode, 2)
-        self.assertIn("ambiguous_lineage", refused.stderr)
+        self.assertIn("unmigrated direct run", refused.stderr)
         self.assertEqual((first.read_bytes(), second.read_bytes()), before)  # D23
         for sequence in (1, 2, 3):
             self.assertIsNone(self.store().lookup(ai.direct_key(41, sequence)))
@@ -520,7 +520,7 @@ class LegacyOwnerCompatibilityTest(MigrationFixtures, unittest.TestCase):
         bound = self.read_state()["transaction_id"]
         self.finish(1, self.merged_result(), now="2026-08-13T20:30:00Z")
         self.assertEqual(self.read_state()["issues"]["14"]["attempts"][-1]["state"], "merged")
-        self.assert_owner_bound()  # finish ran on the schema-9 ledger and kept its binding (D25)
+        self.assert_owner_bound()  # finish ran on the schema-10 ledger and kept its binding (D25)
         self.assertEqual(self.read_state()["transaction_id"], bound)
 
     def assert_owner_bound(self):

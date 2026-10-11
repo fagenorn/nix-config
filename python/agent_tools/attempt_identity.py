@@ -10,7 +10,7 @@ and `load`, and the mint lock); `workflow-state` owns the ledgers, their locks a
 import copy
 import datetime
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
@@ -41,7 +41,7 @@ _PATTERNS = {
 _CALLER_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _SUBJECT_KEYS = frozenset({"schema", "kind", "issue", "sequence", "prior_run", "alias"})
 _KINDS = ("direct", "orchestrated")
-_MAX_SCHEMA_VERSION = 9
+_MAX_SCHEMA_VERSION = 10
 _MAX_ISSUE = 9_999_999
 _MAX_SEQUENCE = 999_999
 
@@ -167,6 +167,24 @@ def run_key(caller_key: str) -> str:
     return f"{SUBJECT_SCHEMA}:run:{caller_key}"
 
 
+def issue_set_caller_key(issues: Iterable[int], ordinal: int) -> str:
+    """The caller key of the `ordinal`th run for a set of issues (`init-run --issue-set`).
+
+    Sorted, unique issue numbers joined by `-`, then the ordinal. A `ValueError` for no
+    issue, a member that is not an int in 1 to `_MAX_ISSUE`, an ordinal below 1, or a key
+    the caller-key grammar refuses.
+    """
+    numbers = sorted(set(issues))
+    if not numbers or not all(_is_int(number, 1, _MAX_ISSUE) for number in numbers):
+        raise ValueError("an issue set needs issue numbers in 1 to 9999999")
+    if type(ordinal) is not int or ordinal < 1:
+        raise ValueError(f"issue set ordinal {ordinal!r} is not a positive integer")
+    key = f"issue-set:{'-'.join(map(str, numbers))}:{ordinal}"
+    if _CALLER_KEY.fullmatch(key) is None:
+        raise ValueError(f"issue set key {key!r} is not {_CALLER_KEY.pattern}")
+    return key
+
+
 def _direct_predecessor(identity: RunIdentity, prior_run: object) -> bool:
     """`prior_run` is a legacy direct id for the same issue with a lower sequence."""
     if classify(prior_run) != "direct":
@@ -191,7 +209,7 @@ def prior_run_violation(identity: RunIdentity, prior_run: object, *,
 
 
 def schema_refusal(document: object) -> str | None:
-    """"unknown_schema" unless `document` is a dict whose schema_version is an int in 1-9."""
+    """"unknown_schema" unless `document` is a dict whose schema_version is an int in 1-10."""
     version = document.get("schema_version") if type(document) is dict else None
     if type(version) is int and 1 <= version <= _MAX_SCHEMA_VERSION:
         return None
