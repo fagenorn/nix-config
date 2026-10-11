@@ -922,5 +922,106 @@ class IntegrationBranchOperandTest(VerifyTestCase):
             ("adopt_failure", "adopt.verify.integration_branch_repeated"))
 
 
+class IntegrationBranchOperandLifecycleTest(VerifyTestCase):
+    """Issue 363: what an operand-selected registration reads, and how its
+    registry entry lives beside later registrations."""
+
+    def register_through_the_operand(self, root: Path) -> dict:
+        return self.report(root, "--register", "--integration-branch", "dev")
+
+    def test_nothing_is_read_from_the_checkout(self):
+        root = stale_default_repo(self.home)
+        adoption = git(root, "rev-parse", "main").strip()
+        # Freshness: origin's `dev` first holds the commit before the
+        # adoption, and is advanced on origin itself, so the checkout's
+        # `refs/remotes/origin/dev` is stale when registration starts.
+        bare = publish(root, ("stale:main", "main~1:dev"))
+        git(root, "push", "--quiet", "origin",
+            f"{adoption}:refs/staging/adopt")
+        git(bare, "update-ref", "refs/heads/dev", adoption)
+        # A checkout that could answer nothing: unrelated local `main` and
+        # `dev`, no contract in the working tree, an unstaged edit and an
+        # untracked file.
+        git(root, "checkout", "--quiet", "--orphan", "elsewhere")
+        git(root, "rm", "--quiet", "-r", "-f", ".")
+        write(root, "README.md", "# unrelated\n")
+        commit(root, "unrelated history")
+        git(root, "branch", "--quiet", "-f", "dev", "HEAD")
+        write(root, "more.md", "# more\n")
+        commit(root, "more unrelated history")
+        git(root, "branch", "--quiet", "-f", "main", "HEAD")
+        write(root, "README.md", "# unstaged edit\n")
+        untracked = write(root, "scratch.txt", "untracked bytes\n")
+        self.assertFalse((root / ".agents" / "project.json").exists())
+        local = {name: git(root, "rev-parse", f"refs/heads/{name}").strip()
+                 for name in ("main", "dev")}
+        self.assertNotIn(adoption, local.values())
+        status = git(root, "status", "--porcelain")
+        snapshot = tree_snapshot(root)
+
+        report = self.register_through_the_operand(root)
+
+        self.assertEqual(report["result"], "adopted", report["checks"])
+        self.assertIs(report["registered"], True)
+        self.assertEqual(report["revision"], {
+            "ref": "refs/remotes/origin/dev", "commit": adoption})
+        self.assertEqual(report["branch_override"], OVERRIDE)
+        self.assertEqual(
+            {name: git(root, "rev-parse", f"refs/heads/{name}").strip()
+             for name in ("main", "dev")}, local)
+        self.assertEqual(git(root, "status", "--porcelain"), status)
+        self.assertEqual(tree_snapshot(root), snapshot)
+        self.assertEqual(untracked.read_text("utf-8"), "untracked bytes\n")
+        self.assertFalse((root / ".git" / "FETCH_HEAD").exists())
+
+    def test_a_repeated_operand_registration_is_byte_identical(self):
+        root = stale_default_repo(self.home)
+        publish(root, ("stale:main", "main:dev"))
+        self.register_through_the_operand(root)
+        first = self.registry_path().read_bytes()
+        self.register_through_the_operand(root)
+        self.assertEqual(self.registry_path().read_bytes(), first)
+        self.assertEqual(self.registry()["projects"][0]["branch_override"],
+                         OVERRIDE)
+
+    def test_a_later_registration_without_the_operand_drops_the_override(self):
+        root = stale_default_repo(self.home)
+        publish(root, ("stale:main", "main:dev"))
+        self.register_through_the_operand(root)
+        self.assertIn("branch_override", self.registry()["projects"][0])
+        # The default branch catches up: its contract now resolves and names
+        # `dev`, so the ordinary hop reaches it.
+        git(root, "push", "--quiet", "--force", "origin", "main:main")
+        report = self.report(root, "--register")
+        self.assertIs(report["registered"], True)
+        self.assertNotIn("branch_override", report)
+        self.assertEqual(self.registry()["projects"], [
+            {"project_id": "fixture/target", "root": str(root)}])
+
+    def test_another_projects_registration_keeps_the_override(self):
+        alpha = stale_default_repo(self.home, project_id="fixture/alpha")
+        publish(alpha, ("stale:main", "main:dev"))
+        self.register_through_the_operand(alpha)
+        beta = verifiable_repo(self.home, project_id="fixture/beta")
+        publish(beta)
+        self.report(beta, "--register")
+        self.assertEqual(self.registry()["projects"], [
+            {"project_id": "fixture/alpha", "root": str(alpha),
+             "branch_override": OVERRIDE},
+            {"project_id": "fixture/beta", "root": str(beta)},
+        ])
+
+    def test_a_non_conformant_operand_branch_reports_and_writes_nothing(self):
+        root = stale_default_repo(self.home)
+        write_adoption_records(root, digest="b2" * 32)
+        commit(root, "a second adoption record")
+        publish(root, ("stale:main", "main:dev"))
+        report = self.register_through_the_operand(root)
+        self.assertEqual(report["result"], "not_conformant", report)
+        self.assertEqual(report["branch_override"], OVERRIDE)
+        self.assertIs(report["registered"], False)
+        self.assertFalse(self.registry_path().exists())
+
+
 if __name__ == "__main__":
     unittest.main()
