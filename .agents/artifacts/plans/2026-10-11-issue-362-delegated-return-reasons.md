@@ -55,5 +55,10 @@ Task 2 — Grade evals 5, 6 and 7 once and write the acceptance evidence — `.a
 
 - Where the reasons go and that eval 6 is not edited: D1. The paying cuts and the untouched ceilings: D2. The grading method, the tighter rule for eval 6 and what a failure allows: D3. What the gradings stand for, and when they are repeated: D4. How 352's row is extended and its verdict rule: D5. The design-time probes: D6.
 - Appended by this plan: D7 (this issue's own acceptance record and its two commits), D8 (no inline grading; a failed grading is reported, not repaired, by the grader), D9 (the full suite is run once at the graded commit as a cited measurement), D10 (the skill edit and the row extension are made by exact-match scripts).
+- Appended by the standards review: D11 (the record scripts refuse only their own template tokens, and a rerun extends this issue's record).
 
 ---
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, model gpt-6-astra, effort xhigh), isolated read-only mode, no fallback, no focus. Base SHA 96174d0ec1a6b4f507059bdcdff56f5532442bbf; plan reviewed at cb3b5de2. Findings: 1 blocking and 1 should-fix, both verified against the live plan and `evals.json` and accepted (D11); 0 rejected, 0 deferred, 0 discussion.

@@ -75,18 +75,26 @@ if __name__ == "__main__":
 """Issue 362: extend the AC3 row of issue 352's acceptance record.
 
 usage: record.py extend <additions.json> | check <base commit>
+| unfilled <file>
 (run from the worktree root)
 
 additions.json holds the strings `observed`, `commit` and `conditions`, each
 appended to its cell after "; ", and `passes`, an object of six booleans. The
 verdict is `met` only when all six are true (spec D5). `check` compares the
-file with its version at <base commit>.
+file with its version at <base commit>. `unfilled` exits 1 when <file> still
+holds a template token of Steps 5 and 6.
 """
 import json
 import pathlib
+import re
 import subprocess
 import sys
 
+# The template tokens of Steps 5 and 6. Any other angle bracket is quoted
+# evidence, such as the literal `<value>` in eval 5's expected output (D11).
+UNFILLED = re.compile(
+    r"<(G|R|count|eval \d verdict|contract tests result|suite result|gate output line|relaunch note)>"
+)
 PATH = ".agents/artifacts/plans/2026-10-10-issue-352-delegated-ship-routing.acceptance.md"
 PASSES = ("eval_5", "eval_6", "eval_7", "contract_tests", "workflow_tests", "budget_gate")
 OBSERVED, COMMIT, CONDITIONS, VERDICT = 4, 5, 6, 7
@@ -114,8 +122,8 @@ def extend(additions_path):
     lines, row, cells = split(path.read_text(encoding="utf-8"))
     for index, key in EXTENDED:
         value = add[key].strip()
-        if not value or any(mark in value for mark in ("|", "\n", "<", ">")):
-            raise SystemExit(f"record: {key} is empty or holds '|', a newline or an unfilled <...>")
+        if not value or "|" in value or "\n" in value or UNFILLED.search(value):
+            raise SystemExit(f"record: {key} is empty or holds '|', a newline or an unfilled template token")
         if cells[index].endswith("; " + value):
             raise SystemExit(f"record: {key} is already appended")
         cells[index] += "; " + value
@@ -139,7 +147,7 @@ def check(base):
         problems.append("one of the first four AC3 cells changed")
     for index, key in EXTENDED:
         added = new[index][len(old[index]):]
-        if not new[index].startswith(old[index] + "; ") or "362" not in added or "<" in added:
+        if not new[index].startswith(old[index] + "; ") or "362" not in added or UNFILLED.search(added):
             problems.append(f"{key} is not the old cell plus a filled-in issue 362 extension")
     if new[VERDICT] not in ("met", "unmet"):
         problems.append(f"verdict is {new[VERDICT]!r}")
@@ -149,10 +157,16 @@ def check(base):
     return 1 if problems else 0
 
 
+def unfilled(path):
+    found = sorted({m.group(0) for m in UNFILLED.finditer(pathlib.Path(path).read_text(encoding="utf-8"))})
+    print("unfilled: " + ", ".join(found) if found else "unfilled: none")
+    return 1 if found else 0
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 3 or sys.argv[1] not in ("extend", "check"):
+    if len(sys.argv) != 3 or sys.argv[1] not in ("extend", "check", "unfilled"):
         sys.exit(__doc__)
-    sys.exit(extend(sys.argv[2]) if sys.argv[1] == "extend" else check(sys.argv[2]))
+    sys.exit({"extend": extend, "check": check, "unfilled": unfilled}[sys.argv[1]](sys.argv[2]))
 # end record
 ```
 
@@ -228,7 +242,7 @@ For each failed clause, search the five graded files for the fact it names and n
 
 - [ ] **Step 5: Extend 352's AC3 row**
 
-Write `$SCRATCH/additions.json` from this template. Replace every `<…>` with what you observed: `<G>` with the graded commit id, each `<eval N verdict>` with that case's line from `verdicts.md` without its leading `eval N `, the three result placeholders with the lines from Step 2 (for example `Ran 4 tests, OK`), and `<relaunch note>` with nothing, or with `; eval <id> launched again once because the first launch returned no answer` if that happened. The values may not contain `|`, `<`, `>` or a line break; escape `"` as `\"`. Set each of the six booleans to whether that item passed.
+Write `$SCRATCH/additions.json` from this template. Replace every `<…>` with what you observed: `<G>` with the graded commit id, each `<eval N verdict>` with that case's line from `verdicts.md` without its leading `eval N `, the three result placeholders with the lines from Step 2 (for example `Ran 4 tests, OK`), and `<relaunch note>` with nothing, or with `; eval <id> launched again once because the first launch returned no answer` if that happened. The values may not contain `|`, a line break or one of the template's own `<…>` tokens; an angle bracket quoted from an expected output, such as eval 5's `<value>`, is evidence and stays (D11). Escape `"` as `\"`. Set each of the six booleans to whether that item passed.
 
 ```json
 {
@@ -270,7 +284,9 @@ git rev-parse --short=8 HEAD
 Run: `grep -c '^. AC3 . .* . met .$' .agents/artifacts/plans/2026-10-10-issue-352-delegated-ship-routing.acceptance.md`
 Expected: `1` when Step 5's verdict was `met`, `0` otherwise (`grep -c` exits 1 on `0`). Keep the number printed.
 
-Create `.agents/artifacts/plans/2026-10-11-issue-362-delegated-return-reasons.acceptance.md` with this content. Replace each `<…>` as in Step 5; `<R>` is the commit from Step 5 and `<count>` the number just printed. Leave the four `Verdict` cells empty: the sdd controller writes them.
+First run (the record does not exist at `G`): create `.agents/artifacts/plans/2026-10-11-issue-362-delegated-return-reasons.acceptance.md` with the content below. Replace each template token as in Step 5; `<R>` is the commit from Step 5 and `<count>` the number just printed. Leave the four `Verdict` cells empty: the sdd controller writes them.
+
+Rerun (the record exists at `G`, because a graded file changed after an earlier grading; D4, D11): do not recreate it. In each of rows AC1–AC4, leave the first four cells as they are, append `; ` and this run's text (the template cell below, filled in) to the Observed, Commit and Conditions cells, and empty the Verdict cell so the controller writes it again from the extended evidence. Then run `git diff "$G" -- .agents/artifacts/plans/2026-10-11-issue-362-delegated-return-reasons.acceptance.md | grep '^[-+]| AC'` and read each removed row against its added row: every removed Observed, Commit and Conditions cell must be the start of the added one. A cell that lost earlier text is a rewrite: restore it and append again.
 
 ````markdown
 # Acceptance record — issue #362
@@ -292,12 +308,12 @@ Run:
 ```bash
 f=.agents/artifacts/plans/2026-10-11-issue-362-delegated-return-reasons.acceptance.md
 grep -c '^| AC[1-4] |' "$f"
-if grep -q '<' "$f"; then echo "unfilled placeholder"; exit 1; fi
+python3 "$SCRATCH/record.py" unfilled "$f"
 if git diff --name-only "$G" -- home | grep -q .; then echo "a file under home/ changed"; exit 1; fi
 python3 "$SCRATCH/record.py" check "$G"
 ```
 
-Expected: `4`; no `unfilled placeholder` line; no `a file under home/ changed` line; `record: pass, verdict <met or unmet>`.
+Expected: `4`; `unfilled: none`; no `a file under home/ changed` line; `record: pass, verdict <met or unmet>`.
 
 ```bash
 git add .agents/artifacts/plans/2026-10-11-issue-362-delegated-return-reasons.acceptance.md
