@@ -175,16 +175,13 @@ Run `sdd-gate next PLAN_FILE --skill-dir <skill-dir> --task N`
 - `--repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
   under a lifecycle identity.
 
-It records the task's base, marks progress, runs the cumulative delivery gate,
-writes the task brief, registers the worker and prints one JSON object. On `outcome: ready` the whole prompt is
-`Read the dispatch brief at <brief_path> and follow it exactly.`; agent type,
-model and effort come from the template's marker lines.
+It prints one JSON object. On `outcome: ready` the whole prompt is
+`Read the dispatch brief at <brief_path> and follow it exactly.`
 
 On `outcome: refused` dispatch nothing: `gate: decompose_required` and
 `gate: failed` are the review-package gate's second and third exits; step
 `release-worker` or `register-worker` is a lifecycle failure under
-`### Lifecycle workers`; any other `step` is a contract error: stop. Once the
-cause is fixed, re-run the same call.
+`### Lifecycle workers`; any other `step` is a contract error: stop.
 
 - Record the implementer's agent identity and `worker_id`: fix rounds 1–3 resume it.
 - Never dispatch multiple implementers in parallel (conflicts).
@@ -193,9 +190,9 @@ Template: [implementer-prompt.md](implementer-prompt.md)
 
 ### 2. Handle the report
 
-- **DONE** → run `sdd-gate review PLAN_FILE --skill-dir <skill-dir> --task N` with step 1's `--standards` and lifecycle flags plus `--worker-id <worker_id>`. It releases the worker, gates the task's review package and renders the reviewer brief; a refusal routes as in step 1.
+- **DONE** → run `sdd-gate review PLAN_FILE --skill-dir <skill-dir> --task N` with step 1's `--standards` and lifecycle flags plus `--worker-id <worker_id>`. A refusal routes as in step 1.
 - **DONE_WITH_CONCERNS** → correctness/scope concerns get addressed before review; observations get noted, review proceeds.
-- **NEEDS_CONTEXT** → release the worker, then repeat step 1's call with the context added: the task base is kept and a fresh worker registered.
+- **NEEDS_CONTEXT** → release the worker, then repeat step 1's call with the context added.
 - **BLOCKED** → a `launch fence refused` report follows `### Lifecycle workers` and is never re-dispatched. Otherwise: context problem: re-dispatch as for NEEDS_CONTEXT, at the same tier. Reasoning problem: the same, with the blocker and the report path in the context, to a fresh Opus/high implementer:
 
 <!-- agent-dispatch: id=sdd-blocked-reasoning-escalation role=implementer model=opus effort=high -->
@@ -212,7 +209,7 @@ If the implementer asks questions — before or during — answer completely.
 Per-task review is never skipped, and a report missing either verdict (spec compliance AND quality) is not accepted; implementer self-review never substitutes. Its **form** follows the task's risk lane from the plan's task index:
 
 - **full lane** — the full first-pass reviewer below, always.
-- **mechanical / low-risk lane** — scoped verification: dispatch reviewer-lite with the declared lane and the `manifest_root` and `metrics` `sdd-gate review` printed; its rendered brief is not dispatched. For a mechanical microtask whose verify commands are deterministic, the controller may instead verify inline (run the commands, inspect the diff) and ledger `Task <N>: verified inline (mechanical)`.
+- **mechanical / low-risk lane** — scoped verification: dispatch reviewer-lite with the declared lane and the `manifest_root` and `metrics` `sdd-gate review` printed. For a mechanical microtask whose verify commands are deterministic, the controller may instead verify inline (run the commands, inspect the diff) and ledger `Task <N>: verified inline (mechanical)`.
 - **Batching** — adjacent same-lane microtasks in the same file neighborhood may share one verification context when isolation adds nothing; ledger the batch.
 - A lane verification that surfaces ambiguity, semantic doubt, or anything beyond its lane escalates to the full reviewer; never adjudicate inside the cheap gate or route a lane the plan didn't declare.
 
