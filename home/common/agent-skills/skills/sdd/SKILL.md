@@ -240,7 +240,7 @@ Never fix findings yourself in the controller session.
 
 ### 5. Complete the task
 
-Clean review — or everything parked-with-ruling at the cap — is recorded by the next `sdd-gate next --completed N` (step 1's call, without `--task` after the last task): it appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)` and runs the cumulative delivery gate. Mark the todo and move on only on `outcome: ready`. Never advance past open Critical/Important findings that are neither fixed nor parked.
+Clean review — or everything parked-with-ruling at the cap — is recorded by the next `sdd-gate next --completed N` (step 1's call; without `--task` after the last task or before a headroom stop): it appends `Task <N>: complete (commits <base7>..<head7>, review clean | <K> parked)` and runs the cumulative delivery gate. Mark the todo and move on only on `outcome: ready`. Never advance past open Critical/Important findings that are neither fixed nor parked.
 
 ## Final review — two axes
 
