@@ -19,6 +19,8 @@ an occurrence's `path` and `subject` are the base path, its `target` is where
 the plan leaves the file. An answer is the occurrence's own, or else the one
 given to its policy, `<tree>:<class>`, the moved tree and the class of the
 file name; `effective_answer` is the one place that precedence is decided.
+A path the moves would leave more than one file at is `contested`, and no edit
+is made at it: `rewritten` returns no file for such a path.
 
 A token is read as a plain path first (`split_token`). Only when that reading
 names no moved path is it read a second time as a regular-expression spelling
@@ -32,6 +34,7 @@ only. Standard library only; no per-language parser is used.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -290,8 +293,11 @@ class Occurrence:
 
 @dataclass(frozen=True)
 class References:
+    """The scanned texts by base path, their occurrences, and the paths the
+    moves would leave more than one file at (`contested`)."""
     texts: dict[str, str]
     occurrences: tuple[Occurrence, ...]
+    contested: frozenset[str] = frozenset()
 
 
 def _line_bounds(text: str, start: int, end: int) -> tuple[int, int]:
@@ -436,9 +442,15 @@ def plan_references(texts: dict[str, str], paths: Iterable[str],
 
     `texts` is keyed by base path. `trees` maps each moved file to the tree
     its policy is named for; a moved file with no entry raises `ValueError`.
+    `contested` holds every path more than one file of the tree is left at:
+    the destination of two moves, or of one move and a file that stays.
     """
     base, moved = Tree(paths), dict(moves)
     after = Tree((base.paths - moved.keys()) | set(moved.values()))
+    landings = Counter(moved.get(path, path)
+                       for path in base.paths | moved.keys())
+    contested = frozenset(path for path, count in landings.items()
+                          if count > 1)
     sources = tuple(moved)
     held: dict[str, str] = {}
     found: list[Occurrence] = []
@@ -457,7 +469,7 @@ def plan_references(texts: dict[str, str], paths: Iterable[str],
                 held[path] = text
                 found.append(occurrence)
     found.sort(key=lambda o: (o.path, o.line, o.column))
-    return References(held, tuple(found))
+    return References(held, tuple(found), contested)
 
 
 def effective_answer(occurrence: Occurrence, answers: Mapping[str, str],
@@ -537,11 +549,14 @@ def rewritten(references: References, answers: Mapping[str, str],
     """`target -> (before, after)` for each file an answer edits.
 
     `before` is the base text, edited by base offsets; the key is where the
-    plan leaves the file. A file whose text is unchanged is not returned.
-    Raises `ValueError` for an own answer the occurrence does not offer, and
-    for an offered one it cannot carry out: a `rewrite` with no replacement,
+    plan leaves the file. A file whose text is unchanged is not returned, and
+    neither is one whose target is in `references.contested`: its answers are
+    still checked, and no edit is made at a path another file is also left
+    at. Raises `ValueError` for an own answer the occurrence does not offer,
+    for an offered one it cannot carry out (a `rewrite` with no replacement,
     an `extend` with no `quoted` or `line` shape, or an answer outside
-    `ANSWERS`.
+    `ANSWERS`), and for two edited files with one target that is not
+    contested.
     """
     edits: dict[str, list[tuple[int, int, str]]] = {}
     targets: dict[str, str] = {}
@@ -552,17 +567,23 @@ def rewritten(references: References, answers: Mapping[str, str],
         answer, _ = effective_answer(occurrence, answers, policies)
         if answer is None or answer == "retain":
             continue
+        triple = _edit(references.texts[occurrence.path], occurrence, answer)
+        if occurrence.target in references.contested:
+            continue
         targets[occurrence.path] = occurrence.target
-        edits.setdefault(occurrence.path, []).append(
-            _edit(references.texts[occurrence.path], occurrence, answer))
-    files = {}
+        edits.setdefault(occurrence.path, []).append(triple)
+    files: dict[str, tuple[str, str]] = {}
     for path, triples in edits.items():
         before = text = references.texts[path]
         for start, end, new in sorted(triples, key=lambda t: t[:2],
                                       reverse=True):
             text = text[:start] + new + text[end:]
-        if text != before:
-            files[targets[path]] = (before, text)
+        if text == before:
+            continue
+        if targets[path] in files:
+            raise ValueError(
+                f"{targets[path]!r} is the target of two edited files")
+        files[targets[path]] = (before, text)
     return files
 
 

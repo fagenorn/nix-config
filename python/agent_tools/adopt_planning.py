@@ -597,8 +597,15 @@ def check_reference_writes(changes: list[dict],
     `targets`, or in `sources` unless it is a `regenerate-projection`, which
     only reads its source and runs after the write, so a projection source a
     reference answer edits has one writer, as one the link rewriter edits
-    does under `check_markdown_writes`. This is a derivation bug, never a
-    repository condition, so it raises rather than gating."""
+    does under `check_markdown_writes`.
+
+    Two moves onto one path are a repository condition: two tracked files of
+    different legacy trees can share a destination. The ready gate
+    `no-existing-destination` keeps such a plan `draft`, and
+    `adopt_references.rewritten` returns no edit for a path more than one
+    file is left at, so no such path is among `reference_targets`. A target
+    that fails here was therefore derived wrongly, and this raises rather
+    than gating."""
     for target in sorted(reference_targets):
         naming = [op for op in changes
                   if target in op["targets"]
@@ -633,7 +640,9 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
     writes sorted by target, and finally the projection regenerations.
     `reference_files` maps the path, after the moves, of each non-Markdown
     file an answered path reference edits onto its `(before, after)` texts,
-    `before` being the text at the base revision.
+    `before` being the text at the base revision; it is what
+    `adopt_references.rewritten` returned, so each path is one file's and a
+    path two files are left at is absent.
 
     `contents` maps each `write-file` target onto the exact bytes whose hash
     the operation publishes as `after`. The plan document carries the hash and

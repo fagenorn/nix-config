@@ -487,6 +487,70 @@ class PolicyTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             adopt_references.rewritten(references, {skip: "rewrite"}, {})
 
+    def test_a_path_two_files_are_left_at_is_contested_and_never_edited(self):
+        shared = SPECS + "/check.py"
+        occupied = ".agents/knowledge/rejections/z.py"
+        texts = {
+            ".claude/research/check.py": 'SPEC = ".claude/specs/x.md"\n',
+            ".claude/specs/check.py": 'PLAN = ".claude/plans/y.md"\n',
+            ".out-of-scope/z.py": 'PLAN = ".claude/plans/y.md"\n',
+            occupied: 'SPEC = ".claude/specs/x.md"\n',
+            ".claude/specs/tool.py": 'SPEC = ".claude/specs/x.md"\n',
+        }
+        moves = MOVES + [
+            (".claude/research/check.py", shared),
+            (".claude/specs/check.py", shared),
+            (".out-of-scope/z.py", occupied),
+            (".claude/specs/tool.py", SPECS + "/tool.py")]
+        moved_trees = {
+            source: (".out-of-scope" if source.startswith(".out-of-scope/")
+                     else "/".join(source.split("/")[:2]))
+            for source, _ in moves}
+        references = adopt_references.plan_references(
+            texts, PATHS + list(texts), moves, moved_trees)
+        self.assertEqual(references.contested,
+                         frozenset({shared, occupied}))
+        self.assertEqual(
+            [(o.path, o.target) for o in references.occurrences],
+            [(occupied, occupied), (".claude/research/check.py", shared),
+             (".claude/specs/check.py", shared),
+             (".claude/specs/tool.py", SPECS + "/tool.py"),
+             (".out-of-scope/z.py", occupied)])
+        tool = (SPECS + "/tool.py", (
+            texts[".claude/specs/tool.py"],
+            'SPEC = ".agents/artifacts/specs/x.md"\n'))
+        every = {o.subject: "rewrite" for o in references.occurrences}
+        self.assertEqual(adopt_references.rewritten(references, every, {}),
+                         dict([tool]))
+        for path in texts:
+            one = {o.subject: "rewrite" for o in references.occurrences
+                   if o.path == path}
+            with self.subTest(path=path):
+                self.assertEqual(
+                    adopt_references.rewritten(references, one, {}),
+                    dict([tool]) if path == ".claude/specs/tool.py" else {})
+        self.assertEqual(
+            [(row["subject"], row["answer"], row["target"])
+             for row in adopt_references.summary(references, every, {})],
+            [(o.subject, "rewrite", o.target)
+             for o in references.occurrences])
+
+    def test_no_path_is_contested_when_each_file_has_its_own(self):
+        self.assertEqual(self.references().contested, frozenset())
+        self.assertEqual(adopt_references.References({}, ()).contested,
+                         frozenset())
+
+    def test_two_edited_files_at_one_uncontested_path_raise(self):
+        references = self.references()
+        data, spec, _, _ = references.occurrences
+        merged = adopt_references.References(
+            references.texts,
+            (dataclasses.replace(data, target=spec.target), spec))
+        with self.assertRaises(ValueError):
+            adopt_references.rewritten(
+                merged, {data.subject: "rewrite", spec.subject: "rewrite"},
+                {})
+
 
 def git(root: Path, *args: str) -> None:
     subprocess.run(

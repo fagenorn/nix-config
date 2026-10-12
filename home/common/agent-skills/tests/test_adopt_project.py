@@ -486,6 +486,25 @@ def write_moved_tool(root: Path) -> None:
     commit(root, "add a script to a moved tree")
 
 
+# Two scripts of different legacy trees that one classification target would
+# leave at one path, each naming a file another tree moves.
+SHARED_TOOLS = {
+    ".claude/research/check.py": 'SPEC = ".claude/specs/x.md"\n',
+    ".claude/specs/check.py": 'PLAN = ".claude/plans/y.md"\n',
+}
+SHARED_TOOL_NEW = ".agents/artifacts/specs/check.py"
+RESEARCH_TOOL_SUBJECT = ".claude/research/check.py:1:9"
+SPECS_TOOL_SUBJECT = ".claude/specs/check.py:1:9"
+
+
+def shared_destination_repo(home: Path) -> Path:
+    root = nix_config_shape_repo(home)
+    for path, text in SHARED_TOOLS.items():
+        write(root, path, text)
+    commit(root, "add two scripts that move to one path")
+    return root
+
+
 POLICY_DIR = ".claude/notes/study"
 POLICY_NEW = ".agents/artifacts/notes/study"
 RUN_REPORT = "tools/run_report.py"
@@ -2148,6 +2167,80 @@ class MovedFileReferencePlanTest(AdoptTestCase):
                 with self.assertRaises(ValueError):
                     adopt_planning.check_reference_writes(
                         changes, {MOVED_TOOL_NEW})
+
+
+class SharedDestinationReferencePlanTest(AdoptTestCase):
+    """Two moves onto one path are a repository condition: the plan is a
+    draft the destination gate blocks, whatever its references are answered,
+    and no reference write lands on the shared path."""
+
+    ANSWERS = {
+        "one occurrence rewritten": (
+            ("path-reference", RESEARCH_TOOL_SUBJECT, "rewrite"),
+            ("path-reference", SPECS_TOOL_SUBJECT, "retain")),
+        "both rewritten by their policies": (
+            ("reference-policy", ".claude/research:.py", "rewrite"),
+            ("reference-policy", ".claude/specs:.py", "rewrite")),
+        "both rewritten, one by its policy": (
+            ("path-reference", SPECS_TOOL_SUBJECT, "rewrite"),
+            ("reference-policy", ".claude/research:.py", "rewrite")),
+    }
+    DECIDED = {
+        "one occurrence rewritten": [
+            (RESEARCH_TOOL_SUBJECT, "rewrite", "occurrence"),
+            (SPECS_TOOL_SUBJECT, "retain", "occurrence")],
+        "both rewritten by their policies": [
+            (RESEARCH_TOOL_SUBJECT, "rewrite", "policy"),
+            (SPECS_TOOL_SUBJECT, "rewrite", "policy")],
+        "both rewritten, one by its policy": [
+            (RESEARCH_TOOL_SUBJECT, "rewrite", "policy"),
+            (SPECS_TOOL_SUBJECT, "rewrite", "occurrence")],
+    }
+
+    def test_an_answered_rewrite_leaves_a_draft_plan_with_the_blocker(self):
+        root = shared_destination_repo(self.home)
+        for name, triples in self.ANSWERS.items():
+            with self.subTest(name):
+                code, doc, err = self.plan(root, *answer_args(*triples))
+                self.assertEqual(code, 0, err or doc)
+                self.assertEqual(doc["plan"]["state"], "draft")
+                self.assertEqual(
+                    [gate["id"] for gate in doc["verification"]["ready_gates"]
+                     if gate["status"] != "passed"],
+                    ["no-existing-destination"])
+                self.assertEqual(
+                    [blocker["id"] for blocker in doc["plan"]["blockers"]],
+                    ["no-existing-destination"])
+                self.assertEqual(doc["decisions"]["open"], [])
+                self.assertEqual(
+                    [(row["subject"], row["answer"], row["decided_by"])
+                     for row in doc["path_references"]], self.DECIDED[name])
+                self.assertEqual(
+                    {row["target"] for row in doc["path_references"]},
+                    {SHARED_TOOL_NEW})
+                # Both moves are listed, and neither file's edit is written
+                # where the other would also land.
+                self.assertEqual(
+                    [(op["op"], op["sources"]) for op in doc["changes"]
+                     if SHARED_TOOL_NEW in op["sources"] + op["targets"]],
+                    [("git-mv", [path]) for path in sorted(SHARED_TOOLS)])
+                self.assertEqual(doc["plan"]["plan_id"],
+                                 documented_plan_id(doc))
+
+    def test_an_edit_beside_the_shared_path_is_still_written(self):
+        root = shared_destination_repo(self.home)
+        write_moved_tool(root)
+        code, doc, err = self.plan(root, *answer_args(
+            *self.ANSWERS["both rewritten by their policies"],
+            ("path-reference", MOVED_TOOL_SUBJECT, "rewrite")))
+        self.assertEqual(code, 0, err or doc)
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(
+            [(op["targets"][0], op["after"]) for op in doc["changes"]
+             if op["op"] == "write-file"
+             and op["targets"][0].endswith(".py")],
+            [(MOVED_TOOL_NEW,
+              sha256_hash(MOVED_TOOL_AFTER.encode("utf-8")))])
 
 
 class ReferencePolicyPlanTest(AdoptTestCase):
