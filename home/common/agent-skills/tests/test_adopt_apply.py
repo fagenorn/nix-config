@@ -1129,6 +1129,8 @@ FORMAT_COMMANDS = {
     "spill": [sys.executable, FORMATTER, "--touch", CLEAN],
     "litter": [sys.executable, FORMATTER, "--touch", "stray.txt"],
 }
+ARCHIVED_LINK_SOURCE = ".claude/odd-link.md"
+ARCHIVED_LINK = ".agents/knowledge/archive/adopted/.claude/odd-link.md"
 REWRITE_ANALYZER = ("path-reference", ANALYZER_SUBJECT, "rewrite")
 
 
@@ -1245,6 +1247,25 @@ class ReferenceFormattingApplyTest(ApplyTestCase):
                     self.assertEqual(
                         {gate["status"] for gate in record["gates"]},
                         {"not_run"})
+
+    def test_an_archived_contained_symlink_is_not_an_unplanned_change(self):
+        """`git add` stores a symlink's target text, so the confinement proof
+        hashes that text, not the file the link points to."""
+        root = formatting_repo(self.home)
+        (root / ARCHIVED_LINK_SOURCE).symlink_to("../README.md")
+        git(root, "add", ARCHIVED_LINK_SOURCE)
+        commit(root, "track a contained agent link")
+        document = self.planned(
+            root, REWRITE_ANALYZER, ("reference-format", ".py", "format"),
+            ("candidate-class", ARCHIVED_LINK_SOURCE, "archive-history"))
+        (last,) = [op for op in document["changes"]
+                   if op["targets"][:1] == [ARCHIVED_LINK]][-1:]
+        self.assertEqual(last["op"], "git-mv")
+        self.assertTrue(last["after"].startswith("git-object:"))
+        result = self.succeed(root, document["plan"]["plan_id"])
+        self.assertEqual(
+            git(root, "ls-tree", result["branch"], ARCHIVED_LINK).split()[0],
+            "120000")
 
     def test_the_evidence_record_lists_the_format_answer_and_rows(self):
         root = formatting_repo(self.home)

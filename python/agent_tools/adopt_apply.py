@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -448,6 +449,22 @@ def run_formatting(worktree: Path, operations: list[dict], rows: list[dict],
     prove_formatting_confined(worktree, operations, formatted)
 
 
+def on_disk_object_id(worktree: Path, relative: str) -> str | None:
+    """The object id `git add` would store for the path as it is on disk.
+
+    A symlink is stored as its link text, so that text is hashed rather than
+    the file the link points to, which `git hash-object -- <path>` would read
+    and which does not exist for a dangling link or a link to a directory.
+    """
+    path = worktree / relative
+    if path.is_symlink():
+        code, out = run_git(worktree, "hash-object", "--stdin",
+                            input=os.fsencode(os.readlink(path)))
+    else:
+        code, out = run_git(worktree, "hash-object", "--", relative)
+    return out.decode("ascii", "replace").strip() if code == 0 else None
+
+
 def prove_formatting_confined(worktree: Path, operations: list[dict],
                               formatted: set[str]) -> None:
     """Refuse a formatter that touched a path it was not given.
@@ -456,8 +473,9 @@ def prove_formatting_confined(worktree: Path, operations: list[dict],
     naming it as its first target and publishing an `after` must still hold:
     the last decides because a moved file a later write edits is judged by the
     write (D9). A `git-object:` hash is answered from the index, so the bytes
-    on disk are also hashed as `git add` would store them, which catches an
-    unstaged edit of a move-only destination (D17). A formatted file must be a
+    on disk are also hashed as `git add` would store them (a symlink as its
+    link text, see `on_disk_object_id`), which catches an unstaged edit of a
+    move-only destination (D17). A formatted file must be a
     regular file, not a symlink. Paths no operation names are left to the
     worktree-status gate and the commit-content proof.
     """
@@ -470,8 +488,7 @@ def prove_formatting_confined(worktree: Path, operations: list[dict],
             continue
         unchanged = operation_result_matches(worktree, operation)
         if unchanged and operation["after"].startswith("git-object:"):
-            code, out = run_git(worktree, "hash-object", "--", target)
-            unchanged = (code == 0 and out.decode("ascii", "replace").strip()
+            unchanged = (on_disk_object_id(worktree, target)
                          == operation["after"].split(":", 1)[1])
         if not unchanged:
             raise format_failure(
