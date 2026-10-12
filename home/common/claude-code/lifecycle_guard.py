@@ -15,8 +15,17 @@ import sys
 
 
 POLICY_KEYS = frozenset(
-    {"authorized_owners", "integration_bases", "git_bin", "gh_bin", "jq_bin"}
+    {
+        "authorized_owners",
+        "integration_bases",
+        "git_bin",
+        "gh_bin",
+        "jq_bin",
+        "derived_repositories",
+        "derivation",
+    }
 )
+DERIVED_ROW_KEYS = frozenset({"default_branch", "integration_branch", "evidence"})
 CHILD_DIAGNOSTIC_LIMIT = 240
 # The harness exports a fine-grained GITHUB_TOKEN that gh prefers over the
 # keyring credential, and its reach is narrower — it cannot see every
@@ -785,11 +794,19 @@ def default_branch(git_bin, cwd, timeout):
 
 
 class Policy:
-    """The Nix-owned values, read from the store policy file."""
+    """The values of the policy file named by `--policy`.
+
+    The registered hook names the compiled policy, the base policy plus one
+    derived row per registered project; a test passes any policy of the same
+    schema. `derived_repositories` maps a repository slug to its row, and the
+    guard reads a row's two branches and leaves `evidence` and `derivation` to
+    the compiler that wrote them.
+    """
 
     def __init__(self, document):
         self.authorized_owners = frozenset(document["authorized_owners"])
         self.integration_bases = dict(document["integration_bases"])
+        self.derived_repositories = dict(document["derived_repositories"])
         self.git_bin = document["git_bin"]
         self.gh_bin = document["gh_bin"]
         self.jq_bin = document["jq_bin"]
@@ -819,6 +836,28 @@ def load_policy(path):
     for key in ("git_bin", "gh_bin", "jq_bin"):
         if not isinstance(document[key], str) or not os.path.isabs(document[key]):
             return None, f"{path}: {key} must be an absolute path"
+    derived = document["derived_repositories"]
+    if not isinstance(derived, dict):
+        return None, f"{path}: derived_repositories must be an object"
+    for repository, row in derived.items():
+        if not isinstance(repository, str) or SLUG_PATTERN.fullmatch(repository) is None:
+            return None, f"{path}: derived_repositories key {repository!r} is not an owner/name slug"
+        if not isinstance(row, dict) or set(row) != DERIVED_ROW_KEYS:
+            keys = ", ".join(sorted(DERIVED_ROW_KEYS))
+            return None, (
+                f"{path}: derived_repositories {repository} must be an object "
+                f"with exactly the keys {keys}"
+            )
+        for key in ("default_branch", "integration_branch"):
+            branch = row[key]
+            if not isinstance(branch, str) or REF_NAME_PATTERN.fullmatch(branch) is None:
+                return None, f"{path}: derived_repositories {repository} {key} must be a branch name"
+        if not isinstance(row["evidence"], dict):
+            return None, f"{path}: derived_repositories {repository} evidence must be an object"
+        if repository in bases:
+            return None, f"{path}: {repository} is in both integration_bases and derived_repositories"
+    if document["derivation"] is not None and not isinstance(document["derivation"], dict):
+        return None, f"{path}: derivation must be null or an object"
     return Policy(document), None
 
 
@@ -831,18 +870,41 @@ class Context:
         self.jq_bin = args.jq_bin
         self.timeout = args.child_timeout_seconds
         self.authorized_owners = policy.authorized_owners
-        self.integration_bases = policy.integration_bases
         self.repository = detect_repository(self.git_bin, cwd, self.timeout)
         self.base_branch = default_branch(self.git_bin, cwd, self.timeout)
         self.cwd = cwd
+        self.derived_row = policy.derived_repositories.get(self.repository)
+        # A derived row with two distinct branches declares an integration
+        # branch exactly as an `integration_bases` entry does, so every reader
+        # of `integration_bases` sees both without knowing where a row came from.
+        self.integration_bases = dict(policy.integration_bases)
+        if self.derived_row is not None and (
+            self.derived_row["integration_branch"] != self.derived_row["default_branch"]
+        ):
+            self.integration_bases[self.repository] = self.derived_row["integration_branch"]
 
 
-def ownership_problem(repository, authorized_owners):
-    """Why `repository` is outside standing authorization, or None."""
+def ownership_problem(context):
+    """Why the context's repository is outside standing authorization, or None.
+
+    A derived row authorizes exactly its repository, whoever the owner is, and
+    only while origin/HEAD names the branch the row recorded as the default.
+    Without a row the owner must be a literal authorized owner.
+    """
+    repository = context.repository
     if repository is None:
         return "repository unknown is outside standing authorization"
-    if repository.split("/", 1)[0] not in authorized_owners:
-        return f"repository {repository} is outside standing authorization"
+    row = context.derived_row
+    if row is None:
+        if repository.split("/", 1)[0] not in context.authorized_owners:
+            return f"repository {repository} is outside standing authorization"
+        return None
+    if context.base_branch != row["default_branch"]:
+        live = context.base_branch if context.base_branch is not None else "no branch"
+        return (
+            f"repository {repository}: origin/HEAD names {live}, "
+            f"its derived policy row names {row['default_branch']}"
+        )
     return None
 
 
@@ -998,7 +1060,7 @@ def validate_tag_push(tag, context):
 
 
 def validate_push(segment, context):
-    problem = ownership_problem(context.repository, context.authorized_owners)
+    problem = ownership_problem(context)
     if problem is not None:
         return block(f"unsafe push: {problem}")
     if any(character in UNSAFE_BRANCH_CHARS for character in segment):
@@ -1030,7 +1092,7 @@ def validate_push(segment, context):
 
 
 def validate_pr_create(segment, context):
-    problem = ownership_problem(context.repository, context.authorized_owners)
+    problem = ownership_problem(context)
     if problem is not None:
         return block(f"unsafe PR creation: {problem}")
     try:
@@ -1103,7 +1165,7 @@ def parse_release_raw(command, repository):
 
 def validate_release(command, context):
     """Release creation is judged on the whole command, like the merge."""
-    problem = ownership_problem(context.repository, context.authorized_owners)
+    problem = ownership_problem(context)
     if problem is not None:
         return block(f"unsafe release creation: {problem}")
     if command.startswith(UNSET_GITHUB_TOKEN_PREFIX):
@@ -1128,7 +1190,7 @@ def validate_release(command, context):
 
 
 def validate_merge(command, context):
-    problem = ownership_problem(context.repository, context.authorized_owners)
+    problem = ownership_problem(context)
     if problem is not None:
         return block(f"unsafe merge: {problem}")
     repository = context.repository

@@ -6,8 +6,14 @@ import sys
 import tempfile
 import unittest
 
+from .guard_policy_world import GuardPolicyWorld
+
 
 SETTINGS_PATH = Path(os.environ["CLAUDE_SETTINGS_PATH"])
+BASE_POLICY_PATH = Path(os.environ["CLAUDE_GUARD_BASE_POLICY_PATH"])
+NODO = "elevenyellow/nodocom"
+NODO_ROW = {"default_branch": "main", "integration_branch": "dev", "evidence": {}}
+ABSENT = object()
 EXPECTED_ALLOW = [
     "Bash(git fetch:*)", "Bash(git status:*)", "Bash(git log:*)",
     "Bash(git diff:*)", "Bash(gh pr view:*)", "Bash(gh pr list:*)",
@@ -130,12 +136,29 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         cls.fake_gh = Path(cls.fixture_dir.name) / "fake-gh"
         cls.fake_gh.write_text(f"#!{sys.executable}\n" + FAKE_GH_SCRIPT, encoding="utf-8")
         cls.fake_gh.chmod(0o755)
+        # The registered wrapper names the compiled policy of this host, which no
+        # test may read: every invocation passes a fixture policy as a later
+        # `--policy`, the built base policy plus one derived row for Nodo.
+        cls.base_policy = json.loads(BASE_POLICY_PATH.read_text(encoding="utf-8"))
+        cls.policy = cls.write_policy(derived_repositories={NODO: NODO_ROW}, derivation={})
 
     @classmethod
     def tearDownClass(cls):
         cls.fixture_dir.cleanup()
 
+    @classmethod
+    def write_policy(cls, **members):
+        """A policy file: the built base policy with `members` replaced (ABSENT removes one)."""
+        document = {**cls.base_policy, **members}
+        document = {key: value for key, value in document.items() if value is not ABSENT}
+        handle, name = tempfile.mkstemp(dir=cls.fixture_dir.name, suffix=".json")
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(document, stream)
+        return Path(name)
+
     def invoke_raw(self, raw, *guard_args, env=None):
+        if "--policy" not in guard_args:
+            guard_args = (*guard_args, "--policy", str(self.policy))
         child_env = {k: v for k, v in os.environ.items() if not k.startswith("FAKE_")}
         child_env.update(env or {})
         return subprocess.run(
@@ -1121,6 +1144,169 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 result = self.run_guard(merge, cwd=repo, env=env)
                 self.assertEqual(2, result.returncode, result.stderr)
                 self.assertIn("cannot read the PR head branch", result.stderr)
+
+    # ------------------------------------------------------------------
+    # Derived policy (issue 126): the base policy, the compiled file the hook
+    # reads, and the rows a registered project is judged by.
+    # ------------------------------------------------------------------
+
+    def test_built_base_policy_holds_only_the_unregistered_literals(self):
+        """R3: no hand-authored Nodo fact in the Nix source or the built base policy."""
+        self.assertEqual(
+            {"authorized_owners", "integration_bases", "git_bin", "gh_bin", "jq_bin",
+             "derived_repositories", "derivation"}, set(self.base_policy))
+        self.assertEqual(["fagenorn"], self.base_policy["authorized_owners"])
+        self.assertEqual({"fagenorn/arcwave": "dev"}, self.base_policy["integration_bases"])
+        self.assertEqual({}, self.base_policy["derived_repositories"])
+        self.assertIsNone(self.base_policy["derivation"])
+        source = Path(__file__).resolve().parents[1] / "home/common/claude-code/default.nix"
+        self.assertNotIn("elevenyellow", source.read_text(encoding="utf-8"))
+
+    def test_registered_hook_reads_the_compiled_policy(self):
+        wrapper = self.guard.read_text(encoding="utf-8")
+        self.assertRegex(wrapper, r'--policy /\S+/\.agents/state/guard/policy\.json "\$@"\n')
+        self.assertNotIn(str(BASE_POLICY_PATH), wrapper)
+
+    def test_base_policy_alone_loads_and_authorizes_no_nodo_verb(self):
+        base = ("--gh-bin", str(self.fake_gh), "--policy", str(BASE_POLICY_PATH))
+        self.assertEqual(0, self.invoke_command("true", *base).returncode)
+        repo = self.make_repo(f"git@github.com:{NODO}.git")
+        refused = self.run_guard("git push -u origin topic", cwd=repo, guard_args=base)
+        self.assertEqual(2, refused.returncode)
+        self.assertIn(f"repository {NODO} is outside standing authorization", refused.stderr)
+        allowed = self.run_guard("git push -u origin topic", cwd=repo)
+        self.assertEqual(0, allowed.returncode, allowed.stderr)
+
+    def test_derived_row_never_authorizes_its_owner_s_other_repositories(self):
+        """R2, D3: the row is keyed by the exact repository."""
+        sibling = self.make_repo("git@github.com:elevenyellow/other.git")
+        for label, command in (
+            ("push", "git push -u origin topic"),
+            ("PR creation", 'gh pr create --repo elevenyellow/other --base main --head t '
+                            '--title "x" --body "y"'),
+            ("merge", "gh pr merge 7 --repo elevenyellow/other --merge --delete-branch"),
+            ("release creation", 'gh release create v1.2.3 --repo elevenyellow/other '
+                                 '--verify-tag --title "v1.2.3" --notes-file notes.md'),
+        ):
+            with self.subTest(verb=label):
+                result = self.run_guard(command, cwd=sibling)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"lifecycle guard: unsafe {label}: repository elevenyellow/other "
+                              "is outside standing authorization", result.stderr)
+
+    def test_derived_repository_is_refused_when_origin_head_differs_from_its_row(self):
+        """R6, D8: every repository-bound verb, with a reason naming both branches."""
+        for live, named in (("trunk", "trunk"), (None, "no branch")):
+            repo = self.make_repo(f"git@github.com:{NODO}.git", default_branch=live)
+            for label, command in (
+                ("push", "git push -u origin topic"),
+                ("PR creation", f'gh pr create --repo {NODO} --base dev --head t '
+                                '--title "x" --body "y"'),
+                ("merge", f"gh pr merge 7 --repo {NODO} --merge --delete-branch"),
+                ("release creation", f'gh release create v1.2.3 --repo {NODO} '
+                                     '--verify-tag --title "v1.2.3" --notes-file notes.md'),
+            ):
+                with self.subTest(origin_head=live, verb=label):
+                    result = self.run_guard(command, cwd=repo)
+                    self.assertEqual(2, result.returncode, command)
+                    self.assertIn(
+                        f"lifecycle guard: unsafe {label}: repository {NODO}: origin/HEAD "
+                        f"names {named}, its derived policy row names main", result.stderr)
+            # Branch deletion is not repository-bound and stays judged on its grammar.
+            self.assertEqual(0, self.run_guard("git branch -d topic", cwd=repo).returncode)
+
+    def test_literal_owner_does_not_bypass_the_derived_row_check(self):
+        """R6, D8: a derived row is checked even when the owner is a literal authorized owner."""
+        slug = "fagenorn/nix-config"
+        policy = self.write_policy(derivation={}, derived_repositories={
+            slug: {"default_branch": "main", "integration_branch": "main", "evidence": {}}})
+        self.assertIn("fagenorn", self.base_policy["authorized_owners"])
+        args = ("--gh-bin", str(self.fake_gh), "--policy", str(policy))
+        repo = self.make_repo(f"git@github.com:{slug}.git", default_branch="trunk")
+        for label, command in (
+            ("push", "git push -u origin topic"),
+            ("PR creation", f'gh pr create --repo {slug} --base trunk --head t '
+                            '--title "x" --body "y"'),
+            ("merge", f"gh pr merge 7 --repo {slug} --merge --delete-branch"),
+        ):
+            with self.subTest(verb=label):
+                result = self.run_guard(command, cwd=repo, guard_args=args)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(
+                    f"lifecycle guard: unsafe {label}: repository {slug}: origin/HEAD "
+                    "names trunk, its derived policy row names main", result.stderr)
+
+    def test_single_branch_derived_row_keeps_the_default_branch_only_rule(self):
+        policy = self.write_policy(derivation={}, derived_repositories={
+            "acme/tool": {"default_branch": "main", "integration_branch": "main",
+                          "evidence": {}}})
+        args = ("--gh-bin", str(self.fake_gh), "--policy", str(policy))
+        repo = self.make_repo("git@github.com:acme/tool.git")
+        create = 'gh pr create --repo acme/tool --base {} --head t --title "x" --body "y"'
+        self.assertEqual(
+            0, self.run_guard(create.format("main"), cwd=repo, guard_args=args).returncode)
+        self.assertEqual(
+            2, self.run_guard(create.format("dev"), cwd=repo, guard_args=args).returncode)
+        release_arm = self.run_guard(
+            "gh pr merge 1 --repo acme/tool --merge", cwd=repo, guard_args=args,
+            env={"FAKE_PR_MODE": "nonzero"})
+        self.assertEqual(2, release_arm.returncode)
+        self.assertIn("declared integration branch", release_arm.stderr)
+
+    def test_a_policy_outside_the_schema_blocks_every_call(self):
+        """R5, R6: a missing, malformed or overlapping policy refuses even `true`."""
+        row = dict(NODO_ROW)
+        cases = {
+            "missing derivation": {"derivation": ABSENT},
+            "missing derived_repositories": {"derived_repositories": ABSENT},
+            "missing integration_bases": {"integration_bases": ABSENT},
+            "extra member": {"grants": []},
+            "derived_repositories is a list": {"derived_repositories": []},
+            "derived key is not a slug": {"derived_repositories": {"nodocom": row}},
+            "row is not an object": {"derived_repositories": {NODO: "dev"}},
+            "row lacks evidence": {"derived_repositories": {
+                NODO: {"default_branch": "main", "integration_branch": "dev"}}},
+            "row has an extra member": {"derived_repositories": {NODO: {**row, "owner": "x"}}},
+            "empty branch": {"derived_repositories": {NODO: {**row, "integration_branch": ""}}},
+            "branch is not a ref name": {
+                "derived_repositories": {NODO: {**row, "default_branch": "main; true"}}},
+            "branch is not a string": {
+                "derived_repositories": {NODO: {**row, "default_branch": None}}},
+            "evidence is not an object": {"derived_repositories": {NODO: {**row, "evidence": []}}},
+            "derivation is a list": {"derivation": []},
+            "derived and literal overlap": {"integration_bases": {NODO: "dev"}},
+        }
+        for name, members in cases.items():
+            with self.subTest(policy=name):
+                members = {"derived_repositories": {NODO: row}, "derivation": {}, **members}
+                result = self.invoke_command("true", "--policy", str(self.write_policy(**members)))
+                self.assertEqual(2, result.returncode, name)
+                self.assertIn("lifecycle guard: invalid policy:", result.stderr)
+        missing = self.invoke_command(
+            "true", "--policy", str(Path(self.fixture_dir.name) / "absent-policy.json"))
+        self.assertEqual(2, missing.returncode)
+        self.assertIn("lifecycle guard: invalid policy: cannot load", missing.stderr)
+        control = self.invoke_command("true", "--policy", str(self.write_policy(
+            derived_repositories={NODO: row}, derivation={})))
+        self.assertEqual(0, control.returncode, control.stderr)
+
+    def test_a_compiled_policy_round_trips_through_the_guard(self):
+        """D10: the compiler's file is the guard's input, so the schema cannot drift."""
+        world = GuardPolicyWorld(self)
+        world.project("nodocom", NODO, integration_branch="dev", publication_free=True,
+                      override=True)
+        code, report, stderr = world.compile(base=BASE_POLICY_PATH)
+        self.assertEqual((0, [NODO]), (code, report["derived"]), stderr)
+        args = ("--gh-bin", str(self.fake_gh), "--policy", str(world.output))
+        repo = self.make_repo(f"git@github.com:{NODO}.git")
+        allowed = self.run_guard(
+            f'gh pr create --repo {NODO} --base dev --head issue-7-topic '
+            '--title "x" --body "y"', cwd=repo, guard_args=args)
+        self.assertEqual(0, allowed.returncode, allowed.stderr)
+        sibling = self.make_repo("git@github.com:elevenyellow/other.git")
+        refused = self.run_guard("git push -u origin topic", cwd=sibling, guard_args=args)
+        self.assertEqual(2, refused.returncode)
+        self.assertIn("outside standing authorization", refused.stderr)
 
     def test_hostile_interpreter_environment_is_ignored(self):
         # Each plant exits 0 before the guard can judge: a BASH_ENV file that the
