@@ -2,9 +2,10 @@
 
 This module provides what a relocation needs to find a repository path written
 in a tracked, non-Markdown text file that would be left pointing at a path
-that moved: the token grammar (`tokens`, `split_token`, `split_pattern`), the
-successors of a referenced path and the carried form of a successor
-(`successors`, `carried_form`, `pattern_form`), the occurrences, each with its
+that moved: the token grammar (`tokens`, `split_token`, `split_pattern`,
+`split_variable`), the successors of a referenced path and the carried form of
+a successor (`successors`, `carried_form`, `pattern_form`, `variable_form`), the
+occurrences, each with its
 shape, the answers it offers, the path its edit lands at and, for a file the
 plan moves, the policy that can answer it (`Occurrence`, `plan_references`),
 the class of a file name and the answer recommended for it (`file_class`,
@@ -25,7 +26,13 @@ is made at it: `rewritten` returns no file for such a path.
 A token is read as a plain path first (`split_token`). Only when that reading
 names no moved path is it read a second time as a regular-expression spelling
 (`split_pattern`, for a token that starts with `^` or holds `\\.`), and the
-forms offered for it keep its anchor, escape and tail (`pattern_form`).
+forms offered for it keep its anchor, escape and tail (`pattern_form`). In a
+file of a shell class (`SHELL_CLASSES`, decided by the base path), a token
+neither reading makes an occurrence is read a third time as a `$name/` or
+`${name}/` prefix and a path (`split_variable`); the occurrence it makes offers
+`rewrite` and `retain` only, keeps the variable and the tail in the form it
+rewrites to (`variable_form`), and belongs to the `<tree>:<class>/variable`
+policy, never to the `<tree>:<class>` one.
 
 It is imported and never run. It reads blobs only through git, never the
 working tree, writes nothing, and imports `adopt_inspection` and `adopt_links`
@@ -49,6 +56,7 @@ ANSWERS = ("extend", "rewrite", "retain")
 POLICY_ANSWERS = ("rewrite", "retain")
 REWRITE_CLASSES = (".py", ".sh", ".bash", ".zsh", ".nix", ".yaml", ".yml",
                    ".toml", ".js", ".mjs", ".cjs", ".ts")
+SHELL_CLASSES = (".sh", ".bash", ".zsh")
 RETAIN_CLASSES = (".json", ".jsonl", ".ndjson", ".csv", ".tsv", ".txt",
                   ".log")
 TOKEN_DELIMITERS = "\"'`,;:=()<>|&#!"
@@ -59,6 +67,8 @@ CARRIED_TAILS = ("", "/", "/**")
 RECORD_HOMES = (".agents/artifacts/", ".agents/knowledge/archive/")
 
 _QUOTES = "\"'"
+_VARIABLE_PREFIX = re.compile(
+    r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})/")
 _PATTERN_SAFE = re.compile(r"[A-Za-z0-9_./-]+")
 _OPENING_BEFORE = "[{,"
 _CLOSING_REST = ",])}"
@@ -150,6 +160,27 @@ def split_pattern(token: str) -> tuple[str, str, str, str, str] | None:
             rest[len("/".join(raw[:count])):])
 
 
+def split_variable(token: str) -> tuple[str, str, str] | None:
+    """`(variable, path, tail)` of a `$name/` or `${name}/` token, or None.
+
+    `variable` is the prefix with its `/`, and `variable + path + tail` is the
+    token. The path is the longest run of `/`-separated segments after it that
+    are non-empty and hold neither a glob character nor a `$`.
+    """
+    match = _VARIABLE_PREFIX.match(token)
+    if match is None:
+        return None
+    variable, rest = match.group(), token[match.end():]
+    count = 0
+    for segment in rest.split("/"):
+        if (not segment or "$" in segment
+                or any(c in GLOB_CHARACTERS for c in segment)):
+            break
+        count += 1
+    path = "/".join(rest.split("/")[:count])
+    return variable, path, rest[len(path):]
+
+
 # --------------------------------------------------------------------------
 # Successors and carried forms
 # --------------------------------------------------------------------------
@@ -229,6 +260,26 @@ def pattern_form(anchor: str, escape: str, prefix: str, successor: str,
     return form if read is not None and read[3] == successor else None
 
 
+def variable_form(variable: str, successor: str, is_directory: bool,
+                  tail: str, single: bool) -> str | None:
+    """The `variable`-joined token that keeps `tail` and shape on `successor`.
+
+    None when `tail` is not carried and when the spelling would not be read
+    back by `split_variable` as `successor`.
+    """
+    if single:
+        carried = tail
+    elif tail in CARRIED_TAILS:
+        carried = tail if is_directory else ""
+    else:
+        return None
+    form = variable + successor + carried
+    if not _is_one_token(form):
+        return None
+    read = split_variable(form)
+    return form if read is not None and read[1] == successor else None
+
+
 def _is_one_token(form: str) -> bool:
     whole = tokens(form)
     return len(whole) == 1 and (whole[0].start, whole[0].end) == (0, len(form))
@@ -278,17 +329,25 @@ class Occurrence:
     shape: str | None
     target: str
     tree: str | None
+    variable: bool = False
 
     @property
     def subject(self) -> str:
         return f"{self.path}:{self.line}:{self.column}"
 
     @property
+    def occurrence_class(self) -> str:
+        """The file's class, or `<file class>/variable` for a variable-joined
+        occurrence; a file class never holds `/`, so the two never collide."""
+        klass = file_class(self.path)
+        return klass + "/variable" if self.variable else klass
+
+    @property
     def policy(self) -> str | None:
-        """`<tree>:<class>` for a file the plan moves, else None."""
+        """`<tree>:<occurrence class>` for a file the plan moves, else None."""
         if self.tree is None:
             return None
-        return f"{self.tree}:{file_class(self.path)}"
+        return f"{self.tree}:{self.occurrence_class}"
 
 
 @dataclass(frozen=True)
@@ -339,41 +398,54 @@ def _names_moved(target: str, base: Tree, sources: tuple[str, ...]) -> bool:
         s == target or s.startswith(target + "/") for s in sources)
 
 
-def _reading(token: str, base: Tree, sources: tuple[str, ...]
-             ) -> tuple[str, Callable[[str, bool, bool], str | None]] | None:
-    """`(path, form)` of the first reading of `token` that names a moved path.
+def _reading(token: str, base: Tree, sources: tuple[str, ...], shell: bool
+             ) -> tuple[str, Callable[[str, bool, bool], str | None],
+                        bool] | None:
+    """`(path, form, variable)` of the first reading of `token` that names a
+    moved path.
 
     `form(successor, is_directory, single)` is the spelling of a successor that
     keeps the token's shape. The plain reading decides alone whenever it names
-    a moved path; the pattern reading is consulted only when it does not.
+    a moved path; the pattern reading is consulted only when it does not, and
+    the variable reading, for a `shell` file only, when neither does (`variable`
+    is true for it alone).
     """
     prefix, target, tail = split_token(token)
     if _names_moved(target, base, sources):
         def plain(successor: str, is_directory: bool, single: bool
                   ) -> str | None:
             return carried_form(prefix, successor, is_directory, tail, single)
-        return target, plain
+        return target, plain, False
     pattern = split_pattern(token)
-    if pattern is None or not _names_moved(pattern[3], base, sources):
-        return None
-    anchor, escape, pattern_prefix, pattern_target, pattern_tail = pattern
+    if pattern is not None and _names_moved(pattern[3], base, sources):
+        anchor, escape, pattern_prefix, pattern_target, pattern_tail = pattern
 
-    def spelled(successor: str, is_directory: bool, single: bool
+        def spelled(successor: str, is_directory: bool, single: bool
+                    ) -> str | None:
+            return pattern_form(anchor, escape, pattern_prefix, successor,
+                                is_directory, pattern_tail, single)
+        return pattern_target, spelled, False
+    joined = split_variable(token) if shell else None
+    if joined is None or not _names_moved(joined[1], base, sources):
+        return None
+    variable, joined_target, joined_tail = joined
+
+    def carried(successor: str, is_directory: bool, single: bool
                 ) -> str | None:
-        return pattern_form(anchor, escape, pattern_prefix, successor,
-                            is_directory, pattern_tail, single)
-    return pattern_target, spelled
+        return variable_form(variable, successor, is_directory, joined_tail,
+                             single)
+    return joined_target, carried, True
 
 
 def _occurrence(path: str, text: str, token: Token, base: Tree, after: Tree,
                 moved: dict[str, str], sources: tuple[str, ...], target: str,
-                tree: str | None) -> Occurrence | None:
+                tree: str | None, shell: bool) -> Occurrence | None:
     if "/" not in token.text and not _is_quoted(text, token):
         return None
-    reading = _reading(token.text, base, sources)
+    reading = _reading(token.text, base, sources, shell)
     if reading is None:
         return None
-    referenced, form = reading
+    referenced, form, variable = reading
     single, found = successors(referenced, base, after, moved)
     forms = [form(successor, is_directory, single)
              for successor, is_directory in found]
@@ -381,7 +453,7 @@ def _occurrence(path: str, text: str, token: Token, base: Tree, after: Tree,
     answers = []
     additions: tuple[str, ...] = ()
     replacement = None
-    if shape is not None and forms and None not in forms:
+    if not variable and shape is not None and forms and None not in forms:
         answers.append("extend")
         additions = tuple(forms)
     if single and forms and forms[0] is not None:
@@ -390,7 +462,7 @@ def _occurrence(path: str, text: str, token: Token, base: Tree, after: Tree,
     answers.append("retain")
     return Occurrence(path, token.line, token.column, token.start, token.end,
                       token.text, tuple(answers), additions, replacement,
-                      shape, target, tree)
+                      shape, target, tree, variable)
 
 
 # --------------------------------------------------------------------------
@@ -462,9 +534,10 @@ def plan_references(texts: dict[str, str], paths: Iterable[str],
             if path not in trees:
                 raise ValueError(f"{path}: a moved file has no tree")
             tree = trees[path]
+        shell = file_class(path) in SHELL_CLASSES
         for token in tokens(text):
             occurrence = _occurrence(path, text, token, base, after, moved,
-                                     sources, target, tree)
+                                     sources, target, tree, shell)
             if occurrence is not None:
                 held[path] = text
                 found.append(occurrence)
@@ -528,7 +601,7 @@ def policy_summary(references: References, answers: Mapping[str, str],
     for subject, members in sorted(grouped.items()):
         first = members[0][0]
         decided = [answer for _, answer, _ in members]
-        klass = file_class(first.path)
+        klass = first.occurrence_class
         rows.append({
             "subject": subject, "tree": first.tree, "class": klass,
             "recommended": recommended_answer(klass),
