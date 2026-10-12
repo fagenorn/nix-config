@@ -75,6 +75,7 @@ in
       modules = [
         ../hosts/common/common-packages.nix
         ../hosts/common/darwin-common.nix
+        ../hosts/common/darwin-github-runners.nix
         customConf
         inputs.home-manager.darwinModules.home-manager
         {

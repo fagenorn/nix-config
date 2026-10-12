@@ -20,6 +20,25 @@ switch target_host=hostname: (build target_host)
   @echo "switching to new config for {{target_host}}"
   sudo ./result/sw/bin/darwin-rebuild switch --flake ".#{{target_host}}"
 
+# Mint a one-hour registration token per self-hosted runner repo (see
+# hosts/common/darwin-github-runners.nix) and hand it to the runner daemon, which
+# watches the file and registers on change. Needed once, after the first switch,
+# or again after deleting /var/lib/github-runners/<name>/.runner.
+[macos]
+register-runners target_host=hostname:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  repos=$(nix eval --raw ".#darwinConfigurations.{{target_host}}.config.services.github-runners" \
+    --apply 'rs: builtins.concatStringsSep " " (map (r: builtins.baseNameOf r.url) (builtins.attrValues rs))')
+  # sudo's secure_path would pick BSD install, which cannot read /dev/stdin.
+  install_bin=$(command -v install)
+  for repo in $repos; do
+    echo "registering runner for fagenorn/$repo" >&2
+    gh api -X POST "repos/fagenorn/$repo/actions/runners/registration-token" -q .token \
+      | tr -d '\n' \
+      | sudo "$install_bin" -m 0440 -o root -g _github-runner /dev/stdin "/var/lib/github-runner-tokens/$repo.token"
+  done
+
 ### linux
 # Build the NixOS configuration without switching to it
 [linux]
