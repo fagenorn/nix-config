@@ -36,13 +36,14 @@ policy, never to the `<tree>:<class>` one.
 
 A file the plan moves and that is in the depth read set (`depth_texts`) is read
 a fourth time, for the `../` climbs that leave its moved tree (`split_climb`).
-A climb names no moved path; it is a path that stops landing where it did once
-the file sits at a different depth. Each climb that ends above the tree and
-lands elsewhere from the destination makes an occurrence that belongs to the
-`<tree>:<class>/depth` policy, never to the `<tree>:<class>` one, and offers
-`rewrite` (the climb shifted by the depth delta, `climb_form`) and `retain`
-only, or `retain` alone when no shifted form is valid or the climb's target is
-itself a moved path.
+A climb is an occurrence when it ends at a proper ancestor of the tree's root,
+or above the repository root, the same climb from the destination ends
+elsewhere, and its target text is not inside the tree, which moves with the
+file. It belongs to the `<tree>:<class>/depth` policy, never to the
+`<tree>:<class>` one. It offers `rewrite` (the climb shifted by the depth
+delta, `climb_form`) and `retain` when it ends above the repository root or at
+an ancestor of the destination's directory, its target is no moved path and the
+shifted climb is valid, and `retain` alone otherwise.
 
 It is imported and never run. It reads blobs only through git, never the
 working tree, writes nothing, and imports `adopt_inspection` and `adopt_links`
