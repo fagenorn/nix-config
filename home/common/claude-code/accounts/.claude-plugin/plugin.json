@@ -1,0 +1,5 @@
+{
+  "name": "accounts",
+  "version": "0.1.0",
+  "description": "Run different Claude accounts side by side: one config directory per account, bound per project, switched with /account."
+}

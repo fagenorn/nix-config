@@ -26,6 +26,47 @@ let
     exec ${pkgs.nodejs}/bin/node ${agentPlugins.codex}/plugins/codex/scripts/codex-companion.mjs "$@"
   '';
 
+  # Latest Claude Code from the community flake: official native binary, autoupdater
+  # pre-disabled for the read-only store, served from its Cachix cache (no local compile).
+  # Advances on `just update` (nix flake update) + the next rebuild.
+  claudeUnwrapped = inputs.claude-code.packages.${pkgs.system}.default;
+
+  # The `accounts` mod (./accounts): one config directory per Claude account,
+  # bound per project. Mod and launcher are one store path because the mod runs
+  # `$.plugin.root/bin/claude-account` and the launcher names its own folder in
+  # CLAUDE_CODE_PLUGIN_DIRS. The launcher's tools are rewritten to store paths
+  # rather than prefixed onto PATH, which the claude it execs would inherit.
+  accountsMod =
+    pkgs.runCommand "claude-accounts-mod"
+      {
+        buildInputs = [ pkgs.bash ];
+      }
+      ''
+        cp -R ${./accounts} "$out"
+        chmod -R u+w "$out"
+        substituteInPlace "$out/bin/claude-account" \
+          --replace-fail 'JQ=jq' 'JQ=${pkgs.jq}/bin/jq' \
+          --replace-fail 'GIT=git' 'GIT=${pkgs.git}/bin/git' \
+          --replace-fail 'DEFAULT_CLAUDE_BIN=' 'DEFAULT_CLAUDE_BIN=${claudeUnwrapped}/bin/claude'
+        patchShebangs "$out/bin"
+        HOME="$(mktemp -d)" "$out/bin/claude-account" status
+      '';
+
+  # `claude` on PATH starts under the account the current project is bound to,
+  # for interactive and non-interactive callers alike. Both entries are scripts,
+  # not links: the launcher finds the mod relative to its own real location.
+  claudeWithAccounts = pkgs.symlinkJoin {
+    name = "claude-code-with-accounts-${claudeUnwrapped.version}";
+    paths = [ claudeUnwrapped ];
+    postBuild = ''
+      rm "$out/bin/claude"
+      printf '%s\n' '#!${pkgs.runtimeShell}' 'exec ${accountsMod}/bin/claude-account run "$@"' > "$out/bin/claude"
+      printf '%s\n' '#!${pkgs.runtimeShell}' 'exec ${accountsMod}/bin/claude-account "$@"' > "$out/bin/claude-account"
+      chmod +x "$out/bin/claude" "$out/bin/claude-account"
+    '';
+    inherit (claudeUnwrapped) meta version;
+  };
+
   # The GitHub owners whose repositories carry standing authorization for the
   # guarded verbs (push, PR creation, merge, release creation) without being
   # registered projects. A registered project is not listed here: its
@@ -230,10 +271,8 @@ in
   programs.claude-code = {
     enable = true;
 
-    # Latest Claude Code from the community flake: official native binary, autoupdater
-    # pre-disabled for the read-only store, served from its Cachix cache (no local compile).
-    # Advances on `just update` (nix flake update) + the next rebuild.
-    package = inputs.claude-code.packages.${pkgs.system}.default;
+    # The pinned binary behind the account-aware launcher (see claudeWithAccounts).
+    package = claudeWithAccounts;
 
     # ~/.claude/CLAUDE.md — global user instructions (read-only store symlink is safe; static).
     memory.source = ../agent-guidance/AGENTS.md;
