@@ -38,14 +38,14 @@ import tempfile
 import time
 from typing import Any
 
+from agent_tools.github_remote import github_slug
+
 CHILD_TIMEOUT_SECONDS = 30
 COLLECTION_BUDGET_SECONDS = 30
 DETAIL_LIMIT = 240
 TOKEN_VARIABLES = ("GITHUB_TOKEN", "GH_TOKEN")
 HTTP_STATUS = re.compile(r"\(HTTP (\d{3})\)")
 SLUG = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
-GITHUB_REMOTE = re.compile(r"(?:git@github\.com:|https://github\.com/|ssh://git@github\.com/)"
-                           r"(?P<slug>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?")
 BRANCH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*")
 VERSION = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -464,17 +464,6 @@ def _invoke_shape(request: Any) -> tuple[str, dict[str, Any]]:
     return operation, parameters
 
 
-def _github_slug(url: str) -> str | None:
-    """`owner/name` of a remote URL on the host `github.com` exactly, else None.
-
-    Only the three GitHub spellings are recognised (`git@github.com:`, `https://github.com/`
-    and `ssh://git@github.com/`): a URL on any other host, a lookalike host included, names
-    no GitHub repository however its path reads.
-    """
-    match = GITHUB_REMOTE.fullmatch(url.strip())
-    return None if match is None or ".." in match["slug"] else match["slug"]
-
-
 def _same_repository(slug: str, checkout: str) -> None:
     origin = _precondition_read(["git", "remote", "get-url", "origin"], checkout)
     pushes = [line for line in _precondition_read(
@@ -485,11 +474,11 @@ def _same_repository(slug: str, checkout: str) -> None:
     if len(pushes) != 1:
         raise _Refusal("rejected", "precondition_failed", f"origin has {len(pushes)} push urls")
     for what, url in (("origin", origin), ("push url", pushes[0])):
-        if _github_slug(url) is None:
+        if github_slug(url) is None:
             raise _Refusal("rejected", "precondition_failed",
                            f"{what} is not a github.com repository url")
-    for what, found in (("origin", _github_slug(origin)),
-                        ("push url", _github_slug(pushes[0])), ("repository", named)):
+    for what, found in (("origin", github_slug(origin)),
+                        ("push url", github_slug(pushes[0])), ("repository", named)):
         if found != slug:
             raise _Refusal("rejected", "precondition_failed",
                            f"{what} is {found}, not {slug}")

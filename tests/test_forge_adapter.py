@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools import forge_adapter, release_adapter, release_profile
+from agent_tools import forge_adapter, github_remote, release_adapter, release_profile
 from . import release_test_support as support
 from .forge_world import ForgeWorld
 
@@ -355,6 +355,28 @@ class InvokeCase(ForgeCase):
     def mutations(self):
         return [c for c in self.world.calls() if (c["tool"], c["argv"][:2]) in
                 (("git", ["push", "origin"]), ("gh", ["release", "create"]))]
+
+class GithubRemoteTest(unittest.TestCase):
+    """The slug rule has one home, which the adapter imports (issue 126 D9)."""
+
+    def test_only_the_three_github_spellings_name_a_repository(self):
+        for url in ("git@github.com:fagenorn/nix-config.git", "git@github.com:fagenorn/nix-config",
+                    "https://github.com/fagenorn/nix-config.git",
+                    "ssh://git@github.com/fagenorn/nix-config\n"):
+            with self.subTest(url=url):
+                self.assertEqual(github_remote.github_slug(url), "fagenorn/nix-config")
+        for url in ("git@gitlab.com:fagenorn/nix-config.git", "/srv/git/nix-config.git", "",
+                    "https://github.com.evil.example/fagenorn/nix-config.git",
+                    "http://github.com/fagenorn/nix-config", "git@github.com:fagenorn/..",
+                    "https://github.com/fagenorn/nix-config/extra"):
+            with self.subTest(url=url):
+                self.assertIsNone(github_remote.github_slug(url))
+
+    def test_the_adapter_uses_that_rule_and_keeps_no_copy(self):
+        self.assertIs(forge_adapter.github_slug, github_remote.github_slug)
+        for name in ("_github_slug", "GITHUB_REMOTE"):
+            self.assertFalse(hasattr(forge_adapter, name), name)
+
 
 class PublicSurfaceTest(unittest.TestCase):
     def test_exactly_three_public_operations(self):

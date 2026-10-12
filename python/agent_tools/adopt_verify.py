@@ -47,6 +47,7 @@ from agent_tools import agent_platform
 from agent_tools.adopt_inspection import (
     AdoptError,
     EVIDENCE_RECORD_DIR,
+    GIT_TIMEOUT_SECONDS,
     REMOTE,
     VERIFY_RESULTS,
     blob_at,
@@ -89,7 +90,9 @@ class VerificationSource:
     passed over, and `override_reason` why it was passed over; both are `None`
     unless the operand selected `branch`. `default_contract_resolved` records
     whether the contract on the default branch resolved, which `HEAD` has no
-    default branch to ask about and so leaves `True`.
+    default branch to ask about and so leaves `True`. `remote_default` is the
+    branch `origin`'s `HEAD` names, set by `remote_source` on every source it
+    yields and `None` on the `HEAD` source, which asks no remote.
     """
 
     ref: str
@@ -100,6 +103,7 @@ class VerificationSource:
     override_default: str | None = None
     override_reason: str | None = None
     default_contract_resolved: bool = True
+    remote_default: str | None = None
 
 
 def branch_override(source: VerificationSource) -> dict | None:
@@ -125,7 +129,9 @@ def head_source(root: Path) -> VerificationSource:
 
 @contextlib.contextmanager
 def remote_source(root: Path, run_resolver: Resolver,
-                  operand: str | None = None) -> Iterator[VerificationSource]:
+                  operand: str | None = None, *,
+                  network_timeout: float = GIT_TIMEOUT_SECONDS
+                  ) -> Iterator[VerificationSource]:
     """The source `--register` reads: the contract's integration branch.
 
     Nothing is read from the checkout's branches or files. `origin` is listed,
@@ -148,6 +154,11 @@ def remote_source(root: Path, run_resolver: Resolver,
     and name `B`, so there is no further hop. The source then carries the
     default branch and the reason, which `branch_override` reports.
 
+    `network_timeout` bounds each `ls-remote` and `fetch` child, so one that
+    outlasts it refuses `adopt.git.unavailable`. Every source carries the
+    branch `origin`'s `HEAD` names as `remote_default`, whichever branch it
+    pins.
+
     No `origin` refuses `not_integrated` with `adopt.registration.no_remote`,
     an `origin` that advertises no default branch with
     `adopt.registration.remote_default_unknown`, and a `B` that `origin` does
@@ -161,7 +172,7 @@ def remote_source(root: Path, run_resolver: Resolver,
         raise refuse(
             "not_integrated", "adopt.registration.no_remote", "",
             "the repository has no `origin` remote to register against")
-    heads = remote_heads(root)
+    heads = remote_heads(root, network_timeout)
     default = heads.default
     if default is None:
         raise refuse(
@@ -169,7 +180,7 @@ def remote_source(root: Path, run_resolver: Resolver,
             "`origin` does not name a default branch it also lists")
     with tempfile.TemporaryDirectory() as scratch:
         branch = default
-        pinned = fetch_pinned(root, default)
+        pinned = fetch_pinned(root, default, network_timeout)
         exported = Path(scratch) / "default"
         export_commit(root, pinned, exported)
         exit_code, payload = run_resolver(exported, "resolve")
@@ -194,7 +205,7 @@ def remote_source(root: Path, run_resolver: Resolver,
             pinned, exported = pin_integration_branch(
                 root, run_resolver, branch, Path(scratch) / "integration",
                 "the contract on the `--integration-branch` branch does not "
-                "resolve or does not name that branch")
+                "resolve or does not name that branch", network_timeout)
             override_default = default
         if named is not None and named != default:
             if named not in heads.branches:
@@ -205,19 +216,22 @@ def remote_source(root: Path, run_resolver: Resolver,
             pinned, exported = pin_integration_branch(
                 root, run_resolver, branch, Path(scratch) / "integration",
                 "the contract on the integration branch does not resolve or "
-                "does not name that branch")
+                "does not name that branch", network_timeout)
         yield VerificationSource(
             ref=f"refs/remotes/{REMOTE}/{branch}", commit=pinned,
             resolver_root=exported, inventory=tree_inventory(root, pinned),
             branch=branch, override_default=override_default,
             override_reason=(agent_platform.BRANCH_OVERRIDE_REASONS[0]
                              if override_default is not None else None),
-            default_contract_resolved=default_resolved)
+            default_contract_resolved=default_resolved,
+            remote_default=default)
 
 
 def pin_integration_branch(root: Path, run_resolver: Resolver, branch: str,
                            destination: Path,
-                           unconfirmed: str) -> tuple[str, Path]:
+                           unconfirmed: str,
+                           network_timeout: float = GIT_TIMEOUT_SECONDS
+                           ) -> tuple[str, Path]:
     """Fetch `branch`, export its pinned commit and require it to name itself.
 
     Returns the pinned commit id and the directory it was exported to. The
@@ -227,9 +241,9 @@ def pin_integration_branch(root: Path, run_resolver: Resolver, branch: str,
     message. This is the one confirmation both ways of reaching an integration
     branch other than the default go through, so neither can admit a branch the
     other would refuse; checking that `origin` lists `branch` stays with the
-    caller, whose refusal wording differs.
+    caller, whose refusal wording differs. `network_timeout` bounds the fetch.
     """
-    pinned = fetch_pinned(root, branch)
+    pinned = fetch_pinned(root, branch, network_timeout)
     export_commit(root, pinned, destination)
     exit_code, payload = run_resolver(destination, "resolve")
     if exit_code != 0 or integration_branch(payload) != branch:
