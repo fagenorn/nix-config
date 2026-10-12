@@ -38,6 +38,10 @@ from .test_adopt_project import (
     LINKED_BASE,
     LINKED_SOURCES,
     LINKED_SUMMARY,
+    MOVED_TOOL,
+    MOVED_TOOL_AFTER,
+    MOVED_TOOL_NEW,
+    MOVED_TOOL_SUBJECT,
     REFERENCE_ROW,
     REFERENCE_SUBJECT,
     UNRELATED_SCRIPT,
@@ -52,6 +56,7 @@ from .test_adopt_project import (
     write,
     write_dissolved_tree,
     write_linked_tree,
+    write_moved_tool,
     write_reference_tree,
 )
 
@@ -841,9 +846,31 @@ class PathReferenceApplyTest(ApplyTestCase):
         self.assertIn({"id": "path-reference", "subject": REFERENCE_SUBJECT,
                        "value": "extend"}, record["decisions_accepted"])
         self.assertEqual(record["path_references"],
-                         [{**REFERENCE_ROW, "answer": "extend"}])
+                         [{**REFERENCE_ROW, "answer": "extend",
+                           "decided_by": "occurrence"}])
         self.assertEqual(record["path_references"],
                          document["path_references"])
+
+
+class MovedFileReferenceApplyTest(ApplyTestCase):
+    """#372 D1: the edit of a moved file is part of the adoption commit."""
+
+    def test_the_moved_script_is_rewritten_at_its_destination(self):
+        root = apply_repo(self.home)
+        write_moved_tool(root)
+        code, out, err = run("plan", "--repo-root", str(root), "--answer",
+                             "path-reference", MOVED_TOOL_SUBJECT, "rewrite",
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+        document = json.loads(out)
+        self.assertEqual(document["plan"]["state"], "ready",
+                         document["plan"]["blockers"])
+        branch = self.succeed(root, document["plan"]["plan_id"])["branch"]
+        self.assertEqual(git(root, "show", f"{branch}:{MOVED_TOOL_NEW}"),
+                         MOVED_TOOL_AFTER)
+        self.assertNotIn(MOVED_TOOL, self.branch_files(root, branch))
+        self.assertEqual(
+            git(root, "rev-list", "--count", f"HEAD..{branch}").strip(), "1")
 
 
 class CommitLinkProofTest(ApplyTestCase):

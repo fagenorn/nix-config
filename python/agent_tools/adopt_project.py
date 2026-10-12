@@ -203,9 +203,10 @@ def compose_plan(root: Path, manifest: dict,
         root, found, inventory, answered,
         adopt_planning.reference_excluded(contract_source))
     reference_answers = adopt_planning.reference_answers(answered)
-    path_references = adopt_references.summary(references, reference_answers)
+    path_references = adopt_references.summary(references, reference_answers,
+                                               {})
     reference_files = adopt_references.rewritten(references,
-                                                 reference_answers)
+                                                 reference_answers, {})
     untracked = adopt_inspection.untracked_under(
         root, adopt_inspection.overlap_targets(found))
     for path in untracked:

@@ -205,7 +205,9 @@ def apply_answers(root: Path, found: Candidates, inventory: Inventory,
     is mutated until every answer has validated, so a refusal changes nothing.
 
     The references are derived once, from the base revision's tracked text
-    with `excluded` skipped, over the moves the answers settle (D12): at the
+    with `excluded` skipped, moved files included and read at their base
+    paths, each moved file carrying the group it moves in as its tree, over
+    the moves the answers settle (D12): at the
     first `path-reference` answer, over `found.moves` plus the archive
     destination of every `archive-history` answer validated before it, which
     is every one of them because `candidate-class` sorts first; with no such
@@ -225,6 +227,8 @@ def apply_answers(root: Path, found: Candidates, inventory: Inventory,
                if entry["action"] == "needs-decision"}
     seen: set[tuple[str, str]] = set()
     moves = list(found.moves)
+    trees = {path: group for group, info in found.groups.items()
+             for path, _ in info["members"]}
     references: References | None = None
     for answer in sorted(answers, key=lambda a: (a["id"], a["subject"],
                                                  a["value"])):
@@ -242,7 +246,7 @@ def apply_answers(root: Path, found: Candidates, inventory: Inventory,
         if question == "path-reference":
             if references is None:
                 references = adopt_references.derive_references(
-                    root, inventory.base_revision, moves, excluded)
+                    root, inventory.base_revision, moves, excluded, trees)
             occurrence = next(
                 (o for o in references.occurrences
                  if o.subject == answer["subject"]), None)
@@ -271,6 +275,7 @@ def apply_answers(root: Path, found: Candidates, inventory: Inventory,
         if answer["value"] == "archive-history":
             moves.append((answer["subject"],
                           f"{ARCHIVE_ADOPTED_DIR}/{answer['subject']}"))
+            trees[answer["subject"]] = answer["subject"]
 
     tracked = dict(inventory.tracked)
     settled = sorted(answers, key=lambda a: (a["id"], a["subject"]))
@@ -289,7 +294,7 @@ def apply_answers(root: Path, found: Candidates, inventory: Inventory,
             found.moves.append((path, target))
     if references is None:
         references = adopt_references.derive_references(
-            root, inventory.base_revision, found.moves, excluded)
+            root, inventory.base_revision, found.moves, excluded, trees)
     return settled, references
 
 # --------------------------------------------------------------------------
@@ -527,27 +532,30 @@ def check_markdown_writes(changes: list[dict],
 def check_reference_writes(changes: list[dict],
                            reference_targets: set[str]) -> None:
     """Refuse an operation list that does not hold each path-reference file
-    exactly once, as a plain in-place write (D9).
+    as one in-place write, and at most one move onto it (D9).
 
-    For every target exactly one operation may hold it, and that one is a
-    `write-file` whose `sources` and `targets` are both `[target]`: a file
-    edited by a reference answer and also moved, deleted, regenerated or
-    written a second time would disagree with itself. An operation holds a
-    file it names in `targets`, or in `sources` unless it is a
-    `regenerate-projection`, which only reads its source and runs after the
-    write, so a projection source a reference answer edits has one writer, as
-    one the link rewriter edits does under `check_markdown_writes`. This is a
-    derivation bug, never a repository condition, so it raises rather than
-    gating."""
+    A target is a file's path after the plan's moves. Among the operations
+    that hold it exactly one is a `write-file` whose `sources` and `targets`
+    are both `[target]`, and every other one (at most one) is a `git-mv` whose
+    `targets` are `[target]`: a file edited by a reference answer and also
+    moved away, deleted, regenerated, moved onto twice or written a second
+    time would disagree with itself. An operation holds a file it names in
+    `targets`, or in `sources` unless it is a `regenerate-projection`, which
+    only reads its source and runs after the write, so a projection source a
+    reference answer edits has one writer, as one the link rewriter edits
+    does under `check_markdown_writes`. This is a derivation bug, never a
+    repository condition, so it raises rather than gating."""
     for target in sorted(reference_targets):
         naming = [op for op in changes
                   if target in op["targets"]
                   or (target in op["sources"]
                       and op["op"] != "regenerate-projection")]
-        if len(naming) != 1 or not (
-                naming[0]["op"] == "write-file"
-                and naming[0]["sources"] == [target]
-                and naming[0]["targets"] == [target]):
+        writes = [op for op in naming if op["op"] == "write-file"
+                  and op["sources"] == [target] and op["targets"] == [target]]
+        moves = [op for op in naming if op["op"] == "git-mv"
+                 and op["targets"] == [target]]
+        if (len(writes) != 1 or len(moves) > 1
+                or len(writes) + len(moves) != len(naming)):
             raise ValueError(
                 f"{target!r} is not held by exactly one in-place write-file "
                 f"operation: {naming!r}")
@@ -569,8 +577,9 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
     superseded evidence record and the two records, then the living-reference
     rewrite, the Markdown link rewrites sorted by target, the path-reference
     writes sorted by target, and finally the projection regenerations.
-    `reference_files` maps each non-Markdown file an answered path reference
-    edits onto its `(before, after)` texts.
+    `reference_files` maps the path, after the moves, of each non-Markdown
+    file an answered path reference edits onto its `(before, after)` texts,
+    `before` being the text at the base revision.
 
     `contents` maps each `write-file` target onto the exact bytes whose hash
     the operation publishes as `after`. The plan document carries the hash and
@@ -642,9 +651,10 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
                               sha256_hash(before), sha256_hash(after)))
         contents[target] = after
 
-    # One in-place `write-file` per non-Markdown file an answered path
-    # reference edits (#350). Those files are never moved (a move source is
-    # not read for references), so the target is where the file already is.
+    # One `write-file` per non-Markdown file an answered path reference
+    # edits (#350), at the path the file has after the moves: a moved file is
+    # written where `git-mv` left it, because the write sits in `tail`, after
+    # every relocation; a retained one where it already is.
     for target in sorted(reference_files):
         before, after = (text.encode("utf-8")
                          for text in reference_files[target])

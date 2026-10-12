@@ -445,7 +445,8 @@ REFERENCE_ROW = {
     "column": 29, "literal": ".claude/", "answers": ["extend", "retain"],
     "answer": None,
     "additions": [".agents/artifacts/plans/", ".agents/artifacts/specs/"],
-    "replacement": None}
+    "replacement": None, "target": CHECK_LINKS, "policy": None,
+    "decided_by": None}
 REFERENCE_TREE = {
     "README.md": "# readme\n\nSee [spec x](.claude/specs/x.md).\n",
     ".claude/specs/x.md": "# spec x\n\nGone: [gone](missing.md).\n",
@@ -469,6 +470,19 @@ def referenced_repo(home: Path, *, script: bool = True) -> Path:
     root = nix_config_shape_repo(home)
     write_reference_tree(root, script=script)
     return root
+
+
+MOVED_TOOL = ".claude/notes/tool.py"
+MOVED_TOOL_NEW = ".agents/artifacts/notes/tool.py"
+MOVED_TOOL_TEXT = 'SPEC = ".claude/specs/x.md"\n'
+MOVED_TOOL_AFTER = 'SPEC = ".agents/artifacts/specs/x.md"\n'
+MOVED_TOOL_SUBJECT = f"{MOVED_TOOL}:1:9"
+
+
+def write_moved_tool(root: Path) -> None:
+    """One script inside a moved tree that names a file of another."""
+    write(root, MOVED_TOOL, MOVED_TOOL_TEXT)
+    commit(root, "add a script to a moved tree")
 
 
 def write_dissolved_tree(root: Path) -> None:
@@ -1747,7 +1761,8 @@ class PathReferencePlanTest(AdoptTestCase):
                          [{"id": "path-reference",
                            "subject": REFERENCE_SUBJECT, "value": "extend"}])
         self.assertEqual(doc["path_references"],
-                         [{**REFERENCE_ROW, "answer": "extend"}])
+                         [{**REFERENCE_ROW, "answer": "extend",
+                           "decided_by": "occurrence"}])
         (write_op,) = self.naming(doc, CHECK_LINKS)
         self.assertEqual(write_op["op"], "write-file")
         self.assertEqual(write_op["sources"], [CHECK_LINKS])
@@ -1770,7 +1785,8 @@ class PathReferencePlanTest(AdoptTestCase):
         self.assertEqual(doc["plan"]["state"], "ready",
                          doc["plan"]["blockers"])
         self.assertEqual(doc["path_references"],
-                         [{**REFERENCE_ROW, "answer": "retain"}])
+                         [{**REFERENCE_ROW, "answer": "retain",
+                           "decided_by": "occurrence"}])
         self.assertEqual(self.naming(doc, CHECK_LINKS), [])
 
     def test_the_answer_is_covered_by_the_plan_id(self):
@@ -1941,6 +1957,72 @@ class PathReferencePlanTest(AdoptTestCase):
             with self.subTest(changes=changes):
                 with self.assertRaises(ValueError):
                     adopt_planning.check_reference_writes(changes, {target})
+
+
+class MovedFileReferencePlanTest(AdoptTestCase):
+    """#372 D1: a moved file is read, and written where the move leaves it."""
+
+    def repo(self) -> Path:
+        root = nix_config_shape_repo(self.home)
+        write_moved_tool(root)
+        return root
+
+    def test_a_moved_file_is_read_and_its_row_names_the_destination(self):
+        doc = self.ready_plan(self.repo())
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(doc["path_references"], [{
+            "subject": MOVED_TOOL_SUBJECT, "path": MOVED_TOOL, "line": 1,
+            "column": 9, "literal": ".claude/specs/x.md",
+            "answers": ["rewrite", "retain"], "answer": None,
+            "additions": [], "replacement": ".agents/artifacts/specs/x.md",
+            "target": MOVED_TOOL_NEW, "policy": ".claude/notes:.py",
+            "decided_by": None}])
+        self.assertEqual(
+            [op["op"] for op in doc["changes"]
+             if MOVED_TOOL_NEW in op["targets"]], ["git-mv"])
+
+    def test_an_answered_moved_file_is_written_once_at_its_destination(self):
+        code, doc, err = self.plan(self.repo(), "--answer", "path-reference",
+                                   MOVED_TOOL_SUBJECT, "rewrite")
+        self.assertEqual(code, 0, err or doc)
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        (row,) = doc["path_references"]
+        self.assertEqual((row["answer"], row["decided_by"]),
+                         ("rewrite", "occurrence"))
+        move, write_op = [op for op in doc["changes"]
+                          if MOVED_TOOL_NEW in op["sources"] + op["targets"]]
+        self.assertEqual((move["op"], move["sources"], move["targets"]),
+                         ("git-mv", [MOVED_TOOL], [MOVED_TOOL_NEW]))
+        self.assertEqual(
+            (write_op["op"], write_op["sources"], write_op["targets"]),
+            ("write-file", [MOVED_TOOL_NEW], [MOVED_TOOL_NEW]))
+        self.assertEqual(write_op["before"],
+                         sha256_hash(MOVED_TOOL_TEXT.encode("utf-8")))
+        self.assertEqual(write_op["after"],
+                         sha256_hash(MOVED_TOOL_AFTER.encode("utf-8")))
+        self.assertEqual(
+            [op["op"] for op in doc["changes"]
+             if MOVED_TOOL in op["sources"] + op["targets"]], ["git-mv"])
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+
+    def test_a_reference_target_may_be_one_move_destination(self):
+        op = adopt_planning.operation
+        blob = "git-object:" + "0" * 40
+        write_op = op("write-file", [MOVED_TOOL_NEW], [MOVED_TOOL_NEW],
+                      "sha256:" + "0" * 64, "sha256:" + "1" * 64)
+        move = op("git-mv", [MOVED_TOOL], [MOVED_TOOL_NEW], blob, blob)
+        adopt_planning.check_reference_writes([move, write_op],
+                                              {MOVED_TOOL_NEW})
+        second = op("git-mv", ["tools/other.py"], [MOVED_TOOL_NEW], blob,
+                    blob)
+        away = op("git-mv", [MOVED_TOOL_NEW], ["tools/moved.py"], blob, blob)
+        for changes in ([move], [move, write_op, write_op],
+                        [move, second, write_op], [move, write_op, away]):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    adopt_planning.check_reference_writes(
+                        changes, {MOVED_TOOL_NEW})
 
 
 class GitignoreAmendmentTest(AdoptTestCase):

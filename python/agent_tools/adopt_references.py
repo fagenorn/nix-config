@@ -5,10 +5,20 @@ in a tracked, non-Markdown text file that would be left pointing at a path
 that moved: the token grammar (`tokens`, `split_token`, `split_pattern`), the
 successors of a referenced path and the carried form of a successor
 (`successors`, `carried_form`, `pattern_form`), the occurrences, each with its
-shape and the answers it offers (`Occurrence`, `plan_references`), the report
-of those occurrences and the edits their answers make (`summary`, `rewritten`),
-and the reader that feeds the core a tree's text through git
-(`derive_references`, over `adopt_inspection.tree_records` and `blob_at`).
+shape, the answers it offers, the path its edit lands at and, for a file the
+plan moves, the policy that can answer it (`Occurrence`, `plan_references`),
+the class of a file name and the answer recommended for it (`file_class`,
+`recommended_answer`), the answer that decides an occurrence
+(`effective_answer`), the reports of the occurrences and of the policies
+(`summary`, `policy_summary`) and the edits the answers make (`rewritten`), and
+the reader that feeds the core a tree's text through git (`derive_references`,
+over `adopt_inspection.tree_records` and `blob_at`).
+
+A file the plan moves is read at its base path and edited at its destination:
+an occurrence's `path` and `subject` are the base path, its `target` is where
+the plan leaves the file. An answer is the occurrence's own, or else the one
+given to its policy, `<tree>:<class>`, the moved tree and the class of the
+file name; `effective_answer` is the one place that precedence is decided.
 
 A token is read as a plain path first (`split_token`). Only when that reading
 names no moved path is it read a second time as a regular-expression spelling
@@ -25,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
 from agent_tools.adopt_inspection import (
     blob_at, is_secret_path, refuse, run_git, split_nul, tree_records)
@@ -33,6 +43,11 @@ from agent_tools.adopt_links import (
     REGULAR_MODES, Tree, directory_successor, is_markdown_path)
 
 ANSWERS = ("extend", "rewrite", "retain")
+POLICY_ANSWERS = ("rewrite", "retain")
+REWRITE_CLASSES = (".py", ".sh", ".bash", ".zsh", ".nix", ".yaml", ".yml",
+                   ".toml", ".js", ".mjs", ".cjs", ".ts")
+RETAIN_CLASSES = (".json", ".jsonl", ".ndjson", ".csv", ".tsv", ".txt",
+                  ".log")
 TOKEN_DELIMITERS = "\"'`,;:=()<>|&#!"
 GLOB_CHARACTERS = "*?[{"
 PATTERN_ESCAPES = ("\\\\.", "\\.")
@@ -217,6 +232,31 @@ def _is_one_token(form: str) -> bool:
 
 
 # --------------------------------------------------------------------------
+# Classes and recommendations
+# --------------------------------------------------------------------------
+
+
+def file_class(path: str) -> str:
+    """The lower-cased extension of a file name with its dot, or `-`.
+
+    A name with no dot, a leading dot only (`.envrc`) or a trailing dot
+    (`notes.`) has no class.
+    """
+    name = path.rpartition("/")[2]
+    stem, dot, extension = name.rpartition(".")
+    return "." + extension.lower() if dot and stem and extension else "-"
+
+
+def recommended_answer(file_class: str) -> str | None:
+    """The policy answer printed for a class, or None when none is given."""
+    if file_class in REWRITE_CLASSES:
+        return "rewrite"
+    if file_class in RETAIN_CLASSES:
+        return "retain"
+    return None
+
+
+# --------------------------------------------------------------------------
 # Occurrences and shapes
 # --------------------------------------------------------------------------
 
@@ -233,10 +273,19 @@ class Occurrence:
     additions: tuple[str, ...]
     replacement: str | None
     shape: str | None
+    target: str
+    tree: str | None
 
     @property
     def subject(self) -> str:
         return f"{self.path}:{self.line}:{self.column}"
+
+    @property
+    def policy(self) -> str | None:
+        """`<tree>:<class>` for a file the plan moves, else None."""
+        if self.tree is None:
+            return None
+        return f"{self.tree}:{file_class(self.path)}"
 
 
 @dataclass(frozen=True)
@@ -311,15 +360,15 @@ def _reading(token: str, base: Tree, sources: tuple[str, ...]
 
 
 def _occurrence(path: str, text: str, token: Token, base: Tree, after: Tree,
-                moved: dict[str, str], sources: tuple[str, ...]
-                ) -> Occurrence | None:
+                moved: dict[str, str], sources: tuple[str, ...], target: str,
+                tree: str | None) -> Occurrence | None:
     if "/" not in token.text and not _is_quoted(text, token):
         return None
     reading = _reading(token.text, base, sources)
     if reading is None:
         return None
-    target, form = reading
-    single, found = successors(target, base, after, moved)
+    referenced, form = reading
+    single, found = successors(referenced, base, after, moved)
     forms = [form(successor, is_directory, single)
              for successor, is_directory in found]
     shape = _shape(text, token)
@@ -335,7 +384,7 @@ def _occurrence(path: str, text: str, token: Token, base: Tree, after: Tree,
     answers.append("retain")
     return Occurrence(path, token.line, token.column, token.start, token.end,
                       token.text, tuple(answers), additions, replacement,
-                      shape)
+                      shape, target, tree)
 
 
 # --------------------------------------------------------------------------
@@ -381,8 +430,13 @@ def _edit(text: str, occurrence: Occurrence, answer: str
 
 
 def plan_references(texts: dict[str, str], paths: Iterable[str],
-                    moves: Iterable[tuple[str, str]]) -> References:
-    """The occurrences of moved paths in `texts`, over the tree `paths`."""
+                    moves: Iterable[tuple[str, str]],
+                    trees: Mapping[str, str]) -> References:
+    """The occurrences of moved paths in `texts`, over the tree `paths`.
+
+    `texts` is keyed by base path. `trees` maps each moved file to the tree
+    its policy is named for; a moved file with no entry raises `ValueError`.
+    """
     base, moved = Tree(paths), dict(moves)
     after = Tree((base.paths - moved.keys()) | set(moved.values()))
     sources = tuple(moved)
@@ -390,9 +444,15 @@ def plan_references(texts: dict[str, str], paths: Iterable[str],
     found: list[Occurrence] = []
     for path in sorted(texts):
         text = texts[path]
+        target = moved.get(path, path)
+        tree = None
+        if path in moved:
+            if path not in trees:
+                raise ValueError(f"{path}: a moved file has no tree")
+            tree = trees[path]
         for token in tokens(text):
             occurrence = _occurrence(path, text, token, base, after, moved,
-                                     sources)
+                                     sources, target, tree)
             if occurrence is not None:
                 held[path] = text
                 found.append(occurrence)
@@ -400,41 +460,109 @@ def plan_references(texts: dict[str, str], paths: Iterable[str],
     return References(held, tuple(found))
 
 
-def summary(references: References, answers: dict[str, str]) -> list[dict]:
-    """One row per occurrence, in order, with the answer given to it."""
-    return [{"subject": o.subject, "path": o.path, "line": o.line,
-             "column": o.column, "literal": o.literal,
-             "answers": list(o.answers), "answer": answers.get(o.subject),
-             "additions": list(o.additions), "replacement": o.replacement}
-            for o in references.occurrences]
+def effective_answer(occurrence: Occurrence, answers: Mapping[str, str],
+                     policies: Mapping[str, str]
+                     ) -> tuple[str | None, str | None]:
+    """`(answer, decided_by)` of an occurrence; `(None, None)` when open.
+
+    The occurrence's own answer decides first (`occurrence`). Otherwise the
+    answer given to its policy decides (`policy`) when the occurrence offers
+    it. Raises `ValueError` for a policy answer outside `POLICY_ANSWERS`.
+    """
+    own = answers.get(occurrence.subject)
+    if own is not None:
+        return own, "occurrence"
+    policy = occurrence.policy
+    if policy is not None and policy in policies:
+        value = policies[policy]
+        if value not in POLICY_ANSWERS:
+            raise ValueError(f"{policy}: {value!r} is not a policy answer")
+        if value in occurrence.answers:
+            return value, "policy"
+    return None, None
 
 
-def rewritten(references: References, answers: dict[str, str]
-              ) -> dict[str, tuple[str, str]]:
-    """`path -> (before, after)` for each file an `extend` or `rewrite` edits.
+def summary(references: References, answers: Mapping[str, str],
+            policies: Mapping[str, str]) -> list[dict]:
+    """One row per occurrence, in order, with the answer that decides it."""
+    rows = []
+    for o in references.occurrences:
+        answer, decided_by = effective_answer(o, answers, policies)
+        rows.append({
+            "subject": o.subject, "path": o.path, "line": o.line,
+            "column": o.column, "literal": o.literal,
+            "answers": list(o.answers), "answer": answer,
+            "additions": list(o.additions), "replacement": o.replacement,
+            "target": o.target, "policy": o.policy,
+            "decided_by": decided_by})
+    return rows
 
-    Raises `ValueError` for an answer the occurrence does not offer, and for
-    an offered one it cannot carry out: a `rewrite` with no replacement, an
-    `extend` with no `quoted` or `line` shape, or an answer outside `ANSWERS`.
+
+def policy_summary(references: References, answers: Mapping[str, str],
+                   policies: Mapping[str, str]) -> list[dict]:
+    """One row per policy that has an occurrence, sorted by subject.
+
+    `files` counts distinct base paths, `rewritable` the occurrences that
+    offer `rewrite`, `rewritten`, `retained` and `extended` those decided by
+    that answer, `open` those no answer decides and `overridden` those their
+    own answer decides.
+    """
+    grouped: dict[str, list[tuple[Occurrence, str | None, str | None]]] = {}
+    for o in references.occurrences:
+        if o.policy is not None:
+            grouped.setdefault(o.policy, []).append(
+                (o, *effective_answer(o, answers, policies)))
+    rows = []
+    for subject, members in sorted(grouped.items()):
+        first = members[0][0]
+        decided = [answer for _, answer, _ in members]
+        klass = file_class(first.path)
+        rows.append({
+            "subject": subject, "tree": first.tree, "class": klass,
+            "recommended": recommended_answer(klass),
+            "answer": policies.get(subject),
+            "files": len({o.path for o, _, _ in members}),
+            "occurrences": len(members),
+            "rewritable": sum("rewrite" in o.answers for o, _, _ in members),
+            "rewritten": decided.count("rewrite"),
+            "retained": decided.count("retain"),
+            "extended": decided.count("extend"),
+            "open": decided.count(None),
+            "overridden": sum(by == "occurrence" for _, _, by in members)})
+    return rows
+
+
+def rewritten(references: References, answers: Mapping[str, str],
+              policies: Mapping[str, str]) -> dict[str, tuple[str, str]]:
+    """`target -> (before, after)` for each file an answer edits.
+
+    `before` is the base text, edited by base offsets; the key is where the
+    plan leaves the file. A file whose text is unchanged is not returned.
+    Raises `ValueError` for an own answer the occurrence does not offer, and
+    for an offered one it cannot carry out: a `rewrite` with no replacement,
+    an `extend` with no `quoted` or `line` shape, or an answer outside
+    `ANSWERS`.
     """
     edits: dict[str, list[tuple[int, int, str]]] = {}
+    targets: dict[str, str] = {}
     for occurrence in references.occurrences:
-        answer = answers.get(occurrence.subject)
-        if answer is None:
+        own = answers.get(occurrence.subject)
+        if own is not None and own not in occurrence.answers:
+            raise ValueError(f"{occurrence.subject}: {own!r} is not offered")
+        answer, _ = effective_answer(occurrence, answers, policies)
+        if answer is None or answer == "retain":
             continue
-        if answer not in occurrence.answers:
-            raise ValueError(
-                f"{occurrence.subject}: {answer!r} is not offered")
-        if answer != "retain":
-            edits.setdefault(occurrence.path, []).append(
-                _edit(references.texts[occurrence.path], occurrence, answer))
+        targets[occurrence.path] = occurrence.target
+        edits.setdefault(occurrence.path, []).append(
+            _edit(references.texts[occurrence.path], occurrence, answer))
     files = {}
     for path, triples in edits.items():
         before = text = references.texts[path]
         for start, end, new in sorted(triples, key=lambda t: t[:2],
                                       reverse=True):
             text = text[:start] + new + text[end:]
-        files[path] = (before, text)
+        if text != before:
+            files[targets[path]] = (before, text)
     return files
 
 
@@ -445,8 +573,14 @@ def rewritten(references: References, answers: dict[str, str]
 
 def derive_references(root: Path, revision: str,
                       moves: Iterable[tuple[str, str]],
-                      excluded: Iterable[str]) -> References:
-    """The references `moves` leave in `revision`'s tracked text files."""
+                      excluded: Iterable[str],
+                      trees: Mapping[str, str]) -> References:
+    """The references `moves` leave in `revision`'s tracked text files.
+
+    A file the moves carry is read like any other, at its base path; a record
+    home is tested against that base path. `trees` names the tree of each
+    moved file (see `plan_references`).
+    """
     moves = list(moves)
     if not moves:
         return References({}, ())
@@ -462,7 +596,7 @@ def derive_references(root: Path, revision: str,
                      "a git inspection command did not succeed")
     records = tree_records(root, revision)
     modes = {path: mode for path, mode, _ in records}
-    skipped = set(excluded) | sources
+    skipped = set(excluded)
     texts: dict[str, str] = {}
     for result in split_nul(out):
         path = result.removeprefix(revision + ":")
@@ -477,4 +611,5 @@ def derive_references(root: Path, revision: str,
             texts[path] = data.decode("utf-8")
         except UnicodeDecodeError:
             continue
-    return plan_references(texts, [path for path, _, _ in records], moves)
+    return plan_references(texts, [path for path, _, _ in records], moves,
+                           trees)
