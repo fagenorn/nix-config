@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -27,6 +28,13 @@ BASE_POLICY_KEYS = frozenset(
 )
 COMPILED_POLICY_KEYS = frozenset({"derived_repositories", "derivation"})
 DERIVED_ROW_KEYS = frozenset({"default_branch", "integration_branch", "evidence"})
+# A policy file larger than this is refused unread. Either file is a few kilobytes,
+# so the cap only bounds the read of a file that is not what it claims to be.
+POLICY_MAX_BYTES = 1 << 20
+# Variables a shell reads its startup file from (`BASH_ENV`, `ENV`) or imports
+# functions from (`BASH_FUNC_<name>%%`), which never reach the row check.
+ROW_CHECK_ENV_DROPPED = frozenset({"BASH_ENV", "ENV"})
+ROW_CHECK_ENV_DROPPED_PREFIX = "BASH_FUNC_"
 CHILD_DIAGNOSTIC_LIMIT = 240
 # One invocation, the row check included, answers inside this many seconds, which
 # keeps the verdict ahead of the hook's 30-second timeout.
@@ -828,12 +836,49 @@ class BasePolicy:
         self.jq_bin = document["jq_bin"]
 
 
+def _read_policy_bytes(path):
+    """(bytes, None) for a regular file at `path` of at most POLICY_MAX_BYTES, else (None, why).
+
+    The open never blocks (`O_NONBLOCK`, so a FIFO with no writer opens at once), and
+    the descriptor's own `fstat` decides: anything but a regular file, a FIFO or a
+    device such as `/dev/zero` behind a symlink included, is refused before a byte
+    is read, and so is a file over the cap or one that grows past it while read.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY)
+    except OSError as error:
+        return None, str(error)
+    try:
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode):
+            return None, "not a regular file"
+        if status.st_size > POLICY_MAX_BYTES:
+            return None, f"larger than {POLICY_MAX_BYTES} bytes"
+        chunks = []
+        size = 0
+        while size <= POLICY_MAX_BYTES:
+            chunk = os.read(descriptor, POLICY_MAX_BYTES + 1 - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        if size > POLICY_MAX_BYTES:
+            return None, f"larger than {POLICY_MAX_BYTES} bytes"
+        return b"".join(chunks), None
+    except OSError as error:
+        return None, str(error)
+    finally:
+        os.close(descriptor)
+
+
 def _load_json_object(path, keys):
     """(document, None) for a JSON object at `path` with exactly `keys`, else (None, reason)."""
+    data, why = _read_policy_bytes(path)
+    if data is None:
+        return None, f"cannot load {path}: {why}"
     try:
-        with open(path, encoding="utf-8") as handle:
-            document = json.load(handle)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        document = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
         return None, f"cannot load {path}: {error}"
     if not isinstance(document, dict) or set(document) != keys:
         return None, f"{path}: expected an object with exactly the keys {', '.join(sorted(keys))}"
@@ -867,9 +912,11 @@ def load_compiled_policy(path):
 
     The file supplies derived rows alone: `derived_repositories` maps a repository
     slug to its row, and the guard reads a row's two branches and leaves
-    `evidence` and `derivation` to the compiler that wrote them. A file that
-    cannot be read or carries any malformed row contributes no row at all, so it is
-    never partially read, and it never blocks a call by itself.
+    `evidence` and `derivation` to the compiler that wrote them. The path is read
+    without blocking and only when it is a regular file of at most
+    POLICY_MAX_BYTES (`_read_policy_bytes`). A file that is anything else, cannot
+    be read or carries any malformed row contributes no row at all, so it is never
+    partially read, and it never blocks a call by itself.
     """
     document, reason = _load_json_object(path, COMPILED_POLICY_KEYS)
     if document is None:
@@ -1013,13 +1060,28 @@ def _report_mismatch(report, status, repository, row):
     return f"unavailable ({cause['reason_code']})"
 
 
+def row_check_env():
+    """os.environ without the shell startup variables and exported bash functions.
+
+    A `BASH_ENV` or `ENV` file, or a `BASH_FUNC_<name>%%` function, could make a
+    shell script in the row check print a report the check never derived.
+    """
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name not in ROW_CHECK_ENV_DROPPED
+        and not name.startswith(ROW_CHECK_ENV_DROPPED_PREFIX)
+    }
+
+
 def row_check_problem(derive_bin, repository, row, timeout):
     """Why the row check does not confirm `row` for `repository`, or None when it does.
 
     The check is `derive_bin --repository <repository>`, run once with no stdin,
-    its output captured and its own session, so one SIGKILL to its process group
-    on the bound takes its descendants with it. The pipes are not read again after
-    the kill; only the direct child is reaped.
+    the environment of `row_check_env`, its output captured and its own session,
+    so one SIGKILL to its process group on the bound takes its descendants with
+    it. The pipes are not read again after the kill; only the direct child is
+    reaped.
     """
     why = None
     try:
@@ -1028,6 +1090,7 @@ def row_check_problem(derive_bin, repository, row, timeout):
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=row_check_env(),
             start_new_session=True,
         )
     except OSError as error:
@@ -1038,7 +1101,8 @@ def row_check_problem(derive_bin, repository, row, timeout):
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
+                # Gone, or (macOS) a group of zombies only, which signals as EPERM.
                 pass
             child.wait()
             why = "timed out"

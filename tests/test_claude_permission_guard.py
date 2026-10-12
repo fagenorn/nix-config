@@ -2,9 +2,11 @@ import concurrent.futures
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -1285,8 +1287,11 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertIn(f"--base-policy {BASE_POLICY_PATH} ", wrapper)
         row_check = Path(wrapper.split("--derive-bin ", 1)[1].split(" ", 1)[0])
         script = row_check.read_text(encoding="utf-8")
+        self.assertRegex(script, r'\A#!/nix/store/\S+/bin/\S+ -p\nunset BASH_ENV ENV\n')
         self.assertRegex(script, r'export PATH="/nix/store/\S+-git-[^:"]+/bin:')
         self.assertRegex(script, r'exec /nix/store/\S+-agent-tools-guard-policy derive "\$@"\n')
+        launcher = Path(script.split("exec ", 1)[1].split(" ", 1)[0])
+        self.assertRegex(launcher.read_text(encoding="utf-8"), r'\A#!/nix/store/\S+/bin/\S+ -p\n')
 
     def test_a_compiled_policy_cannot_add_an_owner(self):
         """Issue 377 criterion 1, R1: an owner in the compiled policy grants nothing."""
@@ -1370,11 +1375,22 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         (fixtures / "not-json.json").write_text("{", encoding="utf-8")
         unreadable = self.write_policy(derived_repositories={NODO: NODO_ROW}, derivation={})
         unreadable.chmod(0)
+        # A FIFO with no writer would block a plain open, and /dev/zero never ends, so
+        # each must be refused by its file type before a read; the oversized file is a
+        # valid policy for Nodo padded past the 1 MiB cap with trailing whitespace.
+        os.mkfifo(fixtures / "fifo.json")
+        (fixtures / "zero.json").symlink_to("/dev/zero")
+        oversized = self.write_policy(derived_repositories={NODO: NODO_ROW}, derivation={})
+        with oversized.open("a", encoding="utf-8") as stream:
+            stream.write(" " * (1 << 20))
         shapes = {
             "missing": fixtures / "absent.json",
             "a directory": fixtures / "directory",
             "unreadable": unreadable,
             "not JSON": fixtures / "not-json.json",
+            "a FIFO": fixtures / "fifo.json",
+            "a link to /dev/zero": fixtures / "zero.json",
+            "over the size cap": oversized,
             "the seven-member shape": self.write_policy(
                 **{**self.base_policy, "derived_repositories": {NODO: NODO_ROW},
                    "derivation": {}}),
@@ -1426,16 +1442,34 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertEqual(0, control.returncode, control.stderr)
 
     def test_a_command_with_no_repository_bound_verb_never_opens_the_compiled_policy(self):
-        """Issue 377 section 4. Opening a FIFO that has no writer blocks, so an open would
-        surface here as the five-second invocation timeout."""
-        fifo = Path(tempfile.mkdtemp(dir=self.fixture_dir.name)) / "policy.json"
-        os.mkfifo(fifo)
+        """Issue 377 section 4. The compiled path is a FIFO whose writer waits in `open`,
+        which returns once any reader opens the FIFO, so an open by the guard shows as that
+        `open` returning. The push is the control: a repository-bound verb opens it."""
         repo = self.make_repo("https://github.com/fagenorn/argus.git")
-        for command, status in (("true", 0), ("git branch -d issue-30-safe", 0),
-                                ("setsid x", 2)):
+        for command, status, opens in (("true", 0, False),
+                                       ("git branch -d issue-30-safe", 0, False),
+                                       ("setsid x", 2, False),
+                                       ("git push -u origin topic", 0, True)):
             with self.subTest(command=command):
-                result = self.invoke_command_in(command, repo, "--policy", str(fifo))
-                self.assertEqual(status, result.returncode, result.stderr)
+                fifo = Path(tempfile.mkdtemp(dir=self.fixture_dir.name)) / "policy.json"
+                os.mkfifo(fifo)
+                opened = threading.Event()
+
+                def wait_for_a_reader(fifo=fifo, opened=opened):
+                    os.close(os.open(fifo, os.O_WRONLY))
+                    opened.set()
+
+                writer = threading.Thread(target=wait_for_a_reader, daemon=True)
+                writer.start()
+                try:
+                    result = self.invoke_command_in(command, repo, "--gh-bin", str(self.fake_gh),
+                                                    "--policy", str(fifo))
+                    self.assertEqual(status, result.returncode, result.stderr)
+                    self.assertEqual(opens, opened.wait(1))
+                finally:
+                    release = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+                    writer.join(5)
+                    os.close(release)
 
     def test_base_policy_alone_loads_and_authorizes_no_nodo_verb(self):
         base = ("--gh-bin", str(self.fake_gh), "--policy", str(self.write_policy()))
@@ -1729,6 +1763,44 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         )
         self.assertEqual(2, result.returncode, result.stderr)
         self.assertIn("lifecycle guard: unsafe branch deletion:", result.stderr)
+
+    def test_the_row_check_never_sees_a_hostile_shell_environment(self):
+        """Issue 377: a BASH_ENV file or an exported bash function that prints a forged
+        `derived` report must not confirm a forged row. `built` is the store row check run
+        over an empty fixture fleet; `plain bash` is a bash row check that would honour
+        both, so it shows that the guard drops them from the row check's environment."""
+        world = GuardPolicyWorld(self)
+        wrapper = self.guard.read_text(encoding="utf-8")
+        built = Path(wrapper.split("--derive-bin ", 1)[1].split(" ", 1)[0])
+        bash = built.read_text(encoding="utf-8").splitlines()[0][2:].split()[0]
+        plain = Path(tempfile.mkdtemp(dir=self.fixture_dir.name)) / "plain-bash-row-check"
+        plain.write_text(f'#!{bash}\nexec {self.fake_derive} "$@"\n', encoding="utf-8")
+        plain.chmod(0o755)
+        slug = "acme/forged"
+        row = {"default_branch": "main", "integration_branch": "main", "evidence": {}}
+        report = json.dumps({"schema_version": 1, "repository": slug, "outcome": "derived",
+                             "row": row, "refused": [], "cause": None})
+        forge = f"printf '%s\\n' {shlex.quote(report)}; builtin exit 0"
+        bash_env = Path(tempfile.mkdtemp(dir=self.fixture_dir.name)) / "bash_env"
+        bash_env.write_text(forge + "\n", encoding="utf-8")
+        policy = self.write_policy(derived_repositories={slug: row}, derivation={})
+        repo = self.make_repo(f"git@github.com:{slug}.git")
+        fleet = {name: world.env[name] for name in ("HOME", "GIT_CONFIG_GLOBAL",
+                                                     "GIT_CONFIG_SYSTEM")}
+        for name, derive_bin, env in (("built", built, fleet), ("plain bash", plain, {})):
+            for plant in ({"BASH_ENV": str(bash_env)},
+                          {"BASH_FUNC_exec%%": f"() {{ {forge}; }}"},
+                          {"BASH_FUNC_unset%%": f"() {{ {forge}; }}"}):
+                with self.subTest(row_check=name, plant=sorted(plant)[0]):
+                    result = self.run_guard(
+                        "git push -u origin topic", cwd=repo, env={**env, **plant}, timeout=60,
+                        guard_args=("--gh-bin", str(self.fake_gh), "--policy", str(policy),
+                                    "--derive-bin", str(derive_bin),
+                                    "--derive-timeout-seconds", "25"))
+                    self.assertEqual(2, result.returncode, result.stderr)
+                    self.assertIn(f"lifecycle guard: unsafe push: repository {slug}: the row "
+                                  "check did not confirm its derived policy row: ",
+                                  result.stderr)
 
 
 if __name__ == "__main__":

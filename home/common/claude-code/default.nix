@@ -112,10 +112,22 @@ let
   # derive`, which re-derives one repository's row from the fleet registry. It
   # pins the store git, gh and ssh first on PATH as `claude-guard-policy` does.
   # The hook wrapper names it by store path, and it is not installed on PATH.
-  lifecycleGuardRowCheck = pkgs.writeShellScript "claude-guard-row-check" ''
-    export PATH="${guardToolPath}:$PATH"
-    exec ${agentTools.launchers.guard-policy} derive "$@"
-  '';
+  # Bash's `-p` ignores BASH_ENV and inherited functions here, and the `unset`
+  # keeps BASH_ENV and ENV from the launcher it execs, which runs under `-p` too;
+  # the guard also drops them and every exported function from its environment.
+  lifecycleGuardRowCheck = pkgs.writeTextFile {
+    name = "claude-guard-row-check";
+    executable = true;
+    text = ''
+      #!${pkgs.runtimeShell} -p
+      unset BASH_ENV ENV
+      export PATH="${guardToolPath}:$PATH"
+      exec ${agentTools.launchers.guard-policy} derive "$@"
+    '';
+    checkPhase = ''
+      ${pkgs.stdenv.shellDryRun} "$target"
+    '';
+  };
 
   # The registered hook: one argument-free store path. Bash's `-p` ignores
   # BASH_ENV and inherited functions, `-I` and the unset keep PYTHONPATH, user

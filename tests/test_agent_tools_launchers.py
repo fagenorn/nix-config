@@ -26,7 +26,7 @@ from .retained_evidence_test_support import ANCHOR_SHA256, BUNDLE
 INSTALLED_HOME_ENV = "AGENT_SKILLS_INSTALLED_HOME"
 INSTALLED_RECIPE = "just agent-installed-skill-tests"
 PACKAGE_BYTES = b"agent_tools"
-# `writeShellScript` prepends the shebang and appends a newline to the body.
+# `launcherScript` (lib/agent-tools.nix) writes a `-p` shebang line, then the body and a newline.
 LAUNCHER = re.compile(
     rb"#![^\n]+\n"
     rb"unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
