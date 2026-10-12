@@ -7,6 +7,7 @@
 }:
 let
   agentPlugins = import ../../../lib/agent-plugins.nix { inherit inputs pkgs; };
+  agentTools = import ../../../lib/agent-tools.nix { inherit pkgs; };
 
   # Bare `codex-companion` on PATH. The codex-collaboration bridge (and its
   # `command -v` pre-flight) invokes it by name; without this every spawned
@@ -26,27 +27,30 @@ let
   '';
 
   # The GitHub owners whose repositories carry standing authorization for the
-  # guarded verbs (push, PR creation, merge). Membership is the whole of the
-  # ownership test, so adding a name here hands every repository under it the
-  # standing chain — keep the list to owners whose repos we actually ship from.
-  # Branch deletion stays guarded regardless of ownership.
+  # guarded verbs (push, PR creation, merge, release creation) without being
+  # registered projects. A registered project is not listed here: its
+  # repository gets a derived row in the compiled policy, which authorizes that
+  # one repository. Adding a name here hands every repository under it the
+  # standing chain, so keep the list to owners whose unregistered repos we
+  # ship from. Branch deletion stays guarded regardless of ownership.
   authorizedOwners = [
     "fagenorn"
-    "elevenyellow"
   ];
 
-  # Repositories whose integration branch is not the branch origin/HEAD points
-  # at. The guard otherwise requires every guarded PR to be opened against, and
-  # merged into, the default branch; nodo integrates on `dev` and promotes to
-  # `main` only at release, so both verbs have to accept that branch there. A
-  # repository absent from this set keeps the default-branch-only rule, and the
-  # default branch stays acceptable everywhere.
+  # Unregistered repositories whose integration branch is not the branch
+  # origin/HEAD points at. The guard otherwise requires every guarded PR to be
+  # opened against, and merged into, the default branch. A registered project
+  # never gets a row here: its integration branch comes from its derived row,
+  # and a repository present in both makes the compiler withhold both rows and
+  # the guard refuse the policy. A repository with neither keeps the
+  # default-branch-only rule, and the default branch stays acceptable
+  # everywhere.
   #
   # Declaring a branch here widens which branch may be targeted AND waives the
   # merge's forge-protection demand for that branch: an integration branch is
   # the development-pace branch, deliberately unprotected, and its CI gate
-  # lives in the shipping flow's wait-for-checks (nodo's CI is path-filtered,
-  # so no required status check could report on every PR shape anyway). The
+  # lives in the shipping flow's wait-for-checks (a path-filtered CI has no
+  # required status check that could report on every PR shape anyway). The
   # default branch keeps the full demand for feature merges — required status
   # checks plus enforce_admins — even if it is ever also declared here.
   #
@@ -59,30 +63,54 @@ let
   # path-filtered CI means no required-status-check rule on the default branch
   # could stand in for the release PR's actual checks.
   integrationBases = {
-    "elevenyellow/nodocom" = "dev";
     # arcwave is a private free-plan repository: GitHub refuses branch
     # protection there, so the default-branch merge demand can never be met.
     # Feature PRs integrate on `dev`; releases promote `dev` to `main`.
     "fagenorn/arcwave" = "dev";
   };
 
-  # The Nix-owned values the lifecycle guard reads at run time, as one store
-  # JSON file. The guard's source never embeds them, so an owner or base change
-  # moves only this file, and the tool paths keep git, gh and jq in the closure.
-  lifecycleGuardPolicy = pkgs.writeText "claude-bash-lifecycle-guard-policy.json" (
+  # The base policy: the literal rows above and the tool paths, as one store
+  # JSON file that is a valid guard policy by itself, with no derived row. The
+  # wrapper's build check and the guard suite load it, and `guard-policy
+  # compile` copies it into the compiled policy. The tool paths keep git, gh
+  # and jq in the closure.
+  lifecycleGuardBasePolicy = pkgs.writeText "claude-bash-lifecycle-guard-base-policy.json" (
     builtins.toJSON {
       authorized_owners = authorizedOwners;
       integration_bases = integrationBases;
       git_bin = "${pkgs.git}/bin/git";
       gh_bin = "${pkgs.gh}/bin/gh";
       jq_bin = "${pkgs.jq}/bin/jq";
+      derived_repositories = { };
+      derivation = null;
     }
   );
+
+  # The compiled policy the registered hook reads: the base policy plus one
+  # derived row per registered project, written by `claude-guard-policy`.
+  lifecycleGuardPolicyPath = "${config.home.homeDirectory}/.agents/state/guard/policy.json";
+
+  # `guard-policy compile` with the base policy and the compiled path fixed, and
+  # the store git, gh and ssh first on PATH. It takes no argument; the
+  # activation step below and a repair from an authenticated shell both run it.
+  claudeGuardPolicy = pkgs.writeShellScriptBin "claude-guard-policy" ''
+    export PATH="${
+      lib.makeBinPath [
+        pkgs.git
+        pkgs.gh
+        pkgs.openssh
+      ]
+    }:$PATH"
+    exec ${agentTools.launchers.guard-policy} compile \
+      --base ${lifecycleGuardBasePolicy} --output ${lifecycleGuardPolicyPath}
+  '';
 
   # The registered hook: one argument-free store path. Bash's `-p` ignores
   # BASH_ENV and inherited functions, `-I` and the unset keep PYTHONPATH, user
   # site and NIX_PYTHON* `.pth` hooks out, and `exec` hands the hook's timeout
-  # kill to Python. The check refuses a guard that cannot load its policy.
+  # kill to Python. `--policy` names the compiled policy, whose path is fixed at
+  # evaluation time. The check runs the guard against the base policy, so the
+  # build refuses a guard source or a base policy that cannot load.
   lifecycleGuard = pkgs.writeTextFile {
     name = "claude-bash-lifecycle-guard";
     executable = true;
@@ -90,10 +118,11 @@ let
     text = ''
       #!${pkgs.runtimeShell} -p
       unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
-      exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --policy ${lifecycleGuardPolicy} "$@"
+      exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --policy ${lifecycleGuardPolicyPath} "$@"
     '';
     checkPhase = ''
-      if ! printf '%s' '{"tool_name":"Bash","tool_input":{"command":"true"}}' | "$target"; then
+      if ! printf '%s' '{"tool_name":"Bash","tool_input":{"command":"true"}}' \
+        | "$target" --policy ${lifecycleGuardBasePolicy}; then
         echo "claude-bash-lifecycle-guard: refused a harmless Bash payload" >&2
         exit 1
       fi
@@ -233,6 +262,7 @@ in
     pkgs.nodejs
     codexCompanionBin
     lifecycleGuard
+    claudeGuardPolicy
   ];
 
   # Claude-only bridge orchestration. Keeping this outside the shared
@@ -283,6 +313,31 @@ in
       fi
     fi
   '';
+
+  # Compile the guard policy the registered hook reads, on every switch. It runs
+  # after linkGeneration because the compiler loads the platform manifest from
+  # ~/.agents/share, and before the settings copy. It never aborts the switch:
+  # exit 1 leaves a policy without the refused projects' rows, and any other
+  # failure removes the policy file, which makes the hook block every Bash call.
+  # The removal is an `if` condition because the activation script runs under
+  # `set -e`. When it fails the step says so instead, and the hook reads
+  # whatever is at the path: a directory or an unreadable or malformed file
+  # still blocks every call, and a readable earlier policy stays in force.
+  home.activation.claudeGuardPolicy =
+    lib.hm.dag.entryBetween [ "claudeCodeSettings" ] [ "writeBoundary" "linkGeneration" ]
+      ''
+        guardPolicyStatus=0
+        run ${claudeGuardPolicy}/bin/claude-guard-policy >/dev/null || guardPolicyStatus=$?
+        if [ "$guardPolicyStatus" -eq 1 ]; then
+          echo "claude-guard-policy: the projects named above have no derived guard row; rerun claude-guard-policy from an authenticated shell" >&2
+        elif [ "$guardPolicyStatus" -ne 0 ]; then
+          if run rm -f ${lifecycleGuardPolicyPath}; then
+            echo "claude-guard-policy: no guard policy was written (exit $guardPolicyStatus), so the lifecycle guard blocks every Bash call; rerun claude-guard-policy from an authenticated shell" >&2
+          else
+            echo "claude-guard-policy: no guard policy was written (exit $guardPolicyStatus) and ${lifecycleGuardPolicyPath} could not be removed, so the lifecycle guard reads whatever is there; remove it, then rerun claude-guard-policy from an authenticated shell" >&2
+          fi
+        fi
+      '';
 
   # Copy settings.json to a writable location on each activation. Nix is the source of truth
   # (re-asserted every `sudo just`), but Claude Code can still rewrite it at runtime — your
