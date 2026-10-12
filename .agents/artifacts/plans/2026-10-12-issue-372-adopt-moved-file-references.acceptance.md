@@ -1,0 +1,11 @@
+# Acceptance record — issue #372
+
+| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |
+|----|-----------|------|------------------|----------|--------|------------|---------|
+| AC1 | Fixture: a moved tree containing a script, a Nix or YAML module and a JSON record that each name a path inside a moved tree; `plan` does not reach `ready` until they are decided, and a single policy answer can decide a whole class. | code | `test_adopt_project.py::ReferencePolicyPlanTest::test_moved_files_open_one_question_per_class`, `::test_answering_every_policy_and_outside_occurrence_reaches_ready` | in final verification | — | — | met |
+| AC2 | After `apply` with `rewrite`, each moved file at its new location names the new path, in the same atomic commit; a fixture command that ran the script from the old location runs it from the new one. | code | `test_adopt_apply.py::ReferencePolicyApplyTest::test_rewritten_files_land_at_their_destinations_in_one_commit`, `::test_the_outside_command_runs_on_the_adopt_commit_as_on_base` | in final verification | — | — | met |
+| AC3 | A regex-form or escaped exclusion naming a moved tree's old prefix is surfaced and can be extended. | code | `test_adopt_apply.py::ReferencePolicyApplyTest::test_the_pattern_exclusion_is_extended` | in final verification | — | — | met |
+| AC4 | A tracked `.claude/settings.json` can be retained in place, and the plan says so in its evidence. | code | `test_adopt_apply.py::ReferencePolicyApplyTest::test_the_settings_file_stays_in_place_with_a_null_destination` | in final verification | — | — | met |
+| AC5 | Occurrences in files outside the answered classes are untouched; #345 Markdown rewriting and #350 per-occurrence answers are unchanged, and existing tests stay green. | code | `test_adopt_project.py::ReferencePolicyPlanTest::test_an_occurrence_answer_overrides_its_policy`, `::test_markdown_rewriting_is_unchanged` | in final verification | — | — | met |
+| AC6 | The answers are covered by the plan id and listed in the evidence record. | code | `test_adopt_apply.py::ReferencePolicyApplyTest::test_the_evidence_record_lists_the_policy_answers_and_rows` | in final verification | — | — | met |
+| AC7 | `just agent-workflow-tests` passes. | code | `just agent-workflow-tests` | in final verification | — | — | met |

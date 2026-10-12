@@ -118,8 +118,10 @@ LIFECYCLE_CLASSES = (
 # D35: the public question contract. An id is a literal, never formatted at
 # emission, so a caller can dispatch over the set exhaustively. A
 # `candidate-class` entry is keyed by its `subject`, the candidate path, and a
-# `path-reference` entry by its `subject`, `<path>:<line>:<column>`.
-QUESTION_IDS = ("project-id", "candidate-class", "path-reference")
+# `path-reference` entry by its `subject`, `<path>:<line>:<column>`, and a
+# `reference-policy` entry by its `subject`, `<tree>:<class>`.
+QUESTION_IDS = ("project-id", "candidate-class", "path-reference",
+                "reference-policy")
 
 # The archive bucket for adopted agent records.
 ARCHIVE_ADOPTED_DIR = ".agents/knowledge/archive/adopted"
@@ -132,6 +134,11 @@ CANDIDATE_BASIS = "no classification row settles this agent path"
 # candidate's, it never names the file or the literal, which the entry's
 # `subject` carries.
 PATH_REFERENCE_BASIS = "a tracked non-Markdown file names a path this plan moves"
+
+# The fixed basis of every `reference-policy` question (#372): it names no
+# tree, class or file, which the entry's `subject` carries.
+REFERENCE_POLICY_BASIS = ("files of one class inside a tree this plan moves "
+                          "name paths this plan moves")
 
 READY_GATES = (
     "contract-valid-after-amendment",
@@ -227,6 +234,8 @@ CLASSIFICATION_RULES = (
     (".claude/skills.config.json", "exact", "legacy-native-store",
      "retain-product", None),
     (".claude/settings.local.json", "exact", "legacy-native-store",
+     "retain-product", None),
+    (".claude/settings.json", "exact", "legacy-native-store",
      "retain-product", None),
     (".claude/skills", "prefix", "legacy-native-store", "retain-product", None),
     (".claude/hints", "prefix", "legacy-native-store", "retain-product", None),
@@ -370,6 +379,10 @@ def question_impact(question_id: str) -> str:
         return ("the file keeps naming the old path and nothing in it is "
                 "edited until the reference is answered, so the "
                 "no-open-decisions gate fails and the plan stays draft")
+    if question_id == "reference-policy":
+        return ("nothing in those files is edited until the policy or each "
+                "of its occurrences is answered, so the no-open-decisions "
+                "gate fails and the plan stays draft")
     raise ValueError(f"unknown question id: {question_id!r}")
 
 
@@ -395,6 +408,17 @@ def question_recommendation(question_id: str) -> str:
                 "lists beside the literal, rewrite replaces the literal "
                 "with that row's replacement, and retain leaves the file "
                 "unchanged")
+    if question_id == "reference-policy":
+        return ("answer it with plan --answer reference-policy <subject> "
+                "<value>, using this entry's subject and one of its "
+                "answers, and apply the plan id that run prints; value is "
+                "the answer recommended for the class, or null when the "
+                "class has none: rewrite replaces every literal whose "
+                "path_references row offers rewrite with that row's "
+                "replacement, at the file's target, and leaves the rest "
+                "open, retain leaves the class's files unchanged, and a "
+                "path-reference answer on one occurrence overrides the "
+                "policy")
     raise ValueError(f"unknown question id: {question_id!r}")
 
 

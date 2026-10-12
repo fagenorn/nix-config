@@ -28,6 +28,23 @@ DISSOLVED_MOVES = [
 PLANS, SPECS = ".agents/artifacts/plans", ".agents/artifacts/specs"
 EXEMPT = 'EXEMPT = ("docs/archive/", ".claude/")\n'
 ANSWERS_ALL = ("extend", "rewrite", "retain")
+PATTERN_EXCLUDE = (r'EXCLUDE = ["^var/", "^\\.claude/", "^\\.worktrees/"]'
+                   + "\n")
+POLICY_TEXTS = {
+    ".claude/specs/tool.py":
+        'SPEC = ".claude/specs/x.md"\nSKIP = (".claude",)\n',
+    ".claude/specs/sub/data.json": '{"plan": ".claude/plans/y.md"}\n',
+    "tools/check.py": EXEMPT,
+}
+POLICY_PATHS = PATHS + [".claude/specs/tool.py", ".claude/specs/sub/data.json"]
+POLICY_MOVES = MOVES + [
+    (".claude/specs/tool.py", SPECS + "/tool.py"),
+    (".claude/specs/sub/data.json", SPECS + "/sub/data.json")]
+POLICY_TREES = {
+    source: (".out-of-scope" if source.startswith(".out-of-scope/")
+             else "/".join(source.split("/")[:2]))
+    for source, _ in POLICY_MOVES}
+PY, JSON = ".claude/specs:.py", ".claude/specs:.json"
 
 
 def trees(paths, moves):
@@ -37,7 +54,7 @@ def trees(paths, moves):
 
 def found(text, paths=PATHS, moves=MOVES):
     return adopt_references.plan_references(
-        {"tools/check.py": text}, paths, moves).occurrences
+        {"tools/check.py": text}, paths, moves, {}).occurrences
 
 
 def offers(text, **kwargs):
@@ -47,10 +64,10 @@ def offers(text, **kwargs):
 
 def edit(text, *answers):
     references = adopt_references.plan_references(
-        {"tools/check.py": text}, PATHS, MOVES)
+        {"tools/check.py": text}, PATHS, MOVES, {})
     chosen = {o.subject: answer
               for o, answer in zip(references.occurrences, answers)}
-    files = adopt_references.rewritten(references, chosen)
+    files = adopt_references.rewritten(references, chosen, {})
     return files["tools/check.py"][1] if files else text
 
 
@@ -120,12 +137,105 @@ class SuccessorTest(unittest.TestCase):
         self.assertIsNone(form("", "new/x[1]", True, "", True))
 
 
+class PatternTest(unittest.TestCase):
+    """#372 D6: a token the plain reading rejects is read as a pattern."""
+
+    def test_a_pattern_splits_into_anchor_escape_prefix_path_and_tail(self):
+        for token, expected in (
+                (r"^\\.claude/", ("^", r"\\.", "", ".claude", "/")),
+                (r"^\.claude/specs/x\.md",
+                 ("^", r"\.", "", ".claude/specs/x.md", "")),
+                (r"\.claude/specs", ("", r"\.", "", ".claude/specs", "")),
+                (r"^/\.claude/", ("^", r"\.", "/", ".claude", "/")),
+                ("^.claude/specs/.*", ("^", "", "", ".claude/specs", "/.*")),
+                (r"^\.claude/[a-z]+/",
+                 ("^", r"\.", "", ".claude", "/[a-z]+/")),
+                (r"^\.claude\b/x", ("^", r"\.", "", "", r"\.claude\b/x")),
+                (r"^\\.claude/a\.b", ("^", r"\\.", "", ".claude", r"/a\.b")),
+                ("^", ("^", "", "", "", "")),
+                (".claude/specs", None),
+                ("docs/guide.txt", None)):
+            with self.subTest(token=token):
+                self.assertEqual(adopt_references.split_pattern(token),
+                                 expected)
+
+    def test_pattern_forms_keep_anchor_escape_and_tail(self):
+        form = adopt_references.pattern_form
+        self.assertEqual(form("^", r"\\.", "", SPECS, True, "/", False),
+                         r"^\\.agents/artifacts/specs/")
+        self.assertEqual(
+            form("^", r"\.", "", SPECS + "/x.md", False, "", True),
+            r"^\.agents/artifacts/specs/x\.md")
+        self.assertEqual(form("^", "", "/", SPECS, True, "/.*", True),
+                         "^/" + SPECS + "/.*")
+        self.assertEqual(form("", r"\.", "", "new/x.json", False, "/", False),
+                         r"new/x\.json")
+        # A tail that is not carried for a path with several successors.
+        self.assertIsNone(form("^", r"\.", "", SPECS, True, "/.*", False))
+        # A successor outside letters, digits, `_`, `-`, `.` and `/`.
+        self.assertIsNone(form("^", r"\.", "", "new/x+y.md", False, "", True))
+        # `new/x` holds neither `^` nor `\.`: it would not read back.
+        self.assertIsNone(form("", r"\.", "", "new/x", True, "", True))
+
+    def test_a_pattern_spelling_is_an_occurrence_with_pattern_forms(self):
+        for text, expected in (
+                (PATTERN_EXCLUDE,
+                 [(r"^\\.claude/", ("extend", "retain"),
+                   (r"^\\.agents/artifacts/plans/",
+                    r"^\\.agents/artifacts/specs/"), None)]),
+                (r'X = "^\.claude/specs/x\.md"' + "\n",
+                 [(r"^\.claude/specs/x\.md", ("rewrite", "retain"), (),
+                   r"^\.agents/artifacts/specs/x\.md")]),
+                (r'"\.claude/specs/"' + "\n",
+                 [(r"\.claude/specs/", ANSWERS_ALL,
+                   (r"\.agents/artifacts/specs/",),
+                   r"\.agents/artifacts/specs/")]),
+                ('"^.claude/plans/y.md"\n',
+                 [("^.claude/plans/y.md", ANSWERS_ALL,
+                   ("^" + PLANS + "/y.md",), "^" + PLANS + "/y.md")]),
+                (r"^\.claude/specs/.*  @team" + "\n",
+                 [(r"^\.claude/specs/.*", ("rewrite", "retain"), (),
+                   r"^\.agents/artifacts/specs/.*")])):
+            with self.subTest(text=text):
+                self.assertEqual(offers(text), expected)
+
+    def test_a_pattern_naming_nothing_moved_is_no_occurrence(self):
+        for text in (r'"^\.claude/specs$"', '"^var/"', r'"^\.worktrees/"',
+                     r"x = ^\.claude", r'"^docs/guide\.txt"',
+                     r'"^\.claude\b/"', r'"^./\.claude/"'):
+            with self.subTest(text=text):
+                self.assertEqual(found(text + "\n"), ())
+
+    def test_the_plain_reading_decides_when_it_yields_an_occurrence(self):
+        paths = ["^gen/a.md", "gen/a.md", "tools/check.py"]
+        moves = [("^gen/a.md", "out/a.md"), ("gen/a.md", "other/a.md")]
+        self.assertEqual(
+            offers('x = "^gen/a.md"\n', paths=paths, moves=moves),
+            [("^gen/a.md", ("rewrite", "retain"), (), "out/a.md")])
+
+    def test_a_successor_with_no_pattern_form_offers_retain_only(self):
+        moves = [(".claude/specs/x.md", SPECS + "/x+y.md")] + MOVES[1:]
+        self.assertEqual(
+            offers(r'x = "^\.claude/specs/x\.md"' + "\n", moves=moves),
+            [(r"^\.claude/specs/x\.md", ("retain",), (), None)])
+
+    def test_answers_edit_a_pattern_spelling(self):
+        self.assertEqual(edit(PATTERN_EXCLUDE, "extend"), (
+            r'EXCLUDE = ["^var/", "^\\.claude/", '
+            r'"^\\.agents/artifacts/plans/", "^\\.agents/artifacts/specs/", '
+            r'"^\\.worktrees/"]' + "\n"))
+        self.assertEqual(edit(r'X = "^\.claude/specs/x\.md"' + "\n",
+                              "rewrite"),
+                         r'X = "^\.agents/artifacts/specs/x\.md"' + "\n")
+
+
 class OccurrenceTest(unittest.TestCase):
     def test_the_motivating_tuple_is_one_occurrence(self):
         (occurrence,) = found(EXEMPT)
         self.assertEqual(occurrence, adopt_references.Occurrence(
             "tools/check.py", 1, 29, 28, 36, ".claude/",
-            ("extend", "retain"), (PLANS + "/", SPECS + "/"), None, "quoted"))
+            ("extend", "retain"), (PLANS + "/", SPECS + "/"), None, "quoted",
+            "tools/check.py", None))
         self.assertEqual(occurrence.subject, "tools/check.py:1:29")
 
     def test_text_that_is_not_a_whole_repository_path_is_no_occurrence(self):
@@ -202,7 +312,7 @@ class EditTest(unittest.TestCase):
 
     def test_an_occurrence_outside_the_closed_sets_raises(self):
         references = adopt_references.plan_references(
-            {"tools/check.py": ".claude/specs/\n"}, PATHS, MOVES)
+            {"tools/check.py": ".claude/specs/\n"}, PATHS, MOVES, {})
         (occurrence,) = references.occurrences
         self.assertEqual((occurrence.answers, occurrence.shape),
                          (ANSWERS_ALL, "line"))
@@ -216,21 +326,230 @@ class EditTest(unittest.TestCase):
             with self.subTest(changed=changed, answer=answer):
                 with self.assertRaises(ValueError):
                     adopt_references.rewritten(
-                        broken, {occurrence.subject: answer})
+                        broken, {occurrence.subject: answer}, {})
 
     def test_the_summary_rows(self):
         references = adopt_references.plan_references(
-            {"tools/check.py": EXEMPT}, PATHS, MOVES)
+            {"tools/check.py": EXEMPT}, PATHS, MOVES, {})
         row = {"subject": "tools/check.py:1:29", "path": "tools/check.py",
                "line": 1, "column": 29, "literal": ".claude/",
                "answers": ["extend", "retain"], "answer": None,
-               "additions": [PLANS + "/", SPECS + "/"], "replacement": None}
-        self.assertEqual(adopt_references.summary(references, {}), [row])
+               "additions": [PLANS + "/", SPECS + "/"], "replacement": None,
+               "target": "tools/check.py", "policy": None,
+               "decided_by": None}
+        self.assertEqual(adopt_references.summary(references, {}, {}), [row])
         self.assertEqual(
             adopt_references.summary(
-                references, {"tools/check.py:1:29": "extend"}),
-            [{**row, "answer": "extend"}])
+                references, {"tools/check.py:1:29": "extend"}, {}),
+            [{**row, "answer": "extend", "decided_by": "occurrence"}])
         self.assertEqual(references.texts, {"tools/check.py": EXEMPT})
+
+
+class PolicyTest(unittest.TestCase):
+    """#372 D2-D5: targets, policy subjects, precedence, counts and edits."""
+
+    def references(self):
+        return adopt_references.plan_references(
+            POLICY_TEXTS, POLICY_PATHS, POLICY_MOVES, POLICY_TREES)
+
+    def policy_row(self, subject, recommended, occurrences, **changed):
+        tree, _, file_class = subject.partition(":")
+        return {"subject": subject, "tree": tree, "class": file_class,
+                "recommended": recommended, "answer": None, "files": 1,
+                "occurrences": occurrences, "rewritable": 1, "rewritten": 0,
+                "retained": 0, "extended": 0, "open": occurrences,
+                "overridden": 0, **changed}
+
+    def test_the_class_of_a_file_name(self):
+        for path, expected in (("a/b.py", ".py"), ("a/B.PY", ".py"),
+                               ("a.tar.gz", ".gz"), ("a/.config.json", ".json"),
+                               ("Makefile", "-"), (".envrc", "-"),
+                               ("a.d/run", "-"), ("notes.", "-")):
+            with self.subTest(path=path):
+                self.assertEqual(adopt_references.file_class(path), expected)
+
+    def test_the_recommendation_table_is_closed(self):
+        recommended = adopt_references.recommended_answer
+        for file_class in (".py", ".sh", ".bash", ".zsh", ".nix", ".yaml",
+                           ".yml", ".toml", ".js", ".mjs", ".cjs", ".ts"):
+            self.assertEqual(recommended(file_class), "rewrite", file_class)
+        for file_class in (".json", ".jsonl", ".ndjson", ".csv", ".tsv",
+                           ".txt", ".log"):
+            self.assertEqual(recommended(file_class), "retain", file_class)
+        for file_class in ("-", ".md", ".cfg", ".lock", ""):
+            self.assertIsNone(recommended(file_class), file_class)
+        self.assertEqual(adopt_references.POLICY_ANSWERS,
+                         ("rewrite", "retain"))
+
+    def test_targets_and_policy_subjects(self):
+        self.assertEqual(
+            [(o.subject, o.target, o.tree, o.policy)
+             for o in self.references().occurrences],
+            [(".claude/specs/sub/data.json:1:11", SPECS + "/sub/data.json",
+              ".claude/specs", JSON),
+             (".claude/specs/tool.py:1:9", SPECS + "/tool.py",
+              ".claude/specs", PY),
+             (".claude/specs/tool.py:2:10", SPECS + "/tool.py",
+              ".claude/specs", PY),
+             ("tools/check.py:1:29", "tools/check.py", None, None)])
+
+    def test_a_moved_file_without_a_tree_raises(self):
+        with self.assertRaises(ValueError):
+            adopt_references.plan_references(
+                POLICY_TEXTS, POLICY_PATHS, POLICY_MOVES, {})
+
+    def test_effective_answers(self):
+        data, spec, skip, exempt = self.references().occurrences
+        self.assertEqual((spec.answers, skip.answers),
+                         (("rewrite", "retain"), ("extend", "retain")))
+        rewrite, retain = {PY: "rewrite"}, {PY: "retain"}
+        for occurrence, answers, policies, expected in (
+                (spec, {}, {}, (None, None)),
+                (spec, {}, rewrite, ("rewrite", "policy")),
+                (spec, {spec.subject: "retain"}, rewrite,
+                 ("retain", "occurrence")),
+                (spec, {spec.subject: "retain"}, {}, ("retain", "occurrence")),
+                (skip, {}, rewrite, (None, None)),
+                (skip, {}, retain, ("retain", "policy")),
+                (skip, {skip.subject: "extend"}, rewrite,
+                 ("extend", "occurrence")),
+                (data, {}, rewrite, (None, None)),
+                (exempt, {}, rewrite, (None, None)),
+                (exempt, {exempt.subject: "extend"}, {},
+                 ("extend", "occurrence"))):
+            with self.subTest(subject=occurrence.subject, answers=answers,
+                              policies=policies):
+                self.assertEqual(adopt_references.effective_answer(
+                    occurrence, answers, policies), expected)
+        with self.assertRaises(ValueError):
+            adopt_references.effective_answer(skip, {}, {PY: "extend"})
+
+    def test_rows_carry_target_policy_and_what_decided(self):
+        references = self.references()
+        skip = references.occurrences[2].subject
+        rows = adopt_references.summary(references, {skip: "extend"},
+                                        {PY: "rewrite"})
+        self.assertEqual(list(rows[0]), [
+            "subject", "path", "line", "column", "literal", "answers",
+            "answer", "additions", "replacement", "target", "policy",
+            "decided_by"])
+        self.assertEqual(
+            [(row["subject"], row["answer"], row["decided_by"],
+              row["target"], row["policy"]) for row in rows],
+            [(".claude/specs/sub/data.json:1:11", None, None,
+              SPECS + "/sub/data.json", JSON),
+             (".claude/specs/tool.py:1:9", "rewrite", "policy",
+              SPECS + "/tool.py", PY),
+             (skip, "extend", "occurrence", SPECS + "/tool.py", PY),
+             ("tools/check.py:1:29", None, None, "tools/check.py", None)])
+
+    def test_policy_rows_count_each_class(self):
+        references = self.references()
+        _, spec, skip, _ = (o.subject for o in references.occurrences)
+        rows = adopt_references.policy_summary
+        data = self.policy_row(JSON, "retain", 1)
+        self.assertEqual(rows(references, {}, {}),
+                         [data, self.policy_row(PY, "rewrite", 2)])
+        self.assertEqual(
+            rows(references, {}, {PY: "rewrite"}),
+            [data, self.policy_row(PY, "rewrite", 2, answer="rewrite",
+                                   rewritten=1, open=1)])
+        self.assertEqual(
+            rows(references, {spec: "retain"}, {}),
+            [data, self.policy_row(PY, "rewrite", 2, retained=1, open=1,
+                                   overridden=1)])
+        self.assertEqual(
+            rows(references, {skip: "extend"},
+                 {PY: "rewrite", JSON: "retain"}),
+            [{**data, "answer": "retain", "retained": 1, "open": 0},
+             self.policy_row(PY, "rewrite", 2, answer="rewrite", rewritten=1,
+                             extended=1, open=0, overridden=1)])
+
+    def test_a_moved_file_is_edited_under_its_target(self):
+        references = self.references()
+        skip = references.occurrences[2].subject
+        before = POLICY_TEXTS[".claude/specs/tool.py"]
+        self.assertEqual(
+            adopt_references.rewritten(references, {}, {PY: "rewrite"}),
+            {SPECS + "/tool.py": (before, (
+                'SPEC = ".agents/artifacts/specs/x.md"\n'
+                'SKIP = (".claude",)\n'))})
+        self.assertEqual(
+            adopt_references.rewritten(
+                references, {skip: "extend"}, {PY: "rewrite"}),
+            {SPECS + "/tool.py": (before, (
+                'SPEC = ".agents/artifacts/specs/x.md"\n'
+                'SKIP = (".claude", ".agents/artifacts/plans", '
+                '".agents/artifacts/specs",)\n'))})
+        self.assertEqual(
+            adopt_references.rewritten(
+                references, {}, {PY: "retain", JSON: "retain"}), {})
+        with self.assertRaises(ValueError):
+            adopt_references.rewritten(references, {skip: "rewrite"}, {})
+
+    def test_a_path_two_files_are_left_at_is_contested_and_never_edited(self):
+        shared = SPECS + "/check.py"
+        occupied = ".agents/knowledge/rejections/z.py"
+        texts = {
+            ".claude/research/check.py": 'SPEC = ".claude/specs/x.md"\n',
+            ".claude/specs/check.py": 'PLAN = ".claude/plans/y.md"\n',
+            ".out-of-scope/z.py": 'PLAN = ".claude/plans/y.md"\n',
+            occupied: 'SPEC = ".claude/specs/x.md"\n',
+            ".claude/specs/tool.py": 'SPEC = ".claude/specs/x.md"\n',
+        }
+        moves = MOVES + [
+            (".claude/research/check.py", shared),
+            (".claude/specs/check.py", shared),
+            (".out-of-scope/z.py", occupied),
+            (".claude/specs/tool.py", SPECS + "/tool.py")]
+        moved_trees = {
+            source: (".out-of-scope" if source.startswith(".out-of-scope/")
+                     else "/".join(source.split("/")[:2]))
+            for source, _ in moves}
+        references = adopt_references.plan_references(
+            texts, PATHS + list(texts), moves, moved_trees)
+        self.assertEqual(references.contested,
+                         frozenset({shared, occupied}))
+        self.assertEqual(
+            [(o.path, o.target) for o in references.occurrences],
+            [(occupied, occupied), (".claude/research/check.py", shared),
+             (".claude/specs/check.py", shared),
+             (".claude/specs/tool.py", SPECS + "/tool.py"),
+             (".out-of-scope/z.py", occupied)])
+        tool = (SPECS + "/tool.py", (
+            texts[".claude/specs/tool.py"],
+            'SPEC = ".agents/artifacts/specs/x.md"\n'))
+        every = {o.subject: "rewrite" for o in references.occurrences}
+        self.assertEqual(adopt_references.rewritten(references, every, {}),
+                         dict([tool]))
+        for path in texts:
+            one = {o.subject: "rewrite" for o in references.occurrences
+                   if o.path == path}
+            with self.subTest(path=path):
+                self.assertEqual(
+                    adopt_references.rewritten(references, one, {}),
+                    dict([tool]) if path == ".claude/specs/tool.py" else {})
+        self.assertEqual(
+            [(row["subject"], row["answer"], row["target"])
+             for row in adopt_references.summary(references, every, {})],
+            [(o.subject, "rewrite", o.target)
+             for o in references.occurrences])
+
+    def test_no_path_is_contested_when_each_file_has_its_own(self):
+        self.assertEqual(self.references().contested, frozenset())
+        self.assertEqual(adopt_references.References({}, ()).contested,
+                         frozenset())
+
+    def test_two_edited_files_at_one_uncontested_path_raise(self):
+        references = self.references()
+        data, spec, _, _ = references.occurrences
+        merged = adopt_references.References(
+            references.texts,
+            (dataclasses.replace(data, target=spec.target), spec))
+        with self.assertRaises(ValueError):
+            adopt_references.rewritten(
+                merged, {data.subject: "rewrite", spec.subject: "rewrite"},
+                {})
 
 
 def git(root: Path, *args: str) -> None:
@@ -263,6 +582,10 @@ class DerivationTest(unittest.TestCase):
              (".claude/specs/data.txt", SPECS + "/data.txt"),
              (".claude/plans/y.md", PLANS + "/y.md")]
 
+    TREES = {".claude/specs/x.md": ".claude/specs",
+             ".claude/specs/data.txt": ".claude/specs",
+             ".claude/plans/y.md": ".claude/plans"}
+
     def setUp(self) -> None:
         self.root = Path(tempfile.mkdtemp()).resolve()
         git(self.root, "init", "--quiet", "-b", "main")
@@ -276,19 +599,22 @@ class DerivationTest(unittest.TestCase):
 
     def subjects(self, excluded=()):
         return [o.subject for o in adopt_references.derive_references(
-            self.root, "HEAD", self.MOVES, excluded).occurrences]
+            self.root, "HEAD", self.MOVES, excluded, self.TREES).occurrences]
 
     def test_only_scanned_files_yield_occurrences(self):
         self.assertEqual(self.subjects(["config/owners.txt"]),
-                         [".claude/keep.json:1:10", "tools/check.py:1:29"])
+                         [".claude/keep.json:1:10",
+                          ".claude/specs/data.txt:1:1", "tools/check.py:1:29"])
         self.assertEqual(self.subjects(),
-                         [".claude/keep.json:1:10", "config/owners.txt:1:1",
+                         [".claude/keep.json:1:10",
+                          ".claude/specs/data.txt:1:1", "config/owners.txt:1:1",
                           "tools/check.py:1:29"])
 
     def test_forced_colour_does_not_hide_the_candidates(self):
         git(self.root, "config", "color.ui", "always")
         self.assertEqual(self.subjects(["config/owners.txt"]),
-                         [".claude/keep.json:1:10", "tools/check.py:1:29"])
+                         [".claude/keep.json:1:10",
+                          ".claude/specs/data.txt:1:1", "tools/check.py:1:29"])
 
     def test_the_revision_is_read_not_the_working_tree(self):
         (self.root / "tools/check.py").write_text("nothing\n",
@@ -297,7 +623,7 @@ class DerivationTest(unittest.TestCase):
 
     def test_no_moves_is_no_reference(self):
         self.assertEqual(
-            adopt_references.derive_references(self.root, "HEAD", [], []),
+            adopt_references.derive_references(self.root, "HEAD", [], [], {}),
             adopt_references.References({}, ()))
 
 
