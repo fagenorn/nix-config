@@ -66,3 +66,10 @@ Task 5 — The answered fixture applies in one commit, and the documented contra
 - Planning added D9 and D10 to the spec's ledger; no other decision was forced.
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`plan-review`, isolated read-only, no fallback), base SHA `32807f90d4a4a4eae6ec969adf4e1fb3d5570dca`, no focus.
+- Findings: 0 blocking, 2 should-fix, 0 actionable discussion. Accepted 2, rejected 0, deferred 0.
+- PR-S1 (accepted): Task 4 Step 5 now updates the `plan --answer` help text to name `reference-policy`.
+- PR-S2 (accepted): Task 5 documentation item 9 now limits the settings claim to the `candidate-class` question and relocation; literals inside the file may still be answered and edited in place.

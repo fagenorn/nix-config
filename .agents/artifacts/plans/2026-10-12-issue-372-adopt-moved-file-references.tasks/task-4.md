@@ -509,6 +509,10 @@ Expected: FAIL/ERROR — `KeyError: 'reference_policies'`, the open list holding
 - In the open-question loop, a `reference-policy` entry prints `open reference-policy <subject> (answers: rewrite|retain, recommended: <value or none>): <recommendation>`, the answers joined from the entry's `answers` and `none` printed for a null `value`.
 - The `references:` line is unchanged: it already counts rows by their (now effective) `answer`.
 
+`main`'s parser:
+
+- The `plan --answer` help text names all three answerable ids: `candidate-class`, `path-reference` and `reference-policy` (standards review PR-S1).
+
 - [ ] **Step 6: Verify**
 
 Run: `env PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_adopt_project.py` (timeout 1800 s)
