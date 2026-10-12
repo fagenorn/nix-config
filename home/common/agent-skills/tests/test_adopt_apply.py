@@ -1058,35 +1058,211 @@ class VariablePolicyApplyTest(ApplyTestCase):
                          git(root, "show", f"HEAD:{COLLECT}.sh"))
 
 
-class ReferenceFormatGuardTest(ApplyTestCase):
-    """#376 D16: until `apply` runs a declared formatter, a plan that names
-    one is refused rather than applied unformatted."""
+# #376 D15: the fixture's own lint and formatter, standard-library scripts
+# that walk `*.py` from their working directory, so the same lint runs in
+# the adoption worktree and on an export of the adoption commit.
+LINT = "tools/lint.py"
+FORMATTER = "tools/format.py"
+LINT_TEXT = (
+    "import pathlib\n"
+    "import sys\n"
+    "\n"
+    "LIMIT = 60\n"
+    "long = []\n"
+    'for path in sorted(pathlib.Path(".").rglob("*.py")):\n'
+    '    text = path.read_text(encoding="utf-8")\n'
+    "    for number, line in enumerate(text.splitlines(), 1):\n"
+    "        if len(line) > LIMIT:\n"
+    '            long.append(f"{path}:{number}")\n'
+    'print("\\n".join(long))\n'
+    "sys.exit(1 if long else 0)\n")
+# Rewraps a `name = value` line over the limit and strips trailing
+# whitespace in the files it is given; `--fail` exits non-zero and each
+# `--touch PATH` appends a line to PATH first.
+FORMATTER_TEXT = (
+    "import sys\n"
+    "\n"
+    "LIMIT = 60\n"
+    "args = sys.argv[1:]\n"
+    'if args[:1] == ["--fail"]:\n'
+    "    sys.exit(3)\n"
+    'while args[:1] == ["--touch"]:\n'
+    '    with open(args[1], "a", encoding="utf-8") as handle:\n'
+    '        handle.write("# touched\\n")\n'
+    "    args = args[2:]\n"
+    "\n"
+    "\n"
+    "def wrapped(line):\n"
+    '    head, sep, tail = line.partition(" = ")\n'
+    "    if len(line) <= LIMIT or not sep:\n"
+    "        return [line]\n"
+    '    return [head + " = (", "    " + tail, ")"]\n'
+    "\n"
+    "\n"
+    "for name in args:\n"
+    '    with open(name, encoding="utf-8") as handle:\n'
+    "        lines = handle.read().splitlines()\n"
+    "    out = []\n"
+    "    for line in lines:\n"
+    "        out.extend(wrapped(line.rstrip()))\n"
+    '    with open(name, "w", encoding="utf-8") as handle:\n'
+    '        handle.write("".join(x + "\\n" for x in out))\n')
+ANALYZER = "tests/test_analyzer.py"
+ANALYZER_SUBJECT = f"{ANALYZER}:1:34"
+ANALYZER_TEXT = 'ANALYZER_SPEC_PATH_UNDER_TEST = ".claude/specs/x.md"\n'
+ANALYZER_REWRITTEN = ANALYZER_TEXT.replace(".claude/specs",
+                                           ".agents/artifacts/specs")
+ANALYZER_FORMATTED = ('ANALYZER_SPEC_PATH_UNDER_TEST = (\n'
+                      '    ".agents/artifacts/specs/x.md"\n'
+                      ')\n')
+CLEAN = "tests/clean.py"
+CLEAN_TEXT = "VALUE = 1   \n"
+# A moved file no link rewrite edits: its last operation is the `git-mv`.
+SHIFTED = ".agents/artifacts/plans/y.md"
+FORMAT_COMMANDS = {
+    "format": [sys.executable, FORMATTER],
+    "broken": [sys.executable, FORMATTER, "--fail"],
+    "meddle": [sys.executable, FORMATTER, "--touch", ".gitignore"],
+    # #376 D17: a move-only destination (a `git-mv` whose `after` is a
+    # `git-object:` hash), edited on disk and never staged.
+    "shift": [sys.executable, FORMATTER, "--touch", SHIFTED],
+    "spill": [sys.executable, FORMATTER, "--touch", CLEAN],
+    "litter": [sys.executable, FORMATTER, "--touch", "stray.txt"],
+}
+REWRITE_ANALYZER = ("path-reference", ANALYZER_SUBJECT, "rewrite")
 
-    def test_a_declared_formatter_is_refused_until_apply_runs_it(self):
-        root = apply_repo(self.home, commands={"format": ["true"]})
-        write(root, "tools/note.py", 'SPEC = ".claude/specs/x.md"\n')
-        commit(root, "add a script that names a moved file")
-        base = git(root, "rev-parse", "HEAD").strip()
-        code, out, err = run(
-            "plan", "--repo-root", str(root),
-            *answer_args(("path-reference", "tools/note.py:1:9", "rewrite"),
-                         ("reference-format", ".py", "format")),
-            home=self.home)
+
+def formatting_repo(home: Path) -> Path:
+    """`apply_repo` whose verification command is the line-limit lint, with
+    the formatter commands, #345's linked tree (a moved Markdown file whose
+    link is rewritten), a reference whose rewrite crosses the limit and a
+    second Python file that is not format-clean."""
+    root = apply_repo(home, verification=(sys.executable, LINT),
+                      commands=FORMAT_COMMANDS)
+    for path, text in ((LINT, LINT_TEXT), (FORMATTER, FORMATTER_TEXT),
+                       (ANALYZER, ANALYZER_TEXT), (CLEAN, CLEAN_TEXT)):
+        write(root, path, text)
+    commit(root, "add a lint, a formatter and two Python files")
+    write_linked_tree(root)
+    return root
+
+
+class ReferenceFormattingApplyTest(ApplyTestCase):
+    """#376 AC1, AC4: the declared formatter runs over the reference-edited
+    files inside `apply`, confined, before the commit gates."""
+
+    def planned(self, root: Path, *triples: tuple[str, str, str]) -> dict:
+        code, out, err = run("plan", "--repo-root", str(root),
+                             *answer_args(*triples), home=self.home)
         self.assertEqual(code, 0, err or out)
         document = json.loads(out)
         self.assertEqual(document["plan"]["state"], "ready",
                          document["plan"]["blockers"])
+        return document
+
+    def lint(self, root: Path, revision: str) -> int:
+        export = Path(tempfile.mkdtemp()) / "tree"
+        adopt_inspection.export_commit(root, revision, export)
+        return subprocess.run([sys.executable, LINT], cwd=export,
+                              capture_output=True, timeout=120).returncode
+
+    def test_the_formatted_rewrite_commits_and_passes_the_lint(self):
+        self.assertLessEqual(len(ANALYZER_TEXT) - 1, 60)
+        self.assertGreater(len(ANALYZER_REWRITTEN) - 1, 60)
+        root = formatting_repo(self.home)
+        base = git(root, "rev-parse", "HEAD").strip()
+        self.assertEqual(self.lint(root, "HEAD"), 0)
+        document = self.planned(root, REWRITE_ANALYZER,
+                                ("reference-format", ".py", "format"))
         self.assertEqual(document["reference_formatting"], [
-            {"class": ".py", "command": "format",
-             "files": ["tools/note.py"]}])
-        plan_id = document["plan"]["plan_id"]
-        self.assert_retained(root, plan_id, base, "adopt.format.failed")
-        record = json.loads(self.state(
-            "adopt", "worktrees", self.digest(plan_id) + ".failure.json")
-            .read_text("utf-8"))
-        self.assertEqual([gate["status"] for gate in record["gates"]],
-                         ["not_run"] * len(record["gates"]))
-        self.assertTrue(record["gates"])
+            {"class": ".py", "command": "format", "files": [ANALYZER]}])
+        (write_op,) = [op for op in document["changes"]
+                       if op["op"] == "write-file"
+                       and op["targets"] == [ANALYZER]]
+        self.assertEqual(write_op["after"], adopt_inspection.sha256_hash(
+            ANALYZER_REWRITTEN.encode("utf-8")))
+        moved = {op["targets"][0] for op in document["changes"]
+                 if op["op"] == "git-mv"}
+        self.assertTrue(any(
+            op["op"] == "write-file" and op["targets"][0] in moved
+            and adopt_links.is_markdown_path(op["targets"][0])
+            for op in document["changes"]))
+        result = self.succeed(root, document["plan"]["plan_id"])
+        branch = result["branch"]
+        self.assertEqual(git(root, "show", f"{branch}:{ANALYZER}"),
+                         ANALYZER_FORMATTED)
+        self.assertEqual(git(root, "rev-parse", f"{branch}:{CLEAN}"),
+                         git(root, "rev-parse", f"HEAD:{CLEAN}"))
+        self.assertEqual(self.lint(root, branch), 0)
+        required, optional = adopt_apply.expected_commit_paths(
+            document["changes"])
+        changed = set(git(root, "diff", "--name-only", "--no-renames",
+                          base, branch).splitlines())
+        self.assertTrue(required <= changed <= required | optional,
+                        changed ^ required)
+        git(root, "merge", "--ff-only", "--quiet", branch)
+        code, out, err = run("verify", "--repo-root", str(root),
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+        (check,) = [entry for entry in json.loads(out)["checks"]
+                    if entry["id"] == "adoption-commit-derived"]
+        self.assertEqual(check["status"], "passed")
+
+    def test_without_a_format_answer_the_lint_gate_refuses(self):
+        root = formatting_repo(self.home)
+        base = git(root, "rev-parse", "HEAD").strip()
+        document = self.planned(root, REWRITE_ANALYZER)
+        self.assertEqual(document["reference_formatting"], [
+            {"class": ".py", "command": None, "files": [ANALYZER]}])
+        self.assert_retained(root, document["plan"]["plan_id"], base,
+                             "adopt.gate.workflow-verification-commands")
+
+    def test_an_unconfined_or_failing_formatter_is_refused(self):
+        for command, repair_id in (
+                ("broken", "adopt.format.failed"),
+                ("meddle", "adopt.format.unplanned_content"),
+                ("shift", "adopt.format.unplanned_content"),
+                ("spill", "adopt.gate.worktree-status-matches-operations"),
+                ("litter", "adopt.gate.worktree-status-matches-operations")):
+            with self.subTest(command=command):
+                root = formatting_repo(self.home)
+                base = git(root, "rev-parse", "HEAD").strip()
+                plan_id = self.planned(
+                    root, REWRITE_ANALYZER,
+                    ("reference-format", ".py", command))["plan"]["plan_id"]
+                if command == "shift":
+                    stored = json.loads(
+                        self.stored_plan(plan_id).read_text("utf-8"))
+                    (last,) = [op for op in stored["changes"]
+                               if op["targets"][:1] == [SHIFTED]][-1:]
+                    self.assertEqual(last["op"], "git-mv")
+                    self.assertTrue(last["after"].startswith("git-object:"))
+                self.assert_retained(root, plan_id, base, repair_id)
+                record = json.loads(self.state(
+                    "adopt", "worktrees",
+                    self.digest(plan_id) + ".failure.json").read_text("utf-8"))
+                if repair_id.startswith("adopt.format."):
+                    self.assertEqual(
+                        {gate["status"] for gate in record["gates"]},
+                        {"not_run"})
+
+    def test_the_evidence_record_lists_the_format_answer_and_rows(self):
+        root = formatting_repo(self.home)
+        answers = (REWRITE_ANALYZER, ("reference-format", ".py", "format"))
+        document = self.planned(root, *answers)
+        result = self.succeed(root, document["plan"]["plan_id"])
+        record = json.loads(git(
+            root, "show", f"{result['branch']}:{result['evidence_record']}"))
+        for question, subject, value in answers:
+            with self.subTest(subject=subject):
+                self.assertIn(
+                    {"id": question, "subject": subject, "value": value},
+                    record["decisions_accepted"])
+        for member in ("reference_formatting", "reference_policies",
+                       "path_references"):
+            with self.subTest(member=member):
+                self.assertEqual(record[member], document[member])
+        self.assertEqual(record["plan_id"], document["plan"]["plan_id"])
 
 
 class CommitLinkProofTest(ApplyTestCase):

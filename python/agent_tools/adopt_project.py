@@ -25,7 +25,10 @@ name a moved path's first segment, and writes only under
 `apply` takes a stored `ready` plan by that id, refuses on any drift, and
 carries the whole transformation out in an isolated worktree in the same user
 scope — outside the target checkout, so it cannot appear in the target's own
-`git status` (D14). Every refusal in it mutates nothing; a failed pre-commit
+`git status` (D14). After the operations and before the gates it runs the
+formatter a `reference-format` answer declared over the files the reference
+answers edited, and refuses a formatter that changed any other planned file.
+Every refusal in it mutates nothing; a failed pre-commit
 gate leaves no commit and retains the worktree with its evidence (D17); a
 green run produces exactly one commit on one new branch and removes the
 worktree only after proving that the commit changes exactly the paths the plan
@@ -592,14 +595,9 @@ def command_apply(args: argparse.Namespace) -> int:
         for operation in changes:
             adopt_apply.execute_operation(
                 worktree, operation, composed.contents, run_resolver)
-        # This apply cannot run a declared formatter yet; the formatting step
-        # replaces this refusal, which stands in for it at the same point.
-        if any(row["command"] is not None
-               for row in composed.document["reference_formatting"]):
-            raise adopt_inspection.refuse(
-                "verification_failed", "adopt.format.failed",
-                "/reference_formatting",
-                "this apply cannot run a declared reference formatter")
+        adopt_apply.run_formatting(
+            worktree, changes, composed.document["reference_formatting"],
+            run_resolver)
     except adopt_inspection.AdoptError as error:
         adopt_apply.retain_failure(digest, document, worktree, branch, [
             adopt_inspection.gate_entry(gate, "not_run", None)
