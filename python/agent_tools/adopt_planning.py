@@ -39,6 +39,7 @@ from agent_tools.adopt_inspection import (
     PATH_REFERENCE_BASIS,
     QUESTION_IDS,
     READY_GATES,
+    REFERENCE_POLICY_BASIS,
     RUNTIME_IGNORE_PATTERN,
     RUNTIME_SENTINEL,
     RUNTIME_SENTINEL_BYTES,
@@ -163,29 +164,66 @@ def candidate_questions(found: Candidates) -> list[dict]:
          for entry in found.entries if entry["action"] == "needs-decision"),
         key=lambda entry: entry["subject"])
 
-def reference_questions(references: References,
-                        answers: dict[str, str]) -> list[dict]:
-    """One open `path-reference` question per unanswered occurrence (#350).
+def reference_questions(references: References, answers: dict[str, str],
+                        policies: dict[str, str]) -> list[dict]:
+    """The open `path-reference` questions, then the open `reference-policy`
+    ones (#350, #372).
 
-    In occurrence order. Every prose member is fixed and never names the file
-    or the literal: the entry's `subject` does, so the question is stable
-    across plans of one tree. The entry carries no `value`, because the
-    answer is the operator's choice among the occurrence's own `answers`.
+    A policy, `<tree>:<class>`, is open when no answer was given it and at
+    least one of its occurrences has no answer of its own. An occurrence opens
+    a `path-reference` question when no answer decides it and its policy is
+    not open, so a policy question speaks for its class until it is answered;
+    the occurrences are in occurrence order and the policies sorted by
+    subject. Every prose member is fixed and never names the file, the
+    literal, the tree or the class: the entry's `subject` does, so the
+    question is stable across plans of one tree. A `path-reference` entry
+    carries no `value`, because the answer is the operator's choice among the
+    occurrence's own `answers`; a `reference-policy` entry's `value` is the
+    answer recommended for the class, or null.
     """
-    return [{"id": "path-reference",
-             "subject": occurrence.subject,
-             "answers": list(occurrence.answers),
-             "basis": PATH_REFERENCE_BASIS,
-             "impact": question_impact("path-reference"),
-             "recommendation": question_recommendation("path-reference")}
-            for occurrence in references.occurrences
-            if occurrence.subject not in answers]
+    open_policies = sorted({
+        occurrence.policy for occurrence in references.occurrences
+        if occurrence.policy is not None and occurrence.policy not in policies
+        and occurrence.subject not in answers})
+    questions = [
+        {"id": "path-reference",
+         "subject": occurrence.subject,
+         "answers": list(occurrence.answers),
+         "basis": PATH_REFERENCE_BASIS,
+         "impact": question_impact("path-reference"),
+         "recommendation": question_recommendation("path-reference")}
+        for occurrence in references.occurrences
+        if adopt_references.effective_answer(
+            occurrence, answers, policies)[0] is None
+        and occurrence.policy not in open_policies]
+    classes = {occurrence.policy: adopt_references.file_class(occurrence.path)
+               for occurrence in references.occurrences}
+    return questions + [
+        {"id": "reference-policy",
+         "subject": subject,
+         "answers": list(adopt_references.POLICY_ANSWERS),
+         "value": adopt_references.recommended_answer(classes[subject]),
+         "basis": REFERENCE_POLICY_BASIS,
+         "impact": question_impact("reference-policy"),
+         "recommendation": question_recommendation("reference-policy")}
+        for subject in open_policies]
 
 
 def reference_answers(answered: list[dict]) -> dict[str, str]:
     """`subject -> value` of the settled `path-reference` answers."""
     return {answer["subject"]: answer["value"] for answer in answered
             if answer["id"] == "path-reference"}
+
+
+def policy_answers(answered: list[dict]) -> dict[str, str]:
+    """`subject -> value` of the settled `reference-policy` answers."""
+    return {answer["subject"]: answer["value"] for answer in answered
+            if answer["id"] == "reference-policy"}
+
+
+_ANSWERED_THING = {"candidate-class": "candidate",
+                   "path-reference": "path reference",
+                   "reference-policy": "reference policy"}
 
 
 def apply_answers(root: Path, found: Candidates, inventory: Inventory,
@@ -195,20 +233,23 @@ def apply_answers(root: Path, found: Candidates, inventory: Inventory,
     references the settled moves leave.
 
     Each answer is `{"id", "subject", "value"}`, all strings, and answers a
-    `candidate-class` or a `path-reference` question. They are validated in
-    order of `(id, subject, value)`, refusing on the first violation: an id
-    other than those two, a question answered twice and then, for a
-    `candidate-class`, a subject that is not the path of a `needs-decision`
-    entry and a value other than the one that candidate's open question
-    offers or, for a `path-reference`, a subject that is no occurrence of this
-    inspection and a value that occurrence does not offer. Nothing in `found`
-    is mutated until every answer has validated, so a refusal changes nothing.
+    `candidate-class`, a `path-reference` or a `reference-policy` question.
+    They are validated in order of `(id, subject, value)`, refusing on the
+    first violation: an id other than those three, a question answered twice
+    and then, for a `candidate-class`, a subject that is not the path of a
+    `needs-decision` entry and a value other than the one that candidate's
+    open question offers; for a `path-reference`, a subject that is no
+    occurrence of this inspection and a value that occurrence does not offer;
+    or, for a `reference-policy`, a subject that is the policy of no
+    occurrence of this inspection and a value outside
+    `adopt_references.POLICY_ANSWERS`. Nothing in `found` is mutated until
+    every answer has validated, so a refusal changes nothing.
 
     The references are derived once, from the base revision's tracked text
     with `excluded` skipped, moved files included and read at their base
     paths, each moved file carrying the group it moves in as its tree, over
     the moves the answers settle (D12): at the
-    first `path-reference` answer, over `found.moves` plus the archive
+    first `path-reference` or `reference-policy` answer, over `found.moves` plus the archive
     destination of every `archive-history` answer validated before it, which
     is every one of them because `candidate-class` sorts first; with no such
     answer, after the candidate mutation below, over `found.moves`. The two
@@ -233,20 +274,33 @@ def apply_answers(root: Path, found: Candidates, inventory: Inventory,
     for answer in sorted(answers, key=lambda a: (a["id"], a["subject"],
                                                  a["value"])):
         question = answer["id"]
-        if question not in ("candidate-class", "path-reference"):
+        if question not in ("candidate-class", "path-reference",
+                            "reference-policy"):
             raise refuse("adopt_failure", "adopt.decisions.invalid_answer",
-                         pointer, "only a candidate-class or path-reference "
-                         "question can be answered")
+                         pointer, "only a candidate-class, path-reference or "
+                         "reference-policy question can be answered")
         if (question, answer["subject"]) in seen:
             raise refuse("adopt_failure", "adopt.decisions.invalid_answer",
-                         pointer, "a candidate is answered more than once"
-                         if question == "candidate-class" else
-                         "a path reference is answered more than once")
+                         pointer, f"a {_ANSWERED_THING[question]} is "
+                         "answered more than once")
         seen.add((question, answer["subject"]))
+        if question != "candidate-class" and references is None:
+            references = adopt_references.derive_references(
+                root, inventory.base_revision, moves, excluded, trees)
+        if question == "reference-policy":
+            if not any(o.policy == answer["subject"]
+                       for o in references.occurrences):
+                raise refuse("adopt_failure",
+                             "adopt.decisions.unmatched_answer", pointer,
+                             "the answered subject is not a reference policy "
+                             "of this inspection")
+            if answer["value"] not in adopt_references.POLICY_ANSWERS:
+                raise refuse("adopt_failure",
+                             "adopt.decisions.invalid_answer", pointer,
+                             "the answer is not one this reference policy's "
+                             "open question offers")
+            continue
         if question == "path-reference":
-            if references is None:
-                references = adopt_references.derive_references(
-                    root, inventory.base_revision, moves, excluded, trees)
             occurrence = next(
                 (o for o in references.occurrences
                  if o.subject == answer["subject"]), None)
@@ -703,7 +757,8 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
                            decisions: dict,
                            ready_gates: list[dict],
                            link_rewrites: dict,
-                           path_references: list[dict]) -> tuple[
+                           path_references: list[dict],
+                           reference_policies: list[dict]) -> tuple[
                                list[dict], dict[str, bytes]]:
     """The path-migration map and the adoption evidence record, preceded by
     the deletion of every evidence record an earlier adoption committed.
@@ -746,6 +801,7 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
                    for gate in ready_gates],
         "link_rewrites": link_rewrites,
         "path_references": path_references,
+        "reference_policies": reference_policies,
         "path_migration_map": records["migration_map"],
     })
     return [
@@ -938,11 +994,12 @@ def blockers_for(gates: list[dict]) -> list[dict]:
 def compute_plan_id(project_id: str | None, base_revision: str,
                     platform_block: dict, evidence: list[dict],
                     answered: list[dict], link_rewrites: dict,
-                    path_references: list[dict]) -> str:
-    """D15's content address over exactly eight inputs: the project id, the
+                    path_references: list[dict],
+                    reference_policies: list[dict]) -> str:
+    """D15's content address over exactly nine inputs: the project id, the
     base revision, the platform block, the evidence, the answered decisions,
-    the schema version, the `link_rewrites` summary (#345) and the
-    `path_references` rows (#350).
+    the schema version, the `link_rewrites` summary (#345), the
+    `path_references` rows (#350) and the `reference_policies` rows (#372).
 
     The manifest's `migrations` array is deliberately *not* one of them (D36):
     it can only route toward `migration_required` or `repair_required`, and
@@ -960,6 +1017,7 @@ def compute_plan_id(project_id: str | None, base_revision: str,
         "decisions_answered": answered,
         "link_rewrites": link_rewrites,
         "path_references": path_references,
+        "reference_policies": reference_policies,
     }
     return "sha256:" + hashlib.sha256(canonical_json(source)).hexdigest()
 
