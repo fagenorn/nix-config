@@ -22,6 +22,18 @@ fleet), 1 when the file was written but at least one project has no row, and 2
 when no policy could be compiled, in which case no file is left at `--output`.
 The report, one line of JSON on stdout, names the outcome, the derived slugs,
 each refusal and the cause of an exit 2 (`CAUSES`).
+
+`guard-policy derive --repository <slug>` re-derives one repository's row, the
+check the lifecycle guard runs before it trusts a compiled row. It reads the
+registry, runs the first two proof steps for every entry (`entry_slug`) and the
+rest (`prove`) only for entries whose `origin` names the slug, then the duplicate
+and name checks among them (`_admit`); it reads no base policy, so it never
+reports `literal_conflict`, and it writes no file beyond the fetched objects and
+remote-tracking refs. The report, one line of JSON on stdout, has the members
+`schema_version`, `repository`, `outcome`, `row`, `refused` and `cause`. Exit 0
+is `derived` with the row; exit 1 is `refused`, with the `refused` entries that
+name the slug (empty when none does); exit 2 is `unavailable`, with a `cause`
+from `CAUSES` (`registry_invalid`, `platform_unavailable` or `internal`).
 """
 
 from __future__ import annotations
@@ -39,6 +51,7 @@ from agent_tools import (adopt_inspection, adopt_verify, agent_platform, canonic
                          github_remote, release_profile, resolve_project)
 
 REPORT_SCHEMA_VERSION = 1
+DERIVE_REPORT_SCHEMA_VERSION = 1
 DERIVATION_SCHEMA_VERSION = 1
 
 BASE_MEMBERS = ("authorized_owners", "integration_bases", "git_bin", "gh_bin", "jq_bin")
@@ -265,8 +278,8 @@ def _proof(root: Path, entry: dict, slug: str, source: adopt_verify.Verification
                 "provider_full_name": answer.strip(), "profiles": compiled}}
 
 
-def derive(entry: dict) -> tuple[str, dict]:
-    """Steps 1 to 10 for one registry entry: `(slug, derived row)`, or `ProjectRefused`."""
+def entry_slug(entry: dict) -> tuple[Path, str]:
+    """Steps 1 and 2 for one registry entry: `(root, slug)`, or `ProjectRefused`."""
     root = Path(entry["root"])
     try:
         code, _ = adopt_inspection.run_git(root, "rev-parse", "--git-dir")
@@ -274,18 +287,28 @@ def derive(entry: dict) -> tuple[str, dict]:
         code = 1
     if code != 0:
         raise ProjectRefused("root_unavailable", f"{root} is not a git repository")
-    slug = origin_slug(root)
+    return root, origin_slug(root)
+
+
+def prove(entry: dict, root: Path, slug: str) -> dict:
+    """Steps 3 to 10 for one registry entry at `root` whose origin names `slug`: the row."""
     override = entry.get("branch_override")
     try:
         with adopt_verify.remote_source(
                 root, resolver, override["branch"] if override else None,
                 network_timeout=forge_adapter.CHILD_TIMEOUT_SECONDS) as source:
-            return slug, _proof(root, entry, slug, source)
+            return _proof(root, entry, slug, source)
     except adopt_inspection.AdoptError as error:
         reason = ("branch_unresolved" if error.repair_id in BRANCH_UNRESOLVED_REPAIRS
                   else "fetch_failed")
         raise ProjectRefused(reason, f"{error.repair_id}: "
                              f"{error.violations[0]['message']}") from None
+
+
+def derive(entry: dict) -> tuple[str, dict]:
+    """Steps 1 to 10 for one registry entry: `(slug, derived row)`, or `ProjectRefused`."""
+    root, slug = entry_slug(entry)
+    return slug, prove(entry, root, slug)
 
 
 # --------------------------------------------------------------------------
@@ -311,6 +334,46 @@ def _refusal(entry: dict, error: ProjectRefused) -> dict:
             "detail": error.detail[:forge_adapter.DETAIL_LIMIT]}
 
 
+def _admit(proven: list[tuple[dict, str, dict]],
+           literal_slugs) -> tuple[dict[str, dict], list[dict]]:
+    """Step 11 and the rest of admission over the proven `(entry, slug, row)` triples:
+    `(rows by slug, refusals)`. A slug in `literal_slugs` is `literal_conflict`."""
+    derived_by = [slug for _, slug, _ in proven]
+    rows: dict[str, dict] = {}
+    refusals: list[dict] = []
+    for entry, slug, row in proven:
+        if derived_by.count(slug) > 1:
+            refusals.append(_refusal(entry, ProjectRefused(
+                "duplicate_repository", f"more than one registered project derives {slug}")))
+        elif slug in literal_slugs:
+            refusals.append(_refusal(entry, ProjectRefused(
+                "literal_conflict", f"{slug} is also a literal integration base")))
+        elif (unsupported := unsupported_name(slug, row)) is not None:
+            refusals.append(_refusal(entry, ProjectRefused("name_unsupported", unsupported)))
+        else:
+            rows[slug] = row
+    return rows, refusals
+
+
+def derive_repository(entries: list[dict], repository: str) -> tuple[dict | None, list[dict]]:
+    """`(row, refusals)` for `repository`: only entries whose origin names it are proven."""
+    proven: list[tuple[dict, str, dict]] = []
+    refusals: list[dict] = []
+    for entry in entries:
+        try:
+            root, slug = entry_slug(entry)
+        except ProjectRefused:
+            continue
+        if slug != repository:
+            continue
+        try:
+            proven.append((entry, slug, prove(entry, root, slug)))
+        except ProjectRefused as error:
+            refusals.append(_refusal(entry, error))
+    rows, more = _admit(proven, frozenset())
+    return rows.get(repository), refusals + more
+
+
 def compile_policy(base: dict, entries: list[dict]) -> tuple[dict, dict[str, dict], list[dict]]:
     """`(integration_bases, derived rows, refusals)`: `derive` per entry, then steps 11 and 12
     and the loader's name shapes, so every row returned is one the guard loads."""
@@ -323,22 +386,11 @@ def compile_policy(base: dict, entries: list[dict]) -> tuple[dict, dict[str, dic
             refusals.append(_refusal(entry, error))
         else:
             proven.append((entry, slug, row))
-    derived_by = [slug for _, slug, _ in proven]
-    rows: dict[str, dict] = {}
-    for entry, slug, row in proven:
-        if derived_by.count(slug) > 1:
-            refusals.append(_refusal(entry, ProjectRefused(
-                "duplicate_repository", f"more than one registered project derives {slug}")))
-        elif slug in base["integration_bases"]:
-            refusals.append(_refusal(entry, ProjectRefused(
-                "literal_conflict", f"{slug} is also a literal integration base")))
-        elif (unsupported := unsupported_name(slug, row)) is not None:
-            refusals.append(_refusal(entry, ProjectRefused("name_unsupported", unsupported)))
-        else:
-            rows[slug] = row
+    rows, more = _admit(proven, base["integration_bases"])
+    derived_by = {slug for _, slug, _ in proven}
     bases = {slug: branch for slug, branch in base["integration_bases"].items()
              if slug not in derived_by}
-    return bases, rows, refusals
+    return bases, rows, refusals + more
 
 
 # --------------------------------------------------------------------------
@@ -376,6 +428,35 @@ def _write(base: dict, entries: list[dict], platform_version: str,
         raise CompileRefused("output_unwritable", f"{output}: {error}") from None
     outcome, status = ("written_with_refusals", 1) if refusals else ("complete", 0)
     return status, _report(outcome, list(rows), refusals, None)
+
+
+def _derive_report(repository: str, outcome: str, row: dict | None, refused: list[dict],
+                   cause: dict | None) -> dict:
+    return {"schema_version": DERIVE_REPORT_SCHEMA_VERSION, "repository": repository,
+            "outcome": outcome, "row": row, "refused": refused, "cause": cause}
+
+
+def run_derive(repository: str) -> tuple[int, dict]:
+    """The exit status and the report of re-deriving `repository`'s row; writes no file."""
+    try:
+        try:
+            agent_platform.load_manifest()
+        except agent_platform.PlatformManifestError as error:
+            raise _platform_refusal("platform_unavailable", error) from None
+        try:
+            entries = agent_platform.read_registry()
+        except agent_platform.PlatformManifestError as error:
+            raise _platform_refusal("registry_invalid", error) from None
+        row, refusals = derive_repository(entries, repository)
+    except CompileRefused as error:
+        cause = {"reason_code": error.cause, "detail": error.detail}
+    except Exception as error:  # a closed cause for any failure: the guard reads one report
+        cause = {"reason_code": "internal", "detail": f"{type(error).__name__}: {error}"}
+    else:
+        if row is not None:
+            return 0, _derive_report(repository, "derived", row, refusals, None)
+        return 1, _derive_report(repository, "refused", None, refusals, None)
+    return 2, _derive_report(repository, "unavailable", None, [], cause)
 
 
 def _remove_previous(output: Path, cause: dict) -> None:
@@ -419,18 +500,31 @@ def _parser() -> argparse.ArgumentParser:
                                  help="the base policy file")
     compile_command.add_argument("--output", required=True, type=Path,
                                  help="where the compiled policy is written")
+    derive_command = commands.add_parser("derive", help="re-derive one repository's row")
+    derive_command.add_argument("--repository", required=True, help="the owner/name slug")
     return parser
+
+
+def _print_refusals(report: dict) -> None:
+    for refusal in report["refused"]:
+        print(f"guard-policy: {refusal['project_id']} ({refusal['root']}) has no derived row: "
+              f"{refusal['reason_code']}: {refusal['detail']}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    status, report = run_compile(args.base, args.output)
-    for refusal in report["refused"]:
-        print(f"guard-policy: {refusal['project_id']} ({refusal['root']}) has no derived row: "
-              f"{refusal['reason_code']}: {refusal['detail']}", file=sys.stderr)
-    if report["cause"] is not None:
-        print(f"guard-policy: no policy was written: {report['cause']['reason_code']}: "
-              f"{report['cause']['detail']}", file=sys.stderr)
+    if args.command == "derive":
+        status, report = run_derive(args.repository)
+        _print_refusals(report)
+        if report["cause"] is not None:
+            print(f"guard-policy: no row was derived: {report['cause']['reason_code']}: "
+                  f"{report['cause']['detail']}", file=sys.stderr)
+    else:
+        status, report = run_compile(args.base, args.output)
+        _print_refusals(report)
+        if report["cause"] is not None:
+            print(f"guard-policy: no policy was written: {report['cause']['reason_code']}: "
+                  f"{report['cause']['detail']}", file=sys.stderr)
     print(json.dumps(report, sort_keys=True))
     return status
 

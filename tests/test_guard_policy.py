@@ -125,6 +125,96 @@ class DerivationTest(WorldCase):
         self.assertEqual(sorted(self.world.policy()["derived_repositories"]), ["fagenorn/two"])
 
 
+REPORT_MEMBERS = {"schema_version", "repository", "outcome", "row", "refused", "cause"}
+
+
+class DeriveTest(WorldCase):
+    """`guard-policy derive --repository <slug>`: the row check the guard runs (issue 377 D2)."""
+
+    def derived(self, repository: str) -> dict:
+        code, report, err = self.world.derive(repository)
+        self.assertEqual((code, set(report)), (0, REPORT_MEMBERS), (report, err))
+        self.assertEqual((report["schema_version"], report["repository"], report["outcome"],
+                          report["cause"]), (1, repository, "derived", None))
+        return report
+
+    def refused_for(self, repository: str) -> dict:
+        code, report, err = self.world.derive(repository)
+        self.assertEqual((code, set(report)), (1, REPORT_MEMBERS), (report, err))
+        self.assertEqual((report["repository"], report["outcome"], report["row"],
+                          report["cause"]), (repository, "refused", None, None))
+        return report
+
+    def test_a_registered_slug_derives_the_row_compile_writes(self):
+        self.world.project("nodocom", NODO, integration_branch="dev", publication_free=True,
+                           override=True)
+        self.world.project("fixture/single", "fagenorn/single")
+        report = self.derived(NODO)
+        self.assertEqual(report["refused"], [])
+        self.assertEqual((report["row"]["default_branch"], report["row"]["integration_branch"]),
+                         ("main", "dev"))
+        self.assertEqual(self.world.compile()[0], 0)
+        self.assertEqual(report["row"], self.world.policy()["derived_repositories"][NODO])
+        self.assertEqual(self.derived("fagenorn/single")["row"]["integration_branch"], "main")
+
+    def test_an_unregistered_slug_is_refused_with_an_empty_list(self):
+        self.world.project("fixture/one", "fagenorn/one")
+        self.assertEqual(self.refused_for("acme/forged")["refused"], [])
+
+    def test_an_absent_registry_refuses_every_slug(self):
+        self.assertEqual(self.refused_for(NODO)["refused"], [])
+
+    def test_a_failing_proof_is_refused_with_its_code(self):
+        root = self.world.project("fixture/one", "fagenorn/one")
+        self.world.provider("fagenorn/one", exit=1)
+        code, report, err = self.world.derive("fagenorn/one")
+        self.assertEqual(code, 1, report)
+        [refusal] = report["refused"]
+        self.assertEqual((refusal["project_id"], refusal["root"], refusal["reason_code"]),
+                         ("fixture/one", str(root), "provider_unproven"))
+        self.assertIn("fixture/one ", err)
+
+    def test_two_entries_on_one_slug_are_duplicate_repository(self):
+        self.world.project("fixture/one", "fagenorn/one")
+        self.world.project("fixture/two", "fagenorn/one")
+        report = self.refused_for("fagenorn/one")
+        self.assertEqual([(r["project_id"], r["reason_code"]) for r in report["refused"]],
+                         [("fixture/one", "duplicate_repository"),
+                          ("fixture/two", "duplicate_repository")])
+
+    def test_a_name_the_guard_does_not_load_is_refused(self):
+        self.world.project("fixture/one", "fagenorn/one", integration_branch="dev+ci")
+        [refusal] = self.refused_for("fagenorn/one")["refused"]
+        self.assertEqual(refusal["reason_code"], "name_unsupported")
+
+    def test_a_literal_integration_base_is_not_derive_s_concern(self):
+        """Step 12 needs the base policy, which derive never reads."""
+        self.world.write_base(integration_bases={"fagenorn/one": "dev"})
+        self.world.project("fixture/one", "fagenorn/one")
+        self.assertEqual(self.derived("fagenorn/one")["refused"], [])
+
+    def test_an_entry_naming_another_slug_is_never_fetched(self):
+        self.world.project("fixture/one", "fagenorn/one")
+        other = self.world.project("fixture/two", "fagenorn/two")
+        self.world.git(other, "update-ref", "-d", "refs/remotes/origin/main")
+        self.assertEqual(self.world.git(other, "for-each-ref", "refs/remotes/origin"), "")
+        self.derived("fagenorn/one")
+        self.assertEqual(self.world.git(other, "for-each-ref", "refs/remotes/origin"), "")
+
+    def test_an_unusable_registry_or_manifest_is_unavailable(self):
+        self.world.project("fixture/one", "fagenorn/one")
+        self.world.write_registry("{")
+        code, report, err = self.world.derive("fagenorn/one")
+        self.assertEqual((code, report["outcome"], report["row"], report["refused"]),
+                         (2, "unavailable", None, []), report)
+        self.assertEqual(report["cause"]["reason_code"], "registry_invalid")
+        self.assertIn("registry_invalid", err)
+        self.world.register()
+        (self.world.home / ".agents/share/platform-manifest.json").unlink()
+        code, report, _ = self.world.derive("fagenorn/one")
+        self.assertEqual((code, report["cause"]["reason_code"]), (2, "platform_unavailable"))
+
+
 class ProjectRefusalTest(WorldCase):
     def test_root_unavailable(self):
         plain = self.world.tmp / "plain"

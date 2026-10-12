@@ -219,5 +219,13 @@ class GuardPolicyWorld:
             capture_output=True, text=True, timeout=300, env=env or self.env, cwd=self.tmp)
         return done.returncode, json.loads(done.stdout), done.stderr
 
+    def derive(self, repository: str, *, env: dict | None = None) -> tuple[int, dict, str]:
+        """Run `derive` from source: `(exit status, parsed report, stderr)`."""
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.guard_policy", "derive",
+             "--repository", repository],
+            capture_output=True, text=True, timeout=300, env=env or self.env, cwd=self.tmp)
+        return done.returncode, json.loads(done.stdout), done.stderr
+
     def policy(self) -> dict:
         return json.loads(self.output.read_text("utf-8"))
