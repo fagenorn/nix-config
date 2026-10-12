@@ -108,6 +108,9 @@ sync_profile() {
   dir="$(profile_dir "$1")"
   mkdir -p "$dir"
   chmod 700 "$dir"
+  # Shared state must exist in ~/.claude before it is linked, or claude would
+  # write it inside the profile, where no other account can see it.
+  mkdir -p "$BASE/projects" "$BASE/file-history"
   for entry in "${SHARED[@]}"; do
     if { [ -e "$BASE/$entry" ] || [ -L "$BASE/$entry" ]; } &&
       [ ! -e "$dir/$entry" ] && [ ! -L "$dir/$entry" ]; then
@@ -121,11 +124,37 @@ sync_profile() {
   fi
 }
 
-unbind() { # <column> <value>: drop the bindings whose column equals value
-  [ -f "$BINDINGS" ] || return 0
+# Serializes every rewrite of the bindings file across concurrent sessions.
+# mkdir is atomic and, unlike flock, present on macOS.
+lock_bindings() {
+  local tries=0
+  mkdir -p "$ROOT"
+  until mkdir "$BINDINGS.lock" 2>/dev/null; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 100 ] || die "bindings are locked ($BINDINGS.lock); remove it if no claude-account is running"
+    sleep 0.1
+  done
+  trap 'rmdir "$BINDINGS.lock" 2>/dev/null' EXIT
+}
+
+unlock_bindings() {
+  rmdir "$BINDINGS.lock" 2>/dev/null
+  trap - EXIT
+}
+
+# <column> <value> [<key> <account>]: drop the bindings whose column equals
+# value, then append the given binding, as one locked, atomic replacement.
+rebind() {
   local tmp="$BINDINGS.tmp.$$"
-  awk -F'\t' -v c="$1" -v v="$2" '$c != v' "$BINDINGS" >"$tmp"
+  lock_bindings
+  if [ -f "$BINDINGS" ]; then
+    awk -F'\t' -v c="$1" -v v="$2" '$c != v' "$BINDINGS" >"$tmp"
+  else
+    : >"$tmp"
+  fi
+  [ -z "${3:-}" ] || printf '%s\t%s\n' "$3" "$4" >>"$tmp"
   mv "$tmp" "$BINDINGS"
+  unlock_bindings
 }
 
 claude_bin() {
@@ -170,9 +199,8 @@ cmd_use() {
   local name="${1:-}" key
   require_account "$name"
   key="$(project_key)"
-  mkdir -p "$ROOT"
-  unbind 1 "$key"
-  [ "$name" = default ] || printf '%s\t%s\n' "$key" "$name" >>"$BINDINGS"
+  # default is recorded too, so it overrides a binding on a parent directory.
+  rebind 1 "$key" "$key" "$name"
   echo "$key now uses account '$name'."
 }
 
@@ -211,7 +239,7 @@ cmd_rm() {
   require_account "$name"
   [ "$name" = default ] && die "the default account is ~/.claude and is not removed here"
   rm -rf "$(profile_dir "$name")"
-  unbind 2 "$name"
+  rebind 2 "$name"
   echo "Removed account '$name'. If it was signed in, its stored login was not removed."
 }
 
