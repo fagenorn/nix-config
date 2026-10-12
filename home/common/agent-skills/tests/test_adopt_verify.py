@@ -17,13 +17,17 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from agent_tools import adopt_inspection
+from agent_tools import adopt_project
 from agent_tools import adopt_verify
 from agent_tools import agent_platform
 from agent_tools.adopt_inspection import AdoptError
@@ -623,6 +627,67 @@ class RemoteRegistrationTest(VerifyTestCase):
         git(root, "remote", "add", "origin",
             str(Path(tempfile.mkdtemp()).resolve() / "missing.git"))
         self.refuse_with(root, "adopt_failure", "adopt.git.remote_unreachable")
+
+
+SLOW_GIT = """#!{python}
+import os, sys, time
+if "ls-remote" in sys.argv or "fetch" in sys.argv:
+    time.sleep(30)
+os.execv({git!r}, [{git!r}, *sys.argv[1:]])
+"""
+
+
+class RemoteSourceSeamTest(VerifyTestCase):
+    """What a caller other than registration reads from `remote_source` (issue 126 D13)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def slow_git(self) -> None:
+        """Put a `git` first on PATH whose `ls-remote` and `fetch` outlast any test bound."""
+        shims = Path(tempfile.mkdtemp())
+        shim = shims / "git"
+        shim.write_text(SLOW_GIT.format(python=sys.executable, git=shutil.which("git")),
+                        encoding="utf-8")
+        shim.chmod(0o755)
+        patcher = mock.patch.dict(
+            os.environ, {"PATH": f"{shims}{os.pathsep}{os.environ['PATH']}"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_source_names_the_remote_default_branch(self):
+        root = verifiable_repo(self.home, integration_branch="dev")
+        git(root, "branch", "dev")
+        publish(root, ("main", "dev"))
+        with adopt_verify.remote_source(root, adopt_project.run_resolver) as source:
+            self.assertEqual((source.branch, source.remote_default), ("dev", "main"))
+        single = verifiable_repo(self.home, project_id="fixture/single")
+        publish(single)
+        with adopt_verify.remote_source(single, adopt_project.run_resolver) as source:
+            self.assertEqual((source.branch, source.remote_default), ("main", "main"))
+        self.assertIsNone(adopt_verify.head_source(single).remote_default)
+
+    def test_a_network_child_is_bounded_by_the_caller(self):
+        self.assertEqual(adopt_inspection.GIT_TIMEOUT_SECONDS, 300)
+        root = verifiable_repo(self.home)
+        publish(root)
+        self.slow_git()
+        calls = (
+            lambda: adopt_inspection.remote_heads(root, 0.5),
+            lambda: adopt_inspection.fetch_pinned(root, "main", 0.5),
+            lambda: adopt_verify.remote_source(
+                root, adopt_project.run_resolver, network_timeout=0.5).__enter__(),
+        )
+        for index, call in enumerate(calls):
+            with self.subTest(call=index):
+                started = time.monotonic()
+                with self.assertRaises(AdoptError) as caught:
+                    call()
+                self.assertLess(time.monotonic() - started, 10)
+                self.assertEqual(caught.exception.repair_id, "adopt.git.unavailable")
 
 
 class RegisterProjectInnerCheckTest(VerifyTestCase):

@@ -2,17 +2,17 @@
 
 `plan` inspects a target checkout inside a bounded, read-only boundary,
 classifies every candidate it finds under one closed action set, routes the
-repository to exactly one of five closed outcomes, and emits the nine-member
+repository to exactly one of five closed outcomes, and emits the ten-member
 adoption plan document: `schema_version`, `plan`, `evidence`, `decisions`,
-`changes`, `link_rewrites`, `path_references`, `verification`, `handoff`
-(R4.3).
+`changes`, `link_rewrites`, `path_references`, `reference_policies`,
+`verification`, `handoff` (R4.3).
 
 The document is content-addressed. `plan_id` is the SHA-256 of canonical JSON
 over exactly `{adopt_schema_version, project_id, base_revision, platform,
-evidence, decisions.answered, link_rewrites, path_references}` (D15), so two
-checkouts of one revision on one platform produce one identifier and any
-change to a source byte, the base revision or a platform input produces
-another. The absolute checkout path is deliberately outside that source and
+evidence, decisions.answered, link_rewrites, path_references,
+reference_policies}` (D15), so two checkouts of one revision on one platform
+produce one identifier and any change to a source byte, the base revision or
+a platform input produces another. The absolute checkout path is deliberately outside that source and
 appears only in `handoff`.
 
 `plan` mutates nothing: it runs `git` and the resolver as child processes,
@@ -192,8 +192,8 @@ def compose_plan(root: Path, manifest: dict,
     `apply` re-runs exactly this to recompute the input digest and regenerate
     the canonical operation list (D33), so a second, subtly different
     derivation cannot exist to disagree with it. It writes nothing.
-    `answered` is the operator's answers to open `candidate-class` and
-    `path-reference` questions, applied before anything else is derived, so
+    `answered` is the operator's answers to open `candidate-class`,
+    `path-reference` and `reference-policy` questions, applied before anything else is derived, so
     they enter `plan_id`.
     """
     inventory = inspect_repository(root)
@@ -203,9 +203,13 @@ def compose_plan(root: Path, manifest: dict,
         root, found, inventory, answered,
         adopt_planning.reference_excluded(contract_source))
     reference_answers = adopt_planning.reference_answers(answered)
-    path_references = adopt_references.summary(references, reference_answers)
+    policies = adopt_planning.policy_answers(answered)
+    path_references = adopt_references.summary(references, reference_answers,
+                                               policies)
+    reference_policies = adopt_references.policy_summary(
+        references, reference_answers, policies)
     reference_files = adopt_references.rewritten(references,
-                                                 reference_answers)
+                                                 reference_answers, policies)
     untracked = adopt_inspection.untracked_under(
         root, adopt_inspection.overlap_targets(found))
     for path in untracked:
@@ -257,8 +261,8 @@ def compose_plan(root: Path, manifest: dict,
         key=lambda entry: (
             adopt_inspection.QUESTION_IDS.index(entry["id"]),
             entry.get("subject", "")))
-    open_questions += adopt_planning.reference_questions(references,
-                                                         reference_answers)
+    open_questions += adopt_planning.reference_questions(
+        references, reference_answers, policies)
     decisions = {"recommended": recommended, "answered": answered,
                  "open": open_questions}
 
@@ -269,7 +273,8 @@ def compose_plan(root: Path, manifest: dict,
     }
     plan_id = adopt_planning.compute_plan_id(
         project_id, inventory.base_revision, platform_block, evidence,
-        decisions["answered"], links.summary, path_references)
+        decisions["answered"], links.summary, path_references,
+        reference_policies)
 
     ready_gates = adopt_planning.evaluate_ready_gates(
         root, found, contract_source, contract_resolves, unfixable, untracked,
@@ -303,7 +308,8 @@ def compose_plan(root: Path, manifest: dict,
         records = adopt_planning.adoption_records(plan_id)
         bookkeeping, written = adopt_planning.bookkeeping_operations(
             found, plan_id, outcome, inventory.base_revision, platform_block,
-            decisions, ready_gates, links.summary, path_references)
+            decisions, ready_gates, links.summary, path_references,
+            reference_policies)
         contents.update(written)
         changes = head + bookkeeping + tail
         adopt_planning.check_markdown_writes(changes, set(links.files))
@@ -346,6 +352,7 @@ def compose_plan(root: Path, manifest: dict,
         "changes": changes,
         "link_rewrites": links.summary,
         "path_references": path_references,
+        "reference_policies": reference_policies,
         "verification": {
             "ready_gates": ready_gates,
             "commit_gates": [adopt_inspection.gate_entry(gate, "not_run", None)
@@ -427,6 +434,13 @@ def emit_human(document: dict) -> int:
         f"extended {count('extend')}, rewritten {count('rewrite')}, "
         f"retained {count('retain')}, open {count(None)}",
     ]
+    for row in document["reference_policies"]:
+        lines.append(
+            f"policy {row['subject']}: {row['files']} files, "
+            f"{row['occurrences']} occurrences, rewritable "
+            f"{row['rewritable']}, rewritten {row['rewritten']}, retained "
+            f"{row['retained']}, extended {row['extended']}, open "
+            f"{row['open']}")
     for entry in document["decisions"]["recommended"]:
         lines.append(f"recommended {entry['id']}: {entry['value']}")
     for entry in document["decisions"]["answered"]:
@@ -437,6 +451,11 @@ def emit_human(document: dict) -> int:
             answer = "none" if entry["value"] is None else entry["value"]
             lines.append(f"open {entry['id']} {entry['subject']} "
                          f"(answer: {answer}): {entry['recommendation']}")
+        elif entry["id"] == "reference-policy":
+            answer = "none" if entry["value"] is None else entry["value"]
+            lines.append(f"open {entry['id']} {entry['subject']} (answers: "
+                         f"{'|'.join(entry['answers'])}, recommended: "
+                         f"{answer}): {entry['recommendation']}")
         elif entry["id"] == "path-reference":
             lines.append(f"open {entry['id']} {entry['subject']} (answers: "
                          f"{'|'.join(entry['answers'])}): "
@@ -706,8 +725,9 @@ def build_parser() -> argparse.ArgumentParser:
                            "is the same either way")
     plan.add_argument("--answer", action="append", nargs=3, default=[],
                       metavar=("QUESTION", "SUBJECT", "VALUE"),
-                      help="settle one open candidate-class or "
-                           "path-reference question; repeatable")
+                      help="settle one open candidate-class, "
+                           "path-reference or reference-policy question; "
+                           "repeatable")
     apply_plan = subparsers.add_parser(
         "apply", help="carry out a stored ready plan in an isolated worktree")
     # Two flags and no more: naming the content-addressed id is the exact-plan
