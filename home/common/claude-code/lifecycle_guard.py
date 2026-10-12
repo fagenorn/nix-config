@@ -1,7 +1,10 @@
 """Claude Code's PreToolUse Bash lifecycle guard.
 
 The claude-code module's store wrapper clears NIX_PYTHON* and runs this file
-under `python3 -I` with `--policy <store JSON of the Nix-owned values>`.
+under `python3 -I` with `--policy` naming the compiled policy at
+`~/.agents/state/guard/policy.json`. A `--policy` given after the wrapper's
+own replaces it, which is how the wrapper's build check loads the base policy
+and a test loads a fixture.
 Standard library only: it imports nothing from the repository's helper package.
 """
 

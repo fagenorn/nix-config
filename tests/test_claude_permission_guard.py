@@ -1290,6 +1290,17 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             derived_repositories={NODO: row}, derivation={})))
         self.assertEqual(0, control.returncode, control.stderr)
 
+    def test_a_policy_path_that_is_no_readable_file_blocks_every_call(self):
+        """What a failed removal can leave at the compiled path still fails closed."""
+        directory = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+        unreadable = self.write_policy(derived_repositories={NODO: NODO_ROW}, derivation={})
+        unreadable.chmod(0)
+        for name, path in (("a directory", directory), ("an unreadable file", unreadable)):
+            with self.subTest(policy=name):
+                result = self.invoke_command("true", "--policy", str(path))
+                self.assertEqual(2, result.returncode, name)
+                self.assertIn("lifecycle guard: invalid policy: cannot load", result.stderr)
+
     def test_a_compiled_policy_round_trips_through_the_guard(self):
         """D10: the compiler's file is the guard's input, so the schema cannot drift."""
         world = GuardPolicyWorld(self)
@@ -1307,6 +1318,31 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         refused = self.run_guard("git push -u origin topic", cwd=sibling, guard_args=args)
         self.assertEqual(2, refused.returncode)
         self.assertIn("outside standing authorization", refused.stderr)
+
+    def test_a_compiled_policy_loads_whatever_branch_names_the_fleet_carries(self):
+        """The compiler and the loader agree on names: one the loader refuses costs its
+        project a row, and every row the compiler does write loads."""
+        world = GuardPolicyWorld(self)
+        world.project("nodocom", NODO, integration_branch="dev", publication_free=True,
+                      override=True)
+        world.project("fixture/wide", "acme/wide_1.x", integration_branch="release/1.x_y-z")
+        world.project("fixture/plus", "acme/plus", integration_branch="dev+ci")
+        code, report, stderr = world.compile(base=BASE_POLICY_PATH)
+        self.assertEqual((1, ["acme/wide_1.x", NODO]), (code, report["derived"]), stderr)
+        self.assertEqual([("fixture/plus", "name_unsupported")],
+                         [(r["project_id"], r["reason_code"]) for r in report["refused"]])
+        args = ("--gh-bin", str(self.fake_gh), "--policy", str(world.output))
+        loaded = self.invoke_command("true", "--policy", str(world.output))
+        self.assertEqual(0, loaded.returncode, loaded.stderr)
+        wide = self.make_repo("git@github.com:acme/wide_1.x.git")
+        allowed = self.run_guard(
+            'gh pr create --repo acme/wide_1.x --base release/1.x_y-z --head issue-7-topic '
+            '--title "x" --body "y"', cwd=wide, guard_args=args)
+        self.assertEqual(0, allowed.returncode, allowed.stderr)
+        plus = self.make_repo("git@github.com:acme/plus.git")
+        refused = self.run_guard("git push -u origin topic", cwd=plus, guard_args=args)
+        self.assertEqual(2, refused.returncode)
+        self.assertIn("repository acme/plus is outside standing authorization", refused.stderr)
 
     def test_hostile_interpreter_environment_is_ignored(self):
         # Each plant exits 0 before the guard can judge: a BASH_ENV file that the

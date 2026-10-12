@@ -1,9 +1,11 @@
 """The guard-policy compiler at its command seam (issue 126 D10, D15).
 
 Every case runs `python -m agent_tools.guard_policy compile` over `GuardPolicyWorld` and
-asserts on the exit status, the report and the written file. `TargetProfilesTest` is the one
-imported-function suite: the release grammar refuses a foreign forge target before the
-compiler sees it, so that step is pinned on a resolved snapshot edited in memory.
+asserts on the exit status, the report and the written file. Two suites call an imported
+function instead, each for a check no command input reaches: `TargetProfilesTest`, because
+the release grammar refuses a foreign forge target before the compiler sees it, and
+`UnsupportedNameTest` for the repository slug, because `github_remote.github_slug` already
+reads no slug the guard's loader would refuse.
 """
 import json
 import shutil
@@ -242,6 +244,61 @@ class ProjectRefusalTest(WorldCase):
         policy = self.world.policy()
         self.assertEqual(policy["integration_bases"], {"fagenorn/arcwave": "dev"})
         self.assertEqual(policy["derived_repositories"], {})
+
+    def test_name_unsupported_integration_branch(self):
+        """Git and the contract take `dev+ci`; the guard's loader refuses the whole policy."""
+        self.world.project("fixture/one", "fagenorn/one", integration_branch="dev+ci")
+        self.world.project("fixture/two", "fagenorn/two")
+        self.assertIn("integration_branch 'dev+ci'", self.refused("name_unsupported")["detail"])
+        self.assertEqual(sorted(self.world.policy()["derived_repositories"]), ["fagenorn/two"])
+
+    def test_name_unsupported_default_branch(self):
+        def trunk(contract: dict) -> None:
+            contract["bindings"]["vcs"].update(default_branch="rel+1", integration_branch="rel+1")
+            target = contract["release"]["profiles"]["forge-main"]["bindings"]["targets"]
+            target["repository"]["branch"] = "rel+1"
+        root = self.world.project("fixture/one", "fagenorn/one", publication_free=True,
+                                  mutate=trunk)
+        self.world.git(root, "branch", "rel+1")
+        self.world.publish(root, ["rel+1"], default="rel+1")
+        self.world.project("fixture/two", "fagenorn/two")
+        self.assertIn("default_branch 'rel+1'", self.refused("name_unsupported")["detail"])
+        self.assertEqual(sorted(self.world.policy()["derived_repositories"]), ["fagenorn/two"])
+
+    def test_an_unsupported_name_does_not_keep_its_literal_row(self):
+        """D14: the slug was derived, so its literal integration row leaves the file too."""
+        self.world.write_base(integration_bases={"fagenorn/one": "dev"})
+        self.world.project("fixture/one", "fagenorn/one", integration_branch="dev+ci")
+        self.refused("literal_conflict")
+        self.assertEqual(self.world.policy()["integration_bases"], {})
+
+
+class UnsupportedNameTest(unittest.TestCase):
+    """The loader's three names, on a hand-built row: what `unsupported_name` reports."""
+
+    @staticmethod
+    def row(default_branch: str = "main", integration_branch: str = "dev") -> dict:
+        return {"default_branch": default_branch, "integration_branch": integration_branch,
+                "evidence": {}}
+
+    def test_the_names_the_guard_loads_are_supported(self):
+        for slug, row in (("fagenorn/one", self.row()),
+                          ("Acme-1/tool_2.x", self.row("release/1.x_y-z", "feature/a.b"))):
+            with self.subTest(slug=slug):
+                self.assertIsNone(guard_policy.unsupported_name(slug, row))
+
+    def test_each_name_outside_the_loader_s_shapes_is_reported(self):
+        for slug, row, named in (
+                ("fagenorn/one+two", self.row(), "repository 'fagenorn/one+two'"),
+                ("fagenorn/one/two", self.row(), "repository 'fagenorn/one/two'"),
+                ("fagenorn", self.row(), "repository 'fagenorn'"),
+                ("fagenorn/one", self.row("rel+1"), "default_branch 'rel+1'"),
+                ("fagenorn/one", self.row("main", "dev+ci"), "integration_branch 'dev+ci'"),
+                ("fagenorn/one", self.row("main", "dev ci"), "integration_branch 'dev ci'"),
+                ("fagenorn/one", self.row("main", "dev\n"), "integration_branch 'dev\\n'"),
+        ):
+            with self.subTest(slug=slug, row=row):
+                self.assertIn(named, guard_policy.unsupported_name(slug, row))
 
 
 class TargetProfilesTest(unittest.TestCase):

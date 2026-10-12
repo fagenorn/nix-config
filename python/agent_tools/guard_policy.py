@@ -4,9 +4,10 @@
 fleet registry (`agent_platform.read_registry`) and, for each registered
 project, the contract on its registered branch of `origin`: the checkout's
 working tree, index and local branches are never read. A project earns a
-derived row only when all twelve proof steps hold in this run; the steps are
-`derive`, `target_profiles` and `compile_policy`, and each refusal carries one
-of `REASON_CODES`.
+derived row only when all twelve proof steps hold in this run and the guard's
+loader accepts the row's slug and two branch names (`unsupported_name`); the
+steps are `derive`, `target_profiles` and `compile_policy`, and each refusal
+carries one of `REASON_CODES`.
 
 It writes one JSON document, the base policy's five members with
 `integration_bases` stripped of every derived slug, plus `derived_repositories`
@@ -29,6 +30,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -47,13 +49,23 @@ REASON_CODES = (
     "root_unavailable", "origin_unproven", "branch_unresolved", "fetch_failed",
     "contract_unresolved", "identity_mismatch", "tracker_mismatch", "no_forge_target",
     "target_mismatch", "profile_inadmissible", "branch_mismatch", "provider_unproven",
-    "duplicate_repository", "literal_conflict",
+    "duplicate_repository", "literal_conflict", "name_unsupported",
 )
 CAUSES = ("base_invalid", "registry_invalid", "platform_unavailable", "output_unwritable",
           "internal")
 
 BRANCH_UNRESOLVED_REPAIRS = ("adopt.registration.remote_default_unknown",
                              "adopt.registration.integration_branch_unresolved")
+
+# The shapes the lifecycle guard's `load_policy` demands of a derived row's key
+# and of its two branches (`SLUG_PATTERN` and `REF_NAME_PATTERN` in
+# `home/common/claude-code/lifecycle_guard.py`). The guard refuses the whole
+# policy over one row outside them, and git and the contract grammar both take
+# names it does not, such as `dev+ci`. The guard is a standalone file this
+# package cannot import, so the two are restated here and the guard suite's
+# round trip holds them to what the built guard loads.
+GUARD_SLUG = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
+GUARD_REF_NAME = re.compile(r"[A-Za-z0-9._/-]+")
 
 
 class ProjectRefused(Exception):
@@ -281,6 +293,18 @@ def derive(entry: dict) -> tuple[str, dict]:
 # --------------------------------------------------------------------------
 
 
+def unsupported_name(slug: str, row: dict) -> str | None:
+    """The first of `slug` and `row`'s two branches the guard's loader refuses, or None."""
+    for member, name, shape in (("repository", slug, GUARD_SLUG),
+                                ("default_branch", row["default_branch"], GUARD_REF_NAME),
+                                ("integration_branch", row["integration_branch"],
+                                 GUARD_REF_NAME)):
+        if shape.fullmatch(name) is None:
+            return (f"{member} {name!r} is not a name the lifecycle guard loads, and one such "
+                    "row would make it refuse the whole policy")
+    return None
+
+
 def _refusal(entry: dict, error: ProjectRefused) -> dict:
     return {"project_id": entry["project_id"], "root": entry["root"],
             "reason_code": error.reason_code,
@@ -288,7 +312,8 @@ def _refusal(entry: dict, error: ProjectRefused) -> dict:
 
 
 def compile_policy(base: dict, entries: list[dict]) -> tuple[dict, dict[str, dict], list[dict]]:
-    """`(integration_bases, derived rows, refusals)`: `derive` per entry, then steps 11 and 12."""
+    """`(integration_bases, derived rows, refusals)`: `derive` per entry, then steps 11 and 12
+    and the loader's name shapes, so every row returned is one the guard loads."""
     proven: list[tuple[dict, str, dict]] = []
     refusals: list[dict] = []
     for entry in entries:
@@ -307,6 +332,8 @@ def compile_policy(base: dict, entries: list[dict]) -> tuple[dict, dict[str, dic
         elif slug in base["integration_bases"]:
             refusals.append(_refusal(entry, ProjectRefused(
                 "literal_conflict", f"{slug} is also a literal integration base")))
+        elif (unsupported := unsupported_name(slug, row)) is not None:
+            refusals.append(_refusal(entry, ProjectRefused("name_unsupported", unsupported)))
         else:
             rows[slug] = row
     bases = {slug: branch for slug, branch in base["integration_bases"].items()

@@ -318,7 +318,11 @@ in
   # after linkGeneration because the compiler loads the platform manifest from
   # ~/.agents/share, and before the settings copy. It never aborts the switch:
   # exit 1 leaves a policy without the refused projects' rows, and any other
-  # failure leaves no policy file, which makes the hook block every Bash call.
+  # failure removes the policy file, which makes the hook block every Bash call.
+  # The removal is an `if` condition because the activation script runs under
+  # `set -e`. When it fails the step says so instead, and the hook reads
+  # whatever is at the path: a directory or an unreadable or malformed file
+  # still blocks every call, and a readable earlier policy stays in force.
   home.activation.claudeGuardPolicy =
     lib.hm.dag.entryBetween [ "claudeCodeSettings" ] [ "writeBoundary" "linkGeneration" ]
       ''
@@ -327,8 +331,11 @@ in
         if [ "$guardPolicyStatus" -eq 1 ]; then
           echo "claude-guard-policy: the projects named above have no derived guard row; rerun claude-guard-policy from an authenticated shell" >&2
         elif [ "$guardPolicyStatus" -ne 0 ]; then
-          run rm -f ${lifecycleGuardPolicyPath}
-          echo "claude-guard-policy: no guard policy was written (exit $guardPolicyStatus), so the lifecycle guard blocks every Bash call; rerun claude-guard-policy from an authenticated shell" >&2
+          if run rm -f ${lifecycleGuardPolicyPath}; then
+            echo "claude-guard-policy: no guard policy was written (exit $guardPolicyStatus), so the lifecycle guard blocks every Bash call; rerun claude-guard-policy from an authenticated shell" >&2
+          else
+            echo "claude-guard-policy: no guard policy was written (exit $guardPolicyStatus) and ${lifecycleGuardPolicyPath} could not be removed, so the lifecycle guard reads whatever is there; remove it, then rerun claude-guard-policy from an authenticated shell" >&2
+          fi
         fi
       '';
 
