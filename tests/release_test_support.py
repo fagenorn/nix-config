@@ -34,6 +34,10 @@ def forge_profile() -> dict:
     return _load("github-release-profile.json")
 
 
+def publication_free_profile() -> dict:
+    return _load("publication-free-profile.json")
+
+
 def restorable_profile() -> dict:
     return _load("restorable-profile.json")
 
