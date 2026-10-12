@@ -45,6 +45,27 @@ delta, `climb_form`) and `retain` when it ends above the repository root or at
 an ancestor of the destination's directory, its target is no moved path and the
 shifted climb is valid, and `retain` alone otherwise.
 
+In a file whose base path has class `.py`, the depth reading also takes the
+parent-count chains of `python_climbs`, as climbs with no target text. An
+anchor is `Path(__file__)` or `pathlib.Path(__file__)` not preceded by an
+identifier character or `.`, with at most one `.resolve()` or `.absolute()`;
+or a name bound at column 0 by `NAME = <that>` or `NAME = <that>.parent`
+(with an optional `: Path` annotation, a trailing comment and a CRLF line
+end) and bound nowhere else in the file, at any indentation, by assignment,
+`for`, `as`, `del`, `global`, `nonlocal` or a keyword argument; a use of the
+name is the name preceded by neither an identifier character nor `.` and not
+followed by one. A chain is zero or more `.parent` then at most one
+`.parents[N]` with `N` a decimal literal, at least one of them, with no
+whitespace; it climbs the offset (-1 from the file itself, 0 from its
+directory) plus one per `.parent` plus `N + 1` levels. It is an
+occurrence under the rules of a text climb; its rewrite is the chain with `N`
+(or the number of `.parent`s, which stays at least one) moved by the depth
+delta (`shift_chain`). Not read: `os.path` calls, `Path.cwd()`, a name chained
+from another name, a binding inside a function or class, a name bound more
+than once, a chain continued by `.parent` after its end, a chain with
+whitespace or a non-literal index, and a chain overlapping a text climb or an
+occurrence another reading made in the file.
+
 It is imported and never run. It reads blobs only through git, never the
 working tree, writes nothing, and imports `adopt_inspection` and `adopt_links`
 only. Standard library only; no per-language parser is used.
@@ -84,6 +105,14 @@ _PATTERN_SAFE = re.compile(r"[A-Za-z0-9_./-]+")
 _OPENING_BEFORE = "[{,"
 _CLOSING_REST = ",])}"
 _NOT_A_CALL_BEFORE = "_)]"
+_FILE_ANCHOR = (r"(?:pathlib\.)?Path\(__file__\)"
+                r"(?:\.resolve\(\)|\.absolute\(\))?")
+_DIRECT_ANCHOR = re.compile(r"(?<![\w.])" + _FILE_ANCHOR)
+_CHAIN = re.compile(r"((?:\.parent(?!\w))*)(?:\.parents\[(\d+)\])?")
+# `\r?` keeps the binding of a CRLF file, whose `\r` the decode leaves.
+_BINDING = re.compile(
+    r"^([A-Za-z_]\w*)[ \t]*(?::[ \t]*(?:pathlib\.)?Path[ \t]*)?=[ \t]*"
+    + _FILE_ANCHOR + r"(\.parent)?[ \t]*(?:#[^\r\n]*)?\r?$", re.MULTILINE)
 
 
 # --------------------------------------------------------------------------
@@ -543,9 +572,83 @@ def _position(text: str, start: int) -> tuple[int, int]:
     return text.count("\n", 0, start) + 1, start - line_start + 1
 
 
+def _chain_at(text: str, at: int) -> tuple[int, int, int | None] | None:
+    """`(end, parents, index)` of the `.parent` / `.parents[N]` chain that
+    starts at `at`, or None when there is none or `.parent` continues it."""
+    match = _CHAIN.match(text, at)
+    end = match.end()
+    if end == at or text.startswith(".parent", end):
+        return None
+    index = match.group(2)
+    return end, len(match.group(1)) // len(".parent"), (
+        None if index is None else int(index))
+
+
+def _rebinds(name: str, text: str) -> int:
+    """How many times `name` is bound in `text`, at any indentation: by plain,
+    annotated, augmented or `:=` assignment, a keyword argument, or `for`,
+    `as`, `del`, `global` or `nonlocal`."""
+    escaped = re.escape(name)
+    assigned = re.findall(
+        r"(?<![\w.])" + escaped + r"[ \t]*(?:(?::[^=\n]*)?=(?!=)"
+        r"|(?:[-+*/%@&|^:]|//|\*\*|>>|<<)=)", text)
+    named = re.findall(
+        r"(?<![\w.])(?:for|as|del|global|nonlocal)[ \t]+" + escaped
+        + r"(?!\w)", text)
+    return len(assigned) + len(named)
+
+
+def python_climbs(text: str) -> list[tuple[int, int, int]]:
+    """`(start, end, height)` of every chain in `text` anchored at the file's
+    own location, sorted by `start`; `text[start:end]` is the chain after its
+    anchor.
+
+    An anchor is `Path(__file__)` (or `pathlib.Path(__file__)`), with at most
+    one `.resolve()` or `.absolute()`, and stands for the file; or a name bound
+    at column 0 to it, which stands for the file, or to its `.parent`, which
+    stands for its directory, and rebound nowhere else in the file. A chain is
+    `.parent`s then at most one `.parents[N]`, at least one of them, and
+    `height` is the levels it climbs from the file's directory: the file's
+    anchor offsets it by -1, the directory's by 0.
+    """
+    found = []
+
+    def add(anchor_end: int, offset: int) -> None:
+        chain = _chain_at(text, anchor_end)
+        if chain is not None:
+            end, parents, index = chain
+            found.append((anchor_end, end, offset + parents
+                          + (0 if index is None else index + 1)))
+
+    for anchor in _DIRECT_ANCHOR.finditer(text):
+        add(anchor.end(), -1)
+    for binding in _BINDING.finditer(text):
+        name = binding.group(1)
+        if _rebinds(name, text) != 1:
+            continue
+        offset = 0 if binding.group(2) else -1
+        for use in re.finditer(r"(?<![\w.])" + re.escape(name) + r"(?!\w)",
+                               text):
+            add(use.end(), offset)
+    return sorted(found)
+
+
+def shift_chain(chain: str, delta: int) -> str | None:
+    """`chain` climbing `delta` levels more, or None when it cannot: the
+    `.parents[N]` index moves with the `.parent`s kept, and a chain of
+    `.parent`s alone keeps at least one."""
+    match = _CHAIN.fullmatch(chain)
+    parents, index = match.group(1), match.group(2)
+    if index is not None:
+        shifted = int(index) + delta
+        return None if shifted < 0 else f"{parents}.parents[{shifted}]"
+    count = len(parents) // len(".parent") + delta
+    return ".parent" * count if count >= 1 else None
+
+
 def _depth_occurrences(path: str, text: str, base: Tree,
-                       sources: tuple[str, ...], target: str, tree: str
-                       ) -> list[Occurrence]:
+                       sources: tuple[str, ...], target: str, tree: str,
+                       taken: Iterable[Occurrence]) -> list[Occurrence]:
     """The `../` climbs of `text` that the move to `target` leaves landing
     elsewhere, in text order.
 
@@ -557,6 +660,10 @@ def _depth_occurrences(path: str, text: str, base: Tree,
     moves with the file. `rewrite` is offered when the climb ends at an
     ancestor of `Q` or above the root, its base target is no moved path and
     the shifted climb is valid.
+
+    In a `.py` file the chains of `python_climbs` are read too, as climbs with
+    no target text; one overlapping an occurrence in `taken`, which the other
+    readings made in the same file, or a text climb accepted here is dropped.
     """
     old_dir, new_dir = path.rpartition("/")[0], target.rpartition("/")[0]
     root = tree if path.startswith(tree + "/") else old_dir
@@ -600,6 +707,16 @@ def _depth_occurrences(path: str, text: str, base: Tree,
             lambda d, p=prefix, h=height, r=rest: climb_form(p, h + d, r))
         if occurrence is not None:
             found.append(occurrence)
+    if file_class(path) == ".py":
+        claimed = [*taken, *found]
+        for start, end, height in python_climbs(text):
+            if any(start < o.end and o.start < end for o in claimed):
+                continue
+            occurrence = consider(
+                start, end, height, None,
+                lambda d, chain=text[start:end]: shift_chain(chain, d))
+            if occurrence is not None:
+                found.append(occurrence)
     return found
 
 
@@ -687,7 +804,7 @@ def plan_references(texts: dict[str, str], paths: Iterable[str],
                     occurrences.append(occurrence)
         if path in depth_texts and tree is not None:
             occurrences += _depth_occurrences(path, text, base, sources,
-                                              target, tree)
+                                              target, tree, occurrences)
         if occurrences:
             held[path] = text
             found += occurrences

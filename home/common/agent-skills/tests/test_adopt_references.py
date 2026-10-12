@@ -878,6 +878,136 @@ class TextClimbTest(unittest.TestCase):
             refs, {}, {toml: "retain", depth: "retain"}), {})
 
 
+RUN = TOOL + "/run.py"
+BOUND = "HERE = Path(__file__).resolve().parent\n"
+
+
+def chains(text, **kwargs):
+    return [(o.subject, o.literal, o.answers, o.replacement)
+            for o in depth_found({RUN: text}, **kwargs)]
+
+
+def heights(text):
+    return [height for _, _, height in adopt_references.python_climbs(text)]
+
+
+class PythonClimbTest(unittest.TestCase):
+    """#380 D2: parent-count chains anchored at the file's own location."""
+
+    def test_anchored_chains_and_their_heights(self):
+        for text, expected in (
+                ("R = Path(__file__).parents[3]\n", [3]),
+                ("R = pathlib.Path(__file__).resolve().parent.parent\n", [1]),
+                ("R = Path(__file__).absolute().parent.parents[1]\n", [2]),
+                (BOUND + "R = HERE.parents[2]\n", [0, 3]),
+                ("F: Path = Path(__file__)  # me\nR = F.parent.parent\n", [1]),
+                ("R = Path(__file__).parents[2].joinpath('x')\n", [2])):
+            with self.subTest(text=text):
+                self.assertEqual(heights(text), expected)
+        for text in ("R = os.path.dirname(os.path.dirname(__file__))\n",
+                     "R = Path.cwd().parents[2]\n",
+                     "R = Path(__file__).parents[i]\n",
+                     "R = Path(__file__).parents[1].parent\n",
+                     "R = Path(__file__).parent.parents[i]\n",
+                     "R = Path(__file__) .parent\n",
+                     "R = MyPath(__file__).parent\n",
+                     "R = x.Path(__file__).parent\n",
+                     "R = Path(__file__)\n"):
+            with self.subTest(text=text):
+                self.assertEqual(heights(text), [])
+
+    def test_only_a_name_never_rebound_is_followed(self):
+        for text, expected in (
+                ("HERE = Path(__file__).parent\nHERE = Path('.')\n"
+                 "R = HERE.parents[2]\n", [0]),
+                (BOUND + 'HERE /= "/fixed/a/b/c"\nROOT = HERE.parents[2]\n',
+                 [0]),
+                (BOUND + "for HERE in xs:\n    pass\nR = HERE.parents[2]\n",
+                 [0]),
+                (BOUND + "def f():\n    HERE = 1\nR = HERE.parents[2]\n",
+                 [0]),
+                ("def f():\n    HERE = Path(__file__).parent\n"
+                 "    return HERE.parents[2]\n", [0]),
+                (BOUND + "ROOT = HERE.parents[2]\nX = ROOT.parent\n", [0, 3]),
+                ("UP = Path(__file__).parents[2]\nX = UP.parent\n", [2]),
+                (BOUND + "R = self.HERE.parents[2]\nS = MYHERE.parent\n",
+                 [0])):
+            with self.subTest(text=text):
+                self.assertEqual(heights(text), expected)
+
+    def test_a_chain_to_the_root_is_rewritten(self):
+        text = (BOUND + "ROOT = HERE.parents[2]\n"
+                "UP = Path(__file__).parent.parent.parent.parent\n")
+        self.assertEqual(chains(text), [
+            (RUN + ":2:12", ".parents[2]", ("rewrite", "retain"),
+             ".parents[3]"),
+            (RUN + ":3:20", ".parent.parent.parent.parent",
+             ("rewrite", "retain"), ".parent.parent.parent.parent.parent")])
+
+    def test_crlf_line_ends_read_like_lf(self):
+        crlf = (BOUND + "ROOT = HERE.parents[2]\n").replace("\n", "\r\n")
+        self.assertEqual(heights(crlf), [0, 3])
+        self.assertEqual(chains(crlf), [
+            (RUN + ":2:12", ".parents[2]", ("rewrite", "retain"),
+             ".parents[3]")])
+        refs = adopt_references.plan_references(
+            {RUN: crlf}, DEPTH_PATHS, DEPTH_MOVES, DEPTH_TREES,
+            depth_texts={RUN: crlf})
+        self.assertEqual(
+            adopt_references.rewritten(
+                refs, {}, {NOTES + ":.py/depth": "rewrite"}),
+            {TOOL_NEW + "/run.py": (
+                crlf, crlf.replace(".parents[2]", ".parents[3]"))})
+
+    def test_chains_inside_the_tree_are_not_surfaced(self):
+        self.assertEqual(chains(BOUND + "NOTES = HERE.parent\n"
+                                "T = Path(__file__).parents[1]\n"), [])
+
+    def test_a_landing_point_only_above_the_old_directory_is_retained(self):
+        self.assertEqual(chains("C = Path(__file__).parents[2]\n"), [
+            (RUN + ":1:19", ".parents[2]", ("retain",), None)])
+
+    def test_a_shallower_move_that_cannot_climb_less_is_retained(self):
+        text = (BOUND + "R = HERE.parents[2]\n"
+                "S = Path(__file__).parent.parent.parent.parent\n")
+        self.assertEqual(chains(text, moves=[(RUN, "run.py")]), [
+            (RUN + ":2:9", ".parents[2]", ("retain",), None),
+            (RUN + ":3:19", ".parent.parent.parent.parent",
+             ("rewrite", "retain"), ".parent")])
+
+    def test_only_python_files_are_read_for_chains(self):
+        path = TOOL + "/run.sh"
+        self.assertEqual(depth_found(
+            {path: "R = Path(__file__).parents[2]\n"},
+            moves=DEPTH_MOVES + [(path, TOOL_NEW + "/run.sh")],
+            trees={**DEPTH_TREES, path: NOTES},
+            paths=DEPTH_PATHS + [path]), ())
+
+    def test_a_chain_overlapping_a_token_occurrence_is_dropped(self):
+        text = ("HERE = Path(__file__).parent\n"
+                "Y = .claude/specs/x.md+HERE.parents[2]\n")
+        self.assertEqual(
+            [(o.subject, o.depth)
+             for o in depth_found({RUN: text}, scanned={RUN: text})],
+            [(RUN + ":2:5", False)])
+        self.assertEqual([o.subject for o in depth_found({RUN: text})],
+                         [RUN + ":2:28"])
+
+    def test_a_chain_inside_a_text_climb_is_dropped(self):
+        text = BOUND + 'S = "../../../HERE.parents[2]"\n'
+        self.assertEqual(chains(text), [
+            (RUN + ":2:6", "../../../HERE.parents[2]", ("rewrite", "retain"),
+             "../../../../HERE.parents[2]")])
+        refs = adopt_references.plan_references(
+            {RUN: text}, DEPTH_PATHS, DEPTH_MOVES, DEPTH_TREES,
+            depth_texts={RUN: text})
+        self.assertEqual(
+            adopt_references.rewritten(
+                refs, {}, {NOTES + ":.py/depth": "rewrite"}),
+            {TOOL_NEW + "/run.py": (
+                text, text.replace("../../../", "../../../../"))})
+
+
 def git(root: Path, *args: str) -> None:
     subprocess.run(
         ["git", "-C", str(root), *args], check=True, capture_output=True,
