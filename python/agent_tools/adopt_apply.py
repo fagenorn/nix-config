@@ -2,12 +2,14 @@
 
 Everything `adopt-project apply` is made of below its command function: the
 stored document's loader, the validation of every caller-reachable operation,
-the typed execution of the operations themselves, the seven pre-commit gates
-and their ordered run, the fixed commit message (D28), the three proofs taken
-over the commit once it exists — that it changes exactly the planned paths,
-that no Markdown file in it has more non-resolving relative links than its
-pre-move counterpart, and that the branch carries it and nothing else — and
-the retention of a failed attempt beside its worktree (D17).
+the typed execution of the operations themselves, the declared reference
+formatter and the proof that it stayed on the files it was given, the seven
+pre-commit gates and their ordered run, the fixed commit message (D28), the
+three proofs taken over the commit once it exists — that it changes exactly
+the planned paths, that no Markdown file in it has more non-resolving relative
+links than its pre-move counterpart, and that the branch carries it and
+nothing else — and the retention of a failed attempt beside its worktree
+(D17).
 
 Every refusal here mutates nothing, and nothing here trusts a stored
 operation: the plan id authenticates the plan's *inputs*, and the entry point
@@ -29,7 +31,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import json
+import os
 from pathlib import Path
+import posixpath
 import re
 import subprocess
 import tarfile
@@ -47,6 +51,7 @@ from agent_tools.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
     AdoptError,
     COMMIT_GATES,
+    CONTRACT_FILENAME,
     OPERATION_KINDS,
     RUNTIME_SENTINEL,
     canonical_json,
@@ -383,6 +388,177 @@ def execute_operation(worktree: Path, operation: dict,
 def operation_failure(message: str) -> AdoptError:
     return refuse(
         "verification_failed", "adopt.operation.failed", "/changes", message)
+
+
+# How much of a failed formatter's stderr its refusal carries.
+STDERR_TAIL = 2000
+
+
+def format_failure(repair_id: str, message: str) -> AdoptError:
+    return refuse(
+        "verification_failed", repair_id, "/reference_formatting", message)
+
+
+def generated_file_sources(worktree: Path) -> set[str] | None:
+    """The sources of the worktree contract's `generated_file` projections.
+
+    A `generated_file` target holds its source's bytes, while a
+    `managed_import` line names only the source's path. None when the
+    contract cannot be read as a projection list, so the caller keeps every
+    projection source rather than guess which kind it feeds.
+    """
+    raw = read_bytes_bounded(worktree / CONTRACT_FILENAME)
+    try:
+        contract = json.loads(raw) if raw is not None else None
+    except ValueError:
+        return None
+    entries = contract.get("projections") if isinstance(contract, dict) \
+        else None
+    if not isinstance(entries, list):
+        return None
+    return {posixpath.normpath(entry["source"]) for entry in entries
+            if isinstance(entry, dict)
+            and entry.get("kind") == "generated_file"
+            and isinstance(entry.get("source"), str)}
+
+
+def run_formatting(worktree: Path, operations: list[dict], rows: list[dict],
+                   run_resolver: Resolver) -> None:
+    """Run each declared formatter over the files its row names, and stage them.
+
+    A row's `command` is a key of the worktree's `bindings.commands`, read from
+    a `resolve` of the worktree taken here. It runs as a verification command
+    runs: its `argv`, then the row's files as absolute worktree paths in row
+    order, at the entry's `cwd`, output captured and no timeout. The row's files
+    are staged afterwards. Rows with no command are skipped, and a plan with
+    none names no formatter, so the resolver is not called at all.
+
+    Before anything runs, a file of a row that names a command and is the
+    `sources[0]` of a `regenerate-projection` operation whose projection is a
+    `generated_file` is refused, the paths compared after
+    `posixpath.normpath`, since the contract accepts a source spelled with a
+    `./` or a repeated `/`: that projection was regenerated from the
+    file's bytes before formatting, and regenerating it again would change a
+    planned `after`, so the target would be left stale behind a gate that
+    names the projection rather than the formatter. A `managed_import` renders
+    from its source's path alone, so formatting its source is allowed.
+
+    Once every command has run, `prove_formatting_confined` holds the formatter
+    to the files it was given. Any failure here is `verification_failed` with
+    `adopt.format.failed` (a formatted projection source, no resolving
+    contract, no entry for the id, a command that cannot start or exits
+    non-zero, a file that cannot be staged) or `adopt.format.unplanned_content`.
+    A command that cannot start is named in the message with its launch
+    error, and one that exits non-zero with its exit status and the tail of
+    its stderr.
+    """
+    declared = [row for row in rows if row["command"] is not None]
+    if not declared:
+        return
+    projected = {posixpath.normpath(operation["sources"][0])
+                 for operation in operations
+                 if operation["op"] == "regenerate-projection"}
+    rendered_from_bytes = generated_file_sources(worktree)
+    if rendered_from_bytes is not None:
+        projected &= rendered_from_bytes
+    for row in declared:
+        for path in row["files"]:
+            if posixpath.normpath(path) in projected:
+                raise format_failure(
+                    "adopt.format.failed",
+                    f"{path} is the source of a regenerated projection, so "
+                    "formatting it would leave that projection stale")
+    resolve_code, payload = run_resolver(worktree, "resolve")
+    bindings = payload.get("bindings") if isinstance(payload, dict) else None
+    commands = bindings.get("commands") if isinstance(bindings, dict) \
+        else None
+    if resolve_code != 0 or not isinstance(commands, dict):
+        raise format_failure(
+            "adopt.format.failed",
+            "the worktree's contract did not resolve to a command set")
+    formatted: set[str] = set()
+    for row in declared:
+        entry = commands.get(row["command"])
+        if not isinstance(entry, dict):
+            raise format_failure(
+                "adopt.format.failed",
+                "a declared formatter names no command of the contract")
+        argv = [*entry["argv"], *(str(worktree / path)
+                                  for path in row["files"])]
+        try:
+            proc = subprocess.run(argv, cwd=entry["cwd"],
+                                  capture_output=True)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise format_failure(
+                "adopt.format.failed",
+                f"the declared formatter {row['command']!r} could not be "
+                f"started: {error}") from None
+        if proc.returncode != 0:
+            tail = proc.stderr.decode("utf-8", "replace")[-STDERR_TAIL:]
+            raise format_failure(
+                "adopt.format.failed",
+                f"the declared formatter {row['command']!r} exited "
+                f"{proc.returncode}; stderr ends: {tail}")
+        code, _ = run_git(worktree, "add", "--", *row["files"])
+        if code != 0:
+            raise format_failure(
+                "adopt.format.failed",
+                "a formatted file could not be staged")
+        formatted.update(row["files"])
+    prove_formatting_confined(worktree, operations, formatted)
+
+
+def on_disk_object_id(worktree: Path, relative: str) -> str | None:
+    """The object id `git add` would store for the path as it is on disk.
+
+    A symlink is stored as its link text, so that text is hashed rather than
+    the file the link points to, which `git hash-object -- <path>` would read
+    and which does not exist for a dangling link or a link to a directory.
+    """
+    path = worktree / relative
+    if path.is_symlink():
+        code, out = run_git(worktree, "hash-object", "--stdin",
+                            input=os.fsencode(os.readlink(path)))
+    else:
+        code, out = run_git(worktree, "hash-object", "--", relative)
+    return out.decode("ascii", "replace").strip() if code == 0 else None
+
+
+def prove_formatting_confined(worktree: Path, operations: list[dict],
+                              formatted: set[str]) -> None:
+    """Refuse a formatter that touched a path it was not given.
+
+    For every planned path that is not a formatted file, the *last* operation
+    naming it as its first target and publishing an `after` must still hold:
+    the last decides because a moved file a later write edits is judged by the
+    write (D9). A `git-object:` hash is answered from the index, so the bytes
+    on disk are also hashed as `git add` would store them (a symlink as its
+    link text, see `on_disk_object_id`), which catches an unstaged edit of a
+    move-only destination (D17). A formatted file must be a
+    regular file, not a symlink. Paths no operation names are left to the
+    worktree-status gate and the commit-content proof.
+    """
+    last: dict[str, dict] = {}
+    for operation in operations:
+        if operation["targets"] and operation["after"] is not None:
+            last[operation["targets"][0]] = operation
+    for target, operation in sorted(last.items()):
+        if target in formatted:
+            continue
+        unchanged = operation_result_matches(worktree, operation)
+        if unchanged and operation["after"].startswith("git-object:"):
+            unchanged = (on_disk_object_id(worktree, target)
+                         == operation["after"].split(":", 1)[1])
+        if not unchanged:
+            raise format_failure(
+                "adopt.format.unplanned_content",
+                "a declared formatter changed a planned file it was not "
+                "given")
+    for path in sorted(formatted):
+        if not (worktree / path).is_file() or (worktree / path).is_symlink():
+            raise format_failure(
+                "adopt.format.unplanned_content",
+                "a formatted file is no longer a regular file")
 
 
 class GateRun:
