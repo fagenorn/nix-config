@@ -69,7 +69,9 @@ Every one of the three identity children runs with the `forge_adapter.TOKEN_VARI
 |---|---|---|---|
 | every entry derived (an absent registry is the empty fleet) | 0 | `complete` | written |
 | at least one refusal | 1 | `written_with_refusals` | written, refused projects absent |
-| `CompileRefused`, or any other exception | 2 | `refused` | `output.unlink(missing_ok=True)` |
+| `CompileRefused`, or any other exception | 2 | `refused` | removed: `output.unlink()` with `FileNotFoundError` and `NotADirectoryError` suppressed (both mean no file is there) |
+
+The removal never replaces the outcome: the report and exit 2 are returned with the cause already chosen (`output_unwritable` stays `output_unwritable` when the output's parent is a regular file, the case `test_an_output_that_cannot_be_written` pins). Any other `OSError` from the removal leaves the cause as chosen and appends `; could not remove the previous policy: <message>` to its detail.
 
 The written document is the base's five members with `integration_bases` replaced, plus `derived_repositories` and `derivation = {"schema_version": 1, "platform_version": manifest["platform_version"], "registry_digest": ...}`, where `manifest` is `agent_platform.load_manifest()[0]` and `registry_digest` is `telemetry_digest({"schema_version": agent_platform.REGISTRY_SCHEMA_VERSION, "projects": entries})`, or `None` when `agent_platform.registry_path()` does not exist. It is serialized as `json.dumps(document, indent=2, sort_keys=True) + "\n"` and written with `agent_platform.write_atomically`. Causes: `PlatformManifestError` from `load_manifest` is `platform_unavailable`, from `read_registry` `registry_invalid`; `OSError` from the write is `output_unwritable`; any other exception is `internal` with `"<type name>: <message>"` as its detail.
 
@@ -77,7 +79,7 @@ The report is always `{"schema_version": 1, "outcome", "derived": <sorted slugs>
 
 **Invariants:**
 - No row is written for a project unless all twelve steps held in this run; a previous file's row never survives (R4).
-- After exit 2 no file exists at `--output`, whatever was there before (R5).
+- After exit 2 no file exists at `--output`, whatever was there before (R5), unless the removal itself failed with an error other than the two suppressed ones, which the cause's detail then says.
 - `gh` never sees `GITHUB_TOKEN` or `GH_TOKEN` (the world's `gh` exits 65 if it does).
 - In a registered root nothing but the remote-tracking refs of the branches read (`refs/remotes/origin/<default>` and, when it differs, `refs/remotes/origin/<integration>`) and fetched objects is written: no `FETCH_HEAD`, no local branch, index or working-tree change.
 - The module has no contract parser, writes no snapshot, and imports nothing by path.

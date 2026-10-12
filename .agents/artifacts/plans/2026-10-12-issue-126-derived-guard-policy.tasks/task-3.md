@@ -152,6 +152,27 @@ ABSENT = object()
             # Branch deletion is not repository-bound and stays judged on its grammar.
             self.assertEqual(0, self.run_guard("git branch -d topic", cwd=repo).returncode)
 
+    def test_literal_owner_does_not_bypass_the_derived_row_check(self):
+        """R6, D8: a derived row is checked even when the owner is a literal authorized owner."""
+        slug = "fagenorn/nix-config"
+        policy = self.write_policy(derivation={}, derived_repositories={
+            slug: {"default_branch": "main", "integration_branch": "main", "evidence": {}}})
+        self.assertIn("fagenorn", self.base_policy["authorized_owners"])
+        args = ("--gh-bin", str(self.fake_gh), "--policy", str(policy))
+        repo = self.make_repo(f"git@github.com:{slug}.git", default_branch="trunk")
+        for label, command in (
+            ("push", "git push -u origin topic"),
+            ("PR creation", f'gh pr create --repo {slug} --base trunk --head t '
+                            '--title "x" --body "y"'),
+            ("merge", f"gh pr merge 7 --repo {slug} --merge --delete-branch"),
+        ):
+            with self.subTest(verb=label):
+                result = self.run_guard(command, cwd=repo, guard_args=args)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(
+                    f"lifecycle guard: unsafe {label}: repository {slug}: origin/HEAD "
+                    "names trunk, its derived policy row names main", result.stderr)
+
     def test_single_branch_derived_row_keeps_the_default_branch_only_rule(self):
         policy = self.write_policy(derivation={}, derived_repositories={
             "acme/tool": {"default_branch": "main", "integration_branch": "main",

@@ -32,11 +32,11 @@ Spec: `.agents/artifacts/specs/2026-10-12-issue-126-derived-guard-policy-design.
 - Unchanged: the guard's grammar for every verb, its protection demand and waiver, the release arm's rollup check, branch deletion, detaching words, the raise label (spec section 5); `tests/fixtures/forge-adapter-spellings.json`, `tests/fixtures/guarded-command-shapes.json`, `tests/forge_world.py`; the fleet registry schema.
 - Prose that lands in code or documentation (docstrings, comments, error messages, README sentences) describes the code as it behaves at that task's commit. Where a task lists facts instead of a sentence, write the sentence from the implemented code. Messages a test pins are given verbatim. Use full issue URLs or the words "issue 126" in prose, never a bare `#126`.
 - Every long command, each test command included, runs in the foreground from the worktree root as `launch-scope exec --repo-root <ledger repo root> --run-id <run-id> --worker-id <worker-id> -- <argv>` with an explicit timeout above its duration; commits go through `launch-commit … -- <git commit args>`, signed, with the session's trailers. Scratch files live under `launch-scope scratch`'s root.
-- Python suites run as `env PYTHONPATH="$PWD/python" python3 -m unittest <test file> [-k <pattern>]` (timeout 900 s).
+- Python suites run as `env PYTHONPATH="$PWD/python" python3 -m unittest <test file> [-k <pattern>]` (timeout 900 s). Where a task's `Run:` line pipes a suite or recipe into `tail`, the pipe only trims the display: run it under `set -o pipefail` (or without the pipe) and judge the step by the command's own exit status together with the expected text, never by `tail`'s.
 - `just build` (timeout 3600 s) evaluates the git tree, so `git add` every new file before it runs; its `./result` link is git-ignored. The guard suite runs against that build and is in no `just` recipe (spec `## Out of scope`). From Task 3 on its one invocation is (timeout 900 s):
 
   ```bash
-  set -e
+  set -e -o pipefail
   just build
   REQ=$(nix-store --query --requisites ./result)
   CLAUDE_SETTINGS_PATH=$(printf '%s\n' "$REQ" | grep -- '-claude-code-settings\.json$') \
@@ -98,3 +98,13 @@ Criteria in issue order: the five of `## Acceptance criteria`, then the five of 
 - No glossary or ADR; the three terms are fixed in the guard README: D12.
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, `gpt-6-astra`, effort `xhigh`), thread `01a12f60-b372-7bb1-b70c-ed749a465291`; isolated read-only mode; no fallback; no focus.
+- Base SHA `450f1de3627bd206a325ec1e46990d0d6cc61dc3`; plan reviewed at `f8255b86`.
+- Findings: 1 blocking and 3 should-fix, all verified against the live worktree and accepted (4 accepted, 0 rejected, 0 deferred); no discussion items.
+  - PR126-01 (blocking, Task 2): the refused outcome's removal of the previous policy suppresses `NotADirectoryError` as well as `FileNotFoundError` and never replaces the chosen cause.
+  - PR126-02 (should fix, Global Constraints): filtered verification commands run under `pipefail` and are judged by the command's own exit status.
+  - PR126-03 (should fix, Task 3): a guard test pins the derived-row default-branch check for a repository whose owner is a literal authorized owner.
+  - PR126-04 (should fix, Task 4): the README's release-creation sentence takes the standing-authorization wording along with the tag-push arm's.
