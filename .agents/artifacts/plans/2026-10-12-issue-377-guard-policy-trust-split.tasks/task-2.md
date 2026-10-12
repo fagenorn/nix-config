@@ -143,7 +143,12 @@ Update the setUpClass comment above `cls.base_policy` to say every invocation pa
                                   "is outside standing authorization", result.stderr)
 
     def test_a_compiled_policy_cannot_substitute_the_tools(self):
-        """Issue 377 criterion 2, R1: no program the compiled policy names is ever run."""
+        """Issue 377 criterion 2, R1: no program the compiled policy names is ever run.
+
+        The fake `gh` comes from a fixture base policy, never `--gh-bin`: an override
+        takes precedence over every policy value, so it would hide a guard that took
+        `gh_bin` from the compiled policy."""
+        base = self.write_base(gh_bin=str(self.fake_gh))
         markers = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
         tools = {}
         for member in ("git_bin", "gh_bin", "jq_bin"):
@@ -158,10 +163,11 @@ Update the setUpClass comment above `cls.base_policy` to say every invocation pa
         for command in ("git push -u origin topic",
                         "gh pr merge 7 --repo fagenorn/tool --merge --delete-branch"):
             with self.subTest(command=command):
-                untampered = self.run_guard(command, cwd=repo)
+                untampered = self.run_guard(command, cwd=repo,
+                                            guard_args=("--base-policy", str(base)))
                 self.assertEqual(0, untampered.returncode, untampered.stderr)
                 result = self.run_guard(command, cwd=repo, guard_args=(
-                    "--gh-bin", str(self.fake_gh), "--policy", str(tampered)))
+                    "--base-policy", str(base), "--policy", str(tampered)))
                 self.assertEqual((0, untampered.stderr), (result.returncode, result.stderr))
         self.assertEqual([], sorted(path.name for path in markers.glob("*.ran")))
 
@@ -318,12 +324,12 @@ Expected: FAIL — `test_built_base_policy_holds_exactly_the_five_trusted_member
 `home/common/claude-code/default.nix`:
 - `lifecycleGuardBasePolicy` drops `derived_repositories` and `derivation`; its comment says it holds the five trusted members, is the only place the guard reads them from, and is copied by no one (the compiler only validates it).
 - The wrapper's `exec` line becomes `… -I ${./lifecycle_guard.py} --base-policy ${lifecycleGuardBasePolicy} --policy ${lifecycleGuardPolicyPath} "$@"`; the `checkPhase` pipes the harmless payload into `"$target"` with no argument. Rewrite the comment above `lifecycleGuard` from that code (the check loads the base policy; the compiled path is not opened for a payload with no repository-bound verb).
-- `lifecycleGuardPolicyPath`'s comment: derived rows only. The `integrationBases` comment's "the guard refuse the policy" becomes that the guard refuses that repository's guarded verbs.
-- `home.activation.claudeGuardPolicy`: the comment and the two messages of the non-1 branch say that registered projects then have no derived guard row (verbs in their repositories are refused until `claude-guard-policy` succeeds), not that every Bash call is blocked; the second message keeps "could not be removed" and says the hook reads whatever rows are there. Status 1's message and the removal itself are unchanged.
+- `lifecycleGuardPolicyPath`'s comment: derived rows only. In the `integrationBases` comment, "a repository present in both makes the compiler withhold both rows and the guard refuse the policy" becomes: the compiler refuses that project its derived row (`literal_conflict`), the literal row stays in the base policy, and the guard refuses the guarded verbs of a repository that has both a literal row and a compiled row.
+- `home.activation.claudeGuardPolicy`: the comment and the two messages of the non-1 branch say that registered projects then lose their derived guard row, and with it their derived integration branch, so only a repository that relies on a derived row for its authorization is refused until `claude-guard-policy` succeeds, while authorization from the base policy (an authorized owner or a literal integration row) still applies; they no longer say that every Bash call is blocked. The second message keeps "could not be removed" and says the hook reads whatever rows are there. Status 1's message and the removal itself are unchanged.
 
 `python/agent_tools/guard_policy.py`: `POLICY_MEMBERS`, `DERIVATION_SCHEMA_VERSION = 2`, `read_base` demanding exactly `BASE_MEMBERS` (drop the compiled-policy check), `compile_policy` returning `(rows, refusals)` with no `integration_bases` stripping, `_write` writing `{"derived_repositories": rows, "derivation": {...}}`. Rewrite the module docstring's second paragraph and the comment above `GUARD_SLUG` (a row outside these shapes makes the guard drop the whole compiled policy) from the code.
 
-`python/README.md` § guard-policy: the base policy has exactly the five trusted members; `compile` writes `derived_repositories` and `derivation` only (`derivation.schema_version` 2); a `literal_conflict` project gets no row and the literal row stays in the base policy (issue 377 D5); the lifecycle guard reads its trusted members from the base policy only.
+`python/README.md` § guard-policy: the base policy has exactly the five trusted members; `compile` writes `derived_repositories` and `derivation` only (`derivation.schema_version` 2); a `literal_conflict` project gets no row and the literal row stays in the base policy (issue 377 D5), so the closing sentence about removing derived slugs from the written `integration_bases` goes; the lifecycle guard reads its trusted members from the base policy only. In the `name_unsupported` sentence, the guard's `load_policy` becomes `load_compiled_policy`, and "the guard refuses the whole policy over one such row, which would block every Bash call" becomes that the guard drops the whole compiled policy over one such row, which removes every derived row and blocks nothing the base policy allows (issue 377 D4).
 
 - [ ] **Step 4: Verify**
 
@@ -343,6 +349,8 @@ grep -q '^BASE_POLICY_KEYS = ' "$f"
 grep -q '^def load_compiled_policy(' "$f"
 if grep -q 'derived_repositories = { };' home/common/claude-code/default.nix; then exit 1; fi
 if grep -qE 'blocks? every (Bash )?call' home/common/claude-code/default.nix; then exit 1; fi
+if grep -q 'withhold both rows' home/common/claude-code/default.nix; then exit 1; fi
+if grep -qE '`load_policy`|block every Bash call' python/README.md; then exit 1; fi
 echo SPLIT
 ```
 

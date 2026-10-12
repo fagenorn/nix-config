@@ -150,11 +150,14 @@ on the registered branch fetched from `origin` in this run, and the provider's
 answer for `repos/S`. No ref already present is trusted.
 
 **Bound and cost.** The guard records its start and gives itself an invocation
-deadline of 27 seconds. Every child started once the context exists gets the
-smaller of its own bound and the time left: 15 seconds for the row check,
-`--child-timeout-seconds` (5) for the others. A child that hits its bound
-refuses, as today, so the guard answers inside the hook timeout without relying
-on what the harness does with a timed-out hook. Measured on the host on
+deadline of 27 seconds. The row check gets the smaller of its own 15 seconds
+and the time left, and is not started when no time is left. Every other child
+started once the context exists starts only while its whole
+`--child-timeout-seconds` bound (5) fits in the time left; otherwise the guard
+refuses, naming the invocation deadline, and judges no later operation of a
+chained command (D12). A child that hits its bound refuses, as today, so the
+guard answers inside the hook timeout without relying on what the harness does
+with a timed-out hook. Measured on the host on
 2026-10-12: `git ls-remote origin` 1.9 s and `gh api repos/<slug>` 0.7 s. A
 derivation is one listing, one fetch per branch read and one provider read, so
 the expected cost is about 5 s for a single-branch project and about 7 s for
@@ -338,3 +341,4 @@ policy.
 | D9 | No glossary or ADR is written; the terms **base policy**, **compiled policy**, **derived row** and **row check** are fixed in the guard README and this ledger is the decision record. | No context path is bound for this project; issue 126 D12 is the precedent. | Creating a context map or `adr/` directory: an unauthorized new knowledge surface. |
 | D10 | (Plan.) R6's 27-second invocation deadline gets no override flag: one guard-suite test proves it with a row check that outlives a 60-second `--derive-timeout-seconds`, at a cost of about 27 s of suite time; a second, fast test proves the process-group kill with a short `--derive-timeout-seconds`. | D6; the suite's settings pin refuses test overrides in the registered command, so every new flag widens what it must list. | A `--deadline-seconds` override: a sixth test flag for one assertion. Proving R6 by review alone: the one requirement about the hook timeout would have no check. |
 | D11 | (Plan.) Delivery order: the additive `derive` subcommand first, then the trust split as one atomic commit (guard two-input load, bad-file rule, compiler output, Nix base and wrapper, both suites), then the row check at use. Between the last two, the branch uses compiled rows unchecked, exactly as #375 does on `main`; nothing is switched before the pull request carries all three. | Issue 126 plan precedent (atomic cutover task); the issue's out-of-scope line excludes activating the host. | One commit for everything: a review unit too large to reject in part. The row check first: it would recheck rows of a file whose trusted members are still read. |
+| D12 | (Plan, standards review.) Refusal on an exhausted deadline. The row check gets `min(--derive-timeout-seconds, time left)` and is not started when no time is left; every other child started once the context exists starts only when its whole `--child-timeout-seconds` bound fits before the deadline, else the guard refuses with one fixed message naming the 27-second invocation deadline and judges no later operation. The guard checks at the top of each operation of `main`'s loop and when a child's bound is read. Tested inside D10's one slow test, concurrently, with no override flag. | Codex plan review B1: the planned `max(0.01, min(child bound, time left))` floor let a chained command keep starting fast children past the deadline, so R6 was unfulfilled. | Keeping the 10 ms floor. Clipping each child to the time left and refusing only at zero: a deadline crossed inside a clipped child surfaces as that child's own timeout, so no test can pin the deadline refusal, and the floor's failure stays untestable. |

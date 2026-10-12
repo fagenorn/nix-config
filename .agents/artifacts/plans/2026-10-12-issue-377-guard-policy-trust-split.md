@@ -9,7 +9,7 @@
 
 **Tech stack:** Python 3 standard library (`agent_tools` under `python/`, the standalone `home/common/claude-code/lifecycle_guard.py`), `unittest`, Nix (home-manager module `home/common/claude-code/default.nix`), `git` and `gh` as child processes.
 
-Spec: `.agents/artifacts/specs/2026-10-12-issue-377-guard-policy-trust-split-design.md` (requirements R1–R6, sections 1–7, `## Test seams`; its `## Decision ledger` rows D1–D11 are cited by ID; "issue 126 Dn" cites the ledger that spec names).
+Spec: `.agents/artifacts/specs/2026-10-12-issue-377-guard-policy-trust-split-design.md` (requirements R1–R6, sections 1–7, `## Test seams`; its `## Decision ledger` rows D1–D12 are cited by ID; "issue 126 Dn" cites the ledger that spec names).
 
 ## Global Constraints
 
@@ -70,8 +70,18 @@ Task 4 — Guard prose: trust split, row check, residual — `home/common/claude
 - Two closed schemas, the compiler's two-member output and five-member base: D1. The bad-file rule (compiled: no row; base: block every call): D4.
 - The row check, its command and comparison: D2; network on every row-bound verb with no cache or lock: D3; its path as a wrapper argument: D7.
 - Literal/derived overlap refused at use, literal never withheld: D5.
-- Deadline and process group: D6; its test without an override flag: D10 (appended by this plan).
+- Deadline and process group: D6; its test without an override flag: D10 (appended by this plan); refusal once the deadline leaves too little time for the next child, no 10 ms floor: D12 (appended by the standards review).
 - Test seams: D8. Delivery order and the unchecked-row interval on the branch: D11 (appended by this plan).
 - No glossary or ADR: D9.
+
+## Standards review provenance
+
+- Reviewer: Codex (codex-companion plan-review, model gpt-6-astra, reasoning effort xhigh), isolated read-only mode, no focus, no fallback.
+- Base: `69a1047920707528fc97729b57b705332a360d27`.
+- Disposition: accepted 4, rejected 0, deferred 0. Discussion: none.
+  - B1 (blocking): the deadline's 10 ms floor let chained children run past it (R6). Applied in Task 3 per spec D12 (appended by this review).
+  - S1: the tool-substitution test took the fake `gh` from `--gh-bin`. Applied in Task 2: it comes from a fixture base policy.
+  - S2: the activation messages overstated what a missing compiled policy refuses (Task 2), and Task 4 called an estimated cost measured.
+  - S3: Task 2 now names the `integrationBases` comment in `default.nix` and the `load_policy` sentence of `python/README.md` § guard-policy.
 
 ---

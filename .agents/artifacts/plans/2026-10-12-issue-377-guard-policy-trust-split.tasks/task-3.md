@@ -1,6 +1,6 @@
 # Task 3: Row check at use under an invocation deadline
 
-Spec section 2 (`--derive-bin`, the row-check script), section 3 "Guard" steps 3–4, "Bound and cost", "Unreachable `origin` or provider" and "Environment and concurrency" (per D2, D3, D6, D7, D8, D10). After this task a compiled row authorizes nothing until the row check confirms it in the same invocation.
+Spec section 2 (`--derive-bin`, the row-check script), section 3 "Guard" steps 3–4, "Bound and cost", "Unreachable `origin` or provider" and "Environment and concurrency" (per D2, D3, D6, D7, D8, D10, D12). After this task a compiled row authorizes nothing until the row check confirms it in the same invocation, and no child starts once the invocation deadline leaves too little time for it (D12).
 
 **Files:**
 - Modify: `home/common/claude-code/lifecycle_guard.py`
@@ -11,15 +11,17 @@ Spec section 2 (`--derive-bin`, the row-check script), section 3 "Guard" steps 3
 **Interfaces:**
 - Consumes (Task 1): `python -m agent_tools.guard_policy derive --repository <slug>`, its report keys and exit statuses. (Task 2): `Context(args, base, cwd)`, `row_problem`, `derived_row`, `ownership_problem`, `write_policy`, `write_base`, `invoke_raw(..., timeout=5)`.
 - Produces:
-  - Guard: `INVOCATION_DEADLINE_SECONDS = 27`; argv `--derive-bin` (required) and `--derive-timeout-seconds` (float, default 15); `Context(args, base, cwd, deadline)` where `deadline` is `time.monotonic()` at the top of `main` plus 27; `Context.timeout` becomes a read-only property, `max(0.01, min(args.child_timeout_seconds, deadline - time.monotonic()))`; `row_check_problem(derive_bin, repository, row, timeout) -> str | None`.
+  - Guard: `INVOCATION_DEADLINE_SECONDS = 27`; `class DeadlineExhausted(Exception)`; `DEADLINE_REFUSAL` (the text under Invariants); argv `--derive-bin` (required) and `--derive-timeout-seconds` (float, default 15); `Context(args, base, cwd, deadline)` where `deadline` is `time.monotonic()` at the top of `main` plus 27; `Context.timeout` becomes a read-only property that returns `args.child_timeout_seconds` when `deadline - time.monotonic()` is at least that bound and raises `DeadlineExhausted` otherwise (no floor, no clipping); `row_check_problem(derive_bin, repository, row, timeout) -> str | None`, whose `timeout` the caller computes as `min(args.derive_timeout_seconds, deadline - time.monotonic())`, raising `DeadlineExhausted` instead of calling it when that remaining time is not positive.
   - Nix: `lifecycleGuardRowCheck`, a `pkgs.writeShellScript "claude-guard-row-check"` that exports `PATH="<store git, gh, openssh bin>:$PATH"` and runs `exec ${agentTools.launchers.guard-policy} derive "$@"`; that PATH string is one `let` binding shared with `claudeGuardPolicy`. Not added to `home.packages`.
   - Test support: `GuardPolicyWorld.row_check() -> Path`, an executable `/bin/sh` script in the world's temp dir that exports the world's `HOME`, `PATH`, `PYTHONPATH`, `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` (values `shlex.quote`d) and runs `exec <sys.executable> -m agent_tools.guard_policy derive "$@"`.
   - Guard suite: `FAKE_DERIVE_SCRIPT` stub, `cls.fake_derive`, `rows_env(rows) -> dict`, `run_guard(..., timeout=5)` passed through to `invoke_raw`.
 
 **Invariants:**
 - Context order for a repository `S` with a compiled row (spec section 3): (1) literal conflict, (2) `origin/HEAD` against the row's `default_branch`, (3) the row check, (4) the comparison. The first problem found is `row_problem`; later steps do not run. A repository with no row runs no row check and makes no network read.
-- The row check runs at most once per invocation, when the context is built, as `[derive_bin, "--repository", S]` with stdin `/dev/null`, stdout and stderr captured, `start_new_session=True`, the guard's own environment, bounded by `min(--derive-timeout-seconds, deadline - now)` (floor 0.01). On the bound the guard sends `SIGKILL` to the child's whole process group (`os.killpg`, `ProcessLookupError` ignored) and reaps the direct child with `wait()`, never reading the pipes again.
-- Every other child started once the context exists takes `Context.timeout`, so no verdict waits past the deadline by more than one child's teardown (R6).
+- The row check runs at most once per invocation, when the context is built, as `[derive_bin, "--repository", S]` with stdin `/dev/null`, stdout and stderr captured, `start_new_session=True`, the guard's own environment, bounded by `min(--derive-timeout-seconds, deadline - now)`. When `deadline - now` is not positive the row check is not started: `Context.__init__` raises `DeadlineExhausted` (no 0.01 floor). On the bound the guard sends `SIGKILL` to the child's whole process group (`os.killpg`, `ProcessLookupError` ignored) and reaps the direct child with `wait()`, never reading the pipes again.
+- Every other child started once the context exists (the two `Context.__init__` reads, and every child of the push, PR-creation, release and merge validators) takes `context.timeout` as its bound, read immediately before that child starts. It therefore starts only when its whole `--child-timeout-seconds` bound ends before the deadline; otherwise reading the property raises `DeadlineExhausted` and the child is never started. No such child is clipped, so once the context exists the deadline refuses with `DEADLINE_REFUSAL`, never with a clipped child's own timeout message; only the row check, which the deadline does clip, refuses as `timed out` when the deadline cuts it off. No verdict waits past the deadline by more than the row check's teardown (R6, D12).
+- `main` enforces the deadline at two points: at the top of each iteration of its operation loop it refuses when `time.monotonic() >= started + INVOCATION_DEADLINE_SECONDS`; and it catches `DeadlineExhausted` around the `Context(...)` construction and the validator call of that iteration. Both refuse with `block(f"unsafe {OPERATION_LABELS[operation]}: {DEADLINE_REFUSAL}")` and return at once, so no later operation of a chained command is judged. `DeadlineExhausted` subclasses `Exception` only (never `OSError` or `subprocess.SubprocessError`), so no validator's `except (subprocess.TimeoutExpired, OSError)` swallows it and the module's top-level `except Exception` ("unexpected failure") never sees it.
+- `DEADLINE_REFUSAL`, verbatim: `the 27-second invocation deadline leaves too little time for the next check, so it was not started` (built from `INVOCATION_DEADLINE_SECONDS`).
 - The report is confirmed only when: stdout parses as one JSON object; its `repository` is `S`; its `outcome` matches the exit status (`derived`/0, `refused`/1, `unavailable`/2); for `derived`, `row` is an object whose `default_branch` and `integration_branch` are strings equal to the compiled row's. `evidence` is never compared. A row that fails is never used and the owner literal is never consulted for `S`.
 - Refusal text, verbatim: `repository {S}: the row check did not confirm its derived policy row: {why}; repair: run claude-guard-policy`, with `why` one of:
   - `could not start ({error})` — `OSError` from `Popen`
@@ -35,12 +37,13 @@ Spec section 2 (`--derive-bin`, the row-check script), section 3 "Guard" steps 3
 
 `tests/test_claude_permission_guard.py`:
 
-(a) `import time` at the top. After `FAKE_GH_SCRIPT`, add the stub row check (the `@ROWS@` marker is replaced, not `str.format`ted, because the script holds braces):
+(a) `import concurrent.futures` and `import time` at the top. After `FAKE_GH_SCRIPT`, add the stub row check (the `@ROWS@` marker is replaced, not `str.format`ted, because the script holds braces):
 
 ```python
 # Stand-in for the row check (`guard-policy derive`). Answers from a JSON object
 # of slug -> row: FAKE_DERIVE_ROWS names one, else the class default (Nodo's row).
-# FAKE_DERIVE_MODE: rows (default), refused_code, unavailable, garbage, hang.
+# FAKE_DERIVE_MODE: rows (default), refused_code, unavailable, garbage, hang, and
+# slow (sleeps until the time.time() instant FAKE_DERIVE_UNTIL, then answers as rows).
 # FAKE_DERIVE_LOG appends each slug asked; FAKE_DERIVE_PIDFILE receives the pid
 # of the grandchild `hang` leaves behind.
 FAKE_DERIVE_SCRIPT = '''
@@ -65,6 +68,8 @@ if mode == "hang":
     with open(os.environ["FAKE_DERIVE_PIDFILE"], "w", encoding="utf-8") as stream:
         stream.write(str(sleeper.pid))
     time.sleep(600)
+if mode == "slow":
+    time.sleep(max(0.0, float(os.environ["FAKE_DERIVE_UNTIL"]) - time.time()))
 if mode == "garbage":
     print("{")
     raise SystemExit(0)
@@ -225,18 +230,36 @@ raise SystemExit(1)
                       result.stderr)
         self.assert_row_check_killed(pidfile)
 
-    def test_the_invocation_deadline_bounds_the_row_check(self):
-        """Issue 377 R6, D10: a 60-second bound still answers inside 27 s (slow by design)."""
+    def test_the_invocation_deadline_bounds_the_row_check_and_every_later_child(self):
+        """Issue 377 R6, D10, D12 (slow by design; the two cases share one 27 s wait).
+
+        `hung`: a row check that outlives a 60-second bound is killed inside 27 s.
+        `exhausted`: a row check that confirms Nodo's row 25 s in leaves less than one
+        5-second child bound, so the first chained push is refused before its first
+        child and the second is never judged."""
         pidfile = Path(tempfile.mkdtemp(dir=self.fixture_dir.name)) / "pid"
         repo = self.make_repo(f"git@github.com:{NODO}.git")
+        args = ("--gh-bin", str(self.fake_gh), "--derive-timeout-seconds", "60")
         started = time.monotonic()
-        result = self.run_guard(
-            "git push -u origin topic", cwd=repo, timeout=40,
-            guard_args=("--gh-bin", str(self.fake_gh), "--derive-timeout-seconds", "60"),
-            env={"FAKE_DERIVE_MODE": "hang", "FAKE_DERIVE_PIDFILE": str(pidfile)})
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            hung = pool.submit(
+                self.run_guard, "git push -u origin topic", cwd=repo, timeout=40,
+                guard_args=args,
+                env={"FAKE_DERIVE_MODE": "hang", "FAKE_DERIVE_PIDFILE": str(pidfile)})
+            exhausted = pool.submit(
+                self.run_guard, "git push -u origin topic-a && git push -u origin topic-b",
+                cwd=repo, timeout=40, guard_args=args,
+                env={"FAKE_DERIVE_MODE": "slow", "FAKE_DERIVE_UNTIL": str(time.time() + 25)})
+            hung, exhausted = hung.result(), exhausted.result()
         elapsed = time.monotonic() - started
-        self.assertEqual(2, result.returncode, result.stderr)
-        self.assertIn("timed out", result.stderr)
+        self.assertEqual(2, hung.returncode, hung.stderr)
+        self.assertIn("the row check did not confirm its derived policy row: timed out",
+                      hung.stderr)
+        self.assertEqual(2, exhausted.returncode, exhausted.stderr)
+        self.assertIn("lifecycle guard: unsafe push: the 27-second invocation deadline leaves "
+                      "too little time for the next check, so it was not started",
+                      exhausted.stderr)
+        self.assertEqual(1, exhausted.stderr.count("lifecycle guard:"), exhausted.stderr)
         self.assertGreater(elapsed, 20)
         self.assertLess(elapsed, 29)
         self.assert_row_check_killed(pidfile)
@@ -256,6 +279,8 @@ raise SystemExit(1)
         self.assertEqual(f"{NODO}\n", log.read_text(encoding="utf-8"))
 ```
 
+The deadline test keeps D10's seam: no deadline override flag, and the two cases run concurrently so the suite still pays the 27-second wait once. Its timing margins: the `exhausted` guard starts after `FAKE_DERIVE_UNTIL` is computed, so its deadline falls at least 2 s after the instant the stub answers, inside the row check's clipped bound; and while the guard starts within 3 s of the `submit`, less than 5 s remain when the first push's `check-ref-format` child would start. The `exhausted` case is what tells D12 apart from the rejected clipping rule: clipped to the 2 s left, both pushes' checks would run and the command would be allowed.
+
 - [ ] **Step 2: Run the suite and watch it fail**
 
 Run the guard-suite invocation (Global Constraints) with the test edits staged (`git add`).
@@ -263,7 +288,7 @@ Expected: FAIL — every invocation errors in argparse on `--derive-bin`, so the
 
 - [ ] **Step 3: Write the minimal implementation**
 
-`home/common/claude-code/lifecycle_guard.py`, to the interfaces, invariants and messages above: `import signal` and `import time`; `INVOCATION_DEADLINE_SECONDS`; the two arguments; `started = time.monotonic()` as the first statement of `main` and `Context(args, base, payload.get("cwd"), started + INVOCATION_DEADLINE_SECONDS)`; the `timeout` property; `row_check_problem` called from `Context.__init__` as step 3 of the row order. Module docstring: the wrapper also passes `--derive-bin`, the row check it runs before relying on a compiled row; written from the code.
+`home/common/claude-code/lifecycle_guard.py`, to the interfaces, invariants and messages above: `import signal` and `import time`; `INVOCATION_DEADLINE_SECONDS`, `DeadlineExhausted` and `DEADLINE_REFUSAL`; the two arguments; `started = time.monotonic()` as the first statement of `main` and `Context(args, base, payload.get("cwd"), started + INVOCATION_DEADLINE_SECONDS)`; the `timeout` property; `row_check_problem` called from `Context.__init__` as step 3 of the row order, after the remaining-time check; in `main`'s operation loop, the deadline check at the top of each iteration and the `except DeadlineExhausted` refusal around the context construction and validator call (D12). The comment on `Context.timeout` says a child starts only when its whole bound fits before the deadline; written from the code. Module docstring: the wrapper also passes `--derive-bin`, the row check it runs before relying on a compiled row; written from the code.
 
 `home/common/claude-code/default.nix`: the shared PATH binding, `lifecycleGuardRowCheck`, and the wrapper line `… --policy ${lifecycleGuardPolicyPath} --derive-bin ${lifecycleGuardRowCheck} "$@"`. The comment above `lifecycleGuardRowCheck` says what it runs, that it pins the store `git`, `gh` and `ssh` first on `PATH` as `claude-guard-policy` does, and that it is not installed on `PATH`.
 
@@ -285,6 +310,8 @@ f=home/common/claude-code/lifecycle_guard.py
 grep -q 'start_new_session=True' "$f"
 grep -q 'os.killpg(' "$f"
 grep -q '^INVOCATION_DEADLINE_SECONDS = 27$' "$f"
+grep -q '^class DeadlineExhausted(Exception):$' "$f"
+if grep -q 'max(0\.01' "$f"; then exit 1; fi
 if grep -q 'claude-guard-row-check' home/common/claude-code/default.nix; then echo WIRED; else exit 1; fi
 ```
 
