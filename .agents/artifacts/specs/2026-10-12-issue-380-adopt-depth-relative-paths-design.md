@@ -102,9 +102,12 @@ anchor followed by zero or more `.parent` and then at most one
   `.absolute()`; its offset is −1 (the file itself);
 - **bound name**: a name bound exactly once at column 0 of the file, by
   `NAME = <direct anchor>` or `NAME = <direct anchor>.parent` (an optional
-  `: Path` annotation and a trailing comment allowed), and assigned nowhere
-  else at column 0; its offset is −1 or 0. A use is the name preceded by
-  neither an identifier character nor `.`, anywhere in the file.
+  `: Path` annotation, a trailing comment and a `\r\n` line end allowed), and
+  rebound nowhere else in the file, at any indentation (no other plain,
+  annotated, augmented or `:=` assignment, and no `for`, `as`, `del`, `global`
+  or `nonlocal` naming it; a keyword argument of that name also counts, which
+  errs towards not following); its offset is −1 or 0. A use is the name
+  preceded by neither an identifier character nor `.`, anywhere in the file.
 
 The height is the offset plus one per `.parent` plus `N + 1` for
 `.parents[N]`. The occurrence's span is the chain after the anchor (from its
@@ -112,7 +115,9 @@ first `.parent`), its `literal` that text, and its `line` and `column` those of
 the span's first character, so subjects never collide with a token occurrence.
 A binding's own chain has height −1 or 0 and so never climbs out; a binding
 that climbs further is a direct chain occurrence and its name is not tracked,
-so no use is adjusted twice. Matches inside strings and comments count, as
+so no use is adjusted twice. A chain whose span overlaps a text climb of the
+same file, or an occurrence another reading made there, is dropped, so one
+span never carries two edits. Matches inside strings and comments count, as
 they do for tokens. Not read: `os.path.dirname`, `os.path.join(..., "..")`,
 `Path.cwd()`, chains through other names (`ROOT = HERE.parents[2]` makes `ROOT`
 nothing), function-local bindings, whitespace inside a chain, and a non-literal
@@ -266,3 +271,5 @@ agent_tools.adopt_project` under the recipe's `PYTHONPATH`, plus the
 | D9 | Grill: a plan whose moved files hold a depth occurrence is `draft` until its `/depth` policies or occurrences are answered, even when it was `ready` before this change | The issue's "no silent default" and bootstrap's "no project policy is defaulted"; issue 372 D3 (a recommendation is never applied) | Defaulting `/depth` to `retain` so earlier ready plans stay ready, which is the silent breakage the issue reports |
 | D10 | Plan: `plan_references` takes the depth read set as a keyword `depth_texts` beside the unchanged `texts`; `Occurrence` gains a last field `depth: bool = False` and `occurrence_class` derives `<file class>/depth` from it; `derive_references` reads each blob once for both scans and returns no references only when neither scan finds a file | Issue 376 D6/D13 (a defaulted last field and a derived class keep every caller and existing row byte-identical); D7 | A separate function or `References` member for depth occurrences, which would duplicate the answer, summary and edit paths the spec reuses |
 | D11 | Plan: a text climb whose rest holds a `..` segment, and a Python chain directly continued by `.parent` (`.parents[1].parent`, `.parent.parents[i]`), are not read; a Python chain whose span overlaps an occurrence another reading made in that file is dropped | D1 needs one height per climb, and reading part of such a chain would surface a wrong landing point with a wrong `rewrite`; the spec tries the depth reading last | Summing mixed segments, outside D2/D3's grammar; keeping both overlapping occurrences, which would splice one span twice |
+| D12 | Phase-5 review: a Python chain whose span overlaps a text climb the depth reading accepted in the same file is dropped, as one overlapping another reading's occurrence already was; regression pins the rewritten bytes of `S = "../../../HERE.parents[2]"` (Task 2) | Reviewer (B1): `taken` held only token occurrences, so the climb and the chain both edited one span and the splice in `rewritten` let the climb overwrite the chain's `.parents[3]`; D11's one-edit-per-span intent | Dropping the text climb instead (it spans the whole literal, so it is the edit that resolves the string as written) |
+| D13 | Phase-5 review: a bound name is followed only when nothing else in the file rebinds it, at any indentation (plain, annotated, augmented, `:=`, `for`/`as`/`del`/`global`/`nonlocal`; a keyword argument of that name also excludes it), and `_BINDING` accepts a `\r\n` line end; negative case `HERE /= "/fixed/a/b/c"` and a CRLF regression (Task 2) | Reviewer (B2, B3): the column-0 `=` count missed `HERE /= ...`, proposing `.parents[3]` for a rebound name; `[ \t]*(?:#.*)?$` refused an uncommented binding ending in `\r`, which the strict-UTF-8 decode keeps, hiding AC1's chain; spec "assigned nowhere else" | Counting only column-0 assignments plus augmented ones (misses `for`/`with` rebinding); normalising line ends before matching (shifts offsets and the bytes `rewrite` splices) |

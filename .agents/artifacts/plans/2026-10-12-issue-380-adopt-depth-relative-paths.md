@@ -9,7 +9,7 @@
 
 **Tech stack:** Python 3 standard library (`agent_tools` package under `python/`), `unittest`, real `git init` fixture repositories under a temporary `HOME`.
 
-Spec: `.agents/artifacts/specs/2026-10-12-issue-380-adopt-depth-relative-paths-design.md`. Its `## Decision ledger` rows D1–D11 are cited by ID.
+Spec: `.agents/artifacts/specs/2026-10-12-issue-380-adopt-depth-relative-paths-design.md`. Its `## Decision ledger` rows D1–D13 are cited by ID.
 
 ## Global Constraints
 
@@ -52,7 +52,7 @@ Task 3 — The depth read set, depth occurrences in plan, apply and verify, and 
 | AC3 | code (classified) | Task 1 | `test_adopt_references.py::TextClimbTest::test_a_same_depth_move_surfaces_nothing_new` (no classification row moves at the same depth, so the seam is `plan_references`) |
 | AC4 | code (classified) | Task 3 | every existing class of `test_adopt_references.py`, `test_adopt_project.py`, `test_adopt_apply.py`, `test_adopt_verify.py` and `test_adopt_project_boundaries.py` green with no existing test edited; `TextClimbTest::test_the_depth_read_set_gets_the_depth_reading_only` |
 | AC5 | code (classified) | Task 3 | `test_adopt_verify.py::DepthRewriteVerifyTest::test_a_rewritten_climb_verifies_as_derived` |
-| AC6 | code (classified) | Task 3 | `just agent-workflow-tests` exits 0 on the final head |
+| AC6 | evidence | Task 3 | command `just agent-workflow-tests` (timeout 3600 s), run once on the final head after every task is committed; threshold: exit status `0` |
 
 ## Decisions
 
@@ -61,6 +61,16 @@ Task 3 — The depth read set, depth occurrences in plan, apply and verify, and 
 - The separate depth read set: per D7.
 - The core's interface (`depth_texts`, `Occurrence.depth`, one read per blob): per D10.
 - Grammar edges (a rest holding `..`, a chain continued after `.parents[N]`, a chain overlapping another reading's occurrence): per D11.
-- Planning added D10–D11 to the spec's ledger; no other decision was forced.
+- Planning added D10–D11 to the spec's ledger; the Phase-5 review added D12 (chain inside a text climb) and D13 (rebinding, CRLF bindings).
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`gpt-6-astra`, effort `xhigh`), fresh thread, isolated read-only mode, no fallback. Base SHA `15ccdd44bb73330e49be63cffa8b7c03f56c709c`.
+- Counts: 5 accepted, 0 rejected, 0 deferred.
+- B1 accepted: a Python chain overlapping an accepted text climb is dropped, with a rewritten-bytes regression (Task 2; D12).
+- B2 accepted: a bound name rebound anywhere (augmented, `:=`, `for`/`as`/`del`/`global`/`nonlocal`, any indentation) is not followed, with negative cases (Task 2; D13).
+- B3 accepted: `_BINDING` accepts a `\r\n` line end over the original text, with a CRLF regression (Task 2; D13).
+- S1 accepted: Task 3 qualifies the README's "A variable is never followed to its definition" with the Python-binding exception.
+- S2 accepted: AC6 is `evidence`, owned by Task 3, with its command, final-head condition and exit-status threshold.
