@@ -38,13 +38,22 @@ from .test_adopt_project import (
     LINKED_BASE,
     LINKED_SOURCES,
     LINKED_SUMMARY,
+    LINT_TOML,
     MOVED_TOOL,
     MOVED_TOOL_AFTER,
     MOVED_TOOL_NEW,
     MOVED_TOOL_SUBJECT,
+    POLICY_CODE,
+    POLICY_DIR,
+    POLICY_NEW,
+    POLICY_READY_ANSWERS,
+    POLICY_REWRITTEN,
     REFERENCE_ROW,
     REFERENCE_SUBJECT,
+    RUN_REPORT,
+    SETTINGS,
     UNRELATED_SCRIPT,
+    answer_args,
     commit,
     fixture_contract,
     git,
@@ -57,6 +66,7 @@ from .test_adopt_project import (
     write_dissolved_tree,
     write_linked_tree,
     write_moved_tool,
+    write_policy_tree,
     write_reference_tree,
 )
 
@@ -871,6 +881,120 @@ class MovedFileReferenceApplyTest(ApplyTestCase):
         self.assertNotIn(MOVED_TOOL, self.branch_files(root, branch))
         self.assertEqual(
             git(root, "rev-list", "--count", f"HEAD..{branch}").strip(), "1")
+
+
+class ReferencePolicyApplyTest(ApplyTestCase):
+    """#372: moved code is rewritten at its destination, by class, in the
+    one adoption commit."""
+
+    def applied(self) -> tuple[Path, dict, dict]:
+        """The policy fixture, planned with every answer and applied."""
+        root = apply_repo(self.home)
+        write_policy_tree(root)
+        code, out, err = run("plan", "--repo-root", str(root),
+                             *answer_args(*POLICY_READY_ANSWERS),
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+        document = json.loads(out)
+        self.assertEqual(document["plan"]["state"], "ready",
+                         document["plan"]["blockers"])
+        return root, document, self.succeed(root, document["plan"]["plan_id"])
+
+    def run_report(self, root: Path, revision: str) -> tuple[int, str]:
+        """The fixture's outside script, run from the root of an export of
+        `revision`."""
+        export = Path(tempfile.mkdtemp()) / "tree"
+        adopt_inspection.export_commit(root, revision, export)
+        proc = subprocess.run(
+            [sys.executable, RUN_REPORT], cwd=export, capture_output=True,
+            text=True, timeout=120)
+        return proc.returncode, proc.stdout
+
+    def test_rewritten_files_land_at_their_destinations_in_one_commit(self):
+        root, _, result = self.applied()
+        branch = result["branch"]
+        self.assertEqual(
+            git(root, "rev-list", "--count", f"HEAD..{branch}").strip(), "1")
+        for path, text in POLICY_REWRITTEN.items():
+            with self.subTest(path=path):
+                self.assertEqual(git(root, "show", f"{branch}:{path}"), text)
+        for path in (f"{POLICY_NEW}/report.py", f"{POLICY_NEW}/paths.py",
+                     f"{POLICY_NEW}/devenv.nix", RUN_REPORT):
+            with self.subTest(path=path):
+                self.assertNotIn(".claude/",
+                                 git(root, "show", f"{branch}:{path}"))
+        self.assertEqual(
+            [path for path in self.branch_files(root, branch)
+             if path.startswith(".claude/notes")], [])
+
+    def test_the_outside_command_runs_on_the_adopt_commit_as_on_base(self):
+        root, _, result = self.applied()
+        base = self.run_report(root, "HEAD")
+        self.assertEqual(base, (0, "study\n"))
+        self.assertEqual(self.run_report(root, result["branch"]), base)
+
+    def test_the_pattern_exclusion_is_extended(self):
+        root, document, result = self.applied()
+        (row,) = [row for row in document["path_references"]
+                  if row["path"] == LINT_TOML]
+        self.assertEqual((row["literal"], row["answer"]),
+                         (r"^\\.claude/", "extend"))
+        text = git(root, "show", f"{result['branch']}:{LINT_TOML}")
+        self.assertEqual(text, POLICY_REWRITTEN[LINT_TOML])
+        for element in ('"^\\\\.claude/"', *(
+                f'"{addition}"' for addition in row["additions"])):
+            with self.subTest(element=element):
+                self.assertIn(element, text)
+        self.assertEqual(len(row["additions"]), 3)
+
+    def test_the_settings_file_stays_in_place_with_a_null_destination(self):
+        root, document, result = self.applied()
+        branch = result["branch"]
+        self.assertEqual(git(root, "show", f"{branch}:{SETTINGS}"),
+                         git(root, "show", f"HEAD:{SETTINGS}"))
+        self.assertEqual(
+            [op for op in document["changes"]
+             if SETTINGS in op["sources"] + op["targets"]], [])
+        record = json.loads(git(
+            root, "show", f"{branch}:{result['evidence_record']}"))
+        (source,) = [row for row in record["sources"]
+                     if row["path"] == SETTINGS]
+        self.assertIsNone(source["after"])
+        self.assertIsNotNone(source["before"])
+
+    def test_retained_and_unnamed_files_keep_their_bytes(self):
+        root, _, result = self.applied()
+        branch = result["branch"]
+        for old, new in ((f"{POLICY_DIR}/record.json",
+                          f"{POLICY_NEW}/record.json"),
+                         (".agents/instructions/bootstrap.md",
+                          ".agents/instructions/bootstrap.md")):
+            with self.subTest(path=new):
+                self.assertEqual(git(root, "show", f"{branch}:{new}"),
+                                 git(root, "show", f"HEAD:{old}"))
+        self.assertEqual(
+            git(root, "show", f"{branch}:{POLICY_NEW}/record.json"),
+            POLICY_CODE[f"{POLICY_DIR}/record.json"])
+
+    def test_the_evidence_record_lists_the_policy_answers_and_rows(self):
+        root, document, result = self.applied()
+        record = json.loads(git(
+            root, "show", f"{result['branch']}:{result['evidence_record']}"))
+        for question, subject, value in POLICY_READY_ANSWERS:
+            with self.subTest(subject=subject):
+                self.assertIn(
+                    {"id": question, "subject": subject, "value": value},
+                    record["decisions_accepted"])
+        self.assertEqual(record["reference_policies"],
+                         document["reference_policies"])
+        self.assertEqual(record["path_references"],
+                         document["path_references"])
+        self.assertEqual(
+            [(row["class"], row["answer"], row["open"])
+             for row in record["reference_policies"]],
+            [(".json", "retain", 0), (".nix", "rewrite", 0),
+             (".py", "rewrite", 0)])
+        self.assertEqual(record["plan_id"], document["plan"]["plan_id"])
 
 
 class CommitLinkProofTest(ApplyTestCase):
