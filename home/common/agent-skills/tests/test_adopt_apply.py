@@ -1116,6 +1116,8 @@ ANALYZER_REWRITTEN = ANALYZER_TEXT.replace(".claude/specs",
                                            ".agents/artifacts/specs")
 # #376 COR-001: a `generated_file` projection rendered from the analyzer.
 PROJECTED_ANALYZER = "generated/analyzer.txt"
+# #376 COR-PROJECTION-KIND: a `managed_import` naming the analyzer by path.
+IMPORTED_ANALYZER = "generated/analyzer-import.txt"
 ANALYZER_FORMATTED = ('ANALYZER_SPEC_PATH_UNDER_TEST = (\n'
                       '    ".agents/artifacts/specs/x.md"\n'
                       ')\n')
@@ -1301,6 +1303,31 @@ class ReferenceFormattingApplyTest(ApplyTestCase):
         self.assertEqual(
             (self.worktree(plan_id) / ANALYZER).read_text("utf-8"),
             ANALYZER_REWRITTEN)
+
+    def test_a_managed_import_source_is_formatted(self):
+        """A `managed_import` line names its source by path alone, so
+        formatting that source leaves the projection in sync and is not
+        refused."""
+        root = formatting_repo(self.home)
+        contract = json.loads((root / CONTRACT).read_text("utf-8"))
+        entry = {"id": "codex.analyzer", "agent": "codex",
+                 "kind": "managed_import", "target": IMPORTED_ANALYZER,
+                 "source": ANALYZER}
+        contract["projections"].append(entry)
+        write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
+        write(root, IMPORTED_ANALYZER, resolve_project.render_projection(
+            entry, (root / ANALYZER).read_bytes(),
+            contract["schema_version"]).decode("utf-8"))
+        commit(root, "import the analyzer")
+        document = self.planned(root, REWRITE_ANALYZER,
+                                ("reference-format", ".py", "format"))
+        self.assertIn(
+            ([ANALYZER], [IMPORTED_ANALYZER]),
+            [(op["sources"], op["targets"]) for op in document["changes"]
+             if op["op"] == "regenerate-projection"])
+        result = self.succeed(root, document["plan"]["plan_id"])
+        self.assertEqual(git(root, "show", f"{result['branch']}:{ANALYZER}"),
+                         ANALYZER_FORMATTED)
 
     def test_an_archived_contained_symlink_is_not_an_unplanned_change(self):
         """`git add` stores a symlink's target text, so the confinement proof

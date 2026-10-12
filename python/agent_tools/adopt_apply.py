@@ -50,6 +50,7 @@ from agent_tools.adopt_inspection import (
     ADOPT_SCHEMA_VERSION,
     AdoptError,
     COMMIT_GATES,
+    CONTRACT_FILENAME,
     OPERATION_KINDS,
     RUNTIME_SENTINEL,
     canonical_json,
@@ -397,6 +398,29 @@ def format_failure(repair_id: str, message: str) -> AdoptError:
         "verification_failed", repair_id, "/reference_formatting", message)
 
 
+def generated_file_sources(worktree: Path) -> set[str] | None:
+    """The sources of the worktree contract's `generated_file` projections.
+
+    A `generated_file` target holds its source's bytes, while a
+    `managed_import` line names only the source's path. None when the
+    contract cannot be read as a projection list, so the caller keeps every
+    projection source rather than guess which kind it feeds.
+    """
+    raw = read_bytes_bounded(worktree / CONTRACT_FILENAME)
+    try:
+        contract = json.loads(raw) if raw is not None else None
+    except ValueError:
+        return None
+    entries = contract.get("projections") if isinstance(contract, dict) \
+        else None
+    if not isinstance(entries, list):
+        return None
+    return {entry["source"] for entry in entries
+            if isinstance(entry, dict)
+            and entry.get("kind") == "generated_file"
+            and isinstance(entry.get("source"), str)}
+
+
 def run_formatting(worktree: Path, operations: list[dict], rows: list[dict],
                    run_resolver: Resolver) -> None:
     """Run each declared formatter over the files its row names, and stage them.
@@ -409,11 +433,12 @@ def run_formatting(worktree: Path, operations: list[dict], rows: list[dict],
     none names no formatter, so the resolver is not called at all.
 
     Before anything runs, a file of a row that names a command and is the
-    `sources[0]` of a `regenerate-projection` operation is refused: that
-    projection was regenerated from the file before formatting, and
-    regenerating it again would change a planned `after`, so the target would
-    be left stale behind a gate that names the projection rather than the
-    formatter.
+    `sources[0]` of a `regenerate-projection` operation whose projection is a
+    `generated_file` is refused: that projection was regenerated from the
+    file's bytes before formatting, and regenerating it again would change a
+    planned `after`, so the target would be left stale behind a gate that
+    names the projection rather than the formatter. A `managed_import` renders
+    from its source's path alone, so formatting its source is allowed.
 
     Once every command has run, `prove_formatting_confined` holds the formatter
     to the files it was given. Any failure here is `verification_failed` with
@@ -428,6 +453,9 @@ def run_formatting(worktree: Path, operations: list[dict], rows: list[dict],
         return
     projected = {operation["sources"][0] for operation in operations
                  if operation["op"] == "regenerate-projection"}
+    rendered_from_bytes = generated_file_sources(worktree)
+    if rendered_from_bytes is not None:
+        projected &= rendered_from_bytes
     for row in declared:
         for path in row["files"]:
             if path in projected:
