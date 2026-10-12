@@ -39,12 +39,15 @@ policy, never to the `<tree>:<class>` one.
 A file the plan moves and that is in the depth read set (`depth_texts`) is read
 a fourth time, for the `../` climbs that leave its moved tree (`split_climb`).
 A climb is an occurrence when it ends at a proper ancestor of the tree's root,
-or above the repository root, the same climb from the destination ends
-elsewhere, and its target text is not inside the tree, which moves with the
-file. It belongs to the `<tree>:<class>/depth` policy, never to the
-`<tree>:<class>` one. It offers `rewrite` (the climb shifted by the depth
-delta, `climb_form`) and `retain` when it ends above the repository root or at
-an ancestor of the destination's directory, its target is no moved path and the
+or above the repository root, and the same climb from the destination ends
+elsewhere. A climb whose target text is back inside the tree is one only when
+its unchanged spelling, taken from the destination's directory, misses the
+target's successor (where the tree's root is left, joined to the target's path
+below that root); it then offers `retain` alone. It belongs to the
+`<tree>:<class>/depth` policy, never to the `<tree>:<class>` one. It offers
+`rewrite` (the climb shifted by the depth delta, `climb_form`) and `retain`
+when it ends above the repository root or at an ancestor of the destination's
+directory, its target is neither a moved path nor back inside the tree and the
 shifted climb is valid, and `retain` alone otherwise.
 
 In a file whose base path has class `.py`, the depth reading also takes the
@@ -54,8 +57,10 @@ identifier character or `.`, with at most one `.resolve()` or `.absolute()`;
 or a name bound at column 0 by `NAME = <that>` or `NAME = <that>.parent`
 (with an optional `: Path` or `: pathlib.Path` annotation, a trailing comment
 and a CRLF line end) and bound nowhere else in the file, at any indentation,
-by assignment, `for`, `as`, `del`, `global`, `nonlocal`, a keyword argument or
-a mention in a `def` or `lambda` header (a parameter); a use of the name is
+by assignment, `for`, `as`, `del`, `global`, `nonlocal`, a keyword argument,
+a mention in a `def` or `lambda` header (a parameter) or a mention in a target
+list (`NAME, b = …`, `(a, NAME) = …`, `*NAME, b = …`, between a `for` and its
+`in`, a bracketed run after `as`; see `_rebinds`); a use of the name is
 the name preceded by neither an identifier character nor `.` and not followed
 by one. A chain is zero or more `.parent` then at most one
 `.parents[N]` with `N` a decimal literal, at least one of them, with no
@@ -116,6 +121,13 @@ _CHAIN = re.compile(r"((?:\.parent(?!\w))*)(?:\.parents\[(\d+)\])?")
 # a `lambda` (up to its first `:`).
 _PARAMETER_HEADER = re.compile(
     r"\bdef[ \t]+\w+\s*\((.*?)\)\s*(?:->|:)|\blambda\b([^:]*):", re.DOTALL)
+# The target lists a name may be a member of anywhere in a line, or over
+# lines: a bracketed run directly followed by an assignment's `=`, the text
+# between a `for` and its `in`, and a bracketed run after `as`.
+_TARGET_RUNS = re.compile(
+    r"[(\[]([^()\[\]=]*)[)\]][ \t]*=(?!=)"
+    r"|(?<![\w.])for\b((?:(?!\bin\b)[\w\s,()\[\]*])*)\bin\b"
+    r"|(?<![\w.])as[ \t]*[(\[]([^()\[\]]*)[)\]]")
 # `\r?` keeps the binding of a CRLF file, whose `\r` the decode leaves.
 _BINDING = re.compile(
     r"^([A-Za-z_]\w*)[ \t]*(?::[ \t]*(?:pathlib\.)?Path[ \t]*)?=[ \t]*"
@@ -594,9 +606,18 @@ def _chain_at(text: str, at: int) -> tuple[int, int, int | None] | None:
 def _rebinds(name: str, text: str) -> int:
     """How many times `name` is bound in `text`, at any indentation: by plain,
     annotated, augmented or `:=` assignment, a keyword argument, `for`, `as`,
-    `del`, `global` or `nonlocal`, or a mention in a `def` or `lambda` header,
-    which is where a parameter is bound; a header's extent is read loosely, so
-    a mention there that binds nothing counts too and the name is not
+    `del`, `global` or `nonlocal`, a mention in a `def` or `lambda` header,
+    which is where a parameter is bound, or a mention in a target list.
+
+    The name is in a target list when it is followed on its line by `,`, `)`
+    or `]` and then, on that line, by an assignment's `=` that no bracket
+    opened on the line encloses (`NAME, b = …`, `(a, NAME) = …`, `*NAME, b =
+    …`); when it is inside a bracketed run that holds no bracket and no `=`,
+    over lines too, directly followed by an assignment's `=` (`(a,\\n NAME) =
+    …`); when it lies between a `for` and its `in` (`for _, NAME in …`, a
+    comprehension's too); and when it is inside a bracketed run after `as`
+    (`with … as (a, NAME)`). Headers and target lists are read loosely, so a
+    mention there that binds nothing counts too and the name is not
     followed."""
     escaped = re.escape(name)
     assigned = re.findall(
@@ -609,7 +630,25 @@ def _rebinds(name: str, text: str) -> int:
     parameters = sum(
         len(mention.findall("".join(header.groups(""))))
         for header in _PARAMETER_HEADER.finditer(text))
-    return len(assigned) + len(named) + parameters
+    return (len(assigned) + len(named) + parameters
+            + _target_mentions(escaped, mention, text))
+
+
+def _target_mentions(escaped: str, mention: re.Pattern[str], text: str
+                     ) -> int:
+    """How many times the name `escaped` spells is a member of a target list
+    (see `_rebinds`)."""
+    count = 0
+    for listed in re.finditer(
+            r"(?<![\w.])" + escaped + r"[ \t]*[,)\]][\w \t,*()\[\]]*=(?!=)",
+            text):
+        head = text[text.rfind("\n", 0, listed.start()) + 1:listed.end()]
+        opened = head.count("(") + head.count("[")
+        if opened <= head.count(")") + head.count("]"):
+            count += 1
+    for run in _TARGET_RUNS.finditer(text):
+        count += len(mention.findall(run.group(run.lastindex)))
+    return count
 
 
 def python_climbs(text: str) -> list[tuple[int, int, int]]:
@@ -670,10 +709,12 @@ def _depth_occurrences(path: str, text: str, base: Tree,
     `R` is the root of its tree; a file the plan archives has no tree of its
     own, so its directory stands for it. A climb is an occurrence when it ends
     at a proper ancestor of `R` (or above the repository root) and the same
-    climb from `Q` ends elsewhere, unless its base target is inside `R`, which
-    moves with the file. `rewrite` is offered when the climb ends at an
-    ancestor of `Q` or above the root, its base target is no moved path and
-    the shifted climb is valid.
+    climb from `Q` ends elsewhere. A text climb whose base target is back
+    inside `R` is one only when its unchanged spelling, taken from `Q`, misses
+    the target's successor (where `R` is left, joined to the target's path
+    below `R`); it then offers `retain` alone. `rewrite` is offered when the
+    climb ends at an ancestor of `Q` or above the root, its base target is
+    neither a moved path nor back inside `R`, and the shifted climb is valid.
 
     In a `.py` file the chains of `python_climbs` are read too, as climbs with
     no target text; one overlapping an occurrence in `taken`, which the other
@@ -682,6 +723,15 @@ def _depth_occurrences(path: str, text: str, base: Tree,
     old_dir, new_dir = path.rpartition("/")[0], target.rpartition("/")[0]
     root = tree if path.startswith(tree + "/") else old_dir
     delta = _depth_of(new_dir) - _depth_of(old_dir)
+    # Where the tree's root is left: every member moves by one prefix
+    # substitution, so the file's path below `R` ends its target too.
+    below = path[len(root) + 1:] if root else path
+    new_root = (target[:-len(below) - 1] if target.endswith("/" + below)
+                else "" if target == below else None)
+
+    def joined(place: str, rest: str) -> str:
+        return "/".join(s for s in (place + "/" + rest).split("/")
+                        if s not in ("", "."))
 
     def consider(start: int, end: int, height: int, rest: str | None,
                  shift: Callable[[int], str | None]) -> Occurrence | None:
@@ -693,16 +743,20 @@ def _depth_occurrences(path: str, text: str, base: Tree,
         place, above = landing
         if not above and (place == root or not _is_ancestor(place, root)):
             return None
-        moved_target = False
+        retain_only = False
         if rest is not None and not above:
-            segments = [s for s in (place + "/" + rest).split("/")
-                        if s not in ("", ".")]
-            base_target = "/".join(segments)
+            base_target = joined(place, rest)
             if _is_ancestor(root, base_target):
-                return None
-            moved_target = _names_moved(base_target, base, sources)
+                new_place, new_above = _landing(new_dir, height)
+                successor = None if new_root is None else joined(
+                    new_root, base_target[len(root):])
+                if not new_above and joined(new_place, rest) == successor:
+                    return None
+                retain_only = True
+            else:
+                retain_only = _names_moved(base_target, base, sources)
         replacement = None
-        if (above or _is_ancestor(place, new_dir)) and not moved_target:
+        if (above or _is_ancestor(place, new_dir)) and not retain_only:
             replacement = shift(delta)
         line, column = _position(text, start)
         return Occurrence(
@@ -782,7 +836,8 @@ def plan_references(texts: dict[str, str], paths: Iterable[str],
                     trees: Mapping[str, str],
                     depth_texts: Mapping[str, str] | None = None
                     ) -> References:
-    """The occurrences of moved paths in `texts`, over the tree `paths`.
+    """The occurrences of moved paths in `texts`, and of the climbs in
+    `depth_texts` that the moves change, over the tree `paths`.
 
     `texts` is keyed by base path. `trees` maps each moved file to the tree
     its policy is named for; a moved file with no entry raises `ValueError`.
@@ -994,10 +1049,15 @@ def derive_references(root: Path, revision: str,
     sources = {source for source, _ in moves}
     segments = sorted({source.split("/")[0] for source in sources})
     prefiltered = _grep(root, revision, segments)
+    # Each tree is named twice: `:(literal)` keeps a glob character literal,
+    # and the plain spelling still names the tree when `GIT_LITERAL_PATHSPECS`
+    # makes git read `:(literal)` as part of a path. A file a plain spelling
+    # matches beyond the tree is dropped with every file that is no source.
     climbing = [path for path in _grep(
         root, revision, ("..", "__file__"),
-        [f":(literal){tree}" for tree in sorted(
-            {trees.get(source, source) for source in sources})])
+        [spec for tree in sorted({trees.get(source, source)
+                                  for source in sources})
+         for spec in (f":(literal){tree}", tree)])
         if path in sources]
     if not prefiltered and not climbing:
         return References({}, ())

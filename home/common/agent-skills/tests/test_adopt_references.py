@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools import adopt_references
 from agent_tools.adopt_links import Tree
@@ -777,6 +778,32 @@ class TextClimbTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(climbs(text), [])
 
+    def test_a_climb_back_into_a_renamed_tree_is_retained(self):
+        # Final review C-002 (D15): `.claude/research` is filed under
+        # `.agents/artifacts/specs`, so `../../research/data.txt` taken from
+        # `.agents/artifacts/specs/tool` reaches
+        # `.agents/artifacts/research/data.txt`, not the data's successor
+        # `.agents/artifacts/specs/data.txt`.
+        config, data = (".claude/research/tool/config.toml",
+                        ".claude/research/data.txt")
+        moves = [(config, SPECS + "/tool/config.toml"),
+                 (data, SPECS + "/data.txt")]
+        trees = {config: ".claude/research", data: ".claude/research"}
+        for text, literal in (
+                ('d = "../../research/data.txt"\n', "../../research/data.txt"),
+                ('d = "../../research/new/"\n', "../../research/new/"),
+                ('d = "../../research"\n', "../../research")):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    climbs(text, path=config, moves=moves, trees=trees,
+                           paths=[config, data]),
+                    [(literal, ("retain",), None, True)])
+        # The same spelling reaches the successor when the tree keeps its
+        # name: `.agents/notes/tool` + `../../notes/data/x`.
+        moves = [(TOOL + "/pyproject.toml", ".agents/notes/tool/pyproject.toml"),
+                 (NOTES + "/data/x", ".agents/notes/data/x")]
+        self.assertEqual(climbs('d = "../../notes/data/x"\n', moves=moves), [])
+
     def test_a_landing_point_only_above_the_old_directory_is_retained(self):
         self.assertEqual(climbs('c = "../../settings.json"\n'), [
             ("../../settings.json", ("retain",), None, True)])
@@ -939,6 +966,30 @@ class PythonClimbTest(unittest.TestCase):
                 (BOUND + "F = lambda HERE: HERE.parents[1]\n", [0])):
             with self.subTest(text=text):
                 self.assertEqual(heights(text), expected)
+
+    def test_a_tuple_star_or_for_target_rebinds(self):
+        # Final review C-001 (D16): a name in a target list is rebound.
+        for rebinding in ("HERE, unused = f()\n", "unused, HERE = f()\n",
+                          "(a, HERE) = f()\n", "[a, HERE] = f()\n",
+                          "*HERE, a = f()\n", "a, *HERE = f()\n",
+                          "(a,\n HERE) = f()\n", "a = (b, HERE) = f()\n",
+                          "for _, HERE in xs:\n    pass\n",
+                          "for (a, HERE) in xs:\n    pass\n",
+                          "for (a,\n     HERE) in xs:\n    pass\n",
+                          "ys = [p for p, HERE in xs]\n",
+                          "with f() as (a, HERE):\n    pass\n"):
+            with self.subTest(rebinding=rebinding):
+                self.assertEqual(
+                    heights(BOUND + rebinding + "R = HERE.parents[2]\n"), [0])
+        # A use in a call, a value tuple or a loop's iterable rebinds nothing.
+        for use in ("open(HERE, encoding='utf-8')\n", "X = (HERE, 1)\n",
+                    "f(a, HERE)\nb = 1\n", "d = dict(a=(HERE), b=1)\n",
+                    "for p in HERE.iterdir():\n    pass\n",
+                    "for p in (HERE, x):\n    pass\n",
+                    "ok = (HERE, 1) == t\n"):
+            with self.subTest(use=use):
+                self.assertEqual(
+                    heights(BOUND + use + "R = HERE.parents[2]\n"), [0, 3])
 
     def test_a_chain_to_the_root_is_rewritten(self):
         text = (BOUND + "ROOT = HERE.parents[2]\n"
@@ -1139,6 +1190,19 @@ class DepthDerivationTest(unittest.TestCase):
             (".claude/specs/tool/both.toml:2:9", False),
             (".claude/specs/tool/dots.txt:1:5", True),
             (".claude/specs/tool/run.py:1:22", True)])
+
+    def test_a_global_pathspec_setting_does_not_hide_the_climbs(self):
+        # `GIT_LITERAL_PATHSPECS=1` reads `:(literal)` as part of a path name.
+        for name in ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS",
+                     "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"):
+            with self.subTest(name=name), \
+                    mock.patch.dict(os.environ, {name: "1"}):
+                self.assertEqual(self.found(), [
+                    (".claude/odd.py:1:20", True),
+                    (".claude/specs/tool/both.toml:1:8", True),
+                    (".claude/specs/tool/both.toml:2:9", False),
+                    (".claude/specs/tool/dots.txt:1:5", True),
+                    (".claude/specs/tool/run.py:1:22", True)])
 
     def test_excluded_files_are_not_read(self):
         self.assertEqual(self.found([".claude/specs/tool/run.py"]), [

@@ -84,8 +84,13 @@ is no climb: joined segments (`HERE / ".." / ".."`) are not added up.
 
 When the landing point is at or below the root, the token's **base target** is
 the normalised join of the landing point and the rest. A text climb whose base
-target lies inside `R` (`../../notes/x` from `.claude/notes/tool`) re-enters
-the tree, moves with the file and is not surfaced. A base target outside `R`
+target lies inside `R` re-enters the tree, which moves with the file: it is not
+surfaced when its unchanged spelling, taken from `Q`, reaches the target's
+successor, the tree's destination joined to the target's path below `R`
+(`../../notes/x` from `.claude/notes/tool`, for a tree that keeps its name);
+otherwise it is surfaced offering `retain` only, with no computed rewrite
+(`../../research/data.txt` from `.claude/research/tool`, for the tree filed
+under `.agents/artifacts/specs`) (per D15). A base target outside `R`
 that names a path the moves relocate (the issue 350 condition, another moved
 tree) offers `retain` only: the rewrite would land on a path that no longer
 exists, and issue 350's successors are not combined with a climb.
@@ -106,7 +111,10 @@ anchor followed by zero or more `.parent` and then at most one
   rebound nowhere else in the file, at any indentation (no other plain,
   annotated, augmented or `:=` assignment, and no `for`, `as`, `del`, `global`
   or `nonlocal` naming it; a keyword argument of that name also counts, which
-  errs towards not following); its offset is −1 or 0. A use is the name
+  errs towards not following; so does a mention in a `def` or `lambda` header,
+  where a parameter is bound, per D14, and a mention in a target list —
+  `NAME, b = …`, `(a, NAME) = …`, `*NAME, b = …`, between a `for` and its
+  `in`, a bracketed run after `as` — per D16); its offset is −1 or 0. A use is the name
   preceded by neither an identifier character nor `.`, anywhere in the file.
 
 The height is the offset plus one per `.parent` plus `N + 1` for
@@ -164,8 +172,9 @@ The depth reading reads every moved file that passes the existing filters
 (regular blob, not Markdown, not secret-shaped, not adoption-written, not under
 a record home by base path, text by git's `-I` judgement, strict UTF-8) and
 holds `..` or `__file__`, found by one more `git grep -I -l -F` over the base
-revision, limited by literal pathspecs to the trees of the moves (a group's
-directory, an archived file's own path) and then to the moved files. The three existing readings still run only over the files the
+revision, limited by pathspecs to the trees of the moves (a group's
+directory, an archived file's own path; each named as a `:(literal)` pathspec
+and plainly, per D17) and then to the moved files. The three existing readings still run only over the files the
 first-segment prefilter returns; a file both scans return gets all four. So
 the prefilter's documented limit is unchanged, and no occurrence of issues
 350, 372 or 376 appears, changes or disappears. Within one token the depth
@@ -213,12 +222,17 @@ agent_tools.adopt_project` under the recipe's `PYTHONPATH`, plus the
   - text climbs: surfaced above `R`; not surfaced inside the tree (AC2); not
     surfaced for a same-depth move to the root (AC3); surfaced `retain`-only
     for a landing point that is an ancestor of `P` only, and for a base target
-    in another moved tree; a climb re-entering `R` is not surfaced; a shallower move rewrites with fewer `..`; `..` alone and
+    in another moved tree; a climb re-entering `R` is not surfaced when its
+    unchanged spelling reaches the target's successor and is surfaced
+    `retain`-only when the tree is renamed (D15); a shallower move rewrites
+    with fewer `..`; `..` alone and
     `".."` are no climbs; the `./` prefix and the rest are kept.
   - Python chains: direct `parents[N]`, `.parent` chains, mixed chains; a
     `HERE` bound to `.resolve().parent` and used as `HERE.parents[N]`; a name
     bound twice, a function-local binding, `ROOT` chained from `HERE` and
-    `os.path.dirname` produce nothing; a minimum-violating rewrite offers
+    `os.path.dirname` produce nothing, and so does a name that is a
+    parameter (D14) or a member of a tuple, star or `for` target list (D16);
+    a minimum-violating rewrite offers
     `retain` only.
   - class and policy `<tree>:<class>/depth`; an unmoved file yields no depth
     occurrence; `policy_summary` rows with `.py` and `.py/depth` answered
@@ -274,3 +288,6 @@ agent_tools.adopt_project` under the recipe's `PYTHONPATH`, plus the
 | D12 | Phase-5 review: a Python chain whose span overlaps a text climb the depth reading accepted in the same file is dropped, as one overlapping another reading's occurrence already was; regression pins the rewritten bytes of `S = "../../../HERE.parents[2]"` (Task 2) | Reviewer (B1): `taken` held only token occurrences, so the climb and the chain both edited one span and the splice in `rewritten` let the climb overwrite the chain's `.parents[3]`; D11's one-edit-per-span intent | Dropping the text climb instead (it spans the whole literal, so it is the edit that resolves the string as written) |
 | D13 | Phase-5 review: a bound name is followed only when nothing else in the file rebinds it, at any indentation (plain, annotated, augmented, `:=`, `for`/`as`/`del`/`global`/`nonlocal`; a keyword argument of that name also excludes it), and `_BINDING` accepts a `\r\n` line end; negative case `HERE /= "/fixed/a/b/c"` and a CRLF regression (Task 2) | Reviewer (B2, B3): the column-0 `=` count missed `HERE /= ...`, proposing `.parents[3]` for a rebound name; `[ \t]*(?:#.*)?$` refused an uncommented binding ending in `\r`, which the strict-UTF-8 decode keeps, hiding AC1's chain; spec "assigned nowhere else" | Counting only column-0 assignments plus augmented ones (misses `for`/`with` rebinding); normalising line ends before matching (shifts offsets and the bytes `rewrite` splices) |
 | D14 | Phase-6 review: a name that is a `def` or `lambda` parameter anywhere in the file counts as rebound and is not followed (widens D13); regression pins `def f(here)`, `def m(self, HERE)` and `lambda HERE:` (Task 2) | The task reviewer's probe: a shadowing parameter's chain shares the file's `/depth` policy answer and would be shifted wrongly; D13's own intent, "rebound nowhere else" | Keeping D13's binder list and accepting that a policy-wide rewrite shifts a parameter's chain |
+| D15 | Final review: a climb that re-enters its tree is surfaced (retain only) unless its unchanged spelling reaches the target's successor from the destination (refines D8/D1); regression `../../research/data.txt`, `../../research/new/` and `../../research` from `.claude/research/tool` with the tree filed under `.agents/artifacts/specs`, beside the unsurfaced `../../notes/data/x` (Task 1) | Codex correctness review C-002: the classification rule `.claude/research` → `.agents/artifacts/specs` leaves `../../research/data.txt` in `.claude/research/tool/config.toml` resolving to `.agents/artifacts/research/data.txt` after the move while the data is at `.agents/artifacts/specs/data.txt`; D8's suppression assumed the tree keeps its name | Computing a rewrite to the successor (a new form beyond the depth-delta shift the issue asks for); keeping the suppression |
+| D16 | Final review: tuple, star and for-loop targets count as rebinding (widens D13/D14): a name followed on its line by `,`, `)` or `]` and an assignment `=` no bracket opened on that line encloses, a name inside a bracket- and `=`-free bracketed run directly followed by an assignment `=` (over lines too), between a `for` and its `in`, or in a bracketed run after `as`; regressions `HERE, unused = …`, `(a, HERE) = …`, `*HERE, a = …`, `for _, HERE in …`, `with … as (a, HERE)` and uses that stay followed (`open(HERE, encoding=…)`, `X = (HERE, 1)`, `for p in HERE.iterdir()`) (Task 2) | Codex correctness review C-001: after `HERE = Path(__file__).parent`, `HERE, unused = …` or `for _, HERE in …` left the name followed, so a `/depth` rewrite shifted `HERE.parents[2]` to `.parents[3]` although the value was replaced; an over-count only stops following a name | A parser of Python target lists, against issue 350 D6; counting every mention in any comma-separated list, which would stop following a name passed to a call |
+| D17 | Final review: the depth scan names each tree twice, as `:(literal)<tree>` and plainly, so the scan finds the same files when the caller's environment sets `GIT_LITERAL_PATHSPECS`, `GIT_GLOB_PATHSPECS`, `GIT_NOGLOB_PATHSPECS` or `GIT_ICASE_PATHSPECS`; a file a plain spelling matches beyond its tree is dropped with every file that is no move source (Task 3) | Promoted ledger item: `GIT_LITERAL_PATHSPECS=1` makes git read `:(literal)` as part of a path, so the scan silently found nothing | `git --literal-pathspecs grep`, which git refuses beside `GIT_GLOB_PATHSPECS` or `GIT_ICASE_PATHSPECS` ("incompatible with all other global pathspec settings"); scrubbing the environment, which `run_git` does not offer for an ordinary call |
