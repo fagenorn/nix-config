@@ -140,6 +140,7 @@ agent-workflow-tests:
     tests/test_release_bridge.py \
     tests/test_release_command.py \
     tests/test_forge_adapter.py \
+    tests/test_guard_policy.py \
     tests/test_release_adapter_core.py \
     tests/test_agent_costs.py \
     tests/test_agent_model_drift_schema.py \
