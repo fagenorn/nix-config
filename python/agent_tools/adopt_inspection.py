@@ -228,6 +228,8 @@ CLASSIFICATION_RULES = (
      "retain-product", None),
     (".claude/settings.local.json", "exact", "legacy-native-store",
      "retain-product", None),
+    (".claude/settings.json", "exact", "legacy-native-store",
+     "retain-product", None),
     (".claude/skills", "prefix", "legacy-native-store", "retain-product", None),
     (".claude/hints", "prefix", "legacy-native-store", "retain-product", None),
     (".claude/rules", "prefix", "legacy-native-store", "retain-product", None),

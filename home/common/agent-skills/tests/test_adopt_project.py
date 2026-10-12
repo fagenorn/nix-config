@@ -1296,6 +1296,31 @@ class RecordTreeClassificationTest(AdoptTestCase):
         self.assertEqual(doc["plan"]["state"], "draft")
 
 
+class NativeSettingsTest(AdoptTestCase):
+    """#372 D7: a tracked `.claude/settings.json` is retained by its row."""
+
+    PATH = ".claude/settings.json"
+
+    def test_a_tracked_settings_file_is_retained_without_a_question(self):
+        root = nix_config_shape_repo(self.home)
+        write(root, self.PATH, '{"hooks": {}}\n')
+        commit(root, "track the native settings file")
+        doc = self.ready_plan(root)
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["decisions"]["open"], [])
+        self.assertEqual(
+            [op for op in doc["changes"]
+             if self.PATH in op["sources"] + op["targets"]], [])
+        (entry,) = [entry for entry in doc["evidence"]
+                    if entry["path"] == self.PATH]
+        self.assertEqual(
+            (entry["provenance"], entry["lifecycle_class"], entry["action"],
+             entry["target"], entry["count"]),
+            ("tracked", "legacy-native-store", "retain-product", None, 1))
+        self.assertIsNotNone(entry["fingerprint"])
+
+
 class CandidateQuestionTest(AdoptTestCase):
     """#340 AC2: every undecided candidate carries a stable question."""
 
