@@ -931,7 +931,12 @@ class PythonClimbTest(unittest.TestCase):
                 (BOUND + "ROOT = HERE.parents[2]\nX = ROOT.parent\n", [0, 3]),
                 ("UP = Path(__file__).parents[2]\nX = UP.parent\n", [2]),
                 (BOUND + "R = self.HERE.parents[2]\nS = MYHERE.parent\n",
-                 [0])):
+                 [0]),
+                ("here = Path(__file__).parent\ndef f(here):\n"
+                 "    return here.parent\n", [0]),
+                (BOUND + "def m(self, HERE):\n"
+                 "    return HERE.parent.parent\n", [0]),
+                (BOUND + "F = lambda HERE: HERE.parents[1]\n", [0])):
             with self.subTest(text=text):
                 self.assertEqual(heights(text), expected)
 

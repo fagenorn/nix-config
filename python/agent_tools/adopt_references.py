@@ -50,11 +50,12 @@ parent-count chains of `python_climbs`, as climbs with no target text. An
 anchor is `Path(__file__)` or `pathlib.Path(__file__)` not preceded by an
 identifier character or `.`, with at most one `.resolve()` or `.absolute()`;
 or a name bound at column 0 by `NAME = <that>` or `NAME = <that>.parent`
-(with an optional `: Path` annotation, a trailing comment and a CRLF line
-end) and bound nowhere else in the file, at any indentation, by assignment,
-`for`, `as`, `del`, `global`, `nonlocal` or a keyword argument; a use of the
-name is the name preceded by neither an identifier character nor `.` and not
-followed by one. A chain is zero or more `.parent` then at most one
+(with an optional `: Path` or `: pathlib.Path` annotation, a trailing comment
+and a CRLF line end) and bound nowhere else in the file, at any indentation,
+by assignment, `for`, `as`, `del`, `global`, `nonlocal`, a keyword argument or
+a mention in a `def` or `lambda` header (a parameter); a use of the name is
+the name preceded by neither an identifier character nor `.` and not followed
+by one. A chain is zero or more `.parent` then at most one
 `.parents[N]` with `N` a decimal literal, at least one of them, with no
 whitespace; it climbs the offset (-1 from the file itself, 0 from its
 directory) plus one per `.parent` plus `N + 1` levels. It is an
@@ -109,6 +110,10 @@ _FILE_ANCHOR = (r"(?:pathlib\.)?Path\(__file__\)"
                 r"(?:\.resolve\(\)|\.absolute\(\))?")
 _DIRECT_ANCHOR = re.compile(r"(?<![\w.])" + _FILE_ANCHOR)
 _CHAIN = re.compile(r"((?:\.parent(?!\w))*)(?:\.parents\[(\d+)\])?")
+# The parameters of a `def` (up to its first `)` followed by `:` or `->`) or of
+# a `lambda` (up to its first `:`).
+_PARAMETER_HEADER = re.compile(
+    r"\bdef[ \t]+\w+\s*\((.*?)\)\s*(?:->|:)|\blambda\b([^:]*):", re.DOTALL)
 # `\r?` keeps the binding of a CRLF file, whose `\r` the decode leaves.
 _BINDING = re.compile(
     r"^([A-Za-z_]\w*)[ \t]*(?::[ \t]*(?:pathlib\.)?Path[ \t]*)?=[ \t]*"
@@ -586,8 +591,11 @@ def _chain_at(text: str, at: int) -> tuple[int, int, int | None] | None:
 
 def _rebinds(name: str, text: str) -> int:
     """How many times `name` is bound in `text`, at any indentation: by plain,
-    annotated, augmented or `:=` assignment, a keyword argument, or `for`,
-    `as`, `del`, `global` or `nonlocal`."""
+    annotated, augmented or `:=` assignment, a keyword argument, `for`, `as`,
+    `del`, `global` or `nonlocal`, or a mention in a `def` or `lambda` header,
+    which is where a parameter is bound; a header's extent is read loosely, so
+    a mention there that binds nothing counts too and the name is not
+    followed."""
     escaped = re.escape(name)
     assigned = re.findall(
         r"(?<![\w.])" + escaped + r"[ \t]*(?:(?::[^=\n]*)?=(?!=)"
@@ -595,7 +603,11 @@ def _rebinds(name: str, text: str) -> int:
     named = re.findall(
         r"(?<![\w.])(?:for|as|del|global|nonlocal)[ \t]+" + escaped
         + r"(?!\w)", text)
-    return len(assigned) + len(named)
+    mention = re.compile(r"(?<![\w.])" + escaped + r"(?!\w)")
+    parameters = sum(
+        len(mention.findall("".join(header.groups(""))))
+        for header in _PARAMETER_HEADER.finditer(text))
+    return len(assigned) + len(named) + parameters
 
 
 def python_climbs(text: str) -> list[tuple[int, int, int]]:
@@ -717,6 +729,7 @@ def _depth_occurrences(path: str, text: str, base: Tree,
                 lambda d, chain=text[start:end]: shift_chain(chain, d))
             if occurrence is not None:
                 found.append(occurrence)
+    found.sort(key=lambda o: o.start)
     return found
 
 
