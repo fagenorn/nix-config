@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+# claude-account: one Claude Code config directory per account.
+#
+# Each account is a profile directory used as CLAUDE_CONFIG_DIR, so its login
+# is its own while settings, skills, plugins and transcripts stay shared with
+# ~/.claude through symlinks. A project is bound to an account once; `run`
+# then launches claude under whichever account the current project is bound to.
+set -euo pipefail
+
+ROOT="${CLAUDE_ACCOUNTS_DIR:-$HOME/.claude-accounts}"
+BASE="$HOME/.claude"
+PROFILES="$ROOT/profiles"
+BINDINGS="$ROOT/bindings.tsv"
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+
+# The Nix build (home/common/claude-code/default.nix) rewrites these three to
+# store paths. The real binary is pinned because `claude` on PATH is a wrapper
+# that calls back into `run` here.
+JQ=jq
+GIT=git
+DEFAULT_CLAUDE_BIN=
+
+# What a profile shares with ~/.claude. Everything else (the login, caches,
+# per-process state) is the profile's own.
+SHARED=(settings.json CLAUDE.md keybindings.json skills agents commands
+  plugins projects file-history history.jsonl output-styles rules)
+
+die() { echo "claude-account: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'USAGE'
+usage: claude-account <command>
+
+  list                 accounts, which one this project is bound to
+  add <name>           create an account profile
+  login <name>         sign in to an account (opens the browser)
+  use <name|default>   bind the current project to an account
+  status               the account of this session and of this project
+  run [claude args]    start claude under this project's account (what plain
+                       `claude` does)
+  rm <name>            delete an account profile
+
+One-off override for a single launch: CLAUDE_ACCOUNT=<name> claude
+USAGE
+}
+
+valid_name() {
+  case "$1" in
+    ""|default|*[!a-z0-9_-]*) return 1 ;;
+  esac
+}
+
+profile_dir() { echo "$PROFILES/$1"; }
+
+require_account() {
+  [ "$1" = default ] && return 0
+  valid_name "$1" || die "'$1' is not an account name (use a-z, 0-9, - and _)"
+  [ -d "$(profile_dir "$1")" ] || die "no account '$1' (create it: /account add $1, or claude-account add $1)"
+}
+
+# The directory a binding is stored under: the main checkout of the repository
+# (so every worktree shares it), or the current directory outside a repository.
+project_key() {
+  local common
+  if common="$("$GIT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
+    case "$common" in
+      */.git) dirname "$common"; return ;;
+    esac
+    "$GIT" rev-parse --show-toplevel 2>/dev/null && return
+  fi
+  pwd -P
+}
+
+# The account bound to a directory or the nearest bound parent; empty if none.
+bound_account() {
+  local dir="$1"
+  [ -f "$BINDINGS" ] || return 0
+  while :; do
+    awk -F'\t' -v d="$dir" '$1 == d { print $2; found = 1; exit } END { exit !found }' \
+      "$BINDINGS" && return 0
+    [ "$dir" = / ] && return 0
+    dir="$(dirname "$dir")"
+  done
+}
+
+# The account a launch from here would use.
+resolve_account() {
+  local account="${CLAUDE_ACCOUNT:-}"
+  [ -n "$account" ] || account="$(bound_account "$(project_key)")"
+  echo "${account:-default}"
+}
+
+# The account the calling process runs under, from its CLAUDE_CONFIG_DIR.
+active_account() {
+  local dir="${CLAUDE_CONFIG_DIR:-}"
+  dir="${dir%/}"
+  case "$dir" in
+    "") echo default ;;
+    "$PROFILES"/*) echo "${dir#"$PROFILES"/}" ;;
+    *) echo "custom ($dir)" ;;
+  esac
+}
+
+# Creates the profile directory if needed and links what it shares. Runs on
+# every launch, so something added to ~/.claude later is picked up.
+sync_profile() {
+  local dir entry
+  dir="$(profile_dir "$1")"
+  mkdir -p "$dir"
+  chmod 700 "$dir"
+  # Shared state must exist in ~/.claude before it is linked, or claude would
+  # write it inside the profile, where no other account can see it.
+  mkdir -p "$BASE/projects" "$BASE/file-history"
+  for entry in "${SHARED[@]}"; do
+    if { [ -e "$BASE/$entry" ] || [ -L "$BASE/$entry" ]; } &&
+      [ ! -e "$dir/$entry" ] && [ ! -L "$dir/$entry" ]; then
+      ln -s "$BASE/$entry" "$dir/$entry"
+    fi
+  done
+  # Carry over onboarding state, MCP servers and project trust, minus the login.
+  if [ ! -e "$dir/.claude.json" ] && [ -f "$HOME/.claude.json" ]; then
+    (umask 077; "$JQ" 'del(.oauthAccount)' "$HOME/.claude.json" >"$dir/.claude.json") ||
+      rm -f "$dir/.claude.json"
+  fi
+}
+
+# Serializes every rewrite of the bindings file across concurrent sessions.
+# mkdir is atomic and, unlike flock, present on macOS.
+lock_bindings() {
+  local tries=0
+  mkdir -p "$ROOT"
+  until mkdir "$BINDINGS.lock" 2>/dev/null; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 100 ] || die "bindings are locked ($BINDINGS.lock); remove it if no claude-account is running"
+    sleep 0.1
+  done
+  trap 'rmdir "$BINDINGS.lock" 2>/dev/null' EXIT
+}
+
+unlock_bindings() {
+  rmdir "$BINDINGS.lock" 2>/dev/null
+  trap - EXIT
+}
+
+# <column> <value> [<key> <account>]: drop the bindings whose column equals
+# value, then append the given binding, as one locked, atomic replacement.
+rebind() {
+  local tmp="$BINDINGS.tmp.$$"
+  lock_bindings
+  if [ -f "$BINDINGS" ]; then
+    awk -F'\t' -v c="$1" -v v="$2" '$c != v' "$BINDINGS" >"$tmp"
+  else
+    : >"$tmp"
+  fi
+  [ -z "${3:-}" ] || printf '%s\t%s\n' "$3" "$4" >>"$tmp"
+  mv "$tmp" "$BINDINGS"
+  unlock_bindings
+}
+
+claude_bin() {
+  local bin="${CLAUDE_BIN:-$DEFAULT_CLAUDE_BIN}"
+  [ -n "$bin" ] || bin="$(command -v claude)" || die "claude is not on PATH"
+  echo "$bin"
+}
+
+cmd_list() {
+  local bound active name mark
+  bound="$(resolve_account)"
+  active="$(active_account)"
+  for name in default $(ls "$PROFILES" 2>/dev/null); do
+    mark=""
+    [ "$name" = "$bound" ] && mark="  <- this project"
+    [ "$name" = "$active" ] && [ -n "${CLAUDE_CONFIG_DIR+x}${CLAUDECODE:-}" ] &&
+      mark="$mark  (this session)"
+    echo "$name$mark"
+  done
+}
+
+cmd_add() {
+  local name="${1:-}"
+  valid_name "$name" || die "'$name' is not an account name (use a-z, 0-9, - and _)"
+  [ -d "$(profile_dir "$name")" ] && die "account '$name' already exists"
+  sync_profile "$name"
+  echo "Created account '$name'. Bind a project to it with /account $name; its first launch asks you to sign in."
+}
+
+cmd_login() {
+  local name="${1:-}"
+  require_account "$name"
+  if [ "$name" = default ]; then
+    env -u CLAUDE_CONFIG_DIR "$(claude_bin)" auth login
+  else
+    sync_profile "$name"
+    CLAUDE_CONFIG_DIR="$(profile_dir "$name")" "$(claude_bin)" auth login
+  fi
+}
+
+cmd_use() {
+  local name="${1:-}" key
+  require_account "$name"
+  key="$(project_key)"
+  # default is recorded too, so it overrides a binding on a parent directory.
+  rebind 1 "$key" "$key" "$name"
+  echo "$key now uses account '$name'."
+}
+
+cmd_status() {
+  echo "this session: $(active_account)"
+  echo "this project: $(resolve_account)  ($(project_key))"
+}
+
+cmd_run() {
+  local name
+  # A launch from inside a session inherits this, so the mod is added once.
+  case ":${CLAUDE_CODE_PLUGIN_DIRS:-}:" in
+    *":$MOD_DIR:"*) ;;
+    *) export CLAUDE_CODE_PLUGIN_DIRS="${CLAUDE_CODE_PLUGIN_DIRS:+$CLAUDE_CODE_PLUGIN_DIRS:}$MOD_DIR" ;;
+  esac
+  # A config directory the caller chose itself is not an account: leave it be.
+  if [ -z "${CLAUDE_ACCOUNT:-}" ]; then
+    case "${CLAUDE_CONFIG_DIR:-}" in
+      ""|"$PROFILES"/*) ;;
+      *) exec "$(claude_bin)" "$@" ;;
+    esac
+  fi
+  name="$(resolve_account)"
+  require_account "$name"
+  if [ "$name" = default ]; then
+    unset CLAUDE_CONFIG_DIR
+  else
+    sync_profile "$name"
+    export CLAUDE_CONFIG_DIR="$(profile_dir "$name")"
+  fi
+  exec "$(claude_bin)" "$@"
+}
+
+cmd_rm() {
+  local name="${1:-}"
+  require_account "$name"
+  [ "$name" = default ] && die "the default account is ~/.claude and is not removed here"
+  rm -rf "$(profile_dir "$name")"
+  rebind 2 "$name"
+  echo "Removed account '$name'. If it was signed in, its stored login was not removed."
+}
+
+command="${1:-}"
+[ $# -gt 0 ] && shift
+case "$command" in
+  list) cmd_list ;;
+  add) cmd_add "$@" ;;
+  login) cmd_login "$@" ;;
+  use) cmd_use "$@" ;;
+  status) cmd_status ;;
+  active) active_account ;;
+  run) cmd_run "$@" ;;
+  rm) cmd_rm "$@" ;;
+  ""|help|-h|--help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac
