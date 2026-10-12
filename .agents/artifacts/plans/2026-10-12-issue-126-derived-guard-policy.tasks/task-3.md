@@ -415,7 +415,7 @@ Each comment above was checked against a built prototype; if the implemented cod
 - [ ] **Step 5: Verify**
 
 Run the guard-suite invocation of Global Constraints (it builds first).
-Expected: `Ran 59 tests` and `OK` (the 51 at base plus the 8 added).
+Expected: `Ran 60 tests` and `OK` (the 51 at base plus the 9 added; the planning prototype ran 59, before the plan review added `test_literal_owner_does_not_bypass_the_derived_row_check`).
 
 Run, as one script:
 
