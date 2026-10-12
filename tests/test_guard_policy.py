@@ -49,10 +49,8 @@ class DerivationTest(WorldCase):
         self.assertEqual(report, {"schema_version": 1, "outcome": "complete", "cause": None,
                                   "derived": [NODO, "fagenorn/single"], "refused": []})
         policy = self.world.policy()
-        self.assertEqual(set(policy), set(guard_policy.POLICY_MEMBERS))
-        base = json.loads(self.world.base.read_text("utf-8"))
-        for member in guard_policy.BASE_MEMBERS:
-            self.assertEqual(policy[member], base[member], member)
+        self.assertEqual(set(policy), {"derived_repositories", "derivation"})
+        self.assertEqual(set(guard_policy.POLICY_MEMBERS), set(policy))
         rows = policy["derived_repositories"]
         self.assertEqual(sorted(rows), [NODO, "fagenorn/single"])
         for row in rows.values():
@@ -79,7 +77,7 @@ class DerivationTest(WorldCase):
         derivation = policy["derivation"]
         self.assertEqual(set(derivation),
                          {"schema_version", "platform_version", "registry_digest"})
-        self.assertEqual(derivation["schema_version"], 1)
+        self.assertEqual(derivation["schema_version"], 2)
         self.assertRegex(derivation["registry_digest"], r"^sha256:[0-9a-f]{64}$")
         # D11: identity evidence only, never the contract or a resolved snapshot.
         text = self.world.output.read_text("utf-8")
@@ -91,8 +89,7 @@ class DerivationTest(WorldCase):
         self.assertEqual((code, report["outcome"], report["derived"]), (0, "complete", []))
         policy = self.world.policy()
         self.assertEqual(policy["derived_repositories"], {})
-        self.assertEqual(policy["integration_bases"], {"fagenorn/arcwave": "dev"})
-        self.assertEqual(policy["authorized_owners"], ["fagenorn"])
+        self.assertEqual(set(policy), {"derived_repositories", "derivation"})
         self.assertIsNone(policy["derivation"]["registry_digest"])
 
     def test_the_contract_is_read_from_origin_and_the_checkout_is_left_alone(self):
@@ -326,17 +323,17 @@ class ProjectRefusalTest(WorldCase):
         self.refused("duplicate_repository", "fixture/two")
         self.assertEqual(sorted(self.world.policy()["derived_repositories"]), ["fagenorn/three"])
 
-    def test_literal_conflict_withholds_both_rows(self):
+    def test_literal_conflict_withholds_the_derived_row_only(self):
+        """Issue 377 D5: the compiled policy cannot subtract a store literal."""
         self.world.write_base(integration_bases={"fagenorn/one": "dev",
                                                  "fagenorn/arcwave": "dev"})
         self.world.project("fixture/one", "fagenorn/one")
         self.refused("literal_conflict")
-        policy = self.world.policy()
-        self.assertEqual(policy["integration_bases"], {"fagenorn/arcwave": "dev"})
-        self.assertEqual(policy["derived_repositories"], {})
+        self.assertEqual(self.world.policy()["derived_repositories"], {})
+        self.assertNotIn("integration_bases", self.world.policy())
 
     def test_name_unsupported_integration_branch(self):
-        """Git and the contract take `dev+ci`; the guard's loader refuses the whole policy."""
+        """Git and the contract take `dev+ci`; the guard's loader drops the whole compiled policy."""
         self.world.project("fixture/one", "fagenorn/one", integration_branch="dev+ci")
         self.world.project("fixture/two", "fagenorn/two")
         self.assertIn("integration_branch 'dev+ci'", self.refused("name_unsupported")["detail"])
@@ -355,12 +352,10 @@ class ProjectRefusalTest(WorldCase):
         self.assertIn("default_branch 'rel+1'", self.refused("name_unsupported")["detail"])
         self.assertEqual(sorted(self.world.policy()["derived_repositories"]), ["fagenorn/two"])
 
-    def test_an_unsupported_name_does_not_keep_its_literal_row(self):
-        """D14: the slug was derived, so its literal integration row leaves the file too."""
+    def test_literal_conflict_is_judged_before_the_name(self):
         self.world.write_base(integration_bases={"fagenorn/one": "dev"})
         self.world.project("fixture/one", "fagenorn/one", integration_branch="dev+ci")
         self.refused("literal_conflict")
-        self.assertEqual(self.world.policy()["integration_bases"], {})
 
 
 class UnsupportedNameTest(unittest.TestCase):
@@ -443,6 +438,8 @@ class WholeRefusalTest(WorldCase):
             "an extra member": {**valid, "extra": 1},
             "a compiled policy": {**valid, "derivation": {}},
             "a derived row": {**valid, "derived_repositories": {"a/b": {}}},
+            "the #375 seven-member shape": {**valid, "derived_repositories": {},
+                                            "derivation": None},
             "owners": {**valid, "authorized_owners": "fagenorn"},
             "bases": {**valid, "integration_bases": {"a/b": ""}},
             "a relative tool": {**valid, "git_bin": "git"},

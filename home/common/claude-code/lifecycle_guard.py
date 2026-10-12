@@ -1,10 +1,11 @@
 """Claude Code's PreToolUse Bash lifecycle guard.
 
 The claude-code module's store wrapper clears NIX_PYTHON* and runs this file
-under `python3 -I` with `--policy` naming the compiled policy at
-`~/.agents/state/guard/policy.json`. A `--policy` given after the wrapper's
-own replaces it, which is how the wrapper's build check loads the base policy
-and a test loads a fixture.
+under `python3 -I` with `--base-policy` naming the store base policy, the only
+source of the trusted members, and `--policy` naming the compiled policy at
+`~/.agents/state/guard/policy.json`, which supplies derived rows alone. Either
+flag given after the wrapper's own replaces it, which is how a test loads
+fixtures.
 Standard library only: it imports nothing from the repository's helper package.
 """
 
@@ -17,17 +18,10 @@ import subprocess
 import sys
 
 
-POLICY_KEYS = frozenset(
-    {
-        "authorized_owners",
-        "integration_bases",
-        "git_bin",
-        "gh_bin",
-        "jq_bin",
-        "derived_repositories",
-        "derivation",
-    }
+BASE_POLICY_KEYS = frozenset(
+    {"authorized_owners", "integration_bases", "git_bin", "gh_bin", "jq_bin"}
 )
+COMPILED_POLICY_KEYS = frozenset({"derived_repositories", "derivation"})
 DERIVED_ROW_KEYS = frozenset({"default_branch", "integration_branch", "evidence"})
 CHILD_DIAGNOSTIC_LIMIT = 240
 # The harness exports a fine-grained GITHUB_TOKEN that gh prefers over the
@@ -796,35 +790,40 @@ def default_branch(git_bin, cwd, timeout):
     return name
 
 
-class Policy:
-    """The values of the policy file named by `--policy`.
+class BasePolicy:
+    """The values of the base policy file named by `--base-policy`.
 
-    The registered hook names the compiled policy, the base policy plus one
-    derived row per registered project; a test passes any policy of the same
-    schema. `derived_repositories` maps a repository slug to its row, and the
-    guard reads a row's two branches and leaves `evidence` and `derivation` to
-    the compiler that wrote them.
+    The store file holds the five trusted members: the authorized owners, the
+    literal integration bases and the absolute paths of `git`, `gh` and `jq`.
+    Nothing outside this file supplies any of them; a test passes any file of the
+    same schema.
     """
 
     def __init__(self, document):
         self.authorized_owners = frozenset(document["authorized_owners"])
         self.integration_bases = dict(document["integration_bases"])
-        self.derived_repositories = dict(document["derived_repositories"])
         self.git_bin = document["git_bin"]
         self.gh_bin = document["gh_bin"]
         self.jq_bin = document["jq_bin"]
 
 
-def load_policy(path):
-    """(Policy, None) for a well-formed policy file at `path`, else (None, reason)."""
+def _load_json_object(path, keys):
+    """(document, None) for a JSON object at `path` with exactly `keys`, else (None, reason)."""
     try:
         with open(path, encoding="utf-8") as handle:
             document = json.load(handle)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         return None, f"cannot load {path}: {error}"
-    if not isinstance(document, dict) or set(document) != POLICY_KEYS:
-        keys = ", ".join(sorted(POLICY_KEYS))
-        return None, f"{path}: expected an object with exactly the keys {keys}"
+    if not isinstance(document, dict) or set(document) != keys:
+        return None, f"{path}: expected an object with exactly the keys {', '.join(sorted(keys))}"
+    return document, None
+
+
+def load_base_policy(path):
+    """(BasePolicy, None) for a well-formed base policy at `path`, else (None, reason)."""
+    document, reason = _load_json_object(path, BASE_POLICY_KEYS)
+    if document is None:
+        return None, reason
     owners = document["authorized_owners"]
     if not isinstance(owners, list) or not all(
         isinstance(owner, str) and owner for owner in owners
@@ -839,75 +838,114 @@ def load_policy(path):
     for key in ("git_bin", "gh_bin", "jq_bin"):
         if not isinstance(document[key], str) or not os.path.isabs(document[key]):
             return None, f"{path}: {key} must be an absolute path"
+    return BasePolicy(document), None
+
+
+def load_compiled_policy(path):
+    """(rows, None) for a well-formed compiled policy at `path`, else ({}, reason).
+
+    The file supplies derived rows alone: `derived_repositories` maps a repository
+    slug to its row, and the guard reads a row's two branches and leaves
+    `evidence` and `derivation` to the compiler that wrote them. A file that
+    cannot be read or carries any malformed row contributes no row at all, so it is
+    never partially read, and it never blocks a call by itself.
+    """
+    document, reason = _load_json_object(path, COMPILED_POLICY_KEYS)
+    if document is None:
+        return {}, reason
     derived = document["derived_repositories"]
     if not isinstance(derived, dict):
-        return None, f"{path}: derived_repositories must be an object"
+        return {}, f"{path}: derived_repositories must be an object"
     for repository, row in derived.items():
         if not isinstance(repository, str) or SLUG_PATTERN.fullmatch(repository) is None:
-            return None, f"{path}: derived_repositories key {repository!r} is not an owner/name slug"
+            return {}, f"{path}: derived_repositories key {repository!r} is not an owner/name slug"
         if not isinstance(row, dict) or set(row) != DERIVED_ROW_KEYS:
             keys = ", ".join(sorted(DERIVED_ROW_KEYS))
-            return None, (
+            return {}, (
                 f"{path}: derived_repositories {repository} must be an object "
                 f"with exactly the keys {keys}"
             )
         for key in ("default_branch", "integration_branch"):
             branch = row[key]
             if not isinstance(branch, str) or REF_NAME_PATTERN.fullmatch(branch) is None:
-                return None, f"{path}: derived_repositories {repository} {key} must be a branch name"
+                return {}, f"{path}: derived_repositories {repository} {key} must be a branch name"
         if not isinstance(row["evidence"], dict):
-            return None, f"{path}: derived_repositories {repository} evidence must be an object"
-        if repository in bases:
-            return None, f"{path}: {repository} is in both integration_bases and derived_repositories"
+            return {}, f"{path}: derived_repositories {repository} evidence must be an object"
     if document["derivation"] is not None and not isinstance(document["derivation"], dict):
-        return None, f"{path}: derivation must be null or an object"
-    return Policy(document), None
+        return {}, f"{path}: derivation must be null or an object"
+    return dict(derived), None
 
 
 class Context:
-    """Injected dependencies plus the repository facts, resolved once."""
+    """Injected dependencies plus the repository facts, resolved once.
 
-    def __init__(self, args, policy, cwd):
+    Building a context is the one place the compiled policy is opened, so a
+    command with no push, PR creation, merge or release creation never reads it.
+    """
+
+    def __init__(self, args, base, cwd):
         self.git_bin = args.git_bin
         self.gh_bin = args.gh_bin
         self.jq_bin = args.jq_bin
         self.timeout = args.child_timeout_seconds
-        self.authorized_owners = policy.authorized_owners
+        self.authorized_owners = base.authorized_owners
         self.repository = detect_repository(self.git_bin, cwd, self.timeout)
         self.base_branch = default_branch(self.git_bin, cwd, self.timeout)
         self.cwd = cwd
-        self.derived_row = policy.derived_repositories.get(self.repository)
+        rows, self.compiled_problem = load_compiled_policy(args.policy)
+        self.derived_row = rows.get(self.repository)
+        self.row_problem = self._row_problem(base)
         # A derived row with two distinct branches declares an integration
         # branch exactly as an `integration_bases` entry does, so every reader
         # of `integration_bases` sees both without knowing where a row came from.
-        self.integration_bases = dict(policy.integration_bases)
-        if self.derived_row is not None and (
+        # A row with a problem declares nothing.
+        self.integration_bases = dict(base.integration_bases)
+        if self.derived_row is not None and self.row_problem is None and (
             self.derived_row["integration_branch"] != self.derived_row["default_branch"]
         ):
             self.integration_bases[self.repository] = self.derived_row["integration_branch"]
+
+    def _row_problem(self, base):
+        """Why the repository's derived row cannot be used, or None (also None with no row)."""
+        row = self.derived_row
+        if row is None:
+            return None
+        if self.repository in base.integration_bases:
+            return (
+                f"repository {self.repository} has both a literal integration base "
+                "and a derived policy row; repair: run claude-guard-policy"
+            )
+        if self.base_branch != row["default_branch"]:
+            live = self.base_branch if self.base_branch is not None else "no branch"
+            return (
+                f"repository {self.repository}: origin/HEAD names {live}, "
+                f"its derived policy row names {row['default_branch']}"
+            )
+        return None
 
 
 def ownership_problem(context):
     """Why the context's repository is outside standing authorization, or None.
 
     A derived row authorizes exactly its repository, whoever the owner is, and
-    only while origin/HEAD names the branch the row recorded as the default.
-    Without a row the owner must be a literal authorized owner.
+    only while it has no problem: it must not sit beside a literal integration
+    base, and origin/HEAD must name the branch the row recorded as the default.
+    Without a row the owner must be a literal authorized owner, and a compiled
+    policy that contributed no row says why.
     """
     repository = context.repository
     if repository is None:
         return "repository unknown is outside standing authorization"
-    row = context.derived_row
-    if row is None:
-        if repository.split("/", 1)[0] not in context.authorized_owners:
-            return f"repository {repository} is outside standing authorization"
-        return None
-    if context.base_branch != row["default_branch"]:
-        live = context.base_branch if context.base_branch is not None else "no branch"
-        return (
-            f"repository {repository}: origin/HEAD names {live}, "
-            f"its derived policy row names {row['default_branch']}"
-        )
+    if context.derived_row is not None:
+        return context.row_problem
+    if repository.split("/", 1)[0] not in context.authorized_owners:
+        message = f"repository {repository} is outside standing authorization"
+        if context.compiled_problem is not None:
+            message += (
+                f"; the compiled policy contributed no row: {context.compiled_problem}"
+                "; repair: run claude-guard-policy"
+            )
+        return message
     return None
 
 
@@ -1403,6 +1441,7 @@ def validate_release_merge(pr_facts, base, integration_base, context):
 
 def main():
     parser = argparse.ArgumentParser(prog="claude-bash-lifecycle-guard")
+    parser.add_argument("--base-policy", required=True)
     parser.add_argument("--policy", required=True)
     parser.add_argument("--git-bin", default=None)
     parser.add_argument("--gh-bin", default=None)
@@ -1428,15 +1467,15 @@ def main():
     if word is not None:
         return block(f"detaching command `{word}` refused: {DETACHING_ROUTES}")
 
-    policy, reason = load_policy(args.policy)
-    if policy is None:
+    base, reason = load_base_policy(args.base_policy)
+    if base is None:
         return block(f"invalid policy: {reason}")
     if args.git_bin is None:
-        args.git_bin = policy.git_bin
+        args.git_bin = base.git_bin
     if args.gh_bin is None:
-        args.gh_bin = policy.gh_bin
+        args.gh_bin = base.gh_bin
     if args.jq_bin is None:
-        args.jq_bin = policy.jq_bin
+        args.jq_bin = base.jq_bin
 
     operations = guarded_operations(command)
     for operation, _segment, problem in operations:
@@ -1455,7 +1494,7 @@ def main():
             )
         else:
             if context is None:
-                context = Context(args, policy, payload.get("cwd"))
+                context = Context(args, base, payload.get("cwd"))
             if operation == "push":
                 status = validate_push(segment, context)
             elif operation == "pr-create":

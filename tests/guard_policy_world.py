@@ -91,7 +91,7 @@ class GuardPolicyWorld:
         document = {"authorized_owners": ["fagenorn"],
                     "integration_bases": {"fagenorn/arcwave": "dev"},
                     "git_bin": "/usr/bin/git", "gh_bin": "/usr/bin/gh", "jq_bin": "/usr/bin/jq",
-                    "derived_repositories": {}, "derivation": None, **members}
+                    **members}
         self.base.write_text(json.dumps(document), encoding="utf-8")
         return document
 

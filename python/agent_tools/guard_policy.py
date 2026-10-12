@@ -9,9 +9,10 @@ loader accepts the row's slug and two branch names (`unsupported_name`); the
 steps are `derive`, `target_profiles` and `compile_policy`, and each refusal
 carries one of `REASON_CODES`.
 
-It writes one JSON document, the base policy's five members with
-`integration_bases` stripped of every derived slug, plus `derived_repositories`
-and `derivation`, atomically to `--output`. Evidence is identity only: a
+It writes one JSON document with exactly two members, `derived_repositories` and
+`derivation` (`derivation.schema_version` is `DERIVATION_SCHEMA_VERSION`),
+atomically to `--output`; the base policy is only validated and consulted for
+`literal_conflict`, and none of its members is copied into the output. Evidence is identity only: a
 digest of the registry entry, the pinned commit and contract blob, the
 provider's answer and each profile's version and digest. No resolved snapshot
 and no contract body is kept. The only repository writes are the
@@ -52,10 +53,10 @@ from agent_tools import (adopt_inspection, adopt_verify, agent_platform, canonic
 
 REPORT_SCHEMA_VERSION = 1
 DERIVE_REPORT_SCHEMA_VERSION = 1
-DERIVATION_SCHEMA_VERSION = 1
+DERIVATION_SCHEMA_VERSION = 2
 
 BASE_MEMBERS = ("authorized_owners", "integration_bases", "git_bin", "gh_bin", "jq_bin")
-POLICY_MEMBERS = (*BASE_MEMBERS, "derived_repositories", "derivation")
+POLICY_MEMBERS = ("derived_repositories", "derivation")
 TOOL_MEMBERS = ("git_bin", "gh_bin", "jq_bin")
 
 REASON_CODES = (
@@ -70,10 +71,10 @@ CAUSES = ("base_invalid", "registry_invalid", "platform_unavailable", "output_un
 BRANCH_UNRESOLVED_REPAIRS = ("adopt.registration.remote_default_unknown",
                              "adopt.registration.integration_branch_unresolved")
 
-# The shapes the lifecycle guard's `load_policy` demands of a derived row's key
-# and of its two branches (`SLUG_PATTERN` and `REF_NAME_PATTERN` in
-# `home/common/claude-code/lifecycle_guard.py`). The guard refuses the whole
-# policy over one row outside them, and git and the contract grammar both take
+# The shapes the lifecycle guard's `load_compiled_policy` demands of a derived
+# row's key and of its two branches (`SLUG_PATTERN` and `REF_NAME_PATTERN` in
+# `home/common/claude-code/lifecycle_guard.py`). The guard drops the whole
+# compiled policy over one row outside them, and git and the contract grammar both take
 # names it does not, such as `dev+ci`. The guard is a standalone file this
 # package cannot import, so the two are restated here and the guard suite's
 # round trip holds them to what the built guard loads.
@@ -126,10 +127,8 @@ def read_base(path: Path) -> dict:
         base = _strict_load(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise invalid(f"could not be read as JSON ({type(error).__name__})") from None
-    if not isinstance(base, dict) or set(base) != set(POLICY_MEMBERS):
-        raise invalid(f"must be an object with exactly {', '.join(POLICY_MEMBERS)}")
-    if base["derived_repositories"] != {} or base["derivation"] is not None:
-        raise invalid("is a compiled policy: derived_repositories must be {} and derivation null")
+    if not isinstance(base, dict) or set(base) != set(BASE_MEMBERS):
+        raise invalid(f"must be an object with exactly {', '.join(BASE_MEMBERS)}")
     owners, bases = base["authorized_owners"], base["integration_bases"]
     if not isinstance(owners, list) or not all(_is_name(owner) for owner in owners):
         raise invalid("authorized_owners must be a list of non-empty strings")
@@ -324,7 +323,7 @@ def unsupported_name(slug: str, row: dict) -> str | None:
                                  GUARD_REF_NAME)):
         if shape.fullmatch(name) is None:
             return (f"{member} {name!r} is not a name the lifecycle guard loads, and one such "
-                    "row would make it refuse the whole policy")
+                    "row would make it drop the whole compiled policy")
     return None
 
 
@@ -374,9 +373,10 @@ def derive_repository(entries: list[dict], repository: str) -> tuple[dict | None
     return rows.get(repository), refusals + more
 
 
-def compile_policy(base: dict, entries: list[dict]) -> tuple[dict, dict[str, dict], list[dict]]:
-    """`(integration_bases, derived rows, refusals)`: `derive` per entry, then steps 11 and 12
-    and the loader's name shapes, so every row returned is one the guard loads."""
+def compile_policy(base: dict, entries: list[dict]) -> tuple[dict[str, dict], list[dict]]:
+    """`(derived rows, refusals)`: `derive` per entry, then steps 11 and 12 and the loader's
+    name shapes, so every row returned is one the guard loads. A slug the base policy holds
+    as a literal integration base is `literal_conflict`; the literal stays in the base."""
     proven: list[tuple[dict, str, dict]] = []
     refusals: list[dict] = []
     for entry in entries:
@@ -387,10 +387,7 @@ def compile_policy(base: dict, entries: list[dict]) -> tuple[dict, dict[str, dic
         else:
             proven.append((entry, slug, row))
     rows, more = _admit(proven, base["integration_bases"])
-    derived_by = {slug for _, slug, _ in proven}
-    bases = {slug: branch for slug, branch in base["integration_bases"].items()
-             if slug not in derived_by}
-    return bases, rows, refusals + more
+    return rows, refusals + more
 
 
 # --------------------------------------------------------------------------
@@ -411,13 +408,12 @@ def _platform_refusal(cause: str, error: agent_platform.PlatformManifestError) -
 
 def _write(base: dict, entries: list[dict], platform_version: str,
            output: Path) -> tuple[int, dict]:
-    bases, rows, refusals = compile_policy(base, entries)
+    rows, refusals = compile_policy(base, entries)
     registry_digest = None
     if agent_platform.registry_path().exists():
         registry_digest = canonical.telemetry_digest(
             {"schema_version": agent_platform.REGISTRY_SCHEMA_VERSION, "projects": entries})
-    document = {**{member: base[member] for member in BASE_MEMBERS}, "integration_bases": bases,
-                "derived_repositories": rows,
+    document = {"derived_repositories": rows,
                 "derivation": {"schema_version": DERIVATION_SCHEMA_VERSION,
                                "platform_version": platform_version,
                                "registry_digest": registry_digest}}

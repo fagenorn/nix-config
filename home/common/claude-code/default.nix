@@ -41,8 +41,10 @@ let
   # origin/HEAD points at. The guard otherwise requires every guarded PR to be
   # opened against, and merged into, the default branch. A registered project
   # never gets a row here: its integration branch comes from its derived row,
-  # and a repository present in both makes the compiler withhold both rows and
-  # the guard refuse the policy. A repository with neither keeps the
+  # and a repository present in both is refused: the compiler denies that project
+  # its derived row (`literal_conflict`), the literal row stays in the base
+  # policy, and the guard refuses the guarded verbs of a repository that has both
+  # a literal row and a compiled row. A repository with neither keeps the
   # default-branch-only rule, and the default branch stays acceptable
   # everywhere.
   #
@@ -69,11 +71,12 @@ let
     "fagenorn/arcwave" = "dev";
   };
 
-  # The base policy: the literal rows above and the tool paths, as one store
-  # JSON file that is a valid guard policy by itself, with no derived row. The
-  # wrapper's build check and the guard suite load it, and `guard-policy
-  # compile` copies it into the compiled policy. The tool paths keep git, gh
-  # and jq in the closure.
+  # The base policy: the five trusted members, the literal rows above and the
+  # tool paths, as one store JSON file. It is the only place the guard reads
+  # those members from, and no one copies it: `guard-policy compile` only
+  # validates it and checks derived slugs against its literal rows. The wrapper's
+  # build check and the guard suite load it. The tool paths keep git, gh and jq
+  # in the closure.
   lifecycleGuardBasePolicy = pkgs.writeText "claude-bash-lifecycle-guard-base-policy.json" (
     builtins.toJSON {
       authorized_owners = authorizedOwners;
@@ -81,13 +84,11 @@ let
       git_bin = "${pkgs.git}/bin/git";
       gh_bin = "${pkgs.gh}/bin/gh";
       jq_bin = "${pkgs.jq}/bin/jq";
-      derived_repositories = { };
-      derivation = null;
     }
   );
 
-  # The compiled policy the registered hook reads: the base policy plus one
-  # derived row per registered project, written by `claude-guard-policy`.
+  # The compiled policy the registered hook reads: derived rows only, one per
+  # registered project, written by `claude-guard-policy`.
   lifecycleGuardPolicyPath = "${config.home.homeDirectory}/.agents/state/guard/policy.json";
 
   # `guard-policy compile` with the base policy and the compiled path fixed, and
@@ -108,9 +109,11 @@ let
   # The registered hook: one argument-free store path. Bash's `-p` ignores
   # BASH_ENV and inherited functions, `-I` and the unset keep PYTHONPATH, user
   # site and NIX_PYTHON* `.pth` hooks out, and `exec` hands the hook's timeout
-  # kill to Python. `--policy` names the compiled policy, whose path is fixed at
-  # evaluation time. The check runs the guard against the base policy, so the
-  # build refuses a guard source or a base policy that cannot load.
+  # kill to Python. `--base-policy` names the store base policy and `--policy`
+  # the compiled policy, whose path is fixed at evaluation time. The check runs
+  # the wrapper on a payload with no repository-bound verb: the guard loads the
+  # base policy, so the build refuses a guard source or a base policy that cannot
+  # load, and never opens the compiled path.
   lifecycleGuard = pkgs.writeTextFile {
     name = "claude-bash-lifecycle-guard";
     executable = true;
@@ -118,11 +121,11 @@ let
     text = ''
       #!${pkgs.runtimeShell} -p
       unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
-      exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --policy ${lifecycleGuardPolicyPath} "$@"
+      exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --base-policy ${lifecycleGuardBasePolicy} --policy ${lifecycleGuardPolicyPath} "$@"
     '';
     checkPhase = ''
       if ! printf '%s' '{"tool_name":"Bash","tool_input":{"command":"true"}}' \
-        | "$target" --policy ${lifecycleGuardBasePolicy}; then
+        | "$target"; then
         echo "claude-bash-lifecycle-guard: refused a harmless Bash payload" >&2
         exit 1
       fi
@@ -318,11 +321,15 @@ in
   # after linkGeneration because the compiler loads the platform manifest from
   # ~/.agents/share, and before the settings copy. It never aborts the switch:
   # exit 1 leaves a policy without the refused projects' rows, and any other
-  # failure removes the policy file, which makes the hook block every Bash call.
-  # The removal is an `if` condition because the activation script runs under
-  # `set -e`. When it fails the step says so instead, and the hook reads
-  # whatever is at the path: a directory or an unreadable or malformed file
-  # still blocks every call, and a readable earlier policy stays in force.
+  # failure removes the policy file, so registered projects lose their derived
+  # guard row and with it their derived integration branch: only a repository
+  # that relies on a derived row for its authorization is refused until
+  # `claude-guard-policy` succeeds, while authorization from the base policy (an
+  # authorized owner or a literal integration row) still applies. The removal is
+  # an `if` condition because the activation script runs under `set -e`. When it
+  # fails the step says so instead, and the hook reads whatever is at the path:
+  # a directory or an unreadable or malformed file contributes no row, and a
+  # readable earlier policy stays in force.
   home.activation.claudeGuardPolicy =
     lib.hm.dag.entryBetween [ "claudeCodeSettings" ] [ "writeBoundary" "linkGeneration" ]
       ''
@@ -332,9 +339,9 @@ in
           echo "claude-guard-policy: the projects named above have no derived guard row; rerun claude-guard-policy from an authenticated shell" >&2
         elif [ "$guardPolicyStatus" -ne 0 ]; then
           if run rm -f ${lifecycleGuardPolicyPath}; then
-            echo "claude-guard-policy: no guard policy was written (exit $guardPolicyStatus), so the lifecycle guard blocks every Bash call; rerun claude-guard-policy from an authenticated shell" >&2
+            echo "claude-guard-policy: no guard policy was written (exit $guardPolicyStatus), so registered projects lose their derived guard row and the lifecycle guard refuses a repository that relies on one until it succeeds; rerun claude-guard-policy from an authenticated shell" >&2
           else
-            echo "claude-guard-policy: no guard policy was written (exit $guardPolicyStatus) and ${lifecycleGuardPolicyPath} could not be removed, so the lifecycle guard reads whatever is there; remove it, then rerun claude-guard-policy from an authenticated shell" >&2
+            echo "claude-guard-policy: no guard policy was written (exit $guardPolicyStatus) and ${lifecycleGuardPolicyPath} could not be removed, so the lifecycle guard reads whatever rows are there; remove it, then rerun claude-guard-policy from an authenticated shell" >&2
           fi
         fi
       '';
