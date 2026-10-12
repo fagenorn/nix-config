@@ -945,6 +945,28 @@ def rewritten(references: References, answers: Mapping[str, str],
 # --------------------------------------------------------------------------
 
 
+def _grep(root: Path, revision: str, patterns: Iterable[str],
+          pathspecs: Iterable[str] = ()) -> list[str]:
+    """The tracked text files of `revision` that hold any fixed `patterns`.
+
+    Limited to `pathspecs` when there are any. No match is an empty list; any
+    other git failure refuses `adopt.git.failed`.
+    """
+    args = ["grep", "--no-color", "-I", "-l", "-z", "-F",
+            *[arg for pattern in patterns for arg in ("-e", pattern)],
+            revision]
+    pathspecs = list(pathspecs)
+    if pathspecs:
+        args += ["--", *pathspecs]
+    code, out = run_git(root, *args)
+    if code == 1:
+        return []
+    if code != 0:
+        raise refuse("adopt_failure", "adopt.git.failed", "",
+                     "a git inspection command did not succeed")
+    return [result.removeprefix(revision + ":") for result in split_nul(out)]
+
+
 def derive_references(root: Path, revision: str,
                       moves: Iterable[tuple[str, str]],
                       excluded: Iterable[str],
@@ -954,36 +976,52 @@ def derive_references(root: Path, revision: str,
     A file the moves carry is read like any other, at its base path; a record
     home is tested against that base path. `trees` names the tree of each
     moved file (see `plan_references`).
+
+    Two read sets feed `plan_references`. The first is every file holding the
+    first segment of a moved path (`texts`), which the plain, pattern and
+    variable readings take. The second is the depth reading's (`depth_texts`):
+    the moved files, within the trees of the moves, that hold `..` or
+    `__file__`. Both take the same filters (a regular file, not Markdown, not
+    secret-shaped, not excluded, not under a record home, valid UTF-8), and a
+    blob is read once when both sets hold it. No references are returned when
+    neither set holds a file.
     """
     moves = list(moves)
     if not moves:
         return References({}, ())
     sources = {source for source, _ in moves}
     segments = sorted({source.split("/")[0] for source in sources})
-    code, out = run_git(root, "grep", "--no-color", "-I", "-l", "-z", "-F",
-                        *[arg for segment in segments
-                          for arg in ("-e", segment)], revision)
-    if code == 1:
+    prefiltered = _grep(root, revision, segments)
+    climbing = [path for path in _grep(
+        root, revision, ("..", "__file__"),
+        [f":(literal){tree}" for tree in sorted(
+            {trees.get(source, source) for source in sources})])
+        if path in sources]
+    if not prefiltered and not climbing:
         return References({}, ())
-    if code != 0:
-        raise refuse("adopt_failure", "adopt.git.failed", "",
-                     "a git inspection command did not succeed")
     records = tree_records(root, revision)
     modes = {path: mode for path, mode, _ in records}
     skipped = set(excluded)
-    texts: dict[str, str] = {}
-    for result in split_nul(out):
-        path = result.removeprefix(revision + ":")
-        if (modes.get(path) not in REGULAR_MODES or is_markdown_path(path)
-                or is_secret_path(path) or path in skipped
-                or path.startswith(RECORD_HOMES)):
-            continue
-        data = blob_at(root, revision, path)
-        if data is None:
-            continue
-        try:
-            texts[path] = data.decode("utf-8")
-        except UnicodeDecodeError:
-            continue
+    decoded: dict[str, str | None] = {}
+
+    def read(path: str) -> str | None:
+        if path not in decoded:
+            decoded[path] = None
+            if (modes.get(path) in REGULAR_MODES
+                    and not is_markdown_path(path)
+                    and not is_secret_path(path) and path not in skipped
+                    and not path.startswith(RECORD_HOMES)):
+                data = blob_at(root, revision, path)
+                if data is not None:
+                    try:
+                        decoded[path] = data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        pass
+        return decoded[path]
+
+    texts = {path: text for path in prefiltered
+             if (text := read(path)) is not None}
+    depth_texts = {path: text for path in climbing
+                   if (text := read(path)) is not None}
     return plan_references(texts, [path for path, _, _ in records], moves,
-                           trees)
+                           trees, depth_texts)

@@ -1088,5 +1088,72 @@ class DerivationTest(unittest.TestCase):
             adopt_references.References({}, ()))
 
 
+class DepthDerivationTest(unittest.TestCase):
+    """#380 D7: the depth reading's own read set, beside the first-segment
+    prefilter's."""
+
+    FILES = {
+        ".claude/specs/tool/run.py": b"ROOT = Path(__file__).parents[2]\n",
+        ".claude/specs/tool/both.toml":
+            b'lib = "../../../vendor/lib"\nspec = ".claude/plans/y.md"\n',
+        ".claude/specs/tool/notes.md": b"[up](../../../README.md)\n",
+        ".claude/specs/tool/blob.bin": b"\x00../../../x\n",
+        ".claude/specs/tool/.env.ci": b"../../../x\n",
+        ".claude/specs/tool/dots.txt": b"see ../../../README.md\n",
+        ".claude/plans/y.md": b"# y\n",
+        ".claude/odd.py": b"UP = Path(__file__).parents[1]\n",
+        "tools/up.py": b"ROOT = Path(__file__).parents[1]\nX = '../x/y'\n",
+        "README.md": b"# r\n",
+    }
+    MOVES = [(p, p.replace(".claude/specs", SPECS, 1)) for p in (
+        ".claude/specs/tool/run.py", ".claude/specs/tool/both.toml",
+        ".claude/specs/tool/notes.md", ".claude/specs/tool/blob.bin",
+        ".claude/specs/tool/.env.ci", ".claude/specs/tool/dots.txt")] + [
+        (".claude/plans/y.md", ".agents/artifacts/plans/y.md"),
+        (".claude/odd.py", ".agents/knowledge/archive/adopted/.claude/odd.py")]
+    TREES = {**{s: "/".join(s.split("/")[:2]) for s, _ in MOVES},
+             ".claude/odd.py": ".claude/odd.py"}
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp()).resolve()
+        git(self.root, "init", "--quiet", "-b", "main")
+        git(self.root, "config", "commit.gpgsign", "false")
+        for path, data in self.FILES.items():
+            target = self.root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        git(self.root, "add", "-A", "-f")
+        git(self.root, "commit", "--quiet", "-m", "fixture")
+
+    def found(self, excluded=(), moves=None, trees=None):
+        return [(o.subject, o.depth)
+                for o in adopt_references.derive_references(
+                    self.root, "HEAD", self.MOVES if moves is None else moves,
+                    excluded, self.TREES if trees is None else trees
+                ).occurrences]
+
+    def test_moved_text_files_holding_a_climb_are_read(self):
+        self.assertEqual(self.found(), [
+            (".claude/odd.py:1:20", True),
+            (".claude/specs/tool/both.toml:1:8", True),
+            (".claude/specs/tool/both.toml:2:9", False),
+            (".claude/specs/tool/dots.txt:1:5", True),
+            (".claude/specs/tool/run.py:1:22", True)])
+
+    def test_excluded_files_are_not_read(self):
+        self.assertEqual(self.found([".claude/specs/tool/run.py"]), [
+            (".claude/odd.py:1:20", True),
+            (".claude/specs/tool/both.toml:1:8", True),
+            (".claude/specs/tool/both.toml:2:9", False),
+            (".claude/specs/tool/dots.txt:1:5", True)])
+
+    def test_a_move_no_file_names_is_still_read_for_climbs(self):
+        # No blob holds `tools`, so the first-segment prefilter finds nothing.
+        self.assertEqual(
+            self.found(moves=[("tools/up.py", "lib/tools/up.py")],
+                       trees={"tools/up.py": "tools"}),
+            [("tools/up.py:1:22", True), ("tools/up.py:2:6", True)])
+
+
 if __name__ == "__main__":
     unittest.main()
