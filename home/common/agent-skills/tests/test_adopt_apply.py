@@ -33,7 +33,11 @@ from agent_tools import adopt_apply, adopt_inspection, adopt_links, adopt_planni
 from .test_adopt_project import (
     CHECK_LINKS,
     CHECK_LINKS_EXTENDED,
+    COLLECT,
     GITIGNORE_WITH_COMMENT,
+    JOBS_DIR,
+    JOBS_NEW,
+    JOBS_SCRIPT,
     LINKED_AFTER,
     LINKED_BASE,
     LINKED_SOURCES,
@@ -53,6 +57,8 @@ from .test_adopt_project import (
     RUN_REPORT,
     SETTINGS,
     UNRELATED_SCRIPT,
+    VARIABLE_RETAIN_ANSWERS,
+    VARIABLE_REWRITE_ANSWERS,
     answer_args,
     commit,
     fixture_contract,
@@ -62,12 +68,14 @@ from .test_adopt_project import (
     run,
     scaffold,
     tree_snapshot,
+    variable_code,
     write,
     write_dissolved_tree,
     write_linked_tree,
     write_moved_tool,
     write_policy_tree,
     write_reference_tree,
+    write_variable_tree,
 )
 
 CONTRACT = ".agents/project.json"
@@ -995,6 +1003,55 @@ class ReferencePolicyApplyTest(ApplyTestCase):
             [(".json", "retain", 0), (".nix", "rewrite", 0),
              (".py", "rewrite", 0)])
         self.assertEqual(record["plan_id"], document["plan"]["plan_id"])
+
+
+class VariablePolicyApplyTest(ApplyTestCase):
+    """#376 AC2: a `$var/`-joined path is rewritten at the destination in
+    the adoption commit, or its file is left byte-identical."""
+
+    def applied(self, answers: tuple) -> tuple[Path, dict, dict]:
+        root = apply_repo(self.home)
+        write_variable_tree(root)
+        code, out, err = run("plan", "--repo-root", str(root),
+                             *answer_args(*answers), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        document = json.loads(out)
+        self.assertEqual(document["plan"]["state"], "ready",
+                         document["plan"]["blockers"])
+        return root, document, self.succeed(root, document["plan"]["plan_id"])
+
+    def test_rewrite_lands_at_the_destination(self):
+        root, document, result = self.applied(VARIABLE_REWRITE_ANSWERS)
+        branch = result["branch"]
+        code = variable_code()
+        script = git(root, "show", f"{branch}:{JOBS_NEW}/run.sh")
+        self.assertEqual(script,
+                         code[JOBS_SCRIPT].replace(JOBS_DIR, JOBS_NEW))
+        self.assertIn(f'"$root/{JOBS_NEW}/data.txt"', script)
+        self.assertNotIn(".claude/", script)
+        self.assertEqual(
+            git(root, "show", f"{branch}:{COLLECT}.sh"),
+            code[f"{COLLECT}.sh"].replace(JOBS_DIR, JOBS_NEW))
+        record = json.loads(git(
+            root, "show", f"{branch}:{result['evidence_record']}"))
+        for question, subject, value in VARIABLE_REWRITE_ANSWERS:
+            with self.subTest(subject=subject):
+                self.assertIn(
+                    {"id": question, "subject": subject, "value": value},
+                    record["decisions_accepted"])
+        self.assertEqual(record["reference_policies"],
+                         document["reference_policies"])
+        self.assertEqual(record["path_references"],
+                         document["path_references"])
+
+    def test_retain_keeps_the_base_blob(self):
+        root, _, result = self.applied(VARIABLE_RETAIN_ANSWERS)
+        branch = result["branch"]
+        self.assertEqual(
+            git(root, "rev-parse", f"{branch}:{JOBS_NEW}/run.sh"),
+            git(root, "rev-parse", f"HEAD:{JOBS_SCRIPT}"))
+        self.assertEqual(git(root, "show", f"{branch}:{COLLECT}.sh"),
+                         git(root, "show", f"HEAD:{COLLECT}.sh"))
 
 
 class CommitLinkProofTest(ApplyTestCase):

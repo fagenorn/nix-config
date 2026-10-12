@@ -179,7 +179,9 @@ def reference_questions(references: References, answers: dict[str, str],
     question is stable across plans of one tree. A `path-reference` entry
     carries no `value`, because the answer is the operator's choice among the
     occurrence's own `answers`; a `reference-policy` entry's `value` is the
-    answer recommended for the class, or null.
+    answer recommended for the occurrence's class (`<file class>/variable` for
+    a variable-joined occurrence), or null for a class outside the
+    recommendation table, which every `/variable` class is.
     """
     open_policies = sorted({
         occurrence.policy for occurrence in references.occurrences
@@ -196,7 +198,7 @@ def reference_questions(references: References, answers: dict[str, str],
         if adopt_references.effective_answer(
             occurrence, answers, policies)[0] is None
         and occurrence.policy not in open_policies]
-    classes = {occurrence.policy: adopt_references.file_class(occurrence.path)
+    classes = {occurrence.policy: occurrence.occurrence_class
                for occurrence in references.occurrences}
     return questions + [
         {"id": "reference-policy",

@@ -607,6 +607,48 @@ def policy_repo(home: Path, *, code: bool = True) -> Path:
     return root
 
 
+JOBS_DIR = ".claude/notes/jobs"
+JOBS_NEW = ".agents/artifacts/notes/jobs"
+JOBS_SCRIPT = f"{JOBS_DIR}/run.sh"
+COLLECT = "tools/collect"
+SH_POLICY = ".claude/notes:.sh"
+SH_VARIABLE_POLICY = ".claude/notes:.sh/variable"
+JOBS_LITERAL = f"{JOBS_SCRIPT}:3:6"
+JOBS_VARIABLE = f"{JOBS_SCRIPT}:4:6"
+COLLECT_SUBJECT = f"{COLLECT}.sh:2:6"
+VARIABLE_REWRITE_ANSWERS = (
+    ("path-reference", COLLECT_SUBJECT, "rewrite"),
+    ("reference-policy", SH_POLICY, "rewrite"),
+    ("reference-policy", SH_VARIABLE_POLICY, "rewrite"),
+)
+VARIABLE_RETAIN_ANSWERS = tuple(
+    (question, subject, "retain")
+    for question, subject, _ in VARIABLE_REWRITE_ANSWERS)
+
+
+def variable_code(suffix: str = ".sh") -> dict[str, str]:
+    """#376: a moved script with one literal and one `$root/`-joined path
+    into its own tree, the file both name, and an unmoved script with one
+    `${ROOT}/`-joined path into it; `suffix` is both scripts' class."""
+    return {
+        f"{JOBS_DIR}/run{suffix}": (
+            "#!/bin/sh\n"
+            'root="$1"\n'
+            f'cat "{JOBS_DIR}/data.txt"\n'
+            f'cat "$root/{JOBS_DIR}/data.txt"\n'),
+        f"{JOBS_DIR}/data.txt": "jobs\n",
+        f"{COLLECT}{suffix}": (
+            "#!/bin/sh\n"
+            f'cat "${{ROOT}}/{JOBS_DIR}/data.txt"\n'),
+    }
+
+
+def write_variable_tree(root: Path, suffix: str = ".sh") -> None:
+    for path, text in variable_code(suffix).items():
+        write(root, path, text)
+    commit(root, "add shell scripts that join paths to a variable")
+
+
 def answer_args(*triples: tuple[str, str, str]) -> list[str]:
     return [token for triple in triples for token in ("--answer", *triple)]
 
@@ -2535,6 +2577,83 @@ class ReferencePolicyPlanTest(AdoptTestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("\nopen reference-policy .claude/notes:- "
                       "(answers: rewrite|retain, recommended: none): ", out)
+
+
+class VariablePolicyPlanTest(AdoptTestCase):
+    """#376 D7, D8, D10: variable-joined paths in shell files are asked
+    about under their own policy, never with `extend`."""
+
+    def answered(self, root: Path, *triples: tuple[str, str, str]) -> object:
+        code, doc, err = self.plan(root, *answer_args(*triples))
+        self.assertEqual(code, 0, err or doc)
+        return doc
+
+    def variable_repo(self, suffix: str = ".sh") -> Path:
+        root = nix_config_shape_repo(self.home)
+        write_variable_tree(root, suffix)
+        return root
+
+    def opened(self, doc: object) -> list[tuple]:
+        return [(entry["id"], entry["subject"], entry.get("value"))
+                for entry in doc["decisions"]["open"]]
+
+    def test_variable_paths_open_their_own_policy(self):
+        doc = self.answered(self.variable_repo())
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(
+            [(row["subject"], row["answers"], row["replacement"],
+              row["target"], row["policy"]) for row in doc["path_references"]],
+            [(JOBS_LITERAL, ["rewrite", "retain"], f"{JOBS_NEW}/data.txt",
+              f"{JOBS_NEW}/run.sh", SH_POLICY),
+             (JOBS_VARIABLE, ["rewrite", "retain"],
+              f"$root/{JOBS_NEW}/data.txt", f"{JOBS_NEW}/run.sh",
+              SH_VARIABLE_POLICY),
+             (COLLECT_SUBJECT, ["rewrite", "retain"],
+              f"${{ROOT}}/{JOBS_NEW}/data.txt", f"{COLLECT}.sh", None)])
+        self.assertEqual(self.opened(doc), [
+            ("path-reference", COLLECT_SUBJECT, None),
+            ("reference-policy", SH_POLICY, "rewrite"),
+            ("reference-policy", SH_VARIABLE_POLICY, None)])
+        self.assertEqual(doc["reference_policies"], [
+            policy_row(SH_POLICY, "rewrite", 1, 1),
+            policy_row(SH_VARIABLE_POLICY, None, 1, 1)])
+
+    def test_the_literal_policy_never_decides_a_variable_occurrence(self):
+        doc = self.answered(self.variable_repo(),
+                            ("reference-policy", SH_POLICY, "rewrite"))
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(self.opened(doc), [
+            ("path-reference", COLLECT_SUBJECT, None),
+            ("reference-policy", SH_VARIABLE_POLICY, None)])
+        self.assertEqual(
+            [(row["subject"], row["answer"], row["decided_by"])
+             for row in doc["path_references"]],
+            [(JOBS_LITERAL, "rewrite", "policy"), (JOBS_VARIABLE, None, None),
+             (COLLECT_SUBJECT, None, None)])
+
+    def test_every_answer_reaches_ready_with_one_write_per_script(self):
+        doc = self.answered(self.variable_repo(), *VARIABLE_REWRITE_ANSWERS)
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        code = variable_code()
+        for target, text in (
+                (f"{JOBS_NEW}/run.sh",
+                 code[JOBS_SCRIPT].replace(JOBS_DIR, JOBS_NEW)),
+                (f"{COLLECT}.sh",
+                 code[f"{COLLECT}.sh"].replace(JOBS_DIR, JOBS_NEW))):
+            with self.subTest(target=target):
+                (op,) = [op for op in doc["changes"]
+                         if op["op"] == "write-file"
+                         and op["targets"] == [target]]
+                self.assertEqual(op["after"],
+                                 sha256_hash(text.encode("utf-8")))
+
+    def test_a_non_shell_class_reads_no_variable(self):
+        doc = self.answered(self.variable_repo(".py"))
+        self.assertEqual(
+            [(row["subject"], row["policy"])
+             for row in doc["path_references"]],
+            [(f"{JOBS_DIR}/run.py:3:6", ".claude/notes:.py")])
 
 
 class GitignoreAmendmentTest(AdoptTestCase):
