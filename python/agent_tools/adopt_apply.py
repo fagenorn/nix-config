@@ -33,6 +33,7 @@ from collections.abc import Callable
 import json
 import os
 from pathlib import Path
+import posixpath
 import re
 import subprocess
 import tarfile
@@ -415,7 +416,7 @@ def generated_file_sources(worktree: Path) -> set[str] | None:
         else None
     if not isinstance(entries, list):
         return None
-    return {entry["source"] for entry in entries
+    return {posixpath.normpath(entry["source"]) for entry in entries
             if isinstance(entry, dict)
             and entry.get("kind") == "generated_file"
             and isinstance(entry.get("source"), str)}
@@ -434,7 +435,9 @@ def run_formatting(worktree: Path, operations: list[dict], rows: list[dict],
 
     Before anything runs, a file of a row that names a command and is the
     `sources[0]` of a `regenerate-projection` operation whose projection is a
-    `generated_file` is refused: that projection was regenerated from the
+    `generated_file` is refused, the paths compared after
+    `posixpath.normpath`, since the contract accepts a source spelled with a
+    `./` or a repeated `/`: that projection was regenerated from the
     file's bytes before formatting, and regenerating it again would change a
     planned `after`, so the target would be left stale behind a gate that
     names the projection rather than the formatter. A `managed_import` renders
@@ -445,20 +448,22 @@ def run_formatting(worktree: Path, operations: list[dict], rows: list[dict],
     `adopt.format.failed` (a formatted projection source, no resolving
     contract, no entry for the id, a command that cannot start or exits
     non-zero, a file that cannot be staged) or `adopt.format.unplanned_content`.
-    A command that cannot start or exits non-zero is named in the message with
-    its exit status or launch error and the tail of its stderr.
+    A command that cannot start is named in the message with its launch
+    error, and one that exits non-zero with its exit status and the tail of
+    its stderr.
     """
     declared = [row for row in rows if row["command"] is not None]
     if not declared:
         return
-    projected = {operation["sources"][0] for operation in operations
+    projected = {posixpath.normpath(operation["sources"][0])
+                 for operation in operations
                  if operation["op"] == "regenerate-projection"}
     rendered_from_bytes = generated_file_sources(worktree)
     if rendered_from_bytes is not None:
         projected &= rendered_from_bytes
     for row in declared:
         for path in row["files"]:
-            if path in projected:
+            if posixpath.normpath(path) in projected:
                 raise format_failure(
                     "adopt.format.failed",
                     f"{path} is the source of a regenerated projection, so "

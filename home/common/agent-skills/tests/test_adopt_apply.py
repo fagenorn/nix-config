@@ -1263,14 +1263,22 @@ class ReferenceFormattingApplyTest(ApplyTestCase):
                         {"not_run"})
 
     def test_a_formatted_projection_source_is_refused_before_formatting(self):
-        """A reference-edited file that is a `generated_file` projection's
-        source was regenerated from before formatting would change it, so the
-        formatter is refused rather than left to strand a stale target."""
+        """A reference-edited file whose `generated_file` projection was
+        regenerated from its bytes before formatting would change them is
+        refused, rather than left to strand a stale target. The contract may
+        spell the source with a `./` or a repeated `/` (COR-002), and the
+        refusal still holds."""
+        for source in (ANALYZER, "./" + ANALYZER,
+                       ANALYZER.replace("/", "//", 1)):
+            with self.subTest(source=source):
+                self.assert_projection_source_refused(source)
+
+    def assert_projection_source_refused(self, source: str) -> None:
         root = formatting_repo(self.home)
         contract = json.loads((root / CONTRACT).read_text("utf-8"))
         entry = {"id": "codex.analyzer", "agent": "codex",
                  "kind": "generated_file", "target": PROJECTED_ANALYZER,
-                 "source": ANALYZER}
+                 "source": source}
         contract["projections"].append(entry)
         write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
         # Rendered by the resolver's own function, so the target starts in
@@ -1286,8 +1294,8 @@ class ReferenceFormattingApplyTest(ApplyTestCase):
         self.assertEqual(document["reference_formatting"], [
             {"class": ".py", "command": "format", "files": [ANALYZER]}])
         self.assertIn(
-            ([ANALYZER], [PROJECTED_ANALYZER]),
-            [(op["sources"], op["targets"]) for op in document["changes"]
+            [PROJECTED_ANALYZER],
+            [op["targets"] for op in document["changes"]
              if op["op"] == "regenerate-projection"])
         plan_id = document["plan"]["plan_id"]
         payload = self.assert_retained(root, plan_id, base,
