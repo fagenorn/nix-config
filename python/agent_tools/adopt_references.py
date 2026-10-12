@@ -2,13 +2,30 @@
 
 This module provides what a relocation needs to find a repository path written
 in a tracked, non-Markdown text file that would be left pointing at a path
-that moved: the token grammar (`tokens`, `split_token`), the successors of a
-referenced path and the carried form of a successor (`successors`,
-`carried_form`), the occurrences, each with its shape and the answers it
-offers (`Occurrence`, `plan_references`), the report of those occurrences and
-the edits their answers make (`summary`, `rewritten`), and the reader that
-feeds the core a tree's text through git (`derive_references`, over
-`adopt_inspection.tree_records` and `blob_at`).
+that moved: the token grammar (`tokens`, `split_token`, `split_pattern`), the
+successors of a referenced path and the carried form of a successor
+(`successors`, `carried_form`, `pattern_form`), the occurrences, each with its
+shape, the answers it offers, the path its edit lands at and, for a file the
+plan moves, the policy that can answer it (`Occurrence`, `plan_references`),
+the class of a file name and the answer recommended for it (`file_class`,
+`recommended_answer`), the answer that decides an occurrence
+(`effective_answer`), the reports of the occurrences and of the policies
+(`summary`, `policy_summary`) and the edits the answers make (`rewritten`), and
+the reader that feeds the core a tree's text through git (`derive_references`,
+over `adopt_inspection.tree_records` and `blob_at`).
+
+A file the plan moves is read at its base path and edited at its destination:
+an occurrence's `path` and `subject` are the base path, its `target` is where
+the plan leaves the file. An answer is the occurrence's own, or else the one
+given to its policy, `<tree>:<class>`, the moved tree and the class of the
+file name; `effective_answer` is the one place that precedence is decided.
+A path the moves would leave more than one file at is `contested`, and no edit
+is made at it: `rewritten` returns no file for such a path.
+
+A token is read as a plain path first (`split_token`). Only when that reading
+names no moved path is it read a second time as a regular-expression spelling
+(`split_pattern`, for a token that starts with `^` or holds `\\.`), and the
+forms offered for it keep its anchor, escape and tail (`pattern_form`).
 
 It is imported and never run. It reads blobs only through git, never the
 working tree, writes nothing, and imports `adopt_inspection` and `adopt_links`
@@ -17,10 +34,11 @@ only. Standard library only; no per-language parser is used.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Iterable
+from typing import Callable, Iterable, Mapping
 
 from agent_tools.adopt_inspection import (
     blob_at, is_secret_path, refuse, run_git, split_nul, tree_records)
@@ -28,13 +46,20 @@ from agent_tools.adopt_links import (
     REGULAR_MODES, Tree, directory_successor, is_markdown_path)
 
 ANSWERS = ("extend", "rewrite", "retain")
+POLICY_ANSWERS = ("rewrite", "retain")
+REWRITE_CLASSES = (".py", ".sh", ".bash", ".zsh", ".nix", ".yaml", ".yml",
+                   ".toml", ".js", ".mjs", ".cjs", ".ts")
+RETAIN_CLASSES = (".json", ".jsonl", ".ndjson", ".csv", ".tsv", ".txt",
+                  ".log")
 TOKEN_DELIMITERS = "\"'`,;:=()<>|&#!"
 GLOB_CHARACTERS = "*?[{"
+PATTERN_ESCAPES = ("\\\\.", "\\.")
 CARRIED_TAILS = ("", "/", "/**")
 # The paths whose files are records of what was, never read for references.
 RECORD_HOMES = (".agents/artifacts/", ".agents/knowledge/archive/")
 
 _QUOTES = "\"'"
+_PATTERN_SAFE = re.compile(r"[A-Za-z0-9_./-]+")
 _OPENING_BEFORE = "[{,"
 _CLOSING_REST = ",])}"
 _NOT_A_CALL_BEFORE = "_)]"
@@ -95,6 +120,36 @@ def split_token(token: str) -> tuple[str, str, str]:
     return prefix, path, rest[len(path):]
 
 
+def split_pattern(token: str) -> tuple[str, str, str, str, str] | None:
+    """`(anchor, escape, prefix, path, tail)` of a pattern spelling, or None.
+
+    A pattern spelling starts with `^` or holds an escaped dot (`\\.`, or
+    `\\\\.` as a TOML or JSON string spells it); one escape is chosen for the
+    whole token. The path is the longest leading run of `/`-separated segments
+    that decode, by replacing the escape with `.`, to a non-empty segment
+    holding no glob character and no backslash; `anchor + prefix + <the raw
+    text the path was decoded from> + tail` is the token.
+    """
+    escape = next((e for e in PATTERN_ESCAPES if e in token), "")
+    if not token.startswith("^") and not escape:
+        return None
+    anchor = "^" if token.startswith("^") else ""
+    rest = token[len(anchor):]
+    prefix = "/" if rest.startswith("/") else ""
+    rest = rest[len(prefix):]
+    raw = rest.split("/")
+    decoded = [segment.replace(escape, ".") if escape else segment
+               for segment in raw]
+    count = 0
+    for segment in decoded:
+        if (not segment or "\\" in segment
+                or any(c in GLOB_CHARACTERS for c in segment)):
+            break
+        count += 1
+    return (anchor, escape, prefix, "/".join(decoded[:count]),
+            rest[len("/".join(raw[:count])):])
+
+
 # --------------------------------------------------------------------------
 # Successors and carried forms
 # --------------------------------------------------------------------------
@@ -145,10 +200,63 @@ def carried_form(prefix: str, successor: str, is_directory: bool, tail: str,
         form = prefix + successor + (tail if is_directory else "")
     else:
         return None
-    whole = tokens(form)
-    if len(whole) != 1 or (whole[0].start, whole[0].end) != (0, len(form)):
+    if not _is_one_token(form):
         return None
     return form if split_token(form)[1] == successor else None
+
+
+def pattern_form(anchor: str, escape: str, prefix: str, successor: str,
+                 is_directory: bool, tail: str, single: bool) -> str | None:
+    """The pattern spelling that keeps anchor, escape and tail on `successor`.
+
+    None when `successor` holds a character a pattern would need to escape
+    beyond the dot, when `tail` is not carried, and when the spelling would not
+    be read back by `split_pattern` as `successor`.
+    """
+    if not _PATTERN_SAFE.fullmatch(successor):
+        return None
+    if single:
+        carried = tail
+    elif tail in CARRIED_TAILS:
+        carried = tail if is_directory else ""
+    else:
+        return None
+    form = anchor + prefix + (successor.replace(".", escape) if escape
+                              else successor) + carried
+    if not _is_one_token(form):
+        return None
+    read = split_pattern(form)
+    return form if read is not None and read[3] == successor else None
+
+
+def _is_one_token(form: str) -> bool:
+    whole = tokens(form)
+    return len(whole) == 1 and (whole[0].start, whole[0].end) == (0, len(form))
+
+
+# --------------------------------------------------------------------------
+# Classes and recommendations
+# --------------------------------------------------------------------------
+
+
+def file_class(path: str) -> str:
+    """The lower-cased extension of a file name with its dot, or `-`.
+
+    A name with no dot, a leading dot only (`.envrc`) or a trailing dot
+    (`notes.`) has no class.
+    """
+    name = path.rpartition("/")[2]
+    stem, dot, extension = name.rpartition(".")
+    return "." + extension.lower() if dot and stem and extension else "-"
+
+
+def recommended_answer(file_class: str) -> str | None:
+    """The policy answer printed for a class, or None when none is given."""
+    if file_class in REWRITE_CLASSES:
+        return "rewrite"
+    if file_class in RETAIN_CLASSES:
+        return "retain"
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -168,16 +276,28 @@ class Occurrence:
     additions: tuple[str, ...]
     replacement: str | None
     shape: str | None
+    target: str
+    tree: str | None
 
     @property
     def subject(self) -> str:
         return f"{self.path}:{self.line}:{self.column}"
 
+    @property
+    def policy(self) -> str | None:
+        """`<tree>:<class>` for a file the plan moves, else None."""
+        if self.tree is None:
+            return None
+        return f"{self.tree}:{file_class(self.path)}"
+
 
 @dataclass(frozen=True)
 class References:
+    """The scanned texts by base path, their occurrences, and the paths the
+    moves would leave more than one file at (`contested`)."""
     texts: dict[str, str]
     occurrences: tuple[Occurrence, ...]
+    contested: frozenset[str] = frozenset()
 
 
 def _line_bounds(text: str, start: int, end: int) -> tuple[int, int]:
@@ -213,19 +333,49 @@ def _follows_a_name(before: str) -> bool:
                              or before[-1] in _NOT_A_CALL_BEFORE)
 
 
+def _names_moved(target: str, base: Tree, sources: tuple[str, ...]) -> bool:
+    return bool(target) and (target in base.paths
+                             or target in base.directories) and any(
+        s == target or s.startswith(target + "/") for s in sources)
+
+
+def _reading(token: str, base: Tree, sources: tuple[str, ...]
+             ) -> tuple[str, Callable[[str, bool, bool], str | None]] | None:
+    """`(path, form)` of the first reading of `token` that names a moved path.
+
+    `form(successor, is_directory, single)` is the spelling of a successor that
+    keeps the token's shape. The plain reading decides alone whenever it names
+    a moved path; the pattern reading is consulted only when it does not.
+    """
+    prefix, target, tail = split_token(token)
+    if _names_moved(target, base, sources):
+        def plain(successor: str, is_directory: bool, single: bool
+                  ) -> str | None:
+            return carried_form(prefix, successor, is_directory, tail, single)
+        return target, plain
+    pattern = split_pattern(token)
+    if pattern is None or not _names_moved(pattern[3], base, sources):
+        return None
+    anchor, escape, pattern_prefix, pattern_target, pattern_tail = pattern
+
+    def spelled(successor: str, is_directory: bool, single: bool
+                ) -> str | None:
+        return pattern_form(anchor, escape, pattern_prefix, successor,
+                            is_directory, pattern_tail, single)
+    return pattern_target, spelled
+
+
 def _occurrence(path: str, text: str, token: Token, base: Tree, after: Tree,
-                moved: dict[str, str], sources: tuple[str, ...]
-                ) -> Occurrence | None:
+                moved: dict[str, str], sources: tuple[str, ...], target: str,
+                tree: str | None) -> Occurrence | None:
     if "/" not in token.text and not _is_quoted(text, token):
         return None
-    prefix, target, tail = split_token(token.text)
-    if not target or (target not in base.paths
-                      and target not in base.directories):
+    reading = _reading(token.text, base, sources)
+    if reading is None:
         return None
-    if not any(s == target or s.startswith(target + "/") for s in sources):
-        return None
-    single, found = successors(target, base, after, moved)
-    forms = [carried_form(prefix, successor, is_directory, tail, single)
+    referenced, form = reading
+    single, found = successors(referenced, base, after, moved)
+    forms = [form(successor, is_directory, single)
              for successor, is_directory in found]
     shape = _shape(text, token)
     answers = []
@@ -240,7 +390,7 @@ def _occurrence(path: str, text: str, token: Token, base: Tree, after: Tree,
     answers.append("retain")
     return Occurrence(path, token.line, token.column, token.start, token.end,
                       token.text, tuple(answers), additions, replacement,
-                      shape)
+                      shape, target, tree)
 
 
 # --------------------------------------------------------------------------
@@ -286,60 +436,154 @@ def _edit(text: str, occurrence: Occurrence, answer: str
 
 
 def plan_references(texts: dict[str, str], paths: Iterable[str],
-                    moves: Iterable[tuple[str, str]]) -> References:
-    """The occurrences of moved paths in `texts`, over the tree `paths`."""
+                    moves: Iterable[tuple[str, str]],
+                    trees: Mapping[str, str]) -> References:
+    """The occurrences of moved paths in `texts`, over the tree `paths`.
+
+    `texts` is keyed by base path. `trees` maps each moved file to the tree
+    its policy is named for; a moved file with no entry raises `ValueError`.
+    `contested` holds every path more than one file of the tree is left at:
+    the destination of two moves, or of one move and a file that stays.
+    """
     base, moved = Tree(paths), dict(moves)
     after = Tree((base.paths - moved.keys()) | set(moved.values()))
+    landings = Counter(moved.get(path, path)
+                       for path in base.paths | moved.keys())
+    contested = frozenset(path for path, count in landings.items()
+                          if count > 1)
     sources = tuple(moved)
     held: dict[str, str] = {}
     found: list[Occurrence] = []
     for path in sorted(texts):
         text = texts[path]
+        target = moved.get(path, path)
+        tree = None
+        if path in moved:
+            if path not in trees:
+                raise ValueError(f"{path}: a moved file has no tree")
+            tree = trees[path]
         for token in tokens(text):
             occurrence = _occurrence(path, text, token, base, after, moved,
-                                     sources)
+                                     sources, target, tree)
             if occurrence is not None:
                 held[path] = text
                 found.append(occurrence)
     found.sort(key=lambda o: (o.path, o.line, o.column))
-    return References(held, tuple(found))
+    return References(held, tuple(found), contested)
 
 
-def summary(references: References, answers: dict[str, str]) -> list[dict]:
-    """One row per occurrence, in order, with the answer given to it."""
-    return [{"subject": o.subject, "path": o.path, "line": o.line,
-             "column": o.column, "literal": o.literal,
-             "answers": list(o.answers), "answer": answers.get(o.subject),
-             "additions": list(o.additions), "replacement": o.replacement}
-            for o in references.occurrences]
+def effective_answer(occurrence: Occurrence, answers: Mapping[str, str],
+                     policies: Mapping[str, str]
+                     ) -> tuple[str | None, str | None]:
+    """`(answer, decided_by)` of an occurrence; `(None, None)` when open.
+
+    The occurrence's own answer decides first (`occurrence`). Otherwise the
+    answer given to its policy decides (`policy`) when the occurrence offers
+    it. Raises `ValueError` for a policy answer outside `POLICY_ANSWERS`.
+    """
+    own = answers.get(occurrence.subject)
+    if own is not None:
+        return own, "occurrence"
+    policy = occurrence.policy
+    if policy is not None and policy in policies:
+        value = policies[policy]
+        if value not in POLICY_ANSWERS:
+            raise ValueError(f"{policy}: {value!r} is not a policy answer")
+        if value in occurrence.answers:
+            return value, "policy"
+    return None, None
 
 
-def rewritten(references: References, answers: dict[str, str]
-              ) -> dict[str, tuple[str, str]]:
-    """`path -> (before, after)` for each file an `extend` or `rewrite` edits.
+def summary(references: References, answers: Mapping[str, str],
+            policies: Mapping[str, str]) -> list[dict]:
+    """One row per occurrence, in order, with the answer that decides it."""
+    rows = []
+    for o in references.occurrences:
+        answer, decided_by = effective_answer(o, answers, policies)
+        rows.append({
+            "subject": o.subject, "path": o.path, "line": o.line,
+            "column": o.column, "literal": o.literal,
+            "answers": list(o.answers), "answer": answer,
+            "additions": list(o.additions), "replacement": o.replacement,
+            "target": o.target, "policy": o.policy,
+            "decided_by": decided_by})
+    return rows
 
-    Raises `ValueError` for an answer the occurrence does not offer, and for
-    an offered one it cannot carry out: a `rewrite` with no replacement, an
-    `extend` with no `quoted` or `line` shape, or an answer outside `ANSWERS`.
+
+def policy_summary(references: References, answers: Mapping[str, str],
+                   policies: Mapping[str, str]) -> list[dict]:
+    """One row per policy that has an occurrence, sorted by subject.
+
+    `files` counts distinct base paths, `rewritable` the occurrences that
+    offer `rewrite`, `rewritten`, `retained` and `extended` those decided by
+    that answer, `open` those no answer decides and `overridden` those their
+    own answer decides.
+    """
+    grouped: dict[str, list[tuple[Occurrence, str | None, str | None]]] = {}
+    for o in references.occurrences:
+        if o.policy is not None:
+            grouped.setdefault(o.policy, []).append(
+                (o, *effective_answer(o, answers, policies)))
+    rows = []
+    for subject, members in sorted(grouped.items()):
+        first = members[0][0]
+        decided = [answer for _, answer, _ in members]
+        klass = file_class(first.path)
+        rows.append({
+            "subject": subject, "tree": first.tree, "class": klass,
+            "recommended": recommended_answer(klass),
+            "answer": policies.get(subject),
+            "files": len({o.path for o, _, _ in members}),
+            "occurrences": len(members),
+            "rewritable": sum("rewrite" in o.answers for o, _, _ in members),
+            "rewritten": decided.count("rewrite"),
+            "retained": decided.count("retain"),
+            "extended": decided.count("extend"),
+            "open": decided.count(None),
+            "overridden": sum(by == "occurrence" for _, _, by in members)})
+    return rows
+
+
+def rewritten(references: References, answers: Mapping[str, str],
+              policies: Mapping[str, str]) -> dict[str, tuple[str, str]]:
+    """`target -> (before, after)` for each file an answer edits.
+
+    `before` is the base text, edited by base offsets; the key is where the
+    plan leaves the file. A file whose text is unchanged is not returned, and
+    neither is one whose target is in `references.contested`: its answers are
+    still checked, and no edit is made at a path another file is also left
+    at. Raises `ValueError` for an own answer the occurrence does not offer,
+    for an offered one it cannot carry out (a `rewrite` with no replacement,
+    an `extend` with no `quoted` or `line` shape, or an answer outside
+    `ANSWERS`), and for two edited files with one target that is not
+    contested.
     """
     edits: dict[str, list[tuple[int, int, str]]] = {}
+    targets: dict[str, str] = {}
     for occurrence in references.occurrences:
-        answer = answers.get(occurrence.subject)
-        if answer is None:
+        own = answers.get(occurrence.subject)
+        if own is not None and own not in occurrence.answers:
+            raise ValueError(f"{occurrence.subject}: {own!r} is not offered")
+        answer, _ = effective_answer(occurrence, answers, policies)
+        if answer is None or answer == "retain":
             continue
-        if answer not in occurrence.answers:
-            raise ValueError(
-                f"{occurrence.subject}: {answer!r} is not offered")
-        if answer != "retain":
-            edits.setdefault(occurrence.path, []).append(
-                _edit(references.texts[occurrence.path], occurrence, answer))
-    files = {}
+        triple = _edit(references.texts[occurrence.path], occurrence, answer)
+        if occurrence.target in references.contested:
+            continue
+        targets[occurrence.path] = occurrence.target
+        edits.setdefault(occurrence.path, []).append(triple)
+    files: dict[str, tuple[str, str]] = {}
     for path, triples in edits.items():
         before = text = references.texts[path]
         for start, end, new in sorted(triples, key=lambda t: t[:2],
                                       reverse=True):
             text = text[:start] + new + text[end:]
-        files[path] = (before, text)
+        if text == before:
+            continue
+        if targets[path] in files:
+            raise ValueError(
+                f"{targets[path]!r} is the target of two edited files")
+        files[targets[path]] = (before, text)
     return files
 
 
@@ -350,8 +594,14 @@ def rewritten(references: References, answers: dict[str, str]
 
 def derive_references(root: Path, revision: str,
                       moves: Iterable[tuple[str, str]],
-                      excluded: Iterable[str]) -> References:
-    """The references `moves` leave in `revision`'s tracked text files."""
+                      excluded: Iterable[str],
+                      trees: Mapping[str, str]) -> References:
+    """The references `moves` leave in `revision`'s tracked text files.
+
+    A file the moves carry is read like any other, at its base path; a record
+    home is tested against that base path. `trees` names the tree of each
+    moved file (see `plan_references`).
+    """
     moves = list(moves)
     if not moves:
         return References({}, ())
@@ -367,7 +617,7 @@ def derive_references(root: Path, revision: str,
                      "a git inspection command did not succeed")
     records = tree_records(root, revision)
     modes = {path: mode for path, mode, _ in records}
-    skipped = set(excluded) | sources
+    skipped = set(excluded)
     texts: dict[str, str] = {}
     for result in split_nul(out):
         path = result.removeprefix(revision + ":")
@@ -382,4 +632,5 @@ def derive_references(root: Path, revision: str,
             texts[path] = data.decode("utf-8")
         except UnicodeDecodeError:
             continue
-    return plan_references(texts, [path for path, _, _ in records], moves)
+    return plan_references(texts, [path for path, _, _ in records], moves,
+                           trees)
