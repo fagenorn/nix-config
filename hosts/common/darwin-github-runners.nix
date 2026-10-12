@@ -2,6 +2,7 @@
   config,
   lib,
   pkgs,
+  unstablePkgs,
   hostname,
   ...
 }:
@@ -33,6 +34,13 @@ in
       name = "${hostname}-${repo}";
       value = {
         enable = true;
+        # GitHub refuses jobs to a runner more than ~30 days behind the newest
+        # release ("Runner version vX is deprecated and cannot receive messages"),
+        # and Nix runs it with --disableupdate. The 25.11 channel lags too far, so
+        # track unstable and keep `just update` at least monthly.
+        package = unstablePkgs.github-runner;
+        # Upstream dropped node20; the module's default still lists it.
+        nodeRuntimes = [ "node24" ];
         url = "https://github.com/fagenorn/${repo}";
         tokenFile = "${tokenDir}/${repo}.token";
         replace = true;
