@@ -3,11 +3,11 @@
 This module provides what a relocation needs to find a repository path written
 in a tracked, non-Markdown text file that would be left pointing at a path
 that moved: the token grammar (`tokens`, `split_token`, `split_pattern`,
-`split_variable`), the successors of a referenced path and the carried form of
-a successor (`successors`, `carried_form`, `pattern_form`, `variable_form`), the
-occurrences, each with its
-shape, the answers it offers, the path its edit lands at and, for a file the
-plan moves, the policy that can answer it (`Occurrence`, `plan_references`),
+`split_variable`, `split_climb`), the successors of a referenced path and the
+carried form of a successor (`successors`, `carried_form`, `pattern_form`,
+`variable_form`, `climb_form`), the occurrences, each with its shape, the
+answers it offers, the path its edit lands at and, for a file the plan moves,
+the policy that can answer it (`Occurrence`, `plan_references`),
 the class of a file name and the answer recommended for it (`file_class`,
 `recommended_answer`), the answer that decides an occurrence
 (`effective_answer`), the reports of the occurrences and of the policies
@@ -33,6 +33,16 @@ neither reading makes an occurrence is read a third time as a `$name/` or
 `rewrite` and `retain` only, keeps the variable and the tail in the form it
 rewrites to (`variable_form`), and belongs to the `<tree>:<class>/variable`
 policy, never to the `<tree>:<class>` one.
+
+A file the plan moves and that is in the depth read set (`depth_texts`) is read
+a fourth time, for the `../` climbs that leave its moved tree (`split_climb`).
+A climb names no moved path; it is a path that stops landing where it did once
+the file sits at a different depth. Each climb that ends above the tree and
+lands elsewhere from the destination makes an occurrence that belongs to the
+`<tree>:<class>/depth` policy, never to the `<tree>:<class>` one, and offers
+`rewrite` (the climb shifted by the depth delta, `climb_form`) and `retain`
+only, or `retain` alone when no shifted form is valid or the climb's target is
+itself a moved path.
 
 It is imported and never run. It reads blobs only through git, never the
 working tree, writes nothing, and imports `adopt_inspection` and `adopt_links`
@@ -179,6 +189,36 @@ def split_variable(token: str) -> tuple[str, str, str] | None:
         count += 1
     path = "/".join(rest.split("/")[:count])
     return variable, path, rest[len(path):]
+
+
+def split_climb(token: str) -> tuple[str, int, str] | None:
+    """`(prefix, height, rest)` of a `../` climb token, or None.
+
+    `prefix` is `./` or empty, `height` the number of leading `..` segments
+    (at least one) and `rest` the text after the last of them, empty or
+    starting with `/`, so that `prefix + "/".join([".."] * height) + rest` is
+    the token. A token with no `/`, or whose rest holds a `..` segment, is no
+    climb.
+    """
+    if "/" not in token:
+        return None
+    prefix = "./" if token.startswith("./") else ""
+    segments = token[len(prefix):].split("/")
+    height = 0
+    while height < len(segments) and segments[height] == "..":
+        height += 1
+    if height == 0 or ".." in segments[height:]:
+        return None
+    rest = "/" + "/".join(segments[height:]) if height < len(segments) else ""
+    return prefix, height, rest
+
+
+def climb_form(prefix: str, height: int, rest: str) -> str | None:
+    """The climb of `height` levels that keeps `prefix` and `rest`, or None
+    when `height` is below one."""
+    if height < 1:
+        return None
+    return prefix + "/".join([".."] * height) + rest
 
 
 # --------------------------------------------------------------------------
@@ -330,6 +370,7 @@ class Occurrence:
     target: str
     tree: str | None
     variable: bool = False
+    depth: bool = False
 
     @property
     def subject(self) -> str:
@@ -337,9 +378,12 @@ class Occurrence:
 
     @property
     def occurrence_class(self) -> str:
-        """The file's class, or `<file class>/variable` for a variable-joined
-        occurrence; a file class never holds `/`, so the two never collide."""
+        """The file's class, `<file class>/depth` for a climb or
+        `<file class>/variable` for a variable-joined occurrence; a file class
+        never holds `/`, so no suffix collides with a class."""
         klass = file_class(self.path)
+        if self.depth:
+            return klass + "/depth"
         return klass + "/variable" if self.variable else klass
 
     @property
@@ -352,8 +396,8 @@ class Occurrence:
 
 @dataclass(frozen=True)
 class References:
-    """The scanned texts by base path, their occurrences, and the paths the
-    moves would leave more than one file at (`contested`)."""
+    """The texts that hold an occurrence by base path, the occurrences, and
+    the paths the moves would leave more than one file at (`contested`)."""
     texts: dict[str, str]
     occurrences: tuple[Occurrence, ...]
     contested: frozenset[str] = frozenset()
@@ -466,6 +510,99 @@ def _occurrence(path: str, text: str, token: Token, base: Tree, after: Tree,
 
 
 # --------------------------------------------------------------------------
+# Depth
+# --------------------------------------------------------------------------
+
+
+def _depth_of(directory: str) -> int:
+    return len(directory.split("/")) if directory else 0
+
+
+def _landing(directory: str, height: int) -> tuple[str, int]:
+    """`(place, above)` of a climb of `height` levels from `directory`.
+
+    `place` is the directory reached and `above` how many levels the climb
+    goes past the repository root, which it then lands on.
+    """
+    depth = _depth_of(directory)
+    if height <= depth:
+        return "/".join(directory.split("/")[:depth - height]), 0
+    return "", height - depth
+
+
+def _is_ancestor(ancestor: str, path: str) -> bool:
+    """Whether `ancestor` is `path` or a directory above it; the root is `""`."""
+    return not ancestor or path == ancestor or path.startswith(ancestor + "/")
+
+
+def _position(text: str, start: int) -> tuple[int, int]:
+    """The 1-based `(line, column)` of the offset `start`, counted as `tokens`
+    counts them."""
+    line_start = text.rfind("\n", 0, start) + 1
+    return text.count("\n", 0, start) + 1, start - line_start + 1
+
+
+def _depth_occurrences(path: str, text: str, base: Tree,
+                       sources: tuple[str, ...], target: str, tree: str
+                       ) -> list[Occurrence]:
+    """The `../` climbs of `text` that the move to `target` leaves landing
+    elsewhere, in text order.
+
+    `P` and `Q` are the directories of the file before and after the move and
+    `R` is the root of its tree; a file the plan archives has no tree of its
+    own, so its directory stands for it. A climb is an occurrence when it ends
+    at a proper ancestor of `R` (or above the repository root) and the same
+    climb from `Q` ends elsewhere, unless its base target is inside `R`, which
+    moves with the file. `rewrite` is offered when the climb ends at an
+    ancestor of `Q` or above the root, its base target is no moved path and
+    the shifted climb is valid.
+    """
+    old_dir, new_dir = path.rpartition("/")[0], target.rpartition("/")[0]
+    root = tree if path.startswith(tree + "/") else old_dir
+    delta = _depth_of(new_dir) - _depth_of(old_dir)
+
+    def consider(start: int, end: int, height: int, rest: str | None,
+                 shift: Callable[[int], str | None]) -> Occurrence | None:
+        """`rest` is the text climb's rest, or None for a climb with no
+        target text; `shift(delta)` is the shifted form or None."""
+        landing = _landing(old_dir, height)
+        if landing == _landing(new_dir, height):
+            return None
+        place, above = landing
+        if not above and (place == root or not _is_ancestor(place, root)):
+            return None
+        moved_target = False
+        if rest is not None and not above:
+            segments = [s for s in (place + "/" + rest).split("/")
+                        if s not in ("", ".")]
+            base_target = "/".join(segments)
+            if _is_ancestor(root, base_target):
+                return None
+            moved_target = _names_moved(base_target, base, sources)
+        replacement = None
+        if (above or _is_ancestor(place, new_dir)) and not moved_target:
+            replacement = shift(delta)
+        line, column = _position(text, start)
+        return Occurrence(
+            path, line, column, start, end, text[start:end],
+            ("rewrite", "retain") if replacement is not None
+            else ("retain",), (), replacement, None, target, tree, False, True)
+
+    found = []
+    for token in tokens(text):
+        climb = split_climb(token.text)
+        if climb is None:
+            continue
+        prefix, height, rest = climb
+        occurrence = consider(
+            token.start, token.end, height, rest,
+            lambda d, p=prefix, h=height, r=rest: climb_form(p, h + d, r))
+        if occurrence is not None:
+            found.append(occurrence)
+    return found
+
+
+# --------------------------------------------------------------------------
 # Edits
 # --------------------------------------------------------------------------
 
@@ -509,11 +646,15 @@ def _edit(text: str, occurrence: Occurrence, answer: str
 
 def plan_references(texts: dict[str, str], paths: Iterable[str],
                     moves: Iterable[tuple[str, str]],
-                    trees: Mapping[str, str]) -> References:
+                    trees: Mapping[str, str],
+                    depth_texts: Mapping[str, str] | None = None
+                    ) -> References:
     """The occurrences of moved paths in `texts`, over the tree `paths`.
 
     `texts` is keyed by base path. `trees` maps each moved file to the tree
     its policy is named for; a moved file with no entry raises `ValueError`.
+    `depth_texts`, keyed by base path as well, is read by the depth reading
+    alone and only for a moved file; a path in both maps gets every reading.
     `contested` holds every path more than one file of the tree is left at:
     the destination of two moves, or of one move and a file that stays.
     """
@@ -524,10 +665,11 @@ def plan_references(texts: dict[str, str], paths: Iterable[str],
     contested = frozenset(path for path, count in landings.items()
                           if count > 1)
     sources = tuple(moved)
+    depth_texts = depth_texts or {}
     held: dict[str, str] = {}
     found: list[Occurrence] = []
-    for path in sorted(texts):
-        text = texts[path]
+    for path in sorted(set(texts) | set(depth_texts)):
+        text = texts[path] if path in texts else depth_texts[path]
         target = moved.get(path, path)
         tree = None
         if path in moved:
@@ -535,12 +677,19 @@ def plan_references(texts: dict[str, str], paths: Iterable[str],
                 raise ValueError(f"{path}: a moved file has no tree")
             tree = trees[path]
         shell = file_class(path) in SHELL_CLASSES
-        for token in tokens(text):
-            occurrence = _occurrence(path, text, token, base, after, moved,
-                                     sources, target, tree, shell)
-            if occurrence is not None:
-                held[path] = text
-                found.append(occurrence)
+        occurrences = []
+        if path in texts:
+            for token in tokens(text):
+                occurrence = _occurrence(path, text, token, base, after,
+                                         moved, sources, target, tree, shell)
+                if occurrence is not None:
+                    occurrences.append(occurrence)
+        if path in depth_texts and tree is not None:
+            occurrences += _depth_occurrences(path, text, base, sources,
+                                              target, tree)
+        if occurrences:
+            held[path] = text
+            found += occurrences
     found.sort(key=lambda o: (o.path, o.line, o.column))
     return References(held, tuple(found), contested)
 

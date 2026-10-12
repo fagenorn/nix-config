@@ -711,6 +711,173 @@ class VariableReadingTest(unittest.TestCase):
             {})
 
 
+NOTES, NOTES_NEW = ".claude/notes", ".agents/artifacts/notes"
+TOOL, TOOL_NEW = NOTES + "/tool", NOTES_NEW + "/tool"
+DEPTH_PATHS = [TOOL + "/run.py", TOOL + "/pyproject.toml", TOOL + "/uv.lock",
+               NOTES + "/data/x", "vendor/lib/m.py", ".claude/specs/x.md",
+               "README.md"]
+DEPTH_MOVES = [(TOOL + "/run.py", TOOL_NEW + "/run.py"),
+               (TOOL + "/pyproject.toml", TOOL_NEW + "/pyproject.toml"),
+               (TOOL + "/uv.lock", TOOL_NEW + "/uv.lock"),
+               (NOTES + "/data/x", NOTES_NEW + "/data/x"),
+               (".claude/specs/x.md", ".agents/artifacts/specs/x.md")]
+DEPTH_TREES = {source: "/".join(source.split("/")[:2])
+               for source, _ in DEPTH_MOVES}
+
+
+def depth_found(texts, *, moves=DEPTH_MOVES, trees=DEPTH_TREES,
+                paths=DEPTH_PATHS, scanned=None):
+    return adopt_references.plan_references(
+        scanned or {}, paths, moves, trees, depth_texts=texts).occurrences
+
+
+def climbs(text, path=TOOL + "/pyproject.toml", **kwargs):
+    return [(o.literal, o.answers, o.replacement, o.depth)
+            for o in depth_found({path: text}, **kwargs)]
+
+
+class TextClimbTest(unittest.TestCase):
+    """#380 D1, D3, D4, D8: `../` climbs out of a moved file's tree."""
+
+    def test_a_climb_splits_into_prefix_height_and_rest(self):
+        split = adopt_references.split_climb
+        for token, expected in (
+                ("../x", ("", 1, "/x")), ("../../", ("", 2, "/")),
+                ("../..", ("", 2, "")), ("./../x", ("./", 1, "/x")),
+                ("./..", ("./", 1, "")),
+                ("../../../vendor/lib", ("", 3, "/vendor/lib")),
+                ("../a/./b", ("", 1, "/a/./b"))):
+            with self.subTest(token=token):
+                self.assertEqual(split(token), expected)
+                self.assertEqual("".join((expected[0],
+                                          "/".join([".."] * expected[1]),
+                                          expected[2])), token)
+        for token in ("..", "...", ".../x", "..x/y", "a/../b", "/../x",
+                      "../a/../b", "x"):
+            with self.subTest(token=token):
+                self.assertIsNone(split(token))
+
+    def test_the_shifted_form_keeps_prefix_and_rest(self):
+        form = adopt_references.climb_form
+        self.assertEqual(form("", 4, "/vendor/lib"), "../../../../vendor/lib")
+        self.assertEqual(form("./", 1, ""), "./..")
+        self.assertIsNone(form("", 0, "/x"))
+
+    def test_a_climb_to_the_root_is_rewritten_one_level_deeper(self):
+        self.assertEqual(climbs('lib = { path = "../../../vendor/lib" }\n'), [
+            ("../../../vendor/lib", ("rewrite", "retain"),
+             "../../../../vendor/lib", True)])
+        self.assertEqual(climbs('p = "./../../../vendor/"\n'), [
+            ("./../../../vendor/", ("rewrite", "retain"),
+             "./../../../../vendor/", True)])
+
+    def test_climbs_inside_the_tree_are_not_surfaced(self):
+        for text in ('d = "../data/x"\n', 'd = "../../notes/data/x"\n',
+                     'd = "./.."\n', 'd = "../x"\n'):
+            with self.subTest(text=text):
+                self.assertEqual(climbs(text), [])
+
+    def test_a_landing_point_only_above_the_old_directory_is_retained(self):
+        self.assertEqual(climbs('c = "../../settings.json"\n'), [
+            ("../../settings.json", ("retain",), None, True)])
+
+    def test_a_base_target_in_another_moved_tree_is_retained(self):
+        self.assertEqual(climbs('s = "../../../.claude/specs/x.md"\n'), [
+            ("../../../.claude/specs/x.md", ("retain",), None, True)])
+
+    def test_bare_dots_are_no_climb(self):
+        self.assertEqual(climbs('a = ".."\nb = HERE / ".." / ".."\n'), [])
+
+    def test_a_same_depth_move_surfaces_nothing_new(self):
+        moves = [(TOOL + "/pyproject.toml", "tools/notes/tool/pyproject.toml")]
+        self.assertEqual(climbs('lib = { path = "../../../vendor/lib" }\n',
+                                moves=moves), [])
+
+    def test_a_same_depth_move_under_another_parent_is_retained(self):
+        moves = [(TOOL + "/pyproject.toml", "tools/notes/tool/pyproject.toml")]
+        self.assertEqual(climbs('c = "../../settings.json"\n', moves=moves), [
+            ("../../settings.json", ("retain",), None, True)])
+
+    def test_a_shallower_move_climbs_less(self):
+        moves = [(TOOL + "/pyproject.toml", "notes/tool/pyproject.toml")]
+        self.assertEqual(climbs('lib = "../../../vendor/lib"\n', moves=moves),
+                         [("../../../vendor/lib", ("rewrite", "retain"),
+                           "../../vendor/lib", True)])
+        self.assertEqual(climbs('top = "../../../../up"\n', moves=moves),
+                         [("../../../../up", ("rewrite", "retain"),
+                           "../../../up", True)])
+
+    def test_a_shallower_move_that_cannot_climb_less_is_retained(self):
+        moves = [(TOOL + "/pyproject.toml", "pyproject.toml")]
+        # P = .claude/notes/tool (depth 3), Q = "" (depth 0): delta -3.
+        self.assertEqual(climbs('lib = "../../../vendor/lib"\n', moves=moves),
+                         [("../../../vendor/lib", ("retain",), None, True)])
+
+    def test_an_unmoved_or_unread_file_has_no_depth_occurrence(self):
+        self.assertEqual(climbs('lib = "../../../vendor/lib"\n',
+                                path="tools/a/b/c.toml",
+                                paths=DEPTH_PATHS + ["tools/a/b/c.toml"]), [])
+
+    def test_the_class_and_policy_of_a_depth_occurrence(self):
+        texts = {TOOL + "/pyproject.toml": 'lib = "../../../vendor/lib"\n',
+                 TOOL + "/uv.lock": 'source = "../../../vendor/lib"\n'}
+        self.assertEqual(
+            [(o.subject, o.occurrence_class, o.policy, o.target)
+             for o in depth_found(texts)],
+            [(TOOL + "/pyproject.toml:1:8", ".toml/depth",
+              NOTES + ":.toml/depth", TOOL_NEW + "/pyproject.toml"),
+             (TOOL + "/uv.lock:1:11", ".lock/depth", NOTES + ":.lock/depth",
+              TOOL_NEW + "/uv.lock")])
+
+    def test_the_depth_read_set_gets_the_depth_reading_only(self):
+        text = 'lib = "../../../vendor/lib"\nspec = ".claude/specs/x.md"\n'
+        path = TOOL + "/pyproject.toml"
+        self.assertEqual([o.depth for o in depth_found({path: text})], [True])
+        self.assertEqual(
+            [(o.subject, o.depth) for o in depth_found(
+                {path: text}, scanned={path: text})],
+            [(path + ":1:8", True), (path + ":2:9", False)])
+        self.assertEqual(
+            [o.depth for o in adopt_references.plan_references(
+                {path: text}, DEPTH_PATHS, DEPTH_MOVES,
+                DEPTH_TREES).occurrences], [False])
+
+    def test_an_archived_file_is_its_own_directory(self):
+        path = ".claude/odd.toml"
+        moves = [(path, ".agents/knowledge/archive/adopted/.claude/odd.toml")]
+        self.assertEqual(
+            climbs('a = "./../x"\nb = "../../y"\n', path=path, moves=moves,
+                   trees={path: path}, paths=[path]),
+            [("./../x", ("rewrite", "retain"), "./../../../../../x", True),
+             ("../../y", ("rewrite", "retain"), "../../../../../../y", True)])
+
+    def test_the_depth_policy_partitions_answers_and_edits(self):
+        path = TOOL + "/pyproject.toml"
+        text = 'lib = "../../../vendor/lib"\nspec = ".claude/specs/x.md"\n'
+        refs = adopt_references.plan_references(
+            {path: text}, DEPTH_PATHS, DEPTH_MOVES, DEPTH_TREES,
+            depth_texts={path: text})
+        toml, depth = NOTES + ":.toml", NOTES + ":.toml/depth"
+        _, climb = sorted(refs.occurrences, key=lambda o: o.depth)
+        self.assertEqual(adopt_references.effective_answer(
+            climb, {}, {toml: "rewrite"}), (None, None))
+        self.assertEqual(adopt_references.effective_answer(
+            climb, {}, {depth: "rewrite"}), ("rewrite", "policy"))
+        answers = {toml: "retain", depth: "rewrite"}
+        self.assertEqual(
+            [(row["subject"], row["class"], row["recommended"],
+              row["rewritten"], row["retained"])
+             for row in adopt_references.policy_summary(refs, {}, answers)],
+            [(toml, ".toml", "rewrite", 0, 1),
+             (depth, ".toml/depth", None, 1, 0)])
+        self.assertEqual(
+            adopt_references.rewritten(refs, {}, answers),
+            {TOOL_NEW + "/pyproject.toml": (
+                text, text.replace("../../../", "../../../../"))})
+        self.assertEqual(adopt_references.rewritten(
+            refs, {}, {toml: "retain", depth: "retain"}), {})
+
+
 def git(root: Path, *args: str) -> None:
     subprocess.run(
         ["git", "-C", str(root), *args], check=True, capture_output=True,
