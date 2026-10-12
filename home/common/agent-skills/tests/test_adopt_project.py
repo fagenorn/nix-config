@@ -2770,10 +2770,11 @@ class ReferenceFormattingPlanTest(AdoptTestCase):
                 ((*POLICY_READY_ANSWERS,
                   ("reference-format", ".py", command),
                   ("reference-format", ".py", "zz-other")), invalid),
-                # Validated after the other ids, though it sorts first.
-                ((("reference-policy", ".claude/notes:.md", "retain"),
-                  ("reference-format", ".py", "no-such-command")),
-                 unmatched)):
+                # Validated after the other ids, though it sorts first: the
+                # format answer alone is unmatched, the policy one invalid.
+                ((("reference-policy", PY_POLICY, "extend"),
+                  ("reference-format", ".md", command)),
+                 invalid)):
             with self.subTest(triples=triples):
                 before = self.stored_plans()
                 code, payload, err = self.plan(root, *answer_args(*triples))

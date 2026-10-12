@@ -28,7 +28,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools import adopt_apply, adopt_inspection, adopt_links, adopt_planning
+from agent_tools import (adopt_apply, adopt_inspection, adopt_links,
+                         adopt_planning, resolve_project)
 
 from .test_adopt_project import (
     CHECK_LINKS,
@@ -271,7 +272,7 @@ class ApplyTestCase(unittest.TestCase):
         return payload
 
     def assert_retained(self, root: Path, plan_id: str, base: str,
-                        repair_id: str) -> None:
+                        repair_id: str) -> dict:
         code, payload, err = self.apply(plan_id)
         self.assertEqual(code, 2, err or payload)
         self.assertEqual(payload["error"]["code"], "verification_failed")
@@ -289,6 +290,7 @@ class ApplyTestCase(unittest.TestCase):
         self.assertEqual(
             git(root, "rev-list", "--count",
                 f"{base}..adopt-{self.digest(plan_id)[:12]}").strip(), "0")
+        return payload
 
     def branch_files(self, root: Path, branch: str) -> list[str]:
         return git(root, "ls-tree", "-r", "--name-only", branch).split()
@@ -1112,6 +1114,8 @@ ANALYZER_SUBJECT = f"{ANALYZER}:1:34"
 ANALYZER_TEXT = 'ANALYZER_SPEC_PATH_UNDER_TEST = ".claude/specs/x.md"\n'
 ANALYZER_REWRITTEN = ANALYZER_TEXT.replace(".claude/specs",
                                            ".agents/artifacts/specs")
+# #376 COR-001: a `generated_file` projection rendered from the analyzer.
+PROJECTED_ANALYZER = "generated/analyzer.txt"
 ANALYZER_FORMATTED = ('ANALYZER_SPEC_PATH_UNDER_TEST = (\n'
                       '    ".agents/artifacts/specs/x.md"\n'
                       ')\n')
@@ -1239,14 +1243,64 @@ class ReferenceFormattingApplyTest(ApplyTestCase):
                                if op["targets"][:1] == [SHIFTED]][-1:]
                     self.assertEqual(last["op"], "git-mv")
                     self.assertTrue(last["after"].startswith("git-object:"))
-                self.assert_retained(root, plan_id, base, repair_id)
+                payload = self.assert_retained(root, plan_id, base, repair_id)
                 record = json.loads(self.state(
                     "adopt", "worktrees",
                     self.digest(plan_id) + ".failure.json").read_text("utf-8"))
+                if command == "broken":
+                    # The refusal names the command and its exit status (the
+                    # fixture formatter's `--fail` exits 3).
+                    (violation,) = payload["error"]["violations"]
+                    self.assertEqual(violation["pointer"],
+                                     "/reference_formatting")
+                    self.assertIn("'broken'", violation["message"])
+                    self.assertIn(" 3;", violation["message"])
                 if repair_id.startswith("adopt.format."):
                     self.assertEqual(
                         {gate["status"] for gate in record["gates"]},
                         {"not_run"})
+
+    def test_a_formatted_projection_source_is_refused_before_formatting(self):
+        """A reference-edited file that is a `generated_file` projection's
+        source was regenerated from before formatting would change it, so the
+        formatter is refused rather than left to strand a stale target."""
+        root = formatting_repo(self.home)
+        contract = json.loads((root / CONTRACT).read_text("utf-8"))
+        entry = {"id": "codex.analyzer", "agent": "codex",
+                 "kind": "generated_file", "target": PROJECTED_ANALYZER,
+                 "source": ANALYZER}
+        contract["projections"].append(entry)
+        write(root, CONTRACT, json.dumps(contract, indent=2) + "\n")
+        # Rendered by the resolver's own function, so the target starts in
+        # sync: the fixture contract has no `platform`, which the
+        # `write-projections` verb would refuse.
+        write(root, PROJECTED_ANALYZER, resolve_project.render_projection(
+            entry, (root / ANALYZER).read_bytes(),
+            contract["schema_version"]).decode("utf-8"))
+        commit(root, "project the analyzer")
+        base = git(root, "rev-parse", "HEAD").strip()
+        document = self.planned(root, REWRITE_ANALYZER,
+                                ("reference-format", ".py", "format"))
+        self.assertEqual(document["reference_formatting"], [
+            {"class": ".py", "command": "format", "files": [ANALYZER]}])
+        self.assertIn(
+            ([ANALYZER], [PROJECTED_ANALYZER]),
+            [(op["sources"], op["targets"]) for op in document["changes"]
+             if op["op"] == "regenerate-projection"])
+        plan_id = document["plan"]["plan_id"]
+        payload = self.assert_retained(root, plan_id, base,
+                                       "adopt.format.failed")
+        self.assertEqual([v["pointer"] for v in payload["error"]["violations"]],
+                         ["/reference_formatting"])
+        record = json.loads(self.state(
+            "adopt", "worktrees",
+            self.digest(plan_id) + ".failure.json").read_text("utf-8"))
+        self.assertEqual({gate["status"] for gate in record["gates"]},
+                         {"not_run"})
+        # The formatter never ran: the file holds the rewrite it was given.
+        self.assertEqual(
+            (self.worktree(plan_id) / ANALYZER).read_text("utf-8"),
+            ANALYZER_REWRITTEN)
 
     def test_an_archived_contained_symlink_is_not_an_unplanned_change(self):
         """`git add` stores a symlink's target text, so the confinement proof

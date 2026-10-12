@@ -388,6 +388,10 @@ def operation_failure(message: str) -> AdoptError:
         "verification_failed", "adopt.operation.failed", "/changes", message)
 
 
+# How much of a failed formatter's stderr its refusal carries.
+STDERR_TAIL = 2000
+
+
 def format_failure(repair_id: str, message: str) -> AdoptError:
     return refuse(
         "verification_failed", repair_id, "/reference_formatting", message)
@@ -404,15 +408,33 @@ def run_formatting(worktree: Path, operations: list[dict], rows: list[dict],
     are staged afterwards. Rows with no command are skipped, and a plan with
     none names no formatter, so the resolver is not called at all.
 
+    Before anything runs, a file of a row that names a command and is the
+    `sources[0]` of a `regenerate-projection` operation is refused: that
+    projection was regenerated from the file before formatting, and
+    regenerating it again would change a planned `after`, so the target would
+    be left stale behind a gate that names the projection rather than the
+    formatter.
+
     Once every command has run, `prove_formatting_confined` holds the formatter
     to the files it was given. Any failure here is `verification_failed` with
-    `adopt.format.failed` (no resolving contract, no entry for the id, a
-    command that cannot start or exits non-zero, a file that cannot be staged)
-    or `adopt.format.unplanned_content`.
+    `adopt.format.failed` (a formatted projection source, no resolving
+    contract, no entry for the id, a command that cannot start or exits
+    non-zero, a file that cannot be staged) or `adopt.format.unplanned_content`.
+    A command that cannot start or exits non-zero is named in the message with
+    its exit status or launch error and the tail of its stderr.
     """
     declared = [row for row in rows if row["command"] is not None]
     if not declared:
         return
+    projected = {operation["sources"][0] for operation in operations
+                 if operation["op"] == "regenerate-projection"}
+    for row in declared:
+        for path in row["files"]:
+            if path in projected:
+                raise format_failure(
+                    "adopt.format.failed",
+                    f"{path} is the source of a regenerated projection, so "
+                    "formatting it would leave that projection stale")
     resolve_code, payload = run_resolver(worktree, "resolve")
     bindings = payload.get("bindings") if isinstance(payload, dict) else None
     commands = bindings.get("commands") if isinstance(bindings, dict) \
@@ -433,13 +455,17 @@ def run_formatting(worktree: Path, operations: list[dict], rows: list[dict],
         try:
             proc = subprocess.run(argv, cwd=entry["cwd"],
                                   capture_output=True)
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError) as error:
             raise format_failure(
                 "adopt.format.failed",
-                "a declared formatter could not be started") from None
+                f"the declared formatter {row['command']!r} could not be "
+                f"started: {error}") from None
         if proc.returncode != 0:
+            tail = proc.stderr.decode("utf-8", "replace")[-STDERR_TAIL:]
             raise format_failure(
-                "adopt.format.failed", "a declared formatter exited non-zero")
+                "adopt.format.failed",
+                f"the declared formatter {row['command']!r} exited "
+                f"{proc.returncode}; stderr ends: {tail}")
         code, _ = run_git(worktree, "add", "--", *row["files"])
         if code != 0:
             raise format_failure(
