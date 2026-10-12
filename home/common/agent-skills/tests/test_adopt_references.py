@@ -28,6 +28,8 @@ DISSOLVED_MOVES = [
 PLANS, SPECS = ".agents/artifacts/plans", ".agents/artifacts/specs"
 EXEMPT = 'EXEMPT = ("docs/archive/", ".claude/")\n'
 ANSWERS_ALL = ("extend", "rewrite", "retain")
+PATTERN_EXCLUDE = (r'EXCLUDE = ["^var/", "^\\.claude/", "^\\.worktrees/"]'
+                   + "\n")
 
 
 def trees(paths, moves):
@@ -118,6 +120,98 @@ class SuccessorTest(unittest.TestCase):
         self.assertIsNone(form("", SPECS, True, "/*.md", False))
         self.assertIsNone(form("", "new/a b", True, "/", True))
         self.assertIsNone(form("", "new/x[1]", True, "", True))
+
+
+class PatternTest(unittest.TestCase):
+    """#372 D6: a token the plain reading rejects is read as a pattern."""
+
+    def test_a_pattern_splits_into_anchor_escape_prefix_path_and_tail(self):
+        for token, expected in (
+                (r"^\\.claude/", ("^", r"\\.", "", ".claude", "/")),
+                (r"^\.claude/specs/x\.md",
+                 ("^", r"\.", "", ".claude/specs/x.md", "")),
+                (r"\.claude/specs", ("", r"\.", "", ".claude/specs", "")),
+                (r"^/\.claude/", ("^", r"\.", "/", ".claude", "/")),
+                ("^.claude/specs/.*", ("^", "", "", ".claude/specs", "/.*")),
+                (r"^\.claude/[a-z]+/",
+                 ("^", r"\.", "", ".claude", "/[a-z]+/")),
+                (r"^\.claude\b/x", ("^", r"\.", "", "", r"\.claude\b/x")),
+                (r"^\\.claude/a\.b", ("^", r"\\.", "", ".claude", r"/a\.b")),
+                ("^", ("^", "", "", "", "")),
+                (".claude/specs", None),
+                ("docs/guide.txt", None)):
+            with self.subTest(token=token):
+                self.assertEqual(adopt_references.split_pattern(token),
+                                 expected)
+
+    def test_pattern_forms_keep_anchor_escape_and_tail(self):
+        form = adopt_references.pattern_form
+        self.assertEqual(form("^", r"\\.", "", SPECS, True, "/", False),
+                         r"^\\.agents/artifacts/specs/")
+        self.assertEqual(
+            form("^", r"\.", "", SPECS + "/x.md", False, "", True),
+            r"^\.agents/artifacts/specs/x\.md")
+        self.assertEqual(form("^", "", "/", SPECS, True, "/.*", True),
+                         "^/" + SPECS + "/.*")
+        self.assertEqual(form("", r"\.", "", "new/x.json", False, "/", False),
+                         r"new/x\.json")
+        # A tail that is not carried for a path with several successors.
+        self.assertIsNone(form("^", r"\.", "", SPECS, True, "/.*", False))
+        # A successor outside letters, digits, `_`, `-`, `.` and `/`.
+        self.assertIsNone(form("^", r"\.", "", "new/x+y.md", False, "", True))
+        # `new/x` holds neither `^` nor `\.`: it would not read back.
+        self.assertIsNone(form("", r"\.", "", "new/x", True, "", True))
+
+    def test_a_pattern_spelling_is_an_occurrence_with_pattern_forms(self):
+        for text, expected in (
+                (PATTERN_EXCLUDE,
+                 [(r"^\\.claude/", ("extend", "retain"),
+                   (r"^\\.agents/artifacts/plans/",
+                    r"^\\.agents/artifacts/specs/"), None)]),
+                (r'X = "^\.claude/specs/x\.md"' + "\n",
+                 [(r"^\.claude/specs/x\.md", ("rewrite", "retain"), (),
+                   r"^\.agents/artifacts/specs/x\.md")]),
+                (r'"\.claude/specs/"' + "\n",
+                 [(r"\.claude/specs/", ANSWERS_ALL,
+                   (r"\.agents/artifacts/specs/",),
+                   r"\.agents/artifacts/specs/")]),
+                ('"^.claude/plans/y.md"\n',
+                 [("^.claude/plans/y.md", ANSWERS_ALL,
+                   ("^" + PLANS + "/y.md",), "^" + PLANS + "/y.md")]),
+                (r"^\.claude/specs/.*  @team" + "\n",
+                 [(r"^\.claude/specs/.*", ("rewrite", "retain"), (),
+                   r"^\.agents/artifacts/specs/.*")])):
+            with self.subTest(text=text):
+                self.assertEqual(offers(text), expected)
+
+    def test_a_pattern_naming_nothing_moved_is_no_occurrence(self):
+        for text in (r'"^\.claude/specs$"', '"^var/"', r'"^\.worktrees/"',
+                     r"x = ^\.claude", r'"^docs/guide\.txt"',
+                     r'"^\.claude\b/"', r'"^./\.claude/"'):
+            with self.subTest(text=text):
+                self.assertEqual(found(text + "\n"), ())
+
+    def test_the_plain_reading_decides_when_it_yields_an_occurrence(self):
+        paths = ["^gen/a.md", "gen/a.md", "tools/check.py"]
+        moves = [("^gen/a.md", "out/a.md"), ("gen/a.md", "other/a.md")]
+        self.assertEqual(
+            offers('x = "^gen/a.md"\n', paths=paths, moves=moves),
+            [("^gen/a.md", ("rewrite", "retain"), (), "out/a.md")])
+
+    def test_a_successor_with_no_pattern_form_offers_retain_only(self):
+        moves = [(".claude/specs/x.md", SPECS + "/x+y.md")] + MOVES[1:]
+        self.assertEqual(
+            offers(r'x = "^\.claude/specs/x\.md"' + "\n", moves=moves),
+            [(r"^\.claude/specs/x\.md", ("retain",), (), None)])
+
+    def test_answers_edit_a_pattern_spelling(self):
+        self.assertEqual(edit(PATTERN_EXCLUDE, "extend"), (
+            r'EXCLUDE = ["^var/", "^\\.claude/", '
+            r'"^\\.agents/artifacts/plans/", "^\\.agents/artifacts/specs/", '
+            r'"^\\.worktrees/"]' + "\n"))
+        self.assertEqual(edit(r'X = "^\.claude/specs/x\.md"' + "\n",
+                              "rewrite"),
+                         r'X = "^\.agents/artifacts/specs/x\.md"' + "\n")
 
 
 class OccurrenceTest(unittest.TestCase):

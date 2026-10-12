@@ -2,13 +2,18 @@
 
 This module provides what a relocation needs to find a repository path written
 in a tracked, non-Markdown text file that would be left pointing at a path
-that moved: the token grammar (`tokens`, `split_token`), the successors of a
-referenced path and the carried form of a successor (`successors`,
-`carried_form`), the occurrences, each with its shape and the answers it
-offers (`Occurrence`, `plan_references`), the report of those occurrences and
-the edits their answers make (`summary`, `rewritten`), and the reader that
-feeds the core a tree's text through git (`derive_references`, over
-`adopt_inspection.tree_records` and `blob_at`).
+that moved: the token grammar (`tokens`, `split_token`, `split_pattern`), the
+successors of a referenced path and the carried form of a successor
+(`successors`, `carried_form`, `pattern_form`), the occurrences, each with its
+shape and the answers it offers (`Occurrence`, `plan_references`), the report
+of those occurrences and the edits their answers make (`summary`, `rewritten`),
+and the reader that feeds the core a tree's text through git
+(`derive_references`, over `adopt_inspection.tree_records` and `blob_at`).
+
+A token is read as a plain path first (`split_token`). Only when that reading
+names no moved path is it read a second time as a regular-expression spelling
+(`split_pattern`, for a token that starts with `^` or holds `\\.`), and the
+forms offered for it keep its anchor, escape and tail (`pattern_form`).
 
 It is imported and never run. It reads blobs only through git, never the
 working tree, writes nothing, and imports `adopt_inspection` and `adopt_links`
@@ -20,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Iterable
+from typing import Callable, Iterable
 
 from agent_tools.adopt_inspection import (
     blob_at, is_secret_path, refuse, run_git, split_nul, tree_records)
@@ -30,11 +35,13 @@ from agent_tools.adopt_links import (
 ANSWERS = ("extend", "rewrite", "retain")
 TOKEN_DELIMITERS = "\"'`,;:=()<>|&#!"
 GLOB_CHARACTERS = "*?[{"
+PATTERN_ESCAPES = ("\\\\.", "\\.")
 CARRIED_TAILS = ("", "/", "/**")
 # The paths whose files are records of what was, never read for references.
 RECORD_HOMES = (".agents/artifacts/", ".agents/knowledge/archive/")
 
 _QUOTES = "\"'"
+_PATTERN_SAFE = re.compile(r"[A-Za-z0-9_./-]+")
 _OPENING_BEFORE = "[{,"
 _CLOSING_REST = ",])}"
 _NOT_A_CALL_BEFORE = "_)]"
@@ -95,6 +102,36 @@ def split_token(token: str) -> tuple[str, str, str]:
     return prefix, path, rest[len(path):]
 
 
+def split_pattern(token: str) -> tuple[str, str, str, str, str] | None:
+    """`(anchor, escape, prefix, path, tail)` of a pattern spelling, or None.
+
+    A pattern spelling starts with `^` or holds an escaped dot (`\\.`, or
+    `\\\\.` as a TOML or JSON string spells it); one escape is chosen for the
+    whole token. The path is the longest leading run of `/`-separated segments
+    that decode, by replacing the escape with `.`, to a non-empty segment
+    holding no glob character and no backslash; `anchor + prefix + <the raw
+    text the path was decoded from> + tail` is the token.
+    """
+    escape = next((e for e in PATTERN_ESCAPES if e in token), "")
+    if not token.startswith("^") and not escape:
+        return None
+    anchor = "^" if token.startswith("^") else ""
+    rest = token[len(anchor):]
+    prefix = "/" if rest.startswith("/") else ""
+    rest = rest[len(prefix):]
+    raw = rest.split("/")
+    decoded = [segment.replace(escape, ".") if escape else segment
+               for segment in raw]
+    count = 0
+    for segment in decoded:
+        if (not segment or "\\" in segment
+                or any(c in GLOB_CHARACTERS for c in segment)):
+            break
+        count += 1
+    return (anchor, escape, prefix, "/".join(decoded[:count]),
+            rest[len("/".join(raw[:count])):])
+
+
 # --------------------------------------------------------------------------
 # Successors and carried forms
 # --------------------------------------------------------------------------
@@ -145,10 +182,38 @@ def carried_form(prefix: str, successor: str, is_directory: bool, tail: str,
         form = prefix + successor + (tail if is_directory else "")
     else:
         return None
-    whole = tokens(form)
-    if len(whole) != 1 or (whole[0].start, whole[0].end) != (0, len(form)):
+    if not _is_one_token(form):
         return None
     return form if split_token(form)[1] == successor else None
+
+
+def pattern_form(anchor: str, escape: str, prefix: str, successor: str,
+                 is_directory: bool, tail: str, single: bool) -> str | None:
+    """The pattern spelling that keeps anchor, escape and tail on `successor`.
+
+    None when `successor` holds a character a pattern would need to escape
+    beyond the dot, when `tail` is not carried, and when the spelling would not
+    be read back by `split_pattern` as `successor`.
+    """
+    if not _PATTERN_SAFE.fullmatch(successor):
+        return None
+    if single:
+        carried = tail
+    elif tail in CARRIED_TAILS:
+        carried = tail if is_directory else ""
+    else:
+        return None
+    form = anchor + prefix + (successor.replace(".", escape) if escape
+                              else successor) + carried
+    if not _is_one_token(form):
+        return None
+    read = split_pattern(form)
+    return form if read is not None and read[3] == successor else None
+
+
+def _is_one_token(form: str) -> bool:
+    whole = tokens(form)
+    return len(whole) == 1 and (whole[0].start, whole[0].end) == (0, len(form))
 
 
 # --------------------------------------------------------------------------
@@ -213,19 +278,49 @@ def _follows_a_name(before: str) -> bool:
                              or before[-1] in _NOT_A_CALL_BEFORE)
 
 
+def _names_moved(target: str, base: Tree, sources: tuple[str, ...]) -> bool:
+    return bool(target) and (target in base.paths
+                             or target in base.directories) and any(
+        s == target or s.startswith(target + "/") for s in sources)
+
+
+def _reading(token: str, base: Tree, sources: tuple[str, ...]
+             ) -> tuple[str, Callable[[str, bool, bool], str | None]] | None:
+    """`(path, form)` of the first reading of `token` that names a moved path.
+
+    `form(successor, is_directory, single)` is the spelling of a successor that
+    keeps the token's shape. The plain reading decides alone whenever it names
+    a moved path; the pattern reading is consulted only when it does not.
+    """
+    prefix, target, tail = split_token(token)
+    if _names_moved(target, base, sources):
+        def plain(successor: str, is_directory: bool, single: bool
+                  ) -> str | None:
+            return carried_form(prefix, successor, is_directory, tail, single)
+        return target, plain
+    pattern = split_pattern(token)
+    if pattern is None or not _names_moved(pattern[3], base, sources):
+        return None
+    anchor, escape, pattern_prefix, pattern_target, pattern_tail = pattern
+
+    def spelled(successor: str, is_directory: bool, single: bool
+                ) -> str | None:
+        return pattern_form(anchor, escape, pattern_prefix, successor,
+                            is_directory, pattern_tail, single)
+    return pattern_target, spelled
+
+
 def _occurrence(path: str, text: str, token: Token, base: Tree, after: Tree,
                 moved: dict[str, str], sources: tuple[str, ...]
                 ) -> Occurrence | None:
     if "/" not in token.text and not _is_quoted(text, token):
         return None
-    prefix, target, tail = split_token(token.text)
-    if not target or (target not in base.paths
-                      and target not in base.directories):
+    reading = _reading(token.text, base, sources)
+    if reading is None:
         return None
-    if not any(s == target or s.startswith(target + "/") for s in sources):
-        return None
+    target, form = reading
     single, found = successors(target, base, after, moved)
-    forms = [carried_form(prefix, successor, is_directory, tail, single)
+    forms = [form(successor, is_directory, single)
              for successor, is_directory in found]
     shape = _shape(text, token)
     answers = []
