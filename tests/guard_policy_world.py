@@ -9,10 +9,13 @@ The `git` shim answers only `remote get-url origin` and `remote get-url --push -
 from `identities.json` keyed by its working directory, and hands every other call to the real
 `git`; with no entry for the directory it hands those two over as well. The `gh` shim answers
 `api repos/<slug> --jq .full_name` from `providers.json`, exits 64 for any other call and 65
-when a token variable reaches it. Nothing contacts a network remote or reads the host registry.
+when a token variable reaches it. `row_check()` writes the executable the guard runs as its row
+check: it runs `guard-policy derive` under this world's environment. Nothing contacts a network
+remote or reads the host registry.
 """
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -226,6 +229,18 @@ class GuardPolicyWorld:
              "--repository", repository],
             capture_output=True, text=True, timeout=300, env=env or self.env, cwd=self.tmp)
         return done.returncode, json.loads(done.stdout), done.stderr
+
+    def row_check(self) -> Path:
+        """An executable the guard can run as its row check: `guard-policy derive` from source
+        under this world's `HOME`, `PATH`, `PYTHONPATH` and git configuration."""
+        script = self.tmp / "row-check"
+        exports = "".join(f"export {name}={shlex.quote(self.env[name])}\n" for name in (
+            "HOME", "PATH", "PYTHONPATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"))
+        script.write_text(
+            f"#!/bin/sh\n{exports}exec {shlex.quote(sys.executable)} "
+            '-m agent_tools.guard_policy derive "$@"\n', encoding="utf-8")
+        script.chmod(0o755)
+        return script
 
     def policy(self) -> dict:
         return json.loads(self.output.read_text("utf-8"))

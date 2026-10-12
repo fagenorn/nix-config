@@ -91,29 +91,41 @@ let
   # registered project, written by `claude-guard-policy`.
   lifecycleGuardPolicyPath = "${config.home.homeDirectory}/.agents/state/guard/policy.json";
 
+  # The store git, gh and ssh bin directories, as one PATH string shared by
+  # `claude-guard-policy` and the row check below.
+  guardToolPath = lib.makeBinPath [
+    pkgs.git
+    pkgs.gh
+    pkgs.openssh
+  ];
+
   # `guard-policy compile` with the base policy and the compiled path fixed, and
   # the store git, gh and ssh first on PATH. It takes no argument; the
   # activation step below and a repair from an authenticated shell both run it.
   claudeGuardPolicy = pkgs.writeShellScriptBin "claude-guard-policy" ''
-    export PATH="${
-      lib.makeBinPath [
-        pkgs.git
-        pkgs.gh
-        pkgs.openssh
-      ]
-    }:$PATH"
+    export PATH="${guardToolPath}:$PATH"
     exec ${agentTools.launchers.guard-policy} compile \
       --base ${lifecycleGuardBasePolicy} --output ${lifecycleGuardPolicyPath}
+  '';
+
+  # The row check the guard runs before relying on a compiled row: `guard-policy
+  # derive`, which re-derives one repository's row from the fleet registry. It
+  # pins the store git, gh and ssh first on PATH as `claude-guard-policy` does.
+  # The hook wrapper names it by store path, and it is not installed on PATH.
+  lifecycleGuardRowCheck = pkgs.writeShellScript "claude-guard-row-check" ''
+    export PATH="${guardToolPath}:$PATH"
+    exec ${agentTools.launchers.guard-policy} derive "$@"
   '';
 
   # The registered hook: one argument-free store path. Bash's `-p` ignores
   # BASH_ENV and inherited functions, `-I` and the unset keep PYTHONPATH, user
   # site and NIX_PYTHON* `.pth` hooks out, and `exec` hands the hook's timeout
   # kill to Python. `--base-policy` names the store base policy and `--policy`
-  # the compiled policy, whose path is fixed at evaluation time. The check runs
-  # the wrapper on a payload with no repository-bound verb: the guard loads the
-  # base policy, so the build refuses a guard source or a base policy that cannot
-  # load, and never opens the compiled path.
+  # the compiled policy, whose path is fixed at evaluation time, and
+  # `--derive-bin` the row check. The check runs the wrapper on a payload with no
+  # repository-bound verb: the guard loads the base policy, so the build refuses
+  # a guard source or a base policy that cannot load, and never opens the
+  # compiled path or runs the row check.
   lifecycleGuard = pkgs.writeTextFile {
     name = "claude-bash-lifecycle-guard";
     executable = true;
@@ -121,7 +133,7 @@ let
     text = ''
       #!${pkgs.runtimeShell} -p
       unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
-      exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --base-policy ${lifecycleGuardBasePolicy} --policy ${lifecycleGuardPolicyPath} "$@"
+      exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --base-policy ${lifecycleGuardBasePolicy} --policy ${lifecycleGuardPolicyPath} --derive-bin ${lifecycleGuardRowCheck} "$@"
     '';
     checkPhase = ''
       if ! printf '%s' '{"tool_name":"Bash","tool_input":{"command":"true"}}' \
@@ -339,7 +351,7 @@ in
           echo "claude-guard-policy: the projects named above have no derived guard row; rerun claude-guard-policy from an authenticated shell" >&2
         elif [ "$guardPolicyStatus" -ne 0 ]; then
           if run rm -f ${lifecycleGuardPolicyPath}; then
-            echo "claude-guard-policy: no guard policy was written (exit $guardPolicyStatus), so registered projects lose their derived guard row and the lifecycle guard refuses a repository that relies on one until it succeeds; rerun claude-guard-policy from an authenticated shell" >&2
+            echo "claude-guard-policy: no guard policy was written (exit $guardPolicyStatus), so registered projects lose their derived guard row and with it their derived integration branch, and the lifecycle guard refuses a repository that relies on one until it succeeds, while authorization from the base policy (an authorized owner or a literal integration row) still applies; rerun claude-guard-policy from an authenticated shell" >&2
           else
             echo "claude-guard-policy: no guard policy was written (exit $guardPolicyStatus) and ${lifecycleGuardPolicyPath} could not be removed, so the lifecycle guard reads whatever rows are there; remove it, then rerun claude-guard-policy from an authenticated shell" >&2
           fi
