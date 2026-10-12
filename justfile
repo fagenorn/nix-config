@@ -30,13 +30,14 @@ register-runners target_host=hostname:
   set -euo pipefail
   repos=$(nix eval --raw ".#darwinConfigurations.{{target_host}}.config.services.github-runners" \
     --apply 'rs: builtins.concatStringsSep " " (map (r: builtins.baseNameOf r.url) (builtins.attrValues rs))')
-  # sudo's secure_path would pick BSD install, which cannot read /dev/stdin.
-  install_bin=$(command -v install)
+  # install refuses a pipe as its source, so stage each token in a private file.
+  umask 077
+  tmp=$(mktemp)
+  trap 'rm -f "$tmp"' EXIT
   for repo in $repos; do
     echo "registering runner for fagenorn/$repo" >&2
-    gh api -X POST "repos/fagenorn/$repo/actions/runners/registration-token" -q .token \
-      | tr -d '\n' \
-      | sudo "$install_bin" -m 0440 -o root -g _github-runner /dev/stdin "/var/lib/github-runner-tokens/$repo.token"
+    gh api -X POST "repos/fagenorn/$repo/actions/runners/registration-token" -q .token | tr -d '\n' > "$tmp"
+    sudo install -m 0440 -o root -g _github-runner "$tmp" "/var/lib/github-runner-tokens/$repo.token"
   done
 
 ### linux
