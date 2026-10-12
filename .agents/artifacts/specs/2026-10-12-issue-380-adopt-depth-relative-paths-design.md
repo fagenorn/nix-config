@@ -83,10 +83,12 @@ operator decides when it is wrong. A token that is `..` alone, quoted or not,
 is no climb: joined segments (`HERE / ".." / ".."`) are not added up.
 
 When the landing point is at or below the root, the token's **base target** is
-the landing point joined with the rest. A base target that names a path the
-moves relocate (the issue 350 condition) offers `retain` only: the rewrite
-would land on a path that no longer exists, and issue 350's successors are not
-combined with a climb.
+the normalised join of the landing point and the rest. A text climb whose base
+target lies inside `R` (`../../notes/x` from `.claude/notes/tool`) re-enters
+the tree, moves with the file and is not surfaced. A base target outside `R`
+that names a path the moves relocate (the issue 350 condition, another moved
+tree) offers `retain` only: the rewrite would land on a path that no longer
+exists, and issue 350's successors are not combined with a climb.
 
 ### The Python climb (per D2)
 
@@ -157,8 +159,8 @@ The depth reading reads every moved file that passes the existing filters
 (regular blob, not Markdown, not secret-shaped, not adoption-written, not under
 a record home by base path, text by git's `-I` judgement, strict UTF-8) and
 holds `..` or `__file__`, found by one more `git grep -I -l -F` over the base
-revision, limited by literal pathspecs to the trees of the moves and then to
-the moved files. The three existing readings still run only over the files the
+revision, limited by literal pathspecs to the trees of the moves (a group's
+directory, an archived file's own path) and then to the moved files. The three existing readings still run only over the files the
 first-segment prefilter returns; a file both scans return gets all four. So
 the prefilter's documented limit is unchanged, and no occurrence of issues
 350, 372 or 376 appears, changes or disappears. Within one token the depth
@@ -172,7 +174,10 @@ same twelve members (`literal` is the climb, `replacement` the shifted form or
 null, `answers` `["rewrite", "retain"]` or `["retain"]`), a policy has a
 `reference_policies` row with the same thirteen members, its open question is
 an ordinary `reference-policy` question, and a single unanswered occurrence an
-ordinary `path-reference` question. These rows are already inputs of
+ordinary `path-reference` question. A repository whose moved files hold a
+depth occurrence therefore gets a `draft` plan through `no-open-decisions`
+until the `/depth` policies are answered, even where every earlier answer is
+given; that is the "no silent default". These rows are already inputs of
 `plan_id` and members of the evidence record, and the answers appear in
 `decisions_accepted`. A rewritten file is one `write-file` at its destination
 after its `git-mv`, and enters `reference_formatting` under its file class. A
@@ -203,7 +208,7 @@ agent_tools.adopt_project` under the recipe's `PYTHONPATH`, plus the
   - text climbs: surfaced above `R`; not surfaced inside the tree (AC2); not
     surfaced for a same-depth move to the root (AC3); surfaced `retain`-only
     for a landing point that is an ancestor of `P` only, and for a base target
-    that moved; a shallower move rewrites with fewer `..`; `..` alone and
+    in another moved tree; a climb re-entering `R` is not surfaced; a shallower move rewrites with fewer `..`; `..` alone and
     `".."` are no climbs; the `./` prefix and the rest are kept.
   - Python chains: direct `parents[N]`, `.parent` chains, mixed chains; a
     `HERE` bound to `.resolve().parent` and used as `HERE.parents[N]`; a name
@@ -257,3 +262,5 @@ agent_tools.adopt_project` under the recipe's `PYTHONPATH`, plus the
 | D5 | `/depth` is its own class suffix, value null, answers `rewrite`/`retain`, never `extend`; `<tree>:<class>` and `<tree>:<class>/variable` answers never decide it | The issue's "policy class … closed answers rewrite \| retain, with no silent default"; issue 376 D8 and D13 (the reading is recorded on the occurrence, the class derived) | Folding into `<tree>:.py`, where a `rewrite` given for literals would silently shift climbs |
 | D6 | A lock file is its own class (`uv.lock` → `<tree>:.lock/depth`), named in the plan beside its manifest; no new plan or record member; existing rows carry depth occurrences, so a repository without one keeps its plan id | The issue allows "a distinct class the plan names"; issue 372's class is the file suffix; the existing rows are already `plan_id` inputs and evidence-record members | A manifest-to-lock pairing table, per-ecosystem knowledge against issue 350 D6; a new `depth_references` member and `plan_id` input, which invalidates every stored plan for nothing |
 | D7 | The depth reading has its own read set (moved files holding `..` or `__file__`, by a second `git grep -I` limited to the moves' trees); the three existing readings stay confined to the first-segment prefilter's files | Issue 376 D6's route for keeping every existing occurrence byte-identical; the README's documented prefilter limit (an escaped first segment is not found) would otherwise change silently | Widening the existing scan to every moved file, which would make new pattern occurrences appear in existing plans |
+| D8 | Grill: a text climb whose base target lies back inside `R` is not surfaced; one whose base target is in another moved tree is surfaced `retain`-only | Probe: `../../notes/x` from `.claude/notes/tool` lands on `.claude` yet names a path that moves with the file, so it still resolves after the move; surfacing it would ask a question with no wrong answer | Surfacing every climb above `R`, which adds noise questions; resolving the target's successor, the reading rejected in D3 |
+| D9 | Grill: a plan whose moved files hold a depth occurrence is `draft` until its `/depth` policies or occurrences are answered, even when it was `ready` before this change | The issue's "no silent default" and bootstrap's "no project policy is defaulted"; issue 372 D3 (a recommendation is never applied) | Defaulting `/depth` to `retain` so earlier ready plans stay ready, which is the silent breakage the issue reports |
