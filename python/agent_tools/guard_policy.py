@@ -121,12 +121,14 @@ def read_base(path: Path) -> dict:
 # --------------------------------------------------------------------------
 
 
-def _identity_read(argv: list[str], root: Path) -> str | None:
-    """Stdout of `argv` run by name in `root`, or None when the read failed.
+def _identity_read(argv: list[str], root: Path) -> tuple[str | None, str]:
+    """`(stdout, "")` of `argv` run by name in `root`, or `(None, why)` when the read failed.
 
     The child never sees a token variable, is never prompted for credentials,
     reads nothing from stdin and is killed after `CHILD_TIMEOUT_SECONDS`; a
-    timeout or a missing executable is a failed read like a non-zero exit.
+    timeout or a missing executable is a failed read like a non-zero exit. `why`
+    is `timed out`, the `OSError` text, or `exit <n>` with the child's stderr, so a
+    refusal says which of them it was.
     """
     env = {name: value for name, value in os.environ.items()
            if name not in forge_adapter.TOKEN_VARIABLES}
@@ -135,17 +137,24 @@ def _identity_read(argv: list[str], root: Path) -> str | None:
         done = subprocess.run(argv, capture_output=True, text=True, errors="replace",
                               timeout=forge_adapter.CHILD_TIMEOUT_SECONDS, env=env, cwd=root,
                               stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return done.stdout if done.returncode == 0 else None
+    except subprocess.TimeoutExpired:
+        return None, "timed out"
+    except (OSError, subprocess.SubprocessError) as error:
+        return None, str(error) or type(error).__name__
+    if done.returncode == 0:
+        return done.stdout, ""
+    stderr = done.stderr.strip()[:forge_adapter.DETAIL_LIMIT]
+    return None, f"exit {done.returncode}: {stderr}" if stderr else f"exit {done.returncode}"
 
 
 def origin_slug(root: Path) -> str:
     """Step 2: the one github.com slug origin's fetch url and single push url name."""
-    fetch = _identity_read(["git", "remote", "get-url", "origin"], root)
-    pushes = _identity_read(["git", "remote", "get-url", "--push", "--all", "origin"], root)
+    fetch, fetch_why = _identity_read(["git", "remote", "get-url", "origin"], root)
+    pushes, push_why = _identity_read(["git", "remote", "get-url", "--push", "--all", "origin"],
+                                      root)
     if fetch is None or pushes is None:
-        raise ProjectRefused("origin_unproven", "origin's urls could not be read")
+        raise ProjectRefused("origin_unproven", "origin's urls could not be read: "
+                             + (f"fetch: {fetch_why}" if fetch is None else f"push: {push_why}"))
     push_urls = [line.strip() for line in pushes.splitlines() if line.strip()]
     if len(push_urls) != 1:
         raise ProjectRefused("origin_unproven",
@@ -225,10 +234,12 @@ def _proof(root: Path, entry: dict, slug: str, source: adopt_verify.Verification
             "branch_mismatch", f"the contract names {vcs['default_branch']} and "
             f"{vcs['integration_branch']}; origin's default is {source.remote_default} and "
             f"the branch read is {source.branch}")
-    answer = _identity_read(["gh", "api", f"repos/{slug}", "--jq", ".full_name"], root)
-    if answer is None or answer.strip() != slug:
+    answer, why = _identity_read(["gh", "api", f"repos/{slug}", "--jq", ".full_name"], root)
+    if answer is None:
+        raise ProjectRefused("provider_unproven", f"gh api repos/{slug} failed: {why}")
+    if answer.strip() != slug:
         raise ProjectRefused("provider_unproven",
-                             f"gh api repos/{slug} did not answer {slug}")
+                             f"gh api repos/{slug} answered {answer.strip()!r}, not {slug}")
     code, blob = adopt_inspection.run_git(root, "rev-parse", "--verify", "--quiet",
                                           f"{source.commit}:{adopt_inspection.CONTRACT_FILENAME}")
     if code != 0:

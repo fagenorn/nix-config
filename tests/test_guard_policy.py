@@ -207,6 +207,25 @@ class ProjectRefusalTest(WorldCase):
                 self.world.provider("fagenorn/one", **answer)
                 self.refused("provider_unproven")
 
+    def test_provider_unproven_says_what_the_provider_did(self):
+        self.world.project("fixture/one", "fagenorn/one")
+        self.world.provider("fagenorn/one", "fagenorn/renamed")
+        self.assertIn("'fagenorn/renamed'", self.refused("provider_unproven")["detail"])
+        self.world.provider("fagenorn/one", exit=1)
+        self.assertIn("exit 1", self.refused("provider_unproven")["detail"])
+        del self.world.providers["repos/fagenorn/one"]  # the shim then exits 64 on stderr
+        self.world._save()
+        self.assertIn("exit 64: fake gh: unregistered call",
+                      self.refused("provider_unproven")["detail"])
+
+    def test_origin_unproven_says_which_read_failed(self):
+        root = self.world.project("fixture/one", "fagenorn/one")
+        self.world.git(root, "remote", "remove", "origin")
+        self.world.identity(root, None)  # the real git now answers, and has no origin
+        detail = self.refused("origin_unproven")["detail"]
+        self.assertIn("fetch: exit 2", detail)
+        self.assertIn("No such remote", detail)
+
     def test_duplicate_repository_refuses_both(self):
         self.world.project("fixture/one", "fagenorn/one")
         self.world.project("fixture/two", "fagenorn/one")
