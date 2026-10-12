@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
 from agent_tools import (adopt_links, adopt_references, agent_platform,
@@ -223,29 +224,73 @@ def policy_answers(answered: list[dict]) -> dict[str, str]:
             if answer["id"] == "reference-policy"}
 
 
+def format_answers(answered: list[dict]) -> dict[str, str]:
+    """`class -> command id` of the settled `reference-format` answers."""
+    return {answer["subject"]: answer["value"] for answer in answered
+            if answer["id"] == "reference-format"}
+
+
+def contract_command_ids(contract_source: dict | None) -> frozenset[str]:
+    """The ids of the authored contract's `bindings.commands`, or none when
+    there is no contract or it declares no such object."""
+    bindings = (contract_source.get("bindings")
+                if isinstance(contract_source, dict) else None)
+    commands = (bindings.get("commands")
+                if isinstance(bindings, dict) else None)
+    return frozenset(commands) if isinstance(commands, dict) else frozenset()
+
+
+def reference_formatting(reference_files: Mapping[str, tuple[str, str]],
+                         answered: list[dict]) -> list[dict]:
+    """One `{class, command, files}` row per class with an edited file.
+
+    `reference_files` is `adopt_references.rewritten`'s result, so a row
+    exists for exactly the path-reference edits: Markdown link rewrites, the
+    contract, the records and the projections never appear. Rows are sorted by
+    class and `files` by path; `command` is the class's `reference-format`
+    answer, or None.
+    """
+    commands = format_answers(answered)
+    classes: dict[str, list[str]] = {}
+    for target in reference_files:
+        classes.setdefault(adopt_references.file_class(target),
+                           []).append(target)
+    return [{"class": file_class, "command": commands.get(file_class),
+             "files": sorted(files)}
+            for file_class, files in sorted(classes.items())]
+
+
 _ANSWERED_THING = {"candidate-class": "candidate",
                    "path-reference": "path reference",
-                   "reference-policy": "reference policy"}
+                   "reference-policy": "reference policy",
+                   "reference-format": "reference format"}
 
 
 def apply_answers(root: Path, found: Candidates, inventory: Inventory,
-                  answers: list[dict],
-                  excluded: set[str]) -> tuple[list[dict], References]:
+                  answers: list[dict], excluded: set[str],
+                  commands: frozenset[str]) -> tuple[list[dict], References]:
     """Settle the answered questions; return the answers, sorted, and the
     references the settled moves leave.
 
     Each answer is `{"id", "subject", "value"}`, all strings, and answers a
-    `candidate-class`, a `path-reference` or a `reference-policy` question.
-    They are validated in order of `(id, subject, value)`, refusing on the
-    first violation: an id other than those three, a question answered twice
-    and then, for a `candidate-class`, a subject that is not the path of a
-    `needs-decision` entry and a value other than the one that candidate's
+    `candidate-class`, a `path-reference` or a `reference-policy` question, or
+    declares a `reference-format` command, which no question asks for (#376).
+    The first three are validated in order of `(id, subject, value)`, refusing
+    on the first violation: an id other than those four, a question answered
+    twice and then, for a `candidate-class`, a subject that is not the path of
+    a `needs-decision` entry and a value other than the one that candidate's
     open question offers; for a `path-reference`, a subject that is no
     occurrence of this inspection and a value that occurrence does not offer;
     or, for a `reference-policy`, a subject that is the policy of no
     occurrence of this inspection and a value outside
-    `adopt_references.POLICY_ANSWERS`. Nothing in `found` is mutated until
-    every answer has validated, so a refusal changes nothing.
+    `adopt_references.POLICY_ANSWERS`.
+
+    The `reference-format` answers are validated after every other answer,
+    once the references are derived, in order of `(subject, value)`: a subject
+    answered twice is an invalid answer, a subject that is the class of no file
+    the other answers edit is unmatched, and a value that is not an id in
+    `commands` is invalid. Nothing in `found` is mutated until every answer
+    has validated, so a refusal changes nothing.
 
     The references are derived once, from the base revision's tracked text
     with `excluded` skipped, moved files included and read at their base
@@ -253,8 +298,10 @@ def apply_answers(root: Path, found: Candidates, inventory: Inventory,
     the moves the answers settle (D12): at the
     first `path-reference` or `reference-policy` answer, over `found.moves` plus the archive
     destination of every `archive-history` answer validated before it, which
-    is every one of them because `candidate-class` sorts first; with no such
-    answer, after the candidate mutation below, over `found.moves`. The two
+    is every one of them because `candidate-class` sorts first; for a
+    `reference-format` answer with neither of those, once the loop is done,
+    over the same moves; with no such answer, after the candidate mutation
+    below, over `found.moves`. The two
     are the same moves, so the answers' order on the command line changes
     nothing.
 
@@ -273,14 +320,18 @@ def apply_answers(root: Path, found: Candidates, inventory: Inventory,
     trees = {path: group for group, info in found.groups.items()
              for path, _ in info["members"]}
     references: References | None = None
+    formats: list[dict] = []
     for answer in sorted(answers, key=lambda a: (a["id"], a["subject"],
                                                  a["value"])):
         question = answer["id"]
-        if question not in ("candidate-class", "path-reference",
-                            "reference-policy"):
+        if question not in _ANSWERED_THING:
             raise refuse("adopt_failure", "adopt.decisions.invalid_answer",
-                         pointer, "only a candidate-class, path-reference or "
-                         "reference-policy question can be answered")
+                         pointer, "only a candidate-class, path-reference, "
+                         "reference-policy or reference-format answer can be "
+                         "given")
+        if question == "reference-format":
+            formats.append(answer)
+            continue
         if (question, answer["subject"]) in seen:
             raise refuse("adopt_failure", "adopt.decisions.invalid_answer",
                          pointer, f"a {_ANSWERED_THING[question]} is "
@@ -332,6 +383,11 @@ def apply_answers(root: Path, found: Candidates, inventory: Inventory,
             moves.append((answer["subject"],
                           f"{ARCHIVE_ADOPTED_DIR}/{answer['subject']}"))
             trees[answer["subject"]] = answer["subject"]
+    if formats:
+        if references is None:
+            references = adopt_references.derive_references(
+                root, inventory.base_revision, moves, excluded, trees)
+        validate_format_answers(formats, references, answers, commands)
 
     tracked = dict(inventory.tracked)
     settled = sorted(answers, key=lambda a: (a["id"], a["subject"]))
@@ -352,6 +408,33 @@ def apply_answers(root: Path, found: Candidates, inventory: Inventory,
         references = adopt_references.derive_references(
             root, inventory.base_revision, found.moves, excluded, trees)
     return settled, references
+
+def validate_format_answers(formats: list[dict], references: References,
+                            answers: list[dict],
+                            commands: frozenset[str]) -> None:
+    """Refuse the first `reference-format` answer, in `(subject, value)`
+    order, that repeats a subject, names the class of no edited file or names
+    a command the contract does not declare (#376 D11)."""
+    pointer = "/decisions/answered"
+    edited = {adopt_references.file_class(target)
+              for target in adopt_references.rewritten(
+                  references, reference_answers(answers),
+                  policy_answers(answers))}
+    seen: set[str] = set()
+    for answer in sorted(formats, key=lambda a: (a["subject"], a["value"])):
+        if answer["subject"] in seen:
+            raise refuse("adopt_failure", "adopt.decisions.invalid_answer",
+                         pointer, f"a {_ANSWERED_THING['reference-format']} "
+                         "is answered more than once")
+        seen.add(answer["subject"])
+        if answer["subject"] not in edited:
+            raise refuse("adopt_failure", "adopt.decisions.unmatched_answer",
+                         pointer, "the answered subject is the class of no "
+                         "file this plan edits")
+        if answer["value"] not in commands:
+            raise refuse("adopt_failure", "adopt.decisions.invalid_answer",
+                         pointer, "the answer is not a command the contract "
+                         "declares")
 
 # --------------------------------------------------------------------------
 # The `.gitignore` amendment
@@ -769,7 +852,8 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
                            ready_gates: list[dict],
                            link_rewrites: dict,
                            path_references: list[dict],
-                           reference_policies: list[dict]) -> tuple[
+                           reference_policies: list[dict],
+                           reference_formatting: list[dict]) -> tuple[
                                list[dict], dict[str, bytes]]:
     """The path-migration map and the adoption evidence record, preceded by
     the deletion of every evidence record an earlier adoption committed.
@@ -813,6 +897,7 @@ def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
         "link_rewrites": link_rewrites,
         "path_references": path_references,
         "reference_policies": reference_policies,
+        "reference_formatting": reference_formatting,
         "path_migration_map": records["migration_map"],
     })
     return [
@@ -1006,11 +1091,13 @@ def compute_plan_id(project_id: str | None, base_revision: str,
                     platform_block: dict, evidence: list[dict],
                     answered: list[dict], link_rewrites: dict,
                     path_references: list[dict],
-                    reference_policies: list[dict]) -> str:
-    """D15's content address over exactly nine inputs: the project id, the
+                    reference_policies: list[dict],
+                    reference_formatting: list[dict]) -> str:
+    """D15's content address over exactly ten inputs: the project id, the
     base revision, the platform block, the evidence, the answered decisions,
     the schema version, the `link_rewrites` summary (#345), the
-    `path_references` rows (#350) and the `reference_policies` rows (#372).
+    `path_references` rows (#350), the `reference_policies` rows (#372) and
+    the `reference_formatting` rows (#376).
 
     The manifest's `migrations` array is deliberately *not* one of them (D36):
     it can only route toward `migration_required` or `repair_required`, and
@@ -1029,6 +1116,7 @@ def compute_plan_id(project_id: str | None, base_revision: str,
         "link_rewrites": link_rewrites,
         "path_references": path_references,
         "reference_policies": reference_policies,
+        "reference_formatting": reference_formatting,
     }
     return "sha256:" + hashlib.sha256(canonical_json(source)).hexdigest()
 

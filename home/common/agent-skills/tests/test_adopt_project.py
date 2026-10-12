@@ -49,8 +49,8 @@ PROVENANCES = ("tracked", "targeted-ignored",
                "untracked-explicit-paths")
 TOP_LEVEL_MEMBERS = ["changes", "decisions", "evidence", "handoff",
                      "link_rewrites", "path_references", "plan",
-                     "reference_policies", "schema_version",
-                     "verification"]
+                     "reference_formatting", "reference_policies",
+                     "schema_version", "verification"]
 PLAN_MEMBERS = ["base_revision", "blockers", "input_digest", "outcome",
                 "plan_id", "platform", "project_id", "state"]
 HANDOFF_MEMBERS = ["evidence_record", "migration_map", "next_command",
@@ -961,7 +961,7 @@ class ProjectIdentityTest(AdoptTestCase):
 
 
 class DocumentShapeTest(AdoptTestCase):
-    def test_exactly_ten_top_level_members(self):
+    def test_exactly_eleven_top_level_members(self):
         for name, build in (("bootstrap", bootstrap_repo),
                             ("reconcile", reconcile_repo),
                             ("adopted", adopted_repo),
@@ -1060,7 +1060,7 @@ class DocumentShapeTest(AdoptTestCase):
 def documented_plan_id(doc: object) -> str:
     """D15's digest, recomputed here from the document's own inputs.
 
-    The formula is the spec's, not the implementation's: the nine named
+    The formula is the spec's, not the implementation's: the ten named
     members, canonical JSON, SHA-256. Nothing is pasted from a previous
     run.
     """
@@ -1074,6 +1074,7 @@ def documented_plan_id(doc: object) -> str:
         "link_rewrites": doc["link_rewrites"],
         "path_references": doc["path_references"],
         "reference_policies": doc["reference_policies"],
+        "reference_formatting": doc["reference_formatting"],
     }
     payload = json.dumps(source, sort_keys=True,
                          separators=(",", ":")).encode("utf-8")
@@ -1329,6 +1330,7 @@ class TypedOperationTest(AdoptTestCase):
             "link_rewrites": doc["link_rewrites"],
             "path_references": doc["path_references"],
             "reference_policies": doc["reference_policies"],
+            "reference_formatting": doc["reference_formatting"],
             "path_migration_map": doc["handoff"]["migration_map"],
         }
         expected = json.dumps(record, sort_keys=True, indent=2,
@@ -1836,14 +1838,16 @@ class LinkRewritePlanTest(AdoptTestCase):
         self.assertEqual(
             adopt_planning.compute_plan_id(*inputs, doc["link_rewrites"],
                                            doc["path_references"],
-                                           doc["reference_policies"]),
+                                           doc["reference_policies"],
+                                           doc["reference_formatting"]),
             doc["plan"]["plan_id"])
         other = json.loads(json.dumps(LINKED_SUMMARY))
         other["inbound"] = {"links": 4, "files": ["README.md"]}
         self.assertNotEqual(
             adopt_planning.compute_plan_id(*inputs, other,
                                            doc["path_references"],
-                                           doc["reference_policies"]),
+                                           doc["reference_policies"],
+                                           doc["reference_formatting"]),
             doc["plan"]["plan_id"])
 
     def test_the_human_view_prints_one_link_line(self):
@@ -1987,13 +1991,15 @@ class PathReferencePlanTest(AdoptTestCase):
         self.assertEqual(
             adopt_planning.compute_plan_id(*inputs,
                                            extended["path_references"],
-                                           extended["reference_policies"]),
+                                           extended["reference_policies"],
+                                           extended["reference_formatting"]),
             extended["plan"]["plan_id"])
         other = [{**extended["path_references"][0],
                   "additions": [".agents/artifacts/specs/"]}]
         self.assertNotEqual(
             adopt_planning.compute_plan_id(*inputs, other,
-                                           extended["reference_policies"]),
+                                           extended["reference_policies"],
+                                           extended["reference_formatting"]),
             extended["plan"]["plan_id"])
 
     def test_markdown_rewriting_is_unchanged_and_other_files_are_untouched(self):
@@ -2478,12 +2484,14 @@ class ReferencePolicyPlanTest(AdoptTestCase):
                   rewritten["link_rewrites"], rewritten["path_references"])
         self.assertEqual(
             adopt_planning.compute_plan_id(
-                *inputs, rewritten["reference_policies"]),
+                *inputs, rewritten["reference_policies"],
+                rewritten["reference_formatting"]),
             rewritten["plan"]["plan_id"])
         other = [dict(row) for row in rewritten["reference_policies"]]
         other[2]["rewritable"] += 1
         self.assertNotEqual(
-            adopt_planning.compute_plan_id(*inputs, other),
+            adopt_planning.compute_plan_id(
+                *inputs, other, rewritten["reference_formatting"]),
             rewritten["plan"]["plan_id"])
 
     def test_invalid_policy_answers_refuse_and_store_nothing(self):
@@ -2654,6 +2662,144 @@ class VariablePolicyPlanTest(AdoptTestCase):
             [(row["subject"], row["policy"])
              for row in doc["path_references"]],
             [(f"{JOBS_DIR}/run.py:3:6", ".claude/notes:.py")])
+
+
+# What `POLICY_READY_ANSWERS` edits, by class, before any format answer.
+FORMAT_ROWS = [
+    {"class": ".nix", "command": None,
+     "files": [f"{POLICY_NEW}/devenv.nix"]},
+    {"class": ".py", "command": None,
+     "files": [f"{POLICY_NEW}/paths.py", f"{POLICY_NEW}/report.py",
+               RUN_REPORT]},
+    {"class": ".toml", "command": None, "files": [LINT_TOML]},
+]
+
+
+class ReferenceFormattingPlanTest(AdoptTestCase):
+    """#376 D2, D3, D11: a formatter is declared per edited class by an
+    answer, never asked for, and published in `reference_formatting`."""
+
+    def answered(self, root: Path, *triples: tuple[str, str, str]) -> object:
+        code, doc, err = self.plan(root, *answer_args(*triples))
+        self.assertEqual(code, 0, err or doc)
+        return doc
+
+    def command(self, root: Path) -> str:
+        """A command id the fixture's contract declares; `plan` never runs
+        it, and any declared id is accepted (D2)."""
+        contract = json.loads(
+            (root / ".agents" / "project.json").read_text("utf-8"))
+        return sorted(contract["bindings"]["commands"])[0]
+
+    def stored_plans(self) -> list[str]:
+        store = self.home / ".agents" / "state" / "adopt" / "plans"
+        return sorted(path.name for path in store.iterdir()) \
+            if store.is_dir() else []
+
+    def test_rows_list_every_edited_class_without_a_command(self):
+        self.assertEqual(
+            self.answered(nix_config_shape_repo(self.home))
+            ["reference_formatting"], [])
+        doc = self.answered(policy_repo(self.home), *POLICY_READY_ANSWERS)
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["reference_formatting"], FORMAT_ROWS)
+
+    def test_a_format_answer_names_the_command_and_changes_the_id(self):
+        root = policy_repo(self.home)
+        command = self.command(root)
+        without = self.answered(root, *POLICY_READY_ANSWERS)
+        doc = self.answered(root, *POLICY_READY_ANSWERS,
+                            ("reference-format", ".py", command))
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(doc["decisions"]["open"], [])
+        self.assertIn(
+            {"id": "reference-format", "subject": ".py", "value": command},
+            doc["decisions"]["answered"])
+        self.assertEqual(doc["reference_formatting"], [
+            FORMAT_ROWS[0], {**FORMAT_ROWS[1], "command": command},
+            FORMAT_ROWS[2]])
+        self.assertNotEqual(doc["plan"]["plan_id"],
+                            without["plan"]["plan_id"])
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+
+        def code_writes(document: object) -> dict[str, str]:
+            return {op["targets"][0]: op["after"]
+                    for op in document["changes"]
+                    if op["op"] == "write-file"
+                    and op["targets"][0].startswith((POLICY_NEW, "tools/"))}
+        self.assertEqual(code_writes(doc), code_writes(without))
+
+    def test_compute_plan_id_covers_the_rows(self):
+        root = policy_repo(self.home)
+        doc = self.answered(root, *POLICY_READY_ANSWERS,
+                            ("reference-format", ".py", self.command(root)))
+        inputs = (doc["plan"]["project_id"], doc["plan"]["base_revision"],
+                  doc["plan"]["platform"], doc["evidence"],
+                  doc["decisions"]["answered"], doc["link_rewrites"],
+                  doc["path_references"], doc["reference_policies"])
+        self.assertEqual(
+            adopt_planning.compute_plan_id(*inputs,
+                                           doc["reference_formatting"]),
+            doc["plan"]["plan_id"])
+        other = json.loads(json.dumps(doc["reference_formatting"]))
+        other[1]["files"] = other[1]["files"][:-1]
+        self.assertNotEqual(adopt_planning.compute_plan_id(*inputs, other),
+                            doc["plan"]["plan_id"])
+
+    def test_invalid_format_answers_refuse_and_store_nothing(self):
+        root = policy_repo(self.home)
+        command = self.command(root)
+        no_python_edit = tuple(
+            triple for triple in POLICY_READY_ANSWERS
+            if triple[1] not in (PY_POLICY, RUN_SUBJECT)) + (
+            ("reference-policy", PY_POLICY, "retain"),
+            ("path-reference", RUN_SUBJECT, "retain"))
+        unmatched = "adopt.decisions.unmatched_answer"
+        invalid = "adopt.decisions.invalid_answer"
+        for triples, repair_id in (
+                ((*POLICY_READY_ANSWERS,
+                  ("reference-format", ".md", command)), unmatched),
+                ((*POLICY_READY_ANSWERS,
+                  ("reference-format", ".json", command)), unmatched),
+                ((*no_python_edit,
+                  ("reference-format", ".py", command)), unmatched),
+                ((*POLICY_READY_ANSWERS,
+                  ("reference-format", ".py", "no-such-command")), invalid),
+                ((*POLICY_READY_ANSWERS,
+                  ("reference-format", ".py", command),
+                  ("reference-format", ".py", "zz-other")), invalid),
+                # Validated after the other ids, though it sorts first.
+                ((("reference-policy", ".claude/notes:.md", "retain"),
+                  ("reference-format", ".py", "no-such-command")),
+                 unmatched)):
+            with self.subTest(triples=triples):
+                before = self.stored_plans()
+                code, payload, err = self.plan(root, *answer_args(*triples))
+                self.assertEqual(code, 2, err or payload)
+                self.assertEqual(payload["error"]["code"], "adopt_failure")
+                self.assertEqual(payload["error"]["repair_id"], repair_id)
+                self.assertEqual(
+                    payload["error"]["violations"][0]["pointer"],
+                    "/decisions/answered")
+                self.assertEqual(self.stored_plans(), before)
+
+    def test_the_human_view_prints_each_format_row(self):
+        root = policy_repo(self.home)
+        command = self.command(root)
+        code, out, err = run(
+            "plan", "--repo-root", str(root), "--format", "human",
+            *answer_args(*POLICY_READY_ANSWERS,
+                         ("reference-format", ".py", command)),
+            home=self.home)
+        self.assertEqual(code, 0, err)
+        for line in ("format .nix: 1 files, command none",
+                     f"format .py: 3 files, command {command}",
+                     "format .toml: 1 files, command none"):
+            with self.subTest(line=line):
+                self.assertIn(f"\n{line}\n", out)
+        self.assertLess(out.rindex("\npolicy "), out.index("\nformat "))
 
 
 class GitignoreAmendmentTest(AdoptTestCase):

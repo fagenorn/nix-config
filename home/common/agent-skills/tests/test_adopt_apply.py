@@ -88,13 +88,15 @@ MOVED = {
 
 
 def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
-               signed: bool = False) -> Path:
+               signed: bool = False,
+               commands: dict[str, list[str]] | None = None) -> Path:
     """This repository's shape at base, with cheap verification commands.
 
     A valid schema-1 contract without `platform`, the three legacy artifact
     trees, a `.claude/skills.config.json`, a `.gitignore` still carrying the
     runtime pattern, and no runtime sentinel — the `reconcile` shape whose plan
-    reaches `ready`.
+    reaches `ready`. `commands` declares further contract commands by id, each
+    its argv run from the repository root.
     """
     root = init_repo()
     contract = fixture_contract()
@@ -104,6 +106,8 @@ def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
     contract["bindings"]["commands"] = {
         "verify": {"argv": list(verification), "cwd": ".", "env": []},
         "review": {"argv": ["true"], "cwd": ".", "env": []},
+        **{command: {"argv": list(argv), "cwd": ".", "env": []}
+           for command, argv in (commands or {}).items()},
     }
     contract["bindings"]["workflow"]["verification"] = ["verify"]
     contract["bindings"]["workflow"]["review"] = {
@@ -1052,6 +1056,37 @@ class VariablePolicyApplyTest(ApplyTestCase):
             git(root, "rev-parse", f"HEAD:{JOBS_SCRIPT}"))
         self.assertEqual(git(root, "show", f"{branch}:{COLLECT}.sh"),
                          git(root, "show", f"HEAD:{COLLECT}.sh"))
+
+
+class ReferenceFormatGuardTest(ApplyTestCase):
+    """#376 D16: until `apply` runs a declared formatter, a plan that names
+    one is refused rather than applied unformatted."""
+
+    def test_a_declared_formatter_is_refused_until_apply_runs_it(self):
+        root = apply_repo(self.home, commands={"format": ["true"]})
+        write(root, "tools/note.py", 'SPEC = ".claude/specs/x.md"\n')
+        commit(root, "add a script that names a moved file")
+        base = git(root, "rev-parse", "HEAD").strip()
+        code, out, err = run(
+            "plan", "--repo-root", str(root),
+            *answer_args(("path-reference", "tools/note.py:1:9", "rewrite"),
+                         ("reference-format", ".py", "format")),
+            home=self.home)
+        self.assertEqual(code, 0, err or out)
+        document = json.loads(out)
+        self.assertEqual(document["plan"]["state"], "ready",
+                         document["plan"]["blockers"])
+        self.assertEqual(document["reference_formatting"], [
+            {"class": ".py", "command": "format",
+             "files": ["tools/note.py"]}])
+        plan_id = document["plan"]["plan_id"]
+        self.assert_retained(root, plan_id, base, "adopt.format.failed")
+        record = json.loads(self.state(
+            "adopt", "worktrees", self.digest(plan_id) + ".failure.json")
+            .read_text("utf-8"))
+        self.assertEqual([gate["status"] for gate in record["gates"]],
+                         ["not_run"] * len(record["gates"]))
+        self.assertTrue(record["gates"])
 
 
 class CommitLinkProofTest(ApplyTestCase):

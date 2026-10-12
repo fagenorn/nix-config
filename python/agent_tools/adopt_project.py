@@ -2,18 +2,19 @@
 
 `plan` inspects a target checkout inside a bounded, read-only boundary,
 classifies every candidate it finds under one closed action set, routes the
-repository to exactly one of five closed outcomes, and emits the ten-member
+repository to exactly one of five closed outcomes, and emits the eleven-member
 adoption plan document: `schema_version`, `plan`, `evidence`, `decisions`,
 `changes`, `link_rewrites`, `path_references`, `reference_policies`,
-`verification`, `handoff` (R4.3).
+`reference_formatting`, `verification`, `handoff` (R4.3).
 
 The document is content-addressed. `plan_id` is the SHA-256 of canonical JSON
 over exactly `{adopt_schema_version, project_id, base_revision, platform,
 evidence, decisions.answered, link_rewrites, path_references,
-reference_policies}` (D15), so two checkouts of one revision on one platform
-produce one identifier and any change to a source byte, the base revision or
-a platform input produces another. The absolute checkout path is deliberately outside that source and
-appears only in `handoff`.
+reference_policies, reference_formatting}` (D15), so two checkouts of one
+revision on one platform produce one identifier and any change to a source
+byte, the base revision or a platform input produces another. The absolute
+checkout path is deliberately outside that source and appears only in
+`handoff`.
 
 `plan` mutates nothing: it runs `git` and the resolver as child processes,
 reads tracked object ids, and through git, rather than the working tree's
@@ -193,15 +194,17 @@ def compose_plan(root: Path, manifest: dict,
     the canonical operation list (D33), so a second, subtly different
     derivation cannot exist to disagree with it. It writes nothing.
     `answered` is the operator's answers to open `candidate-class`,
-    `path-reference` and `reference-policy` questions, applied before anything else is derived, so
-    they enter `plan_id`.
+    `path-reference` and `reference-policy` questions and its `reference-format`
+    declarations, applied before anything else is derived, so they enter
+    `plan_id`.
     """
     inventory = inspect_repository(root)
     found = adopt_inspection.classify_inventory(root, inventory)
     contract_source = load_contract_source(root)
     answered, references = adopt_planning.apply_answers(
         root, found, inventory, answered,
-        adopt_planning.reference_excluded(contract_source))
+        adopt_planning.reference_excluded(contract_source),
+        adopt_planning.contract_command_ids(contract_source))
     reference_answers = adopt_planning.reference_answers(answered)
     policies = adopt_planning.policy_answers(answered)
     path_references = adopt_references.summary(references, reference_answers,
@@ -210,6 +213,8 @@ def compose_plan(root: Path, manifest: dict,
         references, reference_answers, policies)
     reference_files = adopt_references.rewritten(references,
                                                  reference_answers, policies)
+    reference_formatting = adopt_planning.reference_formatting(
+        reference_files, answered)
     untracked = adopt_inspection.untracked_under(
         root, adopt_inspection.overlap_targets(found))
     for path in untracked:
@@ -274,7 +279,7 @@ def compose_plan(root: Path, manifest: dict,
     plan_id = adopt_planning.compute_plan_id(
         project_id, inventory.base_revision, platform_block, evidence,
         decisions["answered"], links.summary, path_references,
-        reference_policies)
+        reference_policies, reference_formatting)
 
     ready_gates = adopt_planning.evaluate_ready_gates(
         root, found, contract_source, contract_resolves, unfixable, untracked,
@@ -309,7 +314,7 @@ def compose_plan(root: Path, manifest: dict,
         bookkeeping, written = adopt_planning.bookkeeping_operations(
             found, plan_id, outcome, inventory.base_revision, platform_block,
             decisions, ready_gates, links.summary, path_references,
-            reference_policies)
+            reference_policies, reference_formatting)
         contents.update(written)
         changes = head + bookkeeping + tail
         adopt_planning.check_markdown_writes(changes, set(links.files))
@@ -353,6 +358,7 @@ def compose_plan(root: Path, manifest: dict,
         "link_rewrites": links.summary,
         "path_references": path_references,
         "reference_policies": reference_policies,
+        "reference_formatting": reference_formatting,
         "verification": {
             "ready_gates": ready_gates,
             "commit_gates": [adopt_inspection.gate_entry(gate, "not_run", None)
@@ -441,6 +447,10 @@ def emit_human(document: dict) -> int:
             f"{row['rewritable']}, rewritten {row['rewritten']}, retained "
             f"{row['retained']}, extended {row['extended']}, open "
             f"{row['open']}")
+    for row in document["reference_formatting"]:
+        lines.append(
+            f"format {row['class']}: {len(row['files'])} files, "
+            f"command {row['command'] or 'none'}")
     for entry in document["decisions"]["recommended"]:
         lines.append(f"recommended {entry['id']}: {entry['value']}")
     for entry in document["decisions"]["answered"]:
@@ -582,6 +592,14 @@ def command_apply(args: argparse.Namespace) -> int:
         for operation in changes:
             adopt_apply.execute_operation(
                 worktree, operation, composed.contents, run_resolver)
+        # This apply cannot run a declared formatter yet; the formatting step
+        # replaces this refusal, which stands in for it at the same point.
+        if any(row["command"] is not None
+               for row in composed.document["reference_formatting"]):
+            raise adopt_inspection.refuse(
+                "verification_failed", "adopt.format.failed",
+                "/reference_formatting",
+                "this apply cannot run a declared reference formatter")
     except adopt_inspection.AdoptError as error:
         adopt_apply.retain_failure(digest, document, worktree, branch, [
             adopt_inspection.gate_entry(gate, "not_run", None)
@@ -726,8 +744,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--answer", action="append", nargs=3, default=[],
                       metavar=("QUESTION", "SUBJECT", "VALUE"),
                       help="settle one open candidate-class, "
-                           "path-reference or reference-policy question; "
-                           "repeatable")
+                           "path-reference or reference-policy question, or "
+                           "declare a reference-format command (a command "
+                           "id of the contract, run by apply over a class's "
+                           "reference-edited files); repeatable")
     apply_plan = subparsers.add_parser(
         "apply", help="carry out a stored ready plan in an isolated worktree")
     # Two flags and no more: naming the content-addressed id is the exact-plan
