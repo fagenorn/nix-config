@@ -13,7 +13,9 @@ the class of a file name and the answer recommended for it (`file_class`,
 (`effective_answer`), the reports of the occurrences and of the policies
 (`summary`, `policy_summary`) and the edits the answers make (`rewritten`), and
 the reader that feeds the core a tree's text through git (`derive_references`,
-over `adopt_inspection.tree_records` and `blob_at`).
+over `adopt_inspection.tree_records` and `blob_at`), from two `git grep` scans:
+the first segments of the moved paths, and `..` or `__file__` within the
+moves' trees, kept to moved files (`depth_texts`).
 
 A file the plan moves is read at its base path and edited at its destination:
 an occurrence's `path` and `subject` are the base path, its `target` is where
