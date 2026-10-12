@@ -3,7 +3,9 @@
 **Files:**
 - Modify: `python/agent_tools/adopt_planning.py`
 - Modify: `python/agent_tools/adopt_project.py`
+- Modify: `python/README.md` (§ `adopt-project`, the `--answer` paragraph only)
 - Test: `home/common/agent-skills/tests/test_adopt_project.py`
+- Test: `home/common/agent-skills/tests/test_adopt_apply.py` (one guard case, removed again by Task 4)
 
 **Interfaces:**
 - Consumes: `adopt_references.rewritten`, `adopt_references.file_class`, `reference_answers`, `policy_answers`, `load_contract_source`.
@@ -21,6 +23,7 @@
 - Rows come only from `adopt_references.rewritten`'s keys (the path-reference edits), classed by `file_class` of the target; Markdown link rewrites, the contract, records and projections never appear (D3).
 - `reference-format` answers are validated after every other answer and before any candidate mutation, per answer in `(subject, value)` order: repeated subject → `adopt.decisions.invalid_answer`; class of no edited file → `adopt.decisions.unmatched_answer`; value not in `commands` → `adopt.decisions.invalid_answer` (D11). Every refusal points at `/decisions/answered` and stores nothing.
 - The answer changes no planned operation's `after`: formatting happens in `apply` (D4).
+- Fail-closed until Task 4 (D16): `apply` of a plan with a `reference_formatting` row whose `command` is not None refuses `verification_failed`, `adopt.format.failed`, pointer `/reference_formatting`, at the point Task 4's step will run (after every operation executed and matched, before `GateRun`), so the worktree and branch are retained and every commit gate is recorded `not_run`. A plan whose rows all have `command` None applies exactly as today.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -172,6 +175,8 @@ class ReferenceFormattingPlanTest(AdoptTestCase):
         self.assertLess(out.rindex("\npolicy "), out.index("\nformat "))
 ```
 
+In `home/common/agent-skills/tests/test_adopt_apply.py`, one guard case (D16), which Task 4 deletes when it adds `ReferenceFormattingApplyTest`: `ReferenceFormatGuardTest(ApplyTestCase)` with `test_a_declared_formatter_is_refused_until_apply_runs_it`. Build `apply_repo(self.home, commands={"format": ["true"]})`, add a tracked non-Markdown text file holding a quoted `.claude/specs/x.md` literal and commit it, plan with that occurrence's `path-reference` answer `rewrite` and `("reference-format", "<its class>", "format")`, require the plan `ready`, then `self.assert_retained(root, plan_id, base, "adopt.format.failed")` and require every gate of the stored `.failure.json` record `not_run` (the same reads Task 4's refusal case makes). Reuse the helpers the module already has; if `apply_repo` has no `commands` parameter yet, add it here with the shape Task 4's fixture calls it with (`commands: dict[str, list[str]] | None = None`, written into the contract's `bindings.commands`).
+
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run: `env PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_adopt_project.py -k ReferenceFormattingPlanTest -k DocumentShapeTest -k PlanIdentityTest` (timeout 1800 s)
@@ -187,10 +192,13 @@ Expected: FAIL/ERROR — `KeyError: 'reference_formatting'`, the refusal cases e
 5. `bookkeeping_operations`: new last parameter `reference_formatting: list[dict]`; the record dict gains `"reference_formatting": reference_formatting` after `"reference_policies"`. `EVIDENCE_RECORD_MEMBERS` is not changed (the required minimum).
 
 `python/agent_tools/adopt_project.py`:
+0. `command_apply` (D16): inside the existing `try` that executes the operations, after the loop, when any row of `composed.document["reference_formatting"]` has a `command`, raise `adopt_inspection.refuse("verification_failed", "adopt.format.failed", "/reference_formatting", <message saying this apply cannot run a declared formatter>)` (reach `refuse` the way the module already reaches it), so the refusal takes the existing `retain_failure` path with every commit gate `not_run`. A one-line comment says Task 4's formatting step replaces it; no TODO is left in a docstring.
 1. `compose_plan`: pass `adopt_planning.contract_command_ids(contract_source)` to `apply_answers`; after `reference_files`, `reference_formatting = adopt_planning.reference_formatting(reference_files, answered)`; pass it to `compute_plan_id` and `bookkeeping_operations`; the document gains `"reference_formatting": reference_formatting` after `"reference_policies"`. The `compose_plan` docstring names `reference-format` among the answers.
 2. `emit_human`: after the `policy …` lines, one line per row: `f"format {row['class']}: {len(row['files'])} files, command {row['command'] or 'none'}"`.
 3. `build_parser`: the `--answer` help names `reference-format` (a command id of the contract, run by `apply` over a class's reference-edited files).
 4. The module docstring: the plan document has eleven members, `reference_formatting` included, and `plan_id` covers exactly ten inputs, `reference_formatting` added to the listed set.
+
+`python/README.md` § `adopt-project`, the first paragraph (the one listing `candidate-class`, `path-reference` and `reference-policy` as the only answerable ids): written from the implemented code, it names `reference-format` as a fourth answerable id that opens no question (described in a later paragraph), keeps the refusal list true (an id other than the four), and says the `reference-format` answers are validated after the others, in `(subject, value)` order, so the `(id, subject, value)` order statement covers the other three ids only. Keep the count of open-question kinds unchanged.
 
 - [ ] **Step 4: Verify**
 
@@ -200,9 +208,15 @@ Expected: PASS, no failures.
 Run: `env PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_adopt_apply.py -k ApplySuccessTest -k ReferencePolicyApplyTest` (timeout 1800 s)
 Expected: PASS — a plan without `reference-format` still applies.
 
+Run: `env PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_adopt_apply.py -k ReferenceFormatGuardTest` (timeout 1800 s)
+Expected: PASS — the declared formatter is refused `adopt.format.failed` with every gate `not_run`.
+
+Run: `rg -q "reference-format" python/README.md`
+Expected: exit 0.
+
 - [ ] **Step 5: Commit**
 
 ```bash
-git add python/agent_tools/adopt_planning.py python/agent_tools/adopt_project.py home/common/agent-skills/tests/test_adopt_project.py
+git add python/agent_tools/adopt_planning.py python/agent_tools/adopt_project.py python/README.md home/common/agent-skills/tests/test_adopt_project.py home/common/agent-skills/tests/test_adopt_apply.py
 launch-commit … -- -m "feat(adopt): declare a formatter per edited class and publish reference_formatting (#376)"
 ```

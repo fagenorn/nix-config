@@ -34,13 +34,13 @@ Spec: `.agents/artifacts/specs/2026-10-12-issue-376-adopt-format-step-and-variab
 
 ## Delivery estimate and boundaries
 
-Estimates: 9 changed files — `adopt_references.py`, `adopt_planning.py`, `adopt_project.py`, `adopt_apply.py`, three test files, `python/README.md`, the spec — about +250 production lines and +600 test lines, one review package. Tasks 1–2 (variable reading) and Tasks 3–4 (formatting) are independently deliverable slices; Task 2 needs Task 1, Task 4 needs Task 3. Aggregate-growth risks (estimates): `test_adopt_project.py` (2674 lines at base, about 2900 after) and `test_adopt_apply.py` (1271, about 1500). Between Task 3 and Task 4 a `reference-format` answer is accepted and published but `apply` formats nothing, so such a plan is refused at the verification gate exactly as without the answer; that intermediate head is not shipped alone.
+Estimates: 9 changed files — `adopt_references.py`, `adopt_planning.py`, `adopt_project.py`, `adopt_apply.py`, three test files, `python/README.md`, the spec — about +250 production lines and +600 test lines, one review package. Tasks 1–2 (variable reading) and Tasks 3–4 (formatting) are independently deliverable slices; Task 2 needs Task 1, Task 4 needs Task 3. Aggregate-growth risks (estimates): `test_adopt_project.py` (2674 lines at base, about 2900 after) and `test_adopt_apply.py` (1271, about 1500). No head publishes a formatting answer it did not execute: at Task 3's commit `apply` refuses, fail-closed, every plan whose `reference_formatting` names a command (`adopt.format.failed`, pointer `/reference_formatting`, worktree and branch retained, every commit gate `not_run`), whatever the verification commands would say; Task 4 replaces that refusal with the formatting step (per D16).
 
 ## Task index
 
 Task 1 — The variable reading, its carried form and the occurrence class — `python/agent_tools/adopt_references.py`, `home/common/agent-skills/tests/test_adopt_references.py` — full — [task-1.md](2026-10-12-issue-376-adopt-format-step-and-variable-paths.tasks/task-1.md)
 Task 2 — Variable-joined paths in plan and apply, and their documentation — `python/agent_tools/adopt_planning.py`, `python/README.md`, `home/common/agent-skills/tests/test_adopt_project.py`, `home/common/agent-skills/tests/test_adopt_apply.py` — full — [task-2.md](2026-10-12-issue-376-adopt-format-step-and-variable-paths.tasks/task-2.md)
-Task 3 — The `reference-format` answer, `reference_formatting`, the tenth `plan_id` input and the human line — `python/agent_tools/adopt_planning.py`, `python/agent_tools/adopt_project.py`, `home/common/agent-skills/tests/test_adopt_project.py` — full — [task-3.md](2026-10-12-issue-376-adopt-format-step-and-variable-paths.tasks/task-3.md)
+Task 3 — The `reference-format` answer, `reference_formatting`, the tenth `plan_id` input and the human line — `python/agent_tools/adopt_planning.py`, `python/agent_tools/adopt_project.py`, `python/README.md`, `home/common/agent-skills/tests/test_adopt_project.py`, `home/common/agent-skills/tests/test_adopt_apply.py` — full — [task-3.md](2026-10-12-issue-376-adopt-format-step-and-variable-paths.tasks/task-3.md)
 Task 4 — The formatting step in `apply`, its confinement proof, and the documented contract — `python/agent_tools/adopt_apply.py`, `python/agent_tools/adopt_project.py`, `python/README.md`, `home/common/agent-skills/tests/test_adopt_apply.py` — full — [task-4.md](2026-10-12-issue-376-adopt-format-step-and-variable-paths.tasks/task-4.md)
 
 ## Acceptance map
@@ -60,6 +60,17 @@ Task 4 — The formatting step in `apply`, its confinement proof, and the docume
 - The step's place, its confinement proof and its failures: per D4, D5, D9; its resolver observation: per D12.
 - The variable reading, its shell classes and its limits: per D6, D7, D10; the occurrence class and the `/variable` policy: per D8, D13.
 - The AC1 fixture's lint and formatter scripts: per D15.
-- Planning added D11–D15 to the spec's ledger; no other decision was forced.
+- Task 3's fail-closed refusal of a plan that names a formatter, until Task 4 runs it: per D16.
+- Confinement reads the working tree of a move-only destination too, not only the index: per D17.
+- Planning added D11–D15 to the spec's ledger and the Phase-5 standards review D16–D17; no other decision was forced.
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, `codex-companion task --fresh --reviewer plan-review`), isolated read-only mode, no focus; no fallback.
+- Base SHA: `69a1047920707528fc97729b57b705332a360d27`; reviewed head `77f0e3fa`.
+- Findings: 3 — accepted 3 (two blocking, one should-fix), rejected 0, deferred 0.
+  - Blocking, confinement missed an unstaged working-tree change to a move-only destination (`operation_result_matches` reads the index for a `git-object:` hash): Task 4's confinement proof also hashes the bytes on disk and a `shift` refusal case pins it (D17).
+  - Blocking, Task 3's commit accepted and published a formatting answer that `apply` did not execute: Task 3 now refuses such a plan fail-closed until Task 4 (D16).
+  - Should-fix, the README's `--answer` paragraph names three valid ids and one validation order: Task 3 updates it with the fourth id and its deferred validation.
