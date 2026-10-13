@@ -26,6 +26,12 @@ EVIDENCE_MEMBERS = {"project_id", "registry_entry_digest", "source", "contract_b
                     "provider_full_name", "profiles"}
 
 
+def holds(root, commit: str) -> bool:
+    """Whether the checkout's object store holds `commit`."""
+    return subprocess.run([REAL_GIT, "-C", str(root), "cat-file", "-e", f"{commit}^{{commit}}"],
+                          capture_output=True, timeout=60).returncode == 0
+
+
 class WorldCase(unittest.TestCase):
     def setUp(self) -> None:
         self.world = GuardPolicyWorld(self)
@@ -104,6 +110,7 @@ class DerivationTest(WorldCase):
         self.world.git(root, "checkout", "--quiet", "-b", "local-work")
         (root / ".agents/project.json").write_text("not json", "utf-8")
         self.world.git(root, "commit", "--quiet", "-am", "local only")
+        moved = self.world.git(root, "rev-parse", "HEAD")
         self.world.git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
         (root / "untracked.txt").write_text("dirty", "utf-8")
         before = (self.world.git(root, "status", "--porcelain"),
@@ -115,7 +122,12 @@ class DerivationTest(WorldCase):
                                   self.world.git(root, "rev-parse", "HEAD"),
                                   self.world.git(root, "for-each-ref", "refs/heads")))
         self.assertFalse((root / ".git/FETCH_HEAD").exists())
-        self.assertEqual(self.world.git(root, "rev-parse", "refs/remotes/origin/main"), published)
+        # D3: origin's listed commit is already held, so nothing is fetched and the moved
+        # remote-tracking ref stays where it was; the row still reads origin's commit.
+        self.assertEqual(self.world.git(root, "rev-parse", "refs/remotes/origin/main"), moved)
+        self.assertEqual(
+            self.world.policy()["derived_repositories"]["fagenorn/one"]["evidence"]["source"],
+            {"ref": "refs/remotes/origin/main", "commit": published.strip()})
 
     def test_a_refused_project_loses_its_stale_row(self):
         self.world.project("fixture/one", "fagenorn/one")
@@ -202,6 +214,49 @@ class DeriveTest(WorldCase):
         self.assertEqual(self.world.git(other, "for-each-ref", "refs/remotes/origin"), "")
         self.derived("fagenorn/one")
         self.assertEqual(self.world.git(other, "for-each-ref", "refs/remotes/origin"), "")
+
+    def test_a_listed_commit_already_held_is_read_without_a_fetch(self):
+        root = self.world.project("fixture/one", "fagenorn/one")
+        main = self.world.git(root, "rev-parse", "main").strip()
+        self.world.git(root, "update-ref", "-d", "refs/remotes/origin/main")
+        report = self.derived("fagenorn/one")
+        self.assertEqual(report["row"]["evidence"]["source"],
+                         {"ref": "refs/remotes/origin/main", "commit": main})
+        self.assertEqual(self.world.git(root, "for-each-ref", "refs/remotes/origin"), "")
+        self.assertFalse((root / ".git/FETCH_HEAD").exists())
+
+    def test_a_commit_pushed_since_the_last_fetch_is_fetched(self):
+        root = self.world.project("fixture/one", "fagenorn/one")
+        pushed = self.world.advance(root, "main")
+        self.assertFalse(holds(root, pushed))
+        report = self.derived("fagenorn/one")
+        self.assertEqual(report["row"]["evidence"]["source"],
+                         {"ref": "refs/remotes/origin/main", "commit": pushed})
+        self.assertEqual(self.world.git(root, "rev-parse", "refs/remotes/origin/main").strip(),
+                         pushed)
+        self.assertFalse((root / ".git/FETCH_HEAD").exists())
+
+    def test_a_nodo_shaped_row_derives_through_both_pin_paths(self):
+        nodo = self.world.project("nodocom", NODO, integration_branch="dev",
+                                  publication_free=True, override=True)
+        self.world.git(nodo, "update-ref", "-d", "refs/remotes/origin/main")
+        self.world.git(nodo, "update-ref", "-d", "refs/remotes/origin/dev")
+        held = self.derived(NODO)["row"]
+        self.assertEqual((held["default_branch"], held["integration_branch"]), ("main", "dev"))
+        self.assertEqual(held["evidence"]["source"],
+                         {"ref": "refs/remotes/origin/dev",
+                          "commit": self.world.git(nodo, "rev-parse", "dev").strip()})
+        self.assertEqual(self.world.git(nodo, "for-each-ref", "refs/remotes/origin"), "")
+        pushed = self.world.advance(nodo, "dev")
+        fetched = self.derived(NODO)["row"]
+        self.assertEqual((fetched["default_branch"], fetched["integration_branch"]),
+                         ("main", "dev"))
+        self.assertEqual(fetched["evidence"]["source"],
+                         {"ref": "refs/remotes/origin/dev", "commit": pushed})
+        # Only the branch whose listed commit was missing is fetched.
+        self.assertEqual(self.world.git(nodo, "for-each-ref", "--format=%(refname) %(objectname)",
+                                        "refs/remotes/origin").strip(),
+                         f"refs/remotes/origin/dev {pushed}")
 
     def test_an_unusable_registry_or_manifest_is_unavailable(self):
         self.world.project("fixture/one", "fagenorn/one")
@@ -361,6 +416,18 @@ class ProjectRefusalTest(WorldCase):
         self.world.write_base(integration_bases={"fagenorn/one": "dev"})
         self.world.project("fixture/one", "fagenorn/one", integration_branch="dev+ci")
         self.refused("literal_conflict")
+
+    def test_a_symlinked_projection_target_is_contract_unresolved(self):
+        """D9: the sparse export leaves a symlinked projection file absent."""
+        root = self.world.project("fixture/one", "fagenorn/one")
+        (root / "CLAUDE.real.md").write_bytes((root / "CLAUDE.md").read_bytes())
+        (root / "CLAUDE.md").unlink()
+        (root / "CLAUDE.md").symlink_to("CLAUDE.real.md")
+        self.world.git(root, "add", "-A")
+        self.world.git(root, "commit", "--quiet", "-m", "symlinked target")
+        self.world.publish(root, ["main"])
+        refusal = self.refused("contract_unresolved")
+        self.assertIn("projection.claude.entry.missing", refusal["detail"])
 
 
 class UnsupportedNameTest(unittest.TestCase):

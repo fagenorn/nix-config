@@ -189,6 +189,19 @@ class GuardPolicyWorld:
                  *(f"{ref}:refs/heads/{ref}" for ref in refs))
         return bare
 
+    def advance(self, root: Path, branch: str) -> str:
+        """Push one new commit onto `origin`'s `branch` from another clone, so the checkout
+        `root` does not hold it; return its id."""
+        bare = self.git(root, "remote", "get-url", "origin").strip()
+        other = Path(tempfile.mkdtemp(dir=self.tmp)) / "elsewhere"
+        self.git(self.tmp, "clone", "--quiet", "--branch", branch, bare, str(other))
+        self.git(other, "config", "commit.gpgsign", "false")
+        (other / "advanced.txt").write_text(f"{branch}\n", encoding="utf-8")
+        self.git(other, "add", "advanced.txt")
+        self.git(other, "commit", "--quiet", "-m", f"advance {branch}")
+        self.git(other, "push", "--quiet", "origin", f"HEAD:refs/heads/{branch}")
+        return self.git(other, "rev-parse", "HEAD").strip()
+
     def identity(self, root: Path, origin: str | None, pushes: list[str] | None = None) -> None:
         """What the `git` shim reports as `root`'s origin urls; `None` restores the real ones."""
         key = os.path.realpath(root)
