@@ -33,7 +33,9 @@ from agent_tools import agent_platform
 from agent_tools.adopt_inspection import AdoptError
 
 from .test_adopt_project import (
+    DEPTH_REWRITE_ANSWERS,
     EVIDENCE_RECORD_MEMBERS,
+    answer_args,
     commit,
     adopted_repo,
     fixture_contract,
@@ -46,6 +48,7 @@ from .test_adopt_project import (
     tree_snapshot,
     write,
     write_adoption_records,
+    write_depth_tree,
 )
 from .test_adopt_apply import apply_repo, readoption_repo
 
@@ -347,6 +350,26 @@ class AnsweredCandidateVerifyTest(VerifyTestCase):
         self.assertEqual(
             self.check(report, "no-unclassified-agent-path")["status"],
             "passed")
+
+
+class DepthRewriteVerifyTest(VerifyTestCase):
+    def test_a_rewritten_climb_verifies_as_derived(self):
+        """#380 AC5: the depth rewrites are planned writes of the adoption
+        commit, so `adoption-commit-derived` passes."""
+        root = apply_repo(self.home)
+        write_depth_tree(root)
+        code, out, err = run("plan", "--repo-root", str(root),
+                             *answer_args(*DEPTH_REWRITE_ANSWERS),
+                             home=self.home)
+        self.assertEqual(code, 0, err or out)
+        plan_id = json.loads(out)["plan"]["plan_id"]
+        code, out, err = run("apply", "--plan-id", plan_id, home=self.home)
+        self.assertEqual(code, 0, err or out)
+        git(root, "merge", "--ff-only", "--quiet", json.loads(out)["branch"])
+        report = self.report(root)
+        self.assertEqual(report["result"], "adopted", report["checks"])
+        self.assertEqual(
+            self.check(report, "adoption-commit-derived")["status"], "passed")
 
 
 # --------------------------------------------------------------------------

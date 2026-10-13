@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools import adopt_references
 from agent_tools.adopt_links import Tree
@@ -711,6 +712,375 @@ class VariableReadingTest(unittest.TestCase):
             {})
 
 
+NOTES, NOTES_NEW = ".claude/notes", ".agents/artifacts/notes"
+TOOL, TOOL_NEW = NOTES + "/tool", NOTES_NEW + "/tool"
+DEPTH_PATHS = [TOOL + "/run.py", TOOL + "/pyproject.toml", TOOL + "/uv.lock",
+               NOTES + "/data/x", "vendor/lib/m.py", ".claude/specs/x.md",
+               "README.md"]
+DEPTH_MOVES = [(TOOL + "/run.py", TOOL_NEW + "/run.py"),
+               (TOOL + "/pyproject.toml", TOOL_NEW + "/pyproject.toml"),
+               (TOOL + "/uv.lock", TOOL_NEW + "/uv.lock"),
+               (NOTES + "/data/x", NOTES_NEW + "/data/x"),
+               (".claude/specs/x.md", ".agents/artifacts/specs/x.md")]
+DEPTH_TREES = {source: "/".join(source.split("/")[:2])
+               for source, _ in DEPTH_MOVES}
+
+
+def depth_found(texts, *, moves=DEPTH_MOVES, trees=DEPTH_TREES,
+                paths=DEPTH_PATHS, scanned=None):
+    return adopt_references.plan_references(
+        scanned or {}, paths, moves, trees, depth_texts=texts).occurrences
+
+
+def climbs(text, path=TOOL + "/pyproject.toml", **kwargs):
+    return [(o.literal, o.answers, o.replacement, o.depth)
+            for o in depth_found({path: text}, **kwargs)]
+
+
+class TextClimbTest(unittest.TestCase):
+    """#380 D1, D3, D4, D8: `../` climbs out of a moved file's tree."""
+
+    def test_a_climb_splits_into_prefix_height_and_rest(self):
+        split = adopt_references.split_climb
+        for token, expected in (
+                ("../x", ("", 1, "/x")), ("../../", ("", 2, "/")),
+                ("../..", ("", 2, "")), ("./../x", ("./", 1, "/x")),
+                ("./..", ("./", 1, "")),
+                ("../../../vendor/lib", ("", 3, "/vendor/lib")),
+                ("../a/./b", ("", 1, "/a/./b"))):
+            with self.subTest(token=token):
+                self.assertEqual(split(token), expected)
+                self.assertEqual("".join((expected[0],
+                                          "/".join([".."] * expected[1]),
+                                          expected[2])), token)
+        for token in ("..", "...", ".../x", "..x/y", "a/../b", "/../x",
+                      "../a/../b", "x"):
+            with self.subTest(token=token):
+                self.assertIsNone(split(token))
+
+    def test_the_shifted_form_keeps_prefix_and_rest(self):
+        form = adopt_references.climb_form
+        self.assertEqual(form("", 4, "/vendor/lib"), "../../../../vendor/lib")
+        self.assertEqual(form("./", 1, ""), "./..")
+        self.assertIsNone(form("", 0, "/x"))
+
+    def test_a_climb_to_the_root_is_rewritten_one_level_deeper(self):
+        self.assertEqual(climbs('lib = { path = "../../../vendor/lib" }\n'), [
+            ("../../../vendor/lib", ("rewrite", "retain"),
+             "../../../../vendor/lib", True)])
+        self.assertEqual(climbs('p = "./../../../vendor/"\n'), [
+            ("./../../../vendor/", ("rewrite", "retain"),
+             "./../../../../vendor/", True)])
+
+    def test_climbs_inside_the_tree_are_not_surfaced(self):
+        for text in ('d = "../data/x"\n', 'd = "../../notes/data/x"\n',
+                     'd = "./.."\n', 'd = "../x"\n'):
+            with self.subTest(text=text):
+                self.assertEqual(climbs(text), [])
+
+    def test_a_climb_back_into_a_renamed_tree_is_retained(self):
+        # Final review C-002 (D15): `.claude/research` is filed under
+        # `.agents/artifacts/specs`, so `../../research/data.txt` taken from
+        # `.agents/artifacts/specs/tool` reaches
+        # `.agents/artifacts/research/data.txt`, not the data's successor
+        # `.agents/artifacts/specs/data.txt`.
+        config, data = (".claude/research/tool/config.toml",
+                        ".claude/research/data.txt")
+        moves = [(config, SPECS + "/tool/config.toml"),
+                 (data, SPECS + "/data.txt")]
+        trees = {config: ".claude/research", data: ".claude/research"}
+        for text, literal in (
+                ('d = "../../research/data.txt"\n', "../../research/data.txt"),
+                ('d = "../../research/new/"\n', "../../research/new/"),
+                ('d = "../../research"\n', "../../research")):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    climbs(text, path=config, moves=moves, trees=trees,
+                           paths=[config, data]),
+                    [(literal, ("retain",), None, True)])
+        # The same spelling reaches the successor when the tree keeps its
+        # name: `.agents/notes/tool` + `../../notes/data/x`.
+        moves = [(TOOL + "/pyproject.toml", ".agents/notes/tool/pyproject.toml"),
+                 (NOTES + "/data/x", ".agents/notes/data/x")]
+        self.assertEqual(climbs('d = "../../notes/data/x"\n', moves=moves), [])
+
+    def test_a_landing_point_only_above_the_old_directory_is_retained(self):
+        self.assertEqual(climbs('c = "../../settings.json"\n'), [
+            ("../../settings.json", ("retain",), None, True)])
+
+    def test_a_base_target_in_another_moved_tree_is_retained(self):
+        self.assertEqual(climbs('s = "../../../.claude/specs/x.md"\n'), [
+            ("../../../.claude/specs/x.md", ("retain",), None, True)])
+
+    def test_bare_dots_are_no_climb(self):
+        self.assertEqual(climbs('a = ".."\nb = HERE / ".." / ".."\n'), [])
+
+    def test_a_same_depth_move_surfaces_nothing_new(self):
+        moves = [(TOOL + "/pyproject.toml", "tools/notes/tool/pyproject.toml")]
+        self.assertEqual(climbs('lib = { path = "../../../vendor/lib" }\n',
+                                moves=moves), [])
+
+    def test_a_same_depth_move_under_another_parent_is_retained(self):
+        moves = [(TOOL + "/pyproject.toml", "tools/notes/tool/pyproject.toml")]
+        self.assertEqual(climbs('c = "../../settings.json"\n', moves=moves), [
+            ("../../settings.json", ("retain",), None, True)])
+
+    def test_a_shallower_move_climbs_less(self):
+        moves = [(TOOL + "/pyproject.toml", "notes/tool/pyproject.toml")]
+        self.assertEqual(climbs('lib = "../../../vendor/lib"\n', moves=moves),
+                         [("../../../vendor/lib", ("rewrite", "retain"),
+                           "../../vendor/lib", True)])
+        self.assertEqual(climbs('top = "../../../../up"\n', moves=moves),
+                         [("../../../../up", ("rewrite", "retain"),
+                           "../../../up", True)])
+
+    def test_a_shallower_move_that_cannot_climb_less_is_retained(self):
+        moves = [(TOOL + "/pyproject.toml", "pyproject.toml")]
+        # P = .claude/notes/tool (depth 3), Q = "" (depth 0): delta -3.
+        self.assertEqual(climbs('lib = "../../../vendor/lib"\n', moves=moves),
+                         [("../../../vendor/lib", ("retain",), None, True)])
+
+    def test_an_unmoved_or_unread_file_has_no_depth_occurrence(self):
+        self.assertEqual(climbs('lib = "../../../vendor/lib"\n',
+                                path="tools/a/b/c.toml",
+                                paths=DEPTH_PATHS + ["tools/a/b/c.toml"]), [])
+
+    def test_the_class_and_policy_of_a_depth_occurrence(self):
+        texts = {TOOL + "/pyproject.toml": 'lib = "../../../vendor/lib"\n',
+                 TOOL + "/uv.lock": 'source = "../../../vendor/lib"\n'}
+        self.assertEqual(
+            [(o.subject, o.occurrence_class, o.policy, o.target)
+             for o in depth_found(texts)],
+            [(TOOL + "/pyproject.toml:1:8", ".toml/depth",
+              NOTES + ":.toml/depth", TOOL_NEW + "/pyproject.toml"),
+             (TOOL + "/uv.lock:1:11", ".lock/depth", NOTES + ":.lock/depth",
+              TOOL_NEW + "/uv.lock")])
+
+    def test_the_depth_read_set_gets_the_depth_reading_only(self):
+        text = 'lib = "../../../vendor/lib"\nspec = ".claude/specs/x.md"\n'
+        path = TOOL + "/pyproject.toml"
+        self.assertEqual([o.depth for o in depth_found({path: text})], [True])
+        self.assertEqual(
+            [(o.subject, o.depth) for o in depth_found(
+                {path: text}, scanned={path: text})],
+            [(path + ":1:8", True), (path + ":2:9", False)])
+        self.assertEqual(
+            [o.depth for o in adopt_references.plan_references(
+                {path: text}, DEPTH_PATHS, DEPTH_MOVES,
+                DEPTH_TREES).occurrences], [False])
+
+    def test_an_archived_file_is_its_own_directory(self):
+        path = ".claude/odd.toml"
+        moves = [(path, ".agents/knowledge/archive/adopted/.claude/odd.toml")]
+        self.assertEqual(
+            climbs('a = "./../x"\nb = "../../y"\n', path=path, moves=moves,
+                   trees={path: path}, paths=[path]),
+            [("./../x", ("rewrite", "retain"), "./../../../../../x", True),
+             ("../../y", ("rewrite", "retain"), "../../../../../../y", True)])
+
+    def test_the_depth_policy_partitions_answers_and_edits(self):
+        path = TOOL + "/pyproject.toml"
+        text = 'lib = "../../../vendor/lib"\nspec = ".claude/specs/x.md"\n'
+        refs = adopt_references.plan_references(
+            {path: text}, DEPTH_PATHS, DEPTH_MOVES, DEPTH_TREES,
+            depth_texts={path: text})
+        toml, depth = NOTES + ":.toml", NOTES + ":.toml/depth"
+        _, climb = sorted(refs.occurrences, key=lambda o: o.depth)
+        self.assertEqual(adopt_references.effective_answer(
+            climb, {}, {toml: "rewrite"}), (None, None))
+        self.assertEqual(adopt_references.effective_answer(
+            climb, {}, {depth: "rewrite"}), ("rewrite", "policy"))
+        answers = {toml: "retain", depth: "rewrite"}
+        self.assertEqual(
+            [(row["subject"], row["class"], row["recommended"],
+              row["rewritten"], row["retained"])
+             for row in adopt_references.policy_summary(refs, {}, answers)],
+            [(toml, ".toml", "rewrite", 0, 1),
+             (depth, ".toml/depth", None, 1, 0)])
+        self.assertEqual(
+            adopt_references.rewritten(refs, {}, answers),
+            {TOOL_NEW + "/pyproject.toml": (
+                text, text.replace("../../../", "../../../../"))})
+        self.assertEqual(adopt_references.rewritten(
+            refs, {}, {toml: "retain", depth: "retain"}), {})
+
+
+RUN = TOOL + "/run.py"
+BOUND = "HERE = Path(__file__).resolve().parent\n"
+
+
+def chains(text, **kwargs):
+    return [(o.subject, o.literal, o.answers, o.replacement)
+            for o in depth_found({RUN: text}, **kwargs)]
+
+
+def heights(text):
+    return [height for _, _, height in adopt_references.python_climbs(text)]
+
+
+class PythonClimbTest(unittest.TestCase):
+    """#380 D2: parent-count chains anchored at the file's own location."""
+
+    def test_anchored_chains_and_their_heights(self):
+        for text, expected in (
+                ("R = Path(__file__).parents[3]\n", [3]),
+                ("R = pathlib.Path(__file__).resolve().parent.parent\n", [1]),
+                ("R = Path(__file__).absolute().parent.parents[1]\n", [2]),
+                (BOUND + "R = HERE.parents[2]\n", [0, 3]),
+                ("F: Path = Path(__file__)  # me\nR = F.parent.parent\n", [1]),
+                ("R = Path(__file__).parents[2].joinpath('x')\n", [2])):
+            with self.subTest(text=text):
+                self.assertEqual(heights(text), expected)
+        for text in ("R = os.path.dirname(os.path.dirname(__file__))\n",
+                     "R = Path.cwd().parents[2]\n",
+                     "R = Path(__file__).parents[i]\n",
+                     "R = Path(__file__).parents[1].parent\n",
+                     "R = Path(__file__).parent.parents[i]\n",
+                     "R = Path(__file__) .parent\n",
+                     "R = MyPath(__file__).parent\n",
+                     "R = x.Path(__file__).parent\n",
+                     "R = Path(__file__)\n"):
+            with self.subTest(text=text):
+                self.assertEqual(heights(text), [])
+
+    def test_only_a_name_never_rebound_is_followed(self):
+        for text, expected in (
+                ("HERE = Path(__file__).parent\nHERE = Path('.')\n"
+                 "R = HERE.parents[2]\n", [0]),
+                (BOUND + 'HERE /= "/fixed/a/b/c"\nROOT = HERE.parents[2]\n',
+                 [0]),
+                (BOUND + "for HERE in xs:\n    pass\nR = HERE.parents[2]\n",
+                 [0]),
+                (BOUND + "def f():\n    HERE = 1\nR = HERE.parents[2]\n",
+                 [0]),
+                ("def f():\n    HERE = Path(__file__).parent\n"
+                 "    return HERE.parents[2]\n", [0]),
+                (BOUND + "ROOT = HERE.parents[2]\nX = ROOT.parent\n", [0, 3]),
+                ("UP = Path(__file__).parents[2]\nX = UP.parent\n", [2]),
+                (BOUND + "R = self.HERE.parents[2]\nS = MYHERE.parent\n",
+                 [0]),
+                ("here = Path(__file__).parent\ndef f(here):\n"
+                 "    return here.parent\n", [0]),
+                (BOUND + "def m(self, HERE):\n"
+                 "    return HERE.parent.parent\n", [0]),
+                (BOUND + "F = lambda HERE: HERE.parents[1]\n", [0])):
+            with self.subTest(text=text):
+                self.assertEqual(heights(text), expected)
+
+    def test_a_tuple_star_or_for_target_rebinds(self):
+        # Final review C-001 (D16): a name in a target list is rebound.
+        for rebinding in ("HERE, unused = f()\n", "unused, HERE = f()\n",
+                          "(a, HERE) = f()\n", "[a, HERE] = f()\n",
+                          "*HERE, a = f()\n", "a, *HERE = f()\n",
+                          "(a,\n HERE) = f()\n", "a = (b, HERE) = f()\n",
+                          "for _, HERE in xs:\n    pass\n",
+                          "for (a, HERE) in xs:\n    pass\n",
+                          "for (a,\n     HERE) in xs:\n    pass\n",
+                          "ys = [p for p, HERE in xs]\n",
+                          "with f() as (a, HERE):\n    pass\n",
+                          # Ship review C-001: attribute and nested targets.
+                          "HERE, cache.path = (Path('/fixed/a/b/c'), None)\n",
+                          "HERE, d['k'] = f()\n",
+                          "(a, (b, HERE)) = f()\n",
+                          "(a, (b,\n     HERE)) = f()\n",
+                          "[\n    (a, b),\n    HERE,\n] = f()\n"):
+            with self.subTest(rebinding=rebinding):
+                self.assertEqual(
+                    heights(BOUND + rebinding + "R = HERE.parents[2]\n"), [0])
+        # A use in a call, a value tuple or a loop's iterable rebinds nothing.
+        for use in ("open(HERE, encoding='utf-8')\n", "X = (HERE, 1)\n",
+                    "f(a, HERE)\nb = 1\n", "d = dict(a=(HERE), b=1)\n",
+                    "for p in HERE.iterdir():\n    pass\n",
+                    "for p in (HERE, x):\n    pass\n",
+                    "ok = (HERE, 1) == t\n", "ok = (HERE, x.y) != t\n",
+                    "ok = (HERE, a) <= b\n"):
+            with self.subTest(use=use):
+                self.assertEqual(
+                    heights(BOUND + use + "R = HERE.parents[2]\n"), [0, 3])
+
+    def test_a_name_rebound_in_an_attribute_or_nested_target_is_kept(self):
+        # Ship review C-001: no rewrite is offered for the rebound name.
+        for rebinding in (
+                "HERE, cache.path = (Path('/fixed/a/b/c'), None)\n",
+                "(a, (b,\n     HERE)) = (1, (2, Path('/fixed/a/b/c')))\n"):
+            with self.subTest(rebinding=rebinding):
+                self.assertEqual(
+                    chains(BOUND + rebinding + "ROOT = HERE.parents[2]\n"),
+                    [])
+
+    def test_a_chain_to_the_root_is_rewritten(self):
+        text = (BOUND + "ROOT = HERE.parents[2]\n"
+                "UP = Path(__file__).parent.parent.parent.parent\n")
+        self.assertEqual(chains(text), [
+            (RUN + ":2:12", ".parents[2]", ("rewrite", "retain"),
+             ".parents[3]"),
+            (RUN + ":3:20", ".parent.parent.parent.parent",
+             ("rewrite", "retain"), ".parent.parent.parent.parent.parent")])
+
+    def test_crlf_line_ends_read_like_lf(self):
+        crlf = (BOUND + "ROOT = HERE.parents[2]\n").replace("\n", "\r\n")
+        self.assertEqual(heights(crlf), [0, 3])
+        self.assertEqual(chains(crlf), [
+            (RUN + ":2:12", ".parents[2]", ("rewrite", "retain"),
+             ".parents[3]")])
+        refs = adopt_references.plan_references(
+            {RUN: crlf}, DEPTH_PATHS, DEPTH_MOVES, DEPTH_TREES,
+            depth_texts={RUN: crlf})
+        self.assertEqual(
+            adopt_references.rewritten(
+                refs, {}, {NOTES + ":.py/depth": "rewrite"}),
+            {TOOL_NEW + "/run.py": (
+                crlf, crlf.replace(".parents[2]", ".parents[3]"))})
+
+    def test_chains_inside_the_tree_are_not_surfaced(self):
+        self.assertEqual(chains(BOUND + "NOTES = HERE.parent\n"
+                                "T = Path(__file__).parents[1]\n"), [])
+
+    def test_a_landing_point_only_above_the_old_directory_is_retained(self):
+        self.assertEqual(chains("C = Path(__file__).parents[2]\n"), [
+            (RUN + ":1:19", ".parents[2]", ("retain",), None)])
+
+    def test_a_shallower_move_that_cannot_climb_less_is_retained(self):
+        text = (BOUND + "R = HERE.parents[2]\n"
+                "S = Path(__file__).parent.parent.parent.parent\n")
+        self.assertEqual(chains(text, moves=[(RUN, "run.py")]), [
+            (RUN + ":2:9", ".parents[2]", ("retain",), None),
+            (RUN + ":3:19", ".parent.parent.parent.parent",
+             ("rewrite", "retain"), ".parent")])
+
+    def test_only_python_files_are_read_for_chains(self):
+        path = TOOL + "/run.sh"
+        self.assertEqual(depth_found(
+            {path: "R = Path(__file__).parents[2]\n"},
+            moves=DEPTH_MOVES + [(path, TOOL_NEW + "/run.sh")],
+            trees={**DEPTH_TREES, path: NOTES},
+            paths=DEPTH_PATHS + [path]), ())
+
+    def test_a_chain_overlapping_a_token_occurrence_is_dropped(self):
+        text = ("HERE = Path(__file__).parent\n"
+                "Y = .claude/specs/x.md+HERE.parents[2]\n")
+        self.assertEqual(
+            [(o.subject, o.depth)
+             for o in depth_found({RUN: text}, scanned={RUN: text})],
+            [(RUN + ":2:5", False)])
+        self.assertEqual([o.subject for o in depth_found({RUN: text})],
+                         [RUN + ":2:28"])
+
+    def test_a_chain_inside_a_text_climb_is_dropped(self):
+        text = BOUND + 'S = "../../../HERE.parents[2]"\n'
+        self.assertEqual(chains(text), [
+            (RUN + ":2:6", "../../../HERE.parents[2]", ("rewrite", "retain"),
+             "../../../../HERE.parents[2]")])
+        refs = adopt_references.plan_references(
+            {RUN: text}, DEPTH_PATHS, DEPTH_MOVES, DEPTH_TREES,
+            depth_texts={RUN: text})
+        self.assertEqual(
+            adopt_references.rewritten(
+                refs, {}, {NOTES + ":.py/depth": "rewrite"}),
+            {TOOL_NEW + "/run.py": (
+                text, text.replace("../../../", "../../../../"))})
+
+
 def git(root: Path, *args: str) -> None:
     subprocess.run(
         ["git", "-C", str(root), *args], check=True, capture_output=True,
@@ -784,6 +1154,86 @@ class DerivationTest(unittest.TestCase):
         self.assertEqual(
             adopt_references.derive_references(self.root, "HEAD", [], [], {}),
             adopt_references.References({}, ()))
+
+
+class DepthDerivationTest(unittest.TestCase):
+    """#380 D7: the depth reading's own read set, beside the first-segment
+    prefilter's."""
+
+    FILES = {
+        ".claude/specs/tool/run.py": b"ROOT = Path(__file__).parents[2]\n",
+        ".claude/specs/tool/both.toml":
+            b'lib = "../../../vendor/lib"\nspec = ".claude/plans/y.md"\n',
+        ".claude/specs/tool/notes.md": b"[up](../../../README.md)\n",
+        ".claude/specs/tool/blob.bin": b"\x00../../../x\n",
+        ".claude/specs/tool/.env.ci": b"../../../x\n",
+        ".claude/specs/tool/dots.txt": b"see ../../../README.md\n",
+        ".claude/plans/y.md": b"# y\n",
+        ".claude/odd.py": b"UP = Path(__file__).parents[1]\n",
+        "tools/up.py": b"ROOT = Path(__file__).parents[1]\nX = '../x/y'\n",
+        "README.md": b"# r\n",
+    }
+    MOVES = [(p, p.replace(".claude/specs", SPECS, 1)) for p in (
+        ".claude/specs/tool/run.py", ".claude/specs/tool/both.toml",
+        ".claude/specs/tool/notes.md", ".claude/specs/tool/blob.bin",
+        ".claude/specs/tool/.env.ci", ".claude/specs/tool/dots.txt")] + [
+        (".claude/plans/y.md", ".agents/artifacts/plans/y.md"),
+        (".claude/odd.py", ".agents/knowledge/archive/adopted/.claude/odd.py")]
+    TREES = {**{s: "/".join(s.split("/")[:2]) for s, _ in MOVES},
+             ".claude/odd.py": ".claude/odd.py"}
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp()).resolve()
+        git(self.root, "init", "--quiet", "-b", "main")
+        git(self.root, "config", "commit.gpgsign", "false")
+        for path, data in self.FILES.items():
+            target = self.root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        git(self.root, "add", "-A", "-f")
+        git(self.root, "commit", "--quiet", "-m", "fixture")
+
+    def found(self, excluded=(), moves=None, trees=None):
+        return [(o.subject, o.depth)
+                for o in adopt_references.derive_references(
+                    self.root, "HEAD", self.MOVES if moves is None else moves,
+                    excluded, self.TREES if trees is None else trees
+                ).occurrences]
+
+    def test_moved_text_files_holding_a_climb_are_read(self):
+        self.assertEqual(self.found(), [
+            (".claude/odd.py:1:20", True),
+            (".claude/specs/tool/both.toml:1:8", True),
+            (".claude/specs/tool/both.toml:2:9", False),
+            (".claude/specs/tool/dots.txt:1:5", True),
+            (".claude/specs/tool/run.py:1:22", True)])
+
+    def test_a_global_pathspec_setting_does_not_hide_the_climbs(self):
+        # `GIT_LITERAL_PATHSPECS=1` reads `:(literal)` as part of a path name.
+        for name in ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS",
+                     "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"):
+            with self.subTest(name=name), \
+                    mock.patch.dict(os.environ, {name: "1"}):
+                self.assertEqual(self.found(), [
+                    (".claude/odd.py:1:20", True),
+                    (".claude/specs/tool/both.toml:1:8", True),
+                    (".claude/specs/tool/both.toml:2:9", False),
+                    (".claude/specs/tool/dots.txt:1:5", True),
+                    (".claude/specs/tool/run.py:1:22", True)])
+
+    def test_excluded_files_are_not_read(self):
+        self.assertEqual(self.found([".claude/specs/tool/run.py"]), [
+            (".claude/odd.py:1:20", True),
+            (".claude/specs/tool/both.toml:1:8", True),
+            (".claude/specs/tool/both.toml:2:9", False),
+            (".claude/specs/tool/dots.txt:1:5", True)])
+
+    def test_a_move_no_file_names_is_still_read_for_climbs(self):
+        # No blob holds `tools`, so the first-segment prefilter finds nothing.
+        self.assertEqual(
+            self.found(moves=[("tools/up.py", "lib/tools/up.py")],
+                       trees={"tools/up.py": "tools"}),
+            [("tools/up.py:1:22", True), ("tools/up.py:2:6", True)])
 
 
 if __name__ == "__main__":

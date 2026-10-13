@@ -3,17 +3,19 @@
 This module provides what a relocation needs to find a repository path written
 in a tracked, non-Markdown text file that would be left pointing at a path
 that moved: the token grammar (`tokens`, `split_token`, `split_pattern`,
-`split_variable`), the successors of a referenced path and the carried form of
-a successor (`successors`, `carried_form`, `pattern_form`, `variable_form`), the
-occurrences, each with its
-shape, the answers it offers, the path its edit lands at and, for a file the
-plan moves, the policy that can answer it (`Occurrence`, `plan_references`),
+`split_variable`, `split_climb`), the successors of a referenced path and the
+carried form of a successor (`successors`, `carried_form`, `pattern_form`,
+`variable_form`, `climb_form`), the occurrences, each with its shape, the
+answers it offers, the path its edit lands at and, for a file the plan moves,
+the policy that can answer it (`Occurrence`, `plan_references`),
 the class of a file name and the answer recommended for it (`file_class`,
 `recommended_answer`), the answer that decides an occurrence
 (`effective_answer`), the reports of the occurrences and of the policies
 (`summary`, `policy_summary`) and the edits the answers make (`rewritten`), and
 the reader that feeds the core a tree's text through git (`derive_references`,
-over `adopt_inspection.tree_records` and `blob_at`).
+over `adopt_inspection.tree_records` and `blob_at`), from two `git grep` scans:
+the first segments of the moved paths, and `..` or `__file__` within the
+moves' trees, kept to moved files (`depth_texts`).
 
 A file the plan moves is read at its base path and edited at its destination:
 an occurrence's `path` and `subject` are the base path, its `target` is where
@@ -33,6 +35,45 @@ neither reading makes an occurrence is read a third time as a `$name/` or
 `rewrite` and `retain` only, keeps the variable and the tail in the form it
 rewrites to (`variable_form`), and belongs to the `<tree>:<class>/variable`
 policy, never to the `<tree>:<class>` one.
+
+A file the plan moves and that is in the depth read set (`depth_texts`) is read
+a fourth time, for the `../` climbs that leave its moved tree (`split_climb`).
+A climb is an occurrence when it ends at a proper ancestor of the tree's root,
+or above the repository root, and the same climb from the destination ends
+elsewhere. A climb whose target text is back inside the tree is one only when
+its unchanged spelling, taken from the destination's directory, misses the
+target's successor (where the tree's root is left, joined to the target's path
+below that root); it then offers `retain` alone. It belongs to the
+`<tree>:<class>/depth` policy, never to the `<tree>:<class>` one. It offers
+`rewrite` (the climb shifted by the depth delta, `climb_form`) and `retain`
+when it ends above the repository root or at an ancestor of the destination's
+directory, its target is neither a moved path nor back inside the tree and the
+shifted climb is valid, and `retain` alone otherwise.
+
+In a file whose base path has class `.py`, the depth reading also takes the
+parent-count chains of `python_climbs`, as climbs with no target text. An
+anchor is `Path(__file__)` or `pathlib.Path(__file__)` not preceded by an
+identifier character or `.`, with at most one `.resolve()` or `.absolute()`;
+or a name bound at column 0 by `NAME = <that>` or `NAME = <that>.parent`
+(with an optional `: Path` or `: pathlib.Path` annotation, a trailing comment
+and a CRLF line end) and bound nowhere else in the file, at any indentation,
+by assignment, `for`, `as`, `del`, `global`, `nonlocal`, a keyword argument,
+a mention in a `def` or `lambda` header (a parameter) or a mention in a target
+list (`NAME, b = …`, `NAME, obj.attr = …`, `(a, (b, NAME)) = …` over lines
+too, `*NAME, b = …`, between a `for` and its `in`, a bracketed run after `as`;
+see `_rebinds`); a use of the name is
+the name preceded by neither an identifier character nor `.` and not followed
+by one. A chain is zero or more `.parent` then at most one
+`.parents[N]` with `N` a decimal literal, at least one of them, with no
+whitespace; it climbs the offset (-1 from the file itself, 0 from its
+directory) plus one per `.parent` plus `N + 1` levels. It is an
+occurrence under the rules of a text climb; its rewrite is the chain with `N`
+(or the number of `.parent`s, which stays at least one) moved by the depth
+delta (`shift_chain`). Not read: `os.path` calls, `Path.cwd()`, a name chained
+from another name, a binding inside a function or class, a name bound more
+than once, a chain continued by `.parent` after its end, a chain with
+whitespace or a non-literal index, and a chain overlapping a text climb or an
+occurrence another reading made in the file.
 
 It is imported and never run. It reads blobs only through git, never the
 working tree, writes nothing, and imports `adopt_inspection` and `adopt_links`
@@ -73,6 +114,26 @@ _PATTERN_SAFE = re.compile(r"[A-Za-z0-9_./-]+")
 _OPENING_BEFORE = "[{,"
 _CLOSING_REST = ",])}"
 _NOT_A_CALL_BEFORE = "_)]"
+_FILE_ANCHOR = (r"(?:pathlib\.)?Path\(__file__\)"
+                r"(?:\.resolve\(\)|\.absolute\(\))?")
+_DIRECT_ANCHOR = re.compile(r"(?<![\w.])" + _FILE_ANCHOR)
+_CHAIN = re.compile(r"((?:\.parent(?!\w))*)(?:\.parents\[(\d+)\])?")
+# The parameters of a `def` (up to its first `)` followed by `:` or `->`) or of
+# a `lambda` (up to its first `:`).
+_PARAMETER_HEADER = re.compile(
+    r"\bdef[ \t]+\w+\s*\((.*?)\)\s*(?:->|:)|\blambda\b([^:]*):", re.DOTALL)
+# The target lists a name may be a member of anywhere in a line, or over
+# lines, besides a bracketed target (see `_bracketed_targets`): the text
+# between a `for` and its `in`, and a bracketed run after `as`.
+_TARGET_RUNS = re.compile(
+    r"(?<![\w.])for\b((?:(?!\bin\b)[\w\s,()\[\]*])*)\bin\b"
+    r"|(?<![\w.])as[ \t]*[(\[]([^()\[\]]*)[)\]]")
+# A closing bracket directly followed by an assignment's `=`.
+_BRACKET_ASSIGNED = re.compile(r"[)\]][ \t]*=(?!=)")
+# `\r?` keeps the binding of a CRLF file, whose `\r` the decode leaves.
+_BINDING = re.compile(
+    r"^([A-Za-z_]\w*)[ \t]*(?::[ \t]*(?:pathlib\.)?Path[ \t]*)?=[ \t]*"
+    + _FILE_ANCHOR + r"(\.parent)?[ \t]*(?:#[^\r\n]*)?\r?$", re.MULTILINE)
 
 
 # --------------------------------------------------------------------------
@@ -179,6 +240,36 @@ def split_variable(token: str) -> tuple[str, str, str] | None:
         count += 1
     path = "/".join(rest.split("/")[:count])
     return variable, path, rest[len(path):]
+
+
+def split_climb(token: str) -> tuple[str, int, str] | None:
+    """`(prefix, height, rest)` of a `../` climb token, or None.
+
+    `prefix` is `./` or empty, `height` the number of leading `..` segments
+    (at least one) and `rest` the text after the last of them, empty or
+    starting with `/`, so that `prefix + "/".join([".."] * height) + rest` is
+    the token. A token with no `/`, or whose rest holds a `..` segment, is no
+    climb.
+    """
+    if "/" not in token:
+        return None
+    prefix = "./" if token.startswith("./") else ""
+    segments = token[len(prefix):].split("/")
+    height = 0
+    while height < len(segments) and segments[height] == "..":
+        height += 1
+    if height == 0 or ".." in segments[height:]:
+        return None
+    rest = "/" + "/".join(segments[height:]) if height < len(segments) else ""
+    return prefix, height, rest
+
+
+def climb_form(prefix: str, height: int, rest: str) -> str | None:
+    """The climb of `height` levels that keeps `prefix` and `rest`, or None
+    when `height` is below one."""
+    if height < 1:
+        return None
+    return prefix + "/".join([".."] * height) + rest
 
 
 # --------------------------------------------------------------------------
@@ -330,6 +421,7 @@ class Occurrence:
     target: str
     tree: str | None
     variable: bool = False
+    depth: bool = False
 
     @property
     def subject(self) -> str:
@@ -337,9 +429,12 @@ class Occurrence:
 
     @property
     def occurrence_class(self) -> str:
-        """The file's class, or `<file class>/variable` for a variable-joined
-        occurrence; a file class never holds `/`, so the two never collide."""
+        """The file's class, `<file class>/depth` for a climb or
+        `<file class>/variable` for a variable-joined occurrence; a file class
+        never holds `/`, so no suffix collides with a class."""
         klass = file_class(self.path)
+        if self.depth:
+            return klass + "/depth"
         return klass + "/variable" if self.variable else klass
 
     @property
@@ -352,8 +447,8 @@ class Occurrence:
 
 @dataclass(frozen=True)
 class References:
-    """The scanned texts by base path, their occurrences, and the paths the
-    moves would leave more than one file at (`contested`)."""
+    """The texts that hold an occurrence by base path, the occurrences, and
+    the paths the moves would leave more than one file at (`contested`)."""
     texts: dict[str, str]
     occurrences: tuple[Occurrence, ...]
     contested: frozenset[str] = frozenset()
@@ -466,6 +561,260 @@ def _occurrence(path: str, text: str, token: Token, base: Tree, after: Tree,
 
 
 # --------------------------------------------------------------------------
+# Depth
+# --------------------------------------------------------------------------
+
+
+def _depth_of(directory: str) -> int:
+    return len(directory.split("/")) if directory else 0
+
+
+def _landing(directory: str, height: int) -> tuple[str, int]:
+    """`(place, above)` of a climb of `height` levels from `directory`.
+
+    `place` is the directory reached and `above` how many levels the climb
+    goes past the repository root, which it then lands on.
+    """
+    depth = _depth_of(directory)
+    if height <= depth:
+        return "/".join(directory.split("/")[:depth - height]), 0
+    return "", height - depth
+
+
+def _is_ancestor(ancestor: str, path: str) -> bool:
+    """Whether `ancestor` is `path` or a directory above it; the root is `""`."""
+    return not ancestor or path == ancestor or path.startswith(ancestor + "/")
+
+
+def _position(text: str, start: int) -> tuple[int, int]:
+    """The 1-based `(line, column)` of the offset `start`, counted as `tokens`
+    counts them."""
+    line_start = text.rfind("\n", 0, start) + 1
+    return text.count("\n", 0, start) + 1, start - line_start + 1
+
+
+def _chain_at(text: str, at: int) -> tuple[int, int, int | None] | None:
+    """`(end, parents, index)` of the `.parent` / `.parents[N]` chain that
+    starts at `at`, or None when there is none or `.parent` continues it."""
+    match = _CHAIN.match(text, at)
+    end = match.end()
+    if end == at or text.startswith(".parent", end):
+        return None
+    index = match.group(2)
+    return end, len(match.group(1)) // len(".parent"), (
+        None if index is None else int(index))
+
+
+def _rebinds(name: str, text: str) -> int:
+    """How many times `name` is bound in `text`, at any indentation: by plain,
+    annotated, augmented or `:=` assignment, a keyword argument, `for`, `as`,
+    `del`, `global` or `nonlocal`, a mention in a `def` or `lambda` header,
+    which is where a parameter is bound, or a mention in a target list.
+
+    The name is in a target list when it is followed on its line by `,`, `)`
+    or `]` and then, on that line, by an assignment's `=` that no bracket
+    opened on the line encloses (`NAME, b = …`, `(a, NAME) = …`, `*NAME, b =
+    …`, `NAME, obj.attr = …`); when it is inside a bracketed run, nested
+    brackets and line breaks included, directly followed by an assignment's
+    `=` (`(a,\\n NAME) = …`, `(a, (b,\\n NAME)) = …`); when it lies between
+    a `for` and its `in` (`for _, NAME in …`, a comprehension's too); and when it is inside a bracketed run after `as`
+    (`with … as (a, NAME)`). Headers and target lists are read loosely, so a
+    mention there that binds nothing counts too and the name is not
+    followed."""
+    escaped = re.escape(name)
+    assigned = re.findall(
+        r"(?<![\w.])" + escaped + r"[ \t]*(?:(?::[^=\n]*)?=(?!=)"
+        r"|(?:[-+*/%@&|^:]|//|\*\*|>>|<<)=)", text)
+    named = re.findall(
+        r"(?<![\w.])(?:for|as|del|global|nonlocal)[ \t]+" + escaped
+        + r"(?!\w)", text)
+    mention = re.compile(r"(?<![\w.])" + escaped + r"(?!\w)")
+    parameters = sum(
+        len(mention.findall("".join(header.groups(""))))
+        for header in _PARAMETER_HEADER.finditer(text))
+    return (len(assigned) + len(named) + parameters
+            + _target_mentions(escaped, mention, text))
+
+
+def _target_mentions(escaped: str, mention: re.Pattern[str], text: str
+                     ) -> int:
+    """How many times the name `escaped` spells is a member of a target list
+    (see `_rebinds`)."""
+    count = 0
+    for listed in re.finditer(
+            r"(?<![\w.])" + escaped + r"[ \t]*[,)\]][^=\n]*(?<![<>!])=(?!=)",
+            text):
+        head = text[text.rfind("\n", 0, listed.start()) + 1:listed.end()]
+        opened = head.count("(") + head.count("[")
+        if opened <= head.count(")") + head.count("]"):
+            count += 1
+    for run in _TARGET_RUNS.finditer(text):
+        count += len(mention.findall(run.group(run.lastindex)))
+    for target in _bracketed_targets(text):
+        count += len(mention.findall(target))
+    return count
+
+
+def _bracketed_targets(text: str) -> list[str]:
+    """The text of every bracketed run directly followed by an assignment's
+    `=`, from its matching opening bracket, nested brackets and line breaks
+    included (`(a, (b,\\n NAME)) = …`); a run whose opening bracket is not
+    found reaches back to the start of `text`, so a name in it is never
+    followed."""
+    found = []
+    for assigned in _BRACKET_ASSIGNED.finditer(text):
+        depth, start = 0, 0
+        for index in range(assigned.start(), -1, -1):
+            if text[index] in ")]":
+                depth += 1
+            elif text[index] in "([":
+                depth -= 1
+                if depth == 0:
+                    start = index
+                    break
+        found.append(text[start:assigned.start() + 1])
+    return found
+
+
+def python_climbs(text: str) -> list[tuple[int, int, int]]:
+    """`(start, end, height)` of every chain in `text` anchored at the file's
+    own location, sorted by `start`; `text[start:end]` is the chain after its
+    anchor.
+
+    An anchor is `Path(__file__)` (or `pathlib.Path(__file__)`), with at most
+    one `.resolve()` or `.absolute()`, and stands for the file; or a name bound
+    at column 0 to it, which stands for the file, or to its `.parent`, which
+    stands for its directory, and rebound nowhere else in the file. A chain is
+    `.parent`s then at most one `.parents[N]`, at least one of them, and
+    `height` is the levels it climbs from the file's directory: the file's
+    anchor offsets it by -1, the directory's by 0.
+    """
+    found = []
+
+    def add(anchor_end: int, offset: int) -> None:
+        chain = _chain_at(text, anchor_end)
+        if chain is not None:
+            end, parents, index = chain
+            found.append((anchor_end, end, offset + parents
+                          + (0 if index is None else index + 1)))
+
+    for anchor in _DIRECT_ANCHOR.finditer(text):
+        add(anchor.end(), -1)
+    for binding in _BINDING.finditer(text):
+        name = binding.group(1)
+        if _rebinds(name, text) != 1:
+            continue
+        offset = 0 if binding.group(2) else -1
+        for use in re.finditer(r"(?<![\w.])" + re.escape(name) + r"(?!\w)",
+                               text):
+            add(use.end(), offset)
+    return sorted(found)
+
+
+def shift_chain(chain: str, delta: int) -> str | None:
+    """`chain` climbing `delta` levels more, or None when it cannot: the
+    `.parents[N]` index moves with the `.parent`s kept, and a chain of
+    `.parent`s alone keeps at least one."""
+    match = _CHAIN.fullmatch(chain)
+    parents, index = match.group(1), match.group(2)
+    if index is not None:
+        shifted = int(index) + delta
+        return None if shifted < 0 else f"{parents}.parents[{shifted}]"
+    count = len(parents) // len(".parent") + delta
+    return ".parent" * count if count >= 1 else None
+
+
+def _depth_occurrences(path: str, text: str, base: Tree,
+                       sources: tuple[str, ...], target: str, tree: str,
+                       taken: Iterable[Occurrence]) -> list[Occurrence]:
+    """The `../` climbs of `text` that the move to `target` leaves landing
+    elsewhere, in text order.
+
+    `P` and `Q` are the directories of the file before and after the move and
+    `R` is the root of its tree; a file the plan archives has no tree of its
+    own, so its directory stands for it. A climb is an occurrence when it ends
+    at a proper ancestor of `R` (or above the repository root) and the same
+    climb from `Q` ends elsewhere. A text climb whose base target is back
+    inside `R` is one only when its unchanged spelling, taken from `Q`, misses
+    the target's successor (where `R` is left, joined to the target's path
+    below `R`); it then offers `retain` alone. `rewrite` is offered when the
+    climb ends at an ancestor of `Q` or above the root, its base target is
+    neither a moved path nor back inside `R`, and the shifted climb is valid.
+
+    In a `.py` file the chains of `python_climbs` are read too, as climbs with
+    no target text; one overlapping an occurrence in `taken`, which the other
+    readings made in the same file, or a text climb accepted here is dropped.
+    """
+    old_dir, new_dir = path.rpartition("/")[0], target.rpartition("/")[0]
+    root = tree if path.startswith(tree + "/") else old_dir
+    delta = _depth_of(new_dir) - _depth_of(old_dir)
+    # Where the tree's root is left: every member moves by one prefix
+    # substitution, so the file's path below `R` ends its target too.
+    below = path[len(root) + 1:] if root else path
+    new_root = (target[:-len(below) - 1] if target.endswith("/" + below)
+                else "" if target == below else None)
+
+    def joined(place: str, rest: str) -> str:
+        return "/".join(s for s in (place + "/" + rest).split("/")
+                        if s not in ("", "."))
+
+    def consider(start: int, end: int, height: int, rest: str | None,
+                 shift: Callable[[int], str | None]) -> Occurrence | None:
+        """`rest` is the text climb's rest, or None for a climb with no
+        target text; `shift(delta)` is the shifted form or None."""
+        landing = _landing(old_dir, height)
+        if landing == _landing(new_dir, height):
+            return None
+        place, above = landing
+        if not above and (place == root or not _is_ancestor(place, root)):
+            return None
+        retain_only = False
+        if rest is not None and not above:
+            base_target = joined(place, rest)
+            if _is_ancestor(root, base_target):
+                new_place, new_above = _landing(new_dir, height)
+                successor = None if new_root is None else joined(
+                    new_root, base_target[len(root):])
+                if not new_above and joined(new_place, rest) == successor:
+                    return None
+                retain_only = True
+            else:
+                retain_only = _names_moved(base_target, base, sources)
+        replacement = None
+        if (above or _is_ancestor(place, new_dir)) and not retain_only:
+            replacement = shift(delta)
+        line, column = _position(text, start)
+        return Occurrence(
+            path, line, column, start, end, text[start:end],
+            ("rewrite", "retain") if replacement is not None
+            else ("retain",), (), replacement, None, target, tree, False, True)
+
+    found = []
+    for token in tokens(text):
+        climb = split_climb(token.text)
+        if climb is None:
+            continue
+        prefix, height, rest = climb
+        occurrence = consider(
+            token.start, token.end, height, rest,
+            lambda d, p=prefix, h=height, r=rest: climb_form(p, h + d, r))
+        if occurrence is not None:
+            found.append(occurrence)
+    if file_class(path) == ".py":
+        claimed = [*taken, *found]
+        for start, end, height in python_climbs(text):
+            if any(start < o.end and o.start < end for o in claimed):
+                continue
+            occurrence = consider(
+                start, end, height, None,
+                lambda d, chain=text[start:end]: shift_chain(chain, d))
+            if occurrence is not None:
+                found.append(occurrence)
+    found.sort(key=lambda o: o.start)
+    return found
+
+
+# --------------------------------------------------------------------------
 # Edits
 # --------------------------------------------------------------------------
 
@@ -509,11 +858,16 @@ def _edit(text: str, occurrence: Occurrence, answer: str
 
 def plan_references(texts: dict[str, str], paths: Iterable[str],
                     moves: Iterable[tuple[str, str]],
-                    trees: Mapping[str, str]) -> References:
-    """The occurrences of moved paths in `texts`, over the tree `paths`.
+                    trees: Mapping[str, str],
+                    depth_texts: Mapping[str, str] | None = None
+                    ) -> References:
+    """The occurrences of moved paths in `texts`, and of the climbs in
+    `depth_texts` that the moves change, over the tree `paths`.
 
     `texts` is keyed by base path. `trees` maps each moved file to the tree
     its policy is named for; a moved file with no entry raises `ValueError`.
+    `depth_texts`, keyed by base path as well, is read by the depth reading
+    alone and only for a moved file; a path in both maps gets every reading.
     `contested` holds every path more than one file of the tree is left at:
     the destination of two moves, or of one move and a file that stays.
     """
@@ -524,10 +878,11 @@ def plan_references(texts: dict[str, str], paths: Iterable[str],
     contested = frozenset(path for path, count in landings.items()
                           if count > 1)
     sources = tuple(moved)
+    depth_texts = depth_texts or {}
     held: dict[str, str] = {}
     found: list[Occurrence] = []
-    for path in sorted(texts):
-        text = texts[path]
+    for path in sorted(set(texts) | set(depth_texts)):
+        text = texts[path] if path in texts else depth_texts[path]
         target = moved.get(path, path)
         tree = None
         if path in moved:
@@ -535,12 +890,19 @@ def plan_references(texts: dict[str, str], paths: Iterable[str],
                 raise ValueError(f"{path}: a moved file has no tree")
             tree = trees[path]
         shell = file_class(path) in SHELL_CLASSES
-        for token in tokens(text):
-            occurrence = _occurrence(path, text, token, base, after, moved,
-                                     sources, target, tree, shell)
-            if occurrence is not None:
-                held[path] = text
-                found.append(occurrence)
+        occurrences = []
+        if path in texts:
+            for token in tokens(text):
+                occurrence = _occurrence(path, text, token, base, after,
+                                         moved, sources, target, tree, shell)
+                if occurrence is not None:
+                    occurrences.append(occurrence)
+        if path in depth_texts and tree is not None:
+            occurrences += _depth_occurrences(path, text, base, sources,
+                                              target, tree, occurrences)
+        if occurrences:
+            held[path] = text
+            found += occurrences
     found.sort(key=lambda o: (o.path, o.line, o.column))
     return References(held, tuple(found), contested)
 
@@ -665,6 +1027,28 @@ def rewritten(references: References, answers: Mapping[str, str],
 # --------------------------------------------------------------------------
 
 
+def _grep(root: Path, revision: str, patterns: Iterable[str],
+          pathspecs: Iterable[str] = ()) -> list[str]:
+    """The tracked text files of `revision` that hold any fixed `patterns`.
+
+    Limited to `pathspecs` when there are any. No match is an empty list; any
+    other git failure refuses `adopt.git.failed`.
+    """
+    args = ["grep", "--no-color", "-I", "-l", "-z", "-F",
+            *[arg for pattern in patterns for arg in ("-e", pattern)],
+            revision]
+    pathspecs = list(pathspecs)
+    if pathspecs:
+        args += ["--", *pathspecs]
+    code, out = run_git(root, *args)
+    if code == 1:
+        return []
+    if code != 0:
+        raise refuse("adopt_failure", "adopt.git.failed", "",
+                     "a git inspection command did not succeed")
+    return [result.removeprefix(revision + ":") for result in split_nul(out)]
+
+
 def derive_references(root: Path, revision: str,
                       moves: Iterable[tuple[str, str]],
                       excluded: Iterable[str],
@@ -674,36 +1058,57 @@ def derive_references(root: Path, revision: str,
     A file the moves carry is read like any other, at its base path; a record
     home is tested against that base path. `trees` names the tree of each
     moved file (see `plan_references`).
+
+    Two read sets feed `plan_references`. The first is every file holding the
+    first segment of a moved path (`texts`), which the plain, pattern and
+    variable readings take. The second is the depth reading's (`depth_texts`):
+    the moved files, within the trees of the moves, that hold `..` or
+    `__file__`. Both take the same filters (a regular file, not Markdown, not
+    secret-shaped, not excluded, not under a record home, valid UTF-8), and a
+    blob is read once when both sets hold it. No references are returned when
+    neither set holds a file.
     """
     moves = list(moves)
     if not moves:
         return References({}, ())
     sources = {source for source, _ in moves}
     segments = sorted({source.split("/")[0] for source in sources})
-    code, out = run_git(root, "grep", "--no-color", "-I", "-l", "-z", "-F",
-                        *[arg for segment in segments
-                          for arg in ("-e", segment)], revision)
-    if code == 1:
+    prefiltered = _grep(root, revision, segments)
+    # Each tree is named twice: `:(literal)` keeps a glob character literal,
+    # and the plain spelling still names the tree when `GIT_LITERAL_PATHSPECS`
+    # makes git read `:(literal)` as part of a path. A file a plain spelling
+    # matches beyond the tree is dropped with every file that is no source.
+    climbing = [path for path in _grep(
+        root, revision, ("..", "__file__"),
+        [spec for tree in sorted({trees.get(source, source)
+                                  for source in sources})
+         for spec in (f":(literal){tree}", tree)])
+        if path in sources]
+    if not prefiltered and not climbing:
         return References({}, ())
-    if code != 0:
-        raise refuse("adopt_failure", "adopt.git.failed", "",
-                     "a git inspection command did not succeed")
     records = tree_records(root, revision)
     modes = {path: mode for path, mode, _ in records}
     skipped = set(excluded)
-    texts: dict[str, str] = {}
-    for result in split_nul(out):
-        path = result.removeprefix(revision + ":")
-        if (modes.get(path) not in REGULAR_MODES or is_markdown_path(path)
-                or is_secret_path(path) or path in skipped
-                or path.startswith(RECORD_HOMES)):
-            continue
-        data = blob_at(root, revision, path)
-        if data is None:
-            continue
-        try:
-            texts[path] = data.decode("utf-8")
-        except UnicodeDecodeError:
-            continue
+    decoded: dict[str, str | None] = {}
+
+    def read(path: str) -> str | None:
+        if path not in decoded:
+            decoded[path] = None
+            if (modes.get(path) in REGULAR_MODES
+                    and not is_markdown_path(path)
+                    and not is_secret_path(path) and path not in skipped
+                    and not path.startswith(RECORD_HOMES)):
+                data = blob_at(root, revision, path)
+                if data is not None:
+                    try:
+                        decoded[path] = data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        pass
+        return decoded[path]
+
+    texts = {path: text for path in prefiltered
+             if (text := read(path)) is not None}
+    depth_texts = {path: text for path in climbing
+                   if (text := read(path)) is not None}
     return plan_references(texts, [path for path, _, _ in records], moves,
-                           trees)
+                           trees, depth_texts)

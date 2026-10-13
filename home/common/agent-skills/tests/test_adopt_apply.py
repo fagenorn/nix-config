@@ -22,11 +22,12 @@ content only — still resolves.
 from __future__ import annotations
 
 import json
+import posixpath
 import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from agent_tools import (adopt_apply, adopt_inspection, adopt_links,
                          adopt_planning, resolve_project)
@@ -35,6 +36,12 @@ from .test_adopt_project import (
     CHECK_LINKS,
     CHECK_LINKS_EXTENDED,
     COLLECT,
+    DEPTH_CODE,
+    DEPTH_DIR,
+    DEPTH_NEW,
+    DEPTH_RETAIN_ANSWERS,
+    DEPTH_REWRITE_ANSWERS,
+    DEPTH_ROWS,
     GITIGNORE_WITH_COMMENT,
     JOBS_DIR,
     JOBS_NEW,
@@ -71,6 +78,7 @@ from .test_adopt_project import (
     tree_snapshot,
     variable_code,
     write,
+    write_depth_tree,
     write_dissolved_tree,
     write_linked_tree,
     write_moved_tool,
@@ -1058,6 +1066,68 @@ class VariablePolicyApplyTest(ApplyTestCase):
             git(root, "rev-parse", f"HEAD:{JOBS_SCRIPT}"))
         self.assertEqual(git(root, "show", f"{branch}:{COLLECT}.sh"),
                          git(root, "show", f"HEAD:{COLLECT}.sh"))
+
+
+def climbed(directory: str, climb: str) -> str:
+    """Where a text climb or a `.parents[N]` chain on `directory` lands,
+    under a stand-in root `/r`, so a climb above the root stays visible."""
+    start = PurePosixPath("/r", directory)
+    if climb.startswith(".parents["):
+        return str(start.parents[int(climb[len(".parents["):-1])])
+    return posixpath.normpath(posixpath.join(str(start), climb))
+
+
+class DepthPolicyApplyTest(ApplyTestCase):
+    """#380 AC1: `rewrite` keeps each climb's landing point, `retain` keeps
+    each file byte-identical."""
+
+    def applied(self, answers: tuple) -> tuple[Path, dict, dict]:
+        root = apply_repo(self.home)
+        write_depth_tree(root)
+        code, out, err = run("plan", "--repo-root", str(root),
+                             *answer_args(*answers), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        document = json.loads(out)
+        self.assertEqual(document["plan"]["state"], "ready",
+                         document["plan"]["blockers"])
+        return root, document, self.succeed(root, document["plan"]["plan_id"])
+
+    def test_rewrite_lands_where_the_base_climb_landed(self):
+        root, document, result = self.applied(DEPTH_REWRITE_ANSWERS)
+        branch = result["branch"]
+        rows = document["path_references"]
+        self.assertEqual([row["subject"] for row in rows],
+                         [row[0] for row in DEPTH_ROWS])
+        for row in rows:
+            with self.subTest(subject=row["subject"]):
+                base = posixpath.dirname(row["path"])
+                after = posixpath.dirname(row["target"])
+                self.assertEqual(climbed(after, row["replacement"]),
+                                 climbed(base, row["literal"]))
+                self.assertNotEqual(climbed(after, row["literal"]),
+                                    climbed(base, row["literal"]))
+                text = git(root, "show", f"{branch}:{row['target']}")
+                self.assertEqual(text, DEPTH_CODE[row["path"]].replace(
+                    row["literal"], row["replacement"]))
+        record = json.loads(git(
+            root, "show", f"{branch}:{result['evidence_record']}"))
+        for question, subject, value in DEPTH_REWRITE_ANSWERS:
+            with self.subTest(subject=subject):
+                self.assertIn(
+                    {"id": question, "subject": subject, "value": value},
+                    record["decisions_accepted"])
+        self.assertEqual(record["path_references"], rows)
+        self.assertEqual(record["reference_policies"],
+                         document["reference_policies"])
+
+    def test_retain_keeps_the_base_blobs(self):
+        root, _, result = self.applied(DEPTH_RETAIN_ANSWERS)
+        branch = result["branch"]
+        for name in ("run.py", "pyproject.toml", "uv.lock"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    git(root, "rev-parse", f"{branch}:{DEPTH_NEW}/{name}"),
+                    git(root, "rev-parse", f"HEAD:{DEPTH_DIR}/{name}"))
 
 
 # #376 D15: the fixture's own lint and formatter, standard-library scripts
