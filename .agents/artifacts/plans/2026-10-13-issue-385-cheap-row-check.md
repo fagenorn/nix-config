@@ -47,7 +47,7 @@ Estimate: 9 changed files plus the spec and the acceptance record. 5 production 
 
 ## Task index
 
-Task 1 — Sparse contract export and the resolver's projection paths — `python/agent_tools/resolve_project.py`, `python/agent_tools/contract_export.py`, `tests/test_guard_policy.py` — full — [task-1.md](2026-10-13-issue-385-cheap-row-check.tasks/task-1.md)
+Task 1 — Sparse contract export and the resolver's projection paths — `python/agent_tools/resolve_project.py`, `python/agent_tools/adopt_inspection.py`, `python/agent_tools/contract_export.py`, `tests/test_guard_policy.py` — full — [task-1.md](2026-10-13-issue-385-cheap-row-check.tasks/task-1.md)
 Task 2 — Listed-commit pin, the reader parameter and the cheap proof — `python/agent_tools/adopt_inspection.py`, `python/agent_tools/adopt_verify.py`, `python/agent_tools/guard_policy.py`, `tests/guard_policy_world.py`, `tests/test_guard_policy.py`, `python/README.md`, `home/common/claude-code/README.md` — full — [task-2.md](2026-10-13-issue-385-cheap-row-check.tasks/task-2.md)
 Task 3 — Host acceptance: timing series, dry adjudication, measured cost and final gate — `home/common/claude-code/README.md`, `.agents/artifacts/plans/2026-10-13-issue-385-cheap-row-check.acceptance.md` — full — [task-3.md](2026-10-13-issue-385-cheap-row-check.tasks/task-3.md)
 
@@ -67,6 +67,12 @@ Task 3 — Host acceptance: timing series, dry adjudication, measured cost and f
 - Sparse export, path list and mode rules: per D4. Read mechanics: per D10. Symlink divergence: per D9.
 - Reader parameter, `inventory=None`, interfaces and test placement: per D5, D11.
 - Target, evidence and fetch detection: per D7, D12. No knowledge surface: per D8.
-- Planning added D9–D12 to the spec's ledger.
+- No lazy fetch on the cheap path: per D13. A separate batch parser from `adopt_links`: per D14.
+- Planning added D9–D12 to the spec's ledger; the standards review added D13–D14.
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, isolated read-only), job `01a1350e-76a5-77d3-b74d-372e7b744c16`, base `6958c11645165f1a725ac73a7dcc87c9ef617d03`, no fallback.
+- Accepted 4, rejected 0, deferred 0. Blocking: lazy fetch on the cheap reads, applied (D13; Tasks 1–2). Should fix: the duplicate batch reader, resolved by recording why it stays separate (D14); the AC1 script's uncaught run timeout, now recorded as a failed run with its process group killed (Task 3); two stale `adopt_verify` docstrings added to Task 2's prose list.
 
 ---

@@ -49,6 +49,7 @@ Write this script to `<launch-scope scratch root>/i385-acceptance/ac1.py`:
 """AC1: 10 consecutive runs of the built row check for Nodo (issue 385 D7, D12)."""
 import json
 import os
+import signal
 import statistics
 import subprocess
 import sys
@@ -68,19 +69,28 @@ walls, ok = [], True
 for run in range(1, 11):
     before = tips()
     start = time.monotonic()
-    done = subprocess.run([check, "--repository", "elevenyellow/nodocom"], env=env,
-                          stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+    child = subprocess.Popen([check, "--repository", "elevenyellow/nodocom"], env=env,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        stdout, _ = child.communicate(timeout=60)
+        returncode = child.returncode
+    except subprocess.TimeoutExpired:
+        # A run past 60 s is recorded as a failed run, never dropped: kill its group.
+        os.killpg(child.pid, signal.SIGKILL)
+        child.communicate()
+        stdout, returncode = "", "timeout"
     wall = time.monotonic() - start
     walls.append(wall)
     try:
-        report = json.loads(done.stdout)
+        report = json.loads(stdout)
     except ValueError:
         report = {"outcome": "unreadable", "row": None}
     row = report.get("row") or {}
-    passed = (done.returncode == 0 and report.get("outcome") == "derived"
+    passed = (returncode == 0 and report.get("outcome") == "derived"
               and (row.get("default_branch"), row.get("integration_branch")) == ("main", "dev"))
     ok = ok and passed
-    print(json.dumps({"run": run, "wall_s": round(wall, 2), "exit": done.returncode,
+    print(json.dumps({"run": run, "wall_s": round(wall, 2), "exit": returncode,
                       "outcome": report.get("outcome"),
                       "branches": [row.get("default_branch"), row.get("integration_branch")],
                       "fetched": tips() != before,

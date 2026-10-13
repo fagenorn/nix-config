@@ -1,9 +1,10 @@
 # Task 1: Sparse contract export and the resolver's projection paths
 
-Spec section 3 ("Materialize the resolver's reads"), per D4, D9 and D10. This task adds the export and the path list and their direct seam. Nothing calls the export yet (Task 2 wires it), so no command's behaviour changes at this commit.
+Spec section 3 ("Materialize the resolver's reads"), per D4, D9, D10, D13 and D14. This task adds the export and the path list and their direct seam. Nothing calls the export yet (Task 2 wires it), so no command's behaviour changes at this commit.
 
 **Files:**
 - Modify: `python/agent_tools/resolve_project.py` (one new public function beside `validate_projection_entries`)
+- Modify: `python/agent_tools/adopt_inspection.py` (`run_git` gains the keyword `local_only`)
 - Create: `python/agent_tools/contract_export.py`
 - Test: `tests/test_guard_policy.py` (new class `ContractExportTest`, new imports)
 
@@ -11,6 +12,7 @@ Spec section 3 ("Materialize the resolver's reads"), per D4, D9 and D10. This ta
 - Consumes (existing): `resolve_project.CONTRACT_FILENAME` (`".agents/project.json"`), `resolve_project.is_safe_relative_path(value: object) -> bool`, `resolve_project.load_contract(root: Path) -> dict` (raises `ContractError`), `adopt_inspection.run_git(root, *args, input: bytes | None = None, ...) -> tuple[int, bytes]` (`git -C root *args`), `adopt_inspection.refuse(code, repair_id, pointer, message) -> AdoptError`, `adopt_inspection.export_commit(root, commit, destination)` (test oracle only), `guard_policy.resolver(root, "resolve") -> tuple[int, object]`, `GuardPolicyWorld.project(..., register=False)`, `.git`, `.commit_contract`, `.home`, `.tmp`.
 - Produces:
   - `resolve_project.projection_paths(source: object) -> list[str]`: the `source` and `target` of each entry of `source["projections"]` that `is_safe_relative_path` accepts, in declaration order (each entry's `source` before its `target`), first occurrence kept on a duplicate. It never raises. A non-`dict` `source`, a `projections` that is not a `list`, an entry that is not a `dict`, and a member that is absent or not a safe relative path each contribute nothing.
+  - `adopt_inspection.run_git(..., local_only: bool = False)`: when true, the child's environment adds `GIT_NO_LAZY_FETCH=1`, so a partial clone answers a missing object as missing instead of fetching it from its promisor remote (D13). The default leaves every existing call, and so `adopt-project`, unchanged. Extend the docstring's environment sentence with it.
   - `contract_export.export_contract(root: Path, commit: str, destination: Path) -> None`: the sparse export described below. On any git or OS failure it raises `adopt_inspection.refuse("adopt_failure", "adopt.git.export_failed", "", "the remote commit could not be exported")`, the same refusal `export_commit` raises.
 
 **Invariants:**
@@ -19,7 +21,9 @@ Spec section 3 ("Materialize the resolver's reads"), per D4, D9 and D10. This ta
 - Phase 1 reads `CONTRACT_FILENAME` at `commit`. When it is not a regular blob, the export is the empty `destination` and the function returns, so the resolver refuses `not_onboarded`. Otherwise its bytes are written as read. The contract is then parsed with `resolve_project.load_contract(destination)`. Any exception from that parse (a `ContractError`, or a `ValueError` or `RecursionError` from a hostile document) ends the export with only the contract written, because the resolver reports that contract's verdict itself (D10).
 - Phase 2 reads `projection_paths(contract)` at `commit` and writes each regular blob to `destination / <path as authored>`, creating parent directories (`mkdir(parents=True, exist_ok=True)`).
 - Each phase is one `git --literal-pathspecs ls-tree -z --full-tree <commit> -- <paths…>` child and, when it found a regular blob, one `git cat-file --batch` child fed the blob ids on stdin, one per line. An `ls-tree` record is `<mode> <type> <oid>\t<path>`. A requested path matches the record whose path equals `posixpath.normpath(requested)`. A non-zero exit, an unparseable record or a `<oid> missing` batch answer refuses `export_failed`. A `--batch` answer is `<oid> <type> <size>\n<size bytes>\n`, read in request order (D10).
+- Every git child of the export runs with `local_only=True` (D13). An object the store lacks, a partial clone's promised blob included, refuses `export_failed`; nothing is lazily fetched.
 - No other file is written anywhere, and no ref or object is written to the repository.
+- `_read_blobs` is a separate parser from `adopt_links._blobs` (D14): it reads in request order, maps a `missing` answer and every failure to `export_failed`, and runs `local_only`. `adopt_links` is not edited.
 - `contract_export` imports `resolve_project` and `adopt_inspection`. No `adopt_*` module imports `contract_export` or `resolve_project` (issue 148 D26).
 - On the fixture, the resolver's verdict on the sparse export equals its verdict on `export_commit`'s full export for every world except the symlinked projection file, which the sparse export refuses (D9).
 
@@ -29,13 +33,15 @@ Add to the imports of `tests/test_guard_policy.py`:
 
 ```python
 import os
+import subprocess
 from pathlib import Path
 from unittest import mock
 
 from agent_tools import adopt_inspection, contract_export
+from .guard_policy_world import REAL_GIT
 ```
 
-(keep the existing `json`, `shutil`, `unittest`, `guard_policy`, `support` and `GuardPolicyWorld` imports). Append this class after `TargetProfilesTest`:
+(keep the existing `json`, `shutil`, `unittest`, `guard_policy`, `support` and `GuardPolicyWorld` imports; `REAL_GIT` may join the existing `guard_policy_world` import line). Append this class after `TargetProfilesTest`:
 
 ```python
 CONFORMANT = (0, "fixture/one", "main")
@@ -186,6 +192,22 @@ class ContractExportTest(unittest.TestCase):
         with self.assertRaises(adopt_inspection.AdoptError) as caught:
             contract_export.export_contract(self.root, "0" * 40, self.destination())
         self.assertEqual(caught.exception.repair_id, "adopt.git.export_failed")
+
+    def test_a_partial_clone_lacking_a_blob_refuses_without_a_lazy_fetch(self):
+        """D13: a promised blob is missing, not fetched."""
+        bare = self.world.git(self.root, "remote", "get-url", "origin").strip()
+        self.world.git(Path(bare), "config", "uploadpack.allowFilter", "true")
+        partial = self.world.tmp / "partial"
+        self.world.git(self.world.tmp, "clone", "--quiet", "--no-checkout", "--filter=blob:none",
+                       f"file://{bare}", str(partial))
+        blob = self.world.git(partial, "rev-parse", f"{self.base}:.agents/project.json").strip()
+        with self.assertRaises(adopt_inspection.AdoptError) as caught:
+            contract_export.export_contract(partial, self.base, self.destination())
+        self.assertEqual(caught.exception.repair_id, "adopt.git.export_failed")
+        still_missing = subprocess.run(
+            [REAL_GIT, "-C", str(partial), "cat-file", "-e", blob],
+            env={**os.environ, "GIT_NO_LAZY_FETCH": "1"}, capture_output=True, timeout=60)
+        self.assertNotEqual(still_missing.returncode, 0)
 ```
 
 - [ ] **Step 2: Run the tests and watch them fail**
@@ -222,7 +244,7 @@ def _read_blobs(root: Path, object_ids: list[str]) -> list[bytes]:
 - [ ] **Step 4: Verify**
 
 Run: `env PYTHONPATH="$PWD/python" python3 -m unittest tests/test_guard_policy.py 2>&1 | tail -4`
-Expected: `OK`. Every existing class stays green, plus 6 new `ContractExportTest` tests.
+Expected: `OK`. Every existing class stays green, plus 7 new `ContractExportTest` tests.
 
 Run: `env PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_resolve_project.py 2>&1 | tail -4`
 Expected: `OK`.
@@ -236,6 +258,6 @@ Expected: no output, exit 0.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add python/agent_tools/resolve_project.py python/agent_tools/contract_export.py tests/test_guard_policy.py
+git add python/agent_tools/resolve_project.py python/agent_tools/adopt_inspection.py python/agent_tools/contract_export.py tests/test_guard_policy.py
 launch-commit … -- -m "feat(guard-policy): sparse contract export for the row check (issue 385)"
 ```
