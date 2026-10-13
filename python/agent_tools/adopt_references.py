@@ -59,8 +59,9 @@ or a name bound at column 0 by `NAME = <that>` or `NAME = <that>.parent`
 and a CRLF line end) and bound nowhere else in the file, at any indentation,
 by assignment, `for`, `as`, `del`, `global`, `nonlocal`, a keyword argument,
 a mention in a `def` or `lambda` header (a parameter) or a mention in a target
-list (`NAME, b = …`, `(a, NAME) = …`, `*NAME, b = …`, between a `for` and its
-`in`, a bracketed run after `as`; see `_rebinds`); a use of the name is
+list (`NAME, b = …`, `NAME, obj.attr = …`, `(a, (b, NAME)) = …` over lines
+too, `*NAME, b = …`, between a `for` and its `in`, a bracketed run after `as`;
+see `_rebinds`); a use of the name is
 the name preceded by neither an identifier character nor `.` and not followed
 by one. A chain is zero or more `.parent` then at most one
 `.parents[N]` with `N` a decimal literal, at least one of them, with no
@@ -122,12 +123,13 @@ _CHAIN = re.compile(r"((?:\.parent(?!\w))*)(?:\.parents\[(\d+)\])?")
 _PARAMETER_HEADER = re.compile(
     r"\bdef[ \t]+\w+\s*\((.*?)\)\s*(?:->|:)|\blambda\b([^:]*):", re.DOTALL)
 # The target lists a name may be a member of anywhere in a line, or over
-# lines: a bracketed run directly followed by an assignment's `=`, the text
+# lines, besides a bracketed target (see `_bracketed_targets`): the text
 # between a `for` and its `in`, and a bracketed run after `as`.
 _TARGET_RUNS = re.compile(
-    r"[(\[]([^()\[\]=]*)[)\]][ \t]*=(?!=)"
-    r"|(?<![\w.])for\b((?:(?!\bin\b)[\w\s,()\[\]*])*)\bin\b"
+    r"(?<![\w.])for\b((?:(?!\bin\b)[\w\s,()\[\]*])*)\bin\b"
     r"|(?<![\w.])as[ \t]*[(\[]([^()\[\]]*)[)\]]")
+# A closing bracket directly followed by an assignment's `=`.
+_BRACKET_ASSIGNED = re.compile(r"[)\]][ \t]*=(?!=)")
 # `\r?` keeps the binding of a CRLF file, whose `\r` the decode leaves.
 _BINDING = re.compile(
     r"^([A-Za-z_]\w*)[ \t]*(?::[ \t]*(?:pathlib\.)?Path[ \t]*)?=[ \t]*"
@@ -612,10 +614,10 @@ def _rebinds(name: str, text: str) -> int:
     The name is in a target list when it is followed on its line by `,`, `)`
     or `]` and then, on that line, by an assignment's `=` that no bracket
     opened on the line encloses (`NAME, b = …`, `(a, NAME) = …`, `*NAME, b =
-    …`); when it is inside a bracketed run that holds no bracket and no `=`,
-    over lines too, directly followed by an assignment's `=` (`(a,\\n NAME) =
-    …`); when it lies between a `for` and its `in` (`for _, NAME in …`, a
-    comprehension's too); and when it is inside a bracketed run after `as`
+    …`, `NAME, obj.attr = …`); when it is inside a bracketed run, nested
+    brackets and line breaks included, directly followed by an assignment's
+    `=` (`(a,\\n NAME) = …`, `(a, (b,\\n NAME)) = …`); when it lies between
+    a `for` and its `in` (`for _, NAME in …`, a comprehension's too); and when it is inside a bracketed run after `as`
     (`with … as (a, NAME)`). Headers and target lists are read loosely, so a
     mention there that binds nothing counts too and the name is not
     followed."""
@@ -640,7 +642,7 @@ def _target_mentions(escaped: str, mention: re.Pattern[str], text: str
     (see `_rebinds`)."""
     count = 0
     for listed in re.finditer(
-            r"(?<![\w.])" + escaped + r"[ \t]*[,)\]][\w \t,*()\[\]]*=(?!=)",
+            r"(?<![\w.])" + escaped + r"[ \t]*[,)\]][^=\n]*(?<![<>!])=(?!=)",
             text):
         head = text[text.rfind("\n", 0, listed.start()) + 1:listed.end()]
         opened = head.count("(") + head.count("[")
@@ -648,7 +650,30 @@ def _target_mentions(escaped: str, mention: re.Pattern[str], text: str
             count += 1
     for run in _TARGET_RUNS.finditer(text):
         count += len(mention.findall(run.group(run.lastindex)))
+    for target in _bracketed_targets(text):
+        count += len(mention.findall(target))
     return count
+
+
+def _bracketed_targets(text: str) -> list[str]:
+    """The text of every bracketed run directly followed by an assignment's
+    `=`, from its matching opening bracket, nested brackets and line breaks
+    included (`(a, (b,\\n NAME)) = …`); a run whose opening bracket is not
+    found reaches back to the start of `text`, so a name in it is never
+    followed."""
+    found = []
+    for assigned in _BRACKET_ASSIGNED.finditer(text):
+        depth, start = 0, 0
+        for index in range(assigned.start(), -1, -1):
+            if text[index] in ")]":
+                depth += 1
+            elif text[index] in "([":
+                depth -= 1
+                if depth == 0:
+                    start = index
+                    break
+        found.append(text[start:assigned.start() + 1])
+    return found
 
 
 def python_climbs(text: str) -> list[tuple[int, int, int]]:

@@ -977,7 +977,13 @@ class PythonClimbTest(unittest.TestCase):
                           "for (a, HERE) in xs:\n    pass\n",
                           "for (a,\n     HERE) in xs:\n    pass\n",
                           "ys = [p for p, HERE in xs]\n",
-                          "with f() as (a, HERE):\n    pass\n"):
+                          "with f() as (a, HERE):\n    pass\n",
+                          # Ship review C-001: attribute and nested targets.
+                          "HERE, cache.path = (Path('/fixed/a/b/c'), None)\n",
+                          "HERE, d['k'] = f()\n",
+                          "(a, (b, HERE)) = f()\n",
+                          "(a, (b,\n     HERE)) = f()\n",
+                          "[\n    (a, b),\n    HERE,\n] = f()\n"):
             with self.subTest(rebinding=rebinding):
                 self.assertEqual(
                     heights(BOUND + rebinding + "R = HERE.parents[2]\n"), [0])
@@ -986,10 +992,21 @@ class PythonClimbTest(unittest.TestCase):
                     "f(a, HERE)\nb = 1\n", "d = dict(a=(HERE), b=1)\n",
                     "for p in HERE.iterdir():\n    pass\n",
                     "for p in (HERE, x):\n    pass\n",
-                    "ok = (HERE, 1) == t\n"):
+                    "ok = (HERE, 1) == t\n", "ok = (HERE, x.y) != t\n",
+                    "ok = (HERE, a) <= b\n"):
             with self.subTest(use=use):
                 self.assertEqual(
                     heights(BOUND + use + "R = HERE.parents[2]\n"), [0, 3])
+
+    def test_a_name_rebound_in_an_attribute_or_nested_target_is_kept(self):
+        # Ship review C-001: no rewrite is offered for the rebound name.
+        for rebinding in (
+                "HERE, cache.path = (Path('/fixed/a/b/c'), None)\n",
+                "(a, (b,\n     HERE)) = (1, (2, Path('/fixed/a/b/c')))\n"):
+            with self.subTest(rebinding=rebinding):
+                self.assertEqual(
+                    chains(BOUND + rebinding + "ROOT = HERE.parents[2]\n"),
+                    [])
 
     def test_a_chain_to_the_root_is_rewritten(self):
         text = (BOUND + "ROOT = HERE.parents[2]\n"
