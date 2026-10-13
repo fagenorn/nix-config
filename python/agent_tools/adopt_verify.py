@@ -87,8 +87,11 @@ class VerificationSource:
     `ref` is the report's label for it and `commit` the 40-hex id every record
     is read at. `resolver_root` is the directory the resolver is called on and
     `inventory` the `(path, object id)` pairs the unclassified-path check
-    reads, or `None` when the reader that produced the source took no inventory,
-    which `verify_repository` refuses. `branch` is the branch read, pinned
+    reads, or `None` when the reader that produced the source took no inventory.
+    `verify_repository` has no inventory to read on such a source: its
+    unclassified-path check iterates `None` and raises `TypeError`, an error
+    rather than an `AdoptError` refusal, so it fails loud instead of passing an
+    empty inventory (D5). `branch` is the branch read, pinned
     through the reader; it is always `None` for `HEAD`.
     `override_default` is the default branch the `--integration-branch` operand
     passed over, and `override_reason` why it was passed over; both are `None`
@@ -182,19 +185,22 @@ def remote_source(root: Path, run_resolver: Resolver,
     source's `inventory` is `None` when `reader.inventory` is false.
 
     `operand` is the `--integration-branch` value and is consulted only after
-    the default branch was fetched, exported and resolved. A default contract
+    the default branch was pinned, exported and resolved. A default contract
     that resolves keeps its own answer: an operand equal to the branch it names
     (or to `D` when it names none) changes nothing and any other refuses. A
     default contract that does not resolve takes the operand as the integration
-    branch `B` when `origin` lists `B` and `B` is not `D`: `B` is fetched,
-    pinned and confirmed like the hop above, and its own contract must resolve
-    and name `B`, so there is no further hop. The source then carries the
+    branch `B` when `origin` lists `B` and `B` is not `D`: `B` is pinned
+    through `reader`, exported and confirmed like the hop above, and its own
+    contract must resolve and name `B`, so there is no further hop. The source then carries the
     default branch and the reason, which `branch_override` reports.
 
-    `network_timeout` bounds each `ls-remote` and `fetch` child, so one that
-    outlasts it refuses `adopt.git.unavailable`. Every source carries the
-    branch `origin`'s `HEAD` names as `remote_default`, whichever branch it
-    pins.
+    `network_timeout` bounds the `ls-remote` child and is handed to every
+    `reader.pin`, which bounds each `fetch` child it starts with it, so one
+    that outlasts it refuses `adopt.git.unavailable`. `FETCH_READER`'s pin
+    fetches every branch it pins; a pin that returns a listed commit the
+    checkout already holds starts no `fetch` child at all. Every source
+    carries the branch `origin`'s `HEAD` names as `remote_default`, whichever
+    branch it pins.
 
     No `origin` refuses `not_integrated` with `adopt.registration.no_remote`,
     an `origin` that advertises no default branch with
