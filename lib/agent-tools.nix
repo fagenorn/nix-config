@@ -63,6 +63,23 @@ let
     "verified-tree"
   ];
 
+  # A launcher script: bash under `-p`, which ignores BASH_ENV and the functions
+  # an environment exports, so neither can run in place of its two lines (issue
+  # 377, where the lifecycle guard's row check execs the guard-policy launcher).
+  launcherScript =
+    name: text:
+    pkgs.writeTextFile {
+      name = "agent-tools-${name}";
+      executable = true;
+      text = ''
+        #!${pkgs.runtimeShell} -p
+        ${text}
+      '';
+      checkPhase = ''
+        ${pkgs.stdenv.shellDryRun} "$target"
+      '';
+    };
+
   # -I drops every PYTHON* variable, the working directory and the user site.
   # nixpkgs' sitecustomize still reads the NIX_PYTHON* variables under -I, and
   # this environment's python3 sets none of them, so the launcher clears them.
@@ -74,19 +91,17 @@ let
       module = "agent_tools.${lib.replaceStrings [ "-" ] [ "_" ] name}";
     in
     assert lib.assertMsg (lib.elem module modules) "agent-tools: command ${name} has no module ${module}";
-    pkgs.writeShellScript "agent-tools-${name}" ''
+    launcherScript name ''
       unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
-      exec ${env}/bin/python3 -I -m ${module} "$@"
-    '';
+      exec ${env}/bin/python3 -I -m ${module} "$@"'';
 
   # A store copy of a flat script under the same environment and the same
   # `unset` line as the -m launchers (#337 D11, D16).
   scriptLauncher =
     name: script:
-    pkgs.writeShellScript "agent-tools-${name}" ''
+    launcherScript name ''
       unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
-      exec ${env}/bin/python3 -I ${script} "$@"
-    '';
+      exec ${env}/bin/python3 -I ${script} "$@"'';
 in
 {
   launchers = lib.genAttrs commands launcher;
