@@ -1,19 +1,24 @@
 """The guard-policy compiler at its command seam (issue 126 D10, D15).
 
 Every case runs `python -m agent_tools.guard_policy compile` over `GuardPolicyWorld` and
-asserts on the exit status, the report and the written file. Two suites call an imported
+asserts on the exit status, the report and the written file. Three suites call an imported
 function instead, each for a check no command input reaches: `TargetProfilesTest`, because
-the release grammar refuses a foreign forge target before the compiler sees it, and
+the release grammar refuses a foreign forge target before the compiler sees it,
 `UnsupportedNameTest` for the repository slug, because `github_remote.github_slug` already
-reads no slug the guard's loader would refuse.
+reads no slug the guard's loader would refuse, and `ContractExportTest`, because the sparse
+export is a module function whose reader the compiler does not yet call (issue 385).
 """
 import json
+import os
 import shutil
+import subprocess
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from agent_tools import guard_policy
+from agent_tools import adopt_inspection, contract_export, guard_policy
 from . import release_test_support as support
-from .guard_policy_world import GuardPolicyWorld
+from .guard_policy_world import REAL_GIT, GuardPolicyWorld
 
 NODO = "elevenyellow/nodocom"
 ROW_MEMBERS = {"default_branch", "integration_branch", "evidence"}
@@ -411,6 +416,172 @@ class TargetProfilesTest(unittest.TestCase):
                 with self.assertRaises(guard_policy.ProjectRefused) as caught:
                     guard_policy.target_profiles(self.ENTRY, self.SLUG, self.snapshot(**target))
                 self.assertEqual(caught.exception.reason_code, "target_mismatch")
+
+
+CONFORMANT = (0, "fixture/one", "main")
+
+
+class ContractExportTest(unittest.TestCase):
+    """`contract_export.export_contract` on a fixture checkout (issue 385 D4, D9, D10).
+
+    The resolver runs in process on the sparse export and, as the oracle, on `export_commit`'s
+    full `git archive` export of the same commit. A verdict is `(0, project id, integration
+    branch)` or `(status, error code, repair id)`.
+    """
+
+    def setUp(self) -> None:
+        self.world = GuardPolicyWorld(self)
+        self.root = self.world.project("fixture/one", "fagenorn/one", register=False)
+        self.base = self.world.git(self.root, "rev-parse", "HEAD").strip()
+        patcher = mock.patch.dict(os.environ, {"HOME": str(self.world.home),
+                                               "GIT_CONFIG_GLOBAL": os.devnull,
+                                               "GIT_CONFIG_SYSTEM": os.devnull})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.exports = 0
+
+    def commit(self, message: str) -> str:
+        self.world.git(self.root, "add", "-A")
+        self.world.git(self.root, "commit", "--quiet", "-m", message)
+        return self.world.git(self.root, "rev-parse", "HEAD").strip()
+
+    def destination(self) -> Path:
+        self.exports += 1
+        return self.world.tmp / f"export-{self.exports}"
+
+    def sparse(self, commit: str) -> Path:
+        destination = self.destination()
+        contract_export.export_contract(self.root, commit, destination)
+        return destination
+
+    @staticmethod
+    def verdict(root: Path) -> tuple:
+        status, payload = guard_policy.resolver(root, "resolve")
+        if status == 0:
+            return (0, payload["project"]["id"], payload["bindings"]["vcs"]["integration_branch"])
+        return (status, payload["error"]["code"], payload["error"]["repair_id"])
+
+    def verdicts(self, commit: str) -> tuple[tuple, tuple]:
+        full = self.destination()
+        adopt_inspection.export_commit(self.root, commit, full)
+        return self.verdict(self.sparse(commit)), self.verdict(full)
+
+    @staticmethod
+    def files(root: Path) -> set[str]:
+        return {path.relative_to(root).as_posix() for path in root.rglob("*")
+                if path.is_file() or path.is_symlink()}
+
+    def test_a_conformant_commit_exports_the_contract_and_its_projection_files_only(self):
+        sparse = self.sparse(self.base)
+        expected = {".agents/project.json", ".agents/instructions/bootstrap.md",
+                    "AGENTS.md", "CLAUDE.md"}
+        self.assertEqual(self.files(sparse), expected)
+        for relative in expected:
+            self.assertEqual((sparse / relative).read_bytes(),
+                             adopt_inspection.blob_at(self.root, self.base, relative))
+        self.assertEqual(self.verdicts(self.base), (CONFORMANT, CONFORMANT))
+
+    def test_each_refusal_matches_the_full_export(self):
+        root = self.root
+
+        def stale_target():
+            (root / "AGENTS.md").write_text("stale\n", "utf-8")
+
+        def missing_target():
+            (root / "CLAUDE.md").unlink()
+
+        def target_is_a_tree():
+            (root / "CLAUDE.md").unlink()
+            (root / "CLAUDE.md").mkdir()
+            (root / "CLAUDE.md/keep.txt").write_text("x\n", "utf-8")
+
+        def missing_source():
+            (root / ".agents/instructions/bootstrap.md").unlink()
+
+        def unparseable_contract():
+            (root / ".agents/project.json").write_text("not json\n", "utf-8")
+
+        def no_contract():
+            (root / ".agents/project.json").unlink()
+
+        def malformed_projections():
+            path = root / ".agents/project.json"
+            contract = json.loads(path.read_text("utf-8"))
+            contract["projections"] = [1, {"source": "../escape", "target": "AGENTS.md"}]
+            path.write_text(json.dumps(contract), "utf-8")
+
+        cases = (
+            (stale_target, "invalid_projection", "projection.codex.entry.stale"),
+            (missing_target, "invalid_projection", "projection.claude.entry.missing"),
+            (target_is_a_tree, "invalid_projection", "projection.claude.entry.missing"),
+            (missing_source, "invalid_contract", "contract.projections.source_missing"),
+            (unparseable_contract, "invalid_contract", "contract.parse"),
+            (no_contract, "not_onboarded", "onboarding.contract.missing"),
+            (malformed_projections, "invalid_contract", "contract.projections.not_object"),
+        )
+        for mutate, code, repair_id in cases:
+            with self.subTest(mutate.__name__):
+                self.world.git(root, "reset", "--quiet", "--hard", self.base)
+                self.world.git(root, "clean", "-fdq")
+                mutate()
+                sparse, full = self.verdicts(self.commit(mutate.__name__))
+                self.assertEqual(sparse, (2, code, repair_id))
+                self.assertEqual(sparse, full)
+
+    def test_an_executable_projection_file_is_exported(self):
+        (self.root / "AGENTS.md").chmod(0o755)
+        commit = self.commit("executable target")
+        self.assertTrue(self.world.git(self.root, "ls-tree", commit, "AGENTS.md")
+                        .startswith("100755 "))
+        sparse = self.sparse(commit)
+        self.assertTrue((sparse / "AGENTS.md").is_file())
+        self.assertEqual(self.verdict(sparse), CONFORMANT)
+
+    def test_a_symlinked_projection_target_is_left_absent_and_refused(self):
+        """D9: the one intended divergence; a full export follows the in-tree link."""
+        real = self.root / "CLAUDE.real.md"
+        real.write_bytes((self.root / "CLAUDE.md").read_bytes())
+        (self.root / "CLAUDE.md").unlink()
+        os.symlink("CLAUDE.real.md", self.root / "CLAUDE.md")
+        commit = self.commit("symlinked target")
+        self.assertTrue(self.world.git(self.root, "ls-tree", commit, "CLAUDE.md")
+                        .startswith("120000 "))
+        sparse = self.sparse(commit)
+        self.assertFalse(os.path.lexists(sparse / "CLAUDE.md"))
+        self.assertNotIn("CLAUDE.real.md", self.files(sparse))
+        self.assertEqual(self.verdict(sparse),
+                         (2, "invalid_projection", "projection.claude.entry.missing"))
+
+    def test_nested_projection_files_are_exported_and_resolve(self):
+        contract = json.loads((self.root / ".agents/project.json").read_text("utf-8"))
+        contract["projections"].append({
+            "id": "codex.nested", "agent": "codex", "kind": "generated_file",
+            "target": "sub/dir/AGENTS.md", "source": ".agents/instructions/bootstrap.md"})
+        self.world.commit_contract(self.root, contract, "nested projection")
+        commit = self.world.git(self.root, "rev-parse", "HEAD").strip()
+        self.assertIn("sub/dir/AGENTS.md", self.files(self.sparse(commit)))
+        self.assertEqual(self.verdicts(commit), (CONFORMANT, CONFORMANT))
+
+    def test_a_commit_the_object_store_lacks_refuses_export_failed(self):
+        with self.assertRaises(adopt_inspection.AdoptError) as caught:
+            contract_export.export_contract(self.root, "0" * 40, self.destination())
+        self.assertEqual(caught.exception.repair_id, "adopt.git.export_failed")
+
+    def test_a_partial_clone_lacking_a_blob_refuses_without_a_lazy_fetch(self):
+        """D13: a promised blob is missing, not fetched."""
+        bare = self.world.git(self.root, "remote", "get-url", "origin").strip()
+        self.world.git(Path(bare), "config", "uploadpack.allowFilter", "true")
+        partial = self.world.tmp / "partial"
+        self.world.git(self.world.tmp, "clone", "--quiet", "--no-checkout", "--filter=blob:none",
+                       f"file://{bare}", str(partial))
+        blob = self.world.git(partial, "rev-parse", f"{self.base}:.agents/project.json").strip()
+        with self.assertRaises(adopt_inspection.AdoptError) as caught:
+            contract_export.export_contract(partial, self.base, self.destination())
+        self.assertEqual(caught.exception.repair_id, "adopt.git.export_failed")
+        still_missing = subprocess.run(
+            [REAL_GIT, "-C", str(partial), "cat-file", "-e", blob],
+            env={**os.environ, "GIT_NO_LAZY_FETCH": "1"}, capture_output=True, timeout=60)
+        self.assertNotEqual(still_missing.returncode, 0)
 
 
 class WholeRefusalTest(WorldCase):

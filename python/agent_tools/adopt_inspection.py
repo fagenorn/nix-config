@@ -650,18 +650,22 @@ GIT_TIMEOUT_SECONDS = 300
 
 
 def run_git(root: Path, *args: str, network: bool = False,
-            input: bytes | None = None,
+            local_only: bool = False, input: bytes | None = None,
             timeout: float = GIT_TIMEOUT_SECONDS) -> tuple[int, bytes]:
     """`git -C root args`, and its exit code and stdout.
 
     A `network` call never prompts for credentials: it runs with
     `GIT_TERMINAL_PROMPT=0`, so an unauthenticated remote fails instead of
-    hanging. Every other call inherits the environment unchanged. `input`
-    is written to the command's stdin. The child is killed after `timeout`
-    seconds, which refuses `adopt.git.unavailable` like a git that cannot start.
+    hanging. A `local_only` call runs with `GIT_NO_LAZY_FETCH=1`, so a partial
+    clone answers a missing object as missing instead of fetching it from its
+    promisor remote. Every other call inherits the environment unchanged.
+    `input` is written to the command's stdin. The child is killed after
+    `timeout` seconds, which refuses `adopt.git.unavailable` like a git that
+    cannot start.
     """
-    environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0"} if network \
-        else None
+    overrides = {**({"GIT_TERMINAL_PROMPT": "0"} if network else {}),
+                 **({"GIT_NO_LAZY_FETCH": "1"} if local_only else {})}
+    environment = {**os.environ, **overrides} if overrides else None
     try:
         proc = subprocess.run(["git", "-C", str(root), *args],
                               capture_output=True, timeout=timeout,
