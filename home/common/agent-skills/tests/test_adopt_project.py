@@ -663,6 +663,48 @@ def policy_row(subject: str, recommended: str | None, files: int,
             "open": occurrences, "overridden": 0, **changed}
 
 
+# #380: a `.claude/notes` tree one level shallower than its destination,
+# whose tooling climbs to the repository root (D1-D3, D6).
+DEPTH_DIR = ".claude/notes/tool"
+DEPTH_NEW = ".agents/artifacts/notes/tool"
+DEPTH_CODE = {
+    f"{DEPTH_DIR}/run.py": (
+        "from pathlib import Path\n"
+        "\n"
+        "HERE = Path(__file__).resolve().parent\n"
+        "ROOT = HERE.parents[2]\n"
+        "NOTES = HERE.parent\n"
+        'DATA = "../data/x"\n'),
+    f"{DEPTH_DIR}/pyproject.toml": (
+        "[tool.uv.sources]\n"
+        'lib = { path = "../../../vendor/lib" }\n'),
+    f"{DEPTH_DIR}/uv.lock": (
+        "[[package]]\n"
+        'name = "lib"\n'
+        'source = { editable = "../../../vendor/lib" }\n'),
+    "vendor/lib/__init__.py": "",
+}
+DEPTH_POLICIES = (".claude/notes:.lock/depth", ".claude/notes:.py/depth",
+                  ".claude/notes:.toml/depth")
+DEPTH_ROWS = (
+    (f"{DEPTH_DIR}/pyproject.toml:2:17", "../../../vendor/lib",
+     "../../../../vendor/lib", ".claude/notes:.toml/depth"),
+    (f"{DEPTH_DIR}/run.py:4:12", ".parents[2]", ".parents[3]",
+     ".claude/notes:.py/depth"),
+    (f"{DEPTH_DIR}/uv.lock:3:24", "../../../vendor/lib",
+     "../../../../vendor/lib", ".claude/notes:.lock/depth"))
+DEPTH_REWRITE_ANSWERS = tuple(("reference-policy", subject, "rewrite")
+                              for subject in DEPTH_POLICIES)
+DEPTH_RETAIN_ANSWERS = tuple(("reference-policy", subject, "retain")
+                             for subject in DEPTH_POLICIES)
+
+
+def write_depth_tree(root: Path) -> None:
+    for path, text in DEPTH_CODE.items():
+        write(root, path, text)
+    commit(root, "add tooling that climbs to the repository root")
+
+
 def write_dissolved_tree(root: Path) -> None:
     """`.claude/` loses its last retained file and gains a research record,
     so its members move under two different prefixes and a link to the
@@ -2662,6 +2704,49 @@ class VariablePolicyPlanTest(AdoptTestCase):
             [(row["subject"], row["policy"])
              for row in doc["path_references"]],
             [(f"{JOBS_DIR}/run.py:3:6", ".claude/notes:.py")])
+
+
+class DepthPolicyPlanTest(AdoptTestCase):
+    """#380 AC1, AC2: climbs out of a moved tree are asked about under the
+    `<tree>:<class>/depth` policies, with no recommendation."""
+
+    def test_climbs_to_the_root_open_their_own_policies(self):
+        root = nix_config_shape_repo(self.home)
+        write_depth_tree(root)
+        code, doc, err = self.plan(root)
+        self.assertEqual(code, 0, err or doc)
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(
+            [(row["subject"], row["literal"], row["replacement"],
+              row["policy"], row["answers"])
+             for row in doc["path_references"]],
+            [(*row, ["rewrite", "retain"]) for row in DEPTH_ROWS])
+        self.assertEqual(
+            [(entry["id"], entry["subject"], entry["value"])
+             for entry in doc["decisions"]["open"]],
+            [("reference-policy", subject, None)
+             for subject in DEPTH_POLICIES])
+        self.assertEqual(doc["reference_policies"],
+                         [policy_row(subject, None, 1, 1)
+                          for subject in DEPTH_POLICIES])
+
+    def test_answering_the_depth_policies_reaches_ready(self):
+        root = nix_config_shape_repo(self.home)
+        write_depth_tree(root)
+        code, doc, err = self.plan(root, *answer_args(*DEPTH_REWRITE_ANSWERS))
+        self.assertEqual(code, 0, err or doc)
+        self.assertEqual(doc["plan"]["state"], "ready",
+                         doc["plan"]["blockers"])
+        self.assertEqual(
+            [(row["subject"], row["answer"], row["decided_by"])
+             for row in doc["path_references"]],
+            [(row[0], "rewrite", "policy") for row in DEPTH_ROWS])
+        self.assertEqual(
+            [(row["class"], row["files"])
+             for row in doc["reference_formatting"]],
+            [(".lock", [f"{DEPTH_NEW}/uv.lock"]),
+             (".py", [f"{DEPTH_NEW}/run.py"]),
+             (".toml", [f"{DEPTH_NEW}/pyproject.toml"])])
 
 
 # What `POLICY_READY_ANSWERS` edits, by class, before any format answer.
