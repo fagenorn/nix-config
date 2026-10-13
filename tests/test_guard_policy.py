@@ -5,8 +5,9 @@ asserts on the exit status, the report and the written file. Three suites call a
 function instead, each for a check no command input reaches: `TargetProfilesTest`, because
 the release grammar refuses a foreign forge target before the compiler sees it,
 `UnsupportedNameTest` for the repository slug, because `github_remote.github_slug` already
-reads no slug the guard's loader would refuse, and `ContractExportTest`, because the sparse
-export is a module function whose reader the compiler does not yet call (issue 385).
+reads no slug the guard's loader would refuse, and `ContractExportTest`, because no command
+shows the sparse export's files or its equivalence with a full `git archive` export of the
+same commit (issue 385): a compile reports only the row or refusal its resolution leads to.
 """
 import json
 import os
@@ -430,6 +431,20 @@ class ProjectRefusalTest(WorldCase):
         self.assertIn("projection.claude.entry.missing", refusal["detail"])
 
 
+    def test_a_projection_path_git_cannot_name_refuses_that_project_only(self):
+        """A NUL in a projection path is the resolver's refusal, not a whole-compile one."""
+        root = self.world.project("fixture/one", "fagenorn/one")
+        self.world.project("fixture/two", "fagenorn/two")
+        contract = self.world.contract("fixture/one", "fagenorn/one")
+        for entry in contract["projections"]:
+            if entry["agent"] == "claude":
+                entry["target"] = "CLAUDE\u0000.md"
+        self.world.commit_contract(root, contract, "a NUL in a target", render=False)
+        self.world.publish(root, ["main"])
+        self.refused("contract_unresolved")
+        self.assertEqual(sorted(self.world.policy()["derived_repositories"]), ["fagenorn/two"])
+
+
 class UnsupportedNameTest(unittest.TestCase):
     """The loader's three names, on a hand-built row: what `unsupported_name` reports."""
 
@@ -628,6 +643,35 @@ class ContractExportTest(unittest.TestCase):
         commit = self.world.git(self.root, "rev-parse", "HEAD").strip()
         self.assertIn("sub/dir/AGENTS.md", self.files(self.sparse(commit)))
         self.assertEqual(self.verdicts(commit), (CONFORMANT, CONFORMANT))
+
+    def retarget(self, message: str, member: str, value: str) -> str:
+        """Commit the base contract with each claude entry's `member` set to `value`."""
+        self.world.git(self.root, "reset", "--quiet", "--hard", self.base)
+        path = self.root / ".agents/project.json"
+        contract = json.loads(path.read_text("utf-8"))
+        for entry in contract["projections"]:
+            if entry["agent"] == "claude":
+                entry[member] = value
+        path.write_text(json.dumps(contract), "utf-8")
+        return self.commit(message)
+
+    def test_a_non_canonical_projection_spelling_matches_the_full_export(self):
+        """The resolver reads `CLAUDE.md/` as `CLAUDE.md` through `Path`, so the export must
+        look the file up under that name too."""
+        for member, spelling in (("target", "CLAUDE.md/"), ("target", "./CLAUDE.md"),
+                                 ("source", ".agents//instructions/bootstrap.md")):
+            with self.subTest(spelling):
+                sparse, full = self.verdicts(self.retarget(spelling, member, spelling))
+                self.assertEqual(sparse, full)
+
+    def test_a_path_git_cannot_name_is_left_to_the_resolver(self):
+        """A projection path git cannot take as an argument is left absent, never raised."""
+        for name, path in (("an embedded NUL", "CLAUDE\u0000.md"),
+                           ("a lone surrogate", "CLAUDE\ud800.md")):
+            with self.subTest(name):
+                sparse, full = self.verdicts(self.retarget(name, "target", path))
+                self.assertEqual(sparse[0], 2)
+                self.assertEqual(sparse, full)
 
     def test_a_commit_the_object_store_lacks_refuses_export_failed(self):
         with self.assertRaises(adopt_inspection.AdoptError) as caught:

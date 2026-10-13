@@ -4,7 +4,12 @@
 files a resolution reads (`resolve_project.projection_paths`) of one commit
 into a new directory. Every other path is left absent, and so is any symlink,
 tree or submodule at a listed path, so the resolver refuses it as missing and
-no link is ever created in the destination. It reads through git plumbing only
+no link is ever created in the destination. A listed path is looked up under
+its normalized spelling (`CLAUDE.md/` as `CLAUDE.md`), the file the resolver
+reads through `Path`, and written under its authored spelling. A listed path
+git cannot take as an argument (one holding a NUL, or a character the file
+system encoding cannot carry) is never looked up: it is left absent, so the
+resolver judges the contract (D10). It reads through git plumbing only
 (one `ls-tree` and at most one `cat-file --batch` child per phase), each run
 `local_only` so that a partial clone's promised blob refuses instead of being
 fetched. It writes nothing to the repository, it refuses
@@ -16,6 +21,7 @@ A module of the `agent_tools` package, imported by the guard-policy proof.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import posixpath
 
@@ -67,11 +73,15 @@ def _write(destination: Path, paths: list[str], contents: list[bytes]) -> None:
 
 
 def _regular_blobs(root: Path, commit: str, paths: list[str]) -> dict[str, str]:
-    """Requested path -> blob id, for each requested path that is a regular blob at `commit`."""
-    if not paths:
+    """Requested path -> blob id, for each requested path that is a regular blob at `commit`.
+
+    Each nameable path is looked up under its normalized spelling; see the module docstring.
+    """
+    lookups = {path: posixpath.normpath(path) for path in paths if _nameable(path)}
+    if not lookups:
         return {}
     code, out = run_git(root, "--literal-pathspecs", "ls-tree", "-z", "--full-tree",
-                        commit, "--", *paths, local_only=True)
+                        commit, "--", *dict.fromkeys(lookups.values()), local_only=True)
     if code != 0:
         raise _export_failed()
     blobs: dict[str, str] = {}
@@ -85,8 +95,15 @@ def _regular_blobs(root: Path, commit: str, paths: list[str]) -> dict[str, str]:
         mode, kind, oid = (part.decode("ascii", "replace") for part in parts)
         if mode in REGULAR_MODES and kind == "blob":
             blobs[name.decode("utf-8", "surrogateescape")] = oid
-    return {path: blobs[posixpath.normpath(path)] for path in paths
-            if posixpath.normpath(path) in blobs}
+    return {path: blobs[name] for path, name in lookups.items() if name in blobs}
+
+
+def _nameable(path: str) -> bool:
+    """Whether `path` can be a git argument: it encodes to the file system and holds no NUL."""
+    try:
+        return b"\0" not in os.fsencode(path)
+    except UnicodeEncodeError:
+        return False
 
 
 def _read_blobs(root: Path, object_ids: list[str]) -> list[bytes]:
