@@ -61,6 +61,17 @@ in
     }) repos
   );
 
+  # Jobs run `nix run github:cachix/devenv/<rev>`; `_github-runner` is untrusted, so
+  # a workflow's `--option extra-substituters` is ignored and devenv would build
+  # from source. Trust the cache system-wide instead of adding the runner to
+  # `trusted-users`, which would hand PR code root-equivalent control of the store.
+  nix.settings = {
+    extra-substituters = [ "https://devenv.cachix.org" ];
+    extra-trusted-public-keys = [
+      "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw="
+    ];
+  };
+
   # Runs after nix-darwin has created `_github-runner` (users activate first).
   system.activationScripts.launchd.text = lib.mkBefore ''
     ${lib.getExe' pkgs.coreutils "install"} -d -m 0750 -o root -g _github-runner ${tokenDir}
