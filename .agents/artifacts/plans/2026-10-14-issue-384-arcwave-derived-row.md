@@ -19,7 +19,7 @@ Spec: `.agents/artifacts/specs/2026-10-14-issue-384-arcwave-derived-row-design.m
 - Never run `just switch`, the installed `claude-guard-policy`, or any command that writes `~/.agents/state/`.
 - Prose that lands in code or documentation describes the code as it behaves at that task's commit. Use full issue URLs or the words "issue 384", never a bare `#384`. No edit to `CLAUDE.md`, `AGENTS.md` or `.agents/instructions/` (instruction budget).
 - Every long command, each test command included, runs in the foreground from the worktree root as `launch-scope exec --repo-root <ledger repo root> --run-id <run-id> --worker-id <worker-id> -- <argv>` with an explicit timeout above its duration. Commits go through `launch-commit … -- <git commit args>`, signed, with the session's trailers. Scratch files live under `launch-scope scratch`'s root.
-- `tests/test_guard_policy.py` runs as `env PYTHONPATH="$PWD/python" python3 -m unittest tests/test_guard_policy.py 2>&1 | tail -4` (timeout 900 s). Neither it nor the guard suite is in `just agent-workflow-tests`.
+- `tests/test_guard_policy.py` runs as `set -o pipefail; env PYTHONPATH="$PWD/python" python3 -m unittest tests/test_guard_policy.py 2>&1 | tail -4` (pipefail keeps the suite's exit status, not `tail`'s) (timeout 900 s). Neither it nor the guard suite is in `just agent-workflow-tests`.
 - `just build` (timeout 3600 s) evaluates the git tree. The guard suite runs against that build. Its one invocation (timeout 1200 s; 3600 s when the build is cold) is called **the guard-suite invocation** below:
 
   ```bash
@@ -65,3 +65,7 @@ Task 2 — Host compile evidence, final gate and acceptance record — `.agents/
 - No literal fallback on a failed compile: per D5. Two-part AC1 evidence: per D6; how its verdict is recorded: per D7 (added by planning).
 
 ---
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, `codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), isolated read-only, base `0cc5768b`, plan head `8352ab01`, no focus, no fallback. Findings: 0 blocking, 3 should-fix, 0 discussion. Accepted 3 (PR384-01 pipefail on the piped suite runs; PR384-02 the red release case asserts the rollup diagnostic; PR384-03 the README's derive-from-source test list gains the new test), rejected 0, deferred 0. All three were verified against live files; none is a non-obvious decision, so no ledger row was added.

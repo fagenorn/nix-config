@@ -77,7 +77,7 @@ Expected: `derived main dev`.
 
 - [ ] **Step 3: Final gate**
 
-Run: `just agent-workflow-tests 2>&1 | tail -4` (timeout 3600 s). Expected: `OK`, exit 0.
+Run: `set -o pipefail; just agent-workflow-tests 2>&1 | tail -4` (timeout 3600 s). Expected: `OK`, exit 0.
 
 Run: the guard-suite invocation (Global Constraints, timeout 1200 s). Expected: `OK`.
 

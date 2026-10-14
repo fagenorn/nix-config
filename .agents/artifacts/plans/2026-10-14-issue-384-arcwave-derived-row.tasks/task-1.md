@@ -107,6 +107,7 @@ Add directly after `test_a_compiled_policy_round_trips_through_the_guard` (D4):
                                  {"__typename": "CheckRun", "status": "COMPLETED",
                                   "conclusion": "FAILURE"}]))
         self.assertEqual(2, red.returncode, red.stderr)
+        self.assertIn("check rollup is not entirely green", red.stderr)
         unrelated = self.make_repo("git@github.com:acme/unrelated.git")
         refused = self.run_guard("git push -u origin topic", cwd=unrelated, guard_args=args,
                                  timeout=60)
@@ -132,7 +133,7 @@ In `home/common/claude-code/default.nix`:
 - Replace the `integrationBases` attrset (the Arcwave comment lines, beginning "arcwave is a private free-plan repository", and the `"fagenorn/arcwave" = "dev";` entry) with `integrationBases = { };`.
 - In the general comment above it, append two sentences to its first paragraph, the one ending "and the default branch stays acceptable everywhere." (D1): "The set is empty: every repository that has an integration branch is a registered project with a derived row. Add a row only for one that is not." Rewrap to the file's comment width. Leave every other comment line, `lifecycleGuardBasePolicy` and its comment unchanged.
 
-In `home/common/claude-code/README.md` § Guard policy, the paragraph defining the base policy: change "(an `integration_bases` row exists only for a repository that is not a registered project)" to "(an `integration_bases` row exists only for a repository that is not a registered project, and the built set is currently empty)". Nothing else in the README changes.
+In `home/common/claude-code/README.md` § Guard policy, the paragraph defining the base policy: change "(an `integration_bases` row exists only for a repository that is not a registered project)" to "(an `integration_bases` row exists only for a repository that is not a registered project, and the built set is currently empty)". In the same README's `## Allow surface and lifecycle guard` paragraph, the sentence naming the tests that run `guard-policy derive` from source as the row check over a fixture fleet: change "two tests, `test_a_compiled_policy_round_trips_through_the_guard` and `test_a_compiled_policy_loads_whatever_branch_names_the_fleet_carries`," to "three tests, `test_a_compiled_policy_round_trips_through_the_guard`, `test_a_compiled_policy_loads_whatever_branch_names_the_fleet_carries` and `test_an_arcwave_shaped_project_is_judged_by_its_compiled_row`," (Phase-5 finding PR384-03). Nothing else in the README changes.
 
 - [ ] **Step 4: Verify**
 
