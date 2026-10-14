@@ -9,12 +9,14 @@ It reads one pinned revision and nothing else, as a `VerificationSource`:
 plain `verify` reads `HEAD` (the resolver runs on the working tree, the
 inventory comes from the index, and every record is read at the `HEAD` commit
 it pins), while `--register` reads nothing from the checkout's branches or
-files. It lists `origin`, fetches the remote default branch and, when the
-contract there names another integration branch, that branch too, each into
-`refs/remotes/origin/<branch>` (the fetched objects and those remote-tracking
-refs are the only repository writes), exports the pinned commit with
-`git archive` into a temporary directory removed on every exit and runs every
-check there. When the default branch's contract does not resolve, the
+files. It lists `origin`, then pins the remote default branch and, when the
+contract there names another integration branch, that branch too, and exports
+each pinned commit into a temporary directory removed on every exit and runs
+every check there. A `SourceReader` passed as `remote_source`'s `reader`
+decides how a branch is pinned and exported; `--register` uses the default,
+`FETCH_READER`, which fetches each branch into `refs/remotes/origin/<branch>`
+(the fetched objects and those remote-tracking refs are the only repository
+writes) and exports its commit with `git archive`. When the default branch's contract does not resolve, the
 `--integration-branch` operand names the integration branch to read instead,
 under the conditions `remote_source` states; the report then carries a
 `branch_override` member recording the branch read, the default branch passed
@@ -85,7 +87,12 @@ class VerificationSource:
     `ref` is the report's label for it and `commit` the 40-hex id every record
     is read at. `resolver_root` is the directory the resolver is called on and
     `inventory` the `(path, object id)` pairs the unclassified-path check
-    reads. `branch` is the fetched branch name; it is always `None` for `HEAD`.
+    reads, or `None` when the reader that produced the source took no inventory.
+    `verify_repository` has no inventory to read on such a source: its
+    unclassified-path check iterates `None` and raises `TypeError`, an error
+    rather than an `AdoptError` refusal, so it fails loud instead of passing an
+    empty inventory (D5). `branch` is the branch read, pinned
+    through the reader; it is always `None` for `HEAD`.
     `override_default` is the default branch the `--integration-branch` operand
     passed over, and `override_reason` why it was passed over; both are `None`
     unless the operand selected `branch`. `default_contract_resolved` records
@@ -98,12 +105,38 @@ class VerificationSource:
     ref: str
     commit: str
     resolver_root: Path
-    inventory: list[tuple[str, str]]
+    inventory: list[tuple[str, str]] | None
     branch: str | None = None
     override_default: str | None = None
     override_reason: str | None = None
     default_contract_resolved: bool = True
     remote_default: str | None = None
+
+
+@dataclass(frozen=True)
+class SourceReader:
+    """How `remote_source` reads one listed branch of `origin`.
+
+    `pin` takes the checkout root, the branch, the commit id `origin` listed
+    for it (or `None`) and the network timeout, and returns the commit to read.
+    `export` takes the root, that commit and a new destination directory and
+    writes what the resolver is run on. `inventory` is whether the source
+    carries the commit's tree inventory.
+    """
+
+    pin: Callable[[Path, str, str | None, float], str]
+    export: Callable[[Path, str, Path], None]
+    inventory: bool
+
+
+def _fetch_pin(root: Path, branch: str, listed: str | None,
+               timeout: float) -> str:
+    """The default reader's pin: always a fetch, whatever `origin` listed."""
+    return fetch_pinned(root, branch, timeout)
+
+
+# Today's read: fetch the branch, export its whole tree and take its inventory.
+FETCH_READER = SourceReader(pin=_fetch_pin, export=export_commit, inventory=True)
 
 
 def branch_override(source: VerificationSource) -> dict | None:
@@ -130,34 +163,44 @@ def head_source(root: Path) -> VerificationSource:
 @contextlib.contextmanager
 def remote_source(root: Path, run_resolver: Resolver,
                   operand: str | None = None, *,
-                  network_timeout: float = GIT_TIMEOUT_SECONDS
+                  network_timeout: float = GIT_TIMEOUT_SECONDS,
+                  reader: SourceReader = FETCH_READER
                   ) -> Iterator[VerificationSource]:
     """The source `--register` reads: the contract's integration branch.
 
     Nothing is read from the checkout's branches or files. `origin` is listed,
-    its default branch `D` fetched into `refs/remotes/origin/D` and pinned to
-    its commit `R`, and `R` exported with `git archive` into a scratch
-    directory the resolver runs on. If the contract there names another
+    its default branch `D` pinned to a commit `R`, and `R` exported into a
+    scratch directory the resolver runs on. If the contract there names another
     integration branch `B`, that is the one hop made: `B` must be listed by
-    `origin`, is fetched and pinned to `R2` the same way, exported, and its own
-    contract must still name `B`, so there is no second hop. Every later check
-    reads the one pinned commit, and the scratch directory lives as long as the
-    caller's `with` block and is removed on success and on every refusal.
+    `origin`, is pinned to `R2` the same way, exported, and its own contract
+    must still name `B`, so there is no second hop. Every later check reads the
+    one pinned commit, and the scratch directory lives as long as the caller's
+    `with` block and is removed on success and on every refusal.
+
+    `reader` decides how each branch is pinned and exported, and is handed the
+    commit `origin` listed for the branch. The default, `FETCH_READER`, fetches
+    the branch into `refs/remotes/origin/<branch>` whatever was listed, exports
+    the pinned commit with `git archive` and takes the tree inventory of the
+    pinned commit. Every pin and export goes through `reader`, and the yielded
+    source's `inventory` is `None` when `reader.inventory` is false.
 
     `operand` is the `--integration-branch` value and is consulted only after
-    the default branch was fetched, exported and resolved. A default contract
+    the default branch was pinned, exported and resolved. A default contract
     that resolves keeps its own answer: an operand equal to the branch it names
     (or to `D` when it names none) changes nothing and any other refuses. A
     default contract that does not resolve takes the operand as the integration
-    branch `B` when `origin` lists `B` and `B` is not `D`: `B` is fetched,
-    pinned and confirmed like the hop above, and its own contract must resolve
-    and name `B`, so there is no further hop. The source then carries the
+    branch `B` when `origin` lists `B` and `B` is not `D`: `B` is pinned
+    through `reader`, exported and confirmed like the hop above, and its own
+    contract must resolve and name `B`, so there is no further hop. The source then carries the
     default branch and the reason, which `branch_override` reports.
 
-    `network_timeout` bounds each `ls-remote` and `fetch` child, so one that
-    outlasts it refuses `adopt.git.unavailable`. Every source carries the
-    branch `origin`'s `HEAD` names as `remote_default`, whichever branch it
-    pins.
+    `network_timeout` bounds the `ls-remote` child and is handed to every
+    `reader.pin`, which bounds each `fetch` child it starts with it, so one
+    that outlasts it refuses `adopt.git.unavailable`. `FETCH_READER`'s pin
+    fetches every branch it pins; a pin that returns a listed commit the
+    checkout already holds starts no `fetch` child at all. Every source
+    carries the branch `origin`'s `HEAD` names as `remote_default`, whichever
+    branch it pins.
 
     No `origin` refuses `not_integrated` with `adopt.registration.no_remote`,
     an `origin` that advertises no default branch with
@@ -180,9 +223,10 @@ def remote_source(root: Path, run_resolver: Resolver,
             "`origin` does not name a default branch it also lists")
     with tempfile.TemporaryDirectory() as scratch:
         branch = default
-        pinned = fetch_pinned(root, default, network_timeout)
+        pinned = reader.pin(root, default, heads.listed.get(default),
+                            network_timeout)
         exported = Path(scratch) / "default"
-        export_commit(root, pinned, exported)
+        reader.export(root, pinned, exported)
         exit_code, payload = run_resolver(exported, "resolve")
         default_resolved = exit_code == 0
         named = integration_branch(payload) if default_resolved else None
@@ -205,7 +249,8 @@ def remote_source(root: Path, run_resolver: Resolver,
             pinned, exported = pin_integration_branch(
                 root, run_resolver, branch, Path(scratch) / "integration",
                 "the contract on the `--integration-branch` branch does not "
-                "resolve or does not name that branch", network_timeout)
+                "resolve or does not name that branch", network_timeout,
+                listed=heads.listed.get(branch), reader=reader)
             override_default = default
         if named is not None and named != default:
             if named not in heads.branches:
@@ -216,10 +261,12 @@ def remote_source(root: Path, run_resolver: Resolver,
             pinned, exported = pin_integration_branch(
                 root, run_resolver, branch, Path(scratch) / "integration",
                 "the contract on the integration branch does not resolve or "
-                "does not name that branch", network_timeout)
+                "does not name that branch", network_timeout,
+                listed=heads.listed.get(branch), reader=reader)
         yield VerificationSource(
             ref=f"refs/remotes/{REMOTE}/{branch}", commit=pinned,
-            resolver_root=exported, inventory=tree_inventory(root, pinned),
+            resolver_root=exported,
+            inventory=tree_inventory(root, pinned) if reader.inventory else None,
             branch=branch, override_default=override_default,
             override_reason=(agent_platform.BRANCH_OVERRIDE_REASONS[0]
                              if override_default is not None else None),
@@ -230,9 +277,11 @@ def remote_source(root: Path, run_resolver: Resolver,
 def pin_integration_branch(root: Path, run_resolver: Resolver, branch: str,
                            destination: Path,
                            unconfirmed: str,
-                           network_timeout: float = GIT_TIMEOUT_SECONDS
+                           network_timeout: float = GIT_TIMEOUT_SECONDS,
+                           *, listed: str | None = None,
+                           reader: SourceReader = FETCH_READER
                            ) -> tuple[str, Path]:
-    """Fetch `branch`, export its pinned commit and require it to name itself.
+    """Pin `branch` through `reader`, export it and require it to name itself.
 
     Returns the pinned commit id and the directory it was exported to. The
     contract exported there must resolve and name `branch` as its integration
@@ -241,10 +290,12 @@ def pin_integration_branch(root: Path, run_resolver: Resolver, branch: str,
     message. This is the one confirmation both ways of reaching an integration
     branch other than the default go through, so neither can admit a branch the
     other would refuse; checking that `origin` lists `branch` stays with the
-    caller, whose refusal wording differs. `network_timeout` bounds the fetch.
+    caller, whose refusal wording differs. `listed` is the commit `origin` listed
+    for `branch`, handed to `reader`'s pin, whose default still fetches the
+    branch; `network_timeout` bounds that pin's network read.
     """
-    pinned = fetch_pinned(root, branch, network_timeout)
-    export_commit(root, pinned, destination)
+    pinned = reader.pin(root, branch, listed, network_timeout)
+    reader.export(root, pinned, destination)
     exit_code, payload = run_resolver(destination, "resolve")
     if exit_code != 0 or integration_branch(payload) != branch:
         raise unresolved_integration_branch(unconfirmed)

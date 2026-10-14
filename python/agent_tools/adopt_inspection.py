@@ -6,13 +6,15 @@ built from — the closed sets every adoption verb dispatches over, the error
 contract they refuse through, the content hashes, the path predicates that keep
 the inspection inside the target root and away from secret-shaped paths, the
 bounded git queries of the R4.2 inspection, and the git operations a
-registration reads `origin` through: listing its branches, a pinned fetch and
-the export of a commit.
+registration reads `origin` through: listing its branches and the commit each
+lists, a pinned fetch, the pin of a listed commit and the export of a commit.
 
 It is imported, never run: no `main` and no argparse. Its only repository
 writes are `fetch_pinned`'s: the fetched objects and one
-`refs/remotes/origin/<branch>` ref per call. `export_commit` writes only into
-the directory its caller names. It does not import
+`refs/remotes/origin/<branch>` ref per call; `pin_listed` writes only through
+`fetch_pinned`, so it writes nothing when the checkout already holds the commit
+`origin` lists. `export_commit` writes only into the directory its caller
+names. It does not import
 `agent_tools.resolve_project` and never will (D26) — the resolver is reached
 only as a subprocess, by the entry point.
 
@@ -22,13 +24,16 @@ its sibling adoption modules.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tarfile
+import types
 
 # --------------------------------------------------------------------------
 # Closed sets
@@ -650,18 +655,22 @@ GIT_TIMEOUT_SECONDS = 300
 
 
 def run_git(root: Path, *args: str, network: bool = False,
-            input: bytes | None = None,
+            local_only: bool = False, input: bytes | None = None,
             timeout: float = GIT_TIMEOUT_SECONDS) -> tuple[int, bytes]:
     """`git -C root args`, and its exit code and stdout.
 
     A `network` call never prompts for credentials: it runs with
     `GIT_TERMINAL_PROMPT=0`, so an unauthenticated remote fails instead of
-    hanging. Every other call inherits the environment unchanged. `input`
-    is written to the command's stdin. The child is killed after `timeout`
-    seconds, which refuses `adopt.git.unavailable` like a git that cannot start.
+    hanging. A `local_only` call runs with `GIT_NO_LAZY_FETCH=1`, so a partial
+    clone answers a missing object as missing instead of fetching it from its
+    promisor remote. Every other call inherits the environment unchanged.
+    `input` is written to the command's stdin. The child is killed after
+    `timeout` seconds, which refuses `adopt.git.unavailable` like a git that
+    cannot start.
     """
-    environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0"} if network \
-        else None
+    overrides = {**({"GIT_TERMINAL_PROMPT": "0"} if network else {}),
+                 **({"GIT_NO_LAZY_FETCH": "1"} if local_only else {})}
+    environment = {**os.environ, **overrides} if overrides else None
     try:
         proc = subprocess.run(["git", "-C", str(root), *args],
                               capture_output=True, timeout=timeout,
@@ -694,9 +703,11 @@ def split_nul(data: bytes) -> list[str]:
 # Beside them sit the queries `verify` reads a pinned revision with (its tree
 # inventory, its blobs and evidence records, and their ancestry) and the
 # operations `--register` reaches `origin` through: `has_remote`,
-# `remote_heads`'s one listing, `fetch_pinned`'s pinned fetch and
-# `export_commit`'s `git archive` export. Only `remote_heads` and
-# `fetch_pinned` touch the network.
+# `remote_heads`'s one listing, `fetch_pinned`'s pinned fetch, `pin_listed`'s
+# pin of a listed commit and `export_commit`'s `git archive` export. Only
+# `remote_heads` and `fetch_pinned` touch the network, and `pin_listed` reaches
+# it through `fetch_pinned` alone: it writes nothing when the checkout already
+# holds the commit.
 # --------------------------------------------------------------------------
 
 
@@ -750,19 +761,24 @@ def has_remote(root: Path) -> bool:
 
 @dataclass(frozen=True)
 class RemoteHeads:
-    """What `origin` advertises: its default branch and every branch name.
+    """What `origin` advertises: its default branch, every branch name and the
+    commit each lists.
 
     `default` is the branch `HEAD` points at, and `None` when `HEAD` is not a
-    symref to a branch the remote also lists.
+    symref to a branch the remote also lists. `listed` maps a branch name to
+    the object id `origin` listed for it, kept only when the id is 40 or 64
+    lowercase hex characters.
     """
 
     default: str | None
     branches: frozenset[str]
+    listed: Mapping[str, str]
 
 
 def remote_heads(root: Path,
                  timeout: float = GIT_TIMEOUT_SECONDS) -> RemoteHeads:
-    """`origin`'s default branch and branch names, in one `git ls-remote`.
+    """`origin`'s default branch, branch names and their commits, in one
+    `git ls-remote`.
 
     `git ls-remote --symref origin HEAD refs/heads/*`. A non-zero exit refuses
     `adopt.git.remote_unreachable`; a listing still running after `timeout`
@@ -775,15 +791,20 @@ def remote_heads(root: Path,
                      "the remote could not be listed")
     target = None
     branches = set()
+    listed = {}
     for line in out.decode("utf-8", "surrogateescape").splitlines():
         value, _, name = line.partition("\t")
         if name == "HEAD" and value.startswith("ref: refs/heads/"):
             target = value[len("ref: refs/heads/"):]
         elif name.startswith("refs/heads/"):
-            branches.add(name[len("refs/heads/"):])
+            branch = name[len("refs/heads/"):]
+            branches.add(branch)
+            if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
+                listed[branch] = value
     return RemoteHeads(
         default=target if target in branches else None,
-        branches=frozenset(branches))
+        branches=frozenset(branches),
+        listed=types.MappingProxyType(listed))
 
 
 def fetch_pinned(root: Path, branch: str,
@@ -812,6 +833,26 @@ def fetch_pinned(root: Path, branch: str,
         raise refuse("adopt_failure", "adopt.git.fetch_failed", "",
                      "the remote branch could not be fetched")
     return out.decode("ascii", "strict").strip()
+
+
+def pin_listed(root: Path, branch: str, listed: str | None,
+               timeout: float = GIT_TIMEOUT_SECONDS) -> str:
+    """The commit to read `origin`'s `branch` at: `listed` when held, else a fetch.
+
+    When `listed` is the commit id `origin` listed for `branch` and the checkout
+    already holds that commit, it is returned and nothing else runs: no
+    remote-tracking ref, no `FETCH_HEAD` and no object is written. The check is
+    `local_only`, so a partial clone's missing commit counts as missing instead
+    of being fetched from its promisor remote. Otherwise (`listed` is `None` or
+    the commit is absent) the result is `fetch_pinned(root, branch, timeout)`,
+    whose refusals and writes apply unchanged.
+    """
+    if listed is not None:
+        code, _ = run_git(root, "cat-file", "-e", f"{listed}^{{commit}}",
+                          local_only=True)
+        if code == 0:
+            return listed
+    return fetch_pinned(root, branch, timeout)
 
 
 def export_commit(root: Path, commit: str, destination: Path) -> None:

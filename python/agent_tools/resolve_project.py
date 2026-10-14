@@ -941,6 +941,30 @@ def validate_projection_entries(source: dict, violations: list[dict]) -> None:
                 "contract.projections.target_is_source"))
 
 
+def projection_paths(source: object) -> list[str]:
+    """The paths beyond the contract file that resolving `source` reads.
+
+    `validate_projections` reads each projection entry's `source` and `target`,
+    so this lists, in declaration order (an entry's `source` before its
+    `target`), every such member that `is_safe_relative_path` accepts, each path
+    once. It never raises: a `source` that is not an object, a `projections`
+    that is not a list, an entry that is not an object, and a member that is
+    absent or not a safe relative path each contribute nothing, because the
+    resolver itself refuses those shapes.
+    """
+    if not isinstance(source, dict) or not isinstance(source.get("projections"), list):
+        return []
+    paths: list[str] = []
+    for entry in source["projections"]:
+        if not isinstance(entry, dict):
+            continue
+        for name in ("source", "target"):
+            path = entry.get(name)
+            if is_safe_relative_path(path) and path not in paths:
+                paths.append(path)
+    return paths
+
+
 def validate_contract(source: dict, manifest: dict) -> list[dict]:
     """Every shape violation of the authored source, collected in one pass.
 

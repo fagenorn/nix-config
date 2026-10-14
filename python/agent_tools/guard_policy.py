@@ -3,11 +3,14 @@
 `guard-policy compile --base <path> --output <path>` reads the base policy, the
 fleet registry (`agent_platform.read_registry`) and, for each registered
 project, the contract on its registered branch of `origin`: the checkout's
-working tree, index and local branches are never read. A project earns a
-derived row only when all twelve proof steps hold in this run and the guard's
-loader accepts the row's slug and two branch names (`unsupported_name`); the
-steps are `derive`, `target_profiles` and `compile_policy`, and each refusal
-carries one of `REASON_CODES`.
+working tree, index and local branches are never read. Each branch is read at
+the commit `origin` lists for it, which is fetched only when the checkout lacks
+that commit, and the contract and its projection files are exported sparsely
+(`contract_export`) with no tree inventory. A project earns a derived row only
+when all twelve proof steps hold in this run and the guard's loader accepts the
+row's slug and two branch names (`unsupported_name`); the steps are `derive`,
+`target_profiles` and `compile_policy`, and each refusal carries one of
+`REASON_CODES`.
 
 It writes one JSON document with exactly two members, `derived_repositories` and
 `derivation` (`derivation.schema_version` is `DERIVATION_SCHEMA_VERSION`),
@@ -16,7 +19,7 @@ atomically to `--output`; the base policy is only validated and consulted for
 digest of the registry entry, the pinned commit and contract blob, the
 provider's answer and each profile's version and digest. No resolved snapshot
 and no contract body is kept. The only repository writes are the
-remote-tracking refs of the branches read and the fetched objects.
+remote-tracking refs of the branches fetched and the fetched objects.
 
 Exit statuses: 0 when every entry derived (an absent registry is the empty
 fleet), 1 when the file was written but at least one project has no row, and 2
@@ -30,7 +33,7 @@ registry, runs the first two proof steps for every entry (`entry_slug`) and the
 rest (`prove`) only for entries whose `origin` names the slug, then the duplicate
 and name checks among them (`_admit`); it reads no base policy, so it never
 reports `literal_conflict`, and it writes no file beyond the fetched objects and
-remote-tracking refs. The report, one line of JSON on stdout, has the members
+the remote-tracking refs of the branches fetched. The report, one line of JSON on stdout, has the members
 `schema_version`, `repository`, `outcome`, `row`, `refused` and `cause`. Exit 0
 is `derived` with the row; exit 1 is `refused`, with the `refused` entries that
 name the slug (empty when none does); exit 2 is `unavailable`, with a `cause`
@@ -48,8 +51,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from agent_tools import (adopt_inspection, adopt_verify, agent_platform, canonical, forge_adapter,
-                         github_remote, release_profile, resolve_project)
+from agent_tools import (adopt_inspection, adopt_verify, agent_platform, canonical,
+                         contract_export, forge_adapter, github_remote, release_profile,
+                         resolve_project)
 
 REPORT_SCHEMA_VERSION = 1
 DERIVE_REPORT_SCHEMA_VERSION = 1
@@ -289,13 +293,23 @@ def entry_slug(entry: dict) -> tuple[Path, str]:
     return root, origin_slug(root)
 
 
+# How the proof reads `origin` (issue 385): each branch is pinned to the commit
+# `origin` lists for it, fetched only when the checkout lacks it, and exported as
+# the contract and its projection files alone, with no tree inventory. Handed to
+# `adopt_verify.remote_source`, which imports neither of these modules (D26).
+CONTRACT_READER = adopt_verify.SourceReader(
+    pin=adopt_inspection.pin_listed, export=contract_export.export_contract,
+    inventory=False)
+
+
 def prove(entry: dict, root: Path, slug: str) -> dict:
     """Steps 3 to 10 for one registry entry at `root` whose origin names `slug`: the row."""
     override = entry.get("branch_override")
     try:
         with adopt_verify.remote_source(
                 root, resolver, override["branch"] if override else None,
-                network_timeout=forge_adapter.CHILD_TIMEOUT_SECONDS) as source:
+                network_timeout=forge_adapter.CHILD_TIMEOUT_SECONDS,
+                reader=CONTRACT_READER) as source:
             return _proof(root, entry, slug, source)
     except adopt_inspection.AdoptError as error:
         reason = ("branch_unresolved" if error.repair_id in BRANCH_UNRESOLVED_REPAIRS
