@@ -25,14 +25,19 @@ export const register: Register = on => {
     if (!ran.isOk || argv[0] !== 'use') return { text: ran.text }
 
     const active = await run($, ['active'])
-    const isSwitch = active.isOk && active.text !== argv[1]
-    if (isSwitch) $.ui.status(`account: ${active.text} (${argv[1]} after restart)`)
-    else if (active.isOk) $.ui.status(`account: ${active.text}`)
+    if (!active.isOk || active.text === argv[1]) {
+      if (active.isOk) $.ui.status(`account: ${active.text}`)
+      return { text: ran.text }
+    }
 
+    // Ends this session's claude; the launcher resumes it under the new account.
+    $.ui.status(`account: switching to ${argv[1]}`)
+    const switched = await run($, ['switch', argv[1], await $.session.id()])
+    if (switched.isOk) return { text: `${ran.text}\nSwitching this session to '${argv[1]}'…` }
+
+    $.ui.status(`account: ${active.text} (${argv[1]} after restart)`)
     return {
-      text: isSwitch
-        ? `${ran.text}\nThis session stays on '${active.text}'. Exit and run \`claude -c\` to continue it as '${argv[1]}'.`
-        : ran.text,
+      text: `${ran.text}\nThis session stays on '${active.text}': ${switched.text.replace(/^claude-account: /, '')}`,
     }
   })
 }
