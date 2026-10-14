@@ -88,7 +88,9 @@ let
   # policy, and the guard refuses the guarded verbs of a repository that has both
   # a literal row and a compiled row. A repository with neither keeps the
   # default-branch-only rule, and the default branch stays acceptable
-  # everywhere.
+  # everywhere. The set is empty: every repository that has an integration
+  # branch is a registered project with a derived row. Add a row only for one
+  # that is not.
   #
   # Declaring a branch here widens which branch may be targeted AND waives the
   # merge's forge-protection demand for that branch: an integration branch is
@@ -106,12 +108,7 @@ let
   # by the guard itself, in place of the forge-protection demand: the same
   # path-filtered CI means no required-status-check rule on the default branch
   # could stand in for the release PR's actual checks.
-  integrationBases = {
-    # arcwave is a private free-plan repository: GitHub refuses branch
-    # protection there, so the default-branch merge demand can never be met.
-    # Feature PRs integrate on `dev`; releases promote `dev` to `main`.
-    "fagenorn/arcwave" = "dev";
-  };
+  integrationBases = { };
 
   # The base policy: the five trusted members, the literal rows above and the
   # tool paths, as one store JSON file. It is the only place the guard reads

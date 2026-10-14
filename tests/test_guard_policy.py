@@ -387,7 +387,7 @@ class ProjectRefusalTest(WorldCase):
     def test_literal_conflict_withholds_the_derived_row_only(self):
         """Issue 377 D5: the compiled policy cannot subtract a store literal."""
         self.world.write_base(integration_bases={"fagenorn/one": "dev",
-                                                 "fagenorn/arcwave": "dev"})
+                                                 "fagenorn/literal-only": "dev"})
         self.world.project("fixture/one", "fagenorn/one")
         self.refused("literal_conflict")
         self.assertEqual(self.world.policy()["derived_repositories"], {})

@@ -92,7 +92,7 @@ class GuardPolicyWorld:
 
     def write_base(self, **members: object) -> dict:
         document = {"authorized_owners": ["fagenorn"],
-                    "integration_bases": {"fagenorn/arcwave": "dev"},
+                    "integration_bases": {},
                     "git_bin": "/usr/bin/git", "gh_bin": "/usr/bin/gh", "jq_bin": "/usr/bin/jq",
                     **members}
         self.base.write_text(json.dumps(document), encoding="utf-8")

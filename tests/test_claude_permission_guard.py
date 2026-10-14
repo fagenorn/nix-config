@@ -1268,15 +1268,18 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     }
 
     def test_built_base_policy_holds_exactly_the_five_trusted_members(self):
-        """Issue 377 R1, R5: the store file holds the trusted members and the #375 literals."""
+        """Issue 377 R1, R5; issue 384 D3: the store file holds the trusted members and no
+        literal integration row, since every repository with one is a registered project."""
         self.assertEqual({"authorized_owners", "integration_bases", "git_bin", "gh_bin", "jq_bin"},
                          set(self.base_policy))
         self.assertEqual(["fagenorn"], self.base_policy["authorized_owners"])
-        self.assertEqual({"fagenorn/arcwave": "dev"}, self.base_policy["integration_bases"])
+        self.assertEqual({}, self.base_policy["integration_bases"])
         for member, name in (("git_bin", "git"), ("gh_bin", "gh"), ("jq_bin", "jq")):
             self.assertRegex(self.base_policy[member], rf"^/nix/store/[^/]+/bin/{name}$")
         source = Path(__file__).resolve().parents[1] / "home/common/claude-code/default.nix"
-        self.assertNotIn("elevenyellow", source.read_text(encoding="utf-8"))
+        text = source.read_text(encoding="utf-8")
+        self.assertEqual([], [name for name in ("elevenyellow", "fagenorn/arcwave")
+                              if name in text])
 
     def test_registered_hook_names_the_base_policy_compiled_policy_and_row_check(self):
         wrapper = self.guard.read_text(encoding="utf-8")
@@ -1347,11 +1350,12 @@ class ClaudePermissionGuardTest(unittest.TestCase):
 
     def test_a_row_beside_a_literal_integration_base_is_refused(self):
         """Issue 377 D5: the compiled policy cannot recast a literal repository."""
-        slug = "fagenorn/arcwave"
-        self.assertEqual("dev", self.base_policy["integration_bases"][slug])
+        slug = "fagenorn/literal-fixture"
+        base = self.write_base(integration_bases={slug: "dev"})
         policy = self.write_policy(derivation={}, derived_repositories={
             slug: {"default_branch": "trunk", "integration_branch": "release", "evidence": {}}})
-        args = ("--gh-bin", str(self.fake_gh), "--policy", str(policy))
+        args = ("--gh-bin", str(self.fake_gh), "--base-policy", str(base),
+                "--policy", str(policy))
         repo = self.make_repo(f"git@github.com:{slug}.git")
         for label, command in (
             ("push", "git push -u origin topic"),
@@ -1366,7 +1370,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                     f"lifecycle guard: unsafe {label}: repository {slug} has both a literal "
                     "integration base and a derived policy row; repair: run claude-guard-policy",
                     result.stderr)
-        self.assertEqual(0, self.run_guard("git push -u origin topic", cwd=repo).returncode)
+        literal_only = self.run_guard("git push -u origin topic", cwd=repo, guard_args=(
+            "--gh-bin", str(self.fake_gh), "--base-policy", str(base)))
+        self.assertEqual(0, literal_only.returncode, literal_only.stderr)
 
     def test_a_bad_compiled_policy_contributes_no_row(self):
         """Issue 377 D4, R4: the whole file is dropped and nothing the base allows is blocked."""
@@ -1591,6 +1597,49 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertIn("repository acme/forged: the row check did not confirm its derived policy "
                       "row: refused (no registered project derives it); repair: run "
                       "claude-guard-policy", refused.stderr)
+
+    def test_an_arcwave_shaped_project_is_judged_by_its_compiled_row(self):
+        """Issue 384 D4: a registered project with integration branch `dev` needs no literal.
+        Compiled against the built base policy it is derived, not refused, and the guard
+        adjudicates its feature and release arms through the confirmed row."""
+        slug = "fagenorn/arcwave"
+        world = GuardPolicyWorld(self)
+        world.project("arcwave", slug, integration_branch="dev", publication_free=True)
+        code, report, stderr = world.compile(base=BASE_POLICY_PATH)
+        self.assertEqual((0, [slug], []), (code, report["derived"], report["refused"]), stderr)
+        row = world.policy()["derived_repositories"][slug]
+        self.assertEqual(("main", "dev"), (row["default_branch"], row["integration_branch"]))
+        args = ("--gh-bin", str(self.fake_gh), "--policy", str(world.output),
+                "--derive-bin", str(world.row_check()), "--derive-timeout-seconds", "25")
+        repo = self.make_repo(f"git@github.com:{slug}.git")
+        create = self.run_guard(
+            f'gh pr create --repo {slug} --base dev --head issue-7-topic '
+            '--title "x" --body "y"', cwd=repo, guard_args=args, timeout=60)
+        self.assertEqual(0, create.returncode, create.stderr)
+        feature_pr = json.dumps({"state": "OPEN", "baseRefName": "dev",
+                                 "headRefName": "issue-7-topic",
+                                 "url": f"https://github.com/{slug}/pull/7"})
+        feature = self.run_guard(
+            f"gh pr merge 7 --repo {slug} --merge --delete-branch", cwd=repo, guard_args=args,
+            env={"FAKE_PR_JSON": feature_pr, "FAKE_PROTECTION_MODE": "nonzero"}, timeout=60)
+        self.assertEqual(0, feature.returncode, feature.stderr)
+        release = f"gh pr merge 1 --repo {slug} --merge"
+        url = f"https://github.com/{slug}/pull/1"
+        green = self.run_guard(release, cwd=repo, guard_args=args, timeout=60,
+                               env=self.release_env(url=url))
+        self.assertEqual(0, green.returncode, green.stderr)
+        red = self.run_guard(release, cwd=repo, guard_args=args, timeout=60,
+                             env=self.release_env(url=url, statusCheckRollup=[
+                                 {"__typename": "CheckRun", "status": "COMPLETED",
+                                  "conclusion": "FAILURE"}]))
+        self.assertEqual(2, red.returncode, red.stderr)
+        self.assertIn("check rollup is not entirely green", red.stderr)
+        unrelated = self.make_repo("git@github.com:acme/unrelated.git")
+        refused = self.run_guard("git push -u origin topic", cwd=unrelated, guard_args=args,
+                                 timeout=60)
+        self.assertEqual(2, refused.returncode)
+        self.assertIn("repository acme/unrelated is outside standing authorization",
+                      refused.stderr)
 
     def test_a_compiled_policy_loads_whatever_branch_names_the_fleet_carries(self):
         """The compiler and the loader agree on names: one the loader refuses costs its
