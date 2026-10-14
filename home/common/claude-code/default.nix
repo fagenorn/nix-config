@@ -47,6 +47,7 @@ let
         substituteInPlace "$out/bin/claude-account" \
           --replace-fail 'JQ=jq' 'JQ=${pkgs.jq}/bin/jq' \
           --replace-fail 'GIT=git' 'GIT=${pkgs.git}/bin/git' \
+          --replace-fail 'CURL=curl' 'CURL=${pkgs.curl}/bin/curl' \
           --replace-fail 'DEFAULT_CLAUDE_BIN=' 'DEFAULT_CLAUDE_BIN=${claudeUnwrapped}/bin/claude'
         patchShebangs "$out/bin"
         HOME="$(mktemp -d)" "$out/bin/claude-account" status
