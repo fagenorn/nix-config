@@ -13,11 +13,12 @@ PROFILES="$ROOT/profiles"
 BINDINGS="$ROOT/bindings.tsv"
 MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
-# The Nix build (home/common/claude-code/default.nix) rewrites these three to
+# The Nix build (home/common/claude-code/default.nix) rewrites these four to
 # store paths. The real binary is pinned because `claude` on PATH is a wrapper
 # that calls back into `run` here.
 JQ=jq
 GIT=git
+CURL=curl
 DEFAULT_CLAUDE_BIN=
 
 # What a profile shares with ~/.claude. Everything else (the login, caches,
@@ -35,9 +36,12 @@ usage: claude-account <command>
   add <name>           create an account profile
   login <name>         sign in to an account (opens the browser)
   use <name|default>   bind the current project to an account
-  status               the account of this session and of this project
+  status               the account of this session and of this project, and
+                       every account's 5-hour and weekly usage
   run [claude args]    start claude under this project's account (what plain
                        `claude` does)
+  switch <name> <id>   from inside a session: restart it as session <id> under
+                       an account (what /account <name> does)
   rm <name>            delete an account profile
 
 One-off override for a single launch: CLAUDE_ACCOUNT=<name> claude
@@ -204,13 +208,114 @@ cmd_use() {
   echo "$key now uses account '$name'."
 }
 
+# The stored OAuth credentials (JSON) of an account; fails if it never signed
+# in. Claude Code keeps them in the macOS keychain under a name suffixed with a
+# hash of the config directory (none for ~/.claude), elsewhere in the config
+# directory itself.
+credentials() {
+  local dir service="Claude Code-credentials"
+  if [ "$1" = default ]; then dir="$BASE"; else dir="$(profile_dir "$1")"; fi
+  if [ "$(uname)" = Darwin ]; then
+    [ "$1" = default ] ||
+      service="$service-$(printf '%s' "$dir" | /usr/bin/shasum -a 256 | cut -c1-8)"
+    /usr/bin/security find-generic-password -s "$service" -w 2>/dev/null
+  else
+    cat "$dir/.credentials.json" 2>/dev/null
+  fi
+}
+
+# <name> <out>: writes the account's usage as one JSON object to out. The token
+# is only read, never refreshed (that would race a running claude), and goes to
+# curl on stdin so it never shows in the process list.
+fetch_usage() {
+  local creds token config response=null code=0
+  creds="$(credentials "$1")" || creds=""
+  token="$(printf '%s' "$creds" | "$JQ" -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)" ||
+    token=""
+  if [ "$1" = default ]; then config="$HOME/.claude.json"; else config="$(profile_dir "$1")/.claude.json"; fi
+  if [ -n "$token" ]; then
+    response="$(printf 'header = "Authorization: Bearer %s"\n' "$token" |
+      "$CURL" -sS --max-time 10 --config - -w '\n%{http_code}' \
+        -H 'anthropic-beta: oauth-2025-04-20' \
+        https://api.anthropic.com/api/oauth/usage 2>/dev/null)" || response=$'null\n0'
+    code="${response##*$'\n'}"
+    response="${response%$'\n'*}"
+    printf '%s' "$response" | "$JQ" -e . >/dev/null 2>&1 || response=null
+  fi
+  "$JQ" -n --arg name "$1" --argjson code "$code" --argjson usage "$response" \
+    --argjson signedIn "$([ -n "$token" ] && echo true || echo false)" \
+    --argjson creds "$(printf '%s' "$creds" | "$JQ" -c '.claudeAiOauth // {}' 2>/dev/null || echo '{}')" \
+    --argjson config "$("$JQ" -c '.oauthAccount // {}' "$config" 2>/dev/null || echo '{}')" \
+    '{name: $name, signedIn: $signedIn, code: $code, usage: $usage,
+      email: ($config.emailAddress // null),
+      plan: ($creds.subscriptionType // null), tier: ($creds.rateLimitTier // null)}' >"$2"
+}
+
+# Every account's 5-hour and weekly usage, fetched in parallel. Colored only on
+# a terminal, so /account status in a session shows it plain.
+show_usage() {
+  local tmp name i=0 color=false bound active
+  tmp="$(mktemp -d)"
+  bound="$(resolve_account)"
+  active="$(active_account)"
+  for name in default $(ls "$PROFILES" 2>/dev/null); do
+    fetch_usage "$name" "$tmp/$(printf '%03d' "$i")" &
+    i=$((i + 1))
+  done
+  wait
+  [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && color=true
+  cat "$tmp"/* | "$JQ" -rs --argjson color "$color" --arg bound "$bound" \
+    --arg active "$([ -n "${CLAUDE_CONFIG_DIR+x}${CLAUDECODE:-}" ] && echo "$active")" \
+    --argjson now "$(date +%s)" '
+    def c($code): if $color then "\u001b[\($code)m" + . + "\u001b[0m" else . end;
+    def epoch: sub("\\.[0-9]+"; "") | sub("(\\+00:00|Z)$"; "Z") | fromdateiso8601;
+    def pad($n): tostring | (" " * ([$n - length, 0] | max)) + .;
+    def rpad($n): tostring | . + (" " * ([$n - length, 0] | max));
+    def span: (. / 60 | floor) as $m |
+      if $m >= 1440 then "\($m / 1440 | floor)d \($m % 1440 / 60 | floor)h"
+      elif $m >= 60 then "\($m / 60 | floor)h \($m % 60)m"
+      else "\([$m, 1] | max)m" end;
+    def bar($pct): ($pct / 5 | round | [., 20] | min) as $n |
+      ("█" * $n) + ("░" * (20 - $n)) |
+      c(if $pct >= 90 then "31" elif $pct >= 70 then "33" else "32" end);
+    def window($label; $fmt):
+      if . == null then "    \($label | rpad(7)) " + ("no data" | c("2"))
+      else (.utilization // 0) as $pct |
+        "    \($label | rpad(7)) \(bar($pct)) \($pct | round | pad(3))%  " +
+        (if .resets_at == null then "" else (.resets_at | epoch) as $at |
+          ("resets \($at | strflocaltime($fmt)) (in \($at - $now | span))" | c("2")) end)
+      end;
+    def plan: if .tier != null and (.tier | test("max_[0-9]+x")) then
+        "Max " + (.tier | capture("max_(?<x>[0-9]+x)").x)
+      elif .plan != null then .plan | (.[:1] | ascii_upcase) + .[1:]
+      else null end;
+    (map(.name | length) | max) as $w |
+    "Usage",
+    (.[] |
+      ([ (if .name == $active then "this session" else empty end),
+         (if .name == $bound then "this project" else empty end) ] | join(", ")) as $marks |
+      "  " + (.name | rpad($w) | c("1")) +
+        ([.email, plan] | map(select(. != null)) | if length > 0 then "  " + join(" · ") else "" end) +
+        (if $marks != "" then "  " + ("← " + $marks | c("36")) else "" end),
+      (if .signedIn | not then "    " + ("not signed in (claude-account login \(.name))" | c("2"))
+       elif .code == 401 then "    " + ("login expired; run `CLAUDE_ACCOUNT=\(.name) claude` once to refresh it" | c("33"))
+       elif .code != 200 or .usage == null then "    " + ("usage unavailable (HTTP \(.code))" | c("33"))
+       else (.usage.five_hour | window("5-hour"; "%H:%M")),
+            (.usage.seven_day | window("weekly"; "%a %H:%M"))
+       end))
+  '
+  rm -rf "$tmp"
+}
+
 cmd_status() {
   echo "this session: $(active_account)"
   echo "this project: $(resolve_account)  ($(project_key))"
+  echo
+  show_usage
 }
 
 cmd_run() {
-  local name
+  local name status request session
   # A launch from inside a session inherits this, so the mod is added once.
   case ":${CLAUDE_CODE_PLUGIN_DIRS:-}:" in
     *":$MOD_DIR:"*) ;;
@@ -224,14 +329,51 @@ cmd_run() {
     esac
   fi
   name="$(resolve_account)"
+  # claude is waited on, not exec'd, so `switch` can end it and have it resumed
+  # here under another account. Without a switch request this exits as claude did.
+  export CLAUDE_ACCOUNT_LAUNCHER=$$
+  while :; do
+    require_account "$name"
+    if [ "$name" = default ]; then
+      unset CLAUDE_CONFIG_DIR
+    else
+      sync_profile "$name"
+      export CLAUDE_CONFIG_DIR="$(profile_dir "$name")"
+    fi
+    status=0
+    "$(claude_bin)" "$@" || status=$?
+    request="$ROOT/switch/$$"
+    [ -f "$request" ] || exit "$status"
+    IFS=$'\t' read -r name session <"$request" || true
+    rm -f "$request"
+    [ -n "$session" ] || exit "$status"
+    # Only the conversation carries over, not the first launch's other flags.
+    set -- --resume "$session"
+  done
+}
+
+# <name> <session id>: from inside a session `run` started, ends that session's
+# claude and has `run` resume the conversation under the account. The claude to
+# end is the ancestor whose parent is the launcher, so nothing else is signalled.
+cmd_switch() {
+  local name="${1:-}" session="${2:-}" pid=$PPID parent
   require_account "$name"
-  if [ "$name" = default ]; then
-    unset CLAUDE_CONFIG_DIR
-  else
-    sync_profile "$name"
-    export CLAUDE_CONFIG_DIR="$(profile_dir "$name")"
-  fi
-  exec "$(claude_bin)" "$@"
+  case "$session" in
+    ""|*[!A-Za-z0-9-]*) die "'$session' is not a session id" ;;
+  esac
+  [ -n "${CLAUDE_ACCOUNT_LAUNCHER:-}" ] ||
+    die "this session was not started by \`claude\`; exit and run \`claude -c\` to continue it as '$name'"
+  while parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')" && [ -n "$parent" ] &&
+    [ "$parent" != "$CLAUDE_ACCOUNT_LAUNCHER" ]; do
+    [ "$parent" -gt 1 ] ||
+      die "this session's launcher is gone; exit and run \`claude -c\` to continue it as '$name'"
+    pid="$parent"
+  done
+  [ "$parent" = "$CLAUDE_ACCOUNT_LAUNCHER" ] ||
+    die "this session's launcher is gone; exit and run \`claude -c\` to continue it as '$name'"
+  mkdir -p "$ROOT/switch"
+  printf '%s\t%s\n' "$name" "$session" >"$ROOT/switch/$CLAUDE_ACCOUNT_LAUNCHER"
+  kill -TERM "$pid"
 }
 
 cmd_rm() {
@@ -253,6 +395,7 @@ case "$command" in
   status) cmd_status ;;
   active) active_account ;;
   run) cmd_run "$@" ;;
+  switch) cmd_switch "$@" ;;
   rm) cmd_rm "$@" ;;
   ""|help|-h|--help) usage ;;
   *) usage >&2; exit 2 ;;
