@@ -16,6 +16,7 @@ in
     "${username}" = {
       home = "/home/anis";
       shell = pkgs.zsh;
+      extraGroups = [ "docker" ];
     };
   };
 
@@ -84,6 +85,15 @@ in
       enable = true;
       enable32Bit = true;
     };
+  };
+
+  # Native Docker inside the WSL distro (no Docker Desktop). docker_29 because
+  # 25.11's default docker_28 is marked insecure (unmaintained). CDI exposes the
+  # GPU that nvidia-container-toolkit describes: `--device nvidia.com/gpu=all`.
+  virtualisation.docker = {
+    enable = true;
+    package = pkgs.docker_29;
+    daemon.settings.features.cdi = true;
   };
 
   environment.sessionVariables = {
