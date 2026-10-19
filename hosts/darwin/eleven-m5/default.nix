@@ -11,6 +11,9 @@ let
   teammates = [ ];
 in
 {
+  # mkDarwin sets HostName and LocalHostName; Tailscale names the node after the Computer Name.
+  networking.computerName = "eleven-m5";
+
   system.defaults.dock.persistent-apps = [
     "/Applications/Helium.app"
     "/Applications/Google Chrome.app"
