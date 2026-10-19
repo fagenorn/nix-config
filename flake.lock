@@ -412,6 +412,22 @@
         "type": "github"
       }
     },
+    "omlx-tap": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792423482,
+        "narHash": "sha256-frf2vUU4vpdtRbThAJGv47Om0WFX4x9BED/zVhQIzfU=",
+        "owner": "jundot",
+        "repo": "omlx",
+        "rev": "c3595bc65981cb097be66471194f3eb47f5a6d8e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "jundot",
+        "repo": "omlx",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "catppuccin": "catppuccin",
@@ -431,6 +447,7 @@
         "nixpkgs": "nixpkgs_3",
         "nixpkgs-darwin": "nixpkgs-darwin",
         "nixpkgs-unstable": "nixpkgs-unstable",
+        "omlx-tap": "omlx-tap",
         "sops-nix": "sops-nix",
         "spotx-bash": "spotx-bash"
       }
