@@ -29,6 +29,12 @@
         identityFile = "~/.ssh/id_ed25519";
       };
 
+      "eleven-m5" = lib.hm.dag.entryBefore [ "*" ] {
+        hostname = "eleven-m5.mink-fort.ts.net";
+        user = "anis";
+        identityFile = "~/.ssh/id_ed25519";
+      };
+
       "vibes" = lib.hm.dag.entryBefore [ "*" ] {
         hostname = "209.195.17.17";
         user = "vibes";

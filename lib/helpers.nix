@@ -38,9 +38,15 @@ let
       contents = map builtins.readFile allFiles;
     in
     builtins.concatStringsSep "\n" contents;
+
+  # Whether the host's nix-darwin config installs a Homebrew cask, for home modules that only
+  # make sense next to their app. Always false on NixOS, which has no `homebrew` option.
+  hasCask = osConfig: name: lib.any (c: c.name == name) (osConfig.homebrew.casks or [ ]);
 in
 {
   inherit scanPaths;
+
+  inherit hasCask;
 
   inherit mergeFilesOrdered;
 
@@ -110,7 +116,7 @@ in
               "homebrew/homebrew-bundle" = homebrew-bundle;
               "nikitabobko/tap" = nikitabobko-tap;
               # Local tap carrying the self-authored palmier-pro (auto-updating) and darktable casks
-              # (listed in homebrew.casks in hosts/common/darwin-common.nix).
+              # (listed in homebrew.casks in hosts/darwin/mbp/default.nix).
               # builtins.path copies the dir to its OWN top-level store path so it satisfies
               # nix-homebrew's `package`-typed taps option (a bare subpath would not).
               # NOTE: nix-homebrew uses the KEY verbatim as the Library/Taps/<...> dir name, so

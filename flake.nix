@@ -99,6 +99,12 @@
           system = "aarch64-darwin";
           inherit libx myvars;
         };
+        eleven-m5 = libx.mkDarwin {
+          hostname = "eleven-m5";
+          username = myvars.username;
+          system = "aarch64-darwin";
+          inherit libx myvars;
+        };
       };
 
       nixosConfigurations = {
