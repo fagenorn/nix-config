@@ -33,6 +33,12 @@ in
   # mkDarwin sets HostName and LocalHostName; Tailscale names the node after the Computer Name.
   networking.computerName = "eleven-m5";
 
+  # A shared server (oMLX, CI runners, teammate SSH): never sleep, and come back on its own.
+  # The display may still sleep.
+  power.sleep.computer = "never";
+  power.restartAfterPowerFailure = true;
+  power.restartAfterFreeze = true;
+
   system.defaults.dock.persistent-apps = [
     "/Applications/Helium.app"
     "/Applications/Ghostty.app"
