@@ -26,7 +26,7 @@ admin), key-only SSH, and its own dock. Both Macs run the self-hosted GitHub run
 - **Apps.** The shared darwin module keeps only Google Chrome, Helium, Ghostty, OrbStack and
   Tailscale. The MBP's host module adds back every other cask, plus `libmsquic` and its current
   dock. Taps and tap trust stay shared and unchanged. The Studio's host module sets a dock with
-  Helium, Chrome and Ghostty.
+  Helium and Ghostty.
 - **App-coupled home config.** The AeroSpace, darktable and SpotX modules and the palmier-pro MCP
   registration each turn on only when the host's `homebrew.casks` contains their cask. On NixOS
   there are no casks, so all of them stay off; the palmier MCP stops being registered there. The

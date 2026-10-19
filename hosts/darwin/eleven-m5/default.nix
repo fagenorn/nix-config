@@ -16,7 +16,6 @@ in
 
   system.defaults.dock.persistent-apps = [
     "/Applications/Helium.app"
-    "/Applications/Google Chrome.app"
     "/Applications/Ghostty.app"
   ];
 
