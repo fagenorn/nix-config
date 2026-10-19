@@ -17,11 +17,10 @@ in
 
   programs.ghostty = {
     enable = true;
-    package =
-      if pkgs.stdenv.isDarwin then
-        pkgs.hello # pkgs.ghostty is currently broken on darwin
-      else
-        pkgs.ghostty;
+    # pkgs.ghostty is broken on darwin, where the Homebrew cask provides the app. A null package
+    # also drops home-manager's `+validate-config` onChange hook, which otherwise aborts the
+    # activation (before launchd agents and sops-nix) whenever the config file changes.
+    package = if pkgs.stdenv.isDarwin then null else pkgs.ghostty;
     enableBashIntegration = false;
     installBatSyntax = false;
     settings = {
