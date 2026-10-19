@@ -9,7 +9,15 @@ let
   # (non-admin) macOS account with no password: SSH with the listed keys is the only way in.
   # Pick a uid above 500 that is unused (`dscl . -list /Users UniqueID`), e.g.
   #   { name = "jdoe"; uid = 600; keys = [ "ssh-ed25519 AAAA... jdoe@laptop" ]; }
-  teammates = [ ];
+  teammates = [
+    {
+      name = "selo";
+      uid = 503;
+      keys = [
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP5yoVHIP1/z2Gx7BsvVBq5mOlXHWnz5DaEYfhtICm9i j@elevenyellow.com"
+      ];
+    }
+  ];
   # To revoke someone, move their name from `teammates` to here: nix-darwin then deletes the
   # account and its home, and they are taken out of com.apple.access_ssh.
   formerTeammates = [ ];
