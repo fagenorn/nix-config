@@ -34,7 +34,7 @@ admin), key-only SSH, and its own dock. Both Macs run the self-hosted GitHub run
 - **Teammates.** In the Studio host module, a list of `{ name, uid, keys }` becomes nix-darwin
   `knownUsers` accounts: standard (non-admin) accounts with zsh, a created home and
   `openssh.authorizedKeys`. They have no password and are not in `trusted-users`. The list ships
-  empty, with a comment showing how to add an entry.
+  empty, with a comment showing how to add an entry. Revocation is per D9.
 - **SSH server.** The Studio enables `services.openssh` with password and keyboard-interactive
   logins turned off. Teammates get terminal access only; Screen Sharing is not configured.
 - **Secrets.** `anis` on the Studio uses the MBP's age key, copied over once. `.sops.yaml`
@@ -75,3 +75,5 @@ admin), key-only SSH, and its own dock. Both Macs run the self-hosted GitHub run
 | D6 | Runners on both Macs, Studio unchanged from the shared module | User Q4 | Studio only |
 | D7 | Key-only sshd, SSH-only access for teammates | User Q9 (accepted recommendation) | Password SSH or Screen Sharing now |
 | D8 | Teammates get only system packages, no home-manager profile, no Nix trust | User Q10; YAGNI | A managed team profile |
+| D9 | sshd accepts only Nix-declared keys (`AuthorizedKeysFile none`, owner key declared), and revoked teammates move to a `formerTeammates` list that deletes the account | Review: D1's per-person revocation must hold against self-added keys | Keeping `~/.ssh/authorized_keys`: a removed teammate keeps access |
+| D10 | Darwin Ghostty package is `null` (the cask provides the app), and the Studio's Computer Name is `eleven-m5` | First live switch: the `hello` stub's validate hook aborted activation before sops; Tailscale names nodes by Computer Name (D2) | Keeping the stub with the hook disabled; renaming the node only in the admin console |

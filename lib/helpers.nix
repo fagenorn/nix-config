@@ -116,7 +116,7 @@ in
               "homebrew/homebrew-bundle" = homebrew-bundle;
               "nikitabobko/tap" = nikitabobko-tap;
               # Local tap carrying the self-authored palmier-pro (auto-updating) and darktable casks
-              # (listed in homebrew.casks in hosts/common/darwin-common.nix).
+              # (listed in homebrew.casks in hosts/darwin/mbp/default.nix).
               # builtins.path copies the dir to its OWN top-level store path so it satisfies
               # nix-homebrew's `package`-typed taps option (a bare subpath would not).
               # NOTE: nix-homebrew uses the KEY verbatim as the Library/Taps/<...> dir name, so

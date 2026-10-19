@@ -423,6 +423,22 @@ in
   # entry is missing/changed, minimising any race with a running Claude Code. We do NOT own the
   # whole file (it holds OAuth + runtime state) — just this one key. Only on hosts that install
   # the palmier-pro app; elsewhere the server would never answer.
+  # Hosts without the app drop an entry an earlier generation left behind.
+  home.activation.palmierProMcpRemove =
+    lib.mkIf (!libx.hasCask osConfig "fagenorn/palmier/palmier-pro")
+      (
+        lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+          cfg="$HOME/.claude.json"
+          jq=${pkgs.jq}/bin/jq
+          if [ -f "$cfg" ] && "$jq" -e '.mcpServers["palmier-pro"]' "$cfg" >/dev/null 2>&1; then
+            tmp="$cfg.hm-tmp.$$"
+            "$jq" 'del(.mcpServers["palmier-pro"])' "$cfg" > "$tmp"
+            chmod 600 "$tmp"
+            mv -f "$tmp" "$cfg"
+          fi
+        ''
+      );
+
   home.activation.palmierProMcp = lib.mkIf (libx.hasCask osConfig "fagenorn/palmier/palmier-pro") (
     lib.hm.dag.entryAfter [ "writeBoundary" ] ''
       cfg="$HOME/.claude.json"
