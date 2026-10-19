@@ -3,6 +3,8 @@
   lib,
   pkgs,
   inputs,
+  libx,
+  osConfig,
   ...
 }:
 let
@@ -419,26 +421,29 @@ in
   # Declaratively register the palmier-pro MCP server at user scope by merging it into
   # ~/.claude.json (the file Claude Code reads natively). Idempotent: only rewrites when the
   # entry is missing/changed, minimising any race with a running Claude Code. We do NOT own the
-  # whole file (it holds OAuth + runtime state) — just this one key.
-  home.activation.palmierProMcp = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-    cfg="$HOME/.claude.json"
-    jq=${pkgs.jq}/bin/jq
-    want='{"type":"http","url":"http://127.0.0.1:19789/mcp"}'
-    wantC=$(printf '%s' "$want" | "$jq" -cS .)
-    if [ -f "$cfg" ] && "$jq" -e . "$cfg" >/dev/null 2>&1; then
-      haveC=$("$jq" -cS '.mcpServers["palmier-pro"] // null' "$cfg")
-      src=$(cat "$cfg")
-    else
-      haveC=null
-      src='{}'
-    fi
-    # Only rewrite when the entry is actually missing/different (idempotent → avoids churn
-    # and minimises any race with a concurrently-running Claude Code rewriting the file).
-    if [ "$haveC" != "$wantC" ]; then
-      tmp="$cfg.hm-tmp.$$"
-      printf '%s' "$src" | "$jq" --argjson v "$want" '.mcpServers["palmier-pro"] = $v' > "$tmp"
-      chmod 600 "$tmp"
-      mv -f "$tmp" "$cfg"
-    fi
-  '';
+  # whole file (it holds OAuth + runtime state) — just this one key. Only on hosts that install
+  # the palmier-pro app; elsewhere the server would never answer.
+  home.activation.palmierProMcp = lib.mkIf (libx.hasCask osConfig "fagenorn/palmier/palmier-pro") (
+    lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+      cfg="$HOME/.claude.json"
+      jq=${pkgs.jq}/bin/jq
+      want='{"type":"http","url":"http://127.0.0.1:19789/mcp"}'
+      wantC=$(printf '%s' "$want" | "$jq" -cS .)
+      if [ -f "$cfg" ] && "$jq" -e . "$cfg" >/dev/null 2>&1; then
+        haveC=$("$jq" -cS '.mcpServers["palmier-pro"] // null' "$cfg")
+        src=$(cat "$cfg")
+      else
+        haveC=null
+        src='{}'
+      fi
+      # Only rewrite when the entry is actually missing/different (idempotent → avoids churn
+      # and minimises any race with a concurrently-running Claude Code rewriting the file).
+      if [ "$haveC" != "$wantC" ]; then
+        tmp="$cfg.hm-tmp.$$"
+        printf '%s' "$src" | "$jq" --argjson v "$want" '.mcpServers["palmier-pro"] = $v' > "$tmp"
+        chmod 600 "$tmp"
+        mv -f "$tmp" "$cfg"
+      fi
+    ''
+  );
 }

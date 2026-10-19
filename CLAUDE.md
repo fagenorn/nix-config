@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Personal Nix flake managing **nix-darwin** (macOS, host `mbp`) and **NixOS-on-WSL** (host `anis-desktop`), with **home-manager** for user config. Forked from `ironicbadger/nix-config`. Pinned to the 25.11 release channels (`stateVersion` is `25.05`).
+Personal Nix flake managing **nix-darwin** (macOS, hosts `mbp` and the shared Mac Studio `eleven-m5`) and **NixOS-on-WSL** (host `anis-desktop`), with **home-manager** for user config. Forked from `ironicbadger/nix-config`. Pinned to the 25.11 release channels (`stateVersion` is `25.05`).
 
 ## Commands
 
@@ -52,7 +52,7 @@ Two repo-specific helpers in `lib/helpers.nix` drive almost everything — under
 
 **Secrets via sops-nix + age.** Encrypted store is `secrets/secrets.yaml` (recipient in `.sops.yaml`); the age private key must already exist at `~/.config/sops/age/keys.txt` on the machine (it is *not* in the repo; `~/.ssh/id_ed25519` is a decryption fallback). `home/common/sops/default.nix` declares which secrets get decrypted and exports `GITHUB_TOKEN`/`HF_TOKEN` into the shell. To add a secret: `sops secrets/secrets.yaml` to add the encrypted value, then declare `sops.secrets.<name>` in that module and reference it via `${config.sops.secrets.<name>.path}`.
 
-**Homebrew (darwin only).** Casks/brews live in `hosts/common/darwin-common.nix` (`onActivation.extraFlags = [ "--zap" "--force-cleanup" ]` with `cleanup = "none"` removes anything unmanaged on every switch; the comment above it in that file explains the shim and when to drop it). Taps — including the **self-authored `homebrew/palmier-tap/`** — are wired in `lib/helpers.nix` under `nix-homebrew`:
+**Homebrew (darwin only).** Shared casks live in `hosts/common/darwin-common.nix` (`onActivation.extraFlags = [ "--zap" "--force-cleanup" ]` with `cleanup = "none"` removes anything unmanaged on every switch; the comment above it in that file explains the shim and when to drop it), the rest per host in `hosts/darwin/<hostname>/`; home modules tied to an app gate on `libx.hasCask`. Taps — including the **self-authored `homebrew/palmier-tap/`** — are wired in `lib/helpers.nix` under `nix-homebrew`:
   - The tap key **must** carry the `homebrew-` prefix (`fagenorn/homebrew-palmier`) because nix-homebrew uses the key verbatim as the on-disk `Library/Taps/<key>` dir, even though the cask is referenced as `fagenorn/palmier/palmier-pro`.
   - Third-party taps must be listed in `trust.casks` (Homebrew 6.0 requires tap trust + nix-homebrew forces no-API), or `brew bundle` refuses them during activation.
   - `palmier-pro.rb` uses `version :latest` + `sha256 :no_check` with `greedy = true` → re-fetches the newest `.dmg` on every switch (intentionally non-reproducible, always-latest).

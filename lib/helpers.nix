@@ -38,9 +38,15 @@ let
       contents = map builtins.readFile allFiles;
     in
     builtins.concatStringsSep "\n" contents;
+
+  # Whether the host's nix-darwin config installs a Homebrew cask, for home modules that only
+  # make sense next to their app. Always false on NixOS, which has no `homebrew` option.
+  hasCask = osConfig: name: lib.any (c: c.name == name) (osConfig.homebrew.casks or [ ]);
 in
 {
   inherit scanPaths;
+
+  inherit hasCask;
 
   inherit mergeFilesOrdered;
 
