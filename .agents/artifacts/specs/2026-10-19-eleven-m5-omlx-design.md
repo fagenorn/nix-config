@@ -17,7 +17,7 @@ third daemon and hot-swapped by oMLX; activation sets each model's alias and the
 
 - **Model.** TensorFold `GLM-5.3-Flash-MLX-oQ4-MTP` (185 GB): mixed 4–8-bit oQ, validated with
   oMLX, benchmarked on a 256 GB Ultra. It is downloaded by hand into `~/.omlx/models`, not
-  by activation. Native MTP stays off (its card measured it slower).
+  by activation. Native MTP is on (D10).
 - **Install.** The tap is a flake input wired through nix-homebrew and trusted as a formula. It
   is shared by both Macs like the other taps; only `eleven-m5` lists the formula. No custom
   kernels (they need full Xcode).
@@ -46,7 +46,7 @@ third daemon and hot-swapped by oMLX; activation sets each model's alias and the
 ## Out of scope
 
 - A `claude-local` wrapper on the Studio (user Q5: not now).
-- Custom kernels, MTP and per-request tuning.
+- Custom kernels and per-request tuning.
 - Distributing the API key to teammates (the owner shares it).
 
 ## Decision ledger
@@ -58,7 +58,8 @@ third daemon and hot-swapped by oMLX; activation sets each model's alias and the
 | D3 | Listen on every interface behind a sops API key passed in the environment | User Q3 (teammates); argv is visible to all accounts | Localhost only |
 | D4 | 240 GiB wired limit from a boot daemon (the original pin is superseded by D8) | User Q4 | macOS default ~192 GB: the model barely fits with no room for KV cache |
 | D5 | Model settings by a jq merge of only the declared keys, restarting only on change | The repo's jq-merge pattern for app-owned files | Owning `model_settings.json`: the admin UI writes it too |
-| D6 | Carry upstream PR #4644 (GLM-5.3 MTP-tail config check) as a repo patch that activation re-applies only when it is missing, and warns once it no longer applies | Live load failed on oMLX 0.7.1rc1 with transformers 5.17 (45 layers vs 46 `mlp_layer_types`); with the patch the model loads and answers | Waiting for upstream; editing the checkpoint's `config.json` |
+| D6 | Carry upstream PR #4644 (GLM-5.3 MTP-tail config check) as a repo patch that activation re-applies only when it is missing; it goes quiet once a release carries it and warns if the code moved | Live load failed on oMLX 0.7.1rc1 with transformers 5.17 (45 layers vs 46 `mlp_layer_types`); with the patch the model loads and answers | Waiting for upstream; editing the checkpoint's `config.json` |
 | D8 | Serve a declarative model list with LRU hot-swap and no pin: GLM-5.3-Flash (default) plus Jundot's Qwen3.8-Flash-Next oQ4e-mtp | User: fastest strong Qwen3.8 and hot-swappable models; 185 + 106 GB exceeds the 240 GB GPU limit | Pinning GLM plus a co-resident Qwen3.8-27B (16 GB): slower dense model |
 | D9 | Emit the nix-homebrew trust lists as Brewfile `trusted:` lines | Live: `brew bundle cleanup --force` resets trust.json to the Brewfile, which dropped the tap formula's dependencies on the first install | Re-running `brew trust` after the bundle: cleanup already ran without trust |
+| D10 | Native MTP on for both models | Measured on the Studio: GLM ~63 → ~80 tok/s, Qwen ~120 → ~144 tok/s (single stream) | Off, as GLM's card advised from an M3 Ultra run |
 | D7 | The Studio never sleeps and restarts after power loss or a freeze | User: "make sure it doesn't shut down"; it slept and dropped off the tailnet | Leaving macOS's default sleep |

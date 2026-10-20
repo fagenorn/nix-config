@@ -12,16 +12,20 @@ let
   # a model by that directory) and is also reachable by its alias. Nothing is pinned: together
   # they exceed the GPU limit, so oMLX loads whichever one a request names and unloads the least
   # recently used one to make room (a swap reloads it from the SSD). Exactly one is the default
-  # for requests that name no model. Adding a model is one entry here plus a switch.
+  # for requests that name no model. `mtp` turns on the checkpoint's native multi-token
+  # prediction; measured on this M5 Ultra (single stream, 600 tokens) it lifts GLM from ~63 to
+  # ~80 tok/s and Qwen from ~120 to ~144 tok/s. Adding a model is one entry here plus a switch.
   models = [
     {
       repo = "TensorFold/GLM-5.3-Flash-MLX-oQ4-MTP"; # 185 GB; 321B MoE, ~18B active
       alias = "glm-5.3-flash";
       default = true;
+      mtp = true;
     }
     {
       repo = "Jundot/Qwen3.8-Flash-Next-oQ4e-mtp"; # 106 GB; 125B MoE, 6B active
       alias = "qwen3.8-flash-next";
+      mtp = true;
     }
   ];
   modelName = m: baseNameOf m.repo;
@@ -69,8 +73,8 @@ let
   # step goes quiet; drop the patch then (or when it warns that it no longer applies).
   glm5Fix = ../../../patches/omlx/glm5-next-mtp-tail.patch;
 
-  # Per-model settings merged into the file the admin UI also writes: the alias and the single
-  # default, and no pin, which also undoes the pin an earlier generation set.
+  # Per-model settings merged into the file the admin UI also writes: the alias, the single
+  # default, MTP, and no pin, which also undoes the pin an earlier generation set.
   settings = builtins.toJSON (
     lib.listToAttrs (
       map (m: {
@@ -79,6 +83,7 @@ let
           model_alias = m.alias;
           is_default = m.default or false;
           is_pinned = false;
+          mtp_enabled = m.mtp or false;
         };
       }) models
     )
