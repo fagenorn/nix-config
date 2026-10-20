@@ -10,8 +10,8 @@ oMLX, the default GPU memory limit is too small for the model, and nothing keeps
 
 Install the oMLX Homebrew formula from its project tap on `eleven-m5` only. A launchd daemon runs
 `omlx serve` as the owner on port 8000 on every interface, with an API key from sops. A second
-boot daemon raises the GPU wired-memory limit. An activation step pins the model and makes it
-the default in oMLX's own settings file.
+boot daemon raises the GPU wired-memory limit. A declarative model list is downloaded by a
+third daemon and hot-swapped by oMLX; activation sets each model's alias and the default.
 
 ## Decisions
 
@@ -28,16 +28,20 @@ the default in oMLX's own settings file.
 - **GPU memory.** A boot daemon sets `iogpu.wired_limit_mb` to 240 GiB, leaving about 16 GB for
   macOS.
 - **Upstream fix.** Per D6.
-- **Pinning.** Activation merges `is_pinned` and `is_default` for the model into
-  `~/.omlx/model_settings.json`, creating `{"version":1,"models":{}}` if absent. It restarts the
-  daemon only when that merge changed the file. The admin UI keeps owning every other key.
+- **Models (D8).** A declarative list of `{ repo, alias, default? }`. A boot/switch daemon
+  downloads each missing model with `hf download` and marks it complete. Activation merges each
+  model's alias, the single default and `is_pinned = false` into `~/.omlx/model_settings.json`,
+  clearing `is_default` elsewhere, and restarts the daemon only when that changed the file. The
+  admin UI keeps owning every other key. `~/.omlx` is mode 0700.
+- **Tap trust (D9).** nix-homebrew's trust lists are also emitted as Brewfile `trusted:` lines.
 
 ## Test seams
 
-- `just build eleven-m5` and `just build mbp`: the formula, daemons and trust entry appear only
-  on `eleven-m5`.
+- `just build eleven-m5` and `just build mbp`: the formula and daemons appear only on
+  `eleven-m5`; both Brewfiles carry the `trusted:` lines.
 - Live on the Studio: the wired limit is set, `GET /v1/models` lists the model with the key and
-  refuses without it, and a short `/v1/messages` request returns text.
+  refuses without it, a short `/v1/messages` request to each alias returns text (the second one
+  swaps models), and `~/.homebrew/trust.json` and the formula's dependencies survive a switch.
 
 ## Out of scope
 
@@ -52,7 +56,9 @@ the default in oMLX's own settings file.
 | D1 | TensorFold oQ4-MTP | User Q1 "recommended and optimized for the M5 256"; the only build validated with oMLX on 256 GB | pipenetwork 4-bit (plain quant), mixed 4/8 (fit risk) |
 | D2 | Homebrew formula via the flake-pinned tap, Studio only | User Q2 | The `.dmg` app: not declarative |
 | D3 | Listen on every interface behind a sops API key passed in the environment | User Q3 (teammates); argv is visible to all accounts | Localhost only |
-| D4 | 240 GiB wired limit from a boot daemon, and the model pinned | User Q4 | macOS default ~192 GB: the model barely fits with no room for KV cache |
-| D5 | Pin by a jq merge of two keys, restarting only on change | The repo's jq-merge pattern for app-owned files | Owning `model_settings.json`: the admin UI writes it too |
+| D4 | 240 GiB wired limit from a boot daemon (the original pin is superseded by D8) | User Q4 | macOS default ~192 GB: the model barely fits with no room for KV cache |
+| D5 | Model settings by a jq merge of only the declared keys, restarting only on change | The repo's jq-merge pattern for app-owned files | Owning `model_settings.json`: the admin UI writes it too |
 | D6 | Carry upstream PR #4644 (GLM-5.3 MTP-tail config check) as a repo patch that activation re-applies only when it is missing, and warns once it no longer applies | Live load failed on oMLX 0.7.1rc1 with transformers 5.17 (45 layers vs 46 `mlp_layer_types`); with the patch the model loads and answers | Waiting for upstream; editing the checkpoint's `config.json` |
+| D8 | Serve a declarative model list with LRU hot-swap and no pin: GLM-5.3-Flash (default) plus Jundot's Qwen3.8-Flash-Next oQ4e-mtp | User: fastest strong Qwen3.8 and hot-swappable models; 185 + 106 GB exceeds the 240 GB GPU limit | Pinning GLM plus a co-resident Qwen3.8-27B (16 GB): slower dense model |
+| D9 | Emit the nix-homebrew trust lists as Brewfile `trusted:` lines | Live: `brew bundle cleanup --force` resets trust.json to the Brewfile, which dropped the tap formula's dependencies on the first install | Re-running `brew trust` after the bundle: cleanup already ran without trust |
 | D7 | The Studio never sleeps and restarts after power loss or a freeze | User: "make sure it doesn't shut down"; it slept and dropped off the tailnet | Leaving macOS's default sleep |

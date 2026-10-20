@@ -54,7 +54,7 @@ Two repo-specific helpers in `lib/helpers.nix` drive almost everything — under
 
 **Homebrew (darwin only).** Shared casks live in `hosts/common/darwin-common.nix` (`onActivation.extraFlags = [ "--zap" "--force-cleanup" ]` with `cleanup = "none"` removes anything unmanaged on every switch; the comment above it in that file explains the shim and when to drop it), the rest per host in `hosts/darwin/<hostname>/`; home modules tied to an app gate on `libx.hasCask`. Taps — including the **self-authored `homebrew/palmier-tap/`** — are wired in `lib/helpers.nix` under `nix-homebrew`:
   - The tap key **must** carry the `homebrew-` prefix (`fagenorn/homebrew-palmier`) because nix-homebrew uses the key verbatim as the on-disk `Library/Taps/<key>` dir, even though the cask is referenced as `fagenorn/palmier/palmier-pro`.
-  - Third-party taps must be listed in `trust.casks` (Homebrew 6.0 requires tap trust + nix-homebrew forces no-API), or `brew bundle` refuses them during activation.
+  - Third-party taps' casks and formulae must be listed in `trust.casks`/`trust.formulae` (Homebrew 6.0 requires tap trust + nix-homebrew forces no-API), or `brew bundle` refuses them; the same lists are also written into the Brewfile, because `brew bundle cleanup --force` resets the trust store to it.
   - `palmier-pro.rb` uses `version :latest` + `sha256 :no_check` with `greedy = true` → re-fetches the newest `.dmg` on every switch (intentionally non-reproducible, always-latest).
 
 **Claude Code is declaratively managed** by `home/common/claude-code/default.nix` — read it before touching any Claude Code config on this machine:
