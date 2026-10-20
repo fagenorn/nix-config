@@ -27,6 +27,7 @@ the default in oMLX's own settings file.
   8 GB, 100 GB SSD cache).
 - **GPU memory.** A boot daemon sets `iogpu.wired_limit_mb` to 240 GiB, leaving about 16 GB for
   macOS.
+- **Upstream fix.** Per D6.
 - **Pinning.** Activation merges `is_pinned` and `is_default` for the model into
   `~/.omlx/model_settings.json`, creating `{"version":1,"models":{}}` if absent. It restarts the
   daemon only when that merge changed the file. The admin UI keeps owning every other key.
@@ -53,3 +54,5 @@ the default in oMLX's own settings file.
 | D3 | Listen on every interface behind a sops API key passed in the environment | User Q3 (teammates); argv is visible to all accounts | Localhost only |
 | D4 | 240 GiB wired limit from a boot daemon, and the model pinned | User Q4 | macOS default ~192 GB: the model barely fits with no room for KV cache |
 | D5 | Pin by a jq merge of two keys, restarting only on change | The repo's jq-merge pattern for app-owned files | Owning `model_settings.json`: the admin UI writes it too |
+| D6 | Carry upstream PR #4644 (GLM-5.3 MTP-tail config check) as a repo patch that activation re-applies only when it is missing, and warns once it no longer applies | Live load failed on oMLX 0.7.1rc1 with transformers 5.17 (45 layers vs 46 `mlp_layer_types`); with the patch the model loads and answers | Waiting for upstream; editing the checkpoint's `config.json` |
+| D7 | The Studio never sleeps and restarts after power loss or a freeze | User: "make sure it doesn't shut down"; it slept and dropped off the tailnet | Leaving macOS's default sleep |

@@ -47,10 +47,25 @@ in
   };
 
   # Keep the model loaded and make it the default by merging just those two keys into the
-  # settings file the admin UI also writes, then restart the server only when they changed.
+  # settings file the admin UI also writes. Also re-apply the GLM-5.3 config fix from
+  # https://github.com/jundot/omlx/pull/4644 to the Homebrew install, which `brew upgrade` can
+  # replace; drop the patch once a release carries it (the step then warns that it no longer
+  # applies). Restart the server only when either changed something.
   system.activationScripts.postActivation.text = ''
     sudo --user=${username} --set-home ${pkgs.writeShellScript "omlx-pin" ''
       set -euo pipefail
+      fix=${../../../patches/omlx/glm5-next-mtp-tail.patch}
+      for sp in /opt/homebrew/opt/omlx/libexec/lib/python3*/site-packages; do
+        [ -d "$sp/omlx" ] || continue
+        if /usr/bin/patch -d "$sp" -p1 -R --dry-run -s -f < "$fix" >/dev/null 2>&1; then
+          :
+        elif /usr/bin/patch -d "$sp" -p1 -N --dry-run -s -f < "$fix" >/dev/null 2>&1; then
+          /usr/bin/patch -d "$sp" -p1 -N -s -f < "$fix"
+          touch ${home}/.omlx/.restart-needed
+        else
+          echo >&2 "oMLX: the GLM-5.3 config patch no longer applies; check whether upstream merged it"
+        fi
+      done
       cfg=${home}/.omlx/model_settings.json
       jq=${lib.getExe pkgs.jq}
       mkdir -p ${home}/.omlx/logs
@@ -58,11 +73,11 @@ in
       want=$("$jq" '.models["${model}"] += {"is_pinned": true, "is_default": true}' "$cfg")
       if [ "$want" != "$("$jq" . "$cfg")" ]; then
         printf '%s\n' "$want" > "$cfg.tmp" && mv -f "$cfg.tmp" "$cfg"
-        touch ${home}/.omlx/.pin-changed
+        touch ${home}/.omlx/.restart-needed
       fi
     ''}
-    if [ -e ${home}/.omlx/.pin-changed ]; then
-      rm -f ${home}/.omlx/.pin-changed
+    if [ -e ${home}/.omlx/.restart-needed ]; then
+      rm -f ${home}/.omlx/.restart-needed
       launchctl kickstart -k system/org.nixos.omlx || true
     fi
   '';
