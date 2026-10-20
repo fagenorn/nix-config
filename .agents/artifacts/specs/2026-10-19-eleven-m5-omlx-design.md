@@ -16,8 +16,8 @@ third daemon and hot-swapped by oMLX; activation sets each model's alias and the
 ## Decisions
 
 - **Model.** TensorFold `GLM-5.3-Flash-MLX-oQ4-MTP` (185 GB): mixed 4–8-bit oQ, validated with
-  oMLX, benchmarked on a 256 GB Ultra. It is downloaded by hand into `~/.omlx/models`, not
-  by activation. Native MTP is on (D10).
+  oMLX, benchmarked on a 256 GB Ultra. It is the default entry of the model list (D8), which a
+  daemon downloads; native MTP is on (D10).
 - **Install.** The tap is a flake input wired through nix-homebrew and trusted as a formula. It
   is shared by both Macs like the other taps; only `eleven-m5` lists the formula. No custom
   kernels (they need full Xcode).
@@ -28,8 +28,9 @@ third daemon and hot-swapped by oMLX; activation sets each model's alias and the
 - **GPU memory.** A boot daemon sets `iogpu.wired_limit_mb` to 240 GiB, leaving about 16 GB for
   macOS.
 - **Upstream fix.** Per D6.
-- **Models (D8).** A declarative list of `{ repo, alias, default? }`. A boot/switch daemon
-  downloads each missing model with `hf download` and marks it complete. Activation merges each
+- **Models (D8).** A declarative list of `{ repo, alias, default?, mtp? }`. A daemon downloads each
+  missing model into a staging directory, moves it into place when complete and restarts the
+  server; it runs at boot and activation starts it while a model is missing. Activation merges each
   model's alias, the single default and `is_pinned = false` into `~/.omlx/model_settings.json`,
   clearing `is_default` elsewhere, and restarts the daemon only when that changed the file. The
   admin UI keeps owning every other key. `~/.omlx` is mode 0700.

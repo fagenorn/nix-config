@@ -45,18 +45,26 @@ let
     exec /opt/homebrew/bin/omlx serve --host 0.0.0.0 --port 8000 --model-dir ${modelDir}
   '';
 
-  # Fetches every listed model that has not finished downloading. `hf download` resumes a
-  # partial copy and verifies each file, and the marker is written only after it succeeds.
-  # Runs at boot and whenever the list changes (launchd reloads the job when its script does).
+  # Fetches every listed model that has not finished downloading. It downloads into a staging
+  # directory (`hf download` resumes a partial copy and verifies each file) and moves the model
+  # into modelDir only once complete, so oMLX never sees half a model, then restarts the server
+  # (launchd's KeepAlive brings it back) so it discovers the new one. A model already in modelDir
+  # without the marker is verified in place. Runs at boot, and activation starts it whenever a
+  # listed model is missing, so a failed download is retried on the next boot or switch.
   fetch = pkgs.writeShellScript "omlx-models" ''
     set -uo pipefail
+    hf=${pkgs.python3Packages.huggingface-hub}/bin/hf
     status=0
+    added=0
     ${lib.concatMapStrings (m: ''
       dir=${modelDir}/${modelName m}
       if [ ! -e "$dir/.omlx-download-complete" ]; then
-        echo "$(date) downloading ${m.repo}"
-        if ${pkgs.python3Packages.huggingface-hub}/bin/hf download ${m.repo} --local-dir "$dir"; then
-          touch "$dir/.omlx-download-complete"
+        target="$dir"
+        [ -d "$dir" ] || target=${stagingDir}/${modelName m}
+        echo "$(date) downloading ${m.repo} into $target"
+        if "$hf" download ${m.repo} --local-dir "$target"; then
+          touch "$target/.omlx-download-complete"
+          [ "$target" = "$dir" ] || { mv "$target" "$dir" && added=1; }
           echo "$(date) finished ${m.repo}"
         else
           echo "$(date) failed ${m.repo}; it is retried on the next boot or switch" >&2
@@ -64,8 +72,13 @@ let
         fi
       fi
     '') models}
+    [ "$added" = 0 ] || /usr/bin/pkill -U "$(id -u)" -x omlx-server || true
     exit $status
   '';
+  stagingDir = "${home}/.omlx/downloads";
+  modelMarkers = lib.concatMapStringsSep " " (
+    m: "${modelDir}/${modelName m}/.omlx-download-complete"
+  ) models;
 
   # Upstream fix https://github.com/jundot/omlx/pull/4644 (GLM-5.3's MTP tail fails transformers
   # 5.17's layer-count check). `brew upgrade` can replace the patched install, so activation
@@ -122,13 +135,15 @@ in
     StandardErrorPath = "${home}/.omlx/logs/models.log";
   };
 
-  # Restart the server only when the settings merge or the patch changed something. ~/.omlx is
-  # private: its logs can hold other people's prompts, and teammates share the staff group.
+  # Restart the server only when the settings merge or the patch changed something, and start the
+  # downloader when a listed model is missing. ~/.omlx is private: its logs can hold other
+  # people's prompts, and teammates share the staff group.
   system.activationScripts.postActivation.text = ''
     sudo --user=${username} --set-home ${pkgs.writeShellScript "omlx-settings" ''
       set -euo pipefail
-      mkdir -p ${home}/.omlx/logs ${modelDir}
+      mkdir -p ${home}/.omlx/logs ${modelDir} ${stagingDir}
       chmod 0700 ${home}/.omlx
+      rm -f ${home}/.omlx/.restart-needed
 
       for sp in /opt/homebrew/opt/omlx/libexec/lib/python3*/site-packages; do
         [ -d "$sp/omlx" ] || continue
@@ -145,8 +160,10 @@ in
       cfg=${home}/.omlx/model_settings.json
       jq=${lib.getExe pkgs.jq}
       [ -f "$cfg" ] || printf '{"version":1,"models":{}}' > "$cfg"
-      want=$("$jq" --argjson s '${settings}' '
-        .models |= (map_values(del(.is_default)) | reduce ($s | to_entries[]) as $e (.; .[$e.key] += $e.value))
+      want=$("$jq" --argjson s ${lib.escapeShellArg settings} '
+        .models |= ((. // {})
+          | map_values(if type == "object" then .is_default = false else . end)
+          | reduce ($s | to_entries[]) as $e (.; .[$e.key] = ((.[$e.key] | objects) // {}) + $e.value))
       ' "$cfg")
       if [ "$want" != "$("$jq" . "$cfg")" ]; then
         printf '%s\n' "$want" > "$cfg.tmp" && mv -f "$cfg.tmp" "$cfg"
@@ -157,5 +174,8 @@ in
       rm -f ${home}/.omlx/.restart-needed
       launchctl kickstart -k system/org.nixos.omlx || true
     fi
+    for marker in ${modelMarkers}; do
+      [ -e "$marker" ] || { launchctl kickstart system/org.nixos.omlx-models || true; break; }
+    done
   '';
 }
