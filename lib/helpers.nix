@@ -115,6 +115,8 @@ in
               "homebrew/homebrew-cask" = homebrew-cask;
               "homebrew/homebrew-bundle" = homebrew-bundle;
               "nikitabobko/tap" = nikitabobko-tap;
+              # Referenced as `jundot/omlx/omlx`; the key carries the `homebrew-` prefix (see below).
+              "jundot/homebrew-omlx" = omlx-tap;
               # Local tap carrying the self-authored palmier-pro (auto-updating) and darktable casks
               # (listed in homebrew.casks in hosts/darwin/mbp/default.nix).
               # builtins.path copies the dir to its OWN top-level store path so it satisfies
@@ -132,6 +134,7 @@ in
             # so third-party taps must be explicitly trusted or `brew bundle` refuses
             # to load them during activation. `trust` runs `brew trust` (writing
             # ~/.homebrew/trust.json) before the bundle. See https://docs.brew.sh/Tap-Trust.
+            trust.formulae = [ "jundot/omlx/omlx" ];
             trust.casks = [
               "nikitabobko/tap/aerospace"
               "fagenorn/palmier/palmier-pro"
@@ -139,6 +142,41 @@ in
             ];
           };
         }
+        # Homebrew 7's `brew bundle cleanup --force` (run on every switch) resets the trust store
+        # to what the Brewfile declares, which wiped the entries above after each activation and,
+        # with them, the dependencies of untrusted tap formulae. Declare the same trust in the
+        # Brewfile too, as `tap "<user>/<repo>", trusted: { formulae: [...], casks: [...] }`.
+        (
+          { config, lib, ... }:
+          let
+            trust = config.nix-homebrew.trust;
+            item =
+              kind: full:
+              let
+                p = lib.splitString "/" full;
+              in
+              {
+                inherit kind;
+                tap = "${builtins.elemAt p 0}/${builtins.elemAt p 1}";
+                name = builtins.elemAt p 2;
+              };
+            byTap = lib.groupBy (i: i.tap) (
+              map (item "formulae") trust.formulae ++ map (item "casks") trust.casks
+            );
+            names = kind: is: map (i: i.name) (builtins.filter (i: i.kind == kind) is);
+            line =
+              tap: is:
+              let
+                parts =
+                  lib.optional (names "formulae" is != [ ]) "formulae: ${builtins.toJSON (names "formulae" is)}"
+                  ++ lib.optional (names "casks" is != [ ]) "casks: ${builtins.toJSON (names "casks" is)}";
+              in
+              ''tap "${tap}", trusted: { ${lib.concatStringsSep ", " parts} }'';
+          in
+          {
+            homebrew.extraConfig = lib.concatStringsSep "\n" (lib.mapAttrsToList line byTap);
+          }
+        )
 
       ];
       # ] ++ lib.optionals (builtins.pathExists ./../hosts/darwin/${hostname}/default.nix) [

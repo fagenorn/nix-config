@@ -9,7 +9,15 @@ let
   # (non-admin) macOS account with no password: SSH with the listed keys is the only way in.
   # Pick a uid above 500 that is unused (`dscl . -list /Users UniqueID`), e.g.
   #   { name = "jdoe"; uid = 600; keys = [ "ssh-ed25519 AAAA... jdoe@laptop" ]; }
-  teammates = [ ];
+  teammates = [
+    {
+      name = "selo";
+      uid = 503;
+      keys = [
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP5yoVHIP1/z2Gx7BsvVBq5mOlXHWnz5DaEYfhtICm9i j@elevenyellow.com"
+      ];
+    }
+  ];
   # To revoke someone, move their name from `teammates` to here: nix-darwin then deletes the
   # account and its home, and they are taken out of com.apple.access_ssh.
   formerTeammates = [ ];
@@ -20,8 +28,16 @@ let
   ];
 in
 {
+  imports = [ ./omlx.nix ];
+
   # mkDarwin sets HostName and LocalHostName; Tailscale names the node after the Computer Name.
   networking.computerName = "eleven-m5";
+
+  # A shared server (oMLX, CI runners, teammate SSH): never sleep, and come back on its own.
+  # The display may still sleep.
+  power.sleep.computer = "never";
+  power.restartAfterPowerFailure = true;
+  power.restartAfterFreeze = true;
 
   system.defaults.dock.persistent-apps = [
     "/Applications/Helium.app"

@@ -21,6 +21,13 @@
       flake = false;
     };
 
+    # oMLX (MLX inference server) Homebrew tap: the formula lives in the project repo itself.
+    # Advances with `just update`; the eleven-m5 host installs the formula.
+    omlx-tap = {
+      url = "github:jundot/omlx";
+      flake = false;
+    };
+
     nikitabobko-tap = {
       url = "github:nikitabobko/homebrew-tap";
       flake = false;
