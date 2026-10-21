@@ -58,7 +58,8 @@ let
   modelName = m: baseNameOf m.repo;
 
   # 240 of 256 GB may be wired for the GPU; macOS's default (~75%) is too small for the
-  # 185 GB model plus its KV cache. The sysctl resets on reboot, hence a boot daemon.
+  # 185 GB model plus its KV cache. The sysctl resets on reboot, hence a boot daemon. The ~16 GB
+  # left over also holds Colima's 8 GiB VM (docker.nix), so raising this squeezes macOS.
   wiredLimitMb = 240 * 1024;
 
   # Teammates reach the server over the tailnet, so it listens on every interface behind an
