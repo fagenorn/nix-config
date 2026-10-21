@@ -5,9 +5,11 @@
   ...
 }:
 let
-  # Teammates who reach this Studio over the owner's tailnet. Each entry becomes a standard
-  # (non-admin) macOS account with no password: SSH with the listed keys is the only way in.
-  # Pick a uid above 500 that is unused (`dscl . -list /Users UniqueID`), e.g.
+  # Teammates who reach this Studio over the owner's tailnet; SSH with the listed keys is the only
+  # remote way in. An entry nix-darwin creates is a standard account with no password; admin rights
+  # and a password (e.g. from `sysadminctl -addUser ... -admin`) are left alone, since the admin
+  # group is not declared here. Reuse an existing account's uid, or pick an unused one above 500
+  # (`dscl . -list /Users UniqueID`), e.g.
   #   { name = "jdoe"; uid = 600; keys = [ "ssh-ed25519 AAAA... jdoe@laptop" ]; }
   teammates = [
     {
@@ -15,6 +17,13 @@ let
       uid = 503;
       keys = [
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP5yoVHIP1/z2Gx7BsvVBq5mOlXHWnz5DaEYfhtICm9i j@elevenyellow.com"
+      ];
+    }
+    {
+      name = "roly";
+      uid = 504;
+      keys = [
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC/QyaSN3ayfssYqtalgdGpcjIh2Idvzi58ui4fnI20y roly@elevenyellow.com"
       ];
     }
   ];
