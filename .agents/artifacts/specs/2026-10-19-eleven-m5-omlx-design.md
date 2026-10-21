@@ -24,7 +24,9 @@ third daemon and hot-swapped by oMLX; activation sets each model's alias and the
 - **Server.** A system daemon runs as the owner, at boot and kept alive. It decrypts
   `omlx_api_key` with the owner's age key at start and passes it in the environment, never argv.
   It runs `--host 0.0.0.0 --port 8000` and otherwise keeps oMLX's defaults (process limit RAM −
-  8 GB, 100 GB SSD cache).
+  8 GB, 100 GB SSD cache), except chunked prefill and the aggressive decode burst (D11), which
+  activation deep-merges into `~/.omlx/settings.json` under the same rules as D5; the admin UI
+  and the auth secrets keep every other key there.
 - **GPU memory.** A boot daemon sets `iogpu.wired_limit_mb` to 240 GiB, leaving about 16 GB for
   macOS.
 - **Upstream fix.** Per D6.
@@ -58,9 +60,10 @@ third daemon and hot-swapped by oMLX; activation sets each model's alias and the
 | D2 | Homebrew formula via the flake-pinned tap, Studio only | User Q2 | The `.dmg` app: not declarative |
 | D3 | Listen on every interface behind a sops API key passed in the environment | User Q3 (teammates); argv is visible to all accounts | Localhost only |
 | D4 | 240 GiB wired limit from a boot daemon (the original pin is superseded by D8) | User Q4 | macOS default ~192 GB: the model barely fits with no room for KV cache |
-| D5 | Model settings by a jq merge of only the declared keys, restarting only on change | The repo's jq-merge pattern for app-owned files | Owning `model_settings.json`: the admin UI writes it too |
+| D5 | Model and server settings by a jq merge of only the declared keys, restarting only on change | The repo's jq-merge pattern for app-owned files | Owning `model_settings.json` or `settings.json`: the admin UI writes both, and `settings.json` holds the auth secrets |
 | D6 | Carry upstream PR #4644 (GLM-5.3 MTP-tail config check) as a repo patch that activation re-applies only when it is missing; it goes quiet once a release carries it and warns if the code moved | Live load failed on oMLX 0.7.1rc1 with transformers 5.17 (45 layers vs 46 `mlp_layer_types`); with the patch the model loads and answers | Waiting for upstream; editing the checkpoint's `config.json` |
 | D8 | Serve a declarative model list with LRU hot-swap and no pin: GLM-5.3-Flash (default) plus Jundot's Qwen3.8-Flash-Next oQ4e-mtp | User: fastest strong Qwen3.8 and hot-swappable models; 185 + 106 GB exceeds the 240 GB GPU limit | Pinning GLM plus a co-resident Qwen3.8-27B (16 GB): slower dense model |
 | D9 | Emit the nix-homebrew trust lists as Brewfile `trusted:` lines | Live: `brew bundle cleanup --force` resets trust.json to the Brewfile, which dropped the tap formula's dependencies on the first install | Re-running `brew trust` after the bundle: cleanup already ran without trust |
 | D10 | Native MTP on for both models | Measured on the Studio: GLM ~63 → ~80 tok/s, Qwen ~120 → ~144 tok/s (single stream) | Off, as GLM's card advised from an M3 Ultra run |
+| D11 | `scheduler.chunked_prefill = true` and `server.burst_decode_mode = "aggressive"` | Measured on live team traffic: aggregate decode stays ~54 tok/s at any concurrency; chunked prefill took per-request speed with 4+ in flight from 6.5 to 13.8 tok/s and memory-pressure events from 110 to 63 per hour; the burst was neutral to slightly positive | MTP `mtp_adaptive_max_depth = 2`: about −20% aggregate, so the adaptive default (3) stays |
 | D7 | The Studio never sleeps and restarts after power loss or a freeze | User: "make sure it doesn't shut down"; it slept and dropped off the tailnet | Leaving macOS's default sleep |
