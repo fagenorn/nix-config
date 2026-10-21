@@ -57,12 +57,17 @@ in
   # AuthorizedKeysCommand, and `AuthorizedKeysFile none` ignores ~/.ssh/authorized_keys, so a
   # key someone adds to their own home cannot outlive their entry. nix-darwin writes this into
   # /etc/ssh/sshd_config.d, which macOS includes before its own defaults; the first value wins.
+  # SetEnv hands sessions TERMINFO_DIRS before the login shell starts: Apple's /bin/zsh looks up
+  # TERM once at startup and does not recover when /etc/zshenv exports TERMINFO_DIRS later, so a
+  # TERM such as xterm-ghostty that only the system profile provides would leave ZLE without a
+  # terminal definition. /etc/zshenv still replaces it with nix-darwin's full list.
   services.openssh = {
     enable = true;
     extraConfig = ''
       PasswordAuthentication no
       KbdInteractiveAuthentication no
       AuthorizedKeysFile none
+      SetEnv TERMINFO_DIRS=/run/current-system/sw/share/terminfo:/usr/share/terminfo
     '';
   };
 
