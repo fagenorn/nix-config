@@ -18,8 +18,7 @@ let
   #
   # Optional keys: `include` limits the download to those globs (one variant of a GGUF repo),
   # `id` is the model's oMLX name when it is not its directory's (a GGUF is named by its file),
-  # `settings` adds model settings, and an entry without `alias` gets none (the Splash draft,
-  # which oMLX finds among its helper models).
+  # `settings` adds model settings, and an entry with neither `alias` nor `settings` gets none.
   models = [
     {
       repo = "TensorFold/GLM-5.3-Flash-MLX-oQ4-MTP"; # 185 GB; 321B MoE, ~18B active
@@ -49,10 +48,15 @@ let
         max_context_window = 262144;
       };
     }
-    { repo = "incoai/Qwen3.8-Flash-Next-DFlash2"; } # 1.2 GB; Splash's draft for Flash-Next
+    # 1.2 GB; Splash's draft for Flash-Next, which oMLX finds among its helper models. Hidden from
+    # /v1/models, where it is no model to chat with.
+    {
+      repo = "incoai/Qwen3.8-Flash-Next-DFlash2";
+      settings.is_hidden = true;
+    }
   ];
   modelName = m: baseNameOf m.repo;
-  served = builtins.filter (m: m ? alias) models;
+  configured = builtins.filter (m: m ? alias || m ? settings) models;
 
   # 240 of 256 GB may be wired for the GPU; macOS's default (~75%) is too small for the
   # 185 GB model plus its KV cache. The sysctl resets on reboot, hence a boot daemon.
@@ -118,14 +122,15 @@ let
     lib.listToAttrs (
       map (m: {
         name = m.id or (modelName m);
-        value = {
-          model_alias = m.alias;
-          is_default = m.default or false;
-          is_pinned = false;
-          mtp_enabled = m.mtp or false;
-        }
-        // m.settings or { };
-      }) served
+        value =
+          lib.optionalAttrs (m ? alias) { model_alias = m.alias; }
+          // {
+            is_default = m.default or false;
+            is_pinned = false;
+            mtp_enabled = m.mtp or false;
+          }
+          // m.settings or { };
+      }) configured
     )
   );
 
