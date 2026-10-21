@@ -26,6 +26,13 @@ let
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC/QyaSN3ayfssYqtalgdGpcjIh2Idvzi58ui4fnI20y roly@elevenyellow.com"
       ];
     }
+    {
+      name = "lucas";
+      uid = 505;
+      keys = [
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJqftZNz8v3qKDBrOD7BADByst/ApLYgNSeclMk9gFKm lucas@elevenyellow-macstudio"
+      ];
+    }
   ];
   # To revoke someone, move their name from `teammates` to here: nix-darwin then deletes the
   # account and its home, and they are taken out of com.apple.access_ssh.
