@@ -44,7 +44,10 @@ let
   ];
 in
 {
-  imports = [ ./omlx.nix ];
+  imports = [
+    ./omlx.nix
+    ./docker.nix
+  ];
 
   # mkDarwin sets HostName and LocalHostName; Tailscale names the node after the Computer Name.
   networking.computerName = "eleven-m5";
