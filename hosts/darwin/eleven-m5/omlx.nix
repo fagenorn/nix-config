@@ -15,6 +15,11 @@ let
   # for requests that name no model. `mtp` turns on the checkpoint's native multi-token
   # prediction; measured on this M5 Ultra (single stream, 600 tokens) it lifts GLM from ~63 to
   # ~80 tok/s and Qwen from ~120 to ~144 tok/s. Adding a model is one entry here plus a switch.
+  #
+  # Optional keys: `include` limits the download to those globs (one variant of a GGUF repo),
+  # `id` is the model's oMLX name when it is not its directory's (a GGUF is named by its file),
+  # `settings` adds model settings, and an entry without `alias` gets none (the Splash draft,
+  # which oMLX finds among its helper models).
   models = [
     {
       repo = "TensorFold/GLM-5.3-Flash-MLX-oQ4-MTP"; # 185 GB; 321B MoE, ~18B active
@@ -27,8 +32,27 @@ let
       alias = "qwen3.8-flash-next";
       mtp = true;
     }
+    # The same model on Splash's Metal engine with DFlash2 speculative decoding, which batches
+    # concurrent requests out of one shared KV pool. Splash cannot run the MLX checkpoint above,
+    # so this is Unsloth's dynamic 4-bit GGUF (111 GB), the same bit width. Its context is the
+    # native 256K rather than the global 32K default, since Splash only sizes what it is given.
+    {
+      repo = "unsloth/Qwen3.8-Flash-Next-GGUF";
+      include = [
+        "UD-Q4_K_XL/*"
+        "mmproj-BF16.gguf"
+      ];
+      id = "Qwen3.8-Flash-Next-UD-Q4_K_XL";
+      alias = "qwen3.8-flash-next-splash";
+      settings = {
+        external_engine = "splash";
+        max_context_window = 262144;
+      };
+    }
+    { repo = "incoai/Qwen3.8-Flash-Next-DFlash2"; } # 1.2 GB; Splash's draft for Flash-Next
   ];
   modelName = m: baseNameOf m.repo;
+  served = builtins.filter (m: m ? alias) models;
 
   # 240 of 256 GB may be wired for the GPU; macOS's default (~75%) is too small for the
   # 185 GB model plus its KV cache. The sysctl resets on reboot, hence a boot daemon.
@@ -62,7 +86,9 @@ let
         target="$dir"
         [ -d "$dir" ] || target=${stagingDir}/${modelName m}
         echo "$(date) downloading ${m.repo} into $target"
-        if "$hf" download ${m.repo} --local-dir "$target"; then
+        if "$hf" download ${m.repo} ${
+          lib.optionalString (m ? include) "--include ${lib.escapeShellArgs m.include}"
+        } --local-dir "$target"; then
           touch "$target/.omlx-download-complete"
           [ "$target" = "$dir" ] || { mv "$target" "$dir" && added=1; }
           echo "$(date) finished ${m.repo}"
@@ -91,14 +117,15 @@ let
   settings = builtins.toJSON (
     lib.listToAttrs (
       map (m: {
-        name = modelName m;
+        name = m.id or (modelName m);
         value = {
           model_alias = m.alias;
           is_default = m.default or false;
           is_pinned = false;
           mtp_enabled = m.mtp or false;
-        };
-      }) models
+        }
+        // m.settings or { };
+      }) served
     )
   );
 
@@ -109,13 +136,25 @@ let
   # instead of stalling it, and keeps each prefill's transient Metal buffers small; with 4+ requests
   # in flight it doubled per-request speed. The aggressive burst gives each decode burst 0.2 s
   # instead of 0.1 s, which suits this decode-bound load; its gain was within noise but not negative.
+  #
+  # Splash's concurrency is its KV pool: whatever its memory budget holds beyond the weights, shared
+  # by every request in flight and kept afterwards as prefix cache; requests that outgrow it wait.
+  # Left unset, oMLX sizes the budget for a single context window, so 200 GB gives the 111 GB
+  # Flash-Next GGUF ~85 GB of KV for parallel requests while keeping every expert resident (no SSD
+  # streaming) and ~40 GB under the wired limit for macOS. oMLX still clamps it to what its memory
+  # limit leaves free. KV stays int8, Splash's default, which tracks llama.cpp's outputs closely.
   serverSettings = builtins.toJSON {
     scheduler.chunked_prefill = true;
     server.burst_decode_mode = "aggressive";
+    integrations.splash_max_memory_gb = 200;
   };
 in
 {
-  homebrew.brews = [ "jundot/omlx/omlx" ];
+  # oMLX finds the Splash launcher in /opt/homebrew/bin itself (Splash needs macOS 26.4+, M3+).
+  homebrew.brews = [
+    "jundot/omlx/omlx"
+    "incoai/tap/splash"
+  ];
 
   launchd.daemons.iogpu-wired-limit.serviceConfig = {
     ProgramArguments = [

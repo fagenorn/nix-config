@@ -117,6 +117,8 @@ in
               "nikitabobko/tap" = nikitabobko-tap;
               # Referenced as `jundot/omlx/omlx`; the key carries the `homebrew-` prefix (see below).
               "jundot/homebrew-omlx" = omlx-tap;
+              # Referenced as `incoai/tap/splash`.
+              "incoai/homebrew-tap" = splash-tap;
               # Local tap carrying the self-authored palmier-pro (auto-updating) and darktable casks
               # (listed in homebrew.casks in hosts/darwin/mbp/default.nix).
               # builtins.path copies the dir to its OWN top-level store path so it satisfies
@@ -134,7 +136,10 @@ in
             # so third-party taps must be explicitly trusted or `brew bundle` refuses
             # to load them during activation. `trust` runs `brew trust` (writing
             # ~/.homebrew/trust.json) before the bundle. See https://docs.brew.sh/Tap-Trust.
-            trust.formulae = [ "jundot/omlx/omlx" ];
+            trust.formulae = [
+              "jundot/omlx/omlx"
+              "incoai/tap/splash"
+            ];
             trust.casks = [
               "nikitabobko/tap/aerospace"
               "fagenorn/palmier/palmier-pro"
