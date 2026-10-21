@@ -178,17 +178,20 @@ in
           | reduce ($s | to_entries[]) as $e (.; .[$e.key] = ((.[$e.key] | objects) // {}) + $e.value))
       ' "$cfg")
       if [ "$want" != "$("$jq" . "$cfg")" ]; then
-        printf '%s\n' "$want" > "$cfg.tmp" && mv -f "$cfg.tmp" "$cfg"
+        printf '%s\n' "$want" > "$cfg.tmp"
+        mv -f "$cfg.tmp" "$cfg"
         touch ${home}/.omlx/.restart-needed
       fi
 
       # oMLX fills in defaults for any key a partial file leaves out, so a fresh machine can start
-      # from {}. The file holds the API secrets, hence the 0600 umask on the replacement.
+      # from {}. The file holds the API secrets, hence the 0600 umask on the replacement. Each write
+      # step stands alone so `set -e` stops before a failed write could still mark a restart.
       srv=${home}/.omlx/settings.json
       [ -f "$srv" ] || (umask 077; printf '{}' > "$srv")
       want=$("$jq" --argjson s ${lib.escapeShellArg serverSettings} '. * $s' "$srv")
       if [ "$want" != "$("$jq" . "$srv")" ]; then
-        (umask 077; printf '%s\n' "$want" > "$srv.tmp") && mv -f "$srv.tmp" "$srv"
+        (umask 077; printf '%s\n' "$want" > "$srv.tmp")
+        mv -f "$srv.tmp" "$srv"
         touch ${home}/.omlx/.restart-needed
       fi
     ''}
