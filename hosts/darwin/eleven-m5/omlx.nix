@@ -101,6 +101,18 @@ let
       }) models
     )
   );
+
+  # Server settings deep-merged into settings.json, which the admin UI also writes and which holds
+  # the auth secrets, so only these keys are owned here. Measured on live team traffic: total decode
+  # is ~54 tok/s however many requests share the GPU, so these trim overhead rather than add
+  # batching. Chunked prefill interleaves a long (cache-miss) prefill with everyone else's decode
+  # instead of stalling it, and keeps each prefill's transient Metal buffers small; with 4+ requests
+  # in flight it doubled per-request speed. The aggressive burst gives each decode burst 0.2 s
+  # instead of 0.1 s, which suits this decode-bound load; its gain was within noise but not negative.
+  serverSettings = builtins.toJSON {
+    scheduler.chunked_prefill = true;
+    server.burst_decode_mode = "aggressive";
+  };
 in
 {
   homebrew.brews = [ "jundot/omlx/omlx" ];
@@ -135,7 +147,7 @@ in
     StandardErrorPath = "${home}/.omlx/logs/models.log";
   };
 
-  # Restart the server only when the settings merge or the patch changed something, and start the
+  # Restart the server only when a settings merge or the patch changed something, and start the
   # downloader when a listed model is missing. ~/.omlx is private: its logs can hold other
   # people's prompts, and teammates share the staff group.
   system.activationScripts.postActivation.text = ''
@@ -167,6 +179,16 @@ in
       ' "$cfg")
       if [ "$want" != "$("$jq" . "$cfg")" ]; then
         printf '%s\n' "$want" > "$cfg.tmp" && mv -f "$cfg.tmp" "$cfg"
+        touch ${home}/.omlx/.restart-needed
+      fi
+
+      # oMLX fills in defaults for any key a partial file leaves out, so a fresh machine can start
+      # from {}. The file holds the API secrets, hence the 0600 umask on the replacement.
+      srv=${home}/.omlx/settings.json
+      [ -f "$srv" ] || (umask 077; printf '{}' > "$srv")
+      want=$("$jq" --argjson s ${lib.escapeShellArg serverSettings} '. * $s' "$srv")
+      if [ "$want" != "$("$jq" . "$srv")" ]; then
+        (umask 077; printf '%s\n' "$want" > "$srv.tmp") && mv -f "$srv.tmp" "$srv"
         touch ${home}/.omlx/.restart-needed
       fi
     ''}
