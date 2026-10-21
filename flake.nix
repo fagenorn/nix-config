@@ -28,7 +28,8 @@
       flake = false;
     };
 
-    # Splash (external Metal engine oMLX serves Qwen GGUFs through) Homebrew tap; eleven-m5 only.
+    # Splash (external Metal engine oMLX serves Qwen GGUFs through) Homebrew tap; the eleven-m5
+    # host installs the formula.
     splash-tap = {
       url = "github:incoai/homebrew-tap";
       flake = false;

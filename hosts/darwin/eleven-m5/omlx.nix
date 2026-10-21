@@ -18,7 +18,7 @@ let
   #
   # Optional keys: `include` limits the download to those globs (one variant of a GGUF repo),
   # `id` is the model's oMLX name when it is not its directory's (a GGUF is named by its file),
-  # `settings` adds model settings, and an entry with neither `alias` nor `settings` gets none.
+  # and `settings` adds model settings.
   models = [
     {
       repo = "TensorFold/GLM-5.3-Flash-MLX-oQ4-MTP"; # 185 GB; 321B MoE, ~18B active
@@ -33,8 +33,8 @@ let
     }
     # The same model on Splash's Metal engine with DFlash2 speculative decoding, which batches
     # concurrent requests out of one shared KV pool. Splash cannot run the MLX checkpoint above,
-    # so this is Unsloth's dynamic 4-bit GGUF (111 GB), the same bit width. Its context is the
-    # native 256K rather than the global 32K default, since Splash only sizes what it is given.
+    # so this is Unsloth's dynamic 4-bit GGUF (111 GB), the same bit width. Its context limit is
+    # the native 256K rather than the global 32K default, which oMLX would otherwise cap prompts at.
     {
       repo = "unsloth/Qwen3.8-Flash-Next-GGUF";
       include = [
@@ -56,7 +56,6 @@ let
     }
   ];
   modelName = m: baseNameOf m.repo;
-  configured = builtins.filter (m: m ? alias || m ? settings) models;
 
   # 240 of 256 GB may be wired for the GPU; macOS's default (~75%) is too small for the
   # 185 GB model plus its KV cache. The sysctl resets on reboot, hence a boot daemon.
@@ -79,6 +78,8 @@ let
   # (launchd's KeepAlive brings it back) so it discovers the new one. A model already in modelDir
   # without the marker is verified in place. Runs at boot, and activation starts it whenever a
   # listed model is missing, so a failed download is retried on the next boot or switch.
+  # Every glob follows a single `--include`, which this hf (argparse, nargs) reads as one list;
+  # a repeated `--include` would keep only the last.
   fetch = pkgs.writeShellScript "omlx-models" ''
     set -uo pipefail
     hf=${pkgs.python3Packages.huggingface-hub}/bin/hf
@@ -117,7 +118,8 @@ let
   glm5Fix = ../../../patches/omlx/glm5-next-mtp-tail.patch;
 
   # Per-model settings merged into the file the admin UI also writes: the alias, the single
-  # default, MTP, and no pin, which also undoes the pin an earlier generation set.
+  # default, MTP, no pin (which also undoes the pin an earlier generation set), and each entry's
+  # `settings`.
   settings = builtins.toJSON (
     lib.listToAttrs (
       map (m: {
@@ -130,7 +132,7 @@ let
             mtp_enabled = m.mtp or false;
           }
           // m.settings or { };
-      }) configured
+      }) models
     )
   );
 
@@ -146,8 +148,9 @@ let
   # by every request in flight and kept afterwards as prefix cache; requests that outgrow it wait.
   # Left unset, oMLX sizes the budget for a single context window, so 200 GB gives the 111 GB
   # Flash-Next GGUF ~85 GB of KV for parallel requests while keeping every expert resident (no SSD
-  # streaming) and ~40 GB under the wired limit for macOS. oMLX still clamps it to what its memory
-  # limit leaves free. KV stays int8, Splash's default, which tracks llama.cpp's outputs closely.
+  # streaming) and ~40 GB of GPU headroom under the wired limit. oMLX still clamps it to what its
+  # memory limit leaves free. KV stays int8, Splash's default, which tracks llama.cpp's outputs
+  # closely.
   serverSettings = builtins.toJSON {
     scheduler.chunked_prefill = true;
     server.burst_decode_mode = "aggressive";
