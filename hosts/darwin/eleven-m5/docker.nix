@@ -31,7 +31,8 @@ let
   # Supervises the VM for launchd instead of `colima start --foreground`, which returns at once
   # when the VM is already up (a respawn loop under KeepAlive) and never notices the VM dying. It
   # adopts a running VM or starts one, exits when the VM stops so launchd starts it again, and
-  # stops the VM on SIGTERM (shutdown, or a switch that changes this daemon).
+  # stops the VM on SIGTERM (shutdown, or a switch that changes this daemon). A manual
+  # `colima stop` is therefore undone; `sudo launchctl bootout system/org.nixos.colima` holds it.
   supervise = pkgs.writeShellScript "colima-supervise" ''
     colima=${lib.getExe colima}
     trap '"$colima" stop; exit 0' TERM INT
