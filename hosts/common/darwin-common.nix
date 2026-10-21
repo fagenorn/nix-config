@@ -46,6 +46,11 @@ in
   system.primaryUser = "anis";
   system.stateVersion = 5;
 
+  # Ghostty's `xterm-ghostty` terminfo, so SSH sessions from Ghostty (TERM=xterm-ghostty) resolve
+  # it via /run/current-system/sw/share/terminfo on TERMINFO_DIRS. The Homebrew cask only exposes it
+  # to locally launched Ghostty (via TERMINFO); without it zsh/ZLE redraws wrongly over SSH.
+  environment.systemPackages = [ pkgs.ghostty-bin.terminfo ];
+
   nixpkgs = {
     hostPlatform = lib.mkDefault "${system}";
   };
