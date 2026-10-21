@@ -15,6 +15,10 @@ let
   # for requests that name no model. `mtp` turns on the checkpoint's native multi-token
   # prediction; measured on this M5 Ultra (single stream, 600 tokens) it lifts GLM from ~63 to
   # ~80 tok/s and Qwen from ~120 to ~144 tok/s. Adding a model is one entry here plus a switch.
+  #
+  # Optional keys: `include` limits the download to those globs (one variant of a GGUF repo),
+  # `id` is the model's oMLX name when it is not its directory's (a GGUF is named by its file),
+  # and `settings` adds model settings.
   models = [
     {
       repo = "TensorFold/GLM-5.3-Flash-MLX-oQ4-MTP"; # 185 GB; 321B MoE, ~18B active
@@ -26,6 +30,29 @@ let
       repo = "Jundot/Qwen3.8-Flash-Next-oQ4e-mtp"; # 106 GB; 125B MoE, 6B active
       alias = "qwen3.8-flash-next";
       mtp = true;
+    }
+    # The same model on Splash's Metal engine with DFlash2 speculative decoding, which batches
+    # concurrent requests out of one shared KV pool. Splash cannot run the MLX checkpoint above,
+    # so this is Unsloth's dynamic 4-bit GGUF (111 GB), the same bit width. Its context limit is
+    # the native 256K rather than the global 32K default, which oMLX would otherwise cap prompts at.
+    {
+      repo = "unsloth/Qwen3.8-Flash-Next-GGUF";
+      include = [
+        "UD-Q4_K_XL/*"
+        "mmproj-BF16.gguf"
+      ];
+      id = "Qwen3.8-Flash-Next-UD-Q4_K_XL";
+      alias = "qwen3.8-flash-next-splash";
+      settings = {
+        external_engine = "splash";
+        max_context_window = 262144;
+      };
+    }
+    # 1.2 GB; Splash's draft for Flash-Next, which oMLX finds among its helper models. Hidden from
+    # /v1/models, where it is no model to chat with.
+    {
+      repo = "incoai/Qwen3.8-Flash-Next-DFlash2";
+      settings.is_hidden = true;
     }
   ];
   modelName = m: baseNameOf m.repo;
@@ -51,6 +78,8 @@ let
   # (launchd's KeepAlive brings it back) so it discovers the new one. A model already in modelDir
   # without the marker is verified in place. Runs at boot, and activation starts it whenever a
   # listed model is missing, so a failed download is retried on the next boot or switch.
+  # Every glob follows a single `--include`, which this hf (argparse, nargs) reads as one list;
+  # a repeated `--include` would keep only the last.
   fetch = pkgs.writeShellScript "omlx-models" ''
     set -uo pipefail
     hf=${pkgs.python3Packages.huggingface-hub}/bin/hf
@@ -62,7 +91,9 @@ let
         target="$dir"
         [ -d "$dir" ] || target=${stagingDir}/${modelName m}
         echo "$(date) downloading ${m.repo} into $target"
-        if "$hf" download ${m.repo} --local-dir "$target"; then
+        if "$hf" download ${m.repo} ${
+          lib.optionalString (m ? include) "--include ${lib.escapeShellArgs m.include}"
+        } --local-dir "$target"; then
           touch "$target/.omlx-download-complete"
           [ "$target" = "$dir" ] || { mv "$target" "$dir" && added=1; }
           echo "$(date) finished ${m.repo}"
@@ -87,17 +118,20 @@ let
   glm5Fix = ../../../patches/omlx/glm5-next-mtp-tail.patch;
 
   # Per-model settings merged into the file the admin UI also writes: the alias, the single
-  # default, MTP, and no pin, which also undoes the pin an earlier generation set.
+  # default, MTP, no pin (which also undoes the pin an earlier generation set), and each entry's
+  # `settings`.
   settings = builtins.toJSON (
     lib.listToAttrs (
       map (m: {
-        name = modelName m;
-        value = {
-          model_alias = m.alias;
-          is_default = m.default or false;
-          is_pinned = false;
-          mtp_enabled = m.mtp or false;
-        };
+        name = m.id or (modelName m);
+        value =
+          lib.optionalAttrs (m ? alias) { model_alias = m.alias; }
+          // {
+            is_default = m.default or false;
+            is_pinned = false;
+            mtp_enabled = m.mtp or false;
+          }
+          // m.settings or { };
       }) models
     )
   );
@@ -109,13 +143,26 @@ let
   # instead of stalling it, and keeps each prefill's transient Metal buffers small; with 4+ requests
   # in flight it doubled per-request speed. The aggressive burst gives each decode burst 0.2 s
   # instead of 0.1 s, which suits this decode-bound load; its gain was within noise but not negative.
+  #
+  # Splash's concurrency is its KV pool: whatever its memory budget holds beyond the weights, shared
+  # by every request in flight and kept afterwards as prefix cache; requests that outgrow it wait.
+  # Left unset, oMLX sizes the budget for a single context window, so 200 GB gives the 111 GB
+  # Flash-Next GGUF ~85 GB of KV for parallel requests while keeping every expert resident (no SSD
+  # streaming) and ~40 GB of GPU headroom under the wired limit. oMLX still clamps it to what its
+  # memory limit leaves free. KV stays int8, Splash's default, which tracks llama.cpp's outputs
+  # closely.
   serverSettings = builtins.toJSON {
     scheduler.chunked_prefill = true;
     server.burst_decode_mode = "aggressive";
+    integrations.splash_max_memory_gb = 200;
   };
 in
 {
-  homebrew.brews = [ "jundot/omlx/omlx" ];
+  # oMLX finds the Splash launcher in /opt/homebrew/bin itself (Splash needs macOS 26.4+, M3+).
+  homebrew.brews = [
+    "jundot/omlx/omlx"
+    "incoai/tap/splash"
+  ];
 
   launchd.daemons.iogpu-wired-limit.serviceConfig = {
     ProgramArguments = [

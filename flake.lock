@@ -415,11 +415,11 @@
     "omlx-tap": {
       "flake": false,
       "locked": {
-        "lastModified": 1792423482,
-        "narHash": "sha256-frf2vUU4vpdtRbThAJGv47Om0WFX4x9BED/zVhQIzfU=",
+        "lastModified": 1792573662,
+        "narHash": "sha256-N1+vxfq0O14z1U0XegMLnakqUL0jaquGmgXr5dYCIwA=",
         "owner": "jundot",
         "repo": "omlx",
-        "rev": "c3595bc65981cb097be66471194f3eb47f5a6d8e",
+        "rev": "2ecf13716f13a5fb0b0008cb3a34f4a88924d673",
         "type": "github"
       },
       "original": {
@@ -449,6 +449,7 @@
         "nixpkgs-unstable": "nixpkgs-unstable",
         "omlx-tap": "omlx-tap",
         "sops-nix": "sops-nix",
+        "splash-tap": "splash-tap",
         "spotx-bash": "spotx-bash"
       }
     },
@@ -469,6 +470,22 @@
       "original": {
         "owner": "Mic92",
         "repo": "sops-nix",
+        "type": "github"
+      }
+    },
+    "splash-tap": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792535758,
+        "narHash": "sha256-HO+V+QDHrhmhrZut8FzLB2rYaN+7F+eVHUIqOkoXeQY=",
+        "owner": "incoai",
+        "repo": "homebrew-tap",
+        "rev": "007ba2f0bd0956d61d6bd08e34ff3a4db1b1cd82",
+        "type": "github"
+      },
+      "original": {
+        "owner": "incoai",
+        "repo": "homebrew-tap",
         "type": "github"
       }
     },

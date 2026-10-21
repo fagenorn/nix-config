@@ -108,6 +108,7 @@ in
       "nikitabobko/tap"
       "fagenorn/palmier"
       "jundot/omlx"
+      "incoai/tap"
       #"FelixKratz/formulae" #sketchybar
     ];
     # Shared by every Mac. Host-specific apps are added in hosts/darwin/<hostname>/default.nix.
