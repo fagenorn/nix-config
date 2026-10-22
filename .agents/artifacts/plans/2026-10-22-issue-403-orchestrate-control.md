@@ -9,7 +9,7 @@
 
 **Tech stack:** Python 3 standard library (`argparse`, `subprocess`, `json`, `dataclasses`, `unittest`), Nix (`lib/agent-tools.nix` command table), the GitHub GraphQL API through `gh api graphql`.
 
-Spec: `.agents/artifacts/specs/2026-10-21-orchestrate-control-facts-design.md`; its `## Decision ledger` rows are cited by ID, D26–D29 appended by this plan. Issue: https://github.com/fagenorn/nix-config/issues/403
+Spec: `.agents/artifacts/specs/2026-10-21-orchestrate-control-facts-design.md`; its `## Decision ledger` rows are cited by ID, D26–D29 appended by this plan, D30 by its standards review. Issue: https://github.com/fagenorn/nix-config/issues/403
 
 ## Global Constraints
 
@@ -68,3 +68,9 @@ Task 4 — Delivery contracts, chaining, the refusal table and the `step` contra
 - Scope excludes the skill rewrite and the replay seam: per D11.
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, `codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no fallback, no focus.
+- Base SHA: 7e65b0c551ea6163dbd18c8ffef38deaf86fd0a9; plan reviewed at 9de73e33.
+- Findings: 1 Blocking, 2 Should fix, 0 Discussion. Accepted 3 (B1 control-reply type and run check with refusal tests in Tasks 2 and 4; S1 non-empty owners in the chained test, Task 4; S2 unfamiliar unset-list sentinel, Tasks 1–2), rejected 0, deferred 0. All recorded as D30.

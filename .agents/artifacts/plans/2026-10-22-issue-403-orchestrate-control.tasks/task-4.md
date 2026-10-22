@@ -97,6 +97,11 @@ class ContractTest(unittest.TestCase):
         for fact in ("tracker", "forge", "worktrees", "issues", "max_parallel"):
             self.assertEqual(second[fact], first[fact])
         self.assertEqual(out["contract_refusals"], [{"issue": 14, "detail": REFUSED_LINE}])
+
+    def test_owners_ride_the_first_call_once_and_never_the_chained_one(self):
+        # S1 (D30): the owner observations the adapter passes must be non-empty here,
+        # or re-sending them on the chained call would go unnoticed.
+        ...
         self.assertEqual(out["refused_contracts"], [14])
         self.assertNotIn(14, out["contracts_due"])
         self.assertEqual([d["issue"] for d in out["dispatches"]], [12])
@@ -181,6 +186,16 @@ class ChainTest(unittest.TestCase):
                     {"id": "delivery_contract", "kind": "delivery_contract",
                      "issues": [12, 14]}])
 
+    def test_a_chained_reply_that_is_not_a_control_response_keeps_the_first_reply(self):
+        world = OrchestrateWorld(self)
+        session = world.start("12", "14")["session"]
+        boot = world.ws("init-run", "--repo-root", world.root, "--run-id", session["run_id"])
+        world.fault("workflow-state", "control", call=2, stdout=boot.stdout.decode())
+        out = assert_refused(self, world.step(session, first_sweep=True)[0], "step",
+                             "control", steps_before("control"))
+        self.assertEqual(out["response"]["actions"], [
+            {"id": "delivery_contract", "kind": "delivery_contract", "issues": [12, 14]}])
+
 
 class RefusalTableTest(unittest.TestCase):
     def test_every_start_step_refuses_with_its_name(self):
@@ -262,6 +277,7 @@ Expected: the new tests fail (no `build-delivery` call is ever made, `control_ca
   - `contracts`: the wanted set is, when `first_sweep`, every bootstrap requirement in session issues whose `contract_digest` is None, plus `contracts_due`; in session order, `attempt("contracts", issue)` for each wanted issue not in `refused` and not in `pairs`.
   - `control`: `first = run_control(root, run_id, control_request(..., input.owners, pairs))`; `reply, calls = first, 1`. When `[a["kind"] for a in first["actions"]] == ["delivery_contract"]`: for each listed issue in `paths` not in `pairs` and not in `refused`, `attempt("control", issue)`, re-raising any `Refusal` as `Refusal("control", detail, response=first)` (D28); then, when some listed issue is in `pairs`, `send = {i: pairs[i] for i in pairs if i in set(asking issues of first's summaries)}`, `reply = run_control(root, run_id, control_request(..., [], send), previous=first)` and `calls = 2`. Append `control` to `done` only after this.
   - Ready: `control_calls = calls`, `response = reply`, `contracts_due` = `asks_for_contract` issues of `reply`'s summaries not in `refused`, ascending; `refused_contracts = sorted(refused)`; `contract_refusals = refusals` in build order; `ends_run` per Task 2's rule against `reply` and the final `refused`.
+- `test_owners_ride_the_first_call_once_and_never_the_chained_one` (D30) replaces the `...` body above. Pass `step` a non-empty, schema-valid `owners` list (one `{event_id, issue, custody, state: "unavailable"}` observation) while the first control reply is `delivery_contract`-only, then assert: the first logged request's `owners` equals the input list exactly, the chained request's `owners` is `[]`, and `control_calls` is 2. Preferred arrangement: a ledger state in which real `control` accepts that observation and still answers contract-only. If no such state exists, capture a contract-only reply of this same run by calling the source `control` once through `world.ws` with the identical request minus `owners` (a contract-only reply reserves no dispatch), then `fault("workflow-state", "control", call=1, stdout=<that reply>)` so the helper's first call is answered with it while its logged request still carries the owners; the chained call reaches the real `control`.
 - Update the module docstring to the full `step` contract.
 
 - [ ] **Step 5: Write the `step` contract into `python/README.md`**
@@ -271,7 +287,7 @@ Extend the `orchestrate-control` section, from the code at this commit: the `ste
 - [ ] **Step 6: Verify**
 
 Run: `env PYTHONPATH="$PWD/python" python3 -m unittest tests/test_orchestrate_control.py` (timeout 900 s)
-Expected: OK, 41 tests, no failures, errors or skips. Re-sending `owners` on the chained call fails `test_a_builder_refusal_is_reported_and_joins_refused_contracts`; chaining after a dispatch fails `test_a_reply_with_a_dispatch_is_never_chained`; a helper that writes a request or contract file under the root or the working directory fails `test_no_file_is_created_under_the_ledger_root_or_working_directory`.
+Expected: OK, 44 tests, no failures, errors or skips. Re-sending `owners` on the chained call fails `test_owners_ride_the_first_call_once_and_never_the_chained_one`; a reply of another type on the chained call fails `test_a_chained_reply_that_is_not_a_control_response_keeps_the_first_reply`; chaining after a dispatch fails `test_a_reply_with_a_dispatch_is_never_chained`; a helper that writes a request or contract file under the root or the working directory fails `test_no_file_is_created_under_the_ledger_root_or_working_directory`.
 
 - [ ] **Step 7: Commit**
 

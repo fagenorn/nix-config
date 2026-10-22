@@ -138,7 +138,7 @@ Replace `project`'s refusal of dispatch kinds; keep the closed-set check first, 
 - [ ] **Step 5: Verify**
 
 Run: `env PYTHONPATH="$PWD/python" python3 -m unittest tests/test_orchestrate_control.py` (timeout 900 s)
-Expected: OK, 30 tests. A projection that drops, renames or adds a member beyond the six the invariant names fails the `projected` comparison in `test_a_resume_carries_its_owner_object_and_resume_pack`; a refusal on a failed pack fails `test_a_failing_resume_pack_leaves_it_null`; projecting a remainder through `owner_object` fails `test_a_remainder_dispatch_is_its_action_verbatim`.
+Expected: OK, 31 tests. A projection that drops, renames or adds a member beyond the six the invariant names fails the `projected` comparison in `test_a_resume_carries_its_owner_object_and_resume_pack`; a refusal on a failed pack fails `test_a_failing_resume_pack_leaves_it_null`; projecting a remainder through `owner_object` fails `test_a_remainder_dispatch_is_its_action_verbatim`.
 
 - [ ] **Step 6: Commit**
 

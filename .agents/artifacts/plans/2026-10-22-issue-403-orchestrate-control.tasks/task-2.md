@@ -21,7 +21,7 @@
 
 **Invariants:**
 - `step` runs `bindings`, `bootstrap`, `tracker`, `forge`, `worktrees`, `control`, `project` in order (Task 4 inserts `contracts` before `control`); the first refusal stops it.
-- Exactly one tracker GraphQL call per started chunk of 100 session issues and exactly one paginated forge call per step; none sees `GITHUB_TOKEN` or `GH_TOKEN`.
+- Exactly one tracker GraphQL call per started chunk of 100 session issues and exactly one paginated forge call per step; none sees any variable the bound `unset_before_invocation` lists — the fixture binds `GITHUB_TOKEN`, `GH_TOKEN` and the unfamiliar `ORCH_TEST_SENTINEL`, all exported to the command (D30).
 - Facts cover exactly the session's issues in session order; out-of-session requirements are not observed, but their recorded paths exclude candidates (D19).
 - Every reply is validated before any field is read; the `control` request never carries `now`.
 - `project` refuses any kind outside `CLOSED_KINDS`, before projecting anything (D23).
@@ -104,6 +104,17 @@ class FactsTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual([c["token_visible"] for c in world.calls("gh")], [False, False])
         self.assertEqual(world.env["GITHUB_TOKEN"], "harness-token")
+        self.assertEqual(world.env["ORCH_TEST_SENTINEL"], "harness-token")
+
+    def test_a_non_control_reply_refuses_at_control(self):
+        world = OrchestrateWorld(self)
+        session = world.start("12")["session"]
+        boot = world.ws("init-run", "--repo-root", world.root, "--run-id", session["run_id"])
+        world.fault("workflow-state", "control", stdout=boot.stdout.decode())
+        done, _ = world.step(session)
+        assert_refused(self, done, "step", "control",
+                       ["bindings", "bootstrap", "tracker", "forge", "worktrees", "contracts"])
+        self.assertIsNone(json.loads(done.stdout)["response"])
 
     def test_a_bootstrap_of_another_run_refuses_at_bootstrap(self):
         world = OrchestrateWorld(self)
@@ -337,13 +348,13 @@ Expected: the Task 1 tests pass; every new test fails — `step` is not yet a su
 - `forge_facts(b, issues)` (D9, D24, D27): one `run_child("forge", [cli, "api", "graphql", "--paginate", "--slurp", "-f", "query=" + FORGE_QUERY, "-f", "owner=…", "-f", "name=…"], env=tracker_env(b))`, `FORGE_QUERY = "query($owner: String!, $name: String!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequests(first: 100, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { number headRefName isCrossRepository state url mergeCommit { oid } } } } }"`. The output must be a non-empty list of pages, each with `data.repository.pullRequests.nodes` a list; the last page's `pageInfo.hasNextPage` must be false (`the pull-request listing is incomplete`); else refuse at `forge`. For issue `n`: candidates are nodes with `isCrossRepository` false whose `headRefName`, with `b.worktree_prefix` removed when it starts with it, starts with `f"issue-{n}-"`; the highest `number` wins. None → `{"state": "none", "url": None, "merge_sha": None}`; `OPEN`/`CLOSED` → lower-case state, its `url`, `merge_sha` None; `MERGED` → `"merged"`, its `url`, and `mergeCommit.oid`, which must be 40 lower-case hex characters. Any other state or a missing `url` refuses. Result keyed `str(n)` in session order.
 - `worktree_facts(repo_root, b, issues, requirements)` (D10, D19, D21): one `run_child("worktrees", ["git", "-C", repo_root, "worktree", "list", "--porcelain"])` and one `["git", "-C", repo_root, "for-each-ref", "--format=%(refname)", "refs/heads"]`; a non-zero exit refuses at `worktrees`. `live` maps `os.path.realpath(<worktree path>)` to its branch (`refs/heads/` stripped; None when detached). `branches` is the set of `refs/heads/` names. `strip(name)` removes the prefix when the name starts with it. Recorded paths: every requirement's `recorded_worktree`, realpath'd. For each session issue in order: with a requirement, `path = recorded_worktree` and state `absent` when `not os.path.lexists(path)`, `matching_issue_branch` when `live.get(realpath(path))` is a branch whose `strip` starts with `f"issue-{n}-"`, else `mismatch`; entry `{"issue", "recorded": {"path", "state"}, "candidate": None}`. Without one, try `os.path.normpath(os.path.join(b.worktree_root, f"{b.worktree_prefix}issue-{n}-orchestrated{s}"))` for `s` in `""`, `"-2"` … `"-9"`; take the first that does not `lexists`, whose realpath is in neither `live` nor the recorded set nor the candidates already taken, and whose final component and `strip(final component)` are both absent from `branches`; entry `{"issue", "recorded": None, "candidate": {"path", "state": "absent"}}`. None free → `Refusal("worktrees", f"no free candidate worktree for issue {n} (-orchestrated through -9 are taken)")`.
 - `control_request(...)`: keys in this order — `interface_version` 3, `host_route` `ROUTE`, `max_parallel`, `attempt_budget_minutes`, `human_directed`, `issues`, `tracker`, `owners`, `worktrees`, `forge`, `delivery_contracts` (`pairs[n]["contract"]` or None), `authorization_intents` (`[pairs[n]["initial_intent"]]` or `[]`), `authority_observations`, `reevaluation_evidence`, `delivery_observations` (`[]`), `requested_scopes`, `recoveries` (None); every map keyed `str(n)` in session order; never `now`.
-- `run_control(repo_root, run_id, request, *, previous=None)`: `workflow_response("control", "control", "--repo-root", repo_root, "--run-id", run_id, "--request-file", "-", stdin=json.dumps(request, separators=(",", ":"), ensure_ascii=False).encode())`; a `Refusal` is re-raised with `response=previous`.
+- `run_control(repo_root, run_id, request, *, previous=None)`: `workflow_response("control", "control", "--repo-root", repo_root, "--run-id", run_id, "--request-file", "-", stdin=json.dumps(request, separators=(",", ":"), ensure_ascii=False).encode())`; a `Refusal` is re-raised with `response=previous`. The validator accepts every workflow-response type (bootstrap, owner, phase gate, …), so before any field is read the reply must be a control response of this run: no `kind` member, `interface_version` the `int` 3, `run_id` equal to the session's, and `actions` and `summaries` lists; anything else raises `Refusal("control", "control returned a reply that is not this run's control response", response=previous)` (D30).
 - `project(response, repo_root, run_id)`: first check every action's `kind` against `CLOSED_KINDS` (any other → `Refusal("project", f"unknown action kind {kind!r}", response=response)`, D23); then a `spawn`, `resume`, `retry` or `delivery_remainder` action refuses with `Refusal("project", f"{kind} actions are not projected", response=response)`; the other kinds produce no dispatch, so the list is empty.
 
 - [ ] **Step 5: Verify**
 
 Run: `env PYTHONPATH="$PWD/python" python3 -m unittest tests/test_orchestrate_control.py` (timeout 900 s)
-Expected: OK, 26 tests, no failures, errors or skips. A tracker call per issue fails `test_one_tracker_call_per_hundred_issues`; a capped or single-page forge read fails the forge test (PR 9 and PR 12 sit on the third page).
+Expected: OK, 27 tests, no failures, errors or skips. A tracker call per issue fails `test_one_tracker_call_per_hundred_issues`; a capped or single-page forge read fails the forge test (PR 9 and PR 12 sit on the third page).
 
 - [ ] **Step 6: Commit**
 
