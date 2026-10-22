@@ -584,8 +584,8 @@ def guarded_operations(command):
 
 
 # Wrapper options that consume an argument, so the word holding it is not the
-# wrapped command. Used by the verb pass and the detaching pass. Short options may be
-# clustered (`env -iu FOO`), and an argument may be attached (`-uanis`,
+# wrapped command. Used by the verb pass and the detaching pass. Short options
+# may be clustered (`env -iu FOO`), and an argument may be attached (`-uanis`,
 # `--user=anis`). An option not listed here is treated as a flag, so the word
 # after it is taken as the command word.
 WRAPPER_SHORT_OPTIONS_WITH_ARGUMENT = {
@@ -1470,7 +1470,7 @@ def parse_release_raw(command, repository):
 
 
 def validate_release(command, context):
-    """Release creation is judged on the whole command, like the merge."""
+    """Release creation is judged on the whole canonical command, like the merge."""
     problem = ownership_problem(context)
     if problem is not None:
         return block(f"unsafe release creation: {problem}")
