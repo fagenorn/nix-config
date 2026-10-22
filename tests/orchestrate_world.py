@@ -32,12 +32,13 @@ MANIFEST = SKILLS / "platform-manifest.json"
 COMMAND = [sys.executable, "-m", "agent_tools.orchestrate_control"]
 INVALID = "orchestrate-control: invalid invocation\n"
 SLUG = "fagenorn/nix-config"
+ROUTE = "claude-code"
 # The third name is one no implementation would know, so only honouring the contract's bound
 # `unset_before_invocation` list keeps it out of a tracker child (D30).
 TOKENS = ("GITHUB_TOKEN", "GH_TOKEN", "ORCH_TEST_SENTINEL")
 
 PRELUDE = '''#!{python}
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
 from pathlib import Path
 
 state = Path({state!r})
@@ -94,6 +95,32 @@ if argv[:2] == ["issue", "list"]:
     if key in world["listings"]:
         sys.stdout.write(json.dumps([{"number": n} for n in world["listings"][key]]))
         sys.exit(0)
+if argv[:2] == ["api", "graphql"]:
+    query = next(a for a in argv if a.startswith("query="))
+    if "--paginate" in argv:
+        pulls = sorted(world["pulls"], key=lambda pull: pull["number"])
+        pages = [pulls[i:i + 2] for i in range(0, len(pulls), 2)] or [[]]
+        sys.stdout.write(json.dumps([
+            {"data": {"repository": {"pullRequests": {
+                "pageInfo": {"hasNextPage": i < len(pages) - 1 or world["forge_truncated"],
+                             "endCursor": f"c{i}"},
+                "nodes": page}}}} for i, page in enumerate(pages)]))
+        sys.exit(0)
+    fallback = {"typename": "Issue", "state": "OPEN", "blocked_by": [], "truncated": False}
+    aliases = {}
+    for alias, number in re.findall(r"(i\\d+): issueOrPullRequest\\(number: (\\d+)\\)", query):
+        spec = world["issues"].get(number, fallback)
+        if int(number) in world["missing"]:
+            aliases[alias] = None
+            continue
+        node = {"__typename": spec["typename"], "number": int(number)}
+        if spec["typename"] == "Issue":
+            node["state"] = spec["state"]
+            node["blockedBy"] = {"pageInfo": {"hasNextPage": spec["truncated"]},
+                                 "nodes": spec["blocked_by"]}
+        aliases[alias] = node
+    sys.stdout.write(json.dumps({"data": {"repository": aliases}}))
+    sys.exit(0)
 sys.stderr.write("fake gh: unregistered call\\n")
 sys.exit(64)
 '''
@@ -211,3 +238,92 @@ class OrchestrateWorld:
     def git(self, *args) -> str:
         return subprocess.run(["git", "-C", str(self.root), *args], capture_output=True,
                               text=True, check=True, env=self.env).stdout
+
+    def _gh_world(self, change) -> None:
+        world = json.loads((self.state / "gh.json").read_text("utf-8"))
+        change(world)
+        self._write_gh(world)
+
+    def issue(self, number, *, state="OPEN", blocked_by=(), typename="Issue",
+              truncated=False) -> None:
+        self._gh_world(lambda world: world["issues"].__setitem__(str(number), {
+            "typename": typename, "state": state, "blocked_by": list(blocked_by),
+            "truncated": truncated}))
+
+    @staticmethod
+    def blocker(number, *, state="OPEN", labels=(), repo=SLUG, labels_truncated=False) -> dict:
+        return {"number": number, "state": state,
+                "url": f"https://github.com/{repo}/issues/{number}",
+                "repository": {"nameWithOwner": repo},
+                "labels": {"pageInfo": {"hasNextPage": labels_truncated},
+                           "nodes": [{"name": label} for label in labels]}}
+
+    def missing(self, number) -> None:
+        self._gh_world(lambda world: world["missing"].append(number))
+
+    def truncate_forge(self) -> None:
+        self._gh_world(lambda world: world.__setitem__("forge_truncated", True))
+
+    def pull(self, number, head, *, state="OPEN", cross=False, merge_oid=None) -> None:
+        self._gh_world(lambda world: world["pulls"].append({
+            "number": number, "headRefName": head, "isCrossRepository": cross, "state": state,
+            "url": f"https://github.com/{SLUG}/pull/{number}",
+            "mergeCommit": {"oid": merge_oid} if merge_oid else None}))
+
+    def candidate(self, issue, suffix="") -> str:
+        return str(self.root / ".worktrees" / f"worktree-issue-{issue}-orchestrated{suffix}")
+
+    def add_worktree(self, path, branch) -> None:
+        self.git("worktree", "add", "--quiet", "-b", branch, str(path))
+
+    def step(self, session, *, first_sweep=False, owners=(), contracts_due=(),
+             refused_contracts=(), repo_root=None) -> tuple[subprocess.CompletedProcess, dict | None]:
+        stdin = json.dumps({"session": session, "first_sweep": first_sweep,
+                            "owners": list(owners), "contracts_due": list(contracts_due),
+                            "refused_contracts": list(refused_contracts)})
+        done = self.run("step", "--repo-root", repo_root or self.root, "--input", "-",
+                        stdin=stdin)
+        return done, json.loads(done.stdout) if done.stdout else None
+
+    def requests(self) -> list[dict]:
+        return [json.loads(call["stdin"]) for call in self.calls("workflow-state", "control")]
+
+    def seed_spawn(self, session, issues, *, paths=None) -> dict[int, dict]:
+        """Act as the adapter through the source `workflow-state`, unlogged: build the delivery
+        pair of each issue in `issues`, then run one control round that spawns them."""
+        paths = {n: self.candidate(n) for n in session["issues"]} if paths is None else paths
+        pairs = {}
+        for number in issues:
+            built = self.ws("build-delivery", "--repo-root", self.root, "--kind", "contract",
+                            "--input", "-", stdin=json.dumps({
+                                "issue": number, "worktree": paths[number],
+                                "source_kind": session["source"]["kind"],
+                                "source_reference": session["source"]["reference"]}).encode())
+            self.case.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            pairs[number] = json.loads(built.stdout)
+        every = session["issues"]
+        keyed = lambda value: {str(n): value(n) for n in every}
+        request = {
+            "interface_version": 3, "host_route": ROUTE, "max_parallel": len(every),
+            "attempt_budget_minutes": 240, "human_directed": session["human_directed"],
+            "issues": every,
+            "tracker": [{"issue": n, "state": "open", "open_blockers": [],
+                         "decision_blockers": []} for n in every],
+            "owners": [],
+            "worktrees": [{"issue": n, "recorded": None,
+                           "candidate": {"path": paths[n], "state": "absent"}} for n in every],
+            "forge": keyed(lambda n: {"state": "none", "url": None, "merge_sha": None}),
+            "delivery_contracts": keyed(lambda n: pairs[n]["contract"] if n in pairs else None),
+            "authorization_intents": keyed(
+                lambda n: [pairs[n]["initial_intent"]] if n in pairs else []),
+            "authority_observations": keyed(lambda n: []),
+            "reevaluation_evidence": keyed(lambda n: []),
+            "delivery_observations": keyed(lambda n: []),
+            "requested_scopes": keyed(lambda n: None), "recoveries": keyed(lambda n: None)}
+        done = self.ws("control", "--repo-root", self.root, "--run-id", session["run_id"],
+                       "--request-file", "-", stdin=json.dumps(request).encode())
+        self.case.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        spawned = {action["issue"]: action for action in json.loads(done.stdout)["actions"]
+                   if action["kind"] == "spawn"}
+        self.case.assertLessEqual(set(issues), set(spawned))
+        return spawned
