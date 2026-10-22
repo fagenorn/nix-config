@@ -124,6 +124,12 @@ The three outcomes are the exit statuses. Exit 0 (`complete`) means every entry 
 
 Every child of the identity steps, the two `git remote get-url` reads and the `gh api` read, runs by name with `cwd` at the registered root, stdin at `/dev/null`, `GIT_TERMINAL_PROMPT=0`, `GH_PROMPT_DISABLED=1`, a 30-second timeout and `GITHUB_TOKEN` and `GH_TOKEN` removed, so `gh` answers with the keyring credential (issue 126 D7); the fetch and the listing are bounded at the same 30 seconds. A timeout or a missing executable is a failed read. A failed read puts its reason in the refusal's detail (`timed out`, the executable error, or `exit <n>` with the child's stderr), and a `gh` answer other than the slug puts the name it gave. `tests/test_guard_policy.py` drives the commands as `python -m agent_tools.guard_policy compile` and `derive` over `tests/guard_policy_world.py`, and calls two functions directly for the checks no command input reaches: `target_profiles` on a hand-built snapshot for the one step the release grammar hides (issue 126 D10, D15), and `unsupported_name` on a hand-built row for the slug, because `github_remote.github_slug` already reads no slug the guard would refuse.
 
+## Ship delivery recipes
+
+The packaged `ship-delivery` compiler turns factual recipes into canonical shipping
+checkpoints and summaries. Its [complete API](ship-delivery.md) is also installed
+as `~/.agents/share/ship-delivery.md` for agents working in other repositories.
+
 ## Retained review evidence
 
 The retained review evidence that `derive-review-feasibility-fixtures` derives is committed as five files under `tests/fixtures/retained-review-evidence/` (#235); `replay-retained` replays that directory under the anchor digest held in `tests/retained_evidence_test_support.py`, and an authentic replay exits 2 with `projection_unavailable`, because two of the retained issue-121 boundaries are authenticated refusals rather than measurements.

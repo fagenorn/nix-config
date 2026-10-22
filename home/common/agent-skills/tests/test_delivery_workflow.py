@@ -2095,6 +2095,16 @@ class LegacyWorktreeTest(BuilderHarness, unittest.TestCase):
             (Path(path) / ".git").write_text(f"gitdir: {self.root / 'missing'}\n",
                                              encoding="utf-8")
 
+        def git_failure(path):
+            control = subprocess.run(["git", "-C", path, "rev-parse", "--show-toplevel"],
+                capture_output=True, check=False, timeout=60,
+                env={**os.environ, "HOME": str(self.home), "PYTHONDONTWRITEBYTECODE": "1"})
+            self.assertNotEqual(control.returncode, 0)
+            lines = [line.strip() for line in control.stderr.decode("utf-8", "replace").splitlines()
+                     if line.strip()]
+            self.assertTrue(lines, "the failing Git probe must explain its refusal")
+            return ("git failed: " + lines[0]).encode("utf-8")
+
         for label, arrange, clause in (
                 ("absent", None, lambda: b"the worktree is absent"),
                 ("regular file", regular_file, lambda: b"it is not a directory"),
@@ -2104,9 +2114,7 @@ class LegacyWorktreeTest(BuilderHarness, unittest.TestCase):
                 ("detached HEAD", detached, lambda: b"its HEAD is detached"),
                 ("unpatterned branch", feature_branch,
                  lambda: b"its checked-out branch 'feature-x' does not match either"),
-                ("git failure", broken_gitdir,
-                 lambda: b"git failed: fatal: not a git repository: "
-                         + str(self.root / "missing").encode())):
+                ("git failure", broken_gitdir, lambda: git_failure(value["worktree"]))):
             with self.subTest(label=label):
                 self.project()
                 value = self.slugless_input()
