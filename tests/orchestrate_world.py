@@ -235,6 +235,14 @@ class OrchestrateWorld:
         return subprocess.run([sys.executable, str(WORKFLOW), *[str(a) for a in argv]],
                               input=stdin, capture_output=True, env=self.env, timeout=300)
 
+    def validate(self, value: dict) -> subprocess.CompletedProcess:
+        """The source `artifact-budget` validating `value` at the workflow-response boundary,
+        unlogged and without the fault rules."""
+        return subprocess.run(
+            [sys.executable, str(BUDGET), "validate-report", "--boundary", "workflow-response",
+             "--input", "-"], input=json.dumps(value).encode(), capture_output=True,
+            env=self.env, timeout=120)
+
     def git(self, *args) -> str:
         return subprocess.run(["git", "-C", str(self.root), *args], capture_output=True,
                               text=True, check=True, env=self.env).stdout

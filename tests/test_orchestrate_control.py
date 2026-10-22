@@ -410,3 +410,92 @@ class ClosedSetTest(unittest.TestCase):
                              steps_before("project"))
         self.assertEqual(out["response"], canned)
         self.assertIn("teleport", out["detail"])
+
+
+ENVELOPE = ("action_id", "launch_kind", "issue", "attempt", "owner", "worktree", "handoff_path")
+
+
+def projected(action, root, run_id):
+    value = {k: v for k, v in action.items() if k not in ("id", "kind")}
+    value.update(action_id=action["id"], launch_kind=action["kind"], kind="owner",
+                 interface_version=2, ledger_repo_root=str(root), run_id=run_id)
+    return value
+
+
+class ProjectTest(unittest.TestCase):
+    def resumed(self, world):
+        """Seed issue 12's spawn, give it a live worktree, then report its owner unavailable."""
+        session = world.start("12")["session"]
+        spawn = world.seed_spawn(session, [12])[12]
+        world.add_worktree(world.candidate(12), "worktree-issue-12-orchestrated")
+        owner = {"event_id": "12-unavailable", "issue": 12, "custody": spawn["custody"],
+                 "state": "unavailable"}
+        return session, world.step(session, owners=[owner])
+
+    def test_a_resume_carries_its_owner_object_and_resume_pack(self):
+        world = OrchestrateWorld(self)
+        session, (done, out) = self.resumed(world)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (action,) = [a for a in out["response"]["actions"] if a["kind"] != "wait"]
+        self.assertEqual(action["kind"], "resume")
+        (dispatch,) = out["dispatches"]
+        self.assertEqual(set(dispatch), {*ENVELOPE, "owner_object", "resume_pack"})
+        self.assertEqual({k: dispatch[k] for k in ENVELOPE}, {
+            "action_id": action["id"], "launch_kind": "resume", "issue": 12,
+            "attempt": action["attempt"], "owner": action["owner"],
+            "worktree": action["worktree"], "handoff_path": action["handoff_path"]})
+        expected = projected(action, world.root, session["run_id"])
+        self.assertEqual(json.loads(dispatch["owner_object"]), expected)
+        checked = world.validate(expected)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertEqual(dispatch["owner_object"], checked.stdout.decode().removesuffix("\n"))
+        (call,) = world.calls("workflow-state", "resume-pack")
+        self.assertEqual(call["argv"], ["resume-pack", "--repo-root", str(world.root),
+                                        "--run-id", session["run_id"], "--action-id", action["id"]])
+        pack = world.ws(*call["argv"])
+        self.assertEqual(pack.returncode, 0, pack.stderr)
+        self.assertEqual(dispatch["resume_pack"], pack.stdout.decode())
+
+    def test_a_failing_resume_pack_leaves_it_null(self):
+        world = OrchestrateWorld(self)
+        world.fault("workflow-state", "resume-pack", exit=2,
+                    stderr="workflow-state: resume-pack refused: fixture\n")
+        _, (done, out) = self.resumed(world)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (dispatch,) = out["dispatches"]
+        self.assertEqual((dispatch["launch_kind"], dispatch["resume_pack"]), ("resume", None))
+
+    def test_a_remainder_dispatch_is_its_action_verbatim(self):
+        world = OrchestrateWorld(self)
+        session = world.start("12")["session"]
+        remainder = {"interface_version": 2, "kind": "delivery_remainder",
+                     "ledger_repo_root": str(world.root), "run_id": session["run_id"],
+                     "issue": 12, "source_attempt": 1, "owner": "12:r1",
+                     "custody": {"kind": "remainder", "remainder": 1, "launch": 1,
+                                 "action_id": "12:r1:1"},
+                     "worktree": world.candidate(12), "contract": None, "contract_digest": None,
+                     "pending_stage_ids": [], "deadline_at": "2026-10-22T01:00:00Z",
+                     "requirements": [], "authority_evaluation": None, "requested_scope": None}
+        canned = {"interface_version": 3, "run_id": session["run_id"],
+                  "now": "2026-10-22T00:00:00Z", "summaries": [], "deltas": [],
+                  "actions": [remainder], "next_deadline": None, "admission": None}
+        world.fault("workflow-state", "control", stdout=json.dumps(canned) + "\n")
+        world.fault("artifact-budget", "validate-report", passthrough=True)
+        done, out = world.step(session)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(out["dispatches"], [{
+            "action_id": "12:r1:1", "launch_kind": "delivery_remainder", "issue": 12,
+            "attempt": 1, "owner": "12:r1", "worktree": world.candidate(12),
+            "handoff_path": None, "resume_pack": None,
+            "owner_object": json.dumps(remainder, ensure_ascii=False, sort_keys=True,
+                                       separators=(",", ":"))}])
+        self.assertEqual(world.calls("workflow-state", "resume-pack"), [])
+
+    def test_an_owner_object_the_boundary_refuses_refuses_at_project(self):
+        world = OrchestrateWorld(self)
+        world.fault("artifact-budget", "validate-report", stdin_kind="owner", exit=2,
+                    stderr="artifact-budget: invalid report\n")
+        _, (done, _) = self.resumed(world)
+        out = assert_refused(self, done, "step", "project", steps_before("project"))
+        self.assertIn("validate-report", out["detail"])
+        self.assertIn("resume", [a["kind"] for a in out["response"]["actions"]])

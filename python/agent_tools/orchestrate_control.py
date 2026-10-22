@@ -20,9 +20,12 @@ to the issues by branch name), `worktrees` (each issue's recorded or candidate
 worktree, from `git worktree list` and the local branches), `control` (one
 `workflow-state control` round over those facts, its reply validated and required
 to be this run's control response) and `project` (the reply's action kinds
-checked against the closed set; no action kind is projected yet). Ready (exit 0):
+checked against the closed set, then one dispatch per `spawn`, `resume`, `retry` and
+`delivery_remainder` action in returned order: its owner object as `artifact-budget
+validate-report` prints it, and for a `resume` the `workflow-state resume-pack` text, null
+when that child fails; any other failure refuses and prints no dispatches). Ready (exit 0):
 `{"command":"step","outcome":"ready","run_id","control_calls":1,"response",
-"dispatches":[],"contracts_due","refused_contracts","contract_refusals":[],
+"dispatches","contracts_due","refused_contracts","contract_refusals":[],
 "ends_run"}`. A refusal carries the latest validated control reply as `response`
 once `control` has answered, else null.
 
@@ -36,7 +39,7 @@ characters. An invalid invocation prints `orchestrate-control: invalid
 invocation` on stderr, nothing on stdout, and exits 2.
 
 The command resolves the project in process, runs `workflow-state`,
-`artifact-budget` and the bound tracker CLI by name on `PATH`, removes every
+`artifact-budget`, `git` and the bound tracker CLI by name on `PATH`, removes every
 name in the contract's `unset_before_invocation` from each tracker-CLI child's
 environment, and writes no file.
 """
@@ -578,17 +581,66 @@ def asks_for_contract(summary: dict) -> bool:
                for requirement in summary["requirements"])
 
 
+def owner_object(action: dict, repo_root: str, run_id: str) -> dict:
+    """The interface-2 owner object for a `spawn`, `resume` or `retry` action: the action less
+    `id` and `kind`, which become `action_id` and `launch_kind`, with the ledger and run bound."""
+    value = {key: member for key, member in action.items() if key not in ("id", "kind")}
+    value.update(action_id=action["id"], launch_kind=action["kind"], kind="owner",
+                 interface_version=2, ledger_repo_root=repo_root, run_id=run_id)
+    return value
+
+
+def resume_pack(repo_root: str, run_id: str, action_id: str) -> str | None:
+    """The `workflow-state resume-pack` text for a resumed action, or None when it cannot be had;
+    a pack is context for the owner, so its absence never stops a dispatch."""
+    try:
+        done = run_child("project", ["workflow-state", "resume-pack", "--repo-root", repo_root,
+                                     "--run-id", run_id, "--action-id", action_id])
+        return done.stdout.decode("utf-8") if done.returncode == 0 else None
+    except (Refusal, UnicodeDecodeError):
+        return None
+
+
+def _dispatch(action: dict, repo_root: str, run_id: str) -> dict:
+    """One dispatch entry: the validated owner object text and the envelope that names it (D17)."""
+    kind = action["kind"]
+    if kind == "delivery_remainder":
+        value, handle = action, {"action_id": action["custody"]["action_id"],
+                                 "attempt": action["source_attempt"], "handoff_path": None}
+    else:
+        value, handle = owner_object(action, repo_root, run_id), {
+            "action_id": action["id"], "attempt": action["attempt"],
+            "handoff_path": action["handoff_path"]}
+    text = validate_bytes("project", json.dumps(value, separators=(",", ":"),
+                                                ensure_ascii=False).encode()).decode("utf-8")
+    return {"action_id": handle["action_id"], "launch_kind": kind, "issue": action["issue"],
+            "attempt": handle["attempt"], "owner": action["owner"],
+            "worktree": action["worktree"], "handoff_path": handle["handoff_path"],
+            "owner_object": text.removesuffix("\n"),
+            "resume_pack": resume_pack(repo_root, run_id, action["id"])
+            if kind == "resume" else None}
+
+
 def project(response: dict, repo_root: str, run_id: str) -> list[dict]:
-    """The dispatches a control reply asks for, after checking every kind against the closed set."""
-    kinds = [action.get("kind") if isinstance(action, dict) else None
-             for action in response["actions"]]
-    for kind in kinds:
+    """The dispatches a control reply asks for, in returned order, once every action kind is in
+    the closed set; any failure refuses with the response and returns no partial list (D23)."""
+    actions = response["actions"]
+    for action in actions:
+        kind = action.get("kind") if isinstance(action, dict) else None
         if kind not in CLOSED_KINDS:
             raise Refusal("project", f"unknown action kind {kind!r}", response=response)
-    for kind in kinds:
-        if kind in (*DISPATCH_KINDS, "delivery_remainder"):
-            raise Refusal("project", f"{kind} actions are not projected", response=response)
-    return []
+    dispatches = []
+    for action in actions:
+        if action["kind"] not in (*DISPATCH_KINDS, "delivery_remainder"):
+            continue
+        try:
+            dispatches.append(_dispatch(action, repo_root, run_id))
+        except Refusal as refusal:
+            raise Refusal("project", refusal.detail, response=response) from refusal
+        except (KeyError, TypeError, UnicodeDecodeError) as error:
+            raise Refusal("project", f"cannot project {action.get('id', action['kind'])}: "
+                                     f"{type(error).__name__} {error}", response=response) from error
+    return dispatches
 
 
 def step(args: argparse.Namespace, done: list[str]) -> dict:
