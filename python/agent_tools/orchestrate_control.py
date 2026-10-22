@@ -12,22 +12,40 @@ the open issues a label or milestone sweep lists, ascending) and `bootstrap`
 run that id names, which is re-entered and never created).
 
 `step` reads one JSON object on stdin, `{session, first_sweep, owners,
-contracts_due, refused_contracts}`, and runs seven steps in order, stopping at the
+contracts_due, refused_contracts}`, and runs eight steps in order, stopping at the
 first that refuses: `bindings`, `bootstrap` (`init-run --run-id` for the session's
 run), `tracker` (the session issues' state and open blockers, one GraphQL call per
 100 issues), `forge` (the repository's pull requests, one paginated call, matched
 to the issues by branch name), `worktrees` (each issue's recorded or candidate
-worktree, from `git worktree list` and the local branches), `control` (one
-`workflow-state control` round over those facts, its reply validated and required
-to be this run's control response) and `project` (the reply's action kinds
-checked against the closed set, then one dispatch per `spawn`, `resume`, `retry` and
-`delivery_remainder` action in returned order: its owner object as `artifact-budget
-validate-report` prints it, and for a `resume` the `workflow-state resume-pack` text, null
-when that child fails; any other failure refuses and prints no dispatches). Ready (exit 0):
-`{"command":"step","outcome":"ready","run_id","control_calls":1,"response",
-"dispatches","contracts_due","refused_contracts","contract_refusals":[],
-"ends_run"}`. A refusal carries the latest validated control reply as `response`
-once `control` has answered, else null.
+worktree, from `git worktree list` and the local branches), `contracts` (one
+`workflow-state build-delivery --kind contract` per issue that needs a pair before
+the first call: on `first_sweep` every session requirement with a null
+`contract_digest`, and every `contracts_due` issue, never one in `refused_contracts`),
+`control` (one `workflow-state control` round over those facts, its reply validated
+and required to be this run's control response) and `project` (the reply's action
+kinds checked against the closed set, then one dispatch per `spawn`, `resume`,
+`retry` and `delivery_remainder` action in returned order: its owner object as
+`artifact-budget validate-report` prints it, and for a `resume` the `workflow-state
+resume-pack` text, null when that child fails; any other failure refuses and prints
+no dispatches).
+
+A builder that exits 2 with no output has refused that issue: it joins
+`refused_contracts` and `contract_refusals` with the line it printed, and the run goes
+on without a pair for it. Any other builder failure refuses at `contracts`, before the
+first `control` call, or at `control` once the first reply is in hand. When the first
+reply's only action is `delivery_contract`, the issues it lists are built (those not
+already built or refused) and, when any of them has a pair, `control` is called a second
+time and last: the same facts, `owners` empty (the observations ride the first call
+only), and a pair for each issue whose first-reply summary asks for one. A reply with any
+dispatch is never followed by a second call, and a failure in the second round refuses at
+`control` carrying the first reply.
+
+Ready (exit 0): `{"command":"step","outcome":"ready","run_id","control_calls","response",
+"dispatches","contracts_due","refused_contracts","contract_refusals","ends_run"}`:
+`response` is the latest reply, `contracts_due` the issues it still asks a contract for
+less the refused ones, and `ends_run` is true when its only action is `delivery_contract`
+for issues that are all refused. A refusal carries the latest validated control reply as
+`response` once `control` has answered, else null.
 
 Stdout is one compact JSON object and a newline. Ready (exit 0):
 `{"command":"start","outcome":"ready","session":{interface_version, run_id,
@@ -633,14 +651,93 @@ def project(response: dict, repo_root: str, run_id: str) -> list[dict]:
     for action in actions:
         if action["kind"] not in (*DISPATCH_KINDS, "delivery_remainder"):
             continue
+        label = action.get("id", action["kind"])
         try:
             dispatches.append(_dispatch(action, repo_root, run_id))
         except Refusal as refusal:
-            raise Refusal("project", refusal.detail, response=response) from refusal
+            raise Refusal("project", f"cannot project {label}: {refusal.detail}",
+                          response=response) from refusal
         except (KeyError, TypeError, UnicodeDecodeError) as error:
-            raise Refusal("project", f"cannot project {action.get('id', action['kind'])}: "
-                                     f"{type(error).__name__} {error}", response=response) from error
+            raise Refusal("project", f"cannot project {label}: {type(error).__name__} {error}",
+                          response=response) from error
     return dispatches
+
+
+def build_pair(step: str, repo_root: str, issue: int, worktree: str,
+               session: dict) -> tuple[dict | None, str | None]:
+    """`(pair, None)` from `workflow-state build-delivery`, or `(None, <its stderr line>)` when
+    it refused the issue (exit 2, no output); any other failure refuses at `step`."""
+    done = run_child(step, ["workflow-state", "build-delivery", "--repo-root", repo_root,
+                            "--kind", "contract", "--input", "-"],
+                     stdin=json.dumps({"issue": issue, "worktree": worktree,
+                                       "source_kind": session["source"]["kind"],
+                                       "source_reference": session["source"]["reference"]}
+                                      ).encode())
+    if done.returncode == 2 and not done.stdout:
+        return None, done.stderr.decode("utf-8", "replace").removesuffix("\n")
+    if done.returncode != 0:
+        raise Refusal(step, f"build-delivery exit {done.returncode}{why(done)}")
+    try:
+        pair = strict_json(done.stdout)
+    except ValueError:
+        pair = None
+    if not (isinstance(pair, dict) and set(pair) == {"contract", "initial_intent"}
+            and all(isinstance(member, dict) for member in pair.values())):
+        raise Refusal(step, "build-delivery printed no contract pair")
+    return pair, None
+
+
+@dataclass
+class Contracts:
+    """The delivery pairs one `step` call has built, and the issues whose build refused (D4)."""
+
+    repo_root: str
+    session: dict
+    paths: Mapping[int, str]
+    refused: set[int]
+    pairs: dict[int, dict]
+    refusals: list[dict]
+
+    def attempt(self, step: str, issue: int) -> None:
+        pair, line = build_pair(step, self.repo_root, issue, self.paths[issue], self.session)
+        if pair is None:
+            self.refused.add(issue)
+            self.refusals.append({"issue": issue, "detail": line})
+        else:
+            self.pairs[issue] = pair
+
+    def build(self, step: str, issues: Sequence[int]) -> None:
+        """Build for each of `issues` not already built or refused."""
+        for issue in issues:
+            if issue in self.paths and issue not in self.refused and issue not in self.pairs:
+                self.attempt(step, issue)
+
+
+def action_kinds(reply: dict) -> list:
+    """The kind of each action in `reply`, None for one that is not an object."""
+    return [action.get("kind") if isinstance(action, dict) else None
+            for action in reply["actions"]]
+
+
+def control_rounds(args: argparse.Namespace, bindings: Bindings, request: StepInput,
+                   facts: tuple[list, dict, list], contracts: Contracts) -> tuple[dict, int]:
+    """The final control reply and the number of `control` calls made: the first, and one more
+    when it only asks for delivery contracts and some of those issues now have a pair (D6, D18)."""
+    session, run_id = request.session, request.session["run_id"]
+    first = run_control(args.repo_root, run_id, control_request(
+        bindings, session, *facts, request.owners, contracts.pairs))
+    if action_kinds(first) != ["delivery_contract"]:
+        return first, 1
+    try:
+        contracts.build("control", first["actions"][0]["issues"])
+    except Refusal as refusal:
+        raise Refusal("control", refusal.detail, response=first) from refusal
+    if not set(first["actions"][0]["issues"]) & set(contracts.pairs):
+        return first, 1
+    asked = {summary["issue"] for summary in first["summaries"] if asks_for_contract(summary)}
+    send = {issue: pair for issue, pair in contracts.pairs.items() if issue in asked}
+    return run_control(args.repo_root, run_id, control_request(
+        bindings, session, *facts, [], send), previous=first), 2
 
 
 def step(args: argparse.Namespace, done: list[str]) -> dict:
@@ -662,20 +759,27 @@ def step(args: argparse.Namespace, done: list[str]) -> dict:
     done.append("forge")
     worktrees = worktree_facts(args.repo_root, bindings, issues, boot["requirements"])
     done.append("worktrees")
-    reply = run_control(args.repo_root, run_id, control_request(
-        bindings, session, tracker, forge, worktrees, request.owners, {}))
+    contracts = Contracts(
+        args.repo_root, session,
+        {w["issue"]: (w["recorded"] or w["candidate"])["path"] for w in worktrees},
+        set(request.refused_contracts), {}, [])
+    undigested = {r["issue"] for r in boot["requirements"] if r["contract_digest"] is None}
+    contracts.build("contracts", [issue for issue in issues if issue in request.contracts_due
+                                  or (request.first_sweep and issue in undigested)])
+    done.append("contracts")
+    reply, calls = control_rounds(args, bindings, request, (tracker, forge, worktrees), contracts)
     done.append("control")
     dispatches = project(reply, args.repo_root, run_id)
-    refused = set(request.refused_contracts)
     actions = reply["actions"]
-    return {"command": "step", "outcome": "ready", "run_id": run_id, "control_calls": 1,
+    return {"command": "step", "outcome": "ready", "run_id": run_id, "control_calls": calls,
             "response": reply, "dispatches": dispatches,
             "contracts_due": sorted(summary["issue"] for summary in reply["summaries"]
                                     if asks_for_contract(summary)
-                                    and summary["issue"] not in refused),
-            "refused_contracts": sorted(refused), "contract_refusals": [],
+                                    and summary["issue"] not in contracts.refused),
+            "refused_contracts": sorted(contracts.refused),
+            "contract_refusals": contracts.refusals,
             "ends_run": [a["kind"] for a in actions] == ["delivery_contract"]
-            and set(actions[0]["issues"]) <= refused}
+            and set(actions[0]["issues"]) <= contracts.refused}
 
 
 class _Parser(argparse.ArgumentParser):

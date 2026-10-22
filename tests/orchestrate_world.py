@@ -17,6 +17,7 @@ fails loudly. Nothing contacts a network remote.
 """
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -292,6 +293,21 @@ class OrchestrateWorld:
         done = self.run("step", "--repo-root", repo_root or self.root, "--input", "-",
                         stdin=stdin)
         return done, json.loads(done.stdout) if done.stdout else None
+
+    def snapshot(self, path) -> list[tuple[str, str, int | None]]:
+        """Every entry under `path` as (relative path, "d" | "f" | "l", mtime in ns for a regular
+        file), links not followed and the top-level `.superpowers` directory left out."""
+        base, entries = Path(path), []
+        for here, dirs, files in os.walk(base):
+            if here == str(base) and ".superpowers" in dirs:
+                dirs.remove(".superpowers")
+            for name in (*dirs, *files):
+                full = Path(here, name)
+                mode = full.lstat().st_mode
+                kind = "l" if stat.S_ISLNK(mode) else "d" if stat.S_ISDIR(mode) else "f"
+                entries.append((str(full.relative_to(base)), kind,
+                                full.lstat().st_mtime_ns if kind == "f" else None))
+        return sorted(entries)
 
     def requests(self) -> list[dict]:
         return [json.loads(call["stdin"]) for call in self.calls("workflow-state", "control")]

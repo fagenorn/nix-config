@@ -137,7 +137,8 @@ class StartInvocationTest(unittest.TestCase):
                 self.assertEqual((done.returncode, done.stdout, done.stderr), (2, "", INVALID))
 
 
-STEP_ORDER = ["bindings", "bootstrap", "tracker", "forge", "worktrees", "control", "project"]
+STEP_ORDER = ["bindings", "bootstrap", "tracker", "forge", "worktrees", "contracts", "control",
+              "project"]
 
 
 def steps_before(step):
@@ -499,3 +500,265 @@ class ProjectTest(unittest.TestCase):
         out = assert_refused(self, done, "step", "project", steps_before("project"))
         self.assertIn("validate-report", out["detail"])
         self.assertIn("resume", [a["kind"] for a in out["response"]["actions"]])
+
+
+REFUSED_LINE = "workflow-state: build-delivery refused: fixture"
+
+
+def builds(world):
+    return [json.loads(c["stdin"]) for c in world.calls("workflow-state", "build-delivery")]
+
+
+def contract_input(world, issue, session, path=None):
+    return {"issue": issue, "worktree": path or world.candidate(issue),
+            "source_kind": session["source"]["kind"],
+            "source_reference": session["source"]["reference"]}
+
+
+def asking(response):
+    return sorted(s["issue"] for s in response["summaries"]
+                  if any(r.get("reason_code") == "delivery_contract_required"
+                         for r in s["requirements"]))
+
+
+class ContractTest(unittest.TestCase):
+    def test_first_sweep_builds_for_null_digest_requirements_from_the_recorded_worktree(self):
+        world = OrchestrateWorld(self)
+        session = world.start("12", "14")["session"]
+        world.seed_spawn(session, [12])
+        boot = json.loads(world.ws("init-run", "--repo-root", world.root,
+                                   "--run-id", session["run_id"]).stdout)
+        (requirement,) = boot["requirements"]
+        requirement["contract_digest"] = None
+        world.fault("workflow-state", "init-run", stdout=json.dumps(boot) + "\n")
+        world.fault("workflow-state", "control", exit=2, stderr="workflow-state: fixture stop\n")
+        assert_refused(self, world.step(session, first_sweep=True)[0], "step", "control",
+                       steps_before("control"))
+        self.assertEqual(builds(world), [contract_input(world, 12, session)])
+        self.assertEqual(world.calls("workflow-state", "build-delivery")[0]["argv"],
+                         ["build-delivery", "--repo-root", str(world.root), "--kind", "contract",
+                          "--input", "-"])
+        assert_refused(self, world.step(session)[0], "step", "control", steps_before("control"))
+        self.assertEqual(len(builds(world)), 1)
+
+    def test_contracts_due_are_built_and_refused_ones_never(self):
+        world = OrchestrateWorld(self)
+        session = world.start("12", "14", "16")["session"]
+        done, out = world.step(session, contracts_due=[12], refused_contracts=[14])
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(builds(world), [contract_input(world, 12, session)])
+        self.assertEqual(out["control_calls"], 1)
+        self.assertIn(14, asking(out["response"]))
+        self.assertEqual(out["contracts_due"], [i for i in asking(out["response"]) if i != 14])
+        self.assertEqual((out["refused_contracts"], out["contract_refusals"]), ([14], []))
+
+    def test_a_builder_refusal_is_reported_and_joins_refused_contracts(self):
+        world = OrchestrateWorld(self)
+        world.fault("workflow-state", "build-delivery", issue=14, exit=2,
+                    stderr=REFUSED_LINE + "\n")
+        session = world.start("12", "14")["session"]
+        done, out = world.step(session, first_sweep=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(out["control_calls"], 2)
+        first, second = world.requests()
+        self.assertEqual(first["delivery_contracts"], keyed([12, 14], None))
+        self.assertIsNotNone(second["delivery_contracts"]["12"])
+        self.assertIsNone(second["delivery_contracts"]["14"])
+        self.assertEqual((len(second["authorization_intents"]["12"]),
+                          second["authorization_intents"]["14"]), (1, []))
+        self.assertEqual(second["owners"], [])
+        for fact in ("tracker", "forge", "worktrees", "issues", "max_parallel"):
+            self.assertEqual(second[fact], first[fact])
+        self.assertEqual(out["contract_refusals"], [{"issue": 14, "detail": REFUSED_LINE}])
+
+    def test_owners_ride_the_first_call_once_and_never_the_chained_one(self):
+        # S1 (D30): the owner observations the adapter passes must be non-empty here,
+        # or re-sending them on the chained call would go unnoticed. A real `control` answers
+        # an `unavailable` observation of a live custody with a resume dispatch, never
+        # contract-only, so the first call is answered with a contract-only reply of this run
+        # captured from the source `control` for the identical request minus the owners.
+        world = OrchestrateWorld(self)
+        world.fault("workflow-state", "build-delivery", issue=14, exit=2,
+                    stderr=REFUSED_LINE + "\n")
+        session = world.start("12", "14")["session"]
+        owner = {"event_id": "12-unavailable", "issue": 12, "state": "unavailable",
+                 "custody": {"kind": "spawn", "launch": 1, "action_id": "12:1:1"}}
+        world.fault("workflow-state", "control", exit=2, stderr="workflow-state: probe\n")
+        world.step(session, owners=[owner])
+        (probe,) = world.requests()
+        world.clear_faults()
+        world.fault("workflow-state", "build-delivery", issue=14, exit=2,
+                    stderr=REFUSED_LINE + "\n")
+        captured = world.ws("control", "--repo-root", world.root, "--run-id", session["run_id"],
+                            "--request-file", "-",
+                            stdin=json.dumps({**probe, "owners": []}).encode())
+        self.assertEqual(captured.returncode, 0, captured.stdout + captured.stderr)
+        self.assertEqual([a["kind"] for a in json.loads(captured.stdout)["actions"]],
+                         ["delivery_contract"])
+        world.fault("workflow-state", "control", call=2, stdout=captured.stdout.decode())
+        done, out = world.step(session, owners=[owner])
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        _, first, chained = world.requests()
+        self.assertEqual((first["owners"], chained["owners"], out["control_calls"]),
+                         ([owner], [], 2))
+        self.assertEqual(out["refused_contracts"], [14])
+        self.assertNotIn(14, out["contracts_due"])
+        self.assertEqual([d["issue"] for d in out["dispatches"]], [12])
+        self.assertFalse(out["ends_run"])
+
+    def test_a_builder_failure_before_control_refuses_at_contracts(self):
+        cases = {"crash": {"exit": 1, "stderr": "boom\n"},
+                 "exit 2 with output": {"exit": 2, "stdout": "{}", "stderr": "x\n"},
+                 "no pair": {"exit": 0, "stdout": '{"contract": {}}'}}
+        for name, rule in cases.items():
+            with self.subTest(name):
+                world = OrchestrateWorld(self)
+                world.fault("workflow-state", "build-delivery", issue=12, **rule)
+                session = world.start("12")["session"]
+                out = assert_refused(self, world.step(session, contracts_due=[12])[0], "step",
+                                     "contracts", steps_before("contracts"))
+                self.assertIsNone(out["response"])
+                self.assertEqual(world.requests(), [])
+
+
+class ChainTest(unittest.TestCase):
+    def test_a_fresh_set_chains_one_contract_round_into_spawns(self):
+        world = OrchestrateWorld(self)
+        session = world.start("12", "14")["session"]
+        done, out = world.step(session, first_sweep=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(out["control_calls"], 2)
+        first, second = world.requests()
+        self.assertEqual(first["delivery_contracts"], keyed([12, 14], None))
+        self.assertTrue(all(second["delivery_contracts"][k] is not None for k in ("12", "14")))
+        self.assertEqual(builds(world), [contract_input(world, 12, session),
+                                         contract_input(world, 14, session)])
+        actions = {a["id"]: a for a in out["response"]["actions"]}
+        self.assertEqual([(d["action_id"], d["launch_kind"], d["issue"], d["worktree"])
+                          for d in out["dispatches"]],
+                         [("12:1:1", "spawn", 12, world.candidate(12)),
+                          ("14:1:1", "spawn", 14, world.candidate(14))])
+        for dispatch in out["dispatches"]:
+            expected = projected(actions[dispatch["action_id"]], world.root, session["run_id"])
+            self.assertEqual(json.loads(dispatch["owner_object"]), expected)
+            self.assertEqual(dispatch["owner_object"],
+                             world.validate(expected).stdout.decode().removesuffix("\n"))
+            self.assertIsNone(dispatch["resume_pack"])
+        self.assertEqual((out["contracts_due"], out["refused_contracts"],
+                          out["contract_refusals"], out["ends_run"]), ([], [], [], False))
+
+    def test_a_reply_with_a_dispatch_is_never_chained(self):
+        world = OrchestrateWorld(self)
+        session = world.start("12", "14")["session"]
+        done, out = world.step(session, contracts_due=[12, 14])
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual((out["control_calls"], len(world.requests())), (1, 1))
+        self.assertEqual([d["launch_kind"] for d in out["dispatches"]], ["spawn", "spawn"])
+
+    def test_every_listed_refusal_ends_the_run(self):
+        world = OrchestrateWorld(self)
+        for issue in (12, 14):
+            world.fault("workflow-state", "build-delivery", issue=issue, exit=2,
+                        stderr=REFUSED_LINE + "\n")
+        session = world.start("12", "14")["session"]
+        done, out = world.step(session, first_sweep=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(out["response"]["actions"], [
+            {"id": "delivery_contract", "kind": "delivery_contract", "issues": [12, 14]}])
+        self.assertEqual((out["control_calls"], out["dispatches"], out["refused_contracts"],
+                          out["ends_run"]), (1, [], [12, 14], True))
+        self.assertEqual([r["issue"] for r in out["contract_refusals"]], [12, 14])
+
+    def test_a_failure_in_the_chained_phase_refuses_at_control_with_the_first_reply(self):
+        cases = {"second call": ("control", {"call": 2, "exit": 2,
+                                             "stderr": "workflow-state: fixture stop\n"}),
+                 "chained build crash": ("build-delivery", {"issue": 14, "exit": 1,
+                                                            "stderr": "boom\n"})}
+        for name, (sub, rule) in cases.items():
+            with self.subTest(name):
+                world = OrchestrateWorld(self)
+                world.fault("workflow-state", sub, **rule)
+                session = world.start("12", "14")["session"]
+                out = assert_refused(self, world.step(session, first_sweep=True)[0], "step",
+                                     "control", steps_before("control"))
+                self.assertEqual(out["response"]["actions"], [
+                    {"id": "delivery_contract", "kind": "delivery_contract",
+                     "issues": [12, 14]}])
+
+    def test_a_chained_reply_that_is_not_a_control_response_keeps_the_first_reply(self):
+        world = OrchestrateWorld(self)
+        session = world.start("12", "14")["session"]
+        boot = world.ws("init-run", "--repo-root", world.root, "--run-id", session["run_id"])
+        world.fault("workflow-state", "control", call=2, stdout=boot.stdout.decode())
+        out = assert_refused(self, world.step(session, first_sweep=True)[0], "step",
+                             "control", steps_before("control"))
+        self.assertEqual(out["response"]["actions"], [
+            {"id": "delivery_contract", "kind": "delivery_contract", "issues": [12, 14]}])
+
+
+class RefusalTableTest(unittest.TestCase):
+    def test_every_start_step_refuses_with_its_name(self):
+        world = OrchestrateWorld(self)
+        world.listing("--label", "none", [])
+        rows = [("bindings", lambda: None, ["start", "--repo-root", world.cwd, "12"]),
+                ("route", lambda: world.fault("workflow-state", "host-route", exit=2,
+                                              stderr="workflow-state: fixture\n"),
+                 ["start", "--repo-root", world.root, "12"]),
+                ("issues", lambda: None, ["start", "--repo-root", world.root, "--label", "none"]),
+                ("bootstrap", lambda: world.fault("workflow-state", "init-run", exit=2,
+                                                  stderr="workflow-state: fixture\n"),
+                 ["start", "--repo-root", world.root, "12"])]
+        order = ["bindings", "route", "issues", "bootstrap"]
+        for step, arrange, argv in rows:
+            with self.subTest(step):
+                world.clear_faults()
+                arrange()
+                out = assert_refused(self, world.run(*argv), "start", step,
+                                     order[:order.index(step)])
+                self.assertIsNone(out["response"])
+
+    def test_every_step_step_refuses_with_its_name_and_the_response_after_control(self):
+        world = OrchestrateWorld(self)
+        session = world.start("12", "14")["session"]
+        taken = [f"issue-12-orchestrated{s}" for s in ["", *(f"-{n}" for n in range(2, 10))]]
+        rows = [
+            ("bindings", lambda: None, {"repo_root": world.cwd}),
+            ("bootstrap", lambda: world.fault("workflow-state", "init-run", exit=2,
+                                              stderr="workflow-state: fixture\n"), {}),
+            ("tracker", lambda: world.fault("gh", "api", exit=1, stderr="gh: fixture\n"), {}),
+            ("forge", lambda: world.fault("gh", "api", argv_has="--paginate", exit=1,
+                                          stderr="gh: fixture\n"), {}),
+            ("worktrees", lambda: [world.git("branch", name) for name in taken], {}),
+            ("contracts", lambda: world.fault("workflow-state", "build-delivery", issue=12,
+                                              exit=1, stderr="boom\n"),
+             {"contracts_due": [12]}),
+            ("control", lambda: world.fault("workflow-state", "control", exit=2,
+                                            stderr="workflow-state: fixture\n"), {}),
+            ("project", lambda: world.fault("artifact-budget", "validate-report",
+                                            stdin_kind="owner", exit=2,
+                                            stderr="artifact-budget: invalid report\n"),
+             {"contracts_due": [12, 14]})]
+        for step, arrange, extra in rows:
+            with self.subTest(step):
+                world.clear_faults()
+                arrange()
+                out = assert_refused(self, world.step(session, **extra)[0], "step", step,
+                                     steps_before(step))
+                if step == "project":
+                    self.assertEqual(out["response"]["run_id"], session["run_id"])
+                else:
+                    self.assertIsNone(out["response"])
+                if step == "worktrees":
+                    world.git("branch", "-D", *taken)
+
+    def test_no_file_is_created_under_the_ledger_root_or_working_directory(self):
+        world = OrchestrateWorld(self)
+        before = (world.snapshot(world.root), world.snapshot(world.cwd))
+        session = world.start("12", "14")["session"]
+        done, out = world.step(session, first_sweep=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(len(out["dispatches"]), 2)
+        world.fault("workflow-state", "control", exit=2, stderr="workflow-state: fixture\n")
+        assert_refused(self, world.step(session)[0], "step", "control", steps_before("control"))
+        self.assertTrue((world.root / ".superpowers").is_dir())
+        self.assertEqual((world.snapshot(world.root), world.snapshot(world.cwd)), before)
