@@ -229,11 +229,11 @@ def _issues(args: argparse.Namespace, bindings: Bindings) -> tuple[list[int], bo
 
 def _bootstrap(args: argparse.Namespace, issues: list[int]) -> str:
     """The run id `init-run` answers for the run `--run-id` names or the issue set."""
-    handle = ["--run-id", args.run_id] if args.run_id else \
+    handle = ["--run-id", args.run_id] if args.run_id is not None else \
         ["--issue-set", "-".join(map(str, issues))]
     reply = workflow_response("bootstrap", "init-run", "--repo-root", args.repo_root, *handle)
     if reply.get("kind") != "workflow_bootstrap" \
-            or (args.run_id and reply.get("run_id") != args.run_id):
+            or (args.run_id is not None and reply.get("run_id") != args.run_id):
         raise Refusal("bootstrap", "init-run did not answer the requested run")
     return reply["run_id"]
 
@@ -288,6 +288,9 @@ def _parse(argv: Sequence[str] | None) -> argparse.Namespace:
     if not os.path.isabs(args.repo_root) or sum(given) != 1:
         raise InvocationError("start takes an absolute --repo-root and exactly one of "
                               "numbers, --label and --milestone")
+    # An empty value is no selector: gh would apply no filter, and init-run no run id.
+    if "" in (args.label, args.milestone, args.run_id):
+        raise InvocationError("--label, --milestone and --run-id take a non-empty value")
     return args
 
 

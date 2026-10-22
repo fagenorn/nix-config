@@ -124,6 +124,10 @@ class StartInvocationTest(unittest.TestCase):
                                          "--label", "x", "--milestone", "y"],
                  "not a number": ["start", "--repo-root", str(world.root), "12a"],
                  "zero": ["start", "--repo-root", str(world.root), "0"],
+                 "empty label": ["start", "--repo-root", str(world.root), "--label", ""],
+                 "empty milestone": ["start", "--repo-root", str(world.root), "--milestone", ""],
+                 "empty run id": ["start", "--repo-root", str(world.root), "12",
+                                  "--run-id", ""],
                  "no subcommand": []}
         for name, argv in cases.items():
             with self.subTest(name):
