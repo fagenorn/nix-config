@@ -468,6 +468,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     DIRECT_ADD_REASON = (
         "only the user applies this label (Instruction Budget raise control)")
     EVALUATOR_REASON = "shell source passed to an evaluator cannot be validated"
+    SPLIT_STRING_REASON = "command text handed to env -S cannot be validated"
     # The existing fail-closed reasons the label rows reuse.
     UNPARSED_REASON = "the command could not be parsed"
     UNTOKENISED_REASON = "the segment could not be tokenised"
@@ -1235,6 +1236,42 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             with self.subTest(shape=shape["id"]):
                 self.assert_shape_verdict(
                     command, repo, shape["label"], {"exit": 2, "reason": shape["reason"]})
+
+    def test_every_invocation_shape_gets_its_verdict(self):
+        """Issue 400 D10: the guard-only invocation shapes, read from their one home."""
+        slug = self.SHAPES["values"]["<resolved-repository>"]
+        repo = self.make_repo(f"git@github.com:{slug}.git")
+        for shape in self.SHAPES["invocation_shapes"]:
+            command = self.shape_command(shape["template"]).replace(
+                "<repository-root>", str(repo))
+            with self.subTest(shape=shape["id"]):
+                self.assert_shape_verdict(command, repo, shape["label"], shape["verdict"])
+
+    def test_raw_text_sites_match_verb_words_in_order(self):
+        """Issue 400 D5, D12: text the guard cannot tokenise as a command is refused
+        when a verb's words occur in it in order, the first matched by basename."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command, label, reason in (
+            ("sh -c 'git -C /tmp/x push origin issue-400-topic'", "push",
+             self.EVALUATOR_REASON),
+            ("eval git\\ push origin issue-400-topic", "push", self.EVALUATOR_REASON),
+            ("bash -c 'gh --repo fagenorn/nix-config pr merge 1'", "merge",
+             self.EVALUATOR_REASON),
+            ('echo "unterminated ; git -C /tmp/x push origin issue-400-topic', "push",
+             self.UNPARSED_REASON),
+            ("env -S git push origin issue-400-topic", "push", self.SPLIT_STRING_REASON),
+            ("env -u FOO -S 'gh release create v1.2.3'", "release creation",
+             self.SPLIT_STRING_REASON),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"lifecycle guard: unsafe {label}: {reason}", result.stderr)
+        for command in ("sh -c 'git log --oneline'", "env -S 'git status'",
+                        "eval 'git fetch origin'"):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
 
     def test_tag_push_near_misses_are_refused(self):
         repo = self.tagged_repo("fagenorn/nix-config")

@@ -75,25 +75,18 @@ SCRUB_PREFIXES = tuple(sorted(
     },
     key=lambda spelling: (-len(spelling), spelling),
 ))
-# The guarded verbs, as raw text and as token sequences. Order matters: the
-# first match at a token wins, and no sequence is a prefix of another.
-GUARDED_LITERALS = (
-    ("gh pr merge", "merge"),
-    ("gh pr create", "pr-create"),
-    ("git branch -d", "branch"),
-    ("git push", "push"),
-    ("gh release create", "release"),
+# The guarded verbs as word sequences: the program, then its subcommand path.
+# Order matters: the first match at a token wins, and no sequence is a prefix
+# of another.
+GUARDED_VERBS = (
+    (("gh", "pr", "merge"), "merge"),
+    (("gh", "pr", "create"), "pr-create"),
+    (("git", "branch", "-d"), "branch"),
+    (("git", "push"), "push"),
+    (("gh", "release", "create"), "release"),
     # `new` is gh's alias of `create`; it routes to the same grammar, which
     # refuses it because the grammar spells `create`.
-    ("gh release new", "release"),
-)
-GUARDED_TOKEN_LITERALS = (
-    (["gh", "pr", "merge"], "merge"),
-    (["gh", "pr", "create"], "pr-create"),
-    (["git", "branch", "-d"], "branch"),
-    (["git", "push"], "push"),
-    (["gh", "release", "create"], "release"),
-    (["gh", "release", "new"], "release"),
+    (("gh", "release", "new"), "release"),
 )
 # The raise label is the user's Instruction Budget raise decision. The refusal
 # is a mistake-catcher for agents, not enforcement (#294).
@@ -116,11 +109,13 @@ COMMAND_KEYWORDS = frozenset({
     "in", "coproc",
 })
 COMMAND_WRAPPERS = frozenset({"command", "builtin", "exec", "env", "sudo"})
-# Programs whose argument is shell source. Arbitrary shell cannot be parsed
-# here, so a guarded verb anywhere in such a segment is refused outright, and
-# so is a detaching word (matched there as raw text, including when the
-# evaluator is named by path, as in `/bin/sh -c`).
+# Programs whose argument is shell source, matched by basename (`/bin/sh -c`).
+# Arbitrary shell cannot be parsed here, so a guarded verb anywhere in such a
+# segment is refused outright, and so is a detaching word (matched there as
+# raw text).
 SHELL_EVALUATORS = frozenset({"eval", "sh", "bash", "zsh", "dash", "ksh"})
+EVALUATOR_REASON = "shell source passed to an evaluator cannot be validated"
+SPLIT_STRING_REASON = "command text handed to env -S cannot be validated"
 # Words that detach a process from the task that started it (#278). Refused
 # in every repository, before the policy loads.
 DETACHING_WORDS = ("nohup", "setsid", "disown")
@@ -147,6 +142,9 @@ TAG_REF_PREFIX = "refs/tags/"
 SEGMENT_SEPARATORS = frozenset(";&|\n")
 UNSAFE_BRANCH_CHARS = set(";&|<>$`\\\n\r*?[]{}()#~")
 UNSAFE_TEXT_CHARS = frozenset('"$`\\\0\r')
+# Where the guard reads raw text (issue 400 D5, D12), a word ends at whitespace,
+# a quote or any shell-active character.
+RAW_WORD_BREAKS = frozenset("'\"") | frozenset(UNSAFE_BRANCH_CHARS)
 
 
 class DeadlineExhausted(Exception):
@@ -409,7 +407,8 @@ def tokenize_segment(segment):
 
 
 def command_position_flags(tokens):
-    """Per token: does a simple command start here?
+    """(flags, split_string): per token, does a simple command start here; and
+    does an `env` at a command position take `-S`/`--split-string`?
 
     Keywords, assignments and wrappers keep the position open. A wrapper option
     that takes an argument (`env -u NAME`, `sudo -u user`, per the wrapper option
@@ -418,6 +417,7 @@ def command_position_flags(tokens):
     operator token ends any pending option argument.
     """
     flags = [False] * len(tokens)
+    split_string = False
     open_position = True
     wrapper = None
     pending = 0
@@ -437,12 +437,58 @@ def command_position_flags(tokens):
             continue
         if wrapper is not None and value.startswith("-"):
             kind, attached = wrapper_option(wrapper, value)
+            if kind == "payload":
+                split_string = True
             if kind is not None and attached is None:
                 pending += 1
             continue
         flags[index] = True
         open_position = False
-    return flags
+    return flags, split_string
+
+
+def program_name(word):
+    """The basename of `word`: `/usr/bin/git` -> `git`."""
+    return word.rsplit("/", 1)[-1]
+
+
+def raw_words(text):
+    """The words of raw `text`, split at whitespace and RAW_WORD_BREAKS.
+
+    A word that env's option table reads as a split-string option with attached
+    command text (`-Sgit`, `--split-string=git`) is followed by that text as a
+    word of its own, since env runs it (issue 400 D12).
+    """
+    words = []
+    current = []
+    for character in text + " ":
+        if character.isspace() or character in RAW_WORD_BREAKS:
+            if current:
+                words.append("".join(current))
+                current = []
+        else:
+            current.append(character)
+    expanded = []
+    for word in words:
+        expanded.append(word)
+        if word.startswith("-"):
+            kind, attached = wrapper_option("env", word)
+            if kind == "payload" and attached:
+                expanded.append(attached)
+    return expanded
+
+
+def verb_occurs_in_order(words, verb_words):
+    """True when `verb_words` occur in `words` in order, not necessarily
+    adjacent, the program word matched by basename."""
+    position = 0
+    for word in words:
+        candidate = program_name(word) if position == 0 else word
+        if candidate == verb_words[position]:
+            position += 1
+            if position == len(verb_words):
+                return True
+    return False
 
 
 def mentions_raise_label(texts):
@@ -484,14 +530,16 @@ def adds_raise_label(tokens):
 
 
 def unvalidatable(segment, reason, mentions_label=False):
-    """Every guarded verb mentioned in `segment`, all refused for `reason`.
+    """Every guarded verb whose words occur in `segment`'s raw text in order,
+    all refused for `reason`.
 
     When `mentions_label` is set, the raise-label edit is refused too.
     """
+    words = raw_words(segment)
     found = [
         (operation, segment, reason)
-        for literal, operation in GUARDED_LITERALS
-        if literal in segment
+        for verb_words, operation in GUARDED_VERBS
+        if verb_occurs_in_order(words, verb_words)
     ]
     if mentions_label:
         found.append(("label", segment, reason))
@@ -506,7 +554,9 @@ def guarded_operations(command):
     unparseable command, shell source passed to `eval`/`sh -c`, or a position
     that is not a command position (an argument to some other program). Those
     are refused rather than waved through — the parser and the shell have to
-    agree, and where they cannot the guard fails closed.
+    agree, and where they cannot the guard fails closed. A segment in which env
+    takes `-S`/`--split-string` is judged like an evaluator segment, on its
+    whole text, because env appends the remaining words to the split payload.
 
     The `label` operation is mention-gated: it is considered only when the
     command's tokens mention the raise label, always carries a problem, and is
@@ -537,21 +587,21 @@ def guarded_operations(command):
         # `gh` word in an evaluator segment and its label in the next one.
         stream.extend(tokens)
         stream.append((";", True))
-        flags = command_position_flags(tokens)
+        flags, split_string = command_position_flags(tokens)
         values = [value for value, _ in tokens]
         mentions = mentions_raise_label(values)
+        if split_string:
+            found.extend(unvalidatable(segment, SPLIT_STRING_REASON, mentions))
+            continue
         if any(
-            flag and value in SHELL_EVALUATORS
+            flag and program_name(value) in SHELL_EVALUATORS
             for flag, value in zip(flags, values)
         ):
-            found.extend(unvalidatable(
-                segment, "shell source passed to an evaluator cannot be validated",
-                mentions,
-            ))
+            found.extend(unvalidatable(segment, EVALUATOR_REASON, mentions))
             continue
         for index in range(len(values)):
-            for literal_tokens, operation in GUARDED_TOKEN_LITERALS:
-                if values[index:index + len(literal_tokens)] != literal_tokens:
+            for verb_words, operation in GUARDED_VERBS:
+                if tuple(values[index:index + len(verb_words)]) != verb_words:
                     continue
                 if flags[index]:
                     found.append((operation, segment, None))

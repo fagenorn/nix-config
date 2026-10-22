@@ -74,5 +74,15 @@
      "label": "push", "reason": "not in a command position"},
     {"id": "branch.after-cd", "form": "branch.local", "before": "cd /tmp/worktree && ", "after": "",
      "label": "branch deletion", "reason": "forbidden raw command character"}
+  ],
+  "invocation_shapes": [
+    {"id": "push.split-string", "template": "env -S \"git push origin <branch>\"",
+     "label": "push", "verdict": {"exit": 2, "reason": "command text handed to env -S cannot be validated"}},
+    {"id": "push.split-attached", "template": "env -Sgit push origin <branch>",
+     "label": "push", "verdict": {"exit": 2, "reason": "command text handed to env -S cannot be validated"}},
+    {"id": "merge.split-string-long", "template": "env --split-string=\"gh pr merge <pr-num>\"",
+     "label": "merge", "verdict": {"exit": 2, "reason": "command text handed to env -S cannot be validated"}},
+    {"id": "push.evaluator-path", "template": "/bin/sh -c 'git push origin <branch>'",
+     "label": "push", "verdict": {"exit": 2, "reason": "shell source passed to an evaluator cannot be validated"}}
   ]
 }
