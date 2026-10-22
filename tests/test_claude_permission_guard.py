@@ -1279,6 +1279,51 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
 
+    def test_recognition_reads_through_global_options_and_paths(self):
+        """Issue 400 AC3, D3, D4, D6: a guarded verb behind git global options, gh
+        flags or a program path is adjudicated; unguarded invocations still pass."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        spelling = ("the git -C directory must be one word without whitespace, "
+                    "quotes or shell-active characters")
+        hint = "; run git and gh by name, and carry a directory only as git -C <dir>"
+        for command, label, reason in (
+            ("git -C 'two words' push origin issue-400-topic", "push", spelling + hint),
+            ("git -C ~/worktree push origin issue-400-topic", "push", spelling + hint),
+            ("git -C $(pwd) push origin issue-400-topic", "push",
+             "the git invocation continues past a shell substitution or grouping" + hint),
+            ("git -C /tmp/x -c a=b push origin issue-400-topic", "push",
+             "git global option -c is not accepted" + hint),
+            ("git --no-pager branch -d issue-400-topic", "branch deletion",
+             "git global option --no-pager is not accepted" + hint),
+            ("/usr/bin/git branch -d issue-400-topic", "branch deletion",
+             "git named by a path" + hint),
+            ("/opt/homebrew/bin/gh release create v1.2.3 --repo fagenorn/nix-config "
+             '--verify-tag --title "t" --notes-file /tmp/n.md', "release creation",
+             "gh named by a path" + hint),
+            ("gh -R fagenorn/nix-config pr create --repo fagenorn/nix-config --base main "
+             '--head t --title "x" --body "y"', "PR creation",
+             "expected exactly gh pr create"),
+            ("xargs git -C /tmp/x push origin issue-400-topic", "push",
+             "the verb is not in a command position"),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"lifecycle guard: unsafe {label}: {reason}", result.stderr)
+        for command in (
+            "git -C /tmp status --short",
+            "git -C /tmp/x log --grep push",
+            "git --no-pager log --oneline",
+            "git -c core.pager=cat diff",
+            "/usr/bin/git status",
+            "gh pr view 1 --json mergeable",
+            "gh pr list --state merged",
+            "gh -R fagenorn/nix-config pr view 1",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
     def test_tag_push_near_misses_are_refused(self):
         repo = self.tagged_repo("fagenorn/nix-config")
         lightweight = self.tagged_repo("fagenorn/nix-config", tag="v2.0.0", annotated=False)

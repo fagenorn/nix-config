@@ -116,6 +116,12 @@ COMMAND_WRAPPERS = frozenset({"command", "builtin", "exec", "env", "sudo"})
 SHELL_EVALUATORS = frozenset({"eval", "sh", "bash", "zsh", "dash", "ksh"})
 EVALUATOR_REASON = "shell source passed to an evaluator cannot be validated"
 SPLIT_STRING_REASON = "command text handed to env -S cannot be validated"
+NOT_COMMAND_POSITION = (
+    "the verb is not in a command position the guard can validate; quote it "
+    "if you only mean to mention it"
+)
+# Ends every refusal of an invocation form at recognition (issue 400 D6).
+INVOCATION_FORM_HINT = "run git and gh by name, and carry a directory only as git -C <dir>"
 # Words that detach a process from the task that started it (#278). Refused
 # in every repository, before the policy loads.
 DETACHING_WORDS = ("nohup", "setsid", "disown")
@@ -538,6 +544,160 @@ def adds_raise_label(tokens):
     return False
 
 
+def git_directory_problem(directory):
+    """True when a `git -C` directory is not one plain word: empty, or holding
+    whitespace, a quote or a shell-active character (issue 400 D7)."""
+    return not directory or any(
+        character.isspace() or character in "'\"" or character in UNSAFE_BRANCH_CHARS
+        for character in directory
+    )
+
+
+def git_invocation(program, words):
+    """(operation, problem) for a guarded git invocation, else None (issue 400 D3).
+
+    `words` follow the `git` word up to the end of its simple command. Leading
+    words that begin with `-` are global options, each `-C` taking the next word
+    as its directory. With no other option and at most one `-C`, the next word is
+    the subcommand; otherwise `push`, or `branch` then `-d`, anywhere among
+    `words` counts, since the walk cannot know which options take a value.
+    `problem` is None for a plain `git` with no global option or one plain
+    `-C <dir>`, else the recognition refusal (D6).
+    """
+    options = []
+    directories = []
+    index = 0
+    while index < len(words) and words[index].startswith("-"):
+        if words[index] == "-C" and index + 1 < len(words):
+            directories.append(words[index + 1])
+            index += 2
+        else:
+            options.append(words[index])
+            index += 1
+    if not options and len(directories) <= 1:
+        candidates = [words[index:index + 2]]
+    else:
+        candidates = [words[position:position + 2] for position in range(len(words))]
+    operation = None
+    for candidate in candidates:
+        if candidate[:1] == ["push"]:
+            operation = "push"
+        elif candidate == ["branch", "-d"]:
+            operation = "branch"
+        if operation is not None:
+            break
+    if operation is None:
+        return None
+    if program != "git":
+        problem = "git named by a path"
+    elif options:
+        problem = f"git global option {options[0]} is not accepted"
+    elif len(directories) > 1:
+        problem = "git -C given more than once"
+    elif directories and git_directory_problem(directories[0]):
+        problem = (
+            "the git -C directory must be one word without whitespace, quotes "
+            "or shell-active characters"
+        )
+    else:
+        return operation, None
+    return operation, f"{problem}; {INVOCATION_FORM_HINT}"
+
+
+def gh_invocation(program, words):
+    """(operation, problem) for a guarded gh invocation, else None (issue 400 D4).
+
+    Guarded when `words` begin with a guarded path (`pr merge`, `pr create`,
+    `release create`, `release new`), or when a flag word comes before an
+    occurrence of the path's second word that follows its first. Flags after
+    the path never matter. A gh named by a path is refused (D6); a flag between
+    the path words is left to the verb's grammar.
+    """
+    paths = [
+        (list(verb_words[1:]), operation)
+        for verb_words, operation in GUARDED_VERBS
+        if verb_words[0] == "gh"
+    ]
+    found = next((operation for path, operation in paths if words[:2] == path), None)
+    for (first, second), operation in paths:
+        if found is not None:
+            break
+        if first not in words:
+            continue
+        start = words.index(first) + 1
+        if any(
+            words[position] == second
+            and any(word.startswith("-") for word in words[:position])
+            for position in range(start, len(words))
+        ):
+            found = operation
+    if found is None:
+        return None
+    if program != "gh":
+        return found, f"gh named by a path; {INVOCATION_FORM_HINT}"
+    return found, None
+
+
+def guarded_invocation(tokens, index):
+    """(operation, problem) when the word at `index` starts a guarded git or gh
+    invocation, matched by basename, else None.
+
+    Its words run to the next operator token. `problem` is a recognition refusal
+    or None; the caller still judges the command position.
+    """
+    value, operator = tokens[index]
+    if operator:
+        return None
+    words = []
+    truncated = False
+    for word, word_is_operator in tokens[index + 1:]:
+        if word_is_operator:
+            truncated = True
+            break
+        words.append(word)
+    name = program_name(value)
+    if name == "git":
+        found = git_invocation(value, words)
+        if found is None and truncated and git_options_end(words) == len(words):
+            # The run ended inside the global options (issue 400 D15): read on.
+            rest = [word for word, is_operator in tokens[index + 1:] if not is_operator]
+            loose = git_invocation(value, ["--"] + rest)
+            if loose is not None:
+                found = loose[0], (
+                    "the git invocation continues past a shell substitution or "
+                    f"grouping; {INVOCATION_FORM_HINT}"
+                )
+        return found
+    if name == "gh":
+        return gh_invocation(value, words)
+    return None
+
+
+def git_options_end(words):
+    """Index of the first word after the leading git global options, each `-C`
+    taking the next word as its value (issue 400 D15)."""
+    index = 0
+    while index < len(words) and words[index].startswith("-"):
+        index += 2 if words[index] == "-C" and index + 1 < len(words) else 1
+    return index
+
+
+def git_option_operands(tokens, index):
+    """Indices of the `-C` values in the leading global-option run of the word
+    at `index` (issue 400 D15): arguments of git, never programs."""
+    operands = []
+    position = index + 1
+    while (position < len(tokens) and not tokens[position][1]
+           and tokens[position][0].startswith("-")):
+        if (tokens[position][0] == "-C" and position + 1 < len(tokens)
+                and not tokens[position + 1][1]):
+            operands.append(position + 1)
+            position += 2
+        else:
+            position += 1
+    return operands
+
+
 def unvalidatable(segment, reason, mentions_label=False):
     """Every guarded verb whose words occur in `segment`'s raw text in order,
     in either reading of its quotes and backslashes, all refused for `reason`.
@@ -608,20 +768,19 @@ def guarded_operations(command):
         ):
             found.extend(unvalidatable(segment, EVALUATOR_REASON, mentions))
             continue
-        for index in range(len(values)):
-            for verb_words, operation in GUARDED_VERBS:
-                if tuple(values[index:index + len(verb_words)]) != verb_words:
-                    continue
-                if flags[index]:
-                    found.append((operation, segment, None))
-                else:
-                    found.append((
-                        operation,
-                        segment,
-                        "the verb is not in a command position the guard can "
-                        "validate; quote it if you only mean to mention it",
-                    ))
-                break
+        operands = set()
+        for index in range(len(tokens)):
+            if index in operands:
+                continue
+            if not tokens[index][1] and program_name(tokens[index][0]) == "git":
+                operands.update(git_option_operands(tokens, index))
+            invocation = guarded_invocation(tokens, index)
+            if invocation is None:
+                continue
+            operation, problem = invocation
+            found.append((
+                operation, segment, problem if flags[index] else NOT_COMMAND_POSITION,
+            ))
     # Judged over every tokenised segment at once: a separator inside a
     # substitution (`gh pr edit $(gh pr view | jq …) --add-label …`) splits
     # the `gh` word from its label, so a per-segment check would miss it.

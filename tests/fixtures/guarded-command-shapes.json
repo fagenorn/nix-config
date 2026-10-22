@@ -83,6 +83,20 @@
     {"id": "merge.split-string-long", "template": "env --split-string=\"gh pr merge <pr-num>\"",
      "label": "merge", "verdict": {"exit": 2, "reason": "command text handed to env -S cannot be validated"}},
     {"id": "push.evaluator-path", "template": "/bin/sh -c 'git push origin <branch>'",
-     "label": "push", "verdict": {"exit": 2, "reason": "shell source passed to an evaluator cannot be validated"}}
+     "label": "push", "verdict": {"exit": 2, "reason": "shell source passed to an evaluator cannot be validated"}},
+    {"id": "push.config-option", "template": "git -c core.hooksPath=/dev/null push origin <branch>",
+     "label": "push", "verdict": {"exit": 2, "reason": "git -C <dir>"}},
+    {"id": "push.git-dir", "template": "git --git-dir=<repository-root>/.git push origin <branch>",
+     "label": "push", "verdict": {"exit": 2, "reason": "git -C <dir>"}},
+    {"id": "push.second-dir", "template": "git -C <repository-root> -C <repository-root> push origin <branch>",
+     "label": "push", "verdict": {"exit": 2, "reason": "git -C <dir>"}},
+    {"id": "push.path-git", "template": "/usr/bin/git push origin <branch>",
+     "label": "push", "verdict": {"exit": 2, "reason": "git -C <dir>"}},
+    {"id": "merge.path-gh", "template": "/usr/local/bin/gh pr merge <pr-num> --repo <resolved-repository> --merge --delete-branch",
+     "label": "merge", "verdict": {"exit": 2, "reason": "git -C <dir>"}},
+    {"id": "merge.flag-before-path", "template": "gh --repo <resolved-repository> pr merge <pr-num> --merge --delete-branch",
+     "label": "merge", "verdict": {"exit": 2, "reason": "does not match the guarded merge grammar"}},
+    {"id": "merge.flag-between-path", "template": "gh pr --repo <resolved-repository> merge <pr-num> --merge --delete-branch",
+     "label": "merge", "verdict": {"exit": 2, "reason": "does not match the guarded merge grammar"}}
   ]
 }
