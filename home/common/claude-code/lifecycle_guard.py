@@ -640,12 +640,17 @@ def gh_invocation(program, words):
     return found, None, None
 
 
-def guarded_invocation(tokens, index):
+def guarded_invocation(tokens, index, later=""):
     """(operation, problem, directory) when the word at `index` starts a guarded
     git or gh invocation, matched by basename, else None.
 
     Its words run to the next operator token. `problem` is a recognition refusal
-    or None; the caller still judges the command position.
+    or None; the caller still judges the command position. `later` is the raw
+    text of the command's segments after this one: a git run that ends at an
+    operator inside its global options reads on through the rest of this
+    segment and then `later`, in both raw readings, because a separator inside
+    a substitution (`git -C $(pwd | cat) push …`) splits the invocation across
+    segments (issue 400 D15, D17).
     """
     value, operator = tokens[index]
     if operator:
@@ -663,7 +668,16 @@ def guarded_invocation(tokens, index):
         if found is None and truncated and git_options_end(words) == len(words):
             # The run ended inside the global options (issue 400 D15): read on.
             rest = [word for word, is_operator in tokens[index + 1:] if not is_operator]
-            loose = git_invocation(value, ["--"] + rest)
+            loose = next(
+                (
+                    reading for reading in (
+                        git_invocation(value, ["--"] + rest + raw_words(later, glued))
+                        for glued in (False, True)
+                    )
+                    if reading is not None
+                ),
+                None,
+            )
             if loose is not None:
                 found = loose[0], (
                     "the git invocation continues past a shell substitution or "
@@ -701,16 +715,22 @@ def git_option_operands(tokens, index):
 
 
 def unvalidatable(segment, reason, mentions_label=False):
-    """Every guarded verb whose words occur in `segment`'s raw text in order,
-    in either reading of its quotes and backslashes, all refused for `reason`.
+    """Every guarded verb found in `segment`'s raw text, all refused for `reason`.
 
-    When `mentions_label` is set, the raise-label edit is refused too.
+    A verb is found when its words occur in order in either reading of the
+    text's quotes and backslashes (issue 400 D16), or when its words joined by
+    one space are a substring of the text or of the text with its quotes and
+    backslashes deleted (issue 400 D17, the base `336d9e05` check): a word such
+    as `${CMD:-git` or `-df` has no word equal to the verb's, yet the shell runs
+    the verb. When `mentions_label` is set, the raise-label edit is refused too.
     """
     readings = [raw_words(segment), raw_words(segment, glued=True)]
+    texts = [segment, "".join(c for c in segment if c not in RAW_GLUE_CHARS)]
     found = [
         (operation, segment, reason, None)
         for verb_words, operation in GUARDED_VERBS
         if any(verb_occurs_in_order(words, verb_words) for words in readings)
+        or any(" ".join(verb_words) in text for text in texts)
     ]
     if mentions_label:
         found.append(("label", segment, reason, None))
@@ -723,12 +743,19 @@ def guarded_operations(command):
 
     `problem` is None when the segment can be handed to that verb's grammar,
     and a reason when the verb sits where the guard cannot validate it: an
-    unparseable command, shell source passed to `eval`/`sh -c`, or a position
-    that is not a command position (an argument to some other program). Those
-    are refused rather than waved through — the parser and the shell have to
-    agree, and where they cannot the guard fails closed. A segment in which env
-    takes `-S`/`--split-string` is judged like an evaluator segment, on its
-    whole text, because env appends the remaining words to the split payload.
+    unparseable command or untokenisable segment, shell source passed to an
+    evaluator (`eval`, `sh -c`, matched by basename), or a position that is not
+    a command position (an argument to some other program). Those are refused
+    rather than waved through — the parser and the shell have to agree, and
+    where they cannot the guard fails closed. A segment in which env takes
+    `-S`/`--split-string` is judged like an evaluator segment, on its whole
+    text, because env appends the remaining words to the split payload.
+
+    Recognition refuses an invocation form before any lookup (issue 400 D6,
+    D15): git or gh named by a path, a git global option other than one `-C`,
+    a repeated `-C` or a `-C` directory that is not one plain word, and a git
+    run that ends at an operator inside its global options and so continues
+    past a substitution or grouping, read on through the rest of the command.
 
     The `label` operation is mention-gated: it is considered only when the
     command's tokens mention the raise label, always carries a problem, and is
@@ -746,7 +773,7 @@ def guarded_operations(command):
         )
     found = []
     stream = []
-    for segment in segments:
+    for position, segment in enumerate(segments):
         tokens = tokenize_segment(segment)
         if tokens is None:
             found.extend(unvalidatable(
@@ -777,7 +804,8 @@ def guarded_operations(command):
                 continue
             if not tokens[index][1] and program_name(tokens[index][0]) == "git":
                 operands.update(git_option_operands(tokens, index))
-            invocation = guarded_invocation(tokens, index)
+            invocation = guarded_invocation(
+                tokens, index, "\n".join(segments[position + 1:]))
             if invocation is None:
                 continue
             operation, problem, directory = invocation

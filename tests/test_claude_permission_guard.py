@@ -880,7 +880,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     def test_merge_accepts_the_exact_unset_token_prefix(self):
         # A resolved exhaustive credential-name list yields the merge prefix
         # `unset GITHUB_TOKEN && gh pr merge ...` so gh falls back to the
-        # keyring credential; exactly that literal prefix is grammatical.
+        # keyring credential; that prefix is one of the accepted scrub spellings.
         repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
         for command in (
             "unset GITHUB_TOKEN && gh pr merge 1 --repo fagenorn/nix-config "
@@ -1268,6 +1268,11 @@ class ClaudePermissionGuardTest(unittest.TestCase):
              self.SPLIT_STRING_REASON),
             # D5 accepts that words in order are enough, adjacent or not.
             ('sh -c "git log; echo push"', "push", self.EVALUATOR_REASON),
+            # D17: a verb's words as one substring are refused too, as at base
+            # 336d9e05, so an expansion default or a bundled option cannot hide it.
+            ('eval "${CMD:-git push origin main}"', "push", self.EVALUATOR_REASON),
+            ('sh -c "${X:-gh pr merge 1}"', "merge", self.EVALUATOR_REASON),
+            ('sh -c "git branch -df x"', "branch deletion", self.EVALUATOR_REASON),
         ):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)
@@ -1290,6 +1295,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("git -C 'two words' push origin issue-400-topic", "push", spelling + hint),
             ("git -C ~/worktree push origin issue-400-topic", "push", spelling + hint),
             ("git -C $(pwd) push origin issue-400-topic", "push",
+             "the git invocation continues past a shell substitution or grouping" + hint),
+            # D17: a separator inside the substitution does not end the run.
+            ("git -C $(pwd | cat) push origin issue-400-topic", "push",
              "the git invocation continues past a shell substitution or grouping" + hint),
             ("git -C /tmp/x -c a=b push origin issue-400-topic", "push",
              "git global option -c is not accepted" + hint),

@@ -88,8 +88,13 @@ redirection still leaves the verb outside a command position.
 raw text (an unparseable command, an untokenisable segment, an evaluator
 segment, and now a segment in which `env` takes `-S`/`--split-string`), a
 guarded verb matches when its words occur in order among the text's words, the
-first by basename; words are split at whitespace, quotes and shell operator
-characters (D5). The verb pass finds an evaluator at a command position by
+first by basename, in either of two readings: words split at whitespace, quotes
+and the shell-active characters; and words split the same way after quotes and
+backslashes are deleted, since the shell glues quoted or escaped pieces into one
+word (D5, D12, D16). A verb also matches, as at base `336d9e05`, when its words
+joined by one space are a substring of the text or of the text with its quotes
+and backslashes deleted, so a word that is not the verb's own word
+(`${CMD:-git push …}`, `git branch -df x`) cannot hide it (D17). The verb pass finds an evaluator at a command position by
 basename, as the detaching pass already does, so `/bin/sh -c 'git push …'`
 (unadjudicated today) is an evaluator segment. An `env -S` segment is judged on
 its whole text, like an evaluator segment (the raise-label mention included),
@@ -299,3 +304,4 @@ No in-process test imports the guard: it is a standalone file run under
 | D14 | Redirection words between `git`/`gh` and the verb (`git 2>/dev/null push …`) and wrappers named by path (`/usr/bin/env sh -c '…'`) stay unrecognised, as at `336d9e05`; a follow-up issue (plan) | § Recognition keeps redirections' current treatment and matches wrappers as today; the issue's recognition list names neither; planning probe: both exit 0 before and after this change | Fold them in during planning (widens a reviewed recognition rule without a design pass) |
 | D15 | Phase-5 review (R1, R2): a git invocation whose global-option run ends at a shell operator before any subcommand (`git -C $(pwd) push …`) is recognised from the segment's remaining words and refused; a `-C` value word is never itself recognised as a program, so a repository directory named `git` is judged once | Codex plan review R1/R2, traced against `tokenize_segment` (operators split runs) and the per-token recognition loop; the-bar fail-closed | Leave both: R1 leaves a push unadjudicated (the gap issue 400 closes), R2 refuses an authorized push for its directory's basename |
 | D16 | Task-2 review: raw-text sites read a text twice, quotes and backslashes as word breaks and quotes and backslashes deleted, and refuse when either reading holds a guarded verb's words in order | Task-2 review traced `sh -c "g''it push …"`, `eval g\\it push …` and `env -S "gi\\t push …"` past the single reading; README: everything the tokeniser cannot vouch for is refused; `detaching_word`'s two-readings precedent | One reading at quote breaks: the shell glues quoted pieces into one word, so an evaluator payload runs a verb the guard never saw |
+| D17 | Final review: raw-text sites also refuse when a guarded verb's words joined by one space are a substring of the text or of its glued reading; a git run that ends at an operator inside its global options (D15) reads on through the rest of the command, across segment boundaries, in both raw readings, and is refused with the D15 reason when `push` or `branch -d` occurs | final correctness review CR-001, CR-002; base `336d9e05` substring check: `eval "${CMD:-git push origin main}"` and `sh -c "git branch -df x"` exit 0 under the in-order readings alone, and `split_segments` cuts `git -C $(pwd \| cat) push …` at the `\|` inside the substitution | In-order readings only (a regression against base); tracking substitution depth across segments to bound the D15 read (a second model of `$(`, backtick and grouping nesting the tokeniser does not keep) |
