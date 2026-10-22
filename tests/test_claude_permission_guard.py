@@ -1262,6 +1262,12 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("env -S git push origin issue-400-topic", "push", self.SPLIT_STRING_REASON),
             ("env -u FOO -S 'gh release create v1.2.3'", "release creation",
              self.SPLIT_STRING_REASON),
+            ("sh -c \"g''it push origin issue-400-topic\"", "push", self.EVALUATOR_REASON),
+            ("eval g\\it push origin issue-400-topic", "push", self.EVALUATOR_REASON),
+            ('env -S "gi\\t push origin issue-400-topic"', "push",
+             self.SPLIT_STRING_REASON),
+            # D5 accepts that words in order are enough, adjacent or not.
+            ('sh -c "git log; echo push"', "push", self.EVALUATOR_REASON),
         ):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)

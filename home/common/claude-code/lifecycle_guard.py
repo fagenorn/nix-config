@@ -142,9 +142,13 @@ TAG_REF_PREFIX = "refs/tags/"
 SEGMENT_SEPARATORS = frozenset(";&|\n")
 UNSAFE_BRANCH_CHARS = set(";&|<>$`\\\n\r*?[]{}()#~")
 UNSAFE_TEXT_CHARS = frozenset('"$`\\\0\r')
-# Where the guard reads raw text (issue 400 D5, D12), a word ends at whitespace,
-# a quote or any shell-active character.
+# Where the guard reads raw text (issue 400 D5, D12, D16) it reads it twice: a
+# word ends at whitespace, a quote or any shell-active character; and, because
+# the shell glues quoted or escaped pieces into one word (`g''it`, `g\it`), with
+# the quotes and backslashes deleted, a word ends at whitespace or any other
+# shell-active character.
 RAW_WORD_BREAKS = frozenset("'\"") | frozenset(UNSAFE_BRANCH_CHARS)
+RAW_GLUE_CHARS = frozenset("'\"\\")
 
 
 class DeadlineExhausted(Exception):
@@ -452,8 +456,11 @@ def program_name(word):
     return word.rsplit("/", 1)[-1]
 
 
-def raw_words(text):
+def raw_words(text, glued=False):
     """The words of raw `text`, split at whitespace and RAW_WORD_BREAKS.
+
+    With `glued`, quotes and backslashes are deleted first, as the shell joins
+    the pieces around them into one word (issue 400 D16).
 
     A word that env's option table reads as a split-string option with attached
     command text (`-Sgit`, `--split-string=git`) is followed by that text as a
@@ -462,6 +469,8 @@ def raw_words(text):
     words = []
     current = []
     for character in text + " ":
+        if glued and character in RAW_GLUE_CHARS:
+            continue
         if character.isspace() or character in RAW_WORD_BREAKS:
             if current:
                 words.append("".join(current))
@@ -531,15 +540,15 @@ def adds_raise_label(tokens):
 
 def unvalidatable(segment, reason, mentions_label=False):
     """Every guarded verb whose words occur in `segment`'s raw text in order,
-    all refused for `reason`.
+    in either reading of its quotes and backslashes, all refused for `reason`.
 
     When `mentions_label` is set, the raise-label edit is refused too.
     """
-    words = raw_words(segment)
+    readings = [raw_words(segment), raw_words(segment, glued=True)]
     found = [
         (operation, segment, reason)
         for verb_words, operation in GUARDED_VERBS
-        if verb_occurs_in_order(words, verb_words)
+        if any(verb_occurs_in_order(words, verb_words) for words in readings)
     ]
     if mentions_label:
         found.append(("label", segment, reason))
