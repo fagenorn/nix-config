@@ -345,6 +345,17 @@ class WorktreeTest(unittest.TestCase):
                              steps_before("worktrees"))
         self.assertIn("12", out["detail"])
 
+    def test_a_recorded_worktree_whose_path_holds_a_newline_still_matches(self):
+        world = OrchestrateWorld(self)
+        session = world.start("12")["session"]
+        path = str(world.root / ".worktrees" / "line\nbreak" / "worktree-issue-12-orchestrated")
+        world.seed_spawn(session, [12], paths={12: path})
+        world.add_worktree(path, "worktree-issue-12-orchestrated")
+        done, _ = world.step(session)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(world.requests()[0]["worktrees"], [{"issue": 12, "candidate": None,
+            "recorded": {"path": path, "state": "matching_issue_branch"}}])
+
     def test_a_subset_session_observes_only_its_issues_and_avoids_their_paths(self):
         world = OrchestrateWorld(self)
         full = world.start("12", "14")["session"]
@@ -385,7 +396,8 @@ class StepInputTest(unittest.TestCase):
             "foreign due": changed(contracts_due=[99]),
             "repeated refused": changed(refused_contracts=[12, 12]),
             "foreign owner": changed(owners=[owner]),
-            "first_sweep not boolean": changed(first_sweep=1)}
+            "first_sweep not boolean": changed(first_sweep=1),
+            "NUL in run_id": changed(session={**session, "run_id": session["run_id"] + "\0"})}
         for name, text in cases.items():
             with self.subTest(name):
                 done = world.run("step", "--repo-root", world.root, "--input", "-", stdin=text)

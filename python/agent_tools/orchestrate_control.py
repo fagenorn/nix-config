@@ -195,7 +195,7 @@ def run_child(step: str, argv: Sequence[str], *, stdin: bytes | None = None,
     options: dict = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
     try:
         return subprocess.run(list(argv), capture_output=True, check=False, env=env, **options)
-    except OSError as error:
+    except (OSError, ValueError) as error:  # ValueError: an argument holds a NUL
         raise Refusal(step, f"cannot run {argv[0]}: {error}") from error
 
 
@@ -346,7 +346,8 @@ def _session(value: object) -> dict:
     source = _exact(session["source"], {"kind", "reference"})
     human = session["human_directed"]
     if not (_is_int(session["interface_version"]) and session["interface_version"] == 1
-            and isinstance(session["run_id"], str) and session["run_id"] and issues
+            and isinstance(session["run_id"], str) and session["run_id"]
+            and "\0" not in session["run_id"] and issues
             and isinstance(human, bool)
             and source["kind"] == ("explicit_user" if human else "standing_repository")
             and isinstance(source["reference"], str) and source["reference"]):
@@ -471,8 +472,10 @@ def forge_facts(b: Bindings, issues: Sequence[int]) -> dict[str, dict]:
     """Each session issue's newest same-repository pull request, matched by branch name, from
     one complete paginated listing."""
     pages = _graphql("forge", b, FORGE_QUERY, paginate=True)
+    # `--slurp` prints one array of pages, and a repository with no pull request still
+    # answers one page with empty `nodes`: only an array of zero pages (or no array) refuses.
     if not isinstance(pages, list) or not pages:
-        raise Refusal("forge", "the pull-request listing is empty")
+        raise Refusal("forge", "the pull-request listing printed no page")
     pulls = [pull for page in pages for pull in _at(
         "forge", page, "data", "repository", "pullRequests", "nodes", expect=list)]
     if _at("forge", pages[-1], "data", "repository", "pullRequests", "pageInfo", "hasNextPage",
@@ -492,23 +495,26 @@ def forge_facts(b: Bindings, issues: Sequence[int]) -> dict[str, dict]:
     return facts
 
 
-def _git_lines(repo_root: str, *argv: str) -> list[str]:
+def _git_fields(repo_root: str, separator: bytes, *argv: str) -> list[str]:
+    """`git <argv>`'s output split on `separator`, each field decoded as the filesystem
+    encodes paths, so a path with a newline or undecodable bytes survives unchanged."""
     done = run_child("worktrees", ["git", "-C", repo_root, *argv])
     if done.returncode != 0:
         raise Refusal("worktrees", f"git {argv[0]} exit {done.returncode}{why(done)}")
-    return done.stdout.decode("utf-8", "replace").splitlines()
+    return [os.fsdecode(field) for field in done.stdout.split(separator) if field]
 
 
 def _live_worktrees(repo_root: str) -> dict[str, str | None]:
-    """Each live worktree's real path mapped to its branch, None when it is detached."""
+    """Each live worktree's real path mapped to its branch, None when it is detached, from
+    the NUL-delimited listing (`launch_scope.worktree_paths` reads it the same way)."""
     live: dict[str, str | None] = {}
     path: str | None = None
-    for line in _git_lines(repo_root, "worktree", "list", "--porcelain"):
-        if line.startswith("worktree "):
-            path = os.path.realpath(line.removeprefix("worktree "))
+    for field in _git_fields(repo_root, b"\0", "worktree", "list", "--porcelain", "-z"):
+        if field.startswith("worktree "):
+            path = os.path.realpath(field.removeprefix("worktree "))
             live[path] = None
-        elif line.startswith("branch ") and path is not None:
-            live[path] = line.removeprefix("branch ").removeprefix("refs/heads/")
+        elif field.startswith("branch ") and path is not None:
+            live[path] = field.removeprefix("branch ").removeprefix("refs/heads/")
     return live
 
 
@@ -517,8 +523,9 @@ def worktree_facts(repo_root: str, b: Bindings, issues: Sequence[int],
     """Each session issue's recorded worktree normalized to a state, or its first free
     candidate path (D10, D19, D21)."""
     live = _live_worktrees(repo_root)
-    branches = {name.removeprefix("refs/heads/") for name in _git_lines(
-        repo_root, "for-each-ref", "--format=%(refname)", "refs/heads")}
+    # A ref name cannot hold a newline or other control byte, so one ref per line is exact.
+    branches = {name.removeprefix("refs/heads/") for name in _git_fields(
+        repo_root, b"\n", "for-each-ref", "--format=%(refname)", "refs/heads")}
     recorded = {r["issue"]: r["recorded_worktree"] for r in requirements
                 if r["recorded_worktree"]}
     taken = {os.path.realpath(path) for path in recorded.values()}
