@@ -38,8 +38,9 @@ selection; later entries extend the preceding entry. Actual sync eligibility,
 review and CI remain the shipping owner's duties.
 
 Each `observations` entry has exactly `kind`, `source_kind`, `source_reference`,
-`evidence`, `facts`. Source/evidence are actual probe provenance, never a generic
-success claim. `facts` has the canonical builder's exact members:
+`evidence`, `facts`. `source_kind` is `provider`, `tracker`, `repository`,
+`filesystem` or `human_completion`. Source/evidence are actual probe provenance,
+never a generic success claim. `facts` has the canonical builder's exact members:
 
 | Kind | Facts |
 |------|-------|

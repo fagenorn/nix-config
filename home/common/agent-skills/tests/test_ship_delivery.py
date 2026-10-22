@@ -204,6 +204,15 @@ class ShipDeliveryTest(BuilderHarness, unittest.TestCase):
         modified["custody"]["action_id"] = "171:1:2"
         prior.write_text(json.dumps(modified))
         self.assertIn("another contract or custody", self.compile("checkpoint", base, prior=[prior], ok=False).stderr)
+        _, prior = self.compile("checkpoint", {**base,
+            "observations": [self.obs("branch_published", head="a" * 40)]})
+        modified = json.loads(prior.read_text())
+        observation = modified["delivery_observations"][0]
+        observation["contract_digest"] = "sha256:" + "0" * 64
+        fixtures.seal(self.model, observation)
+        prior.write_text(json.dumps(modified))
+        self.assertIn("prior observation belongs to another contract",
+                      self.compile("checkpoint", base, prior=[prior], ok=False).stderr)
 
     def test_stale_context_cannot_checkpoint_but_can_report_truthful_failure(self):
         context = copy.deepcopy(self.context_value)

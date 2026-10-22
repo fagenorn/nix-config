@@ -108,6 +108,9 @@ class DeliveryCompiler:
         return self.selection
 
     def remember(self, observation: dict[str, Any]) -> None:
+        if (observation["contract_digest"] != self.digest
+                or observation["project"] != self.contract["project"]):
+            raise DeliveryInputError("prior observation belongs to another contract")
         kind = observation["observation_kind"]
         self.references.setdefault(kind, {})[observation["id"]] = observation
 
