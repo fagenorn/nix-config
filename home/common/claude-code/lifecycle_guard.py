@@ -44,12 +44,14 @@ DEADLINE_REFUSAL = (
     "little time for the next check, so it was not started"
 )
 ROW_CHECK_EXIT_STATUSES = {"derived": 0, "refused": 1, "unavailable": 2}
-# The harness exports a fine-grained GITHUB_TOKEN that gh prefers over the
-# keyring credential, and its reach is narrower — it cannot see every
-# authorized owner's org. The guard's forge lookups drop the env tokens so
-# validation observes GitHub with the keyring credential, the same auth
-# the `unset GITHUB_TOKEN && ` form of the guarded command will use. A
-# machine with no keyring auth still fails closed at the lookup.
+# The gh keyring credential is the authority for these lookups. gh prefers an
+# ambient GITHUB_TOKEN/GH_TOKEN over it, and such a token, when one is present
+# (CI, a one-off export, another tool), may be narrower: it may not see every
+# authorized owner's org. The guard's forge lookups drop the env tokens, so
+# validation observes GitHub with the keyring credential: the auth the guarded
+# command uses when it sees neither env token (none is set, or the
+# `unset GITHUB_TOKEN && ` prefix removed the only one). A machine with no
+# keyring auth still fails closed at the lookup.
 GH_ENV_TOKEN_NAMES = ("GITHUB_TOKEN", "GH_TOKEN")
 # The scrub-prefix spelling a resolved exhaustive credential-name list yields
 # (`unset GITHUB_TOKEN && gh ...`), and the one the ship-issue skill check reads

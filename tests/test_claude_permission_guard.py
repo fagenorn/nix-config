@@ -39,9 +39,10 @@ import os
 import sys
 import time
 
-# The guard must scrub the gh-recognised token variables from its lookups (the
-# harness token is narrower than the keyring credential). Refusing to answer
-# when one is visible makes every merge-path test double as that assertion.
+# The guard must scrub the gh-recognised token variables from its lookups (an
+# ambient token, which gh would prefer, may be narrower than the keyring
+# credential). Refusing to answer when one is visible makes every merge-path
+# test double as that assertion.
 for name in ("GITHUB_TOKEN", "GH_TOKEN"):
     if name in os.environ:
         print("fake gh saw " + name + " in its environment", file=sys.stderr)
