@@ -1,11 +1,12 @@
 # Task 1 — Compile shipping recipes and replace manual assembly
 
-Implement spec D1–D3. Read `workflow_delivery_build.py`, `DELIVERY-LOOP.md`,
+Implement spec D1–D4. Read `workflow_delivery_build.py`, `DELIVERY-LOOP.md`,
 `POST-SELECTION-SYNC.md`, `REMAINDER.md`, package helper standards and Python
 standards. Add an importable stateless compiler and thin `ship-delivery` CLI.
 Validate tool-produced context/prior payloads, strict recipes, current custody,
 canonical builder outputs and final report. Support ordered sync selections,
-local observation references, holds, denied/partial effects and failed summaries.
+local observation references across custody takeovers, holds, denied/partial
+effects and failed summaries; predecessor authority never enters new output.
 Replace manual ship JSON mechanics with the actual complete compiler interface,
 document every recipe and reference, and add the isolated Nix command-table row.
 

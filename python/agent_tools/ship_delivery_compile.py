@@ -88,9 +88,8 @@ class DeliveryCompiler:
             boundary = "ship-checkpoint" if "requested_scope" in payload else "ship-summary"
             payload = commands.validate(boundary, payload)
             digest_key = "contract_digest" if boundary == "ship-checkpoint" else "delivery_contract_digest"
-            if (payload["issue"], payload["custody"], payload[digest_key]) != (
-                    self.issue, self.custody, self.digest):
-                raise DeliveryInputError("prior payload belongs to another contract or custody")
+            if (payload["issue"], payload[digest_key]) != (self.issue, self.digest):
+                raise DeliveryInputError("prior payload belongs to another issue or contract")
             for observation in payload["delivery_observations"]:
                 self.remember(observation)
 

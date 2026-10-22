@@ -24,7 +24,7 @@ effects remain authoritative and unchanged.
 Checkpoint recipes name the requested stage. Selection recipes support an initial
 selection and ordered sync links. Local references resolve the current selection
 and observation kinds to sealed values/IDs, including cleanup references from prior
-payloads. Ambiguous, absent and cross-custody references fail. A checkpoint or
+payloads. Ambiguous, absent and cross-contract references fail. A checkpoint or
 successful summary requires current launch identity; a failure summary may describe
 a stale launch. Inputs use strict JSON, closed keys and canonical final validation.
 
@@ -52,3 +52,4 @@ service activation or generic workflow scripting language.
 | D1 | Stateless recipe compiler around canonical commands | Existing delivery builder and user finding 2 | Stateful workbench would add a second authority/state home |
 | D2 | Tool-produced context/prior files plus short local references | Token economy; delivery loop completion references | Model-written nested seals preserve the observed failure mode |
 | D3 | Current-launch gate for checkpoints/success, truthful stale failure summaries | Existing ship launch refusal route | Treating construction as authorization weakens the boundary |
+| D4 | Same-contract predecessor observations can resolve references; prior authority is never emitted | Remainder cleanup must reuse facts observed before takeover | Requiring prior custody equality strands a remainder after merge |

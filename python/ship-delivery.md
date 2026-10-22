@@ -6,7 +6,9 @@
 `ship-handoff/v2` or `delivery_remainder`, stored under the primary checkout's
 ignored `.agents/runtime/` so cleanup cannot delete it. Every context and prior
 payload crosses `artifact-budget` validation before use. Prior payloads must
-match this contract and custody. The compiler delegates all sealing to
+match this issue and contract; a predecessor custody's observations remain usable
+as references during a takeover. Prior authority is never copied into output.
+The compiler delegates all sealing to
 `workflow-state build-delivery` and validates its final report. It executes no
 forge effect and performs no ledger write. Checkpoints and successful summaries
 also require `current-launch`; a stale launch can still describe its failure.
@@ -15,7 +17,7 @@ Exit 0 prints only canonical JSON. `--output` additionally retains those bytes
 in a new file, refusing to overwrite an existing file. Exit 2 prints a diagnostic
 on stderr and no stdout. A dependency refusal retains the command, exit code and
 stderr. Input JSON rejects duplicate keys and non-finite literals. Unknown keys,
-missing facts, invalid seals, stale custody and unresolved references refuse.
+missing facts, invalid seals, stale context custody and unresolved references refuse.
 The engine still adjudicates the resulting checkpoint/finish, and effect fences
 and scope echo checks still apply; compilation grants no permission.
 

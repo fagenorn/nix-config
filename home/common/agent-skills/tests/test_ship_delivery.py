@@ -95,6 +95,11 @@ class ShipDeliveryTest(BuilderHarness, unittest.TestCase):
 
     def deliver(self, *, hold=False, remainder=False):
         self.selected()
+        response, merged = self.checkpoint({"requested_stage": "close_tracker",
+            "observations": [self.obs("pr_merged", pr_number=5, pr_url=URL,
+                                      head="a" * 40, merge_sha="b" * 40)],
+            "authority": [self.authority("merge_pr")]})
+        self.assertEqual(response["pending_stage_ids"][0], "close_tracker")
         if remainder:
             summary, _ = self.compile("summary", {"observed_at": NOW, "state": "terminal_failed",
                 "result": {"state": "stopped", "pr_url": URL, "merge_sha": None, "issue_closed": False},
@@ -105,11 +110,6 @@ class ShipDeliveryTest(BuilderHarness, unittest.TestCase):
             self.context.write_text(json.dumps(context))
             self.custody = context["custody"]
             self.checkpoint({"requested_stage": None})
-        response, merged = self.checkpoint({"requested_stage": "close_tracker",
-            "observations": [self.obs("pr_merged", pr_number=5, pr_url=URL,
-                                      head="a" * 40, merge_sha="b" * 40)],
-            "authority": [self.authority("merge_pr")]})
-        self.assertEqual(response["pending_stage_ids"][0], "close_tracker")
         tracker = self.obs("tracker_held", comment_url=HELD_COMMENT, record_path=HELD_RECORD,
             acceptance_state="unmet", observation_identity="github:issue:171:held") if hold else self.obs(
             "tracker_closed", close_reason="completed", observation_identity="github:issue:171:closed")
@@ -135,6 +135,8 @@ class ShipDeliveryTest(BuilderHarness, unittest.TestCase):
                 worktree_observation_ids=["$worktree_absent"],
                 detail_pointer="none", read_evidence="no retained findings")]},
             prior=[merged, closed, removed])
+        self.assertEqual(len(summary["authority_observations"]), 1)
+        self.assertEqual(summary["authority_observations"][0]["launch_id"], self.custody["action_id"])
         finished = json.loads(self.cli("finish", *self.run_args, "--now", LATER,
             "--summary-file", "-", stdin=json.dumps(summary).encode()).stdout)
         self.assertEqual((finished["kind"], finished["pending_stage_ids"]), ("delivery_complete", []))
@@ -186,7 +188,7 @@ class ShipDeliveryTest(BuilderHarness, unittest.TestCase):
             "source_kind": "repository", "source_reference": "sync:wrong", "evidence": "wrong parent"}]}
         self.assertIn("prior selection", self.compile("checkpoint", bad, ok=False).stderr)
 
-    def test_malformed_recipes_and_cross_custody_inputs_fail_without_output(self):
+    def test_malformed_recipes_and_cross_contract_inputs_fail_without_output(self):
         base = {"observed_at": NOW, "requested_stage": None}
         for value in ({**base, "custody": {}}, {**base, "authority": [{}]},
                       {**base, "observations": [self.obs("pr_merged")]},
@@ -200,10 +202,9 @@ class ShipDeliveryTest(BuilderHarness, unittest.TestCase):
         self.compile("checkpoint", None, raw='{"requested_stage":null,"requested_stage":null}', ok=False)
         _, prior = self.compile("checkpoint", base)
         modified = json.loads(prior.read_text())
-        modified["custody"]["launch"] += 1
-        modified["custody"]["action_id"] = "171:1:2"
+        modified["contract_digest"] = "sha256:" + "0" * 64
         prior.write_text(json.dumps(modified))
-        self.assertIn("another contract or custody", self.compile("checkpoint", base, prior=[prior], ok=False).stderr)
+        self.assertIn("another issue or contract", self.compile("checkpoint", base, prior=[prior], ok=False).stderr)
         _, prior = self.compile("checkpoint", {**base,
             "observations": [self.obs("branch_published", head="a" * 40)]})
         modified = json.loads(prior.read_text())
