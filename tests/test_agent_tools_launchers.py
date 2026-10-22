@@ -188,7 +188,7 @@ class AgentToolsLauncherTest(unittest.TestCase):
 
     def test_ship_delivery_uses_the_real_validator_with_hostile_python_channels(self):
         context = self.hostile / "bad-context.json"
-        context.write_text("{}", encoding="utf-8")
+        context.write_text('{"interface_version":2}', encoding="utf-8")
         recipe = self.hostile / "recipe.json"
         recipe.write_text('{"observed_at":"2026-10-22T00:00:00Z","requested_stage":null}',
                           encoding="utf-8")

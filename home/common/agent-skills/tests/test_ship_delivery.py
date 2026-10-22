@@ -238,3 +238,37 @@ class ShipDeliveryTest(BuilderHarness, unittest.TestCase):
                 local_branch_observation_ids=[], worktree_observation_ids=[],
                 detail_pointer="none", read_evidence="empty")]}
         self.assertIn("expected one observation", self.compile("checkpoint", recipe, ok=False).stderr)
+
+    def test_valid_legacy_reports_refuse_as_unsupported_without_tracebacks(self):
+        keys = {"state", "ledger_repo_root", "run_id", "owner", "owner_worktree",
+                "issue_number", "branch", "worktree_path", "spec_artifact", "plan_artifact",
+                "head_sha", "review_state", "acceptance_state", "auto", "report_path", "notes"}
+        legacy = copy.deepcopy({key: self.context_value[key] for key in keys})
+        for name in ("spec_artifact", "plan_artifact"):
+            legacy[name]["metrics"]["largest_member_bytes"] = 0
+        legacy.update(attempt=self.custody["attempt"], action_id=self.custody["action_id"])
+        # Establish that these are valid older wire reports, not malformed JSON.
+        self.context.write_bytes(fixtures.DeliveryLoopTest.validated(self, "ship-handoff", legacy))
+        recipe = {"observed_at": NOW, "requested_stage": None}
+        result = self.compile("checkpoint", recipe, ok=False)
+        self.assertIn("context must use interface_version 2", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.context.write_text(json.dumps(self.context_value))
+        prior = self.runtime / "legacy-summary.json"
+        prior.write_bytes(fixtures.DeliveryLoopTest.validated(self, "ship-summary", {
+            "issue": 171, "state": "stopped", "pr_url": None, "merge_sha": None,
+            "issue_closed": False, "discussion_items": [], "detail_state": "none",
+            "report_path": None, "notes": "older shipping report"}))
+        result = self.compile("checkpoint", recipe, prior=[prior], ok=False)
+        self.assertIn("prior payload must use interface_version 2", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_observation_facts_cannot_collide_with_dispatch_parameters(self):
+        for name in ("kind", "self"):
+            with self.subTest(name=name):
+                observation = self.obs("branch_published", head="a" * 40)
+                observation["facts"][name] = "unexpected"
+                result = self.compile("checkpoint", {"observed_at": NOW, "requested_stage": None,
+                    "observations": [observation]}, ok=False)
+                self.assertIn("reserved builder keys", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)

@@ -69,6 +69,8 @@ class DeliveryCompiler:
 
     def __init__(self, context: Any, prior: list[Any], commands: DeliveryCommands):
         self.commands = commands
+        if not isinstance(context, dict) or context.get("interface_version") != 2:
+            raise DeliveryInputError("context must use interface_version 2")
         if isinstance(context, dict) and context.get("kind") == "delivery_remainder":
             context = commands.validate("workflow-response", context)
             contract, digest = context["contract"], context["contract_digest"]
@@ -85,6 +87,8 @@ class DeliveryCompiler:
         for payload in prior:
             if not isinstance(payload, dict):
                 raise DeliveryInputError("prior payload must be an object")
+            if payload.get("interface_version") != 2:
+                raise DeliveryInputError("prior payload must use interface_version 2")
             boundary = "ship-checkpoint" if "requested_scope" in payload else "ship-summary"
             payload = commands.validate(boundary, payload)
             digest_key = "contract_digest" if boundary == "ship-checkpoint" else "delivery_contract_digest"
@@ -138,7 +142,7 @@ class DeliveryCompiler:
             if name in facts:
                 facts[name] = [self.observation_id(item) for item in array(facts[name], name)]
         # A recipe cannot replace the compiler's context or provenance fields.
-        reserved = {"contract", "observation_kind", "source_kind", "source_reference",
+        reserved = {"kind", "self", "contract", "observation_kind", "source_kind", "source_reference",
                     "observed_at", "evidence"}
         if reserved & facts.keys():
             raise DeliveryInputError("observation facts contain reserved builder keys")

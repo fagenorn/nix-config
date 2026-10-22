@@ -18,3 +18,11 @@ budget and `just build eleven-m5`; report any unavailable check honestly.
 
 Keep long logs outside the repository and pass paths rather than inlining them.
 Commit with inherited signing and `Co-Authored-By: Codex <noreply@openai.com>`.
+
+## Validation context
+
+Main 7e65b0c5 and the feature both reproduced a pre-existing Git 2.55 diagnostic
+difference in the legacy-worktree refusal test. The authorized verification repair
+derives its expected first stderr line from the same real failing Git probe and
+requires that probe to fail. Exact error propagation remains asserted; production
+workflow behavior is unchanged.

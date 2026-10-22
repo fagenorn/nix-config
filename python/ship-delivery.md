@@ -8,6 +8,7 @@ ignored `.agents/runtime/` so cleanup cannot delete it. Every context and prior
 payload crosses `artifact-budget` validation before use. Prior payloads must
 match this issue and contract; a predecessor custody's observations remain usable
 as references during a takeover. Prior authority is never copied into output.
+Only version 2 context and prior payloads are supported; legacy reports refuse.
 The compiler delegates all sealing to
 `workflow-state build-delivery` and validates its final report. It executes no
 forge effect and performs no ledger write. Checkpoints and successful summaries
