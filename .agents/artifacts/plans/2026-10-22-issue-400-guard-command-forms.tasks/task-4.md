@@ -42,6 +42,9 @@ In `tests/test_claude_permission_guard.py`, add directly before `test_tag_push_n
                                default_branch="trunk")
         foreign = self.make_repo("git@github.com:someoneelse/tool.git")
         tagged = self.tagged_repo("fagenorn/guard-fixture")
+        # A repository directory whose basename is `git` (issue 400 D15).
+        named = there.parent / "git"
+        named.symlink_to(there)
         feature = "issue-400-topic"
         for command, cwd in (
             (f"git -C {there} push origin {feature}", here),
@@ -52,6 +55,7 @@ In `tests/test_claude_permission_guard.py`, add directly before `test_tag_push_n
             (f"git -C {tagged} push origin refs/tags/v1.2.3", here),
             (f"env -u GH_TOKEN git -C {there} push origin {feature}", here),
             (f"git -C {there.name} branch -d {feature}", None),
+            (f"git -C {named} push origin {feature}", here),
         ):
             with self.subTest(command=command, cwd=cwd):
                 result = self.run_guard(command, cwd=cwd)
@@ -83,7 +87,7 @@ In `tests/test_claude_permission_guard.py`, add directly before `test_tag_push_n
 - [ ] **Step 2: Watch the tests fail**
 
 Run: the guard-suite invocation with `-k test_every_invocation_shape_gets_its_verdict -k test_git_dash_c_is_judged_against_its_target_repository` (timeout 3600 s).
-Expected: `FAILED (failures=17)`: the three new shapes, all eight allowed rows, and six refused rows (each refused by the push grammar instead of the target repository's verdict); the relative-`<dir>`-without-`cwd`, quoted and double-space rows already pass. Any other result: stop. (Planning dry-ran exactly this on a Task 3 implementation.)
+Expected: `FAILED (failures=18)`: the three new shapes, all nine allowed rows (the `named` row included: at Task 3 it is refused by the push grammar), and six refused rows (each refused by the push grammar instead of the target repository's verdict); the relative-`<dir>`-without-`cwd`, quoted and double-space rows already pass. Any other result: stop. (Planning dry-ran exactly this on a Task 3 implementation.)
 
 - [ ] **Step 3: Implement**
 
@@ -174,7 +178,7 @@ call `canonical_text(operation, judged, directory)`, and replace the `if context
                     )
 ```
 
-In `home/common/claude-code/README.md`, `## Adjudicated verbs`, first paragraph: insert before "The merge's own `gh` lookups run with" the sentence: "`git push` and `git branch -d` also take one `git -C <dir>` directly after `git` (issue 400), `<dir>` one unquoted word without whitespace, quotes or shell-active characters, a relative one joined to the payload `cwd` without normalisation: the guard strips it to the canonical command and builds a push's repository context — origin slug, `origin/HEAD`, the derived-row lookup and row check, and the tag lookup — from that directory, one context per distinct directory in a command under the one invocation deadline, while branch deletion checks only its spelling; an unresolvable directory is an unknown repository, refused as outside standing authorization." Second paragraph: change "(the base policy `git`, the payload `cwd`)" to "(the base policy `git`, in the push's target directory: its `git -C` directory, else the payload `cwd`)".
+In `home/common/claude-code/README.md`, `## Adjudicated verbs`, first paragraph: insert before "The merge's own `gh` lookups run with" the sentence: "`git push` and `git branch -d` also take one `git -C <dir>` directly after `git` (issue 400), `<dir>` one unquoted word without whitespace, quotes or shell-active characters, a relative one joined to the payload `cwd` without normalisation: the guard strips it to the canonical command and builds a push's repository context — origin slug, `origin/HEAD`, the derived-row lookup and row check, and the tag lookup — from that directory, one context per distinct directory in a command under the one invocation deadline, while branch deletion checks only its spelling; an unresolvable directory is an unknown repository, refused as outside standing authorization." Second paragraph: change "(the base policy `git`, the payload `cwd`)" to "(the base policy `git`, in the push's target directory: its `git -C` directory, else the payload `cwd`)". In `## Guard policy`, **Row check.** paragraph (Phase-5 R3): replace "The check runs once per invocation, when the context is built," with "The check runs once per repository context, when that context is built (a command whose pushes name several `git -C` directories builds one context per distinct directory, all under the one invocation deadline),".
 
 - [ ] **Step 4: Verify**
 

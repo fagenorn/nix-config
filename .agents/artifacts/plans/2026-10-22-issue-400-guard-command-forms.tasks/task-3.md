@@ -10,7 +10,7 @@ Spec § Recognition (git, gh, Where), § Accepted invocation forms › Refusals 
 
 **Interfaces:**
 - Consumes: Task 2's `GUARDED_VERBS`, `program_name(word)`, `command_position_flags(tokens) -> (flags, split_string)`, `EVALUATOR_REASON`, `SPLIT_STRING_REASON`, the `invocation_shapes` fixture section and `test_every_invocation_shape_gets_its_verdict`; existing `UNSAFE_BRANCH_CHARS`.
-- Produces: `NOT_COMMAND_POSITION: str`, `INVOCATION_FORM_HINT: str`; `git_directory_problem(directory: str) -> bool`; `git_invocation(program: str, words: list[str]) -> tuple[str, str | None] | None`; `gh_invocation(program: str, words: list[str]) -> tuple[str, str | None] | None`; `guarded_invocation(tokens, index) -> tuple[str, str | None] | None` (operation, problem). Task 4 widens all three tuples with a directory.
+- Produces: `NOT_COMMAND_POSITION: str`, `INVOCATION_FORM_HINT: str`; `git_directory_problem(directory: str) -> bool`; `git_invocation(program: str, words: list[str]) -> tuple[str, str | None] | None`; `gh_invocation(program: str, words: list[str]) -> tuple[str, str | None] | None`; `guarded_invocation(tokens, index) -> tuple[str, str | None] | None` (operation, problem); `git_options_end(words) -> int`, `git_option_operands(tokens, index) -> list[int]`. Task 4 widens all three tuples with a directory.
 
 **Invariants:**
 - `guarded_invocation` reads the words after the program word up to the next operator token, and dispatches on `program_name` of the word at `index`; any other word yields None.
@@ -18,6 +18,8 @@ Spec § Recognition (git, gh, Where), § Accepted invocation forms › Refusals 
 - gh (D4): guarded when the first two words are a guarded path; otherwise when, after the first occurrence of the path's first word, some occurrence of its second word has a flag word (begins with `-`) anywhere before it. The guarded set never grows.
 - Refusal order for a guarded invocation (D6): program named by a path, then the first foreign git global option, then a repeated `-C`, then a `-C` directory that is empty or holds whitespace, a quote or an `UNSAFE_BRANCH_CHARS` character. Each reason ends `; run git and gh by name, and carry a directory only as git -C <dir>`. A gh flag between path words gets no recognition refusal.
 - At a non-command position every recognised invocation gets `NOT_COMMAND_POSITION`, whatever its recognition problem.
+- Opaque option values (Phase-5 R1, D15): when a git word's run ends at an operator token while every word of it is still a global option or a `-C` value (so no subcommand was read, as in `git -C $(pwd) push …`, whose run is `-C $`), the guard reads the remaining non-operator words of the segment instead and, when `push` or `branch` then `-d` occurs among them, records that operation with the refusal `the git invocation continues past a shell substitution or grouping; run git and gh by name, and carry a directory only as git -C <dir>`. A run that already reached a subcommand is unchanged.
+- Option operands are arguments (Phase-5 R2, D15): a word consumed as the `-C` value in the leading global-option run of a word whose basename is `git` is never itself recognised as a program, so `git -C /srv/git push origin topic` yields exactly one invocation.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -53,6 +55,8 @@ In `tests/test_claude_permission_guard.py`, add directly before `test_tag_push_n
         for command, label, reason in (
             ("git -C 'two words' push origin issue-400-topic", "push", spelling + hint),
             ("git -C ~/worktree push origin issue-400-topic", "push", spelling + hint),
+            ("git -C $(pwd) push origin issue-400-topic", "push",
+             "the git invocation continues past a shell substitution or grouping" + hint),
             ("git -C /tmp/x -c a=b push origin issue-400-topic", "push",
              "git global option -c is not accepted" + hint),
             ("git --no-pager branch -d issue-400-topic", "branch deletion",
@@ -90,7 +94,7 @@ In `tests/test_claude_permission_guard.py`, add directly before `test_tag_push_n
 - [ ] **Step 2: Watch the tests fail**
 
 Run: the guard-suite invocation with `-k test_every_invocation_shape_gets_its_verdict -k test_recognition_reads_through_global_options_and_paths` (timeout 3600 s).
-Expected: `FAILED (failures=15)`: the seven new shapes (each runs unadjudicated and exits 0) and the eight refused rows of the recognition test; Task 2's four shapes and the eight passing rows pass. Any other result: stop. (Planning dry-ran exactly this on a Task 2 implementation.)
+Expected: `FAILED (failures=16)`: the seven new shapes (each runs unadjudicated and exits 0) and the nine refused rows of the recognition test; Task 2's four shapes and the eight passing rows pass. Any other result: stop. (Planning dry-ran exactly this on a Task 2 implementation.)
 
 - [ ] **Step 3: Implement**
 
@@ -215,22 +219,66 @@ def guarded_invocation(tokens, index):
     if operator:
         return None
     words = []
+    truncated = False
     for word, word_is_operator in tokens[index + 1:]:
         if word_is_operator:
+            truncated = True
             break
         words.append(word)
     name = program_name(value)
     if name == "git":
-        return git_invocation(value, words)
+        found = git_invocation(value, words)
+        if found is None and truncated and git_options_end(words) == len(words):
+            # The run ended inside the global options (issue 400 D15): read on.
+            rest = [word for word, is_operator in tokens[index + 1:] if not is_operator]
+            loose = git_invocation(value, ["--"] + rest)
+            if loose is not None:
+                found = loose[0], (
+                    "the git invocation continues past a shell substitution or "
+                    f"grouping; {INVOCATION_FORM_HINT}"
+                )
+        return found
     if name == "gh":
         return gh_invocation(value, words)
     return None
+
+
+def git_options_end(words):
+    """Index of the first word after the leading git global options, each `-C`
+    taking the next word as its value (issue 400 D15)."""
+    index = 0
+    while index < len(words) and words[index].startswith("-"):
+        index += 2 if words[index] == "-C" and index + 1 < len(words) else 1
+    return index
+
+
+def git_option_operands(tokens, index):
+    """Indices of the `-C` values in the leading global-option run of the word
+    at `index` (issue 400 D15): arguments of git, never programs."""
+    operands = []
+    position = index + 1
+    while (position < len(tokens) and not tokens[position][1]
+           and tokens[position][0].startswith("-")):
+        if (tokens[position][0] == "-C" and position + 1 < len(tokens)
+                and not tokens[position + 1][1]):
+            operands.append(position + 1)
+            position += 2
+        else:
+            position += 1
+    return operands
 ```
+
+`git_invocation` may reuse `git_options_end` for its own option walk; the observable behaviour is fixed by the two D15 invariants and the `git -C $(pwd)` test row.
 
 c. In `guarded_operations`, replace the whole contiguous-match loop (`for index in range(len(values)):` through its `break`) with:
 
 ```python
+        operands = set()
         for index in range(len(tokens)):
+            if index in operands:
+                continue
+            if not tokens[index][1] and program_name(tokens[index][0]) == "git":
+                operands.update(git_option_operands(tokens, index))
             invocation = guarded_invocation(tokens, index)
             if invocation is None:
                 continue
@@ -240,7 +288,7 @@ c. In `guarded_operations`, replace the whole contiguous-match loop (`for index 
             ))
 ```
 
-In `home/common/claude-code/README.md`, `## Allow surface and lifecycle guard`: after "so `git  push`, `git<TAB>push` and `"git" push` all count." insert: "A word whose basename is `git` starts a git invocation: with no global option, or one `-C <dir>`, the word after them is its subcommand (`push`, or `branch` then `-d`), and with any other global option a `push` or `branch -d` anywhere among its words counts; a word whose basename is `gh` counts when its first two words are `pr merge`, `pr create`, `release create` or `release new`, or when a flag comes before the path's second word and both path words occur in order, so `gh --repo a/b pr merge 1` counts and `gh pr view 1 --json mergeable` does not (issue 400). Such an invocation is refused before any repository lookup, the reason ending `run git and gh by name, and carry a directory only as git -C <dir>`, when its program is named by a path, or it carries a git global option other than one `-C`, a repeated `-C`, or a `-C` directory holding whitespace, a quote or a shell-active character; a gh flag between the path words is left to the verb's grammar."
+In `home/common/claude-code/README.md`, `## Allow surface and lifecycle guard`: after "so `git  push`, `git<TAB>push` and `"git" push` all count." insert: "A word whose basename is `git` starts a git invocation: with no global option, or one `-C <dir>`, the word after them is its subcommand (`push`, or `branch` then `-d`), and with any other global option a `push` or `branch -d` anywhere among its words counts; a word whose basename is `gh` counts when its first two words are `pr merge`, `pr create`, `release create` or `release new`, or when a flag comes before the path's second word and both path words occur in order, so `gh --repo a/b pr merge 1` counts and `gh pr view 1 --json mergeable` does not (issue 400). Such an invocation is refused before any repository lookup, the reason ending `run git and gh by name, and carry a directory only as git -C <dir>`, when its program is named by a path, or it carries a git global option other than one `-C`, a repeated `-C`, or a `-C` directory holding whitespace, a quote or a shell-active character, or when its global options run into a shell substitution or grouping before any subcommand (then `push` or `branch -d` among the segment's remaining words counts); a word taken as a `-C` value is an argument of git, never a program; a gh flag between the path words is left to the verb's grammar."
 
 - [ ] **Step 4: Verify**
 

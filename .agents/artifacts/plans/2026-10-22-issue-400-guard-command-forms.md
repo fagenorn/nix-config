@@ -69,5 +69,11 @@ Task 4 — `git -C <dir>` judged against its target repository — `home/common/
 - `-C` spelling and resolution per D7; one context per target directory per D8.
 - Fixture per D10; the one test seam per D11.
 - One home for canonical text per D13; residual forms left to a follow-up per D14.
+- Opaque `-C` values and `-C` operands per D15 (Task 3, Task 4 test row).
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no focus; base `336d9e05`, plan commit `f0136082`. No fallback.
+- Accepted 3, rejected 0, deferred 0: R1 (blocking: `git -C $(pwd) push` unadjudicated) → Task 3 invariant, code and test row, per D15; R2 (blocking: a `-C` directory named `git` refused) → Task 3 operand skip and Task 4 test row, per D15; R3 (should-fix: README row-check frequency) → Task 4 README edit.
