@@ -1324,6 +1324,55 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
 
+    def test_git_dash_c_is_judged_against_its_target_repository(self):
+        """Issue 400 AC2, D7, D8: `git -C <dir>` builds the push's repository context
+        from <dir> joined to the payload cwd, one context per distinct directory."""
+        here = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        there = self.make_repo("git@github.com:fagenorn/guard-fixture.git",
+                               default_branch="trunk")
+        foreign = self.make_repo("git@github.com:someoneelse/tool.git")
+        tagged = self.tagged_repo("fagenorn/guard-fixture")
+        # A repository directory whose basename is `git` (issue 400 D15).
+        named = there.parent / "git"
+        named.symlink_to(there)
+        feature = "issue-400-topic"
+        for command, cwd in (
+            (f"git -C {there} push origin {feature}", here),
+            (f"git -C {there} push origin main", here),
+            (f"git -C {here} push origin {feature}", foreign),
+            (f"git -C {there.name} push origin {feature}", there.parent),
+            (f"git -C {there} push origin main; git push origin trunk", here),
+            (f"git -C {tagged} push origin refs/tags/v1.2.3", here),
+            (f"env -u GH_TOKEN git -C {there} push origin {feature}", here),
+            (f"git -C {there.name} branch -d {feature}", None),
+            (f"git -C {named} push origin {feature}", here),
+        ):
+            with self.subTest(command=command, cwd=cwd):
+                result = self.run_guard(command, cwd=cwd)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+        unknown = "unsafe push: repository unknown is outside standing authorization"
+        grammar = "unsafe push: expected exactly git push [-u] origin <branch>"
+        for command, cwd, reason in (
+            (f"git -C {there} push origin trunk", here,
+             "unsafe push: refusing to push the default branch trunk"),
+            (f"git -C {foreign} push origin {feature}", here,
+             "unsafe push: repository someoneelse/tool is outside standing authorization"),
+            (f"git -C {there.name} push origin {feature}", None, unknown),
+            (f"git -C {there}/missing push origin {feature}", here, unknown),
+            (f"git -C {there} push origin main; git push origin main", here,
+             "unsafe push: refusing to push the default branch main"),
+            (f"git push origin trunk; git -C {there} push origin trunk", here,
+             "unsafe push: refusing to push the default branch trunk"),
+            (f"git -C {here} push origin refs/tags/v1.2.3", tagged,
+             "unsafe push: v1.2.3 is not an existing annotated tag"),
+            (f'git -C "{there}" push origin {feature}', here, grammar),
+            (f"git -C {there}  push origin {feature}", here, grammar),
+        ):
+            with self.subTest(command=command, cwd=cwd):
+                result = self.run_guard(command, cwd=cwd)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"lifecycle guard: {reason}", result.stderr)
+
     def test_tag_push_near_misses_are_refused(self):
         repo = self.tagged_repo("fagenorn/nix-config")
         lightweight = self.tagged_repo("fagenorn/nix-config", tag="v2.0.0", annotated=False)

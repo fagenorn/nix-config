@@ -76,6 +76,12 @@
      "label": "branch deletion", "reason": "forbidden raw command character"}
   ],
   "invocation_shapes": [
+    {"id": "push.dir", "template": "git -C <repository-root> push origin <branch>",
+     "label": "push", "verdict": {"exit": 0}},
+    {"id": "push.env-dir", "template": "env -u GITHUB_TOKEN git -C <repository-root> push -u origin <branch>",
+     "label": "push", "verdict": {"exit": 0}},
+    {"id": "branch.dir", "template": "git -C <repository-root> branch -d <branch>",
+     "label": "branch deletion", "verdict": {"exit": 0}},
     {"id": "push.split-string", "template": "env -S \"git push origin <branch>\"",
      "label": "push", "verdict": {"exit": 2, "reason": "command text handed to env -S cannot be validated"}},
     {"id": "push.split-attached", "template": "env -Sgit push origin <branch>",

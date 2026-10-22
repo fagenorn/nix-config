@@ -554,7 +554,8 @@ def git_directory_problem(directory):
 
 
 def git_invocation(program, words):
-    """(operation, problem) for a guarded git invocation, else None (issue 400 D3).
+    """(operation, problem, directory) for a guarded git invocation, else None
+    (issue 400 D3).
 
     `words` follow the `git` word up to the end of its simple command. Leading
     words that begin with `-` are global options, each `-C` taking the next word
@@ -562,7 +563,8 @@ def git_invocation(program, words):
     the subcommand; otherwise `push`, or `branch` then `-d`, anywhere among
     `words` counts, since the walk cannot know which options take a value.
     `problem` is None for a plain `git` with no global option or one plain
-    `-C <dir>`, else the recognition refusal (D6).
+    `-C <dir>`, else the recognition refusal (D6). `directory` is that `-C` value
+    when `problem` is None, else None.
     """
     options = []
     directories = []
@@ -600,12 +602,12 @@ def git_invocation(program, words):
             "or shell-active characters"
         )
     else:
-        return operation, None
-    return operation, f"{problem}; {INVOCATION_FORM_HINT}"
+        return operation, None, (directories[0] if directories else None)
+    return operation, f"{problem}; {INVOCATION_FORM_HINT}", None
 
 
 def gh_invocation(program, words):
-    """(operation, problem) for a guarded gh invocation, else None (issue 400 D4).
+    """(operation, problem, None) for a guarded gh invocation, else None (issue 400 D4).
 
     Guarded when `words` begin with a guarded path (`pr merge`, `pr create`,
     `release create`, `release new`), or when a flag word comes before an
@@ -634,13 +636,13 @@ def gh_invocation(program, words):
     if found is None:
         return None
     if program != "gh":
-        return found, f"gh named by a path; {INVOCATION_FORM_HINT}"
-    return found, None
+        return found, f"gh named by a path; {INVOCATION_FORM_HINT}", None
+    return found, None, None
 
 
 def guarded_invocation(tokens, index):
-    """(operation, problem) when the word at `index` starts a guarded git or gh
-    invocation, matched by basename, else None.
+    """(operation, problem, directory) when the word at `index` starts a guarded
+    git or gh invocation, matched by basename, else None.
 
     Its words run to the next operator token. `problem` is a recognition refusal
     or None; the caller still judges the command position.
@@ -666,7 +668,7 @@ def guarded_invocation(tokens, index):
                 found = loose[0], (
                     "the git invocation continues past a shell substitution or "
                     f"grouping; {INVOCATION_FORM_HINT}"
-                )
+                ), None
         return found
     if name == "gh":
         return gh_invocation(value, words)
@@ -706,17 +708,18 @@ def unvalidatable(segment, reason, mentions_label=False):
     """
     readings = [raw_words(segment), raw_words(segment, glued=True)]
     found = [
-        (operation, segment, reason)
+        (operation, segment, reason, None)
         for verb_words, operation in GUARDED_VERBS
         if any(verb_occurs_in_order(words, verb_words) for words in readings)
     ]
     if mentions_label:
-        found.append(("label", segment, reason))
+        found.append(("label", segment, reason, None))
     return found
 
 
 def guarded_operations(command):
-    """(operation, segment, problem) for every guarded verb the shell would run.
+    """(operation, segment, problem, directory) for every guarded verb the shell
+    would run. `directory` is the accepted `git -C` value, else None.
 
     `problem` is None when the segment can be handed to that verb's grammar,
     and a reason when the verb sits where the guard cannot validate it: an
@@ -777,15 +780,15 @@ def guarded_operations(command):
             invocation = guarded_invocation(tokens, index)
             if invocation is None:
                 continue
-            operation, problem = invocation
-            found.append((
-                operation, segment, problem if flags[index] else NOT_COMMAND_POSITION,
-            ))
+            operation, problem, directory = invocation
+            if not flags[index]:
+                problem, directory = NOT_COMMAND_POSITION, None
+            found.append((operation, segment, problem, directory))
     # Judged over every tokenised segment at once: a separator inside a
     # substitution (`gh pr edit $(gh pr view | jq …) --add-label …`) splits
     # the `gh` word from its label, so a per-segment check would miss it.
     if mentions_raise_label([value for value, _ in stream]) and adds_raise_label(stream):
-        found.append(("label", command, RAISE_LABEL_REFUSAL))
+        found.append(("label", command, RAISE_LABEL_REFUSAL, None))
     # A substitution inside a double-quoted word (`x="$(gh pr edit … )"`) runs,
     # but the tokeniser keeps it as one word, so the guard cannot see its `gh`.
     # A word that mentions the label and carries a substitution fails closed.
@@ -797,6 +800,7 @@ def guarded_operations(command):
         found.append((
             "label", command,
             "a command substitution inside a quoted word cannot be validated",
+            None,
         ))
     return found
 
@@ -1030,18 +1034,41 @@ def strip_scrub_prefix(text):
     return text
 
 
-def canonical_text(operation, text):
+def canonical_text(operation, text, directory):
     """The text `operation`'s grammar judges (issue 400 D13).
 
     Push and PR creation are judged per segment, with leading whitespace dropped;
-    every verb but branch deletion (D2) then loses an exact scrub prefix. Text
-    in any other spelling is returned whole, for the grammar to refuse.
+    every verb but branch deletion (D2) then loses an exact scrub prefix; and,
+    with a `git -C` `directory`, a leading `git -C <directory> ` becomes `git `.
+    Text in any other spelling is returned whole, for the grammar to refuse.
     """
     if operation in ("push", "pr-create"):
         text = text.lstrip()
     if operation != "branch":
         text = strip_scrub_prefix(text)
+    if directory is not None:
+        rest = strip_spelling(text, f"git -C {directory} ")
+        if rest is not None:
+            text = "git " + rest
     return text
+
+
+def target_directory(directory, cwd):
+    """The directory a push's repository context is built from (issue 400 D7).
+
+    The `git -C` `directory` joined to the payload `cwd` (an absolute one stands
+    alone; no normalisation, so git resolves it as the shell's `git -C` would),
+    or `cwd` with no `-C`. None when there is none to use: a relative
+    `directory` with no string `cwd`, or no `-C` and no string `cwd`.
+    """
+    base = cwd if isinstance(cwd, str) and cwd else None
+    if directory is None:
+        return base
+    if os.path.isabs(directory):
+        return directory
+    if base is None:
+        return None
+    return os.path.join(base, directory)
 
 
 def detect_repository(git_bin, cwd, timeout):
@@ -1232,11 +1259,14 @@ def load_compiled_policy(path):
 
 
 class Context:
-    """Injected dependencies plus the repository facts, resolved once.
+    """Injected dependencies plus one target directory's repository facts,
+    resolved once per directory (issue 400 D8).
 
-    Building a context is the one place the compiled policy is opened and the one
-    place the row check runs, so a command with no push, PR creation, merge or
-    release creation never reads the first or starts the second.
+    `cwd` is that directory: the payload `cwd`, or a push's `git -C` directory
+    (`target_directory`). Building a context is the one place the compiled
+    policy is opened and the one place the row check runs, so a command with no
+    push, PR creation, merge or release creation never reads the first or
+    starts the second.
     """
 
     def __init__(self, args, base, cwd, deadline):
@@ -1957,12 +1987,13 @@ def main():
         args.jq_bin = base.jq_bin
 
     operations = guarded_operations(command)
-    for operation, _segment, problem in operations:
+    for operation, _segment, problem, _directory in operations:
         if operation == "label":
             return block(f"unsafe {OPERATION_LABELS[operation]}: {problem}")
 
-    context = None
-    for operation, segment, problem in operations:
+    # One context per distinct target directory, all under one deadline.
+    contexts = {}
+    for operation, segment, problem, directory in operations:
         if time.monotonic() >= started + INVOCATION_DEADLINE_SECONDS:
             return block(f"unsafe {OPERATION_LABELS[operation]}: {DEADLINE_REFUSAL}")
         if problem is not None:
@@ -1971,7 +2002,7 @@ def main():
             # Push and PR creation are judged per segment; the other verbs on the
             # whole command, so they tolerate no chaining.
             judged = segment if operation in ("push", "pr-create") else command
-            text = canonical_text(operation, judged)
+            text = canonical_text(operation, judged, directory)
             if operation == "branch":
                 # Branch deletion is judged in every repository: it needs no
                 # forge state.
@@ -1979,9 +2010,11 @@ def main():
                     text, args.git_bin, args.child_timeout_seconds
                 )
             else:
+                target = target_directory(directory, payload.get("cwd"))
+                context = contexts.get(target)
                 if context is None:
-                    context = Context(
-                        args, base, payload.get("cwd"),
+                    context = contexts[target] = Context(
+                        args, base, target,
                         started + INVOCATION_DEADLINE_SECONDS,
                     )
                 if operation == "push":
