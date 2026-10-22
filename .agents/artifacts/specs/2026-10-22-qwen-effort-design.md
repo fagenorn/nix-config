@@ -16,11 +16,12 @@ a required patch cannot be applied or verified.
 
 ## Decisions
 
-- Parse `output_config.effort` as the closed set low, medium, high, xhigh, max;
-  unsupported inputs fail request validation. Other output configuration fields
+- Parse `output_config.effort` as low, medium, high, xhigh, max; null or omission
+  selects the model default. Unsupported values fail validation. Other fields
   remain accepted for client compatibility.
-- For templates advertising exactly low, medium, xhigh, translate high and max
-  to xhigh. Other templates receive the requested effort unchanged. Validate the
+- For Qwen4-exp templates advertising low, medium, xhigh, translate unsupported
+  high and max to xhigh. An advertised high alias remains valid. Other model
+  families receive the requested effort unchanged. Validate the
   effective Qwen effort after merging model defaults and explicit overrides;
   invalid overrides fail before the renderer can silently choose its default.
 - Explicit request template effort wins over the translated API effort; forced
@@ -54,7 +55,7 @@ package changes happen during implementation.
 
 | ID | Choice | Grounding | Rejected alternative |
 |----|--------|-----------|----------------------|
-| D1 | Translate only the advertised Qwen effort set, reject invalid effective values | Installed Qwen template accepts low/medium/xhigh; upstream fallback otherwise silently removes invalid effort | Global high-to-xhigh mapping changes unrelated models |
+| D1 | Translate unsupported high/max only on Qwen4-exp, accepting advertised aliases; reject invalid effective values | MLX accepts low/medium/xhigh; Splash also advertises high alias; upstream fallback otherwise silently removes invalid effort | Global high-to-xhigh mapping changes unrelated models |
 | D2 | Medium default plus 4096 thinking tokens on both served Qwen entries | #410 requests bounded default reasoning; explicit upstream budget precedence supports deliberate deeper work | Unbounded xhigh preserves the observed minutes-long default |
 | D3 | Checked declarative patching and recursive settings merge in one host support command | Host already owns these keys; universal truthful-terminal-states and tests-that-can-fail standards | Warning-only activation can report success without the fix |
 | D4 | Portable flake check uses the pinned upstream fixture and real schema/template | Existing omlx-tap input exactly matches installed adapter; caller owns live smoke | Vendored copy drifts and a duplicate test schema misses dropped fields |

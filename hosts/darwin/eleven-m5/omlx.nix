@@ -30,6 +30,7 @@ let
       repo = "Jundot/Qwen3.8-Flash-Next-oQ4e-mtp"; # 106 GB; 125B MoE, 6B active
       alias = "qwen3.8-flash-next";
       mtp = true;
+      settings = qwenReasoning;
     }
     # The same model on Splash's Metal engine with DFlash2 speculative decoding, which batches
     # concurrent requests out of one shared KV pool. Splash cannot run the MLX checkpoint above,
@@ -43,7 +44,7 @@ let
       ];
       id = "Qwen3.8-Flash-Next-UD-Q4_K_XL";
       alias = "qwen3.8-flash-next-splash";
-      settings = {
+      settings = qwenReasoning // {
         external_engine = "splash";
         max_context_window = 262144;
       };
@@ -56,6 +57,15 @@ let
     }
   ];
   modelName = m: baseNameOf m.repo;
+
+  # Routine Claude Code turns should not inherit Qwen's unbounded xhigh
+  # template default. This is a default budget, so explicit request budgets and
+  # thinking disable still retain their upstream precedence. GLM is unaffected.
+  qwenReasoning = {
+    chat_template_kwargs.reasoning_effort = "medium";
+    thinking_budget_enabled = true;
+    thinking_budget_tokens = 4096;
+  };
 
   # 240 of 256 GB may be wired for the GPU; macOS's default (~75%) is too small for the
   # 185 GB model plus its KV cache. The sysctl resets on reboot, hence a boot daemon. The ~16 GB
@@ -115,8 +125,10 @@ let
   # Upstream fix https://github.com/jundot/omlx/pull/4644 (GLM-5.3's MTP tail fails transformers
   # 5.17's layer-count check). `brew upgrade` can replace the patched install, so activation
   # re-applies it when missing. Once a release carries the fix, the reverse check matches and the
-  # step goes quiet; drop the patch then (or when it warns that it no longer applies).
+  # step goes quiet. Incompatible source fails activation; check upstream before
+  # updating the patch or removing it after the fix ships.
   glm5Fix = ../../../patches/omlx/glm5-next-mtp-tail.patch;
+  anthropicEffort = ../../../patches/omlx/anthropic-effort.patch;
 
   # Per-model settings merged into the file the admin UI also writes: the alias, the single
   # default, MTP, no pin (which also undoes the pin an earlier generation set), and each entry's
@@ -157,8 +169,32 @@ let
     server.burst_decode_mode = "aggressive";
     integrations.splash_max_memory_gb = 200;
   };
+
+  # Also exposed as a user command so a built configuration can be applied and
+  # checked independently of a privileged full-system activation. The command
+  # records restart need; the caller restarts only after the entire merge succeeds.
+  configure =
+    (pkgs.writeShellScriptBin "omlx-configure" ''
+      set -euo pipefail
+      exec ${lib.getExe pkgs.python3} ${./omlx-configure.py} \
+        --state-dir ${home}/.omlx \
+        --site-packages /opt/homebrew/opt/omlx/libexec/lib/python3*/site-packages \
+        --patch-bin ${lib.getExe pkgs.patch} \
+        --patch ${glm5Fix} --patch ${anthropicEffort} \
+        --model-settings ${pkgs.writeText "omlx-model-settings.json" settings} \
+        --server-settings ${pkgs.writeText "omlx-server-settings.json" serverSettings}
+    '').overrideAttrs
+      (_: {
+        passthru = {
+          modelSettings = settings;
+          inherit serverSettings;
+        };
+      });
 in
 {
+  environment.systemPackages = [ configure ];
+  system.build.omlxConfigure = configure;
+
   # oMLX finds the Splash launcher in /opt/homebrew/bin itself (Splash needs macOS 26.4+, M3+).
   homebrew.brews = [
     "jundot/omlx/omlx"
@@ -199,53 +235,16 @@ in
   # downloader when a listed model is missing. ~/.omlx is private: its logs can hold other
   # people's prompts, and teammates share the staff group.
   system.activationScripts.postActivation.text = ''
-    sudo --user=${username} --set-home ${pkgs.writeShellScript "omlx-settings" ''
-      set -euo pipefail
-      mkdir -p ${home}/.omlx/logs ${modelDir} ${stagingDir}
-      chmod 0700 ${home}/.omlx
-      rm -f ${home}/.omlx/.restart-needed
-
-      for sp in /opt/homebrew/opt/omlx/libexec/lib/python3*/site-packages; do
-        [ -d "$sp/omlx" ] || continue
-        if /usr/bin/patch -d "$sp" -p1 -R --dry-run -s -f < ${glm5Fix} >/dev/null 2>&1; then
-          :
-        elif /usr/bin/patch -d "$sp" -p1 -N --dry-run -s -f < ${glm5Fix} >/dev/null 2>&1; then
-          /usr/bin/patch -d "$sp" -p1 -N -s -f < ${glm5Fix}
-          touch ${home}/.omlx/.restart-needed
-        else
-          echo >&2 "oMLX: the GLM-5.3 config patch no longer applies; check whether upstream merged it"
-        fi
-      done
-
-      cfg=${home}/.omlx/model_settings.json
-      jq=${lib.getExe pkgs.jq}
-      [ -f "$cfg" ] || printf '{"version":1,"models":{}}' > "$cfg"
-      want=$("$jq" --argjson s ${lib.escapeShellArg settings} '
-        .models |= ((. // {})
-          | map_values(if type == "object" then .is_default = false else . end)
-          | reduce ($s | to_entries[]) as $e (.; .[$e.key] = ((.[$e.key] | objects) // {}) + $e.value))
-      ' "$cfg")
-      if [ "$want" != "$("$jq" . "$cfg")" ]; then
-        printf '%s\n' "$want" > "$cfg.tmp"
-        mv -f "$cfg.tmp" "$cfg"
-        touch ${home}/.omlx/.restart-needed
-      fi
-
-      # oMLX fills in defaults for any key a partial file leaves out, so a fresh machine can start
-      # from {}. The file holds the API secrets, hence the 0600 umask on the replacement. Each write
-      # step stands alone so `set -e` stops before a failed write could still mark a restart.
-      srv=${home}/.omlx/settings.json
-      [ -f "$srv" ] || (umask 077; printf '{}' > "$srv")
-      want=$("$jq" --argjson s ${lib.escapeShellArg serverSettings} '. * $s' "$srv")
-      if [ "$want" != "$("$jq" . "$srv")" ]; then
-        (umask 077; printf '%s\n' "$want" > "$srv.tmp")
-        mv -f "$srv.tmp" "$srv"
-        touch ${home}/.omlx/.restart-needed
-      fi
-    ''}
+    if ! sudo --user=${username} --set-home ${configure}/bin/omlx-configure; then
+      echo >&2 "oMLX: configuration failed; server was not restarted"
+      exit 1
+    fi
     if [ -e ${home}/.omlx/.restart-needed ]; then
+      if ! launchctl kickstart -k system/org.nixos.omlx; then
+        echo >&2 "oMLX: restart failed; .restart-needed retained for the next activation"
+        exit 1
+      fi
       rm -f ${home}/.omlx/.restart-needed
-      launchctl kickstart -k system/org.nixos.omlx || true
     fi
     for marker in ${modelMarkers}; do
       [ -e "$marker" ] || { launchctl kickstart system/org.nixos.omlx-models || true; break; }
