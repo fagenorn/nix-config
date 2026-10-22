@@ -65,6 +65,8 @@ jobs:
           nix eval --show-trace \
             --extra-experimental-features 'nix-command flakes' \
             --raw '.#nixosConfigurations.anis-desktop.config.system.build.toplevel.drvPath'
+      - name: Check oMLX adapter and host settings against pinned upstream
+        run: nix build --no-link '.#checks.x86_64-linux.omlx-adapter'
 
   agent-workflow-tests:
     name: Agent Workflow Tests (advisory)

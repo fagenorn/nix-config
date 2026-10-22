@@ -106,6 +106,21 @@
     in
     {
 
+      checks = inputs.nixpkgs.lib.genAttrs [ "aarch64-darwin" "x86_64-linux" ] (
+        system:
+        let
+          pkgs = import inputs.nixpkgs { inherit system; };
+          configure = self.darwinConfigurations.eleven-m5.config.system.build.omlxConfigure;
+        in
+        {
+          omlx-adapter = import ./lib/omlx-check.nix {
+            inherit pkgs;
+            omlxSource = inputs.omlx-tap;
+            inherit (configure) modelSettings serverSettings;
+          };
+        }
+      );
+
       darwinConfigurations = {
         mbp = libx.mkDarwin {
           hostname = "mbp";
