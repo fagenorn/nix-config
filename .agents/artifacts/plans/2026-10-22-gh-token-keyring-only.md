@@ -61,4 +61,11 @@ Task 2 — Restate the scrub rationale at the four wrong-cause sites — `CLAUDE
 - Scrubs, prefix and binding unchanged; three doc sites reworded under the phrase ban: per D4. The fourth site, the fake `gh`'s rationale comment in the guard suite: per D6 (added by planning).
 - One-shot evidence at existing seams, no new test: per D5. The guard suite run and cited for the suites criterion: per D7 (added by planning).
 
----
+## Standards review provenance
+
+- Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no fallback.
+- Base SHA: 336d9e05820d31923e093cbc998b0ccd46439f22; no focus beyond the issue, spec and plan.
+- Findings: 0 blocking, 2 should-fix, 0 discussion. Accepted 2, rejected 0, deferred 0.
+  - S1 (accepted): the gates now accept only `git grep` exit 1 as zero matches and abort on any other non-zero exit (`grep_none` in both gate scripts), and Task 2 runs its `git diff` on its own so a git error aborts under `set -e`.
+  - S2 (accepted): Task 2 Step 6 keeps full build and suite logs under `<scratch>/i399/logs/` and prints a failing step's whole log instead of piping into `tail`.
+- Neither finding is a non-obvious decision, so the spec's ledger gained no row.

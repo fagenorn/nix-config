@@ -28,19 +28,24 @@ Save as `<scratch>/i399/task2-check.sh` (the `launch-scope scratch` root):
 # Task 2 gate (issue 399): the four rationale sites. Usage, from the worktree root: bash task2-check.sh
 set -euo pipefail
 fail=0
+# grep_none LABEL <git grep args>: git grep exit 1 is zero matches, exit 0 lists
+# matches and fails the gate, any other exit is a git error and aborts (exit 2).
+grep_none() {
+  local label=$1; shift; local rc=0
+  git grep -n "$@" || rc=$?
+  case $rc in
+    0) echo "$label: the lines above still match"; fail=1 ;;
+    1) echo "$label: zero matches (git grep exit 1)" ;;
+    *) echo "$label: git grep failed (exit $rc)"; exit 2 ;;
+  esac
+}
 
 # AC5: no living doc or comment claims the shell or harness exports a GitHub token.
-if git grep -n -e 'shell exports' -e 'harness exports' -e 'exports .GITHUB_TOKEN' -- CLAUDE.md home python; then
-  echo "AC5: the lines above still match"; fail=1
-else
-  echo "AC5: zero matches"
-fi
+grep_none "AC5" -e 'shell exports' -e 'harness exports' -e 'exports .GITHUB_TOKEN' -- CLAUDE.md home python
 
 # D6: the old wording is gone from the guard, its README and its suite.
-if git grep -n -e 'harness token is narrower' -e 'fine-grained PAT' -e 'fine-grained GITHUB_TOKEN' \
-    -- home/common/claude-code tests/test_claude_permission_guard.py; then
-  echo "D6: the lines above keep the old wording"; fail=1
-fi
+grep_none "D6" -e 'harness token is narrower' -e 'fine-grained PAT' -e 'fine-grained GITHUB_TOKEN' \
+  -- home/common/claude-code tests/test_claude_permission_guard.py
 
 # The new rationale is present at each site.
 grep -qF 'exports `HF_TOKEN` into the shell. The sops store holds no GitHub token and the shell receives none' CLAUDE.md \
@@ -53,8 +58,9 @@ grep -qxF '# ambient token, which gh would prefer, may be narrower than the keyr
   tests/test_claude_permission_guard.py || { echo "guard suite: new comment missing"; fail=1; }
 
 # D4, D6: the guard and its suite change in comment lines only.
-if git diff -U0 336d9e05 -- home/common/claude-code/lifecycle_guard.py tests/test_claude_permission_guard.py \
-    | grep -E '^[-+]' | grep -vE '^(\+\+\+|---) ' | grep -vE '^[-+]#'; then
+# The diff runs on its own first, so a git error aborts the gate under set -e.
+diff=$(git diff -U0 336d9e05 -- home/common/claude-code/lifecycle_guard.py tests/test_claude_permission_guard.py)
+if printf '%s\n' "$diff" | grep -E '^[-+]' | grep -vE '^(\+\+\+|---) ' | grep -vE '^[-+]#'; then
   echo "the lines above are non-comment changes"; fail=1
 fi
 
@@ -139,7 +145,7 @@ New:
 
 - [ ] **Step 4: Run the gate and watch it pass**
 
-Run: `bash <scratch>/i399/task2-check.sh`. Expected: exactly the two lines `AC5: zero matches` and `task2-check exit 0`, and exit 0.
+Run: `bash <scratch>/i399/task2-check.sh`. Expected: exactly the three lines `AC5: zero matches (git grep exit 1)`, `D6: zero matches (git grep exit 1)` and `task2-check exit 0`, and exit 0.
 
 Check: `git diff --numstat -- CLAUDE.md home tests` prints `1 1 CLAUDE.md`, `1 1 home/common/claude-code/README.md`, `8 6 home/common/claude-code/lifecycle_guard.py` and `4 3 tests/test_claude_permission_guard.py`, separated by tabs. A scratch trial of these exact texts gave this result.
 
@@ -159,21 +165,26 @@ Save as `<scratch>/i399/guard-suite.sh` (the guard-suite invocation):
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-just build 2>&1 | tail -3
+# Full logs stay in the log dir; a failing step prints its whole log, a passing one its tail.
+LOG="${1:?usage: guard-suite.sh <log dir>}"; mkdir -p "$LOG"
+run_logged() { local name=$1; shift; if ! "$@" >"$LOG/$name.log" 2>&1; then cat "$LOG/$name.log"; echo "$name failed; full log: $LOG/$name.log"; exit 1; fi; }
+run_logged build just build
+tail -3 "$LOG/build.log"
 REQ=$(nix-store --query --requisites ./result)
 SETTINGS=$(printf '%s\n' "$REQ" | grep -- '-claude-code-settings\.json$')
 BASE=$(printf '%s\n' "$REQ" | grep -- '-claude-bash-lifecycle-guard-base-policy\.json$')
 test "$(printf '%s\n' "$SETTINGS" | wc -l)" -eq 1
 test "$(printf '%s\n' "$BASE" | wc -l)" -eq 1
-CLAUDE_SETTINGS_PATH="$SETTINGS" CLAUDE_GUARD_BASE_POLICY_PATH="$BASE" PYTHONPATH="$PWD/python" \
-  python3 -m unittest tests/test_claude_permission_guard.py 2>&1 | tail -4
+run_logged guard-suite env CLAUDE_SETTINGS_PATH="$SETTINGS" CLAUDE_GUARD_BASE_POLICY_PATH="$BASE" \
+  PYTHONPATH="$PWD/python" python3 -m unittest tests/test_claude_permission_guard.py
+tail -4 "$LOG/guard-suite.log"
 ```
 
-With a clean tree, run (timeout 1200 s, or 3600 s when the build is cold): `launch-scope exec … -- bash <scratch>/i399/guard-suite.sh`. Expected: exit 0, ending in `Ran <n> tests in <t>s` and `OK`. A failure here comes from the build or the suite, not from the comment text: report it with the failing lines and do not edit any assertion.
+With a clean tree, run (timeout 1200 s, or 3600 s when the build is cold): `launch-scope exec … -- bash <scratch>/i399/guard-suite.sh <scratch>/i399/logs`. Expected: exit 0, ending in `Ran <n> tests in <t>s` and `OK`. A failure here comes from the build or the suite, not from the comment text: report it with the failing lines and do not edit any assertion.
 
-Run (timeout 300 s): `set -o pipefail; launch-scope exec … -- env PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_shell_example_contracts.py 2>&1 | tail -3`. Expected: `OK (skipped=1)` (34 tests at the base).
+Run (timeout 300 s): `launch-scope exec … -- env PYTHONPATH="$PWD/python" python3 -m unittest home/common/agent-skills/tests/test_shell_example_contracts.py > <scratch>/i399/logs/shell-contracts.log 2>&1`, then `tail -3` that log (print the whole log when the exit is non-zero). Expected: exit 0 and `OK (skipped=1)` (34 tests at the base).
 
-Run `bash <scratch>/i399/task2-check.sh` once more at the commit. Expected: `AC5: zero matches`, exit 0.
+Run `bash <scratch>/i399/task2-check.sh` once more at the commit. Expected: `AC5: zero matches (git grep exit 1)`, exit 0.
 
 - [ ] **Step 7: Fill AC4 and AC5 in the acceptance record**
 

@@ -30,6 +30,17 @@ S="$1"
 mkdir -p "$S"
 export SOPS_AGE_KEY_FILE="$HOME/.config/sops/age/keys.txt"
 fail=0
+# grep_none LABEL <git grep args>: git grep exit 1 is zero matches, exit 0 lists
+# matches and fails the gate, any other exit is a git error and aborts (exit 2).
+grep_none() {
+  local label=$1; shift; local rc=0
+  git grep -n "$@" || rc=$?
+  case $rc in
+    0) echo "$label: the lines above still match"; fail=1 ;;
+    1) echo "$label: zero matches (git grep exit 1)" ;;
+    *) echo "$label: git grep failed (exit $rc)"; exit 2 ;;
+  esac
+}
 
 # AC2: the evaluated zsh init exports no GitHub token, and HF_TOKEN's export survives.
 nix eval --raw '.#darwinConfigurations.mbp.config.home-manager.users.anis.programs.zsh.initContent' \
@@ -40,11 +51,7 @@ echo "AC2 zsh init: token lines $tokens (want 0), HF_TOKEN exports $hf (want 1)"
 if [ "$tokens" != 0 ] || [ "$hf" != 1 ]; then fail=1; fi
 
 # AC2 (D5): no Nix module or zsh fragment names a GitHub token.
-if git grep -n -e GITHUB_TOKEN -e GH_TOKEN -e github_token -- '*.nix' data; then
-  echo "AC2 grep: the lines above still name a GitHub token"; fail=1
-else
-  echo "AC2 grep: no match in *.nix or data"
-fi
+grep_none "AC2 grep (*.nix, data)" -e GITHUB_TOKEN -e GH_TOKEN -e github_token -- '*.nix' data
 
 # AC3 module: the declared secret names.
 names=$(nix eval --json '.#darwinConfigurations.mbp.config.home-manager.users.anis.sops.secrets' \
@@ -87,7 +94,7 @@ Expected: exit 1, with these lines among nix's evaluation warnings:
 AC2 zsh init: token lines 1 (want 0), HF_TOKEN exports 1 (want 1)
 home/common/sops/default.nix:32:      "github_token" = { };
 home/common/sops/default.nix:38:    export GITHUB_TOKEN="$(cat ${config.sops.secrets.github_token.path})"
-AC2 grep: the lines above still name a GitHub token
+AC2 grep (*.nix, data): the lines above still match
 AC3 declared secrets: ["github_token","hf_token","my_ssh_private_key","my_ssh_public_key"]
 AC3 store: {"head_keys": ["github_token", "hf_token", "my_ssh_private_key", "my_ssh_public_key", "omlx_api_key"], "removed": [], "added": [], "changed": []}
 task1-check exit 1
@@ -134,7 +141,7 @@ Expected: exit 0 and
 
 ```
 AC2 zsh init: token lines 0 (want 0), HF_TOKEN exports 1 (want 1)
-AC2 grep: no match in *.nix or data
+AC2 grep (*.nix, data): zero matches (git grep exit 1)
 AC3 declared secrets: ["hf_token","my_ssh_private_key","my_ssh_public_key"]
 AC3 store: {"head_keys": ["hf_token", "my_ssh_private_key", "my_ssh_public_key", "omlx_api_key"], "removed": ["github_token"], "added": [], "changed": []}
 task1-check exit 0
