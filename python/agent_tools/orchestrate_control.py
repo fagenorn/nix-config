@@ -26,21 +26,6 @@ checked against the closed set; no action kind is projected yet). Ready (exit 0)
 "ends_run"}`. A refusal carries the latest validated control reply as `response`
 once `control` has answered, else null.
 
-`step` reads one JSON object on stdin, `{session, first_sweep, owners,
-contracts_due, refused_contracts}`, and runs seven steps in order, stopping at the
-first that refuses: `bindings`, `bootstrap` (`init-run --run-id` for the session's
-run), `tracker` (the session issues' state and open blockers, one GraphQL call per
-100 issues), `forge` (the repository's pull requests, one paginated call, matched
-to the issues by branch name), `worktrees` (each issue's recorded or candidate
-worktree, from `git worktree list` and the local branches), `control` (one
-`workflow-state control` round over those facts, its reply validated and required
-to be this run's control response) and `project` (the reply's action kinds
-checked against the closed set; no action kind is projected yet). Ready (exit 0):
-`{"command":"step","outcome":"ready","run_id","control_calls":1,"response",
-"dispatches":[],"contracts_due","refused_contracts","contract_refusals":[],
-"ends_run"}`. A refusal carries the latest validated control reply as `response`
-once `control` has answered, else null.
-
 Stdout is one compact JSON object and a newline. Ready (exit 0):
 `{"command":"start","outcome":"ready","session":{interface_version, run_id,
 issues, human_directed, source}}`. A host without the route (exit 0):
@@ -67,7 +52,6 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
-from typing import Any
 
 from agent_tools import resolve_project
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
@@ -79,20 +63,6 @@ ROUTE = "claude-code"
 INTERFACE_VERSION = 1
 LISTING_LIMIT = 1000
 ISSUE_NUMBER = re.compile(r"[1-9][0-9]*")
-DECISION_LABELS = frozenset({"wayfinder:research", "wayfinder:prototype", "wayfinder:grilling",
-                             "wayfinder:task"})
-TRACKER_CHUNK = 100
-CONTROL_VERSION = 3
-CLOSED_KINDS = ("spawn", "resume", "retry", "delivery_remainder", "delivery_contract", "wait",
-                "finalize")
-DISPATCH_KINDS = ("spawn", "resume", "retry")
-CANDIDATE_SUFFIXES = ("", *(f"-{n}" for n in range(2, 10)))
-MERGE_OID = re.compile(r"[0-9a-f]{40}")
-FORGE_QUERY = (
-    "query($owner: String!, $name: String!, $endCursor: String) { "
-    "repository(owner: $owner, name: $name) { "
-    "pullRequests(first: 100, after: $endCursor) { pageInfo { hasNextPage endCursor } "
-    "nodes { number headRefName isCrossRepository state url mergeCommit { oid } } } } }")
 DECISION_LABELS = frozenset({"wayfinder:research", "wayfinder:prototype", "wayfinder:grilling",
                              "wayfinder:task"})
 TRACKER_CHUNK = 100
