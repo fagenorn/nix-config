@@ -1,0 +1,105 @@
+--- a/omlx/api/anthropic_models.py
++++ b/omlx/api/anthropic_models.py
+@@ -219,6 +219,13 @@
+ # =============================================================================
+ 
+ 
++class OutputConfig(BaseModel):
++    """Claude Code reasoning effort; other output options remain accepted."""
++
++    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
++    model_config = ConfigDict(extra="allow")
++
++
+ class MessagesRequest(BaseModel):
+     """Request for Anthropic Messages API."""
+ 
+@@ -235,6 +242,7 @@
+     tools: list[AnthropicTool] | None = None
+     tool_choice: ToolChoice | dict[str, Any] | None = None
+     thinking: ThinkingConfig | None = None
++    output_config: OutputConfig | None = None
+     # Chat template kwargs (e.g. enable_thinking, reasoning_effort)
+     chat_template_kwargs: dict[str, Any] | None = None
+ 
+--- a/omlx/server.py
++++ b/omlx/server.py
+@@ -7490,6 +7490,47 @@
+ _AUTO_MODE_CLASSIFIER_THINKING_BUDGET = 256
+ 
+ 
++def _merge_anthropic_chat_template_kwargs(request, settings, entry) -> dict:
++    """Resolve Claude effort while retaining explicit and forced template keys."""
++    effort = request.output_config.effort if request.output_config else None
++    # Qwen3.8 names its highest tier xhigh rather than high or max. Use the
++    # discovered template contract so aliases and fallback models behave alike.
++    supported_efforts = getattr(entry, "reasoning_efforts", None) or []
++    is_qwen_effort_set = (
++        getattr(entry, "config_model_type", None) == "qwen4_exp"
++        and {"low", "medium", "xhigh"}.issubset(supported_efforts)
++    )
++    if is_qwen_effort_set and effort in ("high", "max") and effort not in supported_efforts:
++        effort = "xhigh"
++    merged = merge_chat_template_request_kwargs(
++        settings,
++        merge_reasoning_effort_chat_template_kwargs(request.chat_template_kwargs, effort),
++    )
++    if is_qwen_effort_set and "reasoning_effort" in merged:
++        if merged["reasoning_effort"] not in supported_efforts:
++            # The generic renderer retries invalid values using the template's
++            # default, which would hide a bad override by silently using xhigh.
++            raise InvalidRequestError(
++                f"This template requires reasoning_effort from {supported_efforts}",
++                field="chat_template_kwargs.reasoning_effort",
++            )
++
++    forced_keys = forced_ct_keys(settings)
++    if request.thinking and "enable_thinking" not in forced_keys:
++        thinking_type = request.thinking.type
++        if thinking_type in ("enabled", "adaptive"):
++            merged["enable_thinking"] = True
++        elif thinking_type == "disabled":
++            merged["enable_thinking"] = False
++        if (
++            thinking_type == "adaptive"
++            and "thinking_mode" not in forced_keys
++            and getattr(entry, "config_model_type", None) in MINIMAX_M3_MODEL_TYPES
++        ):
++            merged.setdefault("thinking_mode", "adaptive")
++    return merged
++
++
+ @app.post("/v1/messages")
+ async def create_anthropic_message(
+     request: AnthropicMessagesRequest,
+@@ -7540,29 +7581,8 @@
+         ms = get_model_settings_for_request(request.model)
+         if ms:
+             max_tool_result_tokens = ms.max_tool_result_tokens
+-        merged_ct_kwargs = merge_chat_template_request_kwargs(
+-            ms,
+-            request.chat_template_kwargs,
+-        )
+-        forced_keys = forced_ct_keys(ms)
+         _entry = get_engine_pool().get_entry(resolved_model)
+-
+-        # Pass Anthropic thinking config to chat template (except forced keys)
+-        if hasattr(request, "thinking") and request.thinking:
+-            if "enable_thinking" not in forced_keys:
+-                thinking_type = getattr(request.thinking, "type", None)
+-                if thinking_type in ("enabled", "adaptive"):
+-                    merged_ct_kwargs["enable_thinking"] = True
+-                elif thinking_type == "disabled":
+-                    merged_ct_kwargs["enable_thinking"] = False
+-                # MiniMax M3 templates have a separate adaptive thinking_mode.
+-                if (
+-                    thinking_type == "adaptive"
+-                    and "thinking_mode" not in forced_keys
+-                    and getattr(_entry, "config_model_type", None)
+-                    in MINIMAX_M3_MODEL_TYPES
+-                ):
+-                    merged_ct_kwargs.setdefault("thinking_mode", "adaptive")
++        merged_ct_kwargs = _merge_anthropic_chat_template_kwargs(request, ms, _entry)
+ 
+         logger.debug(
+             f"Tool result truncation config: max_tokens={max_tool_result_tokens}, "
