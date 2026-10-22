@@ -265,15 +265,13 @@ SHIP_ISSUE_MACHINE_TEXT = {
         "gh issue close <num>",
     ),
     SHIP_ISSUE_DELIVERY_LOOP: (
-        "--kind selected-output", "checkpoint-delivery", "--kind scope", "`test_ref`",
-        "`tracker_held`", "`comment_url`", "`record_path`", "`github:issue:<num>:held`",
-        "--boundary ship-checkpoint", "ship-checkpoint/v2", "--worker-id <worker_id>",
-        "~/.agents/bin/workflow-state current-launch --repo-root <ledger_repo_root> "
+        "workflow-state checkpoint-delivery --repo-root <ledger_repo_root> "
+        "--run-id <run-id> --checkpoint-file -", "--worker-id <worker_id>",
+        "workflow-state current-launch --repo-root <ledger_repo_root> "
         "--run-id <run-id> --action-id <custody action_id>",
-        "validate-report --boundary ship-summary",
     ),
     SHIP_ISSUE_REMAINDER: (
-        "--kind current-selection", "finish --summary-file -",
+        "workflow-state finish --repo-root <ledger_repo_root> --run-id <run-id> --summary-file -",
         "workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> "
         "--worker-id <worker_id> --event returned",
         "gh pr view <pr-num> --repo <resolved-repository> --json body",
@@ -284,7 +282,6 @@ SHIP_ISSUE_MACHINE_TEXT = {
         ".superpowers/ship-review/<issue>/retained-detail.json",
     ),
     SHIP_ISSUE_POST_SELECTION_SYNC: (
-        "--kind current-selection", "--kind sync-selection", "--kind scope", "`test_ref`",
         "launch-commit", "gh pr view <pr-num> --json state,headRefOid,mergeable",
         "git merge --no-commit --no-ff origin/<integration>",
         "git merge-base --is-ancestor <second-parent> origin/<integration>",

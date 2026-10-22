@@ -9,7 +9,7 @@ boundary before decoding. Its `custody` (a remainder, whose `action_id` is
 `pending_stage_ids` are the whole identity; there is no spec, plan or reviewed
 head to review, so skip Phases 0–5. Run `## Delivery loop` from the ledger's
 ready stage, starting with its synchronizing null-scope checkpoint. When
-selection is pending, build it from the PR head
+selection is pending, give the compiler an `initial` selection recipe from the PR head
 (`gh pr view <pr-num> --json headRefOid`) and that head's tree with literal
 refs — `acceptance_ref` the issue URL
 (`https://github.com/<resolved-repository>/issues/<num>`), `review_ref` `unknown`,
@@ -18,8 +18,8 @@ selection. When the merge is pending, start at the merge gate: Phase 6's CI wait
 does the post-selection sync route, which also folds a merge that already landed
 at a sync run. A selection this owner did not build, such as that route's first
 `prior_selection` or the one `implementation_delivered` names, is the ledger's
-current selection: read it with `--kind current-selection`, fed the installed
-contract. Otherwise start at the first pending cleanup cycle. `## Launch guard`
+current selection, read by the compiler for sync recipes and `$selection`.
+Otherwise start at the first pending cleanup cycle. `## Launch guard`
 fences with this custody's `action_id`.
 
 ## Close or hold from the PR body
@@ -41,19 +41,18 @@ second comment.
 ## Exits and finish
 
 A denial or a `delivery_stalled` reply ends a remainder owner's loop exactly as
-step 6 of `## Delivery loop` says: its whole return is the re-entry line or that
+the denial route of `## Delivery loop` says: its whole return is the re-entry line or that
 reply, and it writes no `finish`. Otherwise a remainder owner holds its custody,
 so it writes its own `finish --summary-file -`. A remainder owner whose prompt
 carries a `Lifecycle worker:` line releases every worker it registered and
 then itself with
 `workflow-state release-worker --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> --event returned`
 after its last commit and immediately before its own `finish`; after that
-release it creates no commit. After the last cycle, validate the
-`ship-summary/v2` (its `historical_owner_result` is the legacy row) and write it
-in one command, then return exactly the validated reply and nothing else:
+release it creates no commit. After the last cycle, compile the summary and
+write it in one command, then return exactly the validated reply and nothing else:
 
 ```text
-workflow-state finish --repo-root <ledger_repo_root> --run-id <run-id> --summary-file - <<'EOF' | artifact-budget validate-report --boundary workflow-response --input -
-<canonical ship-summary/v2>
+ship-delivery summary --context <context.json> --prior <merge-payload.json> --prior <absence-payload.json> --input - <<'EOF' | workflow-state finish --repo-root <ledger_repo_root> --run-id <run-id> --summary-file - | artifact-budget validate-report --boundary workflow-response --input -
+<summary recipe; see ~/.agents/share/ship-delivery.md>
 EOF
 ```

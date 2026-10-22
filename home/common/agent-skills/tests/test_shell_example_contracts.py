@@ -62,7 +62,7 @@ COMMAND_VOCABULARY = frozenset({
     "grep", "head", "jq", "just", "kubectl", "ls", "make", "mkdir", "mktemp",
     "mv", "nix", "nixos-rebuild", "node", "npm", "pnpm", "printf", "pytest",
     "python3", "railway", "resolve-project", "review-package", "review-range", "rg", "rm",
-    "sdd-gate", "sdd-workspace", "sed", "sh", "sleep", "sops", "sort", "source", "ssh",
+    "sdd-gate", "sdd-workspace", "sed", "sh", "ship-delivery", "sleep", "sops", "sort", "source", "ssh",
     "tail", "tar", "task-brief", "tee", "terraform", "test", "timeout",
     "touch", "unset", "uv", "wc", "workflow-state", "xargs", "yarn", "zsh",
 })
@@ -1011,6 +1011,9 @@ class LifecycleHelperCallTest(unittest.TestCase):
 
     def test_sanctioned_calls_yield_nothing_in_every_region(self):
         for name, call in (("checkpoint", CHECKPOINT_CALL), ("path-named", PATH_NAMED_CALL),
+                           ("compiled checkpoint", CHECKPOINT_CALL.replace(
+                               "artifact-budget validate-report --boundary ship-checkpoint --input -",
+                               "ship-delivery checkpoint --context /runtime/context.json --input -")),
                            ("double-quoted delimiter", DQUOTED_CHECKPOINT_CALL)):
             for region in _regions_for((call,)):
                 with self.subTest(call=name, region=region):

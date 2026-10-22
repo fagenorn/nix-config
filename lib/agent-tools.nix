@@ -59,6 +59,7 @@ let
     "review-package"
     "review-range"
     "sdd-gate"
+    "ship-delivery"
     "skill-lint"
     "verified-tree"
   ];
