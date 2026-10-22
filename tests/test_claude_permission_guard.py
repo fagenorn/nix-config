@@ -1051,7 +1051,6 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         merge = "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch"
         for command in (
             f"unset PATH && {merge}",                               # wrong variable
-            f"unset GITHUB_TOKEN GH_TOKEN && {merge}",              # extra variable
             f"unset GITHUB_TOKEN; {merge}",                         # wrong separator
             f"unset GITHUB_TOKEN &&{merge}",                        # missing space
             f"unset  GITHUB_TOKEN && {merge}",                      # doubled space
@@ -1064,6 +1063,66 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(2, result.returncode, command)
                 self.assertIn("lifecycle guard: unsafe merge:", result.stderr)
+
+    def test_credential_scrub_prefix_forms_and_wrapper_near_misses(self):
+        """Issue 400 AC1, D1, D13: either scrub-prefix spelling reaches every verb's
+        grammar; any other wrapper reaches the grammar too and is refused there."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        push = "git push origin issue-400-topic"
+        merge = "gh pr merge 2342 --repo fagenorn/nix-config --merge --delete-branch"
+        create = ('gh pr create --repo fagenorn/nix-config --base main '
+                  '--head issue-400-topic --title "x" --body "y"')
+        release = ('gh release create v1.2.3 --repo fagenorn/nix-config --verify-tag '
+                   '--title "v1.2.3" --notes-file /tmp/n.md')
+        for command in (
+            f"env -u GITHUB_TOKEN {push}",
+            "unset GH_TOKEN && git push -u origin issue-400-topic",
+            f"env -u GITHUB_TOKEN {merge}",
+            f"env -u GH_TOKEN {merge}",
+            f"env -u GITHUB_TOKEN -u GH_TOKEN {merge}",
+            f"unset GITHUB_TOKEN GH_TOKEN && {merge}",
+            f"unset GH_TOKEN GITHUB_TOKEN && {merge}",
+            f"env -u GH_TOKEN -u GITHUB_TOKEN {push}",
+            f"true && env -u GH_TOKEN {push}",
+            f"env -u GITHUB_TOKEN {create}",
+            f"env -u GITHUB_TOKEN {release}",
+            f"unset GH_TOKEN && {release}",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+        push_grammar = "unsafe push: expected exactly git push [-u] origin <branch>"
+        merge_grammar = "unsafe merge: command does not match the guarded merge grammar"
+        for command, reason in (
+            (f"env -u PATH {push}", push_grammar),
+            (f"env FOO=1 {push}", push_grammar),
+            (f"env -i {push}", push_grammar),
+            (f"env -u GITHUB_TOKEN -i {push}", push_grammar),
+            (f"env --unset=GITHUB_TOKEN {push}", push_grammar),
+            (f"sudo -u x {push}", push_grammar),
+            (f"env -u GITHUB_TOKEN -u GITHUB_TOKEN {push}", push_grammar),   # repeated name
+            (f"env -uGITHUB_TOKEN {push}", push_grammar),                    # attached
+            (f"env -u GITHUB_TOKEN -- {push}", push_grammar),
+            (f"env env -u GITHUB_TOKEN {push}", push_grammar),               # second env
+            (f"env -u GITHUB_TOKEN env {push}", push_grammar),
+            (f"env -u GITHUB_TOKEN  {push}", push_grammar),                  # double space
+            (f"env -u GITHUB_TOKEN {merge}; echo x", merge_grammar),
+            (f"env -u GITHUB_TOKEN -u GITHUB_TOKEN {merge}", merge_grammar),
+            (f"unset GITHUB_TOKEN GITHUB_TOKEN && {merge}", merge_grammar),
+            (f"env  -u GITHUB_TOKEN {merge}", merge_grammar),
+            (f"env -u GITHUB_TOKEN  {merge}", merge_grammar),
+            ("env -u GITHUB_TOKEN git branch -d issue-400-topic",
+             "unsafe branch deletion: expected exactly git branch -d <branch>"),
+            ("unset GITHUB_TOKEN && git branch -d issue-400-topic",
+             "unsafe branch deletion: forbidden raw command character"),
+            # The wrapper's option argument is consumed, so `sh` is the command word.
+            ("sudo -u root sh -c 'git push origin issue-400-topic'",
+             "unsafe push: shell source passed to an evaluator cannot be validated"),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"lifecycle guard: {reason}", result.stderr)
 
     def test_merge_lookups_drop_env_github_tokens(self):
         # Deterministic version of the fake gh's env check: inject both tokens
@@ -1145,6 +1204,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     SHAPES = json.loads((Path(__file__).parent / "fixtures/guarded-command-shapes.json")
                         .read_text(encoding="utf-8"))
     TOKEN_PREFIX = "unset GITHUB_TOKEN && "
+    ENV_TOKEN_PREFIX = "env -u GITHUB_TOKEN "
 
     def shape_command(self, template):
         for placeholder, value in self.SHAPES["values"].items():
@@ -1165,7 +1225,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         forms = {form["id"]: form for form in self.SHAPES["skill_forms"]}
         for form in forms.values():
             command = self.shape_command(form["template"])
-            for variant, text in (("bare", command), ("prefixed", self.TOKEN_PREFIX + command)):
+            for variant, text in (("bare", command), ("prefixed", self.TOKEN_PREFIX + command),
+                                  ("env_prefixed", self.ENV_TOKEN_PREFIX + command)):
                 with self.subTest(form=form["id"], variant=variant):
                     self.assert_shape_verdict(text, repo, form["label"], form[variant])
         for shape in self.SHAPES["refused_shapes"]:

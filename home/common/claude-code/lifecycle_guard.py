@@ -51,11 +51,30 @@ ROW_CHECK_EXIT_STATUSES = {"derived": 0, "refused": 1, "unavailable": 2}
 # the `unset GITHUB_TOKEN && ` form of the guarded command will use. A
 # machine with no keyring auth still fails closed at the lookup.
 GH_ENV_TOKEN_NAMES = ("GITHUB_TOKEN", "GH_TOKEN")
-# A resolved exhaustive credential-name list may yield the concrete command
-# `unset GITHUB_TOKEN && gh ...`. The merge grammar accepts that one literal prefix and
-# nothing looser; the remainder must still match the guarded merge argv in
-# full, so nothing else can ride along.
+# The scrub-prefix spelling a resolved exhaustive credential-name list yields
+# (`unset GITHUB_TOKEN && gh ...`), and the one the ship-issue skill check reads
+# from this single assignment. SCRUB_PREFIXES below includes it.
 UNSET_GITHUB_TOKEN_PREFIX = "unset GITHUB_TOKEN && "
+# Every accepted credential-scrub prefix (issue 400 D1): `unset N && `,
+# `unset N M && `, `env -u N ` and `env -u N -u M `, single spaces, with N and M
+# distinct members of GH_ENV_TOKEN_NAMES. Unsetting any other name could change
+# the repository or config the command sees. Longest first, so a two-name
+# spelling is tried before the one-name spelling it begins with.
+SCRUB_PREFIXES = tuple(sorted(
+    {
+        spelling
+        for names in [(name,) for name in GH_ENV_TOKEN_NAMES] + [
+            (first, second)
+            for first in GH_ENV_TOKEN_NAMES for second in GH_ENV_TOKEN_NAMES
+            if first != second
+        ]
+        for spelling in (
+            "unset " + " ".join(names) + " && ",
+            "env " + " ".join(f"-u {name}" for name in names) + " ",
+        )
+    },
+    key=lambda spelling: (-len(spelling), spelling),
+))
 # The guarded verbs, as raw text and as token sequences. Order matters: the
 # first match at a token wins, and no sequence is a prefix of another.
 GUARDED_LITERALS = (
@@ -390,16 +409,26 @@ def tokenize_segment(segment):
 
 
 def command_position_flags(tokens):
-    """Per token: does a simple command start here?"""
+    """Per token: does a simple command start here?
+
+    Keywords, assignments and wrappers keep the position open. A wrapper option
+    that takes an argument (`env -u NAME`, `sudo -u user`, per the wrapper option
+    tables) also consumes the next word, unless the argument is attached
+    (`-uNAME`, `--user=anis`), so the wrapped program is the command word. An
+    operator token ends any pending option argument.
+    """
     flags = [False] * len(tokens)
     open_position = True
     wrapper = None
+    pending = 0
     for index, (value, operator) in enumerate(tokens):
         if operator:
-            open_position = True
-            wrapper = None
+            open_position, wrapper, pending = True, None, 0
             continue
         if not open_position:
+            continue
+        if pending:
+            pending -= 1
             continue
         if ASSIGNMENT_PREFIX.match(value) is not None:
             continue
@@ -407,7 +436,9 @@ def command_position_flags(tokens):
             wrapper = value
             continue
         if wrapper is not None and value.startswith("-"):
-            # Options belonging to the wrapper (`env -i`, `sudo -u anis`).
+            kind, attached = wrapper_option(wrapper, value)
+            if kind is not None and attached is None:
+                pending += 1
             continue
         flags[index] = True
         open_position = False
@@ -553,7 +584,7 @@ def guarded_operations(command):
 
 
 # Wrapper options that consume an argument, so the word holding it is not the
-# wrapped command. Used only by the detaching pass. Short options may be
+# wrapped command. Used by the verb pass and the detaching pass. Short options may be
 # clustered (`env -iu FOO`), and an argument may be attached (`-uanis`,
 # `--user=anis`). An option not listed here is treated as a flag, so the word
 # after it is taken as the command word.
@@ -634,11 +665,12 @@ def detaching_command_flags(tokens, state=(True, None, (), False),
     its target, a quoted one (`X='>'`) does not. `embedded_targets` picks one
     reading; `detaching_word` scans both and refuses on either.
 
-    Like `command_position_flags`, but it also steps over redirections, attached
-    (`nohup>log`) or not, and over the arguments of wrapper options, so
-    `>log nohup x` and `sudo -u anis nohup x` are seen. An operator token ends
-    any pending option argument. The verb pass keeps `command_position_flags`;
-    this pass has no such fail-closed backstop, hence the extra stepping.
+    Like `command_position_flags`, which also steps over the arguments of
+    wrapper options (`sudo -u anis nohup x`), but it also steps over
+    redirections, attached (`nohup>log`) or not, so `>log nohup x` is seen. An
+    operator token ends any pending option argument. The verb pass keeps
+    `command_position_flags`; this pass has no such fail-closed backstop, hence
+    the extra stepping.
     """
     flags = [False] * len(tokens)
     payloads = []
@@ -755,6 +787,43 @@ def detaching_word(command):
                 if found is not None:
                     return found
     return None
+
+
+def strip_spelling(text, spelling):
+    """The rest of `text` after a leading `spelling`, or None.
+
+    None also when the rest is empty or begins with whitespace: a doubled space
+    is not the spelling (issue 400 D13).
+    """
+    if not text.startswith(spelling):
+        return None
+    rest = text[len(spelling):]
+    if not rest or rest[0].isspace():
+        return None
+    return rest
+
+
+def strip_scrub_prefix(text):
+    """`text` without its leading credential-scrub prefix, else `text` unchanged."""
+    for prefix in SCRUB_PREFIXES:
+        rest = strip_spelling(text, prefix)
+        if rest is not None:
+            return rest
+    return text
+
+
+def canonical_text(operation, text):
+    """The text `operation`'s grammar judges (issue 400 D13).
+
+    Push and PR creation are judged per segment, with leading whitespace dropped;
+    every verb but branch deletion (D2) then loses an exact scrub prefix. Text
+    in any other spelling is returned whole, for the grammar to refuse.
+    """
+    if operation in ("push", "pr-create"):
+        text = text.lstrip()
+    if operation != "branch":
+        text = strip_scrub_prefix(text)
+    return text
 
 
 def detect_repository(git_bin, cwd, timeout):
@@ -1405,8 +1474,6 @@ def validate_release(command, context):
     problem = ownership_problem(context)
     if problem is not None:
         return block(f"unsafe release creation: {problem}")
-    if command.startswith(UNSET_GITHUB_TOKEN_PREFIX):
-        command = command[len(UNSET_GITHUB_TOKEN_PREFIX):]
     parts = parse_release_raw(command, context.repository)
     if parts is None:
         return block(
@@ -1431,13 +1498,8 @@ def validate_merge(command, context):
     if problem is not None:
         return block(f"unsafe merge: {problem}")
     repository = context.repository
-    # The one sanctioned prefix is derived from a resolved exhaustive
-    # credential-name list and is `unset GITHUB_TOKEN && gh pr merge ...`.
-    # Strip exactly that
-    # literal and judge the remainder as the whole command, so the merge
-    # still tolerates no other chaining.
-    if command.startswith(UNSET_GITHUB_TOKEN_PREFIX):
-        command = command[len(UNSET_GITHUB_TOKEN_PREFIX):]
+    # `command` is the whole canonical command, its scrub prefix already
+    # stripped, so the merge still tolerates no other chaining.
     merge_parts = parse_merge_raw(command, repository)
     if merge_parts is None:
         return block("unsafe merge: command does not match the guarded merge grammar")
@@ -1688,11 +1750,15 @@ def main():
         if problem is not None:
             return block(f"unsafe {OPERATION_LABELS[operation]}: {problem}")
         try:
+            # Push and PR creation are judged per segment; the other verbs on the
+            # whole command, so they tolerate no chaining.
+            judged = segment if operation in ("push", "pr-create") else command
+            text = canonical_text(operation, judged)
             if operation == "branch":
-                # Branch deletion is judged on the whole command, in every
-                # repository: it needs no forge state and tolerates no chaining.
+                # Branch deletion is judged in every repository: it needs no
+                # forge state.
                 status = validate_branch_delete(
-                    command, args.git_bin, args.child_timeout_seconds
+                    text, args.git_bin, args.child_timeout_seconds
                 )
             else:
                 if context is None:
@@ -1701,13 +1767,13 @@ def main():
                         started + INVOCATION_DEADLINE_SECONDS,
                     )
                 if operation == "push":
-                    status = validate_push(segment, context)
+                    status = validate_push(text, context)
                 elif operation == "pr-create":
-                    status = validate_pr_create(segment, context)
+                    status = validate_pr_create(text, context)
                 elif operation == "release":
-                    status = validate_release(command, context)
+                    status = validate_release(text, context)
                 else:
-                    status = validate_merge(command, context)
+                    status = validate_merge(text, context)
         except DeadlineExhausted:
             return block(f"unsafe {OPERATION_LABELS[operation]}: {DEADLINE_REFUSAL}")
         if status != 0:
