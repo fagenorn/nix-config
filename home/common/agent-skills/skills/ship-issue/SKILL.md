@@ -40,7 +40,7 @@ A blocked required capability stops. An authored unsupported tracker takes the e
 5. Review the PR           → review-range picks delta, empty or full; two-axis review over it
 6. Wait for CI             → gh pr checks --required --watch (one blocking call; all checks when none is required)
    Selection gate          → lifecycle identity only: select the CI-green head (## Delivery loop)
-7. Merge                   → gh pr merge <pr-num> --repo <resolved-repository> --merge [--subject "<rendered subject>"] --delete-branch (true merge commit)
+7. Merge                   → gh pr merge <pr-num> --repo <resolved-repository> --merge [--subject "<rendered subject>"] --match-head-commit <reviewed HEAD_SHA> --delete-branch (true merge commit)
 8. Cleanup                 → issue closed or held; worktree + branches removed
                              (lifecycle identity: each 7–8 effect is one ## Delivery loop cycle)
 ```
@@ -257,7 +257,7 @@ With an unsupported tracker capability, merge into the integration branch locall
 Build the subject from retained `bindings.tracker.repo_slug` and `bindings.vcs` values. Pass `--subject` only when the rendered subject is non-empty and contains none of `"`, `$`, backtick, backslash, NUL, LF or CR; otherwise omit it. Never pass `--no-ff`. Then (`## gh hygiene`):
 
 ```
-gh pr merge <pr-num> --repo <resolved-repository> --merge --subject "<rendered subject>" --delete-branch
+gh pr merge <pr-num> --repo <resolved-repository> --merge --subject "<rendered subject>" --match-head-commit <reviewed HEAD_SHA> --delete-branch
 ```
 
 **Judge success by the verify, never by the exit code** (CI-MERGE.md): `gh pr view <pr-num> --json state,mergeCommit` → `MERGED` plus a non-null `mergeCommit.oid`. Then ask the REMOTE whether the branch still exists, `git ls-remote --heads origin <branch>`; PR metadata proves nothing. Non-empty output → `git push origin --delete <branch>` (`## gh hygiene`).

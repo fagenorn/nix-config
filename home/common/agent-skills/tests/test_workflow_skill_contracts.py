@@ -1562,11 +1562,13 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_ship_issue_merge_is_bound_to_the_resolved_repository(self):
         optional_subject = (
             'gh pr merge <pr-num> --repo <resolved-repository> --merge '
-            '[--subject "<rendered subject>"] --delete-branch'
+            '[--subject "<rendered subject>"] --match-head-commit <reviewed HEAD_SHA> '
+            '--delete-branch'
         )
         rendered_subject = (
             'gh pr merge <pr-num> --repo <resolved-repository> --merge '
-            '--subject "<rendered subject>" --delete-branch'
+            '--subject "<rendered subject>" --match-head-commit <reviewed HEAD_SHA> '
+            '--delete-branch'
         )
         # Every merge spelling is one of the two forms the lifecycle guard
         # validates, and the rendered form stands on a line of its own.
