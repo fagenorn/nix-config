@@ -51,6 +51,7 @@ let
     "lane-triage"
     "launch-commit"
     "launch-scope"
+    "orchestrate-control"
     "promotion"
     "release"
     "replay-retained"
