@@ -62,3 +62,7 @@ Task 4 — AC4 evidence over the real store and the acceptance record — `.agen
 - Test seams per D10, with the `-m` pool run per D14 (Tasks 1–3).
 - Result shape, exits, header count, table order, `-` cells and the drop note per D13 (Tasks 2, 3).
 - The evidence window and the no-tuning rule per D11; its record per D14 (Task 4).
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no focus; base 7601d3186a03bc2fd363d2c6241ea72925feb835; no fallback. Findings: 0 blocking, 3 should-fix, 0 discussion — 3 accepted (PR421-01 in Task 2, PR421-02 and PR421-03 in Task 3, per D15), 0 rejected, 0 deferred.

@@ -244,6 +244,32 @@ class CacheScanTest(unittest.TestCase):
         self.assertAlmostEqual(result["deaths"][0]["premium"],
                                36_002 * (weighted - 0.50) / 1e6, places=12)
 
+    def test_repeated_records_of_one_call_merge_usage_by_per_field_maximum(self):
+        # Phase-5 PR421-01: two records per call whose usage differs, so the per-field
+        # maximum is distinguishable from the first copy, the last copy and their sum
+        def usage(read, create, cw_1h, cw_5m):
+            value = cache_usage(read, create, ttl="1h")
+            value["cache_creation"] = {"ephemeral_1h_input_tokens": cw_1h,
+                                       "ephemeral_5m_input_tokens": cw_5m}
+            return value
+        opus = "claude-opus-5-5"
+        lines = [user_prompt(0),
+                 assistant("p1", usage=usage(20_000, 10_000, 10_000, 0), model=opus, timestamp=at(10)),
+                 assistant("p1", usage=usage(26_000, 4_000, 4_000, 0), model=opus, timestamp=at(10)),
+                 assistant("p2", usage=usage(0, 20_000, 20_000, 0), model=opus, timestamp=at(3_710)),
+                 assistant("p2", usage=usage(0, 40_000, 20_000, 20_000), model=opus,
+                           timestamp=at(3_710))]
+        result = scan_cache(write_root(self.root, lines), is_root=True, threshold=25_000)
+        self.assertEqual(result["calls"], 2)
+        # p1's context is 2 + max(read) 26,000 + max(create) 10,000 = 36,002; p2's is 40,002
+        self.assertEqual(result["peak_ctx"], 2 + 0 + 40_000)
+        self.assertEqual(len(result["deaths"]), 1)
+        weighted = (20_000 * 10.0 + 20_000 * 6.25) / 40_000
+        self.assertAlmostEqual(result["deaths"][0]["premium"],
+                               36_002 * (weighted - 0.50) / 1e6, places=12)
+        # only p1's maximum read passes the 25k threshold
+        self.assertAlmostEqual(result["reread_above"], 1_000 * 0.50 / 1e6, places=12)
+
     def test_a_zero_usage_message_is_no_call_and_does_not_hide_a_death(self):
         synthetic = assistant(
             "synthetic-1", model="<synthetic>", stop_reason="stop_sequence", timestamp=at(400),

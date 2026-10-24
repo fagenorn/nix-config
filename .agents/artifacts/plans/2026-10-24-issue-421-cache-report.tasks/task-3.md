@@ -141,13 +141,61 @@ class CacheReportCliTest(unittest.TestCase):
              "--report", "cache", "--days", "0"],
             capture_output=True, text=True, timeout=120, check=False)
         self.assertEqual(completed.returncode, 0, completed.stderr)
+        # the pool must not have fallen back to the sequential scan (Phase-5 PR421-02):
+        # scan_paths catches every pool failure, pickling included, and retries in-process
+        self.assertNotIn("Process pool unavailable", completed.stderr)
         self.assertRegex(completed.stdout, DEATH_ROW)
+
+    def test_aggregation_over_several_transcripts_of_one_type(self):
+        # Phase-5 PR421-03: several same-type transcripts with distinct peaks, deaths and
+        # attachment sets, so sums, percentiles and carrier-only medians are observable
+        def result(agent_type, is_root, calls, deaths, reread, peak, startup):
+            return {"agent_type": agent_type, "is_root": is_root, "calls": calls,
+                    "deaths": [{"kind": k, "gap_s": g, "premium": p} for k, g, p in deaths],
+                    "reread_above": reread, "peak_ctx": peak, "startup": startup}
+        handback = "hand-back after end of turn"
+        results = [
+            result("general-purpose", False, 5,
+                   [(handback, 540.0, 1.5), ("child dispatch", 400.0, 0.8)], 1.5, 150_000,
+                   {"write": 30_000, "read": 0,
+                    "attachments": {"skill_listing": 24_000, "environment": 600}}),
+            result("general-purpose", False, 3, [(handback, 660.0, 2.0)], 0.75, 90_000,
+                   {"write": 10_000, "read": 20_000, "attachments": {"skill_listing": 20_000}}),
+            result("general-purpose", False, 2, [(handback, 600.0, 0.25)], 2.0, 200_000,
+                   {"write": 20_000, "read": 10_000, "attachments": {}}),
+            result("main", True, 4, [("message after end of turn", 3_700.0, 3.0)], 0.0,
+                   50_000, None),
+        ]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            agent_cache_report.print_report(results, window="all time", threshold=120_000,
+                                            top=30)
+        out = out.getvalue()
+        self.assertTrue(out.startswith("Cache report (all time, 4 transcripts, 14 calls)\n"))
+        rows = re.findall(r"(?m)^(general-purpose|main)\s+(hand-back after end of turn|"
+                          r"child dispatch|message after end of turn)\s+\d", out)
+        self.assertEqual(rows, [("general-purpose", handback), ("main", "message after end of turn"),
+                                ("general-purpose", "child dispatch")])  # premium descending
+        # three deaths, nearest-rank median of 540/600/660 s, premiums 1.5 + 2.0 + 0.25
+        self.assertRegex(out, r"(?m)^general-purpose\s+hand-back after end of turn\s+3\s+10\.0m\s+\$4$")
+        self.assertRegex(out, r"(?m)^general-purpose\s+child dispatch\s+1\s+6\.7m\s+\$1$")
+        self.assertIn("\nSubagent deaths 4 ($5 premium); main-session deaths 1 ($3)\n", out)
+        # reread 1.5 + 0.75 + 2.0 summed; peak median 150k is neither the first nor the max
+        self.assertRegex(out, r"(?m)^general-purpose\s+3\s+\$4\s+150\.00k\s+200\.00k\s+200\.00k$")
+        self.assertRegex(out, r"(?m)^main\s+1\s+\$0\s+50\.00k\s+50\.00k\s+50\.00k$")
+        # medians over the subagents that carried each attachment: environment is 600,
+        # not the 0 a missing-as-zero median of (0, 0, 600) would print
+        self.assertRegex(out, r"(?m)^general-purpose\s+3\s+20\.00k\s+10\.00k\s+20\.00k"
+                              r"(\s+-){4}\s+600$")
+        self.assertNotRegex(out, r"(?m)^main\s+\d+\s+[\d.]+k\s+[\d.]+k\s+-")  # no start-up row
 ```
+
+If `re` is not already imported by the test module, add `import re` to its imports.
 
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run (focused test run, timeout 600 s): `-k CacheReportCliTest`
-Expected: `FAILED (failures=6)` — argparse rejects `--report` (exit 2, empty stdout); `test_cache_report_usage_errors_exit_2_with_nothing_on_stdout` already passes, since every case is exit 2 while the flag is unknown.
+Expected: `FAILED (failures=6, errors=1)` — `test_aggregation_over_several_transcripts_of_one_type` errors with `AttributeError` (no `print_report` yet); argparse rejects `--report` (exit 2, empty stdout); `test_cache_report_usage_errors_exit_2_with_nothing_on_stdout` already passes, since every case is exit 2 while the flag is unknown.
 
 - [ ] **Step 3: Implement**
 
