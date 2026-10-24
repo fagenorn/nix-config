@@ -2,6 +2,7 @@ import concurrent.futures
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -1270,6 +1271,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         if verdict["exit"] == 2:
             self.assertIn(f"lifecycle guard: unsafe {label}:", result.stderr)
             self.assertIn(verdict["reason"], result.stderr)
+            self.assertIn("; accepted: ", result.stderr)
 
     def test_every_guarded_command_shape_gets_its_verdict(self):
         """#351 AC3, D6: the skill's literal forms and the refused dressed shapes."""
@@ -1298,6 +1300,203 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 "<repository-root>", str(repo))
             with self.subTest(shape=shape["id"]):
                 self.assert_shape_verdict(command, repo, shape["label"], shape["verdict"])
+
+    # ------------------------------------------------------------------
+    # Accepted forms (issue 402 D3, D6, D7, D8, D13): a refusal that lies in the
+    # command's text prints the forms that would pass where it was printed.
+    # ------------------------------------------------------------------
+
+    FORM_VALUES = SHAPES["form_values"]
+    PREFIX_CLAUSE = "; optional prefix: unset GITHUB_TOKEN && | env -u GITHUB_TOKEN"
+
+    def refusal_line(self, result):
+        """The guard's one refusal line; the call must have exited 2."""
+        self.assertEqual(2, result.returncode, result.stderr)
+        lines = [line for line in result.stderr.splitlines()
+                 if line.startswith("lifecycle guard: ")]
+        self.assertEqual(1, len(lines), result.stderr)
+        return lines[0]
+
+    def accepted_clause(self, line):
+        """(forms, prefixes) a refusal line prints: the forms split at `; or `, each
+        trailing note dropped; each prefix with the space that joins it to a command."""
+        self.assertIn("; accepted: ", line)
+        clause = line.split("; accepted: ", 1)[1]
+        forms_text, _, prefix_text = clause.partition("; optional prefix: ")
+        forms = [re.sub(r" \([^()]*\)$", "", form) for form in forms_text.split("; or ")]
+        prefixes = [spelling + " " for spelling in prefix_text.split(" | ")] if prefix_text else []
+        return forms, prefixes
+
+    def form_spellings(self, form):
+        """Every spelling of `form`, one per subset of its `[...]` groups, filled from
+        form_values; no placeholder may survive the fill."""
+        parts = re.split(r"(\[[^\[\]]*\])", form)
+        groups = [index for index, part in enumerate(parts) if part.startswith("[")]
+        spellings = []
+        for mask in range(1 << len(groups)):
+            kept = "".join(
+                (part[1:-1] if (mask >> groups.index(index)) & 1 else "")
+                if index in groups else part
+                for index, part in enumerate(parts)
+            )
+            spelling = " ".join(kept.split())
+            for placeholder, value in self.FORM_VALUES.items():
+                spelling = spelling.replace(placeholder, value)
+            self.assertNotRegex(spelling, r"<[^<>\s]+>")
+            spellings.append(spelling)
+        return spellings
+
+    def assert_forms_pass(self, line, cwd, label):
+        """Every spelling of every form `line` prints exits 0 in `cwd`, bare and behind
+        each printed prefix, with PR facts that fit the form's merge arm."""
+        forms, prefixes = self.accepted_clause(line)
+        for form in forms:
+            for spelling in self.form_spellings(form):
+                release_arm = (spelling.startswith("gh pr merge ")
+                               and not spelling.endswith(" --delete-branch"))
+                env = self.release_env() if release_arm else None
+                for text in [spelling] + [prefix + spelling for prefix in prefixes]:
+                    with self.subTest(label=label, form=text):
+                        result = self.run_guard(text, cwd=cwd, env=env)
+                        self.assertEqual(0, result.returncode, (text, result.stderr))
+
+    def test_every_printed_form_is_allowed_where_printed(self):
+        """Issue 402 AC3, D13: each operation's whole table, printed in the fixture
+        repository, in a Nodo-row repository and with no context, and the forms the
+        AC2 refusals print, filled from form_values, pass where they were printed."""
+        fixture_slug = self.FORM_VALUES["<slug>"]
+        fixture = self.tagged_repo(fixture_slug)
+        nodo = self.tagged_repo(NODO)
+
+        def provoking(slug):
+            return {
+                "push": "git push --force origin issue-402-topic",
+                "PR creation": f"gh pr create --repo {slug} --draft",
+                "merge": f"gh pr merge 402 --repo {slug} --squash",
+                "release creation": f"gh release create v1.2.3 --repo {slug} --draft",
+                "branch deletion": "git branch -d --force issue-402-topic",
+            }
+
+        recognition = {label: "xargs " + command
+                       for label, command in provoking(fixture_slug).items()}
+        one_each = {"push": 2, "PR creation": 1, "merge": 1, "release creation": 1,
+                    "branch deletion": 1}
+        covered = set()
+        for name, cwd, commands, counts in (
+            ("fixture", fixture, provoking(fixture_slug), one_each),
+            ("nodo", nodo, provoking(NODO), {**one_each, "PR creation": 2, "merge": 2}),
+            ("no context", fixture, recognition, one_each),
+        ):
+            for label, command in commands.items():
+                with self.subTest(context=name, label=label):
+                    line = self.refusal_line(self.run_guard(command, cwd=cwd))
+                    self.assertTrue(line.startswith(f"lifecycle guard: unsafe {label}: "), line)
+                    forms, _ = self.accepted_clause(line)
+                    self.assertEqual(counts[label], len(forms), line)
+                    self.assert_forms_pass(line, cwd, label)
+                    covered.add(label)
+        self.assertEqual({"push", "PR creation", "merge", "release creation",
+                          "branch deletion"}, covered)
+        feature_into_dev = {"FAKE_PR_JSON": json.dumps({
+            "state": "OPEN", "baseRefName": "dev", "headRefName": "issue-2342-topic",
+            "url": f"https://github.com/{NODO}/pull/2342", "statusCheckRollup": []})}
+        for label, cwd, command, env, count in (
+            ("merge", nodo,
+             f"gh pr merge 2342 --repo {NODO} --merge --match-head-commit {self.HEAD_SHA}",
+             feature_into_dev, 1),
+            ("push", fixture,
+             "unset GITHUB_TOKEN; git push -q origin HEAD:issue-402-topic 2>&1 | tail -2",
+             None, 2),
+        ):
+            with self.subTest(context="AC2", label=label):
+                line = self.refusal_line(self.run_guard(command, cwd=cwd, env=env))
+                forms, _ = self.accepted_clause(line)
+                self.assertEqual(count, len(forms), line)
+                self.assert_forms_pass(line, cwd, label)
+
+    def test_text_refusals_list_the_forms_their_facts_admit(self):
+        """Issue 402 D6, D7, D8, D9: the forms follow the context and, after the PR
+        lookup, the arm the PR admits; branch deletion prints no prefix clause."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        feature = ('gh pr merge <n> --repo {slug} --merge [--subject "<subject>"] '
+                   "[--match-head-commit <sha>] --delete-branch")
+        release = ('gh pr merge <n> --repo {slug} --merge [--subject "<subject>"] '
+                   "[--match-head-commit <sha>] (only dev into main)")
+        create = ("gh pr create --repo {slug} --base {base} --head <branch> "
+                  '--title "<title>" --body "<body>"')
+        push = "git push origin refs/tags/<vX.Y.Z>; or git push [-u] origin <branch>"
+
+        def pr(head, base):
+            return {"FAKE_PR_JSON": json.dumps({
+                "state": "OPEN", "baseRefName": base, "headRefName": head,
+                "url": f"https://github.com/{NODO}/pull/7", "statusCheckRollup": []}),
+                "FAKE_PROTECTION_MODE": "nonzero"}
+
+        for command, cwd, env, forms in (
+            ("gh pr merge 7 --repo fagenorn/nix-config --squash", repo, None,
+             feature.format(slug="fagenorn/nix-config")),
+            (f"gh pr merge 7 --repo {NODO} --squash", nodo, None,
+             feature.format(slug=NODO) + "; or " + release.format(slug=NODO)),
+            ("xargs gh pr merge 7", repo, None, feature.format(slug="<slug>")),
+            ("gh pr create --repo fagenorn/nix-config --draft", repo, None,
+             create.format(slug="fagenorn/nix-config", base="main")),
+            (f"gh pr create --repo {NODO} --draft", nodo, None,
+             create.format(slug=NODO, base="dev") + "; or "
+             + create.format(slug=NODO, base="main")),
+            ("xargs gh pr create", repo, None, create.format(slug="<slug>", base="<base>")),
+            ("/usr/bin/git push origin issue-402-topic", repo, None, push),
+            # After the lookup the release form on a feature PR lists the feature arm,
+            (f"gh pr merge 7 --repo {NODO} --merge", nodo, pr("issue-7-topic", "dev"),
+             feature.format(slug=NODO)),
+            # and --delete-branch on the integration-into-default PR the release arm.
+            (f"gh pr merge 7 --repo {NODO} --merge --delete-branch", nodo, pr("dev", "main"),
+             release.format(slug=NODO)),
+        ):
+            with self.subTest(command=command):
+                line = self.refusal_line(self.run_guard(command, cwd=cwd, env=env))
+                self.assertTrue(line.endswith("; accepted: " + forms + self.PREFIX_CLAUSE), line)
+        # D9: an invocation-form refusal keeps its hint, then the clause.
+        line = self.refusal_line(self.run_guard("/usr/bin/git push origin x", cwd=repo))
+        self.assertIn("carry a directory only as git -C <dir>; accepted: ", line)
+        # No arm remains for a permanent head that neither arm admits.
+        for command in (f"gh pr merge 7 --repo {NODO} --merge --delete-branch",
+                        f"gh pr merge 7 --repo {NODO} --merge"):
+            with self.subTest(command=command, head="main", base="dev"):
+                line = self.refusal_line(self.run_guard(command, cwd=nodo, env=pr("main", "dev")))
+                self.assertNotIn("accepted:", line)
+        line = self.refusal_line(self.run_guard("git branch -d --force issue-402-topic"))
+        self.assertTrue(line.endswith("; accepted: git branch -d <branch>"), line)
+
+    def test_state_refusals_print_no_accepted_forms(self):
+        """Issue 402 D3: a refusal of the repository or forge state names only its
+        problem, since no spelling would pass there."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        foreign = self.make_repo("git@github.com:someoneelse/tool.git")
+        lightweight = self.tagged_repo("fagenorn/nix-config", tag="v2.0.0", annotated=False)
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        merge = "gh pr merge 2342 --repo fagenorn/nix-config --merge --delete-branch"
+        for command, cwd, env, problem in (
+            ("git push origin issue-402-topic", foreign, None,
+             "unsafe push: repository someoneelse/tool is outside standing authorization"),
+            ("git push origin main", repo, None,
+             "unsafe push: refusing to push the default branch main"),
+            ("git push origin refs/tags/v2.0.0", lightweight, None,
+             "unsafe push: v2.0.0 is not an existing annotated tag"),
+            ('gh pr create --repo fagenorn/nix-config --base main --head main --title "x" '
+             '--body "y"', repo, None, "unsafe PR creation: head and base must differ"),
+            (merge, repo, {"FAKE_PR_MODE": "nonzero"}, "PR lookup failed"),
+            (merge, repo, {"FAKE_PROTECTION_MODE": "nonzero"}, "protection lookup failed"),
+            (f"gh pr merge 1484 --repo {NODO} --merge", nodo,
+             self.release_env(statusCheckRollup=[]),
+             "unsafe merge: the PR's check rollup is not entirely green"),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=cwd, env=env)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"lifecycle guard: {problem}", result.stderr)
+                self.assertNotIn("accepted:", result.stderr)
+                self.assertNotIn("optional prefix:", result.stderr)
 
     def test_raw_text_sites_match_verb_words_in_order(self):
         """Issue 400 D5, D12: text the guard cannot tokenise as a command is refused

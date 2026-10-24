@@ -123,6 +123,9 @@ NOT_COMMAND_POSITION = (
     "the verb is not in a command position the guard can validate; quote it "
     "if you only mean to mention it"
 )
+# What a branch-name check that timed out reports; a refusal of the state, not
+# of the command's text, so it prints no accepted forms (issue 402 D3).
+BRANCH_VALIDATION_TIMEOUT = "branch validation timed out"
 # Ends every refusal of an invocation form at recognition (issue 400 D6).
 INVOCATION_FORM_HINT = "run git and gh by name, and carry a directory only as git -C <dir>"
 # Words that detach a process from the task that started it (#278). Refused
@@ -1632,7 +1635,7 @@ def branch_name_problem(git_bin, branch, timeout):
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return "branch validation timed out"
+        return BRANCH_VALIDATION_TIMEOUT
     if child.returncode != 0:
         return "invalid branch name"
     return None
@@ -1885,14 +1888,88 @@ def form_problem(operation, compiled, text):
     }[operation]
 
 
+def prefix_clause():
+    """`optional prefix: …`: the one-name scrub spellings of the first credential
+    name, in SCRUB_PREFIXES order (issue 402 D8)."""
+    name = GH_ENV_TOKEN_NAMES[0]
+    spellings = [
+        spelling.rstrip() for spelling in SCRUB_PREFIXES
+        if spelling.split() in (["unset", name, "&&"], ["env", "-u", name])
+    ]
+    return "optional prefix: " + " | ".join(spellings)
+
+
+def declared_integration(context):
+    """The context's integration branch when it declares one distinct from its
+    resolved default branch, else None (also with no context)."""
+    if context is None or context.base_branch is None:
+        return None
+    integration = context.integration_bases.get(context.repository)
+    if integration is None or integration == context.base_branch:
+        return None
+    return integration
+
+
+def accepted_forms(compiled, context, form_ids=None):
+    """The accepted forms a text refusal prints, in table order (issue 402 D6, D7).
+
+    `form_ids` names the forms the refusal's facts admit; None means before any
+    PR lookup: every form, a noted form only where `declared_integration` names
+    a branch. `context` fills `<slug>`, `<base>` (one form per authorized base)
+    and the note; None fills nothing.
+    """
+    integration = declared_integration(context)
+    printed = []
+    for form in compiled.forms:
+        if form_ids is None:
+            if form.note is not None and integration is None:
+                continue
+        elif form.id not in form_ids:
+            continue
+        text = form.template
+        if context is not None and context.repository is not None:
+            text = text.replace("<slug>", context.repository)
+        texts = [text]
+        if "<base>" in text and context is not None and context.base_branch is not None:
+            texts = [
+                text.replace("<base>", base)
+                for base in sorted(authorized_bases(
+                    context.repository, context.base_branch, context.integration_bases))
+            ]
+        note = ""
+        if form.note is not None:
+            note = " (" + form.note.replace("<integration>", integration).replace(
+                "<default>", context.base_branch) + ")"
+        printed.extend(text + note for text in texts)
+    return printed
+
+
+def refuse(operation, problem, forms=()):
+    """Print `operation`'s refusal and return 2 (issue 402 D3).
+
+    With `forms` (a text refusal) the message continues `; accepted: ` and the
+    forms joined by `; or `, then the prefix clause for an operation that takes
+    a scrub prefix; without them (a refusal of the repository or forge state)
+    it names only the problem.
+    """
+    message = f"unsafe {OPERATION_LABELS[operation]}: {problem}"
+    if forms:
+        message += "; accepted: " + "; or ".join(forms)
+        if FORM_TABLE[operation]["scrub_prefix"]:
+            message += "; " + prefix_clause()
+    return block(message)
+
+
 def validate_branch_delete(text, git_bin, timeout, compiled):
     """Branch deletion is guarded in every repository, ownership aside."""
     match = match_form(compiled, text)
     if match is None:
-        return block(f"unsafe branch deletion: {form_problem('branch', compiled, text)}")
+        return refuse("branch", form_problem("branch", compiled, text),
+                      accepted_forms(compiled, None))
     branch = match.values["branch"]
     if branch.startswith("-"):
-        return block("unsafe branch deletion: branch must not begin with a dash")
+        return refuse("branch", "branch must not begin with a dash",
+                      accepted_forms(compiled, None))
     try:
         ref_check = subprocess.run(
             [git_bin, "check-ref-format", "--branch", branch],
@@ -1902,13 +1979,13 @@ def validate_branch_delete(text, git_bin, timeout, compiled):
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return block("unsafe branch deletion: branch validation timed out")
+        return refuse("branch", BRANCH_VALIDATION_TIMEOUT)
     if ref_check.returncode != 0:
-        return block("unsafe branch deletion: invalid branch name")
+        return refuse("branch", "invalid branch name", accepted_forms(compiled, None))
     return 0
 
 
-def validate_tag_push(tag, context):
+def validate_tag_push(tag, context, compiled):
     """The tag-push arm: `git push origin refs/tags/<vX.Y.Z>` of an existing annotated tag.
 
     The caller has judged the owner and the raw characters. The tag must exist
@@ -1916,7 +1993,10 @@ def validate_tag_push(tag, context):
     lightweight tag, a missing one or a branch of the same name never passes.
     """
     if SEMVER_TAG.fullmatch(tag) is None:
-        return block("unsafe push: a tag push must name a vMAJOR.MINOR.PATCH tag")
+        return refuse(
+            "push", "a tag push must name a vMAJOR.MINOR.PATCH tag",
+            accepted_forms(compiled, context),
+        )
     try:
         kind = subprocess.run(
             [context.git_bin, "cat-file", "-t", TAG_REF_PREFIX + tag],
@@ -1927,70 +2007,80 @@ def validate_tag_push(tag, context):
             cwd=context.cwd,
         )
     except subprocess.TimeoutExpired:
-        return block("unsafe push: tag lookup timed out")
+        return refuse("push", "tag lookup timed out")
     if kind.returncode != 0 or kind.stdout.strip() != "tag":
-        return block(f"unsafe push: {tag} is not an existing annotated tag")
+        return refuse("push", f"{tag} is not an existing annotated tag")
     return 0
 
 
 def validate_push(text, context, compiled):
     problem = ownership_problem(context)
     if problem is not None:
-        return block(f"unsafe push: {problem}")
+        return refuse("push", problem)
     match = match_form(compiled, text)
     if match is None:
-        return block(f"unsafe push: {form_problem('push', compiled, text)}")
+        return refuse("push", form_problem("push", compiled, text),
+                      accepted_forms(compiled, context))
     if match.form.id == "tag":
-        return validate_tag_push(match.values["vX.Y.Z"], context)
+        return validate_tag_push(match.values["vX.Y.Z"], context, compiled)
     if match.form.id != "branch":
         raise AssertionError(f"unhandled push form {match.form.id}")
     branch = match.values["branch"]
     reason = branch_name_problem(context.git_bin, branch, context.timeout)
+    if reason == BRANCH_VALIDATION_TIMEOUT:
+        return refuse("push", reason)
     if reason is not None:
-        return block(f"unsafe push: {reason}")
+        return refuse("push", reason, accepted_forms(compiled, context))
     if context.base_branch is None:
-        return block("unsafe push: cannot resolve the repository default branch")
+        return refuse("push", "cannot resolve the repository default branch")
     if branch == context.base_branch:
-        return block(f"unsafe push: refusing to push the default branch {branch}")
+        return refuse("push", f"refusing to push the default branch {branch}")
     return 0
 
 
 def validate_pr_create(text, context, compiled):
     problem = ownership_problem(context)
     if problem is not None:
-        return block(f"unsafe PR creation: {problem}")
+        return refuse("pr-create", problem)
     match = match_form(compiled, text)
     if match is None:
-        return block(f"unsafe PR creation: {form_problem('pr-create', compiled, text)}")
+        return refuse("pr-create", form_problem("pr-create", compiled, text),
+                      accepted_forms(compiled, context))
     repository_argument = match.values["slug"]
     base = match.values["base"]
     head = match.values["branch"]
     title = match.values["title"]
     body = match.values["body"]
     if repository_argument != context.repository:
-        return block(
-            f"unsafe PR creation: --repo {repository_argument} is not the "
-            f"current repository {context.repository}"
+        return refuse(
+            "pr-create",
+            f"--repo {repository_argument} is not the current repository "
+            f"{context.repository}",
+            accepted_forms(compiled, context),
         )
     reason = branch_name_problem(context.git_bin, head, context.timeout)
+    if reason == BRANCH_VALIDATION_TIMEOUT:
+        return refuse("pr-create", f"head {reason}")
     if reason is not None:
-        return block(f"unsafe PR creation: head {reason}")
+        return refuse("pr-create", f"head {reason}", accepted_forms(compiled, context))
     for name, value, allow_newlines in (("title", title, False), ("body", body, True)):
         text_problem = free_text_problem(value, allow_newlines)
         if text_problem is not None:
-            return block(f"unsafe PR creation: {name} {text_problem}")
+            return refuse("pr-create", f"{name} {text_problem}",
+                          accepted_forms(compiled, context))
     if context.base_branch is None:
-        return block("unsafe PR creation: cannot resolve the repository default branch")
+        return refuse("pr-create", "cannot resolve the repository default branch")
     allowed_bases = authorized_bases(
         context.repository, context.base_branch, context.integration_bases
     )
     if base not in allowed_bases:
-        return block(
-            "unsafe PR creation: --base must be one of "
-            + ", ".join(sorted(allowed_bases))
+        return refuse(
+            "pr-create",
+            "--base must be one of " + ", ".join(sorted(allowed_bases)),
+            accepted_forms(compiled, context),
         )
     if head == base:
-        return block("unsafe PR creation: head and base must differ")
+        return refuse("pr-create", "head and base must differ")
     return 0
 
 
@@ -1998,10 +2088,11 @@ def validate_release(text, context, compiled):
     """Release creation is judged on the whole canonical command, like the merge."""
     problem = ownership_problem(context)
     if problem is not None:
-        return block(f"unsafe release creation: {problem}")
+        return refuse("release", problem)
     match = match_form(compiled, text)
     if match is None:
-        return block(f"unsafe release creation: {form_problem('release', compiled, text)}")
+        return refuse("release", form_problem("release", compiled, text),
+                      accepted_forms(compiled, context))
     values = match.values
     path = values["path"]
     if (
@@ -2011,7 +2102,8 @@ def validate_release(text, context, compiled):
         or not os.path.isabs(path)
         or any(character in UNSAFE_BRANCH_CHARS or character.isspace() for character in path)
     ):
-        return block(f"unsafe release creation: {form_problem('release', compiled, text)}")
+        return refuse("release", form_problem("release", compiled, text),
+                      accepted_forms(compiled, context))
     return 0
 
 
@@ -2033,19 +2125,21 @@ def merge_slots_acceptable(values, repository):
 def validate_merge(text, context, compiled):
     problem = ownership_problem(context)
     if problem is not None:
-        return block(f"unsafe merge: {problem}")
+        return refuse("merge", problem)
     repository = context.repository
     # `text` is the whole canonical command, its scrub prefix already
     # stripped, so the merge still tolerates no other chaining.
     match = match_form(compiled, text)
     if match is None or not merge_slots_acceptable(match.values, repository):
-        return block(f"unsafe merge: {form_problem('merge', compiled, text)}")
+        return refuse("merge", form_problem("merge", compiled, text),
+                      accepted_forms(compiled, context))
     number = match.values["n"]
     head_commit = match.values.get("sha")
     if head_commit is not None and HEAD_COMMIT.fullmatch(head_commit) is None:
-        return block(
-            f"unsafe merge: --match-head-commit {head_commit} is not "
-            "40 lowercase hexadecimal characters"
+        return refuse(
+            "merge",
+            f"--match-head-commit {head_commit} is not 40 lowercase hexadecimal characters",
+            accepted_forms(compiled, context),
         )
     if match.form.id == "feature":
         delete_branch = True
@@ -2054,7 +2148,7 @@ def validate_merge(text, context, compiled):
     else:
         raise AssertionError(f"unhandled merge form {match.form.id}")
     if context.base_branch is None:
-        return block("unsafe merge: cannot resolve the repository default branch")
+        return refuse("merge", "cannot resolve the repository default branch")
     allowed_bases = authorized_bases(
         repository, context.base_branch, context.integration_bases
     )
@@ -2065,9 +2159,11 @@ def validate_merge(text, context, compiled):
     # branch, whose head must survive the merge. Where no such branch is
     # declared there is nothing to spare, so refuse before any lookup.
     if not delete_branch and integration_base is None:
-        return block(
-            "unsafe merge: --delete-branch may be omitted only in a repository "
-            "with a declared integration branch"
+        return refuse(
+            "merge",
+            "--delete-branch may be omitted only in a repository "
+            "with a declared integration branch",
+            accepted_forms(compiled, context, ["feature"]),
         )
 
     try:
@@ -2119,23 +2215,30 @@ def validate_merge(text, context, compiled):
         pr_facts = json.loads(pr_lookup.stdout)
         base = pr_facts["baseRefName"]
     except (ValueError, KeyError, TypeError):
-        return block("unsafe merge: cannot read the PR base branch")
+        return refuse("merge", "cannot read the PR base branch")
     if base not in allowed_bases:
-        return block(f"unsafe merge: PR base {base} is not an authorized base")
+        return refuse("merge", f"PR base {base} is not an authorized base")
 
     if not delete_branch:
-        return validate_release_merge(pr_facts, base, integration_base, context)
+        return validate_release_merge(pr_facts, base, integration_base, context, compiled)
 
     # The feature arm deletes the PR's head branch, so the head must be
     # disposable: never the default branch, never the declared integration
     # branch (#116 D5). Judged before any protection lookup.
     head = pr_facts.get("headRefName")
     if not isinstance(head, str) or not head:
-        return block("unsafe merge: cannot read the PR head branch")
+        return refuse("merge", "cannot read the PR head branch")
     if head in (context.base_branch, integration_base):
-        return block(
-            f"unsafe merge: --delete-branch would delete the permanent branch {head}"
-        )
+        permanent = f"--delete-branch would delete the permanent branch {head}"
+        # The one permanent head an arm still admits is the integration branch
+        # promoted into the default branch: the release form names it.
+        if (
+            head == integration_base
+            and base == context.base_branch
+            and declared_integration(context) is not None
+        ):
+            return refuse("merge", permanent, accepted_forms(compiled, context, ["release"]))
+        return refuse("merge", permanent)
 
     # A declared integration branch is deliberately exempt from the
     # protection demand: it is the development-pace branch, and its CI
@@ -2185,7 +2288,7 @@ def validate_merge(text, context, compiled):
     return 0
 
 
-def validate_release_merge(pr_facts, base, integration_base, context):
+def validate_release_merge(pr_facts, base, integration_base, context, compiled):
     """The release arm: the integration branch promoted into the default branch.
 
     Its head is permanent, so the merge may omit `--delete-branch`, and in
@@ -2197,13 +2300,17 @@ def validate_release_merge(pr_facts, base, integration_base, context):
     """
     head = pr_facts.get("headRefName")
     if not isinstance(head, str) or not head:
-        return block("unsafe merge: cannot read the PR head branch")
+        return refuse("merge", "cannot read the PR head branch")
     if head != integration_base or base != context.base_branch:
-        return block(
-            "unsafe merge: --delete-branch may be omitted only when merging "
+        mismatch = (
+            "--delete-branch may be omitted only when merging "
             f"{integration_base} into {context.base_branch}; this PR merges "
             f"{head} into {base}"
         )
+        # A feature head still fits the feature arm; a permanent head fits no arm.
+        if head not in (context.base_branch, integration_base):
+            return refuse("merge", mismatch, accepted_forms(compiled, context, ["feature"]))
+        return refuse("merge", mismatch)
     try:
         rollup_predicate = subprocess.run(
             [
@@ -2284,9 +2391,9 @@ def main():
     contexts = {}
     for operation, segment, problem, directory in operations:
         if time.monotonic() >= started + INVOCATION_DEADLINE_SECONDS:
-            return block(f"unsafe {OPERATION_LABELS[operation]}: {DEADLINE_REFUSAL}")
+            return refuse(operation, DEADLINE_REFUSAL)
         if problem is not None:
-            return block(f"unsafe {OPERATION_LABELS[operation]}: {problem}")
+            return refuse(operation, problem, accepted_forms(table[operation], None))
         try:
             # Push and PR creation are judged per segment; the other verbs on the
             # whole command, so they tolerate no chaining.
@@ -2315,7 +2422,7 @@ def main():
                 else:
                     status = validate_merge(text, context, table[operation])
         except DeadlineExhausted:
-            return block(f"unsafe {OPERATION_LABELS[operation]}: {DEADLINE_REFUSAL}")
+            return refuse(operation, DEADLINE_REFUSAL)
         if status != 0:
             return status
     return 0

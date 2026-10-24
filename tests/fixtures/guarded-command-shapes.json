@@ -104,5 +104,17 @@
      "label": "merge", "verdict": {"exit": 2, "reason": "does not match the guarded merge grammar"}},
     {"id": "merge.flag-between-path", "template": "gh pr --repo <resolved-repository> merge <pr-num> --merge --delete-branch",
      "label": "merge", "verdict": {"exit": 2, "reason": "does not match the guarded merge grammar"}}
-  ]
+  ],
+  "form_values": {
+    "<n>": "402",
+    "<slug>": "fagenorn/nix-config",
+    "<base>": "main",
+    "<branch>": "issue-402-topic",
+    "<sha>": "d4d9acc0505c73305b3e0ced029db43100bc0e8a",
+    "<subject>": "feature (#402)",
+    "<title>": "v1.2.3",
+    "<body>": "Closes #402",
+    "<vX.Y.Z>": "v1.2.3",
+    "<path>": "/tmp/notes.md"
+  }
 }
