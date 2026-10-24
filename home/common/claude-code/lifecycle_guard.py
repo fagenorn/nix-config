@@ -12,6 +12,7 @@ Standard library only: it imports nothing from the repository's helper package.
 """
 
 import argparse
+from collections import namedtuple
 import json
 import os
 import re
@@ -135,7 +136,6 @@ DETACHING_ROUTES = (
 # Characters that end a word and re-open the command position: subshells,
 # groups, `case` arms and command substitution all start a command after one.
 OPERATOR_CHARS = "(){}`"
-PR_CREATE_FLAGS = ("--repo", "--base", "--head", "--title", "--body")
 ASSIGNMENT_PREFIX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 SLUG_PATTERN = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 REF_NAME_PATTERN = re.compile(r"[A-Za-z0-9._/-]+")
@@ -157,6 +157,88 @@ UNSAFE_TEXT_CHARS = frozenset('"$`\\\0\r')
 # shell-active character.
 RAW_WORD_BREAKS = frozenset("'\"") | frozenset(UNSAFE_BRANCH_CHARS)
 RAW_GLUE_CHARS = frozenset("'\"\\")
+
+
+# Every accepted spelling, one table per operation (issue 402 D1). A form is
+# (id, template, note): words separated by single spaces; `<name>` is a slot
+# taking one word, `"<name>"` a free-text slot whose value may begin with `-`;
+# a slot may close a literal word (`refs/tags/<vX.Y.Z>`); `[...]` is an
+# optional group whose first word is its flag, never nested; the note is
+# printed after the form and never matched. Forms are tried in order. `main`
+# compiles this literal first on every invocation (D14).
+FORM_SLOTS = ("n", "slug", "base", "branch", "sha", "subject", "title", "body", "vX.Y.Z", "path")
+FORM_TABLE = {
+    "push": {
+        "forms": (
+            ("tag", "git push origin refs/tags/<vX.Y.Z>", None),
+            ("branch", "git push [-u] origin <branch>", None),
+        ),
+        "whole_text_characters": True,
+        "exact_spelling": False,
+        "scrub_prefix": True,
+    },
+    "pr-create": {
+        "forms": (
+            ("pr-create", 'gh pr create --repo <slug> --base <base> --head <branch> '
+                          '--title "<title>" --body "<body>"', None),
+        ),
+        "whole_text_characters": False,
+        "exact_spelling": False,
+        "scrub_prefix": True,
+    },
+    "merge": {
+        "forms": (
+            ("feature", 'gh pr merge <n> --repo <slug> --merge [--subject "<subject>"] '
+                        "[--match-head-commit <sha>] --delete-branch", None),
+            ("release", 'gh pr merge <n> --repo <slug> --merge [--subject "<subject>"] '
+                        "[--match-head-commit <sha>]", "only <integration> into <default>"),
+        ),
+        "whole_text_characters": False,
+        "exact_spelling": True,
+        "scrub_prefix": True,
+    },
+    "release": {
+        "forms": (
+            ("release", 'gh release create <vX.Y.Z> --repo <slug> --verify-tag '
+                        '--title "<title>" --notes-file <path>', None),
+        ),
+        "whole_text_characters": False,
+        "exact_spelling": True,
+        "scrub_prefix": True,
+    },
+    "branch": {
+        "forms": (("branch", "git branch -d <branch>", None),),
+        "whole_text_characters": True,
+        "exact_spelling": False,
+        "scrub_prefix": False,
+    },
+}
+# The value `--match-head-commit` takes: a full commit SHA (issue 402 D10).
+HEAD_COMMIT = re.compile(r"[0-9a-f]{40}")
+
+Literal = namedtuple("Literal", "word")
+Slot = namedtuple("Slot", "name quoted prefix")
+Group = namedtuple("Group", "elements")
+CompiledForm = namedtuple("CompiledForm", "id template note elements")
+CompiledOperation = namedtuple(
+    "CompiledOperation",
+    "operation forms whole_text_characters exact_spelling scrub_prefix program flags "
+    "quoted_value_flags",
+)
+FormWalk = namedtuple("FormWalk", "position expected values quoted")
+FormMatch = namedtuple("FormMatch", "form values")
+
+FORM_TABLE_OPERATIONS = frozenset({"push", "pr-create", "merge", "release", "branch"})
+FORM_TABLE_PROPERTIES = ("whole_text_characters", "exact_spelling", "scrub_prefix")
+NOTE_PLACEHOLDERS = frozenset({"<integration>", "<default>"})
+SLOT_WORD = re.compile(r'([^<>"]*)<([^<>"]+)>')
+QUOTED_SLOT_WORD = re.compile(r'([^<>"]*)"<([^<>"]+)>"')
+LITERAL_WORD = re.compile(r'[^<>"]+')
+
+
+class FormTableError(ValueError):
+    """A form-table entry that does not compile; `main` lets it reach the
+    unexpected-failure handler, which refuses with exit 2 (issue 402 D14)."""
 
 
 class DeadlineExhausted(Exception):
@@ -1087,13 +1169,14 @@ def canonical_text(operation, text, directory):
     """The text `operation`'s grammar judges (issue 400 D13).
 
     Push and PR creation are judged per segment, with leading whitespace dropped;
-    every verb but branch deletion (D2) then loses an exact scrub prefix; and,
+    every operation whose form-table entry carries the scrub-prefix property (all
+    but branch deletion, issue 400 D2) then loses an exact scrub prefix; and,
     with a `git -C` `directory`, a leading `git -C <directory> ` becomes `git `.
     Text in any other spelling is returned whole, for the grammar to refuse.
     """
     if operation in ("push", "pr-create"):
         text = text.lstrip()
-    if operation != "branch":
+    if FORM_TABLE[operation]["scrub_prefix"]:
         text = strip_scrub_prefix(text)
     if directory is not None:
         rest = strip_spelling(text, f"git -C {directory} ")
@@ -1569,57 +1652,245 @@ def free_text_problem(value, allow_newlines):
     return None
 
 
-def parse_merge_raw(command, repository):
-    """The guarded merge as (number, subject, delete_branch), or None.
+def compile_word(word, fail):
+    """One bracket-stripped template word as a `Literal` or a `Slot`."""
+    if LITERAL_WORD.fullmatch(word):
+        return Literal(word)
+    quoted = QUOTED_SLOT_WORD.fullmatch(word)
+    if quoted:
+        if quoted.group(1):
+            fail(f"quoted slot {word!r} must not carry a prefix")
+        name, is_quoted, prefix = quoted.group(2), True, ""
+    else:
+        slot = SLOT_WORD.fullmatch(word)
+        if not slot:
+            fail(f"word {word!r} is neither a literal nor a slot")
+        prefix, name, is_quoted = slot.group(1), slot.group(2), False
+    if name not in FORM_SLOTS:
+        fail(f"slot <{name}> is not one of {', '.join(FORM_SLOTS)}")
+    return Slot(name, is_quoted, prefix)
 
-    Two arms share one spelling. The feature arm ends in `--delete-branch`:
-    a feature branch is disposable once merged. The release arm omits it,
-    because there the head is the declared integration branch, which is
-    permanent; `validate_merge` confines that arm to exactly that PR shape.
+
+def compile_template(operation, template):
+    """A template's elements: `Literal`, `Slot` and `Group` in order."""
+    def fail(why):
+        raise FormTableError(f"form table {operation}: {template!r}: {why}")
+
+    elements = []
+    group = None
+    for word in template.split(" "):
+        opens = word.startswith("[")
+        closes = word.endswith("]")
+        inner = word[1 if opens else 0:len(word) - 1 if closes else len(word)]
+        if not inner:
+            fail("empty word")
+        if "[" in inner or "]" in inner:
+            fail(f"misplaced bracket in {word!r}")
+        if opens and group is not None:
+            fail("a group does not nest")
+        if closes and not opens and group is None:
+            fail(f"{word!r} closes no group")
+        element = compile_word(inner, fail)
+        if opens:
+            if not (isinstance(element, Literal) and element.word.startswith("-")):
+                fail(f"a group must begin with a flag literal, not {inner!r}")
+            group = []
+        (elements if group is None else group).append(element)
+        if closes:
+            elements.append(Group(tuple(group)))
+            group = None
+    if group is not None:
+        fail("a group is never closed")
+    return tuple(elements)
+
+
+def flag_words(elements):
+    """The literal flag words in `elements`, groups included, and the flags each
+    followed immediately by a quoted slot."""
+    flags, quoted_value_flags = set(), set()
+    for index, element in enumerate(elements):
+        if isinstance(element, Group):
+            inner_flags, inner_quoted = flag_words(element.elements)
+            flags |= inner_flags
+            quoted_value_flags |= inner_quoted
+        elif isinstance(element, Literal) and element.word.startswith("-"):
+            flags.add(element.word)
+            following = elements[index + 1:index + 2]
+            if following and isinstance(following[0], Slot) and following[0].quoted:
+                quoted_value_flags.add(element.word)
+    return flags, quoted_value_flags
+
+
+def compile_form_table(table):
+    """`table` as one `CompiledOperation` per operation, or `FormTableError`.
+
+    Run first on every invocation, so a template that does not compile refuses
+    every call instead of leaving a verb unjudged (issue 402 D14).
     """
-    prefix = "gh pr merge "
-    if not command.startswith(prefix):
+    if not isinstance(table, dict) or set(table) != FORM_TABLE_OPERATIONS:
+        raise FormTableError(
+            "form table: the operations must be exactly "
+            + ", ".join(sorted(FORM_TABLE_OPERATIONS))
+        )
+    compiled = {}
+    for operation, entry in table.items():
+        if not isinstance(entry, dict) or set(entry) != {"forms", *FORM_TABLE_PROPERTIES}:
+            raise FormTableError(
+                f"form table {operation}: the keys must be exactly forms, "
+                + ", ".join(FORM_TABLE_PROPERTIES)
+            )
+        for name in FORM_TABLE_PROPERTIES:
+            if not isinstance(entry[name], bool):
+                raise FormTableError(f"form table {operation}: {name} must be a bool")
+        forms = entry["forms"]
+        if not isinstance(forms, tuple) or not forms:
+            raise FormTableError(f"form table {operation}: forms must be a non-empty tuple")
+        compiled_forms = []
+        for form in forms:
+            if (
+                not isinstance(form, tuple)
+                or len(form) != 3
+                or not isinstance(form[0], str)
+                or not isinstance(form[1], str)
+                or not (form[2] is None or isinstance(form[2], str))
+            ):
+                raise FormTableError(
+                    f"form table {operation}: a form must be (id, template, note), got {form!r}"
+                )
+            form_id, template, note = form
+            if any(form_id == earlier.id for earlier in compiled_forms):
+                raise FormTableError(f"form table {operation}: {template!r}: duplicate id {form_id}")
+            elements = compile_template(operation, template)
+            if not isinstance(elements[0], Literal):
+                raise FormTableError(
+                    f"form table {operation}: {template!r}: a form must begin with a literal"
+                )
+            if note is not None and any(
+                placeholder not in NOTE_PLACEHOLDERS
+                for placeholder in re.findall(r"<[^>]*>", note)
+            ):
+                raise FormTableError(
+                    f"form table {operation}: {template!r}: the note names a placeholder "
+                    "other than <integration> and <default>"
+                )
+            compiled_forms.append(CompiledForm(form_id, template, note, elements))
+        programs = {form.elements[0].word for form in compiled_forms}
+        if len(programs) != 1:
+            raise FormTableError(
+                f"form table {operation}: the forms begin with different literals: "
+                + ", ".join(sorted(programs))
+            )
+        flags, quoted_value_flags = set(), set()
+        for form in compiled_forms:
+            form_flags, form_quoted = flag_words(form.elements)
+            flags |= form_flags
+            quoted_value_flags |= form_quoted
+        compiled[operation] = CompiledOperation(
+            operation, tuple(compiled_forms), entry["whole_text_characters"],
+            entry["exact_spelling"], entry["scrub_prefix"], programs.pop(),
+            frozenset(flags), frozenset(quoted_value_flags),
+        )
+    return compiled
+
+
+def walk_form(elements, words, flags):
+    """How far `words` follow a compiled form's `elements` from the first word.
+
+    An optional group is entered only when the next word equals its flag; once
+    entered, every element in it must match. A literal matches its own word; an
+    unquoted slot takes one word not in `flags`; a glued slot takes a word that
+    starts with its literal, its value the rest; a quoted slot takes any one
+    word. `expected` is the element that could not be matched at `position`,
+    None when every element matched; `quoted` holds the indices of the words
+    quoted slots took.
+    """
+    position = 0
+    values = {}
+    quoted = set()
+
+    def take(element):
+        nonlocal position
+        if position >= len(words):
+            return False
+        word = words[position]
+        if isinstance(element, Literal):
+            if word != element.word:
+                return False
+        elif element.quoted:
+            values[element.name] = word
+            quoted.add(position)
+        elif element.prefix:
+            if not word.startswith(element.prefix):
+                return False
+            values[element.name] = word[len(element.prefix):]
+        elif word in flags:
+            return False
+        else:
+            values[element.name] = word
+        position += 1
+        return True
+
+    for element in elements:
+        if isinstance(element, Group):
+            if position < len(words) and words[position] == element.elements[0].word:
+                for inner in element.elements:
+                    if not take(inner):
+                        return FormWalk(position, inner, values, frozenset(quoted))
+            continue
+        if not take(element):
+            return FormWalk(position, element, values, frozenset(quoted))
+    return FormWalk(position, None, values, frozenset(quoted))
+
+
+def match_form(compiled, text):
+    """The first of `compiled`'s forms that `text` spells, with its slot values, else None
+    (issue 402 D2): the whole-text character rule, the `shlex` words, the forms in
+    table order, and for an exact-spelling operation the rendered form against `text`."""
+    if compiled.whole_text_characters and any(c in UNSAFE_BRANCH_CHARS for c in text):
         return None
-
-    number, separator, remainder = command[len(prefix):].partition(" ")
-    if (
-        not separator
-        or not number
-        or any(character < "0" or character > "9" for character in number)
-        or int(number) <= 0
-    ):
-        return None
-
-    delete_branch_suffix = " --delete-branch"
-    delete_branch = remainder.endswith(delete_branch_suffix)
-    if delete_branch:
-        remainder = remainder[:-len(delete_branch_suffix)]
-
-    if remainder == f"--repo {repository} --merge":
-        return number, None, delete_branch
-
-    subject_prefix = f'--repo {repository} --merge --subject "'
-    subject_suffix = '"'
-    if not remainder.startswith(subject_prefix) or not remainder.endswith(subject_suffix):
-        return None
-
-    subject = remainder[len(subject_prefix):-len(subject_suffix)]
-    if free_text_problem(subject, False) is not None:
-        return None
-    return number, subject, delete_branch
-
-
-def validate_branch_delete(command, git_bin, timeout):
-    """Branch deletion is guarded in every repository, ownership aside."""
-    if any(character in UNSAFE_BRANCH_CHARS for character in command):
-        return block("unsafe branch deletion: forbidden raw command character")
     try:
-        command_argv = shlex.split(command)
+        words = shlex.split(text)
+    except ValueError:
+        return None
+    for form in compiled.forms:
+        walk = walk_form(form.elements, words, compiled.flags)
+        if walk.expected is not None or walk.position != len(words):
+            continue
+        if compiled.exact_spelling:
+            rendered = " ".join(
+                f'"{word}"' if index in walk.quoted else word
+                for index, word in enumerate(words)
+            )
+            if rendered != text:
+                return None
+        return FormMatch(form, walk.values)
+    return None
+
+
+def form_problem(operation, compiled, text):
+    """Why `match_form` refused `text`."""
+    if compiled.whole_text_characters and any(c in UNSAFE_BRANCH_CHARS for c in text):
+        return "forbidden raw command character"
+    try:
+        shlex.split(text)
     except ValueError as error:
-        return block(f"unsafe branch deletion: invalid command quoting: {error}")
-    if len(command_argv) != 4 or command_argv[:3] != ["git", "branch", "-d"]:
-        return block("unsafe branch deletion: expected exactly git branch -d <branch>")
-    branch = command_argv[3]
+        return f"invalid command quoting: {error}"
+    return {
+        "push": "expected exactly git push [-u] origin <branch>",
+        "pr-create": ("expected exactly gh pr create --repo <repo> --base <base> "
+                      "--head <head> --title <title> --body <body>"),
+        "merge": "command does not match the guarded merge grammar",
+        "release": "command does not match the guarded release grammar",
+        "branch": "expected exactly git branch -d <branch>",
+    }[operation]
+
+
+def validate_branch_delete(text, git_bin, timeout, compiled):
+    """Branch deletion is guarded in every repository, ownership aside."""
+    match = match_form(compiled, text)
+    if match is None:
+        return block(f"unsafe branch deletion: {form_problem('branch', compiled, text)}")
+    branch = match.values["branch"]
     if branch.startswith("-"):
         return block("unsafe branch deletion: branch must not begin with a dash")
     try:
@@ -1662,28 +1933,18 @@ def validate_tag_push(tag, context):
     return 0
 
 
-def validate_push(segment, context):
+def validate_push(text, context, compiled):
     problem = ownership_problem(context)
     if problem is not None:
         return block(f"unsafe push: {problem}")
-    if any(character in UNSAFE_BRANCH_CHARS for character in segment):
-        return block("unsafe push: forbidden raw command character")
-    try:
-        command_argv = shlex.split(segment)
-    except ValueError as error:
-        return block(f"unsafe push: invalid command quoting: {error}")
-    if (
-        len(command_argv) == 4
-        and command_argv[:3] == ["git", "push", "origin"]
-        and command_argv[3].startswith(TAG_REF_PREFIX)
-    ):
-        return validate_tag_push(command_argv[3][len(TAG_REF_PREFIX):], context)
-    if len(command_argv) == 5 and command_argv[:4] == ["git", "push", "-u", "origin"]:
-        branch = command_argv[4]
-    elif len(command_argv) == 4 and command_argv[:3] == ["git", "push", "origin"]:
-        branch = command_argv[3]
-    else:
-        return block("unsafe push: expected exactly git push [-u] origin <branch>")
+    match = match_form(compiled, text)
+    if match is None:
+        return block(f"unsafe push: {form_problem('push', compiled, text)}")
+    if match.form.id == "tag":
+        return validate_tag_push(match.values["vX.Y.Z"], context)
+    if match.form.id != "branch":
+        raise AssertionError(f"unhandled push form {match.form.id}")
+    branch = match.values["branch"]
     reason = branch_name_problem(context.git_bin, branch, context.timeout)
     if reason is not None:
         return block(f"unsafe push: {reason}")
@@ -1694,24 +1955,18 @@ def validate_push(segment, context):
     return 0
 
 
-def validate_pr_create(segment, context):
+def validate_pr_create(text, context, compiled):
     problem = ownership_problem(context)
     if problem is not None:
         return block(f"unsafe PR creation: {problem}")
-    try:
-        command_argv = shlex.split(segment)
-    except ValueError as error:
-        return block(f"unsafe PR creation: invalid command quoting: {error}")
-    if len(command_argv) != 13 or command_argv[:3] != ["gh", "pr", "create"]:
-        return block(
-            "unsafe PR creation: expected exactly gh pr create --repo <repo> "
-            "--base <base> --head <head> --title <title> --body <body>"
-        )
-    if tuple(command_argv[3::2]) != PR_CREATE_FLAGS:
-        return block(
-            "unsafe PR creation: flags must be --repo --base --head --title --body in order"
-        )
-    repository_argument, base, head, title, body = command_argv[4::2]
+    match = match_form(compiled, text)
+    if match is None:
+        return block(f"unsafe PR creation: {form_problem('pr-create', compiled, text)}")
+    repository_argument = match.values["slug"]
+    base = match.values["base"]
+    head = match.values["branch"]
+    title = match.values["title"]
+    body = match.values["body"]
     if repository_argument != context.repository:
         return block(
             f"unsafe PR creation: --repo {repository_argument} is not the "
@@ -1739,81 +1994,65 @@ def validate_pr_create(segment, context):
     return 0
 
 
-def parse_release_raw(command, repository):
-    """The guarded release creation as (tag, title, notes_path), or None.
-
-    The one spelling is `gh release create <tag> --repo <repository>
-    --verify-tag --title "<title>" --notes-file <path>`: no `--target`, no
-    draft or prerelease flags, nothing before or after.
-    """
-    prefix = "gh release create "
-    if not command.startswith(prefix):
-        return None
-    tag, separator, remainder = command[len(prefix):].partition(" ")
-    if not separator or SEMVER_TAG.fullmatch(tag) is None:
-        return None
-    title_prefix = f'--repo {repository} --verify-tag --title "'
-    if not remainder.startswith(title_prefix):
-        return None
-    title, quote_found, path = remainder[len(title_prefix):].rpartition('" --notes-file ')
-    if not quote_found or free_text_problem(title, False) is not None:
-        return None
-    if (
-        not os.path.isabs(path)
-        or any(character in UNSAFE_BRANCH_CHARS or character.isspace() for character in path)
-    ):
-        return None
-    return tag, title, path
-
-
-def validate_release(command, context):
+def validate_release(text, context, compiled):
     """Release creation is judged on the whole canonical command, like the merge."""
     problem = ownership_problem(context)
     if problem is not None:
         return block(f"unsafe release creation: {problem}")
-    parts = parse_release_raw(command, context.repository)
-    if parts is None:
-        return block(
-            "unsafe release creation: command does not match the guarded release grammar"
-        )
-    tag, title, path = parts
-    try:
-        command_argv = shlex.split(command)
-    except ValueError as error:
-        return block(f"unsafe release creation: invalid command quoting: {error}")
-    expected_argv = [
-        "gh", "release", "create", tag, "--repo", context.repository,
-        "--verify-tag", "--title", title, "--notes-file", path,
-    ]
-    if command_argv != expected_argv:
-        return block("unsafe release creation: tokenised command does not match guarded argv")
+    match = match_form(compiled, text)
+    if match is None:
+        return block(f"unsafe release creation: {form_problem('release', compiled, text)}")
+    values = match.values
+    path = values["path"]
+    if (
+        SEMVER_TAG.fullmatch(values["vX.Y.Z"]) is None
+        or values["slug"] != context.repository
+        or free_text_problem(values["title"], False) is not None
+        or not os.path.isabs(path)
+        or any(character in UNSAFE_BRANCH_CHARS or character.isspace() for character in path)
+    ):
+        return block(f"unsafe release creation: {form_problem('release', compiled, text)}")
     return 0
 
 
-def validate_merge(command, context):
+def merge_slots_acceptable(values, repository):
+    """Whether a matched merge's `<n>`, `<slug>` and `<subject>` pass, in base order."""
+    number = values["n"]
+    if (
+        not number
+        or any(character < "0" or character > "9" for character in number)
+        or int(number) <= 0
+    ):
+        return False
+    if values["slug"] != repository:
+        return False
+    subject = values.get("subject")
+    return subject is None or free_text_problem(subject, False) is None
+
+
+def validate_merge(text, context, compiled):
     problem = ownership_problem(context)
     if problem is not None:
         return block(f"unsafe merge: {problem}")
     repository = context.repository
-    # `command` is the whole canonical command, its scrub prefix already
+    # `text` is the whole canonical command, its scrub prefix already
     # stripped, so the merge still tolerates no other chaining.
-    merge_parts = parse_merge_raw(command, repository)
-    if merge_parts is None:
-        return block("unsafe merge: command does not match the guarded merge grammar")
-    number, subject, delete_branch = merge_parts
-    try:
-        command_argv = shlex.split(command)
-    except ValueError as error:
-        return block(f"unsafe merge: invalid command quoting: {error}")
-    expected_argv = [
-        "gh", "pr", "merge", number, "--repo", repository, "--merge",
-    ]
-    if subject is not None:
-        expected_argv.extend(["--subject", subject])
-    if delete_branch:
-        expected_argv.append("--delete-branch")
-    if command_argv != expected_argv:
-        return block("unsafe merge: tokenised command does not match guarded argv")
+    match = match_form(compiled, text)
+    if match is None or not merge_slots_acceptable(match.values, repository):
+        return block(f"unsafe merge: {form_problem('merge', compiled, text)}")
+    number = match.values["n"]
+    head_commit = match.values.get("sha")
+    if head_commit is not None and HEAD_COMMIT.fullmatch(head_commit) is None:
+        return block(
+            f"unsafe merge: --match-head-commit {head_commit} is not "
+            "40 lowercase hexadecimal characters"
+        )
+    if match.form.id == "feature":
+        delete_branch = True
+    elif match.form.id == "release":
+        delete_branch = False
+    else:
+        raise AssertionError(f"unhandled merge form {match.form.id}")
     if context.base_branch is None:
         return block("unsafe merge: cannot resolve the repository default branch")
     allowed_bases = authorized_bases(
@@ -1995,6 +2234,7 @@ def validate_release_merge(pr_facts, base, integration_base, context):
 
 
 def main():
+    table = compile_form_table(FORM_TABLE)
     started = time.monotonic()
     parser = argparse.ArgumentParser(prog="claude-bash-lifecycle-guard")
     parser.add_argument("--base-policy", required=True)
@@ -2056,7 +2296,7 @@ def main():
                 # Branch deletion is judged in every repository: it needs no
                 # forge state.
                 status = validate_branch_delete(
-                    text, args.git_bin, args.child_timeout_seconds
+                    text, args.git_bin, args.child_timeout_seconds, table[operation]
                 )
             else:
                 target = target_directory(directory, payload.get("cwd"))
@@ -2067,13 +2307,13 @@ def main():
                         started + INVOCATION_DEADLINE_SECONDS,
                     )
                 if operation == "push":
-                    status = validate_push(text, context)
+                    status = validate_push(text, context, table[operation])
                 elif operation == "pr-create":
-                    status = validate_pr_create(text, context)
+                    status = validate_pr_create(text, context, table[operation])
                 elif operation == "release":
-                    status = validate_release(text, context)
+                    status = validate_release(text, context, table[operation])
                 else:
-                    status = validate_merge(text, context)
+                    status = validate_merge(text, context, table[operation])
         except DeadlineExhausted:
             return block(f"unsafe {OPERATION_LABELS[operation]}: {DEADLINE_REFUSAL}")
         if status != 0:

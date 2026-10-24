@@ -1053,6 +1053,52 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertEqual(2, result.returncode)
                 self.assertIn("PR predicate failed", result.stderr)
 
+    # The PR head commit a merge may pin (issue 402 D10): the guard checks only its spelling.
+    HEAD_SHA = "d4d9acc0505c73305b3e0ced029db43100bc0e8a"
+
+    def test_merge_takes_an_optional_head_commit_flag(self):
+        """Issue 402 AC1, D10: `--match-head-commit <40 lowercase hex>` stands after
+        `--subject` and before `--delete-branch`, optional in both arms."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        sha = self.HEAD_SHA
+        merge = "gh pr merge 2342 --repo fagenorn/nix-config --merge"
+        feature_into_dev = {"FAKE_PR_JSON": json.dumps({
+            "state": "OPEN", "baseRefName": "dev", "headRefName": "issue-2342-topic",
+            "url": f"https://github.com/{NODO}/pull/2342", "statusCheckRollup": []})}
+        for command, cwd, env in (
+            (f"{merge} --match-head-commit {sha} --delete-branch", repo, None),
+            (f'{merge} --subject "feature (#402)" --match-head-commit {sha} --delete-branch',
+             repo, None),
+            (f"unset GITHUB_TOKEN && {merge} --match-head-commit {sha} --delete-branch",
+             repo, None),
+            (f"env -u GITHUB_TOKEN {merge} --match-head-commit {sha} --delete-branch",
+             repo, None),
+            (f"gh pr merge 2342 --repo {NODO} --merge --match-head-commit {sha} --delete-branch",
+             nodo, feature_into_dev),
+            (f"gh pr merge 1484 --repo {NODO} --merge --match-head-commit {sha}",
+             nodo, self.release_env()),
+            (f'gh pr merge 1484 --repo {NODO} --merge --subject "merge: dev (dev → main)" '
+             f"--match-head-commit {sha}", nodo, self.release_env()),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=cwd, env=env)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+        for command in (
+            f"{merge} --match-head-commit {sha[:39]} --delete-branch",           # 39 characters
+            f"{merge} --match-head-commit {sha}0 --delete-branch",               # 41 characters
+            f"{merge} --match-head-commit {sha.upper()} --delete-branch",        # uppercase
+            f"{merge} --match-head-commit={sha} --delete-branch",                # attached value
+            f'{merge} --match-head-commit {sha} --subject "x" --delete-branch',  # before --subject
+            f"{merge} --delete-branch --match-head-commit {sha}",                # after --delete-branch
+            f"{merge} --match-head-commit --delete-branch",                      # no value
+            f"{merge} --match-head-commit {sha} {sha} --delete-branch",          # two values
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn("lifecycle guard: unsafe merge:", result.stderr)
+
     def test_prefixed_merge_near_misses_fail_closed(self):
         repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
         merge = "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch"
