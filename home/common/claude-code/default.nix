@@ -267,6 +267,8 @@ let
         "Bash(~/.agents/bin/workflow-state:*)"
         "Bash(artifact-budget:*)"
         "Bash(~/.agents/bin/artifact-budget:*)"
+        "Bash(ship-delivery:*)"
+        "Bash(~/.agents/bin/ship-delivery:*)"
         "Agent"
       ];
       ask = [ ];

@@ -8,10 +8,9 @@ Under lifecycle identity a selection is immutable, so a PR that needs the integr
 after selection gets a **sync selection** that extends it and never replaces it. The route
 belongs to whoever holds the merge gate: the ship owner under implementation custody, or a
 remainder owner. The **current selection** is the newest link of the ledger's selection chain.
-An owner that does not hold it reads it from the ledger with `## Delivery loop`'s builder call
-and `--kind current-selection`, fed only the installed `contract`. From the first sync on, every
+`ship-delivery` reads it from the ledger when a sync recipe or `$selection` needs it. From the first sync on, every
 later step's "selection" is the current selection, including the `implementation_delivered`
-observation that `## Delivery loop` step 7 builds.
+observation that `## Delivery loop` builds at completion.
 
 **Sync run.** After `git fetch origin`, a PR head is a *sync run* from the current selection
 when its first-parent walk back to that selection's head passes only two-parent merge commits,
@@ -57,14 +56,12 @@ landed.
 4. **Push.** Run `check-launch` (SKILL.md's `## Launch guard`), then
    `git push origin <branch>` (`## gh hygiene`).
 5. **Wait for CI.** Run Phase 6's CI wait, with the reviewed head re-fixed to the pushed head.
-6. **Select.** For each merge of the sync run, oldest first, make `## Delivery loop`'s builder
-   call with `--kind sync-selection`, from the installed `contract`, the current selection as
-   `prior_selection`, the merge's `head`, its `tree` (`git rev-parse <merge-sha>^{tree}`), its
-   `parents` (`git rev-list --parents -n 1 <merge-sha>`, first parent first), the `review_ref`
-   from step 3, and `test_ref` `checks`. Each result is the next one's `prior_selection`, and
-   the first one's is the current selection. Build each link's `selected_output` observation,
-   then `branch_published` and `pr_opened` (the same PR) at the newest head, and checkpoint them
-   all with the `--kind scope` for `merge_pr`.
+6. **Select.** Give `ship-delivery checkpoint` ordered `selections` recipes of kind `sync`,
+   oldest first: each merge's `head`, `tree` (`git rev-parse <merge-sha>^{tree}`), `parents`
+   (`git rev-list --parents -n 1 <merge-sha>`, first parent first), step 3's `review_ref`,
+   `test_ref` `checks` and observed provenance/evidence. The compiler extends the ledger's
+   current selection, chaining the results and emitting their selected-output observations.
+   Add `branch_published` and `pr_opened` at the newest head and request `merge_pr`.
 7. **Merge.** Continue with `## Delivery loop`'s merge cycle.
 
 Steps 1–5 precede the sync selection. So, like pre-selection publication, they run under the
@@ -82,7 +79,7 @@ every review hint path passed in the retained snapshot. Findings come back Block
 
 When the PR merged at a sync run from the current selection, run step 3 for each of its merges,
 then step 6 without a push or a CI wait. Add the `pr_merged` observation at that head to the
-same checkpoint, and give it the next pending stage's `--kind scope` instead of `merge_pr`'s.
+same checkpoint, and request the next pending stage instead of `merge_pr`.
 Then continue with the cleanup cycles.
 
 ## Stops
