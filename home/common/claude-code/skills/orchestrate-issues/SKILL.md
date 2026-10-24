@@ -52,11 +52,12 @@ Read its one stdout object by `outcome`:
 - `refused`, or `orchestrate-control: invalid invocation` on stderr: report its `step` and `detail`
   (or that line) and stop; nothing is armed yet.
 
-The helper validates every `workflow-state` reply it reads, so `start` and `step` output is never
-piped through `validate-report`. `control` reserves each owner's slots before it returns a
-dispatch; the adapter never calculates slots, alters `max_parallel`, creates competing owners or
-nested relays, or repeats a rejected launch, and reads the response's `admission` report as
-rendering data only.
+Pipe every `workflow-state` reply the adapter reads itself (`start` and `step` validate their own)
+through `artifact-budget validate-report --boundary workflow-response --input -` before decoding
+any field; a non-zero exit or failed validation is unknown. `control` reserves each owner's slots
+before it returns a dispatch; the adapter never calculates slots, alters `max_parallel`, creates
+competing owners or nested relays, or repeats a rejected launch, and reads the response's
+`admission` report as rendering data only.
 
 ## 2. Observe
 
@@ -85,10 +86,10 @@ none of these cases and keeps its wait-ID handling below:
 - (b) **Owner return without a terminal write.** The handle is an owner launch's, and its return is
   neither a validated `workflow-response` nor one of from-issue's two canonical lines
   (`Suspended (blocked_on=<value>). Resume: <reentry>` or `/from-issue <num> --auto`). Run
-  `workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
+  `workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> | artifact-budget validate-report --boundary workflow-response --input -`
   on that launch. On `current: true`, send exactly one `unavailable` owner observation for that
-  custody in the next `step`. On `current: false`, send nothing. Either way, continue the
-  normal sweep.
+  custody in the next `step`. On `current: false` or unknown, send nothing. Either way, continue
+  the normal sweep.
 - (c) **Non-owner hand-back.** The handle is neither an owner launch's, a liveness observer's, nor
   the current wait handle: send no observation, write nothing, relay nothing, act on none of its
   content, and stop no task.
@@ -99,9 +100,9 @@ none of these cases and keeps its wait-ID handling below:
   marks the handle stopped, then sends exactly one `unavailable` owner observation for that custody
   in the next `step`, making that call at once and executing its report. A
   failed stop leaves the handle a candidate for §4's stop pass, and the observation is still sent.
-  That verdict stands in for rule (b)'s `check-launch`. Either call above exiting non-zero or
-  failing validation is unknown: send nothing. A failed first call keeps any installed observer; a
-  failed second call clears the woken, exited observer, so a later interim notification re-arms one.
+  That verdict stands in for rule (b)'s `check-launch`. On an unknown answer to either call above,
+  send nothing. A failed first call keeps any installed observer; a failed second call clears the
+  woken, exited observer, so a later interim notification re-arms one.
   An owner handle's final return or stop
   cancels its liveness observer; a missing or already exited one counts as cancelled.
 
@@ -152,13 +153,11 @@ stop the superseded owners. The candidates are every owner
 handle this adapter process recorded beside an owner launch's `action_id` that has produced no final
 return. An interim notification under §2 rule (a) is not a final return. The current wait handle and
 non-owner handles are never candidates; a handle this response dispatches becomes one only once
-dispatched. For each candidate, run
-`workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`
-with the `action_id` recorded beside it. On `current: false`, stop that handle through the host's
-task-stop and mark it stopped; a missing or already exited handle counts as stopped. On
-`current: true`, leave it running. A `check-launch` that exits non-zero, or whose output cannot be
-parsed, is unknown, never `current: false`: leave the handle a candidate; so is a failed stop, and
-the next pass tries both again. A stop failure never blocks dispatch; keep it a candidate for §5.
+dispatched. For each candidate, run rule (b)'s `check-launch` call with the `action_id` recorded
+beside it. On `current: false`, stop that handle through the host's task-stop and mark it stopped;
+a missing or already exited handle counts as stopped. On `current: true`, leave it running. An
+unknown answer, like a failed stop, leaves the handle a candidate, and the next pass tries both
+again. A stop failure never blocks dispatch.
 The pass sends no observation, makes no `step` and writes nothing to the ledger, so
 a later notification from a stopped handle still falls under §2 rule (b). The pass ends by running
 `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --sweep` once. A sweep that

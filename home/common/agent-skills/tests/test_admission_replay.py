@@ -96,6 +96,8 @@ class AdmissionReplayTest(unittest.TestCase):
 
     def cli(self, *argv, stdin=None):
         """A direct workflow-state call, as the skill or an owner makes it."""
+        self.assertNotEqual(argv[0], "control",
+                            "every control round goes through orchestrate-control step")
         done = self.world.ws(*argv, stdin=stdin)
         self.assertEqual(done.returncode, 0, done.stderr.decode())
         return done
