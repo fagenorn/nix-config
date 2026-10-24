@@ -49,9 +49,9 @@ ROW_CHECK_EXIT_STATUSES = {"derived": 0, "refused": 1, "unavailable": 2}
 # (CI, a one-off export, another tool), may be narrower: it may not see every
 # authorized owner's org. The guard's forge lookups drop the env tokens, so
 # validation observes GitHub with the keyring credential: the auth the guarded
-# command uses when it sees neither env token (none is set, or the
-# `unset GITHUB_TOKEN && ` prefix removed the only one). A machine with no
-# keyring auth still fails closed at the lookup.
+# command uses when it sees neither env token (none is set, or an accepted
+# scrub prefix in SCRUB_PREFIXES below removed every one that was set). A
+# machine with no keyring auth still fails closed at the lookup.
 GH_ENV_TOKEN_NAMES = ("GITHUB_TOKEN", "GH_TOKEN")
 # The scrub-prefix spelling a resolved exhaustive credential-name list yields
 # (`unset GITHUB_TOKEN && gh ...`), and the one the ship-issue skill check reads
@@ -710,15 +710,6 @@ def git_verb_uncertain(words):
     return index >= len(words)
 
 
-def git_options_end(words):
-    """Index of the first word after the leading git global options, each `-C`
-    taking the next word as its value (issue 400 D15)."""
-    index = 0
-    while index < len(words) and words[index].startswith("-"):
-        index += 2 if words[index] == "-C" and index + 1 < len(words) else 1
-    return index
-
-
 def git_option_operands(tokens, index):
     """Indices of the `-C` values in the leading global-option run of the word
     at `index` (issue 400 D15): arguments of git, never programs."""
@@ -811,15 +802,21 @@ def guarded_operations(command):
         flags, split_string = command_position_flags(tokens)
         values = [value for value, _ in tokens]
         mentions = mentions_raise_label(values)
+        # An env -S or evaluator segment is judged on its whole text, and its
+        # words are still recognised below with that reason as their problem:
+        # a git or gh run in it may continue into a later segment
+        # (`git -C $(sh -c pwd | cat) push …`, issue 400 D15, D19), which the
+        # segment's own raw text never shows.
+        raw_reason = None
         if split_string:
-            found.extend(unvalidatable(segment, SPLIT_STRING_REASON, mentions))
-            continue
-        if any(
+            raw_reason = SPLIT_STRING_REASON
+        elif any(
             flag and program_name(value) in SHELL_EVALUATORS
             for flag, value in zip(flags, values)
         ):
-            found.extend(unvalidatable(segment, EVALUATOR_REASON, mentions))
-            continue
+            raw_reason = EVALUATOR_REASON
+        if raw_reason is not None:
+            found.extend(unvalidatable(segment, raw_reason, mentions))
         operands = set()
         for index in range(len(tokens)):
             if index in operands:
@@ -833,6 +830,8 @@ def guarded_operations(command):
             operation, problem, directory = invocation
             if not flags[index]:
                 problem, directory = NOT_COMMAND_POSITION, None
+            if problem is None and raw_reason is not None:
+                problem, directory = raw_reason, None
             found.append((operation, segment, problem, directory))
     # Judged over every tokenised segment at once: a separator inside a
     # substitution (`gh pr edit $(gh pr view | jq …) --add-label …`) splits

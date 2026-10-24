@@ -1321,6 +1321,14 @@ class ClaudePermissionGuardTest(unittest.TestCase):
              "the gh invocation continues past a shell substitution or grouping" + hint),
             ("gh $(printf pr) merge 1 --merge", "merge",
              "the gh invocation continues past a shell substitution or grouping" + hint),
+            # D19: an evaluator or env -S segment still recognises a run that
+            # continues into a later segment.
+            ("git -C $(sh -c pwd | cat) push origin main", "push",
+             "the git invocation continues past a shell substitution or grouping" + hint),
+            ("git -c k=$(env -S pwd | cat) push origin main", "push",
+             "the git invocation continues past a shell substitution or grouping" + hint),
+            ("gh pr --repo $(sh -c 'printf x' | cat) merge 1 --merge", "merge",
+             "the gh invocation continues past a shell substitution or grouping" + hint),
             ("git -C /tmp/x -c a=b push origin issue-400-topic", "push",
              "git global option -c is not accepted" + hint),
             ("git --no-pager branch -d issue-400-topic", "branch deletion",
@@ -1354,6 +1362,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "git log --format=$(printf %H) -1",
             "gh pr view $(printf 1) --json url",
             "gh -R fagenorn/nix-config pr view $(printf 1)",
+            "git log $(sh -c pwd | cat) -1",
         ):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)
