@@ -14,7 +14,8 @@ selection is pending, give the compiler an `initial` selection recipe from the P
 refs — `acceptance_ref` the issue URL
 (`https://github.com/<resolved-repository>/issues/<num>`), `review_ref` `unknown`,
 `test_ref` `checks` — so a relaunched remainder owner re-derives the identical
-selection. When the merge is pending, start at the merge gate: Phase 6's CI wait and Phase 7's gate and fence still bind, and so
+selection. When the merge is pending, start at the merge gate: Phase 6's CI wait and Phase 7's gate and fence still bind, with the current
+selection's head as `<reviewed HEAD_SHA>`, and so
 does the post-selection sync route, which also folds a merge that already landed
 at a sync run. A selection this owner did not build, such as that route's first
 `prior_selection` or the one `implementation_delivered` names, is the ledger's
