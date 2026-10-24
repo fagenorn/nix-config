@@ -68,7 +68,7 @@ Stdout is one compact JSON object and a newline. Ready, exit 0: `{"command":"sta
 
 Ready, exit 0: `{"command":"step","outcome":"ready","run_id","control_calls":1|2,"response","dispatches","contracts_due","refused_contracts","contract_refusals","ends_run"}`. `response` is the final control reply; `contracts_due` the issues its summaries still ask a contract for, less the refused ones, ascending; `refused_contracts` the previous list plus this call's refusals, ascending; and `ends_run` is true when the reply's only action is `delivery_contract` and every issue it lists is refused, since no build will ever answer it. A refusal is the same object `start` prints: `response` is the latest validated control reply once `control` has answered (so a refusal at `project`, or in the second call, carries one) and null before.
 
-The command writes no file; its only writes are `workflow-state`'s own ledger writes under the ledger repository's `.superpowers/`. A dispatch that `control` reserved before a later refusal is not undone: it stays in the ledger until its own deadline expires. Teaching the `orchestrate-issues` skill to call the command is a follow-up (D11).
+The command writes no file; its only writes are `workflow-state`'s own ledger writes under the ledger repository's `.superpowers/`. A dispatch that `control` reserved before a later refusal is not undone: it stays in the ledger until its own deadline expires. The `orchestrate-issues` skill drives every run through `start` and `step` (#404).
 
 Every tracker-CLI child runs with this process's environment less each name in `bindings.tracker.credential_env.unset_before_invocation`. The command writes no file and holds no lock.
 
