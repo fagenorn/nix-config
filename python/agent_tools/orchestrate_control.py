@@ -504,25 +504,30 @@ def _git_fields(repo_root: str, separator: bytes, *argv: str) -> list[str]:
     return [os.fsdecode(field) for field in done.stdout.split(separator) if field]
 
 
-def _live_worktrees(repo_root: str) -> dict[str, str | None]:
-    """Each live worktree's real path mapped to its branch, None when it is detached, from
-    the NUL-delimited listing (`launch_scope.worktree_paths` reads it the same way)."""
-    live: dict[str, str | None] = {}
+def _live_worktrees(repo_root: str) -> tuple[set[str], dict[str, str | None]]:
+    """Every registered worktree's real path, and each live one's mapped to its branch, None
+    when it is detached, from the NUL-delimited listing (`launch_scope.worktree_paths` reads
+    it the same way). A registration git marks `prunable` (its checkout's `.git` is gone) is
+    registered but not live, so a stale record never matches its issue's branch."""
+    branches: dict[str, str | None] = {}
+    prunable: set[str] = set()
     path: str | None = None
     for field in _git_fields(repo_root, b"\0", "worktree", "list", "--porcelain", "-z"):
         if field.startswith("worktree "):
             path = os.path.realpath(field.removeprefix("worktree "))
-            live[path] = None
+            branches[path] = None
         elif field.startswith("branch ") and path is not None:
-            live[path] = field.removeprefix("branch ").removeprefix("refs/heads/")
-    return live
+            branches[path] = field.removeprefix("branch ").removeprefix("refs/heads/")
+        elif (field == "prunable" or field.startswith("prunable ")) and path is not None:
+            prunable.add(path)
+    return set(branches), {p: b for p, b in branches.items() if p not in prunable}
 
 
 def worktree_facts(repo_root: str, b: Bindings, issues: Sequence[int],
                    requirements: Sequence[dict]) -> list[dict]:
     """Each session issue's recorded worktree normalized to a state, or its first free
     candidate path (D10, D19, D21)."""
-    live = _live_worktrees(repo_root)
+    registered, live = _live_worktrees(repo_root)
     # A ref name cannot hold a newline or other control byte, so one ref per line is exact.
     branches = {name.removeprefix("refs/heads/") for name in _git_fields(
         repo_root, b"\n", "for-each-ref", "--format=%(refname)", "refs/heads")}
@@ -548,7 +553,7 @@ def worktree_facts(repo_root: str, b: Bindings, issues: Sequence[int],
             path = os.path.normpath(os.path.join(
                 b.worktree_root, f"{b.worktree_prefix}issue-{number}-orchestrated{suffix}"))
             real, name = os.path.realpath(path), os.path.basename(path)
-            if not (os.path.lexists(path) or real in live or real in taken
+            if not (os.path.lexists(path) or real in registered or real in taken
                     or name in branches or strip(name) in branches):
                 taken.add(real)
                 facts.append({"issue": number, "recorded": None,

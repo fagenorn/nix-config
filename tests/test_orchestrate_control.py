@@ -1,5 +1,6 @@
 """`orchestrate-control` run from source (#403, spec seam 1; D26)."""
 import json
+import shutil
 import unittest
 from pathlib import Path
 
@@ -355,6 +356,24 @@ class WorktreeTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(world.requests()[0]["worktrees"], [{"issue": 12, "candidate": None,
             "recorded": {"path": path, "state": "matching_issue_branch"}}])
+
+    def test_a_prunable_registration_is_not_a_matching_worktree(self):
+        world = OrchestrateWorld(self)
+        session = world.start("12", "14")["session"]
+        world.seed_spawn(session, [12])
+        world.add_worktree(world.candidate(12), "worktree-issue-12-orchestrated")
+        (Path(world.candidate(12)) / ".git").unlink()
+        world.add_worktree(world.candidate(14), "topic-14")
+        (Path(world.candidate(14)) / ".git").unlink()
+        shutil.rmtree(world.candidate(14))
+        self.assertEqual(world.git("worktree", "list", "--porcelain").count("prunable"), 2)
+        done, _ = world.step(session)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(world.requests()[0]["worktrees"], [
+            {"issue": 12, "candidate": None,
+             "recorded": {"path": world.candidate(12), "state": "mismatch"}},
+            {"issue": 14, "recorded": None,
+             "candidate": {"path": world.candidate(14, "-2"), "state": "absent"}}])
 
     def test_a_subset_session_observes_only_its_issues_and_avoids_their_paths(self):
         world = OrchestrateWorld(self)
