@@ -1,7 +1,7 @@
 # Phases 6–7 — CI escalation and merge quirks
 
 Read this when Phase 6's CI wait escalates or fails, or when Phase 7's merge
-exits non-zero. Exit-code handling lives in SKILL.md's Phase 6.
+exits non-zero.
 
 ## Escalation after 40 minutes
 
@@ -33,3 +33,6 @@ used by worktree at '<main-root>'` — a non-zero exit **after the merge already
 landed on the remote**. Retrying the merge or reporting failure on that exit
 code is wrong; run Phase 7's verify first, and treat the exit code as
 meaningless until it disagrees with `gh pr view`.
+
+Unmerged: re-read `headRefOid`; if it is not the reviewed `HEAD_SHA`, the head
+moved; take Phase 6's unreviewed-commits stop.

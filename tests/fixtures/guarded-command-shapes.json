@@ -5,7 +5,8 @@
     "<branch>": "issue-351-topic",
     "<pr-num>": "351",
     "<resolved-repository>": "fagenorn/nix-config",
-    "<rendered subject>": "feature (#351)"
+    "<rendered subject>": "feature (#351)",
+    "<reviewed HEAD_SHA>": "d4d9acc0505c73305b3e0ced029db43100bc0e8a"
   },
   "skill_forms": [
     {
@@ -28,7 +29,7 @@
     },
     {
       "id": "merge.subject",
-      "template": "gh pr merge <pr-num> --repo <resolved-repository> --merge --subject \"<rendered subject>\" --delete-branch",
+      "template": "gh pr merge <pr-num> --repo <resolved-repository> --merge --subject \"<rendered subject>\" --match-head-commit <reviewed HEAD_SHA> --delete-branch",
       "sites": ["SKILL.md"],
       "label": "merge",
       "bare": {"exit": 0},
@@ -37,7 +38,7 @@
     },
     {
       "id": "merge.plain",
-      "template": "gh pr merge <pr-num> --repo <resolved-repository> --merge --delete-branch",
+      "template": "gh pr merge <pr-num> --repo <resolved-repository> --merge --match-head-commit <reviewed HEAD_SHA> --delete-branch",
       "sites": [],
       "label": "merge",
       "bare": {"exit": 0},
