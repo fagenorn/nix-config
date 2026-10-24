@@ -110,8 +110,9 @@ Between steps, per D2 and #403 D4, the adapter carries only these values:
 
 Its process-local host state is unchanged from today: the owner handles, the wait pair and the
 liveness observers. One addition: beside each launched handle it records the dispatch's
-`action_id` and the `custody` of the matching action in that step's `response.actions`.
-An observation for that handle carries that `custody`. The adapter never decodes `owner_object`
+`action_id` and the `custody` of the action in that step's `response.actions` whose
+`custody.action_id` equals it. That match works for every dispatch kind, because a
+`delivery_remainder` action has no `id`. An observation for that handle carries that `custody`. The adapter never decodes `owner_object`
 (#403 D17) and never reads the ledger.
 
 It keeps each report's `contract_refusals` entries only to render §5.
@@ -135,7 +136,7 @@ through `validate-report`, and owners still validate their `owner_object` on rec
 | Outcome | What the adapter does |
 |---|---|
 | `ready` | Executed as below. |
-| `refused`, an invalid invocation, or any other exit or stdout | Ends the run as `finalize` does: the stop pass, then clearing the wait state. Its report is the refusal's `step` and `detail` verbatim. It executes no action of the `response` the refusal carries. A dispatch `control` reserved before the refusal is left to the ledger's deadline expiry (#403 D22). A re-invocation re-enters the run. |
+| `refused`, an invalid invocation, or any other exit or stdout | Ends the run as `finalize` does: the stop pass, then clearing the wait state. Its report is the refusal's `step` and `detail` verbatim, plus the `action_id` of every owner handle still running, so it never reads as a finished run. It executes no action of the `response` the refusal carries. A dispatch `control` reserved before the refusal is left to the ledger's deadline expiry (#403 D22). A re-invocation re-enters the run. |
 
 ### Executing a ready report
 
@@ -145,7 +146,7 @@ Actions are handled in returned order:
 
 | Action | Handling |
 |---|---|
-| Dispatch | Each of `spawn`, `resume`, `retry` and `delivery_remainder` arrives as a `dispatches[]` entry, in the same order. The envelope lines are filled from the members of the same names: `action_id`, `issue`, `attempt`, `owner`, `worktree` and `handoff_path` (included only when non-null). The prompt carries `owner_object` verbatim as its canonical JSON. A `resume` with a non-null `resume_pack` adds the pack paragraph. A host-refused launch is never retried. It produces exactly one `step` whose `owners` holds that action's `launch_refused` observation, and the adapter executes that report. |
+| Dispatch | Each of `spawn`, `resume`, `retry` and `delivery_remainder` arrives as a `dispatches[]` entry, in the same order. The envelope lines are filled from the entry's members of the same names: `action_id`, `issue`, `attempt`, `owner`, `worktree` and `handoff_path` (included only when non-null). `ledger_repo_root` and `run_id` come from the adapter and the `session`. The prompt carries `owner_object` verbatim as its canonical JSON. A `resume` with a non-null `resume_pack` adds the pack paragraph. A host-refused launch is never retried, and it never stops the report's later launches or actions. Once the report has executed, one `step` carries every `launch_refused` observation from that report in `owners`, and the adapter executes the resulting report (D12). |
 | `wait` | Unchanged. |
 | `finalize` | Unchanged. |
 | `delivery_contract` | With `ends_run` true it ends the run as `finalize` does, and §5 renders from that response. Otherwise the next `step` answers it at once and passes `contracts_due` back; `step` builds those contracts and makes the control call. The adapter never builds a contract or calls `control` itself (#403 D6). |
@@ -226,9 +227,11 @@ Per D5:
   one allowed row for the heredoc-fed `step` call.
 - **README.** `home/common/claude-code/README.md`'s allow-surface sentence becomes 26 entries and
   names the helper. This is the ship-delivery precedent (b89c6dbb).
-- **Skill examples.** The skill shows `start` as a plain call. It shows `step` as one `text`-fence
-  example: the argv line, a quoted `<<'EOF'` heredoc carrying the five-member object, and `EOF`.
-  Both are vetted examples.
+- **Skill examples.** The skill shows each `start` form as a plain call on its own example line:
+  explicit numbers, `--label <label>`, `--milestone <milestone>`, and `--run-id <run-id>`
+  re-entry. Alternatives are never joined with `|`, which the scanner reads as a pipe. It shows
+  `step` as one `text`-fence example: the argv line, a quoted `<<'EOF'` heredoc carrying the
+  five-member object, and `EOF`. All of them are vetted examples.
 
 ### Evals
 
@@ -246,6 +249,9 @@ Per D10:
 - **Eval 3**'s route check becomes `start`'s `unsupported` outcome, and its refusal becomes one
   `step` carrying `launch_refused`.
 - **Evals 4–6** are unchanged.
+- **Corpus pins.** Evals 1 and 7 keep "Resolve once into a retained ResolvedProject", a phrase the
+  eval-corpus test requires. New eval text avoids the corpus's forbidden phrases, such as
+  "default GitHub".
 - **Eval 7** keeps id 7, mode `pipeline` and its three sandbox asserts (ledger with no attempt, no
   worktree, `main` unmoved). The ledger assert is pinned by `test_eval_cases`. Its prompt drops the
   supplied tracker facts. In its expected output, `start` prints a ready `explicit_user` session
@@ -276,9 +282,14 @@ Per D8, each living document that cites removed text is re-pointed in the same c
   every run through `start` and `step` (#404).
 
 Per D9, the plan runs `instruction_load tighten` after the skill text is final, so that no ceiling
-stays loose. It lowers the `orchestration-dispatcher` and `orchestrated-issue-owner` ceilings (the
-owner profile's `prompt` member is the whole skill file) and the corpus ceiling. Each profile note
-gains "Ceiling lowered for #404". No ceiling rises, so `instruction-budget-raise` is never needed.
+stays loose. It lowers whatever ceilings `tighten` reports loose:
+
+- The `orchestration-dispatcher` ceiling is expected to be loose.
+- So is `orchestrated-issue-owner`, because its `prompt` member is the whole skill file.
+- The corpus ceiling probably is not: a shrink of about 10 KB is under 5% of it.
+
+Each lowered profile note gains "Ceiling lowered for #404". No ceiling rises, so
+`instruction-budget-raise` is never needed.
 
 ### The admission replay
 
@@ -364,7 +375,10 @@ The seams are few and existing, highest first.
 4. **The budget gate (AC3).** `just agent-instruction-budget` against `origin/main`, without
    `--raise-label`.
 5. **The eval suite (AC4).** `home/common/agent-skills/evals/run-eval.sh` on `orchestrate-issues`
-   (plan-only cases 1–3 and pipeline case 7), run once in final verification.
+   (plan-only cases 1–3 and pipeline case 7), run once in final verification. It runs with
+   `EVAL_TREE` set to the worktree, so the tree's `agent_tools` shims put `orchestrate-control` on
+   `PATH`. The deployed `~/.agents/bin` lacks the helper until `just switch`. `EVAL_SETTINGS`
+   points at the built settings, so the new allow entries apply.
 6. **Post-merge evidence (AC5).** Per D11.
 
 `just build` stays the Nix verification, because the allow list is a settings change.
@@ -391,13 +405,14 @@ The seams are few and existing, highest first.
 | ID | Choice | Grounding | Rejected alternative |
 |----|--------|-----------|----------------------|
 | D1 | The skill keeps its one `resolve-project resolve` entry, now consuming only `stall_minutes`, while `ledger_repo_root` stays the checkout root. `orchestrate-control` resolves the rest on each call, and the adapter never resolves again. | Session carries no bindings (#403 D5); rules (a)/(d) stay and need `stall_minutes`; `assert_policy_entries` wants one resolve statement per entry. | Dropping resolution: there is no other source for `stall_minutes` without a helper change. Keeping the tracker/vcs/budget mapping: dead text the helper owns. |
-| D2 | Carried state is `session`, `first_sweep` (true only on the first `step` after `start` in this process), `owners` (this event's observations, cleared after the call), `contracts_due` and `refused_contracts` passed back verbatim. An observation's `custody` comes from the matching action in that step's `response.actions`, recorded beside the launch handle, and `contract_refusals` are kept only for §5. | #403 D4, D17, D18; the issue's step input; rules (b)/(d) and the host-refusal rule need a custody. | Decoding `owner_object` for custody: the glue D17 removed. A bootstrap read: the adapter no longer bootstraps. |
-| D3 | A refused, invalid or unparsable `step` ends the run as `finalize` does and reports `step` and `detail` verbatim, executing nothing from the attached `response`. `ends_run` is `finalize`, and a `delivery_contract` reply without `ends_run` is answered by the next `step` at once. A refused or invalid `start` reports and stops, and `unsupported` renders `route`. | Issue: "surfaces a `refused` step … fails loudly", "treats `ends_run` as `finalize`"; the bar's fail-loud and truthful terminal states; #403 D6, D22; README's `ends_run` definition. | Retrying a refused step: it repeats the refusal and re-sends observations. Executing the attached response: it was refused before projection. Treating an unchained `delivery_contract` as a contract error: the README says a later build can answer it. |
+| D2 | Carried state is `session`, `first_sweep` (true only on the first `step` after `start` in this process), `owners` (this event's observations, cleared after the call), `contracts_due` and `refused_contracts` passed back verbatim. An observation's `custody` comes from the `response.actions` entry whose `custody.action_id` is the dispatch's `action_id`, recorded beside the launch handle, and `contract_refusals` are kept only for §5. | #403 D4, D17, D18; the issue's step input; rules (b)/(d) and the host-refusal rule need a custody. | Decoding `owner_object` for custody: the glue D17 removed. A bootstrap read: the adapter no longer bootstraps. |
+| D3 | A refused, invalid or unparsable `step` ends the run as `finalize` does and reports `step` and `detail` verbatim, plus the still-running owner handles' `action_id`s, executing nothing from the attached `response`. `ends_run` is `finalize`, and a `delivery_contract` reply without `ends_run` is answered by the next `step` at once. A refused or invalid `start` reports and stops, and `unsupported` renders `route`. | Issue: "surfaces a `refused` step … fails loudly", "treats `ends_run` as `finalize`"; the bar's fail-loud and truthful terminal states; #403 D6, D22; README's `ends_run` definition. | Retrying a refused step: it repeats the refusal and re-sends observations. Executing the attached response: it was refused before projection. Treating an unchained `delivery_contract` as a contract error: the README says a later build can answer it. |
 | D4 | Pins whose skill text leaves are deleted, not moved, because `tests/test_orchestrate_control.py` already pins that behaviour. New pins are `orchestrate-control` argv, the five step-input members and the report members the adapter reads. Raw `workflow-state` lifecycle argv and `--request-file` become absence pins. The `orchestrate-issues` policy entry shrinks to `stall_minutes`. | agent-helpers rule 6 (argv and lifecycle key sets only; phrase pins die with their text); AC1's absence clause. | Moving phrase pins onto `python/README.md`: new English-phrase pins, which rule 6 forbids, guarding behaviour already pinned at the command seam. |
 | D5 | Whole-allow `orchestrate-control` (bare and `~/.agents/bin/`) and add it to `COMMAND_VOCABULARY`, the guard test's allow tuple and an allowed row, and the claude-code README count. The `step` example is then a sanctioned heredoc lifecycle call. | The shell-example contract sanctions a heredoc only under a whole-allowed head; precedent b89c6dbb (ship-delivery); the helper's only writes are `workflow-state` ledger writes, and its `gh`/`git` children read. | A heredoc-free inline example: the heredoc form goes unvetted, and every `step` waits on the auto-mode classifier, where a denial stalls an autonomous run. Multi-word allow entries: the checker reads only single-word entries. |
 | D6 | The replay runs real `orchestrate-control` in `tests.orchestrate_world.OrchestrateWorld` with `attempt_budget_minutes` mutated to 180. It pins `WORKFLOW_STATE_TEST_CLOCK` per simulated minute, the fixture host adds and removes real worktrees, and `baseline.json` and its assertions stay. It adds one assertion: logged `control` calls equal the summed `control_calls`. | agent-helpers rule 5 (commands from source via `-m`); #403 D26's world with its fake `gh`; `ledger_clock` honours the test clock, answering #403 D11's `now` obstacle. | In-process patching of `run_child`/fact functions: it breaks rule 5 and ties the test to private code. A second fake `gh` in the agent-skills tree: it duplicates D26's world. Moving the replay into `tests/`: history and recipe churn. |
 | D7 | The owner envelope, marker, `Agent(...)` line and blockquote prompt stay byte-identical. The envelope is filled from the dispatch entry's same-named members. | Issue: owner prompt and marker unchanged; `resume_pack` is the `resume-pack` stdout on exit 0, so the prompt's wording stays true; dispatch carrier region and owner profile prompt measure. | Rewording the pack line to name `resume_pack`: it churns a carrier region and the owner measure for no behavioural gain. |
 | D8 | Re-point living documents in the same change: `acquire-durable.md` drops its contract-rule, §4 and "17-key shape" citations and inlines the projection rename rule (no net growth); the agent-skills README resume-pack sentence and the `python/README.md` D11 sentence follow. The durable route's request template gets no new home here. | The bar: re-point every living document; `from-issue-controller` conditional headroom is 128 B on both hosts; `instruction-load.json` lists no `orchestrate-issues` member in that profile, so the route never loaded the template it cites. | Moving the 17-key template into `acquire-durable.md`: about 1.6 KB, which needs `instruction-budget-raise`, and only the user applies it. Keeping the template in the skill: it contradicts AC1. |
-| D9 | After the skill is final, `instruction_load tighten` lowers every loose ceiling: the dispatcher, the orchestrated owner (its `prompt` is the whole skill file) and the corpus. Each profile note gains "Ceiling lowered for #404", and nothing rises. | AC3; the gate fails a ceiling above 105% of its measure; `tighten` is the gate's own repair verb. | Hand-editing ceilings: it restates numbers the tool measures. |
+| D9 | After the skill is final, `instruction_load tighten` lowers every ceiling it reports loose. That is expected to be the dispatcher and the orchestrated owner (its `prompt` is the whole skill file); the corpus only if it crosses 5%. Each lowered note gains "Ceiling lowered for #404", and nothing rises. | AC3; the gate fails a ceiling above 105% of its measure; `tighten` is the gate's own repair verb. | Hand-editing ceilings: it restates numbers the tool measures. |
 | D10 | Evals 1–3 expect `start`/`step`. They name raw `workflow-state` lifecycle calls, a hand-built request and `owner_object` decoding as failures. Eval 7 becomes a tracker-free run whose first `step` refuses at `tracker`, keeping its sandbox asserts and replacing the builder and `delivery_contract` asserts with a refusal-report assert. Evals 4–6 stay. | #403 D7 (`step` is GitHub only); the eval fixture binds tracker kind `none`; `test_eval_cases` pins case 7's ledger assert. | Switching the fixture to GitHub: the sandbox has no forge. Dropping eval 7: it loses the skill's only pipeline case. |
 | D11 | AC5 is graded `human_pending` at final review, so ship holds #404 open with `needs-verification` until a human reads the next run of three or more issues. Eval 1 and the replay are the pre-merge proxies. | AC5 needs the merged skill installed and a live run; sdd grading tokens; ship-issue holds on `human_pending`. | Grading it `met` from the replay: a replay is not a transcript. Making it a merge gate: it cannot run before merge. |
+| D12 | Grill: a host-refused launch never stops the report's later launches or actions. Once the report has executed, one `step` carries all of its `launch_refused` observations, and each observation still rides exactly one call. | A dispatch left unlaunched stays reserved until its deadline (#403 D22), so stopping at the first refusal strands the rest for hours; `owners` is a list, and observations ride one call (#403 D18). | One immediate `step` per refusal, mid-report: it strands the report's remaining dispatches and multiplies control rounds. |
