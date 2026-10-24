@@ -1300,6 +1300,22 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             # D17: a separator inside the substitution does not end the run.
             ("git -C $(pwd | cat) push origin issue-400-topic", "push",
              "the git invocation continues past a shell substitution or grouping" + hint),
+            # D18: a substitution or expansion inside an option's value ends the
+            # run before the verb; the walk cannot bound a non `-C` option's value.
+            ("git -c core.hooksPath=$(printf /dev/null) push origin main", "push",
+             "the git invocation continues past a shell substitution or grouping" + hint),
+            ("git -c k=${X} push origin main", "push",
+             "the git invocation continues past a shell substitution or grouping" + hint),
+            ("git -C /tmp/x -c k=`printf v` branch -d issue-400-topic", "branch deletion",
+             "the git invocation continues past a shell substitution or grouping" + hint),
+            ("gh pr --repo $(printf fagenorn/nix-config) merge 1 --merge", "merge",
+             "the gh invocation continues past a shell substitution or grouping" + hint),
+            ("gh --repo $(printf fagenorn/nix-config) pr merge 1 --merge", "merge",
+             "the gh invocation continues past a shell substitution or grouping" + hint),
+            ("gh -R `printf x` release create v1.2.3", "release creation",
+             "the gh invocation continues past a shell substitution or grouping" + hint),
+            ("gh $(printf pr) merge 1 --merge", "merge",
+             "the gh invocation continues past a shell substitution or grouping" + hint),
             ("git -C /tmp/x -c a=b push origin issue-400-topic", "push",
              "git global option -c is not accepted" + hint),
             ("git --no-pager branch -d issue-400-topic", "branch deletion",
@@ -1328,6 +1344,11 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "gh pr view 1 --json mergeable",
             "gh pr list --state merged",
             "gh -R fagenorn/nix-config pr view 1",
+            # D18 reads on only while the verb is uncertain.
+            "git -C /tmp/x log $(printf HEAD)",
+            "git log --format=$(printf %H) -1",
+            "gh pr view $(printf 1) --json url",
+            "gh -R fagenorn/nix-config pr view $(printf 1)",
         ):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)

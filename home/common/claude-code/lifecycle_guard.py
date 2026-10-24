@@ -648,11 +648,16 @@ def guarded_invocation(tokens, index, later=""):
 
     Its words run to the next operator token. `problem` is a recognition refusal
     or None; the caller still judges the command position. `later` is the raw
-    text of the command's segments after this one: a git run that ends at an
-    operator inside its global options reads on through the rest of this
-    segment and then `later`, in both raw readings, because a separator inside
-    a substitution (`git -C $(pwd | cat) push …`) splits the invocation across
-    segments (issue 400 D15, D17).
+    text of the command's segments after this one. A run that ends at an
+    operator (a substitution, expansion or grouping) before its verb is
+    certain reads on through the rest of this segment and then `later`, in
+    both raw readings, because a separator inside a substitution
+    (`git -C $(pwd | cat) push …`) splits the invocation across segments
+    (issue 400 D15, D17). A git verb is uncertain when the run ends inside the
+    global options or carries an option other than `-C`, whose value the walk
+    cannot bound (`git -c k=$(…) push …`); a gh verb is uncertain when the run
+    carries a flag or ends before a third word (`gh pr --repo $(…) merge …`,
+    issue 400 D18).
     """
     value, operator = tokens[index]
     if operator:
@@ -666,29 +671,43 @@ def guarded_invocation(tokens, index, later=""):
         words.append(word)
     name = program_name(value)
     if name == "git":
-        found = git_invocation(value, words)
-        if found is None and truncated and git_options_end(words) == len(words):
-            # The run ended inside the global options (issue 400 D15): read on.
-            rest = [word for word, is_operator in tokens[index + 1:] if not is_operator]
-            loose = next(
-                (
-                    reading for reading in (
-                        git_invocation(value, ["--"] + rest + raw_words(later, glued))
-                        for glued in (False, True)
-                    )
-                    if reading is not None
-                ),
-                None,
-            )
-            if loose is not None:
-                found = loose[0], (
-                    "the git invocation continues past a shell substitution or "
-                    f"grouping; {INVOCATION_FORM_HINT}"
-                ), None
-        return found
-    if name == "gh":
-        return gh_invocation(value, words)
-    return None
+        reader, uncertain = git_invocation, git_verb_uncertain(words)
+    elif name == "gh":
+        reader = gh_invocation
+        uncertain = len(words) < 3 or any(word.startswith("-") for word in words)
+    else:
+        return None
+    found = reader(value, words)
+    if found is None and truncated and uncertain:
+        rest = [word for word, is_operator in tokens[index + 1:] if not is_operator]
+        loose = next(
+            (
+                reading for reading in (
+                    reader(value, ["--"] + rest + raw_words(later, glued))
+                    for glued in (False, True)
+                )
+                if reading is not None
+            ),
+            None,
+        )
+        if loose is not None:
+            found = loose[0], (
+                f"the {name} invocation continues past a shell substitution or "
+                f"grouping; {INVOCATION_FORM_HINT}"
+            ), None
+    return found
+
+
+def git_verb_uncertain(words):
+    """True when the leading git global options in `words` leave the subcommand
+    unknown: they run to the end of `words`, or one of them is not `-C`, so
+    the walk cannot know how many words it takes (issue 400 D15, D18)."""
+    index = 0
+    while index < len(words) and words[index].startswith("-"):
+        if words[index] != "-C" or index + 1 == len(words):
+            return True
+        index += 2
+    return index >= len(words)
 
 
 def git_options_end(words):
@@ -754,10 +773,11 @@ def guarded_operations(command):
     text, because env appends the remaining words to the split payload.
 
     Recognition refuses an invocation form before any lookup (issue 400 D6,
-    D15): git or gh named by a path, a git global option other than one `-C`,
-    a repeated `-C` or a `-C` directory that is not one plain word, and a git
-    run that ends at an operator inside its global options and so continues
-    past a substitution or grouping, read on through the rest of the command.
+    D15, D18): git or gh named by a path, a git global option other than one
+    `-C`, a repeated `-C` or a `-C` directory that is not one plain word, and a
+    git or gh run that ends at an operator before its verb is certain and so
+    continues past a substitution or grouping, read on through the rest of the
+    command.
 
     The `label` operation is mention-gated: it is considered only when the
     command's tokens mention the raise label, always carries a problem, and is
