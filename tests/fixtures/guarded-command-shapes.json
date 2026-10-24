@@ -50,30 +50,30 @@
       "sites": ["SKILL.md", "HUMAN-GATE.md"],
       "label": "branch deletion",
       "bare": {"exit": 0},
-      "prefixed": {"exit": 2, "reason": "forbidden raw command character"},
-      "env_prefixed": {"exit": 2, "reason": "expected exactly git branch -d <branch>"}
+      "prefixed": {"exit": 2, "reason": "branch deletion takes no credential-scrub prefix"},
+      "env_prefixed": {"exit": 2, "reason": "branch deletion takes no credential-scrub prefix"}
     },
     {
       "id": "branch.remote",
       "template": "git push origin --delete <branch>",
       "sites": ["SKILL.md", "HUMAN-GATE.md"],
       "label": "push",
-      "bare": {"exit": 2, "reason": "expected exactly git push [-u] origin <branch>"},
-      "prefixed": {"exit": 2, "reason": "expected exactly git push [-u] origin <branch>"},
-      "env_prefixed": {"exit": 2, "reason": "expected exactly git push [-u] origin <branch>"}
+      "bare": {"exit": 2, "reason": "unknown flag --delete"},
+      "prefixed": {"exit": 2, "reason": "unknown flag --delete"},
+      "env_prefixed": {"exit": 2, "reason": "unknown flag --delete"}
     }
   ],
   "refused_shapes": [
     {"id": "push.redirect-pipe", "form": "push.first", "before": "", "after": " 2>&1 | tail -3",
-     "label": "push", "reason": "forbidden raw command character"},
+     "label": "push", "reason": "forbidden character `>`"},
     {"id": "merge.after-cd", "form": "merge.subject", "before": "cd /tmp/worktree && ", "after": "",
-     "label": "merge", "reason": "does not match the guarded merge grammar"},
+     "label": "merge", "reason": "forbidden character `&`"},
     {"id": "merge.then-echo", "form": "merge.plain", "before": "", "after": "; echo exit=$?",
-     "label": "merge", "reason": "does not match the guarded merge grammar"},
+     "label": "merge", "reason": "forbidden character `;`"},
     {"id": "mention.unquoted", "form": "push.later", "before": "workflow-state finish --notes refused ", "after": "",
      "label": "push", "reason": "not in a command position"},
     {"id": "branch.after-cd", "form": "branch.local", "before": "cd /tmp/worktree && ", "after": "",
-     "label": "branch deletion", "reason": "forbidden raw command character"}
+     "label": "branch deletion", "reason": "forbidden character `&`"}
   ],
   "invocation_shapes": [
     {"id": "push.dir", "template": "git -C <repository-root> push origin <branch>",
@@ -101,9 +101,9 @@
     {"id": "merge.path-gh", "template": "/usr/local/bin/gh pr merge <pr-num> --repo <resolved-repository> --merge --delete-branch",
      "label": "merge", "verdict": {"exit": 2, "reason": "git -C <dir>"}},
     {"id": "merge.flag-before-path", "template": "gh --repo <resolved-repository> pr merge <pr-num> --merge --delete-branch",
-     "label": "merge", "verdict": {"exit": 2, "reason": "does not match the guarded merge grammar"}},
+     "label": "merge", "verdict": {"exit": 2, "reason": "--repo is out of place"}},
     {"id": "merge.flag-between-path", "template": "gh pr --repo <resolved-repository> merge <pr-num> --merge --delete-branch",
-     "label": "merge", "verdict": {"exit": 2, "reason": "does not match the guarded merge grammar"}}
+     "label": "merge", "verdict": {"exit": 2, "reason": "--repo is out of place"}}
   ],
   "form_values": {
     "<n>": "402",

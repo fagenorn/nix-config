@@ -1613,19 +1613,24 @@ def authorized_bases(repository, base_branch, integration_bases):
 
 
 def branch_name_problem(git_bin, branch, timeout):
-    """Why `branch` is not a plain, safe branch name, or None."""
+    """Why `branch` is not a plain, safe branch name, or None; the problem names
+    the value, escaped (issue 402 D4, D18)."""
+    shown = shown_value(branch)
     if not branch:
         return "branch name must not be empty"
     if branch.startswith("-"):
-        return "branch must not begin with a dash"
-    if ":" in branch or "+" in branch:
-        return "refspecs and force-pushes are not authorized"
-    if any(character in UNSAFE_BRANCH_CHARS for character in branch):
-        return "forbidden branch character"
+        return f"branch {shown} must not begin with a dash"
+    if ":" in branch:
+        return f"refspec {shown} is not accepted; name the branch alone"
+    if "+" in branch:
+        return f"force-push refspec {shown} is not accepted"
+    forbidden = next((c for c in branch if c in UNSAFE_BRANCH_CHARS), None)
+    if forbidden is not None:
+        return f"branch {shown} contains the forbidden character `{shown_character(forbidden)}`"
     if any(component in REF_NAMESPACE_COMPONENTS for component in branch.split("/")):
         # `refs/heads/main` and `heads/main` both name the branch `main`, so a
         # plain string comparison against the default branch would miss them.
-        return "namespaced refs are not authorized, name the branch directly"
+        return f"namespaced ref {shown} is not accepted; name the branch directly"
     try:
         child = subprocess.run(
             [git_bin, "check-ref-format", "--branch", branch],
@@ -1637,7 +1642,7 @@ def branch_name_problem(git_bin, branch, timeout):
     except subprocess.TimeoutExpired:
         return BRANCH_VALIDATION_TIMEOUT
     if child.returncode != 0:
-        return "invalid branch name"
+        return f"invalid branch name {shown}"
     return None
 
 
@@ -1648,8 +1653,9 @@ def free_text_problem(value, allow_newlines):
     forbidden = set(UNSAFE_TEXT_CHARS)
     if not allow_newlines:
         forbidden.add("\n")
-    if any(character in forbidden for character in value):
-        return "contains a forbidden character"
+    found = next((character for character in value if character in forbidden), None)
+    if found is not None:
+        return f"contains the forbidden character `{shown_character(found)}`"
     if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
         return "contains an unpaired surrogate"
     return None
@@ -1870,22 +1876,136 @@ def match_form(compiled, text):
     return None
 
 
+# Characters that join or redirect a command: their refusal adds the run-alone advice (D5).
+ADVISED_CHARACTERS = frozenset(";&|<>\n")
+
+
+def shown_character(character):
+    """`character` as a message shows it: itself, or its escape when it does not print."""
+    return character if character.isprintable() else repr(character)[1:-1]
+
+
+def shown_value(value):
+    """`value` as a message shows it: each character through `shown_character`,
+    so a value holding a newline keeps the refusal on one line (D18)."""
+    return "".join(shown_character(character) for character in value)
+
+
+def forbidden_character(text, anywhere):
+    """The first character of `text` in UNSAFE_BRANCH_CHARS, anywhere or only
+    outside single and double quotes (a backslash escapes inside double quotes),
+    else None."""
+    quote = None
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if quote == "'":
+            if character == "'":
+                quote = None
+        elif quote == '"':
+            if character == "\\":
+                index += 1
+            elif character == '"':
+                quote = None
+        elif not anywhere and character in "'\"":
+            quote = character
+        elif character in UNSAFE_BRANCH_CHARS:
+            return character
+        index += 1
+    return None
+
+
+def doubled_space_before(text, program):
+    """Whether the raw text before the first whitespace-delimited `program` word
+    holds two whitespace characters in a row."""
+    match = re.search(rf"(?<!\S){re.escape(program)}(?!\S)", text)
+    head = text[:match.start()] if match else text
+    return re.search(r"\s\s", head) is not None
+
+
+def element_spelling(element):
+    """How a refusal names a form element: its word, or the slot as the form spells it."""
+    if isinstance(element, Literal):
+        return element.word
+    if element.quoted:
+        return f'"<{element.name}>"'
+    return f"{element.prefix}<{element.name}>"
+
+
+def structure_problem(compiled, words):
+    """Step 7 (issue 402 D4, D16): read at the furthest point any form reached, ties
+    to table order; None when every word matched a form."""
+    best = None
+    for form in compiled.forms:
+        walk = walk_form(form.elements, words, compiled.flags)
+        if walk.expected is None and walk.position == len(words):
+            return None
+        if best is None or walk.position > best.position:
+            best = walk
+    found = words[best.position] if best.position < len(words) else None
+    if best.expected is None:
+        if found in compiled.flags:
+            return f"{found} is out of place"
+        return f"unexpected {found} at the end"
+    expected = element_spelling(best.expected)
+    if found is None:
+        return f"missing {expected}"
+    if (isinstance(best.expected, Literal) and not best.expected.word.startswith("-")
+            and not found.startswith("-")):
+        return f"expected {expected}, found {found}"
+    if isinstance(best.expected, Slot) or best.expected.word not in words[best.position:]:
+        return f"missing {expected}"
+    return f"{found} is out of place"
+
+
 def form_problem(operation, compiled, text):
-    """Why `match_form` refused `text`."""
-    if compiled.whole_text_characters and any(c in UNSAFE_BRANCH_CHARS for c in text):
-        return "forbidden raw command character"
+    """The first problem (issue 402 D4) of `text`, which `match_form` refused."""
+    label = OPERATION_LABELS[operation]
     try:
-        shlex.split(text)
+        words, quoting = shlex.split(text), None
     except ValueError as error:
-        return f"invalid command quoting: {error}"
-    return {
-        "push": "expected exactly git push [-u] origin <branch>",
-        "pr-create": ("expected exactly gh pr create --repo <repo> --base <base> "
-                      "--head <head> --title <title> --body <body>"),
-        "merge": "command does not match the guarded merge grammar",
-        "release": "command does not match the guarded release grammar",
-        "branch": "expected exactly git branch -d <branch>",
-    }[operation]
+        words, quoting = None, f"invalid command quoting: {error}"
+    start = None
+    if words is not None and compiled.program in words:
+        start = words.index(compiled.program)
+    before = words[:start] if start else []
+    if before and (before[0] in ("unset", "env") or before[0].startswith("-")):
+        if not compiled.scrub_prefix:
+            return f"{label} takes no credential-scrub prefix"
+        problem = f"unaccepted credential-scrub prefix `{' '.join(before)}`"
+        if doubled_space_before(text, compiled.program):
+            problem += " (doubled space)"
+        return problem
+    character = forbidden_character(text, anywhere=compiled.whole_text_characters)
+    if character is not None:
+        problem = f"forbidden character `{shown_character(character)}`"
+        if character in ADVISED_CHARACTERS:
+            problem += (f": run the {label} as its own Bash call and read its output "
+                        "with a follow-up call")
+        return problem
+    if quoting is not None:
+        return quoting
+    if before:
+        return f"unaccepted wrapper `{' '.join(before)}`"
+    if start is None:
+        return "does not match an accepted form"
+    rest = words[start:]
+    if compiled.program == "git" and len(rest) > 1 and rest[1].startswith("-"):
+        if rest[1] == "-C":
+            return "git -C takes one unquoted directory word followed by a single space"
+        return f"git global option {rest[1]} is not accepted"
+    for index, word in enumerate(rest):
+        if index and rest[index - 1] in compiled.quoted_value_flags:
+            continue
+        if word.startswith("-") and word not in compiled.flags:
+            return f"unknown flag {word}"
+    problem = structure_problem(compiled, rest)
+    if problem is not None:
+        return problem
+    if compiled.exact_spelling:
+        return (f"spell the {label} exactly as the accepted form: single spaces, "
+                "free text in double quotes")
+    return "does not match an accepted form"
 
 
 def prefix_clause():
@@ -1968,7 +2088,7 @@ def validate_branch_delete(text, git_bin, timeout, compiled):
                       accepted_forms(compiled, None))
     branch = match.values["branch"]
     if branch.startswith("-"):
-        return refuse("branch", "branch must not begin with a dash",
+        return refuse("branch", f"branch {shown_value(branch)} must not begin with a dash",
                       accepted_forms(compiled, None))
     try:
         ref_check = subprocess.run(
@@ -1981,8 +2101,16 @@ def validate_branch_delete(text, git_bin, timeout, compiled):
     except subprocess.TimeoutExpired:
         return refuse("branch", BRANCH_VALIDATION_TIMEOUT)
     if ref_check.returncode != 0:
-        return refuse("branch", "invalid branch name", accepted_forms(compiled, None))
+        return refuse("branch", f"invalid branch name {shown_value(branch)}",
+                      accepted_forms(compiled, None))
     return 0
+
+
+def tag_problem(tag):
+    """Why `tag` is not a vMAJOR.MINOR.PATCH release tag, or None."""
+    if SEMVER_TAG.fullmatch(tag) is None:
+        return f"tag {shown_value(tag)} is not a vMAJOR.MINOR.PATCH tag"
+    return None
 
 
 def validate_tag_push(tag, context, compiled):
@@ -1992,11 +2120,9 @@ def validate_tag_push(tag, context, compiled):
     locally as an annotated tag object (`git cat-file -t` prints `tag`), so a
     lightweight tag, a missing one or a branch of the same name never passes.
     """
-    if SEMVER_TAG.fullmatch(tag) is None:
-        return refuse(
-            "push", "a tag push must name a vMAJOR.MINOR.PATCH tag",
-            accepted_forms(compiled, context),
-        )
+    problem = tag_problem(tag)
+    if problem is not None:
+        return refuse("push", problem, accepted_forms(compiled, context))
     try:
         kind = subprocess.run(
             [context.git_bin, "cat-file", "-t", TAG_REF_PREFIX + tag],
@@ -2054,7 +2180,7 @@ def validate_pr_create(text, context, compiled):
     if repository_argument != context.repository:
         return refuse(
             "pr-create",
-            f"--repo {repository_argument} is not the current repository "
+            f"--repo {shown_value(repository_argument)} is not the current repository "
             f"{context.repository}",
             accepted_forms(compiled, context),
         )
@@ -2076,12 +2202,33 @@ def validate_pr_create(text, context, compiled):
     if base not in allowed_bases:
         return refuse(
             "pr-create",
-            "--base must be one of " + ", ".join(sorted(allowed_bases)),
+            f"--base {shown_value(base)} is not one of " + ", ".join(sorted(allowed_bases)),
             accepted_forms(compiled, context),
         )
     if head == base:
         return refuse("pr-create", "head and base must differ")
     return 0
+
+
+def release_slot_problem(values, repository):
+    """Why a matched release creation's slots fail, in order, or None."""
+    problem = tag_problem(values["vX.Y.Z"])
+    if problem is not None:
+        return problem
+    if values["slug"] != repository:
+        return (f"--repo {shown_value(values['slug'])} is not the current repository "
+                f"{repository}")
+    title_problem = free_text_problem(values["title"], False)
+    if title_problem is not None:
+        return f"title {title_problem}"
+    path = values["path"]
+    if (
+        not os.path.isabs(path)
+        or any(character in UNSAFE_BRANCH_CHARS or character.isspace() for character in path)
+    ):
+        return (f"--notes-file {shown_value(path)} is not an absolute path without "
+                "whitespace or shell-active characters")
+    return None
 
 
 def validate_release(text, context, compiled):
@@ -2093,33 +2240,29 @@ def validate_release(text, context, compiled):
     if match is None:
         return refuse("release", form_problem("release", compiled, text),
                       accepted_forms(compiled, context))
-    values = match.values
-    path = values["path"]
-    if (
-        SEMVER_TAG.fullmatch(values["vX.Y.Z"]) is None
-        or values["slug"] != context.repository
-        or free_text_problem(values["title"], False) is not None
-        or not os.path.isabs(path)
-        or any(character in UNSAFE_BRANCH_CHARS or character.isspace() for character in path)
-    ):
-        return refuse("release", form_problem("release", compiled, text),
-                      accepted_forms(compiled, context))
+    problem = release_slot_problem(match.values, context.repository)
+    if problem is not None:
+        return refuse("release", problem, accepted_forms(compiled, context))
     return 0
 
 
-def merge_slots_acceptable(values, repository):
-    """Whether a matched merge's `<n>`, `<slug>` and `<subject>` pass, in base order."""
+def merge_slot_problem(values, repository):
+    """Why a matched merge's `<n>`, `<slug>` and `<subject>` fail, in order, or None."""
     number = values["n"]
     if (
         not number
         or any(character < "0" or character > "9" for character in number)
         or int(number) <= 0
     ):
-        return False
+        return f"PR number {shown_value(number)} is not a positive decimal number"
     if values["slug"] != repository:
-        return False
+        return (f"--repo {shown_value(values['slug'])} is not the current repository "
+                f"{repository}")
     subject = values.get("subject")
-    return subject is None or free_text_problem(subject, False) is None
+    subject_problem = None if subject is None else free_text_problem(subject, False)
+    if subject_problem is not None:
+        return f"subject {subject_problem}"
+    return None
 
 
 def validate_merge(text, context, compiled):
@@ -2130,15 +2273,19 @@ def validate_merge(text, context, compiled):
     # `text` is the whole canonical command, its scrub prefix already
     # stripped, so the merge still tolerates no other chaining.
     match = match_form(compiled, text)
-    if match is None or not merge_slots_acceptable(match.values, repository):
+    if match is None:
         return refuse("merge", form_problem("merge", compiled, text),
                       accepted_forms(compiled, context))
+    problem = merge_slot_problem(match.values, repository)
+    if problem is not None:
+        return refuse("merge", problem, accepted_forms(compiled, context))
     number = match.values["n"]
     head_commit = match.values.get("sha")
     if head_commit is not None and HEAD_COMMIT.fullmatch(head_commit) is None:
         return refuse(
             "merge",
-            f"--match-head-commit {head_commit} is not 40 lowercase hexadecimal characters",
+            f"--match-head-commit {shown_value(head_commit)} is not 40 lowercase "
+            "hexadecimal characters",
             accepted_forms(compiled, context),
         )
     if match.form.id == "feature":
@@ -2161,7 +2308,7 @@ def validate_merge(text, context, compiled):
     if not delete_branch and integration_base is None:
         return refuse(
             "merge",
-            "--delete-branch may be omitted only in a repository "
+            "missing --delete-branch: it may be omitted only in a repository "
             "with a declared integration branch",
             accepted_forms(compiled, context, ["feature"]),
         )
@@ -2303,14 +2450,16 @@ def validate_release_merge(pr_facts, base, integration_base, context, compiled):
         return refuse("merge", "cannot read the PR head branch")
     if head != integration_base or base != context.base_branch:
         mismatch = (
-            "--delete-branch may be omitted only when merging "
-            f"{integration_base} into {context.base_branch}; this PR merges "
-            f"{head} into {base}"
+            f"it may be omitted only when merging {integration_base} into "
+            f"{context.base_branch}; this PR merges {shown_value(head)} into "
+            f"{shown_value(base)}"
         )
-        # A feature head still fits the feature arm; a permanent head fits no arm.
+        # A feature head still fits the feature arm, which names the missing flag;
+        # a permanent head fits no arm.
         if head not in (context.base_branch, integration_base):
-            return refuse("merge", mismatch, accepted_forms(compiled, context, ["feature"]))
-        return refuse("merge", mismatch)
+            return refuse("merge", f"missing --delete-branch: {mismatch}",
+                          accepted_forms(compiled, context, ["feature"]))
+        return refuse("merge", f"--delete-branch {mismatch}")
     try:
         rollup_predicate = subprocess.run(
             [

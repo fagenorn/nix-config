@@ -988,7 +988,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                     merge, cwd=repo, env=self.release_env(headRefName=head, baseRefName=base))
                 self.assertEqual(2, result.returncode, result.stderr)
                 self.assertIn(
-                    "--delete-branch may be omitted only when merging dev into main",
+                    "may be omitted only when merging dev into main",
                     result.stderr,
                 )
         # The feature arm is untouched: the same feature PR still merges into
@@ -1145,30 +1145,38 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
-        push_grammar = "unsafe push: expected exactly git push [-u] origin <branch>"
-        merge_grammar = "unsafe merge: command does not match the guarded merge grammar"
+        prefix = "unaccepted credential-scrub prefix"
         for command, reason in (
-            (f"env -u PATH {push}", push_grammar),
-            (f"env FOO=1 {push}", push_grammar),
-            (f"env -i {push}", push_grammar),
-            (f"env -u GITHUB_TOKEN -i {push}", push_grammar),
-            (f"env --unset=GITHUB_TOKEN {push}", push_grammar),
-            (f"sudo -u x {push}", push_grammar),
-            (f"env -u GITHUB_TOKEN -u GITHUB_TOKEN {push}", push_grammar),   # repeated name
-            (f"env -uGITHUB_TOKEN {push}", push_grammar),                    # attached
-            (f"env -u GITHUB_TOKEN -- {push}", push_grammar),
-            (f"env env -u GITHUB_TOKEN {push}", push_grammar),               # second env
-            (f"env -u GITHUB_TOKEN env {push}", push_grammar),
-            (f"env -u GITHUB_TOKEN  {push}", push_grammar),                  # double space
-            (f"env -u GITHUB_TOKEN {merge}; echo x", merge_grammar),
-            (f"env -u GITHUB_TOKEN -u GITHUB_TOKEN {merge}", merge_grammar),
-            (f"unset GITHUB_TOKEN GITHUB_TOKEN && {merge}", merge_grammar),
-            (f"env  -u GITHUB_TOKEN {merge}", merge_grammar),
-            (f"env -u GITHUB_TOKEN  {merge}", merge_grammar),
+            (f"env -u PATH {push}", f"unsafe push: {prefix} `env -u PATH`"),
+            (f"env FOO=1 {push}", f"unsafe push: {prefix} `env FOO=1`"),
+            (f"env -i {push}", f"unsafe push: {prefix} `env -i`"),
+            (f"env -u GITHUB_TOKEN -i {push}", f"unsafe push: {prefix} `-i`"),
+            (f"env --unset=GITHUB_TOKEN {push}", f"unsafe push: {prefix} `env --unset=GITHUB_TOKEN`"),
+            (f"sudo -u x {push}", "unsafe push: unaccepted wrapper `sudo -u x`"),
+            (f"env -u GITHUB_TOKEN -u GITHUB_TOKEN {push}",   # repeated name
+             f"unsafe push: {prefix} `-u GITHUB_TOKEN`"),
+            (f"env -uGITHUB_TOKEN {push}",                    # attached
+             f"unsafe push: {prefix} `env -uGITHUB_TOKEN`"),
+            (f"env -u GITHUB_TOKEN -- {push}", f"unsafe push: {prefix} `--`"),
+            (f"env env -u GITHUB_TOKEN {push}",               # second env
+             f"unsafe push: {prefix} `env env -u GITHUB_TOKEN`"),
+            (f"env -u GITHUB_TOKEN env {push}", f"unsafe push: {prefix} `env`"),
+            (f"env -u GITHUB_TOKEN  {push}",                  # double space
+             f"unsafe push: {prefix} `env -u GITHUB_TOKEN` (doubled space)"),
+            (f"env -u GITHUB_TOKEN {merge}; echo x",
+             "unsafe merge: forbidden character `;`: run the merge as its own Bash call"),
+            (f"env -u GITHUB_TOKEN -u GITHUB_TOKEN {merge}",
+             f"unsafe merge: {prefix} `-u GITHUB_TOKEN`"),
+            (f"unset GITHUB_TOKEN GITHUB_TOKEN && {merge}",
+             f"unsafe merge: {prefix} `unset GITHUB_TOKEN GITHUB_TOKEN &&`"),
+            (f"env  -u GITHUB_TOKEN {merge}",
+             f"unsafe merge: {prefix} `env -u GITHUB_TOKEN` (doubled space)"),
+            (f"env -u GITHUB_TOKEN  {merge}",
+             f"unsafe merge: {prefix} `env -u GITHUB_TOKEN` (doubled space)"),
             ("env -u GITHUB_TOKEN git branch -d issue-400-topic",
-             "unsafe branch deletion: expected exactly git branch -d <branch>"),
+             "unsafe branch deletion: branch deletion takes no credential-scrub prefix"),
             ("unset GITHUB_TOKEN && git branch -d issue-400-topic",
-             "unsafe branch deletion: forbidden raw command character"),
+             "unsafe branch deletion: branch deletion takes no credential-scrub prefix"),
             # The wrapper's option argument is consumed, so `sh` is the command word.
             ("sudo -u root sh -c 'git push origin issue-400-topic'",
              "unsafe push: shell source passed to an evaluator cannot be validated"),
@@ -1498,6 +1506,134 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertNotIn("accepted:", result.stderr)
                 self.assertNotIn("optional prefix:", result.stderr)
 
+    def test_the_retro_commands_name_their_problem_and_cure(self):
+        """Issue 402 AC2: the #2342 merge names the missing --delete-branch and prints
+        the feature form, which, filled in, passes; the #2268 push segment names `>`."""
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        feature_into_dev = {"FAKE_PR_JSON": json.dumps({
+            "state": "OPEN", "baseRefName": "dev", "headRefName": "issue-2342-topic",
+            "url": f"https://github.com/{NODO}/pull/2342", "statusCheckRollup": []}),
+            "FAKE_PROTECTION_MODE": "nonzero"}
+        merge = f"gh pr merge 2342 --repo {NODO} --merge --match-head-commit {self.HEAD_SHA}"
+        line = self.refusal_line(self.run_guard(merge, cwd=nodo, env=feature_into_dev))
+        self.assertEqual(
+            "lifecycle guard: unsafe merge: missing --delete-branch: it may be omitted only "
+            "when merging dev into main; this PR merges issue-2342-topic into dev; accepted: "
+            f'gh pr merge <n> --repo {NODO} --merge [--subject "<subject>"] '
+            "[--match-head-commit <sha>] --delete-branch" + self.PREFIX_CLAUSE, line)
+        filled = self.run_guard(merge + " --delete-branch", cwd=nodo, env=feature_into_dev)
+        self.assertEqual(0, filled.returncode, filled.stderr)
+        line = self.refusal_line(self.run_guard(
+            "unset GITHUB_TOKEN; git push -q origin HEAD:issue-402-topic 2>&1 | tail -2",
+            cwd=repo))
+        self.assertEqual(
+            "lifecycle guard: unsafe push: forbidden character `>`: run the push as its own "
+            "Bash call and read its output with a follow-up call; accepted: git push origin "
+            "refs/tags/<vX.Y.Z>; or git push [-u] origin <branch>" + self.PREFIX_CLAUSE, line)
+
+    def test_refusals_name_the_first_problem(self):
+        """Issue 402 D4, D5, D16: one row per named problem class, each followed by the
+        accepted forms; the first problem that applies is the one named."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        sha = self.HEAD_SHA
+        merge = "gh pr merge 2342 --repo fagenorn/nix-config --merge"
+        create = "gh pr create --repo fagenorn/nix-config --base"
+        release = ("gh release create v1.2.3 --repo fagenorn/nix-config --verify-tag "
+                   '--title "v1.2.3" --notes-file')
+        alone = "run the {} as its own Bash call and read its output with a follow-up call"
+        for command, label, problem in (
+            # 1. A credential-scrub prefix attempt.
+            ("env -u PATH git push origin issue-402-topic", "push",
+             "unaccepted credential-scrub prefix `env -u PATH`"),
+            (f"env  -u GITHUB_TOKEN {merge} --delete-branch", "merge",
+             "unaccepted credential-scrub prefix `env -u GITHUB_TOKEN` (doubled space)"),
+            ("env -u GITHUB_TOKEN -i git push origin issue-402-topic", "push",
+             "unaccepted credential-scrub prefix `-i`"),
+            ("env -u GITHUB_TOKEN git branch -d issue-402-topic", "branch deletion",
+             "branch deletion takes no credential-scrub prefix"),
+            # 2. A forbidden character, shown itself.
+            ("git push origin $(printf issue-402-topic)", "push", "forbidden character `$`"),
+            ("git branch -d issue-402-topic\ntrue", "branch deletion",
+             "forbidden character `\\n`: " + alone.format("branch deletion")),
+            (f"{merge} --delete-branch | cat", "merge",
+             "forbidden character `|`: " + alone.format("merge")),
+            # 4. A wrapper.
+            ("sudo -u x git push origin issue-402-topic", "push",
+             "unaccepted wrapper `sudo -u x`"),
+            ("command git branch -d issue-402-topic", "branch deletion",
+             "unaccepted wrapper `command`"),
+            # 5. A git global option the exact strip missed.
+            (f'git -C "{repo}" push origin issue-402-topic', "push",
+             "git -C takes one unquoted directory word followed by a single space"),
+            # 6. An unknown flag.
+            ("git push --force origin issue-402-topic", "push", "unknown flag --force"),
+            (f"{merge} --admin --delete-branch", "merge", "unknown flag --admin"),
+            # 7. Structure, at the furthest point any form reached.
+            ("gh pr merge 2342 --repo fagenorn/nix-config --delete-branch", "merge",
+             "missing --merge"),
+            ("gh pr merge --repo fagenorn/nix-config --merge --delete-branch", "merge",
+             "missing <n>"),
+            (f"{merge} --match-head-commit --delete-branch", "merge", "missing <sha>"),
+            (release.replace("release create", "release new") + " /tmp/n.md",
+             "release creation", "expected create, found new"),
+            ('gh pr create --base main --repo fagenorn/nix-config --head issue-402-topic '
+             '--title "x" --body "y"', "PR creation", "--base is out of place"),
+            (f"{merge} --delete-branch --match-head-commit {sha}", "merge",
+             "--match-head-commit is out of place"),
+            ("git branch -d issue-402-topic extra", "branch deletion",
+             "unexpected extra at the end"),
+            # 8. Exact spelling.
+            (f"{merge} --subject 'x' --delete-branch", "merge",
+             "spell the merge exactly as the accepted form: single spaces, free text in "
+             "double quotes"),
+            # Slot values, with the value.
+            ("git push origin HEAD:issue-402-topic", "push",
+             "refspec HEAD:issue-402-topic is not accepted; name the branch alone"),
+            ("git push origin +issue-402-topic", "push",
+             "force-push refspec +issue-402-topic is not accepted"),
+            ("git push origin heads/main", "push",
+             "namespaced ref heads/main is not accepted; name the branch directly"),
+            ("git push origin -topic", "push", "branch -topic must not begin with a dash"),
+            ("git push origin refs/tags/v1.2", "push", "tag v1.2 is not a vMAJOR.MINOR.PATCH tag"),
+            (f'{create} release --head issue-402-topic --title "x" --body "y"', "PR creation",
+             "--base release is not one of main"),
+            (f'{create} main --head issue-402-topic --title "$(id)" --body "y"', "PR creation",
+             "title contains the forbidden character `$`"),
+            ("gh pr merge 0 --repo fagenorn/nix-config --merge --delete-branch", "merge",
+             "PR number 0 is not a positive decimal number"),
+            ("gh pr merge 2342 --repo fagenorn/other --merge --delete-branch", "merge",
+             "--repo fagenorn/other is not the current repository fagenorn/nix-config"),
+            (f'{merge} --subject "bad $HOME" --delete-branch', "merge",
+             "subject contains the forbidden character `$`"),
+            (f"{merge} --match-head-commit {sha.upper()} --delete-branch", "merge",
+             f"--match-head-commit {sha.upper()} is not 40 lowercase hexadecimal characters"),
+            (f"{release} notes.md", "release creation",
+             "--notes-file notes.md is not an absolute path without whitespace or "
+             "shell-active characters"),
+            ("git branch -d -topic", "branch deletion", "branch -topic must not begin with a dash"),
+            # The release arm where no integration branch is declared.
+            (merge, "merge", "missing --delete-branch: it may be omitted only in a repository "
+                             "with a declared integration branch"),
+        ):
+            with self.subTest(command=command):
+                line = self.refusal_line(self.run_guard(command, cwd=repo))
+                self.assertIn(f"lifecycle guard: unsafe {label}: {problem}; accepted: ", line)
+
+    def test_a_refused_value_with_a_newline_stays_on_one_line(self):
+        """Issue 402 D18: an interpolated value is shown escaped, so a quoted
+        `--head` holding a newline still refuses on exactly one stderr line."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        command = ('gh pr create --repo fagenorn/nix-config --base main '
+                   '--head "a\nb" --title "t" --body "b"')
+        result = self.run_guard(command, cwd=repo)
+        self.assertEqual(result.returncode, 2)
+        lines = result.stderr.splitlines()
+        self.assertEqual(len(lines), 1, result.stderr)
+        self.assertIn("lifecycle guard: unsafe PR creation: head ", lines[0])
+        self.assertIn("a\\nb", lines[0])
+        self.assertIn("; accepted: ", lines[0])
+
     def test_raw_text_sites_match_verb_words_in_order(self):
         """Issue 400 D5, D12: text the guard cannot tokenise as a command is refused
         when a verb's words occur in it in order, the first matched by basename."""
@@ -1585,7 +1721,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
              "gh named by a path" + hint),
             ("gh -R fagenorn/nix-config pr create --repo fagenorn/nix-config --base main "
              '--head t --title "x" --body "y"', "PR creation",
-             "expected exactly gh pr create"),
+             "unknown flag -R"),
             ("xargs git -C /tmp/x push origin issue-400-topic", "push",
              "the verb is not in a command position"),
         ):
@@ -1640,7 +1776,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 result = self.run_guard(command, cwd=cwd)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
         unknown = "unsafe push: repository unknown is outside standing authorization"
-        grammar = "unsafe push: expected exactly git push [-u] origin <branch>"
+        grammar = "unsafe push: git -C takes one unquoted directory word followed by a single space"
         for command, cwd, reason in (
             (f"git -C {there} push origin trunk", here,
              "unsafe push: refusing to push the default branch trunk"),
