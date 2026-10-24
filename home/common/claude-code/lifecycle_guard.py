@@ -1945,17 +1945,17 @@ def structure_problem(compiled, words):
     found = words[best.position] if best.position < len(words) else None
     if best.expected is None:
         if found in compiled.flags:
-            return f"{found} is out of place"
-        return f"unexpected {found} at the end"
+            return f"{shown_value(found)} is out of place"
+        return f"unexpected {shown_value(found)} at the end"
     expected = element_spelling(best.expected)
     if found is None:
         return f"missing {expected}"
     if (isinstance(best.expected, Literal) and not best.expected.word.startswith("-")
             and not found.startswith("-")):
-        return f"expected {expected}, found {found}"
+        return f"expected {expected}, found {shown_value(found)}"
     if isinstance(best.expected, Slot) or best.expected.word not in words[best.position:]:
         return f"missing {expected}"
-    return f"{found} is out of place"
+    return f"{shown_value(found)} is out of place"
 
 
 def form_problem(operation, compiled, text):
@@ -1972,7 +1972,7 @@ def form_problem(operation, compiled, text):
     if before and (before[0] in ("unset", "env") or before[0].startswith("-")):
         if not compiled.scrub_prefix:
             return f"{label} takes no credential-scrub prefix"
-        problem = f"unaccepted credential-scrub prefix `{' '.join(before)}`"
+        problem = f"unaccepted credential-scrub prefix `{shown_value(' '.join(before))}`"
         if doubled_space_before(text, compiled.program):
             problem += " (doubled space)"
         return problem
@@ -1986,19 +1986,19 @@ def form_problem(operation, compiled, text):
     if quoting is not None:
         return quoting
     if before:
-        return f"unaccepted wrapper `{' '.join(before)}`"
+        return f"unaccepted wrapper `{shown_value(' '.join(before))}`"
     if start is None:
         return "does not match an accepted form"
     rest = words[start:]
     if compiled.program == "git" and len(rest) > 1 and rest[1].startswith("-"):
         if rest[1] == "-C":
             return "git -C takes one unquoted directory word followed by a single space"
-        return f"git global option {rest[1]} is not accepted"
+        return f"git global option {shown_value(rest[1])} is not accepted"
     for index, word in enumerate(rest):
         if index and rest[index - 1] in compiled.quoted_value_flags:
             continue
         if word.startswith("-") and word not in compiled.flags:
-            return f"unknown flag {word}"
+            return f"unknown flag {shown_value(word)}"
     problem = structure_problem(compiled, rest)
     if problem is not None:
         return problem
@@ -2449,17 +2449,17 @@ def validate_release_merge(pr_facts, base, integration_base, context, compiled):
     if not isinstance(head, str) or not head:
         return refuse("merge", "cannot read the PR head branch")
     if head != integration_base or base != context.base_branch:
-        mismatch = (
-            f"it may be omitted only when merging {integration_base} into "
+        omitted = (
+            f"may be omitted only when merging {integration_base} into "
             f"{context.base_branch}; this PR merges {shown_value(head)} into "
             f"{shown_value(base)}"
         )
         # A feature head still fits the feature arm, which names the missing flag;
         # a permanent head fits no arm.
         if head not in (context.base_branch, integration_base):
-            return refuse("merge", f"missing --delete-branch: {mismatch}",
+            return refuse("merge", f"missing --delete-branch: it {omitted}",
                           accepted_forms(compiled, context, ["feature"]))
-        return refuse("merge", f"--delete-branch {mismatch}")
+        return refuse("merge", f"--delete-branch {omitted}")
     try:
         rollup_predicate = subprocess.run(
             [

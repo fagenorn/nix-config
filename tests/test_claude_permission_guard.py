@@ -978,19 +978,23 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     def test_release_merge_arm_requires_exactly_integration_into_default(self):
         repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
         merge = "gh pr merge 7 --repo elevenyellow/nodocom --merge"
-        for head, base in (
-            ("issue-7-topic", "main"),   # a feature branch into the default branch
-            ("issue-7-topic", "dev"),    # a feature branch into the integration branch
-            ("main", "dev"),             # the wrong way round
+        tail = "may be omitted only when merging dev into main; this PR merges {} into {}"
+        for head, base, problem, forms in (
+            # A feature branch into either base: the text refusal names the missing flag.
+            ("issue-7-topic", "main", "missing --delete-branch: it " + tail, True),
+            ("issue-7-topic", "dev", "missing --delete-branch: it " + tail, True),
+            # A permanent head fits no arm: a state refusal, no accepted forms.
+            ("main", "dev", "--delete-branch " + tail, False),
         ):
             with self.subTest(head=head, base=base):
                 result = self.run_guard(
                     merge, cwd=repo, env=self.release_env(headRefName=head, baseRefName=base))
                 self.assertEqual(2, result.returncode, result.stderr)
-                self.assertIn(
-                    "may be omitted only when merging dev into main",
-                    result.stderr,
-                )
+                line = self.refusal_line(result)
+                self.assertTrue(
+                    line.startswith("lifecycle guard: unsafe merge: " + problem.format(head, base)),
+                    line)
+                self.assertEqual(forms, "; accepted: " in line, line)
         # The feature arm is untouched: the same feature PR still merges into
         # the integration branch when it says --delete-branch.
         allowed = self.run_guard(
@@ -1633,6 +1637,25 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertIn("lifecycle guard: unsafe PR creation: head ", lines[0])
         self.assertIn("a\\nb", lines[0])
         self.assertIn("; accepted: ", lines[0])
+
+    def test_a_refused_word_with_a_newline_stays_on_one_line(self):
+        """Issue 402 D18: a word the structure steps name is shown escaped too, so a
+        quoted unknown flag holding a newline refuses on exactly one stderr line."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command, problem in (
+            ('gh pr merge 2342 --repo fagenorn/nix-config --merge "--x\ny" --delete-branch',
+             "unknown flag --x\\ny"),
+            ('gh pr create --repo fagenorn/nix-config --base main --head t --title "t" '
+             '--body "b" "a\nb"', "unexpected a\\nb at the end"),
+            ('sudo -u "x\ny" gh pr merge 2342 --repo fagenorn/nix-config --merge --delete-branch',
+             "unaccepted wrapper `sudo -u x\\ny`"),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(result.returncode, 2)
+                lines = result.stderr.splitlines()
+                self.assertEqual(len(lines), 1, result.stderr)
+                self.assertIn(f": {problem}; accepted: ", lines[0])
 
     def test_raw_text_sites_match_verb_words_in_order(self):
         """Issue 400 D5, D12: text the guard cannot tokenise as a command is refused
