@@ -97,6 +97,8 @@ in
     )
     // {
       ${username}.openssh.authorizedKeys.keys = ownerKeys;
+      # The existing account records this canonical path; nix-darwin compares homes literally.
+      _github-runner.home = lib.mkForce "/private/var/lib/github-runners";
     };
 
   # When Remote Login is limited to "Only these users", macOS checks the com.apple.access_ssh

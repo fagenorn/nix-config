@@ -72,6 +72,7 @@ in
       recursive = false;
     };
     ".agents/share/artifact-budget-policy.json".source = ./artifact-budget-policy.json;
+    ".agents/share/ship-delivery.md".source = ../../../python/ship-delivery.md;
 
     # The platform manifest: authored data with nothing templated, so this
     # store copy is byte-identical to the repository's (D1).

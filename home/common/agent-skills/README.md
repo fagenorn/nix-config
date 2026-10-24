@@ -120,6 +120,12 @@ Its first line is a title naming the spec file. Each entry names a module, seam 
 
 ### workflow-state build-delivery
 
+Shipping uses the packaged `ship-delivery` recipe compiler rather than composing
+sealed JSON or chaining individual builder results. Its complete API, local
+references, runtime context/payload retention and refusal behavior are documented
+in [`python/README.md` § Ship delivery recipes](../../../python/README.md#ship-delivery-recipes).
+The canonical builder below remains the single owner of every delivery seal.
+
 Delivery objects are built, never hand-composed: `workflow-state build-delivery --repo-root <ledger_repo_root> --kind <kind> --input <absolute-path|->` derives the `delivery-contract/v1` and its initial authorization intent from the `resolve-project` policy at `--repo-root` (the ledger repository root, the only policy it seals; when the input worktree already exists it resolves there too and refuses if any sealed member differs; when the worktree's name is not an issue branch, the contract takes the branch checked out there, so a legacy slugless worktree keeps its recorded path), and seals each stage's scope, the reviewed selection and each sync selection that extends it after a post-review sync of the integration branch, every delivery observation, each authority observation an owner submits and the ship handoff's authorization-chain digest, so no agent composes a digest. `build-delivery` is read-only — no lock or write; it reads the clock only for a `--kind contract` input's `now`, to stamp an omitted one and to skew-check a supplied one. A contract it cannot re-derive is served only when a ledger under `--repo-root` has installed it, and then against that ledger's stored initial intent. That ledger is found through the delivery transactions of the contract's digest (`attempt-delivery/v1:<issue>:<digest>:<n>`, probed for `n` from 1 to the first miss) and never by listing `workflows`, so a ledger not yet bound to schema 10 is not found until its next write or `migrate --apply`; `--kind current-selection` serves the current selection of the contract's reviewed slot from the one ledger that installed it; those are the only times it reads a ledger. `build-delivery` refuses anything else it cannot derive with exit 2 and empty stdout; when `resolve-project` refuses, the one stderr line carries the resolver's error document unchanged.
 
 ### Host admission

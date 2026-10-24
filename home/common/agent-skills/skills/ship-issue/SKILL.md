@@ -292,7 +292,7 @@ The final ship-summary contains only `issue`, `state`, `pr_url`, full `merge_sha
 
 ## Delivery loop
 
-Under lifecycle identity (a validated `ship-handoff/v2`, or `## Remainder mode`'s `delivery_remainder`), every delivery effect from the pre-merge selection gate on runs through this loop, per `DELIVERY-LOOP.md`; ledger-free, Phases 7–8 run as written with no ledger call. The builder is `workflow-state build-delivery --repo-root <ledger_repo_root> --kind <kind> --input -`.
+Under lifecycle identity (a validated `ship-handoff/v2`, or `## Remainder mode`'s `delivery_remainder`), every delivery effect from the pre-merge selection gate on runs through `DELIVERY-LOOP.md`. Its `ship-delivery` compiler constructs and validates checkpoints/summaries from facts and retained tool outputs; never assemble sealed JSON. Ledger-free, Phases 7–8 run as written.
 
 ## Remainder mode
 
