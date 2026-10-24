@@ -28,7 +28,8 @@ EXPECTED_ALLOW = [
     "Bash(git branch -d:*)", "Bash(gh pr merge:*)",
     "Bash(workflow-state:*)", "Bash(~/.agents/bin/workflow-state:*)",
     "Bash(artifact-budget:*)", "Bash(~/.agents/bin/artifact-budget:*)",
-    "Bash(ship-delivery:*)", "Bash(~/.agents/bin/ship-delivery:*)", "Agent",
+    "Bash(ship-delivery:*)", "Bash(~/.agents/bin/ship-delivery:*)",
+    "Bash(orchestrate-control:*)", "Bash(~/.agents/bin/orchestrate-control:*)", "Agent",
 ]
 
 # Stand-in for `gh`. Answers the two lookups the guard makes for any slug and
@@ -342,6 +343,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "| workflow-state checkpoint-delivery --repo-root /r --run-id run --checkpoint-file - "
             "| artifact-budget validate-report --boundary workflow-response --input -\n"
             '{"observed_at":"2026-10-22T00:00:00Z","requested_stage":null}\nJSON',
+            "orchestrate-control step --repo-root /r --input - <<'JSON'\n"
+            '{"session":{},"first_sweep":true,"owners":[],"contracts_due":[],'
+            '"refused_contracts":[]}\nJSON',
         ):
             with self.subTest(command=command.split()[0]):
                 result = self.invoke_command(command)
