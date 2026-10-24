@@ -178,6 +178,18 @@ class ScanFileTest(unittest.TestCase):
         expected = (10 * 3.0 + 20 * 15.0 + 5 * 3.75 + 100 * 0.30) / 1e6
         self.assertAlmostEqual(r["cost"], expected, places=12)
 
+    def test_opus_class_list_price_is_five_and_twenty_five_per_mtok(self):
+        usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000,
+                 "cache_read_input_tokens": 1_000_000,
+                 "cache_creation_input_tokens": 3_000_000,
+                 "cache_creation": {"ephemeral_1h_input_tokens": 1_000_000,
+                                    "ephemeral_5m_input_tokens": 2_000_000}}
+        r = self.scan([assistant("m1", usage=usage, model="claude-opus-5-5")])
+        # $5 in + $25 out + 1M x $10 (1h write, 2x) + 2M x $6.25 (5m write, 1.25x)
+        # + 1M x $0.50 (read, 0.1x); the stale $15/$75 row gives $159.
+        self.assertAlmostEqual(r["cost"], 5.0 + 25.0 + 10.0 + 12.5 + 0.5, places=9)
+        self.assertAlmostEqual(r["cost_by_family"]["opus"], 53.0, places=9)
+
     def test_proceed_nudges_counted_and_bounded(self):
         def user(text, sidechain=False):
             return record({"type": "user", "isSidechain": sidechain,
@@ -592,7 +604,8 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(direct["output"], 120)
         self.assertEqual(direct["cache_create"], 30)
         self.assertEqual(direct["cache_read"], 600)
-        self.assertAlmostEqual(direct["cost"], 0.0113625, places=12)
+        # six Opus-class USAGE_1 calls: (10 x 5 + 20 x 25 + 5 x 6.25 + 100 x 0.50) x 6 / 1e6
+        self.assertAlmostEqual(direct["cost"], 0.0037875, places=12)
         self.assertIn("6 turns", successful_stdout)
         self.assertIn("fresh 60", successful_stdout)
         self.assertIn("cache_create 30", successful_stdout)

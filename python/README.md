@@ -155,3 +155,9 @@ as `~/.agents/share/ship-delivery.md` for agents working in other repositories.
 ## Retained review evidence
 
 The retained review evidence that `derive-review-feasibility-fixtures` derives is committed as five files under `tests/fixtures/retained-review-evidence/` (#235); `replay-retained` replays that directory under the anchor digest held in `tests/retained_evidence_test_support.py`, and an authentic replay exits 2 with `projection_unavailable`, because two of the retained issue-121 boundaries are authenticated refusals rather than measurements.
+
+## agent-costs
+
+`agent-costs` (`just agent-costs`; source entry `python -m agent_tools.agent_costs`) reports agent token spend per issue from the Claude Code transcripts under `~/.claude/projects`, and with `--format json` projects one `agent-cost-record` (Codex rollouts too, with `--strata`). Its dollar figures apply list prices per model family from `PRICING`: comparative telemetry, not billing data.
+
+Issue 421 corrected the Opus-class row from $15 input / $75 output per million tokens to $5 / $25, with cache writes at 2× input for the 1-hour TTL and 1.25× for 5 minutes and reads at 0.1×, so dollar figures from before and after that change are not comparable; token counts and the record's shape (`schema_version` 1) are unchanged. `model_family` prices Opus, Fable and any model it does not recognise with that row, so figures for Opus 5.5 and Fable, whose own list prices differ, are approximate.

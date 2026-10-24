@@ -19,8 +19,7 @@ dominant token bucket, cache reads, measures logical context processing: every
 turn re-reads the session prefix from cache, so cache_read counts the tokens
 the model attended to, priced at the list cache-read rate. The estimated $
 figures apply public list prices per family and exist so runs can be compared
-against each other and against the 35-day baseline; they are not what anyone
-was billed.
+against each other; they are not what anyone was billed.
 
 Beyond the per-issue cost table this also derives (heuristically where noted):
 issue outcome (completed/blocked/abandoned from each root session's final
@@ -47,10 +46,11 @@ from pathlib import Path
 from agent_tools.canonical import telemetry_digest
 
 # List price per million tokens: (input, output, cache_write_1h, cache_write_5m, cache_read).
-# Matches the pricing model the transcript-mining report used, so numbers stay
-# comparable to its 35-day baseline. claude-fable-5 is priced as Opus-class.
+# Cache writes cost 2x input for the 1-hour TTL and 1.25x for 5 minutes; reads 0.1x.
+# The Opus-class row is the Opus 5.x list price (issue 421); model_family also
+# prices Fable and any unrecognised model with it.
 PRICING = {
-    "opus": (15.0, 75.0, 30.0, 18.75, 1.50),
+    "opus": (5.0, 25.0, 10.0, 6.25, 0.50),
     "sonnet": (3.0, 15.0, 6.0, 3.75, 0.30),
     "haiku": (1.0, 5.0, 2.0, 1.25, 0.10),
 }
@@ -126,6 +126,19 @@ def model_family(model):
         return "haiku"
     # opus, fable and anything unrecognised are priced Opus-class.
     return "opus"
+
+
+def cache_write_split(usage):
+    """(1-hour, 5-minute) cache-write tokens of one usage object.
+
+    A usage object that records no TTL breakdown is taken as all 5-minute writes.
+    """
+    split = usage.get("cache_creation") or {}
+    cw_1h = split.get("ephemeral_1h_input_tokens") or 0
+    cw_5m = split.get("ephemeral_5m_input_tokens") or 0
+    if cw_1h + cw_5m == 0:
+        return 0, usage.get("cache_creation_input_tokens") or 0
+    return cw_1h, cw_5m
 
 
 def classify_outcome(final_text):
@@ -349,11 +362,7 @@ def scan_file(path):
             c_out = usage.get("output_tokens") or 0
             c_read = usage.get("cache_read_input_tokens") or 0
             c_create = usage.get("cache_creation_input_tokens") or 0
-            split = usage.get("cache_creation") or {}
-            cw_1h = split.get("ephemeral_1h_input_tokens") or 0
-            cw_5m = split.get("ephemeral_5m_input_tokens") or 0
-            if cw_1h + cw_5m == 0:
-                cw_5m = c_create  # no TTL breakdown recorded; assume 5m
+            cw_1h, cw_5m = cache_write_split(usage)
 
             fresh += f_in
             output += c_out
