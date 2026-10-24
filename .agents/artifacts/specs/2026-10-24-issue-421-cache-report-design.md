@@ -51,8 +51,9 @@ Per D1:
   valid only with `--report cache`, where it defaults to 120,000.
 - `--report cache` is text only. It is a usage error (exit 2, nothing on stdout) with
   `--format json`, `--project`, `--artifacts`, `--strata` other than `claude`, or with
-  only one event bound or an inverted range; `--context-threshold` with the issues report is a usage error too. `--top` caps the rows
-  of each cache table, as it caps the issue table.
+  only one event bound or an inverted range; `--context-threshold` with the issues
+  report is a usage error too. `--top` caps the rows of each cache table, and a table
+  that drops rows says how many, as the issue table does.
 - `--events-since/--events-before` become available with `--report cache` as well as
   with `--format json`; their existing rules hold (given together, RFC3339 with an
   offset, since before before).
@@ -71,11 +72,14 @@ breakdown recorded means 5-minute writes") moves from inline code in `scan_file`
 one `agent_costs` function that both scanners call. `agent_costs.main` parses argv,
 validates the combinations above, and for `--report cache` imports
 `agent_cache_report` inside that branch and hands it the parsed window, threshold,
-row cap, transcript root and executor factory.
+row cap, transcript root and executor factory. The scanner takes one job,
+`(path, is_root)`, plus the window and threshold bound with `functools.partial` so the
+process pool can pickle it; an unreadable transcript yields `None` and is skipped, as
+`scan_file` does.
 
 ### Transcript model
 
-Per D4:
+Per D3 (the window) and D4 (the rest):
 
 - **Transcripts.** `find_sessions` supplies root transcripts (main sessions) and
   subagent transcripts. A transcript's agent type is `main` for a root transcript, the
@@ -94,9 +98,11 @@ Per D4:
   already uses.
 - **Window.** With event bounds, a call counts when its start lies in
   `[since, before)` (`event_in_window`; a call without a parsable timestamp is outside),
-  and files are prefiltered by mtime ≥ since in place of `--days`, since a file last
-  written before the window holds no call inside it. Without bounds, `--days` selects
-  files by mtime and every call in a selected file counts, the issue report's rule.
+  and files are prefiltered by mtime ≥ since (`find_sessions(root, since)`). `--days`
+  is not consulted then: a file last written before `since` holds no counting call,
+  and any narrower mtime cut could only drop files that do. Without bounds, `--days`
+  selects files by mtime and every call in a selected file counts, the issue report's
+  rule.
 
 ### Cache deaths
 
@@ -104,26 +110,34 @@ Per the issue's rule: a call is a **death** when it counts (window above), its
 predecessor in the same transcript has context > 5,000, the idle gap
 `start(call) − end(predecessor)` exceeds TTL − 10 s, and the call's
 `cache_creation_input_tokens` exceed half the predecessor's context. A call without
-timestamps on either side of the gap is never a death.
+timestamps on either side of the gap is never a death. The gap runs from record to
+record, so it includes the dying call's time to its first record; the prototype
+counted identical deaths with 0 s and 10 s of slack, so that borderline does not move
+the counts.
 
-**Cause.** Per D5, a death is classified by the last `user` record between the two
-calls, skipping tool results whose record carries `toolEndsTurn: true` (the
-subagent's own `SubagentHandback`). The kinds form a closed set and print verbatim:
+**Cause.** Per D5, a death is classified from the `user` records between the two
+calls, in two steps. A **tool wait** comes first: when a result of one of the
+predecessor's own tool uses lies between the calls — a result whose record carries
+`toolEndsTurn: true` (the subagent's own `SubagentHandback`) does not count — the
+death is classified by the tool of the last such result. Otherwise the turn ended,
+and the death is classified by the first `user` record after the predecessor that is
+not a tool result (the one that woke the agent). The kinds form a closed set and
+print verbatim:
 
-| Kind | That record |
+| Kind | Deciding record |
 |---|---|
-| `child dispatch` | a tool result for an `Agent` or `Task` tool use |
-| `long foreground command` | a tool result for a `Bash` tool use |
-| `other tool` | a tool result for any other tool use |
-| `hand-back after end of turn` | not a tool result; `origin.kind` is `peer` and `origin.handback` is `true` |
-| `task notification after end of turn` | not a tool result; `origin.kind` is `task-notification` |
-| `message after end of turn` | not a tool result, any other origin (human prompt, parent message, coordinator, none) |
-| `unclassified` | there is no such record |
+| `child dispatch` | tool wait; the tool is `Agent` or `Task` |
+| `long foreground command` | tool wait; the tool is `Bash` |
+| `other tool` | tool wait; any other tool |
+| `hand-back after end of turn` | waker whose `origin.kind` is `peer` and `origin.handback` is `true` |
+| `task notification after end of turn` | waker whose `origin.kind` is `task-notification` |
+| `message after end of turn` | waker with any other origin (human prompt, parent message, coordinator, none) |
+| `unclassified` | no tool wait and no waker |
 
-The tool name comes from the transcript's own `tool_use` block with that id; a
-result whose tool use is not in the transcript is `other tool`. A background tool
-returns its result at once, so a long gap after a tool result is time spent in the
-foreground; a gap with no pending tool is a turn that ended.
+A background tool returns its result at once, so a long gap closed by a tool result
+is time spent in the foreground. The tool wait wins over a waker because a message
+that arrives during a foreground tool is delivered after its result, and the gap
+belongs to the tool.
 
 **Premium.** Per D6, a death's rewrite premium is what the rewrite cost beyond a
 warm-cache read of the same prefix: `r × (w − p_read)`, where
@@ -144,8 +158,9 @@ Per D7, for each counting call the reread above the threshold `T` is
 request, so read tokens beyond position `T` are exactly the reads past the threshold.
 Per agent type the table shows transcripts with a counting call, the summed reread
 above `T` in dollars, and the median, p90 and maximum of each transcript's peak
-context over its counting calls (`percentile`, nearest rank, as the existing report's
-distributions). Rows are ordered by the dollar column, descending.
+context over its counting calls. Every median and p90 in the report is `percentile`
+(nearest rank), as the existing report's distributions are. Rows are ordered by the
+dollar column, descending.
 
 ### Subagent start-up overhead
 
@@ -159,7 +174,8 @@ Per D8, for each subagent transcript whose first call counts:
   `environment`. Its size is the character count of its `rendered` content (the sum of
   `len(content)` over the `rendered` list), what the model is sent. The MCP
   instructions and agent listing arrive after the first call and ride the second
-  request, which is why the cut-off is the second call.
+  request, which is why the cut-off is the second call. An attachment record without
+  a `rendered` list is not measured and enters no median.
 
 Per agent type the table shows subagents counted, the median first write and first
 read, and the median size of each attachment over the transcripts that carried it
@@ -186,7 +202,8 @@ before and after the change are not comparable, which the docs state.
 
 ### Documentation
 
-`python/README.md` gains an `agent-costs` section holding the cache report's contract:
+The module docstring, which is the `--help` text, names the cache report in one
+paragraph. `python/README.md` gains an `agent-costs` section holding the cache report's contract:
 the flags and their combinations, the window rule, the death rule, the cause kinds,
 the premium, reread and start-up definitions, and the pricing note (the change's
 non-comparability; that the Opus-class row also prices Opus 5.5 and Fable, whose own
@@ -221,12 +238,14 @@ records with `rendered` lists, `origin` objects with `handback: true`, sibling
    Opus call; a threshold fixture whose calls sit below, at and above `T` yields only
    the above-threshold reread; a subagent's first call yields its write/read and each
    attachment's character count, with the second-call cut-off excluding a later
-   attachment. Neighbouring cases pin each cause kind, the TTL − 10 s and 5k/50 %
-   boundaries, and the window filter.
+   attachment. Neighbouring cases pin each cause kind (including a tool wait that a
+   hand-back arrives during), the TTL − 10 s and 5k/50 % boundaries, and the window
+   filter.
 2. **The command**, `agent_costs.main` through the existing `run_main` helper over a
-   fixture tree: `--report cache` prints the three tables with the death row and the
-   totals line; the usage errors exit 2 with nothing on stdout (the `StrataCliTest`
-   pattern).
+   fixture tree: `--report cache` prints the three tables with the hand-back death's
+   row (kind and count; the exact premium is pinned at seam 1, since the table prints
+   whole dollars) and the totals line; the usage errors exit 2 with nothing on stdout
+   (the `StrataCliTest` pattern).
 3. **Pricing**, through `scan_file` like `test_cost_uses_model_family_pricing`: an
    Opus call's cost equals the $5/$25 arithmetic, which fails against the $15 row; the
    end-to-end cost assertion moves with it.
@@ -253,7 +272,7 @@ records with `rendered` lists, `origin` objects with `handback: true`, sibling
 | D2 | New module `agent_tools.agent_cache_report` owns scanner, aggregation and rendering and imports `agent_costs`' primitives; `agent_costs.main` imports it inside the `--report cache` branch; the write-split rule becomes one shared function | the-bar: split when the second concern arrives, DRY on knowledge; agent-helpers rule 2 (policy in importable functions); `scan_paths` keeps its D41 call-time default | Growing `agent_costs` past 2.5k lines — a second concern in one file; a top-level mutual import — fragile, and `-m` loads a second copy; moving the primitives to a new module — churns the D41 patch seam and every test reference for no behaviour |
 | D3 | The window reuses `--events-since/--events-before` (together, RFC3339, half-open) and filters calls by start time, prefiltering files by mtime ≥ since in place of `--days`; without bounds `--days` selects files and all their calls count | Existing event-bound flags and `event_in_window`; the-bar token economy (few parameters); the issue report's `whole_selected_file_usage` rule | New `--since/--until` date flags — a second spelling of the same bounds; `--days` as a call-time bound — diverges from the issue report's meaning of the same flag |
 | D4 | Calls are message-id groups with per-field max usage and zero-input-usage groups dropped; TTL by location (root 1 h, subagent 5 min); agent type from the sibling `.meta.json` (`main` for roots, `unknown` when absent); gap = start − predecessor's end | Issue decisions (dedup max per field, 5 min/1 h); real store: 5,437 of 5,442 subagent transcripts carry `.meta.json`, write splits match the location rule, 273 synthetic zero-usage messages | TTL from each call's write split — the issue fixed the rule by location and the data agrees; agent type from the parent's `Agent` tool use — needs a cross-file join the meta file makes unnecessary |
-| D5 | Cause = the last `user` record before the dying call, skipping `toolEndsTurn` results, mapped onto a closed seven-kind set (child dispatch, long foreground command, other tool, hand-back / task notification / message after end of turn, unclassified) | Real store: `stop_reason` is null on most per-block records; hand-backs are `origin.kind: peer` with `handback: true`, background events `origin.kind: task-notification`; the prototype classified every death | Classifying by `stop_reason` — unreliable in transcripts; folding task notifications and parent messages into "hand-back" — the issue names the hand-back case, and the others have different fixes |
+| D5 | Cause = a tool wait first (the last non-turn-ending result of the predecessor's own tool uses, by tool name), else the first non-tool-result `user` record after the predecessor (the waker, by `origin`), on a closed seven-kind set (child dispatch, long foreground command, other tool, hand-back / task notification / message after end of turn, unclassified) | Real store: `stop_reason` is null on most per-block records; hand-backs are `origin.kind: peer` with `handback: true`, background events `origin.kind: task-notification`; a message arriving mid-tool is delivered after the result; the prototype classified every death | Classifying by `stop_reason` — unreliable in transcripts; by the last record alone — a hand-back delivered after a long tool's result would steal the tool's gap; folding task notifications and parent messages into "hand-back" — the issue names the hand-back case, and the others have different fixes |
 | D6 | Premium = `min(cache_creation, predecessor context) × (TTL-weighted write price − read price)` | The issue's "rewrite premium": only the previously cached prefix is a rewrite, and a warm cache would have read it; prototype ≈ $2.4–2.6k against the issue's ≈ $2.5k | Full write price of all creation tokens — counts new content written anyway and the read a warm cache pays too |
 | D7 | Reread above `T` = `max(0, cache_read − T) × read price` per call; peaks per transcript over counting calls, nearest-rank percentiles | The cached prefix precedes new tokens in a request; existing `percentile`; prototype general-purpose $1,965–$2,184 against the issue's $2.2k | `max(0, context − T)` — would price written and fresh tokens as reads |
 | D8 | Start-up attachments = first record of each of six types before the second call, sized in characters of `rendered` content; medians over the transcripts that carried each | Real store: MCP instructions and agent listing land after the first call; `rendered` is what is sent; skill listing median 23,826 chars against the issue's ≈24k | Only attachments before the first call — would drop two of the six the issue names; JSON size of the attachment object — measures metadata, not what the model reads |
