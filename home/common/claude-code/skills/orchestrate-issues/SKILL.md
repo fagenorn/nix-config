@@ -121,7 +121,7 @@ orchestrate-control step --repo-root <ledger_repo_root> --input - <<'EOF'
 EOF
 ```
 
-- `session` is the object `start` printed, unchanged.
+- `session` is `start`'s `session` member, unchanged.
 - `first_sweep` is `true` on the first `step` after `start` in this adapter process, `false` after.
 - `owners` holds this event's observations: one `unavailable` from §2 rule (b) or (d), or the
   `launch_refused` observations of §4. Each rides exactly one call and is cleared after it.
