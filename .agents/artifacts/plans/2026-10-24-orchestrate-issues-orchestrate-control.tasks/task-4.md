@@ -174,13 +174,13 @@ launch-commit … -- -m "test(orchestrate-issues): evals expect orchestrate-cont
 
 - [ ] **Step 5: Run the eval suite once against this tree**
 
-With a clean tree at Step 4's commit (`git status --porcelain` prints nothing), build and run the four cases. Write this script to `<scratch>/i404/evals-run.sh` and run it (timeout 3600 s for the build plus up to 2700 s for eval 7; give the command 7200 s): `bash <scratch>/i404/evals-run.sh <scratch>/i404/logs`.
+With a clean tree at Step 4's commit (`git status --porcelain` prints nothing), build, then run the four cases, as two separate foreground commands, each within the host's 3600 s Bash ceiling (`BASH_MAX_TIMEOUT_MS` in `home/common/claude-code/default.nix`). First run (timeout 3600 s) `just build >"<scratch>/i404/logs/build.log" 2>&1` (create the log directory first; on failure print that log and stop). Then write this script to `<scratch>/i404/evals-run.sh` and run it (timeout 3600 s; eval 7 takes up to 2700 s): `bash <scratch>/i404/evals-run.sh <scratch>/i404/logs`.
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 LOG="${1:?usage: evals-run.sh <log dir>}"; mkdir -p "$LOG"
-if ! just build >"$LOG/build.log" 2>&1; then cat "$LOG/build.log"; exit 1; fi
+test -e ./result
 SETTINGS=$(nix-store --query --requisites ./result | grep -- '-claude-code-settings\.json$')
 test "$(printf '%s\n' "$SETTINGS" | wc -l)" -eq 1
 for id in 1 2 3 7; do
@@ -201,8 +201,8 @@ Create `.agents/artifacts/plans/2026-10-24-orchestrate-issues-orchestrate-contro
 - `Criterion`: the issue's acceptance-criterion line verbatim, without its `- [ ] ` checkbox (`gh issue view 404 --repo fagenorn/nix-config --json body --jq .body`).
 - `Kind`: `code` for `AC1`–`AC4`, `evidence` for `AC5`. `Check or command`: the plan's `## Acceptance map` cell for that row.
 - `AC1`–`AC3`: `Observed` `in final verification`; `Commit`, `Conditions` and `Verdict` `—`.
-- `AC4`: `Observed` holds eval 7's `VERDICT:` line and the four results lines' verdicts; `Commit` the short SHA of Step 4's commit; `Conditions`: `run-eval.sh` in tree mode (`EVAL_TREE` this worktree, `EVAL_SETTINGS` the built settings of that commit, model `sonnet`), and plan-only cases 1–3 print their expected output for reading against a transcript. `Verdict` `—`.
-- `AC5`: `Observed` `not measurable before merge`; `Commit` `—`; `Conditions`: after `just switch` of the merged `main`, the next `/orchestrate-issues` run of ≥ 3 issues on nodocom or this repository, threshold 0 `Write` calls creating `.py`/`.sh` helpers and ≥ 1 `orchestrate-control step` call per control round; pre-merge proxies are eval 1 and Task 3's control-call assertion (D11). `Verdict` `—`.
+- `AC4`: `Observed` holds eval 7's `VERDICT:` line and the four results lines' verdicts; `Commit` the short SHA of Step 4's commit; `Conditions`: `run-eval.sh` in tree mode (`EVAL_TREE` this worktree, `EVAL_SETTINGS` the built settings of that commit, model `sonnet`), and plan-only cases 1–3 are printed, not graded, before merge: `run-eval.sh` prints their prompt and expected output and produces no transcript (per D15). `Verdict` `—`.
+- `AC5`: `Observed` `not measurable before merge`; `Commit` `—`; `Conditions`: after `just switch` of the merged `main`, the next `/orchestrate-issues` run of ≥ 3 issues on nodocom or this repository, threshold 0 `Write` calls creating `.py`/`.sh` helpers and ≥ 1 `orchestrate-control step` call per control round; the pre-merge proxy is Task 3's control-call assertion alone (D11, refined by D15). `Verdict` `—`.
 
 ```bash
 git add home/common/agent-skills/evals/results/results.jsonl \

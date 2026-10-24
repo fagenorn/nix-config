@@ -60,4 +60,13 @@ Task 4 — Evals expect `start` and `step`, and one eval-suite run — `home/com
 - Skill-text pins, kept regions and living documents: per D4, D7, D8; the extra absence pin and the dead key sets: per D14 (appended).
 - Permission surface and the vetted heredoc: per D5; its red test: per D14.
 - Budget: per D9, refined by D13 (appended): the skill task lowers only the gate-reported loose ceiling.
-- Replay world, clock and accounting: per D6, D12, D14. Evals and their one run: per D10, D14. AC5: per D11.
+- Replay world, clock and accounting: per D6, D12, D14. Evals and their one run: per D10, D14. AC5: per D11, refined by D15 (Phase 5).
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, model gpt-6-astra, effort xhigh), isolated read-only mode, no focus; no fallback.
+- Base SHA: 648f833c4d3e1f29279988866c5b0cac623b07a1; reviewed plan commit 869c6114.
+- Findings: 0 blocking, 2 should-fix, discussion only notes. Accepted 2, rejected 0, deferred 0.
+  - PR404-01 (accepted): Task 4 Step 5 runs the build and the eval script as two foreground commands, each within the 3600 s Bash ceiling.
+  - PR404-02 (accepted, narrowed): plan-only evals 1–3 are recorded as printed, not graded, and are no longer an AC5 proxy (D15); running them live was weighed and declined.
+- Discussion: the issue body was unreadable from the reviewer sandbox (acceptance criteria were supplied); the reviewer found no D11 row in the prior #403 design spec that the issue quotes; that citation is left unresolved and does not change this plan.
