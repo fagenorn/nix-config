@@ -49,34 +49,46 @@ ROW_CHECK_EXIT_STATUSES = {"derived": 0, "refused": 1, "unavailable": 2}
 # (CI, a one-off export, another tool), may be narrower: it may not see every
 # authorized owner's org. The guard's forge lookups drop the env tokens, so
 # validation observes GitHub with the keyring credential: the auth the guarded
-# command uses when it sees neither env token (none is set, or the
-# `unset GITHUB_TOKEN && ` prefix removed the only one). A machine with no
-# keyring auth still fails closed at the lookup.
+# command uses when it sees neither env token (none is set, or an accepted
+# scrub prefix in SCRUB_PREFIXES below removed every one that was set). A
+# machine with no keyring auth still fails closed at the lookup.
 GH_ENV_TOKEN_NAMES = ("GITHUB_TOKEN", "GH_TOKEN")
-# A resolved exhaustive credential-name list may yield the concrete command
-# `unset GITHUB_TOKEN && gh ...`. The merge grammar accepts that one literal prefix and
-# nothing looser; the remainder must still match the guarded merge argv in
-# full, so nothing else can ride along.
+# The scrub-prefix spelling a resolved exhaustive credential-name list yields
+# (`unset GITHUB_TOKEN && gh ...`), and the one the ship-issue skill check reads
+# from this single assignment. SCRUB_PREFIXES below includes it.
 UNSET_GITHUB_TOKEN_PREFIX = "unset GITHUB_TOKEN && "
-# The guarded verbs, as raw text and as token sequences. Order matters: the
-# first match at a token wins, and no sequence is a prefix of another.
-GUARDED_LITERALS = (
-    ("gh pr merge", "merge"),
-    ("gh pr create", "pr-create"),
-    ("git branch -d", "branch"),
-    ("git push", "push"),
-    ("gh release create", "release"),
+# Every accepted credential-scrub prefix (issue 400 D1): `unset N && `,
+# `unset N M && `, `env -u N ` and `env -u N -u M `, single spaces, with N and M
+# distinct members of GH_ENV_TOKEN_NAMES. Unsetting any other name could change
+# the repository or config the command sees. Longest first, so a two-name
+# spelling is tried before the one-name spelling it begins with.
+SCRUB_PREFIXES = tuple(sorted(
+    {
+        spelling
+        for names in [(name,) for name in GH_ENV_TOKEN_NAMES] + [
+            (first, second)
+            for first in GH_ENV_TOKEN_NAMES for second in GH_ENV_TOKEN_NAMES
+            if first != second
+        ]
+        for spelling in (
+            "unset " + " ".join(names) + " && ",
+            "env " + " ".join(f"-u {name}" for name in names) + " ",
+        )
+    },
+    key=lambda spelling: (-len(spelling), spelling),
+))
+# The guarded verbs as word sequences: the program, then its subcommand path.
+# Order matters: the first match at a token wins, and no sequence is a prefix
+# of another.
+GUARDED_VERBS = (
+    (("gh", "pr", "merge"), "merge"),
+    (("gh", "pr", "create"), "pr-create"),
+    (("git", "branch", "-d"), "branch"),
+    (("git", "push"), "push"),
+    (("gh", "release", "create"), "release"),
     # `new` is gh's alias of `create`; it routes to the same grammar, which
     # refuses it because the grammar spells `create`.
-    ("gh release new", "release"),
-)
-GUARDED_TOKEN_LITERALS = (
-    (["gh", "pr", "merge"], "merge"),
-    (["gh", "pr", "create"], "pr-create"),
-    (["git", "branch", "-d"], "branch"),
-    (["git", "push"], "push"),
-    (["gh", "release", "create"], "release"),
-    (["gh", "release", "new"], "release"),
+    (("gh", "release", "new"), "release"),
 )
 # The raise label is the user's Instruction Budget raise decision. The refusal
 # is a mistake-catcher for agents, not enforcement (#294).
@@ -99,11 +111,19 @@ COMMAND_KEYWORDS = frozenset({
     "in", "coproc",
 })
 COMMAND_WRAPPERS = frozenset({"command", "builtin", "exec", "env", "sudo"})
-# Programs whose argument is shell source. Arbitrary shell cannot be parsed
-# here, so a guarded verb anywhere in such a segment is refused outright, and
-# so is a detaching word (matched there as raw text, including when the
-# evaluator is named by path, as in `/bin/sh -c`).
+# Programs whose argument is shell source, matched by basename (`/bin/sh -c`).
+# Arbitrary shell cannot be parsed here, so a guarded verb anywhere in such a
+# segment is refused outright, and so is a detaching word (matched there as
+# raw text).
 SHELL_EVALUATORS = frozenset({"eval", "sh", "bash", "zsh", "dash", "ksh"})
+EVALUATOR_REASON = "shell source passed to an evaluator cannot be validated"
+SPLIT_STRING_REASON = "command text handed to env -S cannot be validated"
+NOT_COMMAND_POSITION = (
+    "the verb is not in a command position the guard can validate; quote it "
+    "if you only mean to mention it"
+)
+# Ends every refusal of an invocation form at recognition (issue 400 D6).
+INVOCATION_FORM_HINT = "run git and gh by name, and carry a directory only as git -C <dir>"
 # Words that detach a process from the task that started it (#278). Refused
 # in every repository, before the policy loads.
 DETACHING_WORDS = ("nohup", "setsid", "disown")
@@ -130,6 +150,13 @@ TAG_REF_PREFIX = "refs/tags/"
 SEGMENT_SEPARATORS = frozenset(";&|\n")
 UNSAFE_BRANCH_CHARS = set(";&|<>$`\\\n\r*?[]{}()#~")
 UNSAFE_TEXT_CHARS = frozenset('"$`\\\0\r')
+# Where the guard reads raw text (issue 400 D5, D12, D16) it reads it twice: a
+# word ends at whitespace, a quote or any shell-active character; and, because
+# the shell glues quoted or escaped pieces into one word (`g''it`, `g\it`), with
+# the quotes and backslashes deleted, a word ends at whitespace or any other
+# shell-active character.
+RAW_WORD_BREAKS = frozenset("'\"") | frozenset(UNSAFE_BRANCH_CHARS)
+RAW_GLUE_CHARS = frozenset("'\"\\")
 
 
 class DeadlineExhausted(Exception):
@@ -392,16 +419,28 @@ def tokenize_segment(segment):
 
 
 def command_position_flags(tokens):
-    """Per token: does a simple command start here?"""
+    """(flags, split_string): per token, does a simple command start here; and
+    does an `env` at a command position take `-S`/`--split-string`?
+
+    Keywords, assignments and wrappers keep the position open. A wrapper option
+    that takes an argument (`env -u NAME`, `sudo -u user`, per the wrapper option
+    tables) also consumes the next word, unless the argument is attached
+    (`-uNAME`, `--user=anis`), so the wrapped program is the command word. An
+    operator token ends any pending option argument.
+    """
     flags = [False] * len(tokens)
+    split_string = False
     open_position = True
     wrapper = None
+    pending = 0
     for index, (value, operator) in enumerate(tokens):
         if operator:
-            open_position = True
-            wrapper = None
+            open_position, wrapper, pending = True, None, 0
             continue
         if not open_position:
+            continue
+        if pending:
+            pending -= 1
             continue
         if ASSIGNMENT_PREFIX.match(value) is not None:
             continue
@@ -409,11 +448,64 @@ def command_position_flags(tokens):
             wrapper = value
             continue
         if wrapper is not None and value.startswith("-"):
-            # Options belonging to the wrapper (`env -i`, `sudo -u anis`).
+            kind, attached = wrapper_option(wrapper, value)
+            if kind == "payload":
+                split_string = True
+            if kind is not None and attached is None:
+                pending += 1
             continue
         flags[index] = True
         open_position = False
-    return flags
+    return flags, split_string
+
+
+def program_name(word):
+    """The basename of `word`: `/usr/bin/git` -> `git`."""
+    return word.rsplit("/", 1)[-1]
+
+
+def raw_words(text, glued=False):
+    """The words of raw `text`, split at whitespace and RAW_WORD_BREAKS.
+
+    With `glued`, quotes and backslashes are deleted first, as the shell joins
+    the pieces around them into one word (issue 400 D16).
+
+    A word that env's option table reads as a split-string option with attached
+    command text (`-Sgit`, `--split-string=git`) is followed by that text as a
+    word of its own, since env runs it (issue 400 D12).
+    """
+    words = []
+    current = []
+    for character in text + " ":
+        if glued and character in RAW_GLUE_CHARS:
+            continue
+        if character.isspace() or character in RAW_WORD_BREAKS:
+            if current:
+                words.append("".join(current))
+                current = []
+        else:
+            current.append(character)
+    expanded = []
+    for word in words:
+        expanded.append(word)
+        if word.startswith("-"):
+            kind, attached = wrapper_option("env", word)
+            if kind == "payload" and attached:
+                expanded.append(attached)
+    return expanded
+
+
+def verb_occurs_in_order(words, verb_words):
+    """True when `verb_words` occur in `words` in order, not necessarily
+    adjacent, the program word matched by basename."""
+    position = 0
+    for word in words:
+        candidate = program_name(word) if position == 0 else word
+        if candidate == verb_words[position]:
+            position += 1
+            if position == len(verb_words):
+                return True
+    return False
 
 
 def mentions_raise_label(texts):
@@ -454,30 +546,229 @@ def adds_raise_label(tokens):
     return False
 
 
-def unvalidatable(segment, reason, mentions_label=False):
-    """Every guarded verb mentioned in `segment`, all refused for `reason`.
+def git_directory_problem(directory):
+    """True when a `git -C` directory is not one plain word: empty, or holding
+    whitespace, a quote or a shell-active character (issue 400 D7)."""
+    return not directory or any(
+        character.isspace() or character in "'\"" or character in UNSAFE_BRANCH_CHARS
+        for character in directory
+    )
 
-    When `mentions_label` is set, the raise-label edit is refused too.
+
+def git_invocation(program, words):
+    """(operation, problem, directory) for a guarded git invocation, else None
+    (issue 400 D3).
+
+    `words` follow the `git` word up to the end of its simple command. Leading
+    words that begin with `-` are global options, each `-C` taking the next word
+    as its directory. With no other option and at most one `-C`, the next word is
+    the subcommand; otherwise `push`, or `branch` then `-d`, anywhere among
+    `words` counts, since the walk cannot know which options take a value.
+    `problem` is None for a plain `git` with no global option or one plain
+    `-C <dir>`, else the recognition refusal (D6). `directory` is that `-C` value
+    when `problem` is None, else None.
     """
+    options = []
+    directories = []
+    index = 0
+    while index < len(words) and words[index].startswith("-"):
+        if words[index] == "-C" and index + 1 < len(words):
+            directories.append(words[index + 1])
+            index += 2
+        else:
+            options.append(words[index])
+            index += 1
+    if not options and len(directories) <= 1:
+        candidates = [words[index:index + 2]]
+    else:
+        candidates = [words[position:position + 2] for position in range(len(words))]
+    operation = None
+    for candidate in candidates:
+        if candidate[:1] == ["push"]:
+            operation = "push"
+        elif candidate == ["branch", "-d"]:
+            operation = "branch"
+        if operation is not None:
+            break
+    if operation is None:
+        return None
+    if program != "git":
+        problem = "git named by a path"
+    elif options:
+        problem = f"git global option {options[0]} is not accepted"
+    elif len(directories) > 1:
+        problem = "git -C given more than once"
+    elif directories and git_directory_problem(directories[0]):
+        problem = (
+            "the git -C directory must be one word without whitespace, quotes "
+            "or shell-active characters"
+        )
+    else:
+        return operation, None, (directories[0] if directories else None)
+    return operation, f"{problem}; {INVOCATION_FORM_HINT}", None
+
+
+def gh_invocation(program, words):
+    """(operation, problem, None) for a guarded gh invocation, else None (issue 400 D4).
+
+    Guarded when `words` begin with a guarded path (`pr merge`, `pr create`,
+    `release create`, `release new`), or when a flag word comes before an
+    occurrence of the path's second word that follows its first. Flags after
+    the path never matter. A gh named by a path is refused (D6); a flag between
+    the path words is left to the verb's grammar.
+    """
+    paths = [
+        (list(verb_words[1:]), operation)
+        for verb_words, operation in GUARDED_VERBS
+        if verb_words[0] == "gh"
+    ]
+    found = next((operation for path, operation in paths if words[:2] == path), None)
+    for (first, second), operation in paths:
+        if found is not None:
+            break
+        if first not in words:
+            continue
+        start = words.index(first) + 1
+        if any(
+            words[position] == second
+            and any(word.startswith("-") for word in words[:position])
+            for position in range(start, len(words))
+        ):
+            found = operation
+    if found is None:
+        return None
+    if program != "gh":
+        return found, f"gh named by a path; {INVOCATION_FORM_HINT}", None
+    return found, None, None
+
+
+def guarded_invocation(tokens, index, later=""):
+    """(operation, problem, directory) when the word at `index` starts a guarded
+    git or gh invocation, matched by basename, else None.
+
+    Its words run to the next operator token. `problem` is a recognition refusal
+    or None; the caller still judges the command position. `later` is the raw
+    text of the command's segments after this one. A run that ends at an
+    operator (a substitution, expansion or grouping) before its verb is
+    certain reads on through the rest of this segment and then `later`, in
+    both raw readings, because a separator inside a substitution
+    (`git -C $(pwd | cat) push …`) splits the invocation across segments
+    (issue 400 D15, D17). A git verb is uncertain when the run ends inside the
+    global options or carries an option other than `-C`, whose value the walk
+    cannot bound (`git -c k=$(…) push …`); a gh verb is uncertain when the run
+    carries a flag or ends before a third word (`gh pr --repo $(…) merge …`,
+    issue 400 D18).
+    """
+    value, operator = tokens[index]
+    if operator:
+        return None
+    words = []
+    truncated = False
+    for word, word_is_operator in tokens[index + 1:]:
+        if word_is_operator:
+            truncated = True
+            break
+        words.append(word)
+    name = program_name(value)
+    if name == "git":
+        reader, uncertain = git_invocation, git_verb_uncertain(words)
+    elif name == "gh":
+        reader = gh_invocation
+        uncertain = len(words) < 3 or any(word.startswith("-") for word in words)
+    else:
+        return None
+    found = reader(value, words)
+    if found is None and truncated and uncertain:
+        rest = [word for word, is_operator in tokens[index + 1:] if not is_operator]
+        loose = next(
+            (
+                reading for reading in (
+                    reader(value, ["--"] + rest + raw_words(later, glued))
+                    for glued in (False, True)
+                )
+                if reading is not None
+            ),
+            None,
+        )
+        if loose is not None:
+            found = loose[0], (
+                f"the {name} invocation continues past a shell substitution or "
+                f"grouping; {INVOCATION_FORM_HINT}"
+            ), None
+    return found
+
+
+def git_verb_uncertain(words):
+    """True when the leading git global options in `words` leave the subcommand
+    unknown: they run to the end of `words`, or one of them is not `-C`, so
+    the walk cannot know how many words it takes (issue 400 D15, D18)."""
+    index = 0
+    while index < len(words) and words[index].startswith("-"):
+        if words[index] != "-C" or index + 1 == len(words):
+            return True
+        index += 2
+    return index >= len(words)
+
+
+def git_option_operands(tokens, index):
+    """Indices of the `-C` values in the leading global-option run of the word
+    at `index` (issue 400 D15): arguments of git, never programs."""
+    operands = []
+    position = index + 1
+    while (position < len(tokens) and not tokens[position][1]
+           and tokens[position][0].startswith("-")):
+        if (tokens[position][0] == "-C" and position + 1 < len(tokens)
+                and not tokens[position + 1][1]):
+            operands.append(position + 1)
+            position += 2
+        else:
+            position += 1
+    return operands
+
+
+def unvalidatable(segment, reason, mentions_label=False):
+    """Every guarded verb found in `segment`'s raw text, all refused for `reason`.
+
+    A verb is found when its words occur in order in either reading of the
+    text's quotes and backslashes (issue 400 D16), or when its words joined by
+    one space are a substring of the text or of the text with its quotes and
+    backslashes deleted (issue 400 D17, the base `336d9e05` check): a word such
+    as `${CMD:-git` or `-df` has no word equal to the verb's, yet the shell runs
+    the verb. When `mentions_label` is set, the raise-label edit is refused too.
+    """
+    readings = [raw_words(segment), raw_words(segment, glued=True)]
+    texts = [segment, "".join(c for c in segment if c not in RAW_GLUE_CHARS)]
     found = [
-        (operation, segment, reason)
-        for literal, operation in GUARDED_LITERALS
-        if literal in segment
+        (operation, segment, reason, None)
+        for verb_words, operation in GUARDED_VERBS
+        if any(verb_occurs_in_order(words, verb_words) for words in readings)
+        or any(" ".join(verb_words) in text for text in texts)
     ]
     if mentions_label:
-        found.append(("label", segment, reason))
+        found.append(("label", segment, reason, None))
     return found
 
 
 def guarded_operations(command):
-    """(operation, segment, problem) for every guarded verb the shell would run.
+    """(operation, segment, problem, directory) for every guarded verb the shell
+    would run. `directory` is the accepted `git -C` value, else None.
 
     `problem` is None when the segment can be handed to that verb's grammar,
     and a reason when the verb sits where the guard cannot validate it: an
-    unparseable command, shell source passed to `eval`/`sh -c`, or a position
-    that is not a command position (an argument to some other program). Those
-    are refused rather than waved through — the parser and the shell have to
-    agree, and where they cannot the guard fails closed.
+    unparseable command or untokenisable segment, shell source passed to an
+    evaluator (`eval`, `sh -c`, matched by basename), or a position that is not
+    a command position (an argument to some other program). Those are refused
+    rather than waved through — the parser and the shell have to agree, and
+    where they cannot the guard fails closed. A segment in which env takes
+    `-S`/`--split-string` is judged like an evaluator segment, on its whole
+    text, because env appends the remaining words to the split payload.
+
+    Recognition refuses an invocation form before any lookup (issue 400 D6,
+    D15, D18): git or gh named by a path, a git global option other than one
+    `-C`, a repeated `-C` or a `-C` directory that is not one plain word, and a
+    git or gh run that ends at an operator before its verb is certain and so
+    continues past a substitution or grouping, read on through the rest of the
+    command.
 
     The `label` operation is mention-gated: it is considered only when the
     command's tokens mention the raise label, always carries a problem, and is
@@ -495,7 +786,7 @@ def guarded_operations(command):
         )
     found = []
     stream = []
-    for segment in segments:
+    for position, segment in enumerate(segments):
         tokens = tokenize_segment(segment)
         if tokens is None:
             found.extend(unvalidatable(
@@ -508,37 +799,45 @@ def guarded_operations(command):
         # `gh` word in an evaluator segment and its label in the next one.
         stream.extend(tokens)
         stream.append((";", True))
-        flags = command_position_flags(tokens)
+        flags, split_string = command_position_flags(tokens)
         values = [value for value, _ in tokens]
         mentions = mentions_raise_label(values)
-        if any(
-            flag and value in SHELL_EVALUATORS
+        # An env -S or evaluator segment is judged on its whole text, and its
+        # words are still recognised below with that reason as their problem:
+        # a git or gh run in it may continue into a later segment
+        # (`git -C $(sh -c pwd | cat) push …`, issue 400 D15, D19), which the
+        # segment's own raw text never shows.
+        raw_reason = None
+        if split_string:
+            raw_reason = SPLIT_STRING_REASON
+        elif any(
+            flag and program_name(value) in SHELL_EVALUATORS
             for flag, value in zip(flags, values)
         ):
-            found.extend(unvalidatable(
-                segment, "shell source passed to an evaluator cannot be validated",
-                mentions,
-            ))
-            continue
-        for index in range(len(values)):
-            for literal_tokens, operation in GUARDED_TOKEN_LITERALS:
-                if values[index:index + len(literal_tokens)] != literal_tokens:
-                    continue
-                if flags[index]:
-                    found.append((operation, segment, None))
-                else:
-                    found.append((
-                        operation,
-                        segment,
-                        "the verb is not in a command position the guard can "
-                        "validate; quote it if you only mean to mention it",
-                    ))
-                break
+            raw_reason = EVALUATOR_REASON
+        if raw_reason is not None:
+            found.extend(unvalidatable(segment, raw_reason, mentions))
+        operands = set()
+        for index in range(len(tokens)):
+            if index in operands:
+                continue
+            if not tokens[index][1] and program_name(tokens[index][0]) == "git":
+                operands.update(git_option_operands(tokens, index))
+            invocation = guarded_invocation(
+                tokens, index, "\n".join(segments[position + 1:]))
+            if invocation is None:
+                continue
+            operation, problem, directory = invocation
+            if not flags[index]:
+                problem, directory = NOT_COMMAND_POSITION, None
+            if problem is None and raw_reason is not None:
+                problem, directory = raw_reason, None
+            found.append((operation, segment, problem, directory))
     # Judged over every tokenised segment at once: a separator inside a
     # substitution (`gh pr edit $(gh pr view | jq …) --add-label …`) splits
     # the `gh` word from its label, so a per-segment check would miss it.
     if mentions_raise_label([value for value, _ in stream]) and adds_raise_label(stream):
-        found.append(("label", command, RAISE_LABEL_REFUSAL))
+        found.append(("label", command, RAISE_LABEL_REFUSAL, None))
     # A substitution inside a double-quoted word (`x="$(gh pr edit … )"`) runs,
     # but the tokeniser keeps it as one word, so the guard cannot see its `gh`.
     # A word that mentions the label and carries a substitution fails closed.
@@ -550,13 +849,14 @@ def guarded_operations(command):
         found.append((
             "label", command,
             "a command substitution inside a quoted word cannot be validated",
+            None,
         ))
     return found
 
 
 # Wrapper options that consume an argument, so the word holding it is not the
-# wrapped command. Used only by the detaching pass. Short options may be
-# clustered (`env -iu FOO`), and an argument may be attached (`-uanis`,
+# wrapped command. Used by the verb pass and the detaching pass. Short options
+# may be clustered (`env -iu FOO`), and an argument may be attached (`-uanis`,
 # `--user=anis`). An option not listed here is treated as a flag, so the word
 # after it is taken as the command word.
 WRAPPER_SHORT_OPTIONS_WITH_ARGUMENT = {
@@ -636,11 +936,12 @@ def detaching_command_flags(tokens, state=(True, None, (), False),
     its target, a quoted one (`X='>'`) does not. `embedded_targets` picks one
     reading; `detaching_word` scans both and refuses on either.
 
-    Like `command_position_flags`, but it also steps over redirections, attached
-    (`nohup>log`) or not, and over the arguments of wrapper options, so
-    `>log nohup x` and `sudo -u anis nohup x` are seen. An operator token ends
-    any pending option argument. The verb pass keeps `command_position_flags`;
-    this pass has no such fail-closed backstop, hence the extra stepping.
+    Like `command_position_flags`, which also steps over the arguments of
+    wrapper options (`sudo -u anis nohup x`), but it also steps over
+    redirections, attached (`nohup>log`) or not, so `>log nohup x` is seen. An
+    operator token ends any pending option argument. The verb pass keeps
+    `command_position_flags`; this pass has no such fail-closed backstop, hence
+    the extra stepping.
     """
     flags = [False] * len(tokens)
     payloads = []
@@ -757,6 +1058,66 @@ def detaching_word(command):
                 if found is not None:
                     return found
     return None
+
+
+def strip_spelling(text, spelling):
+    """The rest of `text` after a leading `spelling`, or None.
+
+    None also when the rest is empty or begins with whitespace: a doubled space
+    is not the spelling (issue 400 D13).
+    """
+    if not text.startswith(spelling):
+        return None
+    rest = text[len(spelling):]
+    if not rest or rest[0].isspace():
+        return None
+    return rest
+
+
+def strip_scrub_prefix(text):
+    """`text` without its leading credential-scrub prefix, else `text` unchanged."""
+    for prefix in SCRUB_PREFIXES:
+        rest = strip_spelling(text, prefix)
+        if rest is not None:
+            return rest
+    return text
+
+
+def canonical_text(operation, text, directory):
+    """The text `operation`'s grammar judges (issue 400 D13).
+
+    Push and PR creation are judged per segment, with leading whitespace dropped;
+    every verb but branch deletion (D2) then loses an exact scrub prefix; and,
+    with a `git -C` `directory`, a leading `git -C <directory> ` becomes `git `.
+    Text in any other spelling is returned whole, for the grammar to refuse.
+    """
+    if operation in ("push", "pr-create"):
+        text = text.lstrip()
+    if operation != "branch":
+        text = strip_scrub_prefix(text)
+    if directory is not None:
+        rest = strip_spelling(text, f"git -C {directory} ")
+        if rest is not None:
+            text = "git " + rest
+    return text
+
+
+def target_directory(directory, cwd):
+    """The directory a push's repository context is built from (issue 400 D7).
+
+    The `git -C` `directory` joined to the payload `cwd` (an absolute one stands
+    alone; no normalisation, so git resolves it as the shell's `git -C` would),
+    or `cwd` with no `-C`. None when there is none to use: a relative
+    `directory` with no string `cwd`, or no `-C` and no string `cwd`.
+    """
+    base = cwd if isinstance(cwd, str) and cwd else None
+    if directory is None:
+        return base
+    if os.path.isabs(directory):
+        return directory
+    if base is None:
+        return None
+    return os.path.join(base, directory)
 
 
 def detect_repository(git_bin, cwd, timeout):
@@ -947,11 +1308,14 @@ def load_compiled_policy(path):
 
 
 class Context:
-    """Injected dependencies plus the repository facts, resolved once.
+    """Injected dependencies plus one target directory's repository facts,
+    resolved once per directory (issue 400 D8).
 
-    Building a context is the one place the compiled policy is opened and the one
-    place the row check runs, so a command with no push, PR creation, merge or
-    release creation never reads the first or starts the second.
+    `cwd` is that directory: the payload `cwd`, or a push's `git -C` directory
+    (`target_directory`). Building a context is the one place the compiled
+    policy is opened and the one place the row check runs, so a command with no
+    push, PR creation, merge or release creation never reads the first or
+    starts the second.
     """
 
     def __init__(self, args, base, cwd, deadline):
@@ -1403,12 +1767,10 @@ def parse_release_raw(command, repository):
 
 
 def validate_release(command, context):
-    """Release creation is judged on the whole command, like the merge."""
+    """Release creation is judged on the whole canonical command, like the merge."""
     problem = ownership_problem(context)
     if problem is not None:
         return block(f"unsafe release creation: {problem}")
-    if command.startswith(UNSET_GITHUB_TOKEN_PREFIX):
-        command = command[len(UNSET_GITHUB_TOKEN_PREFIX):]
     parts = parse_release_raw(command, context.repository)
     if parts is None:
         return block(
@@ -1433,13 +1795,8 @@ def validate_merge(command, context):
     if problem is not None:
         return block(f"unsafe merge: {problem}")
     repository = context.repository
-    # The one sanctioned prefix is derived from a resolved exhaustive
-    # credential-name list and is `unset GITHUB_TOKEN && gh pr merge ...`.
-    # Strip exactly that
-    # literal and judge the remainder as the whole command, so the merge
-    # still tolerates no other chaining.
-    if command.startswith(UNSET_GITHUB_TOKEN_PREFIX):
-        command = command[len(UNSET_GITHUB_TOKEN_PREFIX):]
+    # `command` is the whole canonical command, its scrub prefix already
+    # stripped, so the merge still tolerates no other chaining.
     merge_parts = parse_merge_raw(command, repository)
     if merge_parts is None:
         return block("unsafe merge: command does not match the guarded merge grammar")
@@ -1679,37 +2036,44 @@ def main():
         args.jq_bin = base.jq_bin
 
     operations = guarded_operations(command)
-    for operation, _segment, problem in operations:
+    for operation, _segment, problem, _directory in operations:
         if operation == "label":
             return block(f"unsafe {OPERATION_LABELS[operation]}: {problem}")
 
-    context = None
-    for operation, segment, problem in operations:
+    # One context per distinct target directory, all under one deadline.
+    contexts = {}
+    for operation, segment, problem, directory in operations:
         if time.monotonic() >= started + INVOCATION_DEADLINE_SECONDS:
             return block(f"unsafe {OPERATION_LABELS[operation]}: {DEADLINE_REFUSAL}")
         if problem is not None:
             return block(f"unsafe {OPERATION_LABELS[operation]}: {problem}")
         try:
+            # Push and PR creation are judged per segment; the other verbs on the
+            # whole command, so they tolerate no chaining.
+            judged = segment if operation in ("push", "pr-create") else command
+            text = canonical_text(operation, judged, directory)
             if operation == "branch":
-                # Branch deletion is judged on the whole command, in every
-                # repository: it needs no forge state and tolerates no chaining.
+                # Branch deletion is judged in every repository: it needs no
+                # forge state.
                 status = validate_branch_delete(
-                    command, args.git_bin, args.child_timeout_seconds
+                    text, args.git_bin, args.child_timeout_seconds
                 )
             else:
+                target = target_directory(directory, payload.get("cwd"))
+                context = contexts.get(target)
                 if context is None:
-                    context = Context(
-                        args, base, payload.get("cwd"),
+                    context = contexts[target] = Context(
+                        args, base, target,
                         started + INVOCATION_DEADLINE_SECONDS,
                     )
                 if operation == "push":
-                    status = validate_push(segment, context)
+                    status = validate_push(text, context)
                 elif operation == "pr-create":
-                    status = validate_pr_create(segment, context)
+                    status = validate_pr_create(text, context)
                 elif operation == "release":
-                    status = validate_release(command, context)
+                    status = validate_release(text, context)
                 else:
-                    status = validate_merge(command, context)
+                    status = validate_merge(text, context)
         except DeadlineExhausted:
             return block(f"unsafe {OPERATION_LABELS[operation]}: {DEADLINE_REFUSAL}")
         if status != 0:

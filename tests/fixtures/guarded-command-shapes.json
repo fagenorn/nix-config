@@ -14,7 +14,8 @@
       "sites": ["SKILL.md"],
       "label": "push",
       "bare": {"exit": 0},
-      "prefixed": {"exit": 0}
+      "prefixed": {"exit": 0},
+      "env_prefixed": {"exit": 0}
     },
     {
       "id": "push.later",
@@ -22,7 +23,8 @@
       "sites": ["REVIEW.md", "POST-SELECTION-SYNC.md"],
       "label": "push",
       "bare": {"exit": 0},
-      "prefixed": {"exit": 0}
+      "prefixed": {"exit": 0},
+      "env_prefixed": {"exit": 0}
     },
     {
       "id": "merge.subject",
@@ -30,7 +32,8 @@
       "sites": ["SKILL.md"],
       "label": "merge",
       "bare": {"exit": 0},
-      "prefixed": {"exit": 0}
+      "prefixed": {"exit": 0},
+      "env_prefixed": {"exit": 0}
     },
     {
       "id": "merge.plain",
@@ -38,7 +41,8 @@
       "sites": [],
       "label": "merge",
       "bare": {"exit": 0},
-      "prefixed": {"exit": 0}
+      "prefixed": {"exit": 0},
+      "env_prefixed": {"exit": 0}
     },
     {
       "id": "branch.local",
@@ -46,7 +50,8 @@
       "sites": ["SKILL.md", "HUMAN-GATE.md"],
       "label": "branch deletion",
       "bare": {"exit": 0},
-      "prefixed": {"exit": 2, "reason": "forbidden raw command character"}
+      "prefixed": {"exit": 2, "reason": "forbidden raw command character"},
+      "env_prefixed": {"exit": 2, "reason": "expected exactly git branch -d <branch>"}
     },
     {
       "id": "branch.remote",
@@ -54,16 +59,13 @@
       "sites": ["SKILL.md", "HUMAN-GATE.md"],
       "label": "push",
       "bare": {"exit": 2, "reason": "expected exactly git push [-u] origin <branch>"},
-      "prefixed": {"exit": 2, "reason": "expected exactly git push [-u] origin <branch>"}
+      "prefixed": {"exit": 2, "reason": "expected exactly git push [-u] origin <branch>"},
+      "env_prefixed": {"exit": 2, "reason": "expected exactly git push [-u] origin <branch>"}
     }
   ],
   "refused_shapes": [
     {"id": "push.redirect-pipe", "form": "push.first", "before": "", "after": " 2>&1 | tail -3",
      "label": "push", "reason": "forbidden raw command character"},
-    {"id": "push.env-wrapper", "form": "push.first", "before": "env -u GITHUB_TOKEN ", "after": "",
-     "label": "push", "reason": "not in a command position"},
-    {"id": "merge.env-wrapper", "form": "merge.subject", "before": "env -u GITHUB_TOKEN ", "after": "",
-     "label": "merge", "reason": "not in a command position"},
     {"id": "merge.after-cd", "form": "merge.subject", "before": "cd /tmp/worktree && ", "after": "",
      "label": "merge", "reason": "does not match the guarded merge grammar"},
     {"id": "merge.then-echo", "form": "merge.plain", "before": "", "after": "; echo exit=$?",
@@ -72,5 +74,35 @@
      "label": "push", "reason": "not in a command position"},
     {"id": "branch.after-cd", "form": "branch.local", "before": "cd /tmp/worktree && ", "after": "",
      "label": "branch deletion", "reason": "forbidden raw command character"}
+  ],
+  "invocation_shapes": [
+    {"id": "push.dir", "template": "git -C <repository-root> push origin <branch>",
+     "label": "push", "verdict": {"exit": 0}},
+    {"id": "push.env-dir", "template": "env -u GITHUB_TOKEN git -C <repository-root> push -u origin <branch>",
+     "label": "push", "verdict": {"exit": 0}},
+    {"id": "branch.dir", "template": "git -C <repository-root> branch -d <branch>",
+     "label": "branch deletion", "verdict": {"exit": 0}},
+    {"id": "push.split-string", "template": "env -S \"git push origin <branch>\"",
+     "label": "push", "verdict": {"exit": 2, "reason": "command text handed to env -S cannot be validated"}},
+    {"id": "push.split-attached", "template": "env -Sgit push origin <branch>",
+     "label": "push", "verdict": {"exit": 2, "reason": "command text handed to env -S cannot be validated"}},
+    {"id": "merge.split-string-long", "template": "env --split-string=\"gh pr merge <pr-num>\"",
+     "label": "merge", "verdict": {"exit": 2, "reason": "command text handed to env -S cannot be validated"}},
+    {"id": "push.evaluator-path", "template": "/bin/sh -c 'git push origin <branch>'",
+     "label": "push", "verdict": {"exit": 2, "reason": "shell source passed to an evaluator cannot be validated"}},
+    {"id": "push.config-option", "template": "git -c core.hooksPath=/dev/null push origin <branch>",
+     "label": "push", "verdict": {"exit": 2, "reason": "git -C <dir>"}},
+    {"id": "push.git-dir", "template": "git --git-dir=<repository-root>/.git push origin <branch>",
+     "label": "push", "verdict": {"exit": 2, "reason": "git -C <dir>"}},
+    {"id": "push.second-dir", "template": "git -C <repository-root> -C <repository-root> push origin <branch>",
+     "label": "push", "verdict": {"exit": 2, "reason": "git -C <dir>"}},
+    {"id": "push.path-git", "template": "/usr/bin/git push origin <branch>",
+     "label": "push", "verdict": {"exit": 2, "reason": "git -C <dir>"}},
+    {"id": "merge.path-gh", "template": "/usr/local/bin/gh pr merge <pr-num> --repo <resolved-repository> --merge --delete-branch",
+     "label": "merge", "verdict": {"exit": 2, "reason": "git -C <dir>"}},
+    {"id": "merge.flag-before-path", "template": "gh --repo <resolved-repository> pr merge <pr-num> --merge --delete-branch",
+     "label": "merge", "verdict": {"exit": 2, "reason": "does not match the guarded merge grammar"}},
+    {"id": "merge.flag-between-path", "template": "gh pr --repo <resolved-repository> merge <pr-num> --merge --delete-branch",
+     "label": "merge", "verdict": {"exit": 2, "reason": "does not match the guarded merge grammar"}}
   ]
 }

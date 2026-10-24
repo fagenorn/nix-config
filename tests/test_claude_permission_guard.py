@@ -474,6 +474,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     DIRECT_ADD_REASON = (
         "only the user applies this label (Instruction Budget raise control)")
     EVALUATOR_REASON = "shell source passed to an evaluator cannot be validated"
+    SPLIT_STRING_REASON = "command text handed to env -S cannot be validated"
     # The existing fail-closed reasons the label rows reuse.
     UNPARSED_REASON = "the command could not be parsed"
     UNTOKENISED_REASON = "the segment could not be tokenised"
@@ -885,7 +886,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     def test_merge_accepts_the_exact_unset_token_prefix(self):
         # A resolved exhaustive credential-name list yields the merge prefix
         # `unset GITHUB_TOKEN && gh pr merge ...` so gh falls back to the
-        # keyring credential; exactly that literal prefix is grammatical.
+        # keyring credential; that prefix is one of the accepted scrub spellings.
         repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
         for command in (
             "unset GITHUB_TOKEN && gh pr merge 1 --repo fagenorn/nix-config "
@@ -1057,7 +1058,6 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         merge = "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch"
         for command in (
             f"unset PATH && {merge}",                               # wrong variable
-            f"unset GITHUB_TOKEN GH_TOKEN && {merge}",              # extra variable
             f"unset GITHUB_TOKEN; {merge}",                         # wrong separator
             f"unset GITHUB_TOKEN &&{merge}",                        # missing space
             f"unset  GITHUB_TOKEN && {merge}",                      # doubled space
@@ -1070,6 +1070,66 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(2, result.returncode, command)
                 self.assertIn("lifecycle guard: unsafe merge:", result.stderr)
+
+    def test_credential_scrub_prefix_forms_and_wrapper_near_misses(self):
+        """Issue 400 AC1, D1, D13: either scrub-prefix spelling reaches every verb's
+        grammar; any other wrapper reaches the grammar too and is refused there."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        push = "git push origin issue-400-topic"
+        merge = "gh pr merge 2342 --repo fagenorn/nix-config --merge --delete-branch"
+        create = ('gh pr create --repo fagenorn/nix-config --base main '
+                  '--head issue-400-topic --title "x" --body "y"')
+        release = ('gh release create v1.2.3 --repo fagenorn/nix-config --verify-tag '
+                   '--title "v1.2.3" --notes-file /tmp/n.md')
+        for command in (
+            f"env -u GITHUB_TOKEN {push}",
+            "unset GH_TOKEN && git push -u origin issue-400-topic",
+            f"env -u GITHUB_TOKEN {merge}",
+            f"env -u GH_TOKEN {merge}",
+            f"env -u GITHUB_TOKEN -u GH_TOKEN {merge}",
+            f"unset GITHUB_TOKEN GH_TOKEN && {merge}",
+            f"unset GH_TOKEN GITHUB_TOKEN && {merge}",
+            f"env -u GH_TOKEN -u GITHUB_TOKEN {push}",
+            f"true && env -u GH_TOKEN {push}",
+            f"env -u GITHUB_TOKEN {create}",
+            f"env -u GITHUB_TOKEN {release}",
+            f"unset GH_TOKEN && {release}",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+        push_grammar = "unsafe push: expected exactly git push [-u] origin <branch>"
+        merge_grammar = "unsafe merge: command does not match the guarded merge grammar"
+        for command, reason in (
+            (f"env -u PATH {push}", push_grammar),
+            (f"env FOO=1 {push}", push_grammar),
+            (f"env -i {push}", push_grammar),
+            (f"env -u GITHUB_TOKEN -i {push}", push_grammar),
+            (f"env --unset=GITHUB_TOKEN {push}", push_grammar),
+            (f"sudo -u x {push}", push_grammar),
+            (f"env -u GITHUB_TOKEN -u GITHUB_TOKEN {push}", push_grammar),   # repeated name
+            (f"env -uGITHUB_TOKEN {push}", push_grammar),                    # attached
+            (f"env -u GITHUB_TOKEN -- {push}", push_grammar),
+            (f"env env -u GITHUB_TOKEN {push}", push_grammar),               # second env
+            (f"env -u GITHUB_TOKEN env {push}", push_grammar),
+            (f"env -u GITHUB_TOKEN  {push}", push_grammar),                  # double space
+            (f"env -u GITHUB_TOKEN {merge}; echo x", merge_grammar),
+            (f"env -u GITHUB_TOKEN -u GITHUB_TOKEN {merge}", merge_grammar),
+            (f"unset GITHUB_TOKEN GITHUB_TOKEN && {merge}", merge_grammar),
+            (f"env  -u GITHUB_TOKEN {merge}", merge_grammar),
+            (f"env -u GITHUB_TOKEN  {merge}", merge_grammar),
+            ("env -u GITHUB_TOKEN git branch -d issue-400-topic",
+             "unsafe branch deletion: expected exactly git branch -d <branch>"),
+            ("unset GITHUB_TOKEN && git branch -d issue-400-topic",
+             "unsafe branch deletion: forbidden raw command character"),
+            # The wrapper's option argument is consumed, so `sh` is the command word.
+            ("sudo -u root sh -c 'git push origin issue-400-topic'",
+             "unsafe push: shell source passed to an evaluator cannot be validated"),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"lifecycle guard: {reason}", result.stderr)
 
     def test_merge_lookups_drop_env_github_tokens(self):
         # Deterministic version of the fake gh's env check: inject both tokens
@@ -1151,6 +1211,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     SHAPES = json.loads((Path(__file__).parent / "fixtures/guarded-command-shapes.json")
                         .read_text(encoding="utf-8"))
     TOKEN_PREFIX = "unset GITHUB_TOKEN && "
+    ENV_TOKEN_PREFIX = "env -u GITHUB_TOKEN "
 
     def shape_command(self, template):
         for placeholder, value in self.SHAPES["values"].items():
@@ -1171,7 +1232,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         forms = {form["id"]: form for form in self.SHAPES["skill_forms"]}
         for form in forms.values():
             command = self.shape_command(form["template"])
-            for variant, text in (("bare", command), ("prefixed", self.TOKEN_PREFIX + command)):
+            for variant, text in (("bare", command), ("prefixed", self.TOKEN_PREFIX + command),
+                                  ("env_prefixed", self.ENV_TOKEN_PREFIX + command)):
                 with self.subTest(form=form["id"], variant=variant):
                     self.assert_shape_verdict(text, repo, form["label"], form[variant])
         for shape in self.SHAPES["refused_shapes"]:
@@ -1180,6 +1242,180 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             with self.subTest(shape=shape["id"]):
                 self.assert_shape_verdict(
                     command, repo, shape["label"], {"exit": 2, "reason": shape["reason"]})
+
+    def test_every_invocation_shape_gets_its_verdict(self):
+        """Issue 400 D10: the guard-only invocation shapes, read from their one home."""
+        slug = self.SHAPES["values"]["<resolved-repository>"]
+        repo = self.make_repo(f"git@github.com:{slug}.git")
+        for shape in self.SHAPES["invocation_shapes"]:
+            command = self.shape_command(shape["template"]).replace(
+                "<repository-root>", str(repo))
+            with self.subTest(shape=shape["id"]):
+                self.assert_shape_verdict(command, repo, shape["label"], shape["verdict"])
+
+    def test_raw_text_sites_match_verb_words_in_order(self):
+        """Issue 400 D5, D12: text the guard cannot tokenise as a command is refused
+        when a verb's words occur in it in order, the first matched by basename."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        for command, label, reason in (
+            ("sh -c 'git -C /tmp/x push origin issue-400-topic'", "push",
+             self.EVALUATOR_REASON),
+            ("eval git\\ push origin issue-400-topic", "push", self.EVALUATOR_REASON),
+            ("bash -c 'gh --repo fagenorn/nix-config pr merge 1'", "merge",
+             self.EVALUATOR_REASON),
+            ('echo "unterminated ; git -C /tmp/x push origin issue-400-topic', "push",
+             self.UNPARSED_REASON),
+            ("env -S git push origin issue-400-topic", "push", self.SPLIT_STRING_REASON),
+            ("env -u FOO -S 'gh release create v1.2.3'", "release creation",
+             self.SPLIT_STRING_REASON),
+            ("sh -c \"g''it push origin issue-400-topic\"", "push", self.EVALUATOR_REASON),
+            ("eval g\\it push origin issue-400-topic", "push", self.EVALUATOR_REASON),
+            ('env -S "gi\\t push origin issue-400-topic"', "push",
+             self.SPLIT_STRING_REASON),
+            # D5 accepts that words in order are enough, adjacent or not.
+            ('sh -c "git log; echo push"', "push", self.EVALUATOR_REASON),
+            # D17: a verb's words as one substring are refused too, as at base
+            # 336d9e05, so an expansion default or a bundled option cannot hide it.
+            ('eval "${CMD:-git push origin main}"', "push", self.EVALUATOR_REASON),
+            ('sh -c "${X:-gh pr merge 1}"', "merge", self.EVALUATOR_REASON),
+            ('sh -c "git branch -df x"', "branch deletion", self.EVALUATOR_REASON),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"lifecycle guard: unsafe {label}: {reason}", result.stderr)
+        for command in ("sh -c 'git log --oneline'", "env -S 'git status'",
+                        "eval 'git fetch origin'"):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_recognition_reads_through_global_options_and_paths(self):
+        """Issue 400 AC3, D3, D4, D6: a guarded verb behind git global options, gh
+        flags or a program path is adjudicated; unguarded invocations still pass."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        spelling = ("the git -C directory must be one word without whitespace, "
+                    "quotes or shell-active characters")
+        hint = "; run git and gh by name, and carry a directory only as git -C <dir>"
+        for command, label, reason in (
+            ("git -C 'two words' push origin issue-400-topic", "push", spelling + hint),
+            ("git -C ~/worktree push origin issue-400-topic", "push", spelling + hint),
+            ("git -C $(pwd) push origin issue-400-topic", "push",
+             "the git invocation continues past a shell substitution or grouping" + hint),
+            # D17: a separator inside the substitution does not end the run.
+            ("git -C $(pwd | cat) push origin issue-400-topic", "push",
+             "the git invocation continues past a shell substitution or grouping" + hint),
+            # D18: a substitution or expansion inside an option's value ends the
+            # run before the verb; the walk cannot bound a non `-C` option's value.
+            ("git -c core.hooksPath=$(printf /dev/null) push origin main", "push",
+             "the git invocation continues past a shell substitution or grouping" + hint),
+            ("git -c k=${X} push origin main", "push",
+             "the git invocation continues past a shell substitution or grouping" + hint),
+            ("git -C /tmp/x -c k=`printf v` branch -d issue-400-topic", "branch deletion",
+             "the git invocation continues past a shell substitution or grouping" + hint),
+            ("gh pr --repo $(printf fagenorn/nix-config) merge 1 --merge", "merge",
+             "the gh invocation continues past a shell substitution or grouping" + hint),
+            ("gh --repo $(printf fagenorn/nix-config) pr merge 1 --merge", "merge",
+             "the gh invocation continues past a shell substitution or grouping" + hint),
+            ("gh -R `printf x` release create v1.2.3", "release creation",
+             "the gh invocation continues past a shell substitution or grouping" + hint),
+            ("gh $(printf pr) merge 1 --merge", "merge",
+             "the gh invocation continues past a shell substitution or grouping" + hint),
+            # D19: an evaluator or env -S segment still recognises a run that
+            # continues into a later segment.
+            ("git -C $(sh -c pwd | cat) push origin main", "push",
+             "the git invocation continues past a shell substitution or grouping" + hint),
+            ("git -c k=$(env -S pwd | cat) push origin main", "push",
+             "the git invocation continues past a shell substitution or grouping" + hint),
+            ("gh pr --repo $(sh -c 'printf x' | cat) merge 1 --merge", "merge",
+             "the gh invocation continues past a shell substitution or grouping" + hint),
+            ("git -C /tmp/x -c a=b push origin issue-400-topic", "push",
+             "git global option -c is not accepted" + hint),
+            ("git --no-pager branch -d issue-400-topic", "branch deletion",
+             "git global option --no-pager is not accepted" + hint),
+            ("/usr/bin/git branch -d issue-400-topic", "branch deletion",
+             "git named by a path" + hint),
+            ("/opt/homebrew/bin/gh release create v1.2.3 --repo fagenorn/nix-config "
+             '--verify-tag --title "t" --notes-file /tmp/n.md', "release creation",
+             "gh named by a path" + hint),
+            ("gh -R fagenorn/nix-config pr create --repo fagenorn/nix-config --base main "
+             '--head t --title "x" --body "y"', "PR creation",
+             "expected exactly gh pr create"),
+            ("xargs git -C /tmp/x push origin issue-400-topic", "push",
+             "the verb is not in a command position"),
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"lifecycle guard: unsafe {label}: {reason}", result.stderr)
+        for command in (
+            "git -C /tmp status --short",
+            "git -C /tmp/x log --grep push",
+            "git --no-pager log --oneline",
+            "git -c core.pager=cat diff",
+            "/usr/bin/git status",
+            "gh pr view 1 --json mergeable",
+            "gh pr list --state merged",
+            "gh -R fagenorn/nix-config pr view 1",
+            # D18 reads on only while the verb is uncertain.
+            "git -C /tmp/x log $(printf HEAD)",
+            "git log --format=$(printf %H) -1",
+            "gh pr view $(printf 1) --json url",
+            "gh -R fagenorn/nix-config pr view $(printf 1)",
+            "git log $(sh -c pwd | cat) -1",
+        ):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=repo)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_git_dash_c_is_judged_against_its_target_repository(self):
+        """Issue 400 AC2, D7, D8: `git -C <dir>` builds the push's repository context
+        from <dir> joined to the payload cwd, one context per distinct directory."""
+        here = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        there = self.make_repo("git@github.com:fagenorn/guard-fixture.git",
+                               default_branch="trunk")
+        foreign = self.make_repo("git@github.com:someoneelse/tool.git")
+        tagged = self.tagged_repo("fagenorn/guard-fixture")
+        # A repository directory whose basename is `git` (issue 400 D15).
+        named = there.parent / "git"
+        named.symlink_to(there)
+        feature = "issue-400-topic"
+        for command, cwd in (
+            (f"git -C {there} push origin {feature}", here),
+            (f"git -C {there} push origin main", here),
+            (f"git -C {here} push origin {feature}", foreign),
+            (f"git -C {there.name} push origin {feature}", there.parent),
+            (f"git -C {there} push origin main; git push origin trunk", here),
+            (f"git -C {tagged} push origin refs/tags/v1.2.3", here),
+            (f"env -u GH_TOKEN git -C {there} push origin {feature}", here),
+            (f"git -C {there.name} branch -d {feature}", None),
+            (f"git -C {named} push origin {feature}", here),
+        ):
+            with self.subTest(command=command, cwd=cwd):
+                result = self.run_guard(command, cwd=cwd)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+        unknown = "unsafe push: repository unknown is outside standing authorization"
+        grammar = "unsafe push: expected exactly git push [-u] origin <branch>"
+        for command, cwd, reason in (
+            (f"git -C {there} push origin trunk", here,
+             "unsafe push: refusing to push the default branch trunk"),
+            (f"git -C {foreign} push origin {feature}", here,
+             "unsafe push: repository someoneelse/tool is outside standing authorization"),
+            (f"git -C {there.name} push origin {feature}", None, unknown),
+            (f"git -C {there}/missing push origin {feature}", here, unknown),
+            (f"git -C {there} push origin main; git push origin main", here,
+             "unsafe push: refusing to push the default branch main"),
+            (f"git push origin trunk; git -C {there} push origin trunk", here,
+             "unsafe push: refusing to push the default branch trunk"),
+            (f"git -C {here} push origin refs/tags/v1.2.3", tagged,
+             "unsafe push: v1.2.3 is not an existing annotated tag"),
+            (f'git -C "{there}" push origin {feature}', here, grammar),
+            (f"git -C {there}  push origin {feature}", here, grammar),
+        ):
+            with self.subTest(command=command, cwd=cwd):
+                result = self.run_guard(command, cwd=cwd)
+                self.assertEqual(2, result.returncode, command)
+                self.assertIn(f"lifecycle guard: {reason}", result.stderr)
 
     def test_tag_push_near_misses_are_refused(self):
         repo = self.tagged_repo("fagenorn/nix-config")
