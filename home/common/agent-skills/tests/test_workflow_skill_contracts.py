@@ -85,12 +85,6 @@ V2_DIRECT_REQUEST_KEYS = {"interface_version", "issue", "attempt_budget_minutes"
     "new_run", "owner_unavailable", "tracker", "worktree", "forge", "delivery_contract",
     "authorization_intents", "authority_observations", "reevaluation_evidence",
     "delivery_observations", "requested_scope", "recovery"}
-V2_CONTROL_REQUEST_KEYS = {"interface_version", "max_parallel",
-    "attempt_budget_minutes", "human_directed", "issues", "tracker", "owners",
-    "worktrees", "forge", "delivery_contracts", "authorization_intents",
-    "authority_observations", "reevaluation_evidence", "delivery_observations",
-    "requested_scopes", "recoveries"}
-V3_CONTROL_REQUEST_KEYS = V2_CONTROL_REQUEST_KEYS | {"host_route"}
 CODEX_ORCHESTRATE = REPO_ROOT / "home/common/codex/skills/orchestrate-issues/SKILL.md"
 CODEX_MODULE = REPO_ROOT / "home/common/codex/default.nix"
 SKILL_TREES = (REPO_ROOT / "home/common/agent-skills/skills",
@@ -201,25 +195,21 @@ CODEX_COLLABORATION_MACHINE_TEXT = {
 }
 
 # Machine-consumed text each orchestrate-issues tree must carry (#291 D6):
-# lifecycle helper argv, the control request's host route, the owner-object
-# projection the delivery wire validates and the observation values the
-# dispatcher sends. No guidance sentence is pinned.
+# lifecycle helper argv, the `orchestrate-control` step input and the
+# ready-report members the adapter reads (#404 D4), and the observation values
+# the dispatcher sends. No guidance sentence is pinned.
 ORCHESTRATE_MACHINE_TEXT = {
     ORCHESTRATE: (
-        "workflow-state host-route --route claude-code", '`host_route: "claude-code"`',
-        "--boundary workflow-response", "workflow_bootstrap", "workflow-state init-run",
-        "workflow-state init-run --repo-root <ledger_repo_root> --issue-set <issues>",
-        "workflow-state control", "workflow-state build-delivery", "--request-file -",
-        "matching_issue_branch | absent | mismatch", "`worktree_fact`",
+        "orchestrate-control start --repo-root <ledger_repo_root>",
+        "orchestrate-control step --repo-root <ledger_repo_root> --input -",
+        "`session`", "`first_sweep`", "`owners`", "`contracts_due`", "`refused_contracts`",
+        "`dispatches`", "`owner_object`", "`resume_pack`", "`contract_refusals`", "`ends_run`",
+        "--boundary workflow-response", "`worktree_fact`",
         "`recorded_worktree_absent`", "`recorded_worktree_mismatch`",
         "workflow-state check-launch --repo-root <ledger_repo_root> --run-id <run-id> "
         "--action-id <action_id>",
-        "workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> "
-        "--action-id <action-id>",
         "launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --sweep",
-        "run_in_background=true",
-        "rename `id` to `action_id`", "`kind` to `launch_kind`", "`kind: owner`",
-        "`interface_version: 2`", "`launch_refused`", "`unavailable`",
+        "run_in_background=true", "`launch_refused`", "`unavailable`",
         "workflow-state owner-liveness --repo-root <ledger_repo_root> --run-id <run-id> "
         "--action-id <action_id> --stall-minutes <stall_minutes> "
         "| artifact-budget validate-report --boundary workflow-response --input -",
@@ -381,12 +371,7 @@ CLAUDE_POLICY_ENTRIES = {
         "bindings.commands", "capabilities.review.plan",
         "capabilities.review.code", "bindings.paths.hints",
     ),
-    "orchestrate-issues/SKILL.md": (
-        "bindings.tracker", "bindings.vcs",
-        "bindings.workflow.orchestration.attempt_budget_minutes",
-        "bindings.workflow.orchestration.max_parallel",
-        "bindings.workflow.orchestration.stall_minutes",
-    ),
+    "orchestrate-issues/SKILL.md": ("bindings.workflow.orchestration.stall_minutes",),
 }
 
 SHARED_POLICY_SUPPORT = {}
@@ -808,7 +793,6 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         self.assertEqual(sorted(callers), [
             "home/common/agent-skills/skills/from-issue/SKILL.md",
             "home/common/agent-skills/skills/ship-issue/SKILL.md",
-            "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
         ])
 
     def test_from_issue_has_no_bindings_or_grounding_reference_file(self):
@@ -908,12 +892,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         for anchor in ("`delivery_contract`", "--kind contract", "`authorization_intents`",
                        "kind: delivery_remainder", "--request-file -"):
             self.assertIn(anchor, normalized(direct))
-        decide = self.section(self.orchestrate, "## 3. Decide", "## 4. Execute control actions")
-        request = json_block(decide)
-        self.assertEqual((set(request), request["interface_version"], request["host_route"]),
-                         (V3_CONTROL_REQUEST_KEYS, 3, "claude-code"))
-        for argv in ("workflow-state build-delivery", "--request-file -"):
-            self.assertIn(argv, normalized(decide))
         self.assertIn('`host_route: "direct"`',
                       normalized(ACQUIRE_DURABLE.read_text(encoding="utf-8")))
 
@@ -1081,8 +1059,15 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         return text[start:end]
 
     def test_dispatcher_calls_no_retired_lifecycle_command(self):
-        for retired in ("workflow-state launch", "workflow-state reconcile"):
-            self.assertNotIn(retired, self.orchestrate)
+        # #404 AC1: every control round goes through orchestrate-control, so the
+        # dispatcher spells no lifecycle call that helper makes, and no request.
+        for retired in ("workflow-state launch", "workflow-state reconcile",
+                        "workflow-state host-route", "workflow-state init-run",
+                        "workflow-state control", "workflow-state build-delivery",
+                        "workflow-state resume-pack", "--request-file",
+                        '"interface_version": 3'):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, self.orchestrate)
 
     def test_dispatcher_passes_immutable_ledger_root_separately_from_worktree(self):
         # The fields of the owner prompt follow its background Agent call.

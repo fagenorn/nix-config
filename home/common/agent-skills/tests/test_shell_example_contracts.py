@@ -60,7 +60,7 @@ COMMAND_VOCABULARY = frozenset({
     "darwin-rebuild", "devenv", "diff", "diff-scope", "docker", "dotnet",
     "echo", "env", "eval", "export", "find", "gh", "git", "glab", "go",
     "grep", "head", "jq", "just", "kubectl", "ls", "make", "mkdir", "mktemp",
-    "mv", "nix", "nixos-rebuild", "node", "npm", "pnpm", "printf", "pytest",
+    "mv", "nix", "nixos-rebuild", "node", "npm", "orchestrate-control", "pnpm", "printf", "pytest",
     "python3", "railway", "resolve-project", "review-package", "review-range", "rg", "rm",
     "sdd-gate", "sdd-workspace", "sed", "sh", "ship-delivery", "sleep", "sops", "sort", "source", "ssh",
     "tail", "tar", "task-brief", "tee", "terraform", "test", "timeout",
@@ -991,6 +991,12 @@ LIFECYCLE_VARIANTS = (
     ("here-string", "<<'EOF'", "<<< text", ("pipe", "heredoc")),
     ("backtick argument", "--run-id <run-id>", "--run-id `cat run-id`", ("pipe", "heredoc")),
 )
+# orchestrate-issues' `step` call: one whole-allowed helper fed by a quoted
+# heredoc (#404 D5).
+ORCHESTRATE_STEP_CALL = """orchestrate-control step --repo-root <ledger_repo_root> --input - <<'EOF'
+{"session": <session>, "first_sweep": <first_sweep>, "owners": <owners>, "contracts_due": <contracts_due>, "refused_contracts": <refused_contracts>}
+EOF"""
+
 # The same call with its delimiter double-quoted: still sanctioned (per D23, D27).
 DQUOTED_CHECKPOINT_CALL = CHECKPOINT_CALL.replace("<<'EOF'", '<<"EOF"')
 
@@ -1014,7 +1020,8 @@ class LifecycleHelperCallTest(unittest.TestCase):
                            ("compiled checkpoint", CHECKPOINT_CALL.replace(
                                "artifact-budget validate-report --boundary ship-checkpoint --input -",
                                "ship-delivery checkpoint --context /runtime/context.json --input -")),
-                           ("double-quoted delimiter", DQUOTED_CHECKPOINT_CALL)):
+                           ("double-quoted delimiter", DQUOTED_CHECKPOINT_CALL),
+                           ("orchestrate step", ORCHESTRATE_STEP_CALL)):
             for region in _regions_for((call,)):
                 with self.subTest(call=name, region=region):
                     document, _ = _appended(self.host, _wrap(region, (call,)))

@@ -240,9 +240,11 @@ let
     # The broad push, PR-create, branch-delete and PR-merge entries are usable only
     # through the lifecycle guard above, which adjudicates every one of them at the
     # command position of a segment. Bare `Agent` remains inert while defaultMode is "auto".
-    # The two lifecycle helpers are allowed whole, bare and by their ~/.agents/bin path:
-    # their only writes are validated ledger transitions under .superpowers/workflows/, and
-    # every lifecycle call is one heredoc-fed command, so each pipeline segment matches a rule.
+    # The lifecycle helpers workflow-state, artifact-budget, ship-delivery and orchestrate-control
+    # are allowed whole, bare and by their ~/.agents/bin path: their only writes are validated
+    # ledger transitions under .superpowers/workflows/ (orchestrate-control's through its
+    # workflow-state children), and every lifecycle call is one heredoc-fed command, so each
+    # pipeline segment matches a rule.
     permissions = {
       defaultMode = "auto";
       allow = [
@@ -269,6 +271,8 @@ let
         "Bash(~/.agents/bin/artifact-budget:*)"
         "Bash(ship-delivery:*)"
         "Bash(~/.agents/bin/ship-delivery:*)"
+        "Bash(orchestrate-control:*)"
+        "Bash(~/.agents/bin/orchestrate-control:*)"
         "Agent"
       ];
       ask = [ ];
