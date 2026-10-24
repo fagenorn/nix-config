@@ -77,5 +77,9 @@ Task 4 — `ship-issue` merges with `--match-head-commit <reviewed HEAD_SHA>` �
 - Problem precedence per D4, read per D16; forbidden characters per D5 (Task 3); the quoting step and the hand-checked compile failure per D17 (Tasks 1, 3).
 - The shape fixture per D12; forms are true per D13 (Tasks 2–4).
 - `ship-issue`'s spellings and side clauses per D11, their byte budget per D15 (Task 4).
+- Interpolated values shown escaped, one stderr line per refusal, per D18 (Task 3).
 
----
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, `gpt-6-astra`, effort `xhigh`), isolated read-only mode, no focus; base `ca3e4423`; no fallback.
+- Accepted 2 (B1 blocking: interpolated values shown escaped, a one-line adversarial row in Task 3, D18; S1 should-fix: the `CI-MERGE.md` clause re-reads `headRefOid` before judging a moved head, Task 4, eight bytes inside D15's headroom), rejected 0, deferred 0.

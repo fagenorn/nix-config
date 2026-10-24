@@ -9,7 +9,7 @@ Spec § Problems the guard names (steps 1–8, slot problems, merge arms), § Sh
 
 **Interfaces:**
 - Consumes: Task 1's `walk_form(elements, words, flags) -> FormWalk`, `Literal`, `Slot`, `CompiledOperation` (`program`, `flags`, `quoted_value_flags`, `whole_text_characters`, `exact_spelling`, `scrub_prefix`, `forms`), `HEAD_COMMIT`, `form_problem(operation, compiled, text)`'s signature; Task 2's `refuse`, `accepted_forms`, `declared_integration`, `BRANCH_VALIDATION_TIMEOUT` and the suite's `refusal_line(result)`, `PREFIX_CLAUSE`, `HEAD_SHA`; base `OPERATION_LABELS`, `UNSAFE_BRANCH_CHARS`, `UNSAFE_TEXT_CHARS`, `REF_NAMESPACE_COMPONENTS`, `SEMVER_TAG`.
-- Produces: `form_problem`'s new body and the helpers `shown_character(character) -> str`, `forbidden_character(text, anywhere) -> str | None`, `doubled_space_before(text, program) -> bool`, `element_spelling(element) -> str`, `structure_problem(compiled, words) -> str | None`; constant `ADVISED_CHARACTERS = frozenset(";&|<>\n")`; the problem texts in Step 3b.
+- Produces: `form_problem`'s new body and the helpers `shown_character(character) -> str`, `shown_value(value) -> str`, `forbidden_character(text, anywhere) -> str | None`, `doubled_space_before(text, program) -> bool`, `element_spelling(element) -> str`, `structure_problem(compiled, words) -> str | None`; constant `ADVISED_CHARACTERS = frozenset(";&|<>\n")`; the problem texts in Step 3b.
 
 **Invariants:**
 - Naming runs only after `match_form` or a slot check has refused, so it changes no verdict, no clause and no state refusal (D4).
@@ -137,7 +137,23 @@ Spec § Problems the guard names (steps 1–8, slot problems, merge arms), § Sh
             with self.subTest(command=command):
                 line = self.refusal_line(self.run_guard(command, cwd=repo))
                 self.assertIn(f"lifecycle guard: unsafe {label}: {problem}; accepted: ", line)
+
+    def test_a_refused_value_with_a_newline_stays_on_one_line(self):
+        """Issue 402 D18: an interpolated value is shown escaped, so a quoted
+        `--head` holding a newline still refuses on exactly one stderr line."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        command = ('gh pr create --repo fagenorn/nix-config --base main '
+                   '--head "a\nb" --title "t" --body "b"')
+        result = self.run_guard(command, cwd=repo)
+        self.assertEqual(result.returncode, 2)
+        lines = result.stderr.splitlines()
+        self.assertEqual(len(lines), 1, result.stderr)
+        self.assertIn("lifecycle guard: unsafe PR creation: head ", lines[0])
+        self.assertIn("a\\nb", lines[0])
+        self.assertIn("; accepted: ", lines[0])
 ```
+
+(The command's `"a\nb"` is a real newline inside the double quotes; the asserted `a\\nb` is its two-character escape. Adapt `returncode`/`stderr` to whatever `run_guard` returns, as the neighbouring tests do.)
 
 2. Existing rows whose problem became specific:
 - `test_release_merge_arm_requires_exactly_integration_into_default`: assert `"may be omitted only when merging dev into main"` instead of `"--delete-branch may be omitted only when merging dev into main"`.
@@ -164,6 +180,12 @@ ADVISED_CHARACTERS = frozenset(";&|<>\n")
 def shown_character(character):
     """`character` as a message shows it: itself, or its escape when it does not print."""
     return character if character.isprintable() else repr(character)[1:-1]
+
+
+def shown_value(value):
+    """`value` as a message shows it: each character through `shown_character`,
+    so a value holding a newline keeps the refusal on one line (D18)."""
+    return "".join(shown_character(character) for character in value)
 
 
 def forbidden_character(text, anywhere):
@@ -283,7 +305,7 @@ def form_problem(operation, compiled, text):
     return "does not match an accepted form"
 ```
 
-**3b. Slot and arm texts.** Every one is a text refusal with Task 2's forms unless marked state; `<v>` is the value.
+**3b. Slot and arm texts.** Every one is a text refusal with Task 2's forms unless marked state; `<v>` is the value. Every value a problem text interpolates from the command or the forge (`<v>`, `<head>`, `<base>`, the `--repo` value) goes through `shown_value`, never raw, so a quoted value carrying a newline or other non-printing character still refuses on one stderr line (D18); `<slug>`, `<integration>` and `<default>` come from the repository context and are shown as they are.
 
 | Where | Problem text |
 |---|---|

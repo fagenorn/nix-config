@@ -67,8 +67,8 @@ Change nothing else in `SKILL.md`.
 2. `home/common/agent-skills/skills/ship-issue/CI-MERGE.md`: in the opening paragraph delete the sentence ` Exit-code handling lives in SKILL.md's Phase 6.` (with its leading space), so it ends `exits non-zero.` (D15). At the end of `## Merge exit code in a worktree`, after the line ending ``meaningless until it disagrees with `gh pr view`.``, add one blank line and exactly:
 
 ```
-Unmerged with `headRefOid` no longer the reviewed `HEAD_SHA`: the head moved;
-take Phase 6's unreviewed-commits stop.
+Unmerged: re-read `headRefOid`; if it is not the reviewed `HEAD_SHA`, the head
+moved; take Phase 6's unreviewed-commits stop.
 ```
 
 3. `home/common/agent-skills/skills/ship-issue/REMAINDER.md`, `## Entry and start points`: replace `Phase 7's gate and fence still bind, and so` with
