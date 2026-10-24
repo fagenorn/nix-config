@@ -138,6 +138,12 @@ class RoutingTest(unittest.TestCase):
     def test_a_foreign_listener_without_the_marker_launches_direct(self):
         self.assert_direct(self.launch(self.foreign_listener()))
 
+    def test_a_redirect_carrying_the_marker_launches_direct(self):
+        # Added at Phase-5 review (S1); the implementer writes the listener: a
+        # ThreadingTCPServer whose GET answers 302 with a Location header and the body
+        # {"service":"cache-proxy","status":"ok"}. Only a 2xx health answer routes.
+        ...
+
     def test_a_caller_set_endpoint_is_left_alone(self):
         environment = self.launch(self.healthy_proxy(), {"ANTHROPIC_BASE_URL": CALLER_URL})
         self.assertEqual(environment.get("ANTHROPIC_BASE_URL"), CALLER_URL)
@@ -204,8 +210,10 @@ route_cache_proxy() {
   if [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ "$ANTHROPIC_BASE_URL" != "$CACHE_PROXY_URL" ]; then
     return 0
   fi
-  if health="$("$CURL" -q --noproxy '*' -fsS --max-time 0.5 "$CACHE_PROXY_URL/_proxy/health" 2>/dev/null)" &&
-    printf '%s' "$health" | "$JQ" -e '.service == "cache-proxy"' >/dev/null 2>&1; then
+  # The status is checked explicitly: `-f` alone would accept a 3xx carrying the marker.
+  if health="$("$CURL" -q --noproxy '*' -sS --max-time 0.5 -w '\n%{http_code}' "$CACHE_PROXY_URL/_proxy/health" 2>/dev/null)" &&
+    case "${health##*$'\n'}" in 2??) true ;; *) false ;; esac &&
+    printf '%s' "${health%$'\n'*}" | "$JQ" -e '.service == "cache-proxy"' >/dev/null 2>&1; then
     export ANTHROPIC_BASE_URL="$CACHE_PROXY_URL"
     # Before Claude Code 2.1.304 a non-first-party base URL turns tool search off.
     [ -n "${ENABLE_TOOL_SEARCH+set}" ] || export ENABLE_TOOL_SEARCH=true
@@ -220,7 +228,7 @@ In `cmd_run`, the early-exec arm becomes `*) route_cache_proxy; exec "$(claude_b
 - [ ] **Step 5: Verify**
 
 Run (timeout 600 s): `env PYTHONPATH="$PWD/python" python3 -m unittest -v tests/test_claude_account_routing.py`
-Expected: PASS, 8 tests (7 on `drop`).
+Expected: PASS, 9 tests (8 on `drop`).
 
 Run (timeout 60 s):
 

@@ -51,12 +51,16 @@ Task 5 — Live evidence: time to first token and the A/B eval — `docs/spikes/
 
 | AC | Kind | Task | Check |
 |----|------|------|-------|
-| AC1 | evidence | Task 1 | `docs/spikes/cache-proxy-spike.md` on mbp with the subscription login (D18): raw usage object of every request; `Fact 1:`, `Fact 2:`, `Fact 4:` lines each `holds` for `Verdict: go` (thresholds per D3, D4, D19); fact 3 is Task 5's TTFT run, appended to the same report (D1, D14). Task 1 fills acceptance row `AC1`; Task 5 adds fact 3 to it |
+| AC1 | evidence | Task 1 | Run `python3 -I <scratch>/i422/harness.py fact1`, `fact2`, `fact4` (each `--out <scratch>/i422/results --account "$ACCOUNT"`), then `harness.py report --out <scratch>/i422/results --doc docs/spikes/cache-proxy-spike.md --meta <scratch>/i422/meta.json`, and check with Task 1 Step 5's script (prints `spike-report-ok`): `docs/spikes/cache-proxy-spike.md` on mbp with the subscription login (D18): raw usage object of every request; `Fact 1:`, `Fact 2:`, `Fact 4:` lines each `holds` for `Verdict: go` (thresholds per D3, D4, D19); fact 3 is Task 5's TTFT run, appended to the same report (D1, D14). Task 1 fills acceptance row `AC1`; Task 5 adds fact 3 to it |
 | AC2 | code | Task 2 | `tests/test_cache_proxy.py` under `just agent-workflow-tests`: `test_sse_events_arrive_byte_identical_and_one_at_a_time`, `test_request_headers_reach_upstream_verbatim_with_only_host_rewritten`, plus the health, 502, mid-stream-reset, reuse and command tests |
 | AC3 | code | Task 3 | `tests/test_claude_account_routing.py` under `just agent-workflow-tests` (health up, closed port, foreign 200, caller-set URL, inherited proxy URL with health down, early exec, unsubstituted copy); `claude-local` never receives the URL by construction (D13), its caller-set case pinned by `test_a_caller_set_endpoint_is_left_alone` |
 | AC4 | code | Task 4 | `just build mbp` passes; targeted `nix eval` of both darwin agents and the anis-desktop unit match Task 4's `jq` assertions; CI `Nix Eval` (`nixosConfigurations.anis-desktop`) green on the PR (D17) |
 | AC5 | evidence | Task 5 | `just evals from-issue 1` with the built wrapper first on `PATH`: `VERDICT: PASS` with the built proxy healthy (proxy log `/v1/messages` lines > 0) and again with it stopped (0 new lines); both runs' `results.jsonl` lines and token totals cited in acceptance row `AC5` (D14, D18) |
 | AC6 | evidence | Task 5 | 10 alternating pairs of identical `claude -p` requests on mbp (D18): proxied median TTFT − direct median TTFT ≤ 100 ms; recorded as fact 3 in the spike report and in acceptance row `AC6` |
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, model gpt-6-astra, effort xhigh), isolated read-only mode, base SHA 7601d3186a03bc2fd363d2c6241ea72925feb835, no focus, no fallback. Findings: B1–B4 blocking, S1–S3 should-fix, D1 and U1 discussion. Accepted and applied: B1 (fact-4 sibling selection excludes the parent), B2 (stage before the first build), B3 (TTFT runs keep raw usage), B4 (AC1 row carries its commands), S1 (explicit 2xx health check + redirect test), S2 (bounded child lifetime, explicit empty-median invalid), S3 (every client write under the client-closed handling + disconnect test), D1 (deadline cutoff in Task 5, per D20). U1 (issue body unreadable from the reviewer sandbox) rejected as a sandbox limit, not a plan defect: the ACs were supplied verbatim. Counts: 8 accepted, 1 rejected, 0 deferred.
 
 ## Decisions
 

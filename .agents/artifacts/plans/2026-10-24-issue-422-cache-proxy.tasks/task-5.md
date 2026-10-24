@@ -18,6 +18,8 @@ Spec § Live evidence, per D1, D14 and D18. On mbp, the built (never activated) 
 - Proxied and direct TTFT runs differ only in `ANTHROPIC_BASE_URL` (D18).
 - Every eval result line stays in `results.jsonl`, including failed attempts; nothing is deleted.
 
+**Deadline cutoff (Phase-5 review D1, per the spec's ledger row for it).** The attempt deadline is 2026-10-25T01:42:25Z and shipping (review, CI, merge) needs its last 60 minutes. Before Step 4, Step 5 and Step 6, compute the minutes left until 00:42:25Z (`deadline − 60 min`). Step 4 (TTFT, ~10 min) runs only with at least 15 minutes left; each eval step runs only with at least 50 minutes left; there is no instrument rerun past the cutoff. A step skipped by the cutoff is not run at all: its acceptance row gets Observed `not run: attempt deadline cutoff`, the exact command to run in `Check or command`, and Verdict `human-pending`, and the fact-3 line becomes `Fact 3: human-pending` when Step 4 is skipped. Stop the proxy before reporting either way. A `human-pending` row makes sdd's `acceptance_state` `human_pending`, so ship holds the issue open with `needs-verification` instead of closing it.
+
 - [ ] **Step 1: Confirm the starting state**
 
 Run (timeout 30 s): `grep -qx 'Pending: measured on the shipped proxy by Task 5 (D14).' docs/spikes/cache-proxy-spike.md && grep -q '^| AC6 |.*pending Task 5' .agents/artifacts/plans/2026-10-24-issue-422-cache-proxy.acceptance.md && echo pending`
@@ -62,6 +64,7 @@ import os
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -81,19 +84,27 @@ def run(arm):
         env["ENABLE_TOOL_SEARCH"] = "true"
     if arm == "direct":
         env["ANTHROPIC_BASE_URL"] = "https://api.anthropic.com"
-    before, first = proxy_lines(), None
+    before, first, usage = proxy_lines(), None, None
     start = time.monotonic()
     proc = subprocess.Popen(ARGV, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env, cwd=cwd)
-    for line in proc.stdout:
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if first is None and event.get("type") == "stream_event" \
-                and event.get("event", {}).get("type") == "content_block_delta":
-            first = round((time.monotonic() - start) * 1000)
-    code = proc.wait(timeout=300)
-    return {"arm": arm, "ttft_ms": first, "exit": code, "proxy_lines": proxy_lines() - before}
+    # The whole child lifetime is bounded, a stalled stream included (Phase-5 review S2).
+    watchdog = threading.Timer(300, proc.kill)
+    watchdog.start()
+    try:
+        for line in proc.stdout:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if first is None and event.get("type") == "stream_event" \
+                    and event.get("event", {}).get("type") == "content_block_delta":
+                first = round((time.monotonic() - start) * 1000)
+            if event.get("type") == "result":
+                usage = event.get("usage")  # raw usage fields, kept for AC1 (Phase-5 review B3)
+        code = proc.wait()
+    finally:
+        watchdog.cancel()
+    return {"arm": arm, "ttft_ms": first, "exit": code, "proxy_lines": proxy_lines() - before, "usage": usage}
 
 
 runs = []
@@ -102,11 +113,13 @@ for pair in range(10):
         runs.append(dict(run(arm), pair=pair))
 valid = all(r["exit"] == 0 and r["ttft_ms"] is not None
             and (r["proxy_lines"] >= 1 if r["arm"] == "proxied" else r["proxy_lines"] == 0) for r in runs)
-medians = {arm: statistics.median(r["ttft_ms"] for r in runs if r["arm"] == arm and r["ttft_ms"] is not None)
+samples = {arm: [r["ttft_ms"] for r in runs if r["arm"] == arm and r["ttft_ms"] is not None]
            for arm in ("proxied", "direct")}
-result = {"runs": runs, "valid": valid, "median_ms": medians,
-          "delta_ms": medians["proxied"] - medians["direct"],
-          "holds": valid and medians["proxied"] - medians["direct"] <= 100}
+medians = {arm: (statistics.median(v) if v else None) for arm, v in samples.items()}
+valid = valid and None not in medians.values()  # an empty arm is an explicit invalid result
+delta = medians["proxied"] - medians["direct"] if valid else None
+result = {"runs": runs, "valid": valid, "median_ms": medians, "delta_ms": delta,
+          "holds": valid and delta <= 100}
 out.write_text(json.dumps(result, indent=2) + "\n")
 print(json.dumps({k: result[k] for k in ("valid", "median_ms", "delta_ms", "holds")}))
 ```
@@ -124,7 +137,7 @@ Expected: one JSON line with `"valid": true`. An invalid run (a failed launch, a
 
 - [ ] **Step 7: Record**
 
-In `docs/spikes/cache-proxy-spike.md`, replace the line `Pending: measured on the shipped proxy by Task 5 (D14).` with: the line `Fact 3: holds` or `Fact 3: fails`; the conditions (date, built wrapper and launcher store paths, account, `--model haiku`, `ENABLE_TOOL_SEARCH` as set in both arms, client-side clock from launch to the first `content_block_delta` stream event); a table of the 20 runs (`pair`, `arm`, `ttft_ms`, `exit`, `proxy_lines`); the two medians and the difference against the +100 ms threshold.
+In `docs/spikes/cache-proxy-spike.md`, replace the line `Pending: measured on the shipped proxy by Task 5 (D14).` with: the line `Fact 3: holds` or `Fact 3: fails`; the conditions (date, built wrapper and launcher store paths, account, `--model haiku`, `ENABLE_TOOL_SEARCH` as set in both arms, client-side clock from launch to the first `content_block_delta` stream event); a table of the 20 runs (`pair`, `arm`, `ttft_ms`, `exit`, `proxy_lines`) followed by each run's raw `usage` object (Phase-5 review B3: AC1 requires the raw usage fields of every request); the two medians and the difference against the +100 ms threshold.
 
 In the acceptance record: `AC6` — Observed: both medians and the difference; Commit: `git rev-parse --short HEAD`; Conditions: as above; Verdict `met` iff fact 3 holds, else `not met`. `AC5` — Observed: each arm's `VERDICT`, proxy-log `/v1/messages` lines added (arm A, > 0) and unchanged (arm B), and each results line's `ts` and token totals; Verdict `met` iff both arms print `VERDICT: PASS` and both counts hold. `AC1` — Observed gains `fact 3 recorded (Task 5)`; Verdict `met` when the report carries facts 1–4.
 
@@ -136,15 +149,17 @@ Run (timeout 60 s):
 set -euo pipefail
 f=docs/spikes/cache-proxy-spike.md
 a=.agents/artifacts/plans/2026-10-24-issue-422-cache-proxy.acceptance.md
-grep -Eqx 'Fact 3: (holds|fails)' "$f"
+grep -Eqx 'Fact 3: (holds|fails|human-pending)' "$f"
 if grep -q 'Pending: measured on the shipped proxy' "$f"; then exit 1; fi
 if grep -nE 'sk-ant-|Bearer |oat01' "$f" "$a"; then exit 1; fi
 for row in AC1 AC5 AC6; do
   line=$(grep "^| $row |" "$a")
-  if printf '%s' "$line" | grep -q 'pending'; then exit 1; fi
+  if printf '%s' "$line" | grep -Eq 'pending Task 5|pending fact 3'; then exit 1; fi
 done
 test "$(git diff --numstat 7601d318 -- home/common/agent-skills/evals/results/results.jsonl | cut -f2)" = 0
-test "$(git diff --numstat 7601d318 -- home/common/agent-skills/evals/results/results.jsonl | cut -f1)" -ge 2
+if ! grep '^| AC5 |' "$a" | grep -q 'human-pending'; then
+  test "$(git diff --numstat 7601d318 -- home/common/agent-skills/evals/results/results.jsonl | cut -f1)" -ge 2
+fi
 if curl -q --noproxy '*' -s --max-time 1 http://127.0.0.1:27183/_proxy/health; then exit 1; fi
 echo evidence-recorded
 ```
@@ -158,4 +173,4 @@ git add docs/spikes/cache-proxy-spike.md home/common/agent-skills/evals/results/
 git commit -m "docs(spike): fact 3 and the proxy A/B eval runs (#422)"
 ```
 
-Report DONE with the AC5 and AC6 verdicts; a `not met` verdict is reported as observed, never re-measured until it passes.
+Report DONE with the AC5 and AC6 verdicts (including any `human-pending` from the deadline cutoff); a `not met` verdict is reported as observed, never re-measured until it passes.

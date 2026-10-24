@@ -312,6 +312,14 @@ class ForwardingTest(ProxyCase):
         [record] = log.records(1)
         self.assertEqual(record["outcome"], "upstream_error")
 
+    def test_a_client_that_disconnects_mid_stream_is_logged_client_closed(self):
+        # Added at Phase-5 review (S3); the implementer writes the body: the responder
+        # sends SSE_HEAD and EVENTS[0] as one chunk, then keeps sending one chunk every
+        # 50 ms for at most 3 s while sendall succeeds; the client reads the status and
+        # the first event, then closes its socket. Exactly one log record follows, with
+        # outcome "client_closed" (never overwritten by "upstream_error").
+        ...
+
     def test_a_second_request_on_one_client_connection_reuses_the_upstream_connection(self):
         fake = self.upstream(json_reply)
         port, log = self.proxy(fake.url)
@@ -438,10 +446,10 @@ Constants: `HOST = "127.0.0.1"`, `DEFAULT_UPSTREAM = "https://api.anthropic.com"
 5. Connection: `label = "reused"` when `_upstream_conn` is not `None`, `_reusable`, `_upstream_conn.sock is not None` and `select.select([sock], [], [], 0)[0]` is empty; otherwise close any old one, `label = "new"`, build `HTTPSConnection(host, port, timeout=UPSTREAM_TIMEOUT, context=server.tls)` or `HTTPConnection(host, port, timeout=UPSTREAM_TIMEOUT)` and `connect()`. Set `_reusable = False`.
 6. `putrequest(self.command, self.path, skip_host=True, skip_accept_encoding=True)`, one `putheader` per header, `endheaders(body or None)`, `getresponse()`. Any `OSError`, `http.client.HTTPException` or `ValueError` from step 5 or 6 → close the upstream connection, send `502` with `envelope("api_error", f"upstream request failed: {type(e).__name__}: {e}")`, log `upstream_error` with `error = f"{type(e).__name__}: {e}"`, return. `ttfb_ms` = milliseconds from `started` to `getresponse()` returning.
 7. Response: `bodiless = command == "HEAD" or 100 <= status < 200 or status in (204, 304)`; `sized = bodiless or (not response.chunked and response.length is not None)`; `declared = response.length` when sized and not bodiless. Forwarded headers = `response.getheaders()` minus dropped names, minus `content-length` when not sized. Write `send_response_only(status, response.reason)`, each header via `send_header`, then `Transfer-Encoding: chunked` when not sized, `end_headers()`.
-8. Body: bodiless → `response.read()` (closes it; nothing written). Otherwise loop `chunk = response.read1(READ_SIZE)`: an exception → outcome `upstream_error` (with `error`); `b""` → end; capture up to `ERROR_BODY_LIMIT` bytes when `status >= 400`; write `chunk` (sized) or `b"%x\r\n%s\r\n" % (len(chunk), chunk)` and flush — an `OSError` → outcome `client_closed`; count bytes. After the loop a sized body with `bytes != declared` is `upstream_error` (`error` names both counts). On `complete` and not sized write `b"0\r\n\r\n"`.
+8. Body: bodiless → `response.read()` (closes it; nothing written). Otherwise loop `chunk = response.read1(READ_SIZE)`: an exception → outcome `upstream_error` (with `error`); `b""` → end; capture up to `ERROR_BODY_LIMIT` bytes when `status >= 400`; write `chunk` (sized) or `b"%x\r\n%s\r\n" % (len(chunk), chunk)` and flush — an `OSError` → outcome `client_closed`; count bytes. After the loop a sized body with `bytes != declared` is `upstream_error` (`error` names both counts). On `complete` and not sized write `b"0\r\n\r\n"`. Every write to the client — step 7's status line and headers, each body chunk and the terminating chunk — is under the same `OSError` handling, which sets outcome `client_closed` and still reaches step 9's cleanup and log line; the sized short-body check runs only while the outcome is still `complete`, so it never overwrites `client_closed` (Phase-5 review S3).
 9. `complete` → `_reusable = True`; any other outcome → close the upstream connection and set `close_connection`. Log the line.
 
-A planning dry run of exactly this algorithm passed all 11 tests on darwin.
+A planning dry run of this algorithm (before the S3 refinement) passed the original 11 tests on darwin.
 
 - `main`: `build_parser()` is `argparse.ArgumentParser(prog="cache-proxy", description=<docstring's first line>)` with `--port` (`type=port_number`, required) and `--upstream` (`type=parse_upstream`, default `DEFAULT_UPSTREAM`). `log = LineLog(sys.stderr)`. A bind `OSError` → `log.write("bind_failed", host=HOST, port=args.port, error="<Class>: <message>")`, return 1. Otherwise `with server:` write `listening` (`host`, `port` from `server_address`, `upstream=args.upstream.url`) and `serve_forever()`, treating `KeyboardInterrupt` as a clean stop; return 0. `if __name__ == "__main__": sys.exit(main())`.
 
@@ -458,9 +466,9 @@ Add `"cache-proxy"` to `commands` in `lib/agent-tools.nix` and the test file to 
 - [ ] **Step 5: Verify**
 
 Run (timeout 600 s): `env PYTHONPATH="$PWD/python" python3 -m unittest -v tests/test_cache_proxy.py`
-Expected: PASS, 11 tests.
+Expected: PASS, 12 tests.
 
-Run (timeout 3600 s): `just build`, then (timeout 60 s):
+First stage the new files — a Git-backed flake build omits untracked files, and `lib/agent-tools.nix` asserts every command row has a discoverable module (Phase-5 review B2): `git add python/agent_tools/cache_proxy.py tests/test_cache_proxy.py lib/agent-tools.nix justfile python/README.md`. Then run (timeout 3600 s): `just build`, then (timeout 60 s):
 
 ```bash
 set -euo pipefail
