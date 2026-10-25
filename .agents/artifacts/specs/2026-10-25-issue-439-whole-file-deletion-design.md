@@ -65,9 +65,9 @@ still `decompose_required`.
 - The record's operation comes from the record policy's `--name-status -z` view,
   read once per range and aligned record-for-record with the `--name-only` paths
   the generator already zips with the diff chunks. The operation set is closed
-  (`A`, `M`, `D`, `T`, `R100`). An unknown operation, or a status path that
-  differs from the name-only path at the same position, fails generation loudly
-  (per D1).
+  (`A`, `M`, `D`, `T`, `R100`). An unknown operation, or a status destination
+  path (the new path of an `R100`) that differs from the name-only path at the
+  same position, fails generation loudly (per D1).
 - Only status `D` qualifies. The base side is read from the base tree; the head
   side is `null` because of that status, and the deletion builder never probes
   the head tree for the path.
@@ -109,7 +109,8 @@ it is an honest exit 3 (per D11).
   - `head` must be `null`, and `base` must be non-null.
   - `base` has exactly the keys `{blob_sha, bytes, content_sha256, line_count}`.
   - `blob_sha` is 40 lowercase hex characters and `content_sha256` is 64.
-  - `bytes` and `line_count` are integers of at least 1 (`bool` is rejected).
+  - `bytes` and `line_count` are non-negative integers (`bool` is rejected),
+    the same metric rule as an EF side.
 - The blob-identity checks (`blob_sha`, `bytes`, `content_sha256`) are one
   helper, shared with the EF side validator.
 - The manifest versions, coverage rules and `validate-report` are unchanged:
@@ -134,7 +135,8 @@ generator test asserts 2 and the validator test covers v3 as AC3 states (per D7)
     and that no surviving file references the deleted path. Missing
     corroboration is a finding, and generated evidence is never a waiver to
     approve.
-- Each prompt keeps its own register and stays as compact as the rules allow.
+- The rule content is the same in all four; each prompt words it in its own
+  existing register, as compactly as the rules allow.
 - `final-review.md` and ship-issue's `REVIEW.md` do not change (per D8).
 
 ### Instruction budget
@@ -192,8 +194,8 @@ All tests drive the source commands (agent-helpers rule 5).
    `test_generated_evidence_manifest_is_strict_and_within_budget`. A v3
    manifest with one `whole-file-deletion` entry is accepted (AC3). Each
    mutation exits 2 with empty stdout: non-null head, null base, an EF-shaped
-   base, missing `line_count`, boolean `line_count`, zero `bytes`, a bad
-   digest, a bad blob sha, and an unknown kind.
+   base, missing `line_count`, boolean `line_count`, a bad digest and a bad
+   blob sha. The existing unknown-kind mutation already covers the closed set.
 5. **Skill machine text**, in `test_workflow_skill_contracts.py`.
    `SDD_MACHINE_TEXT` gains both kind literals for the four reviewer prompts
    (AC4, per D10).
@@ -233,7 +235,7 @@ not change.
 | D3 | Every regular-blob deletion qualifies, binary included; the evidence is content-agnostic | Probe: a 60 KB binary deletion is an 81,689 B base85 record (exit 3 today) that no reviewer can read | Text-only exemption (needs a binary heuristic, keeps an unreviewable record) |
 | D4 | `line_count` = LF count + 1 for a non-empty unterminated tail, which equals Git's numstat deletion count for a text blob | Probe: 1,000 LF + tail → numstat 1001; `len(raw.splitlines())` also splits on CR | `len(bytes.splitlines())` (counts lone CR, disagrees with Git) |
 | D5 | EF designer evidence takes precedence over whole-file deletion; first applicable builder, then the existing fit guard, no second fallback | EF evidence carries semantic counts and its own corroboration rule; a deleted designer already gets EF evidence today | Deletion first (drops EF semantics for deleted designers) |
-| D6 | Validator dispatches per kind over a closed set (deletion: head null, base exact `{blob_sha, bytes≥1, content_sha256, line_count≥1}`, blob identity shared with EF); generator self-check generalises only its kind check to a closed set | the-bar defense in depth and fail loud; build_diff already runs the authoritative check; the-bar "Tests that can fail" against redundant guards | Duplicating side-shape checks in the candidate builder (redundant with construction and the check in the same pipeline) |
+| D6 | Validator dispatches per kind over a closed set (deletion: head null, base exact `{blob_sha, bytes, content_sha256, line_count}` with EF's non-negative metric rule, blob identity shared with EF); generator self-check generalises only its kind check to a closed set | the-bar defense in depth and fail loud; build_diff already runs the authoritative check; the-bar "Tests that can fail" against redundant guards | Duplicating side-shape checks in the candidate builder (redundant with construction and the check in the same pipeline) |
 | D7 | Manifest version rule unchanged: a lone oversized deletion yields v2; generator test asserts 2, validator test covers v3 | `_build_candidate` versioning (initial context + evidence = v2) | Forcing v3 to match the issue demo (changes the version contract for no consumer) |
 | D8 | The four sdd reviewer prompts carry the rule; `final-review.md` (its axes use the conformance/correctness prompts) and ship-issue `REVIEW.md` (no package at ship; reuses those prompts) stay unchanged, and so does the reviewer-lite fix-range brief | final-review.md and REVIEW.md delegate; the brief's gap predates this issue and covers EF too | A shared `generated-evidence.md` (profile closure forces a model change and an extra read); a reviewer-lite clause (hot-budget bytes for a rare route) |
 | D9 | Pay the prompt growth with a labelled raise of exactly the breached `implementation-owner` hot ceilings; the PR asks the user for `instruction-budget-raise` and holds | Measured headroom 55 B vs about +130 B; "Only the user applies the instruction-budget-raise label"; established raise-note practice | Cutting unrelated reviewer guidance to fit (out of scope, weakens other rules) |
