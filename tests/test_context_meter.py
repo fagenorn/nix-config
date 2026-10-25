@@ -189,7 +189,8 @@ class ProgressRewriteTest(MeterHarness):
     def test_an_unprovable_removal_leaves_the_command_unchanged_with_a_message(self):
         self.append(self.agent_transcript, assistant_record(87412, message_id="01"))
         for command in ("workflow-state progress --phase 3 --context-tokens $(printf 85000)",
-                        "workflow-state progress --phase 3 --context-tokens=$(printf 85000)"):
+                        "workflow-state progress --phase 3 --context-tokens=$(printf 85000)",
+                        "workflow-state progress --phase 3 --context-tokens=`printf 85000`"):
             with self.subTest(command=command):
                 self.assertEqual(self.run_meter(self.payload(command)), (0, {
                     "systemMessage": "context-meter: left a workflow-state progress call "

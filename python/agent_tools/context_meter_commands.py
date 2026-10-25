@@ -195,17 +195,19 @@ def _is_redirection(token: Token) -> bool:
 
 
 def _glued_to_operator(tokens: Sequence[Token], index: int) -> bool:
-    """Whether deleting word `index` would fuse its text with a following `(` or redirection.
+    """Whether deleting word `index` would fuse its text with a following opener or redirection.
 
     `$(…)` lexes as the word `$` then `(`; deleting the `$` would turn a command
-    substitution into a subshell, and `x<(…)` is a process substitution. A word
-    glued to a closing or separating operator (`5;`, `5)`) loses nothing.
+    substitution into a subshell, deleting `--context-tokens=` before a backtick
+    would leave the substitution standing alone as a new word, and `x<(…)` is a
+    process substitution. A word glued to a closing or separating operator
+    (`5;`, `5)`) loses nothing.
     """
     if index + 1 >= len(tokens):
         return False
     following = tokens[index + 1]
     return (following.kind == "op" and following.start == tokens[index].end
-            and (following.value == "(" or _is_redirection(following)))
+            and (following.value in OPENERS or _is_redirection(following)))
 
 
 def _removals(tokens: Sequence[Token], start: int) -> tuple[set[int], bool]:
