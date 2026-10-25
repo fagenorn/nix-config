@@ -1104,6 +1104,92 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                     result = self.run_check("review-package", root)
                     self.assertEqual((result.returncode, result.stdout), (2, ""))
 
+    def test_whole_file_deletion_evidence_is_strict_in_a_v3_manifest(self):
+        # Issue 439: an oversized whole-file deletion travels as bounded evidence.
+        with tempfile.TemporaryDirectory() as raw:
+            root, _, manifest = self.review_manifest(Path(raw), size=256)
+            manifest["interface_version"] = 3
+            manifest["source_diff_bytes"] = 82_259
+            manifest["total_review_bytes"] = manifest.pop("total_diff_bytes")
+            manifest["stat"] = {"files_changed": 1, "insertions": 0, "deletions": 1_000}
+            manifest["packaging"] = {
+                "context_lines": 7,
+                "shard_strategy": "stable-first-fit-whole-file",
+            }
+            manifest["generated_evidence"] = [{
+                "path": "landing/src/app/app/page.tsx",
+                "kind": "whole-file-deletion",
+                "source_diff_bytes": 82_259,
+                "base": {
+                    "blob_sha": "c" * 40,
+                    "bytes": 80_975,
+                    "content_sha256": "d" * 64,
+                    "line_count": 1_000,
+                },
+                "head": None,
+            }]
+            manifest["coverage"] = {
+                "complete": True,
+                "file_diff_count": 1,
+                "byte_complete_file_count": 0,
+                "generated_evidence_file_count": 1,
+            }
+            root.write_text(json.dumps(manifest), encoding="utf-8")
+            accepted = self.run_check("review-package", root)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            self.assertEqual(json.loads(accepted.stdout)["status"], "within_budget")
+
+            ef_side = {
+                "blob_sha": "c" * 40, "bytes": 80_975, "content_sha256": "d" * 64,
+                "migration_id": "20260826010101_AddWidgets", "product_version": "10.0.10",
+                "entity_types": 12, "properties": 70, "indexes": 5, "foreign_keys": 3,
+                "tables": 12,
+            }
+
+            def entry(m):
+                return m["generated_evidence"][0]
+
+            mutations = {
+                "non-null head": (
+                    lambda m: entry(m).__setitem__("head", dict(entry(m)["base"])),
+                    "invalid whole-file deletion sides"),
+                "null base": (
+                    lambda m: entry(m).__setitem__("base", None),
+                    "invalid whole-file deletion sides"),
+                "EF-shaped base": (
+                    lambda m: entry(m).__setitem__("base", ef_side),
+                    "invalid generated evidence side"),
+                "missing line count": (
+                    lambda m: entry(m)["base"].pop("line_count"),
+                    "invalid generated evidence side"),
+                "boolean line count": (
+                    lambda m: entry(m)["base"].__setitem__("line_count", True),
+                    "invalid generated evidence metric"),
+                "negative line count": (
+                    lambda m: entry(m)["base"].__setitem__("line_count", -1),
+                    "invalid generated evidence metric"),
+                "boolean bytes": (
+                    lambda m: entry(m)["base"].__setitem__("bytes", True),
+                    "invalid generated evidence metric"),
+                "bad digest": (
+                    lambda m: entry(m)["base"].__setitem__("content_sha256", "D" * 64),
+                    "invalid generated evidence digest"),
+                "bad blob sha": (
+                    lambda m: entry(m)["base"].__setitem__("blob_sha", "c" * 39),
+                    "invalid generated evidence blob"),
+                "non-string kind": (
+                    lambda m: entry(m).__setitem__("kind", ["whole-file-deletion"]),
+                    "invalid generated evidence kind"),
+            }
+            for name, (mutate, message) in mutations.items():
+                with self.subTest(name=name):
+                    invalid = deepcopy(manifest)
+                    mutate(invalid)
+                    root.write_text(json.dumps(invalid), encoding="utf-8")
+                    result = self.run_check("review-package", root)
+                    self.assertEqual((result.returncode, result.stdout), (2, ""))
+                    self.assertIn(message, result.stderr)
+
     def test_adaptive_context_manifest_is_strict_and_within_budget(self):
         with tempfile.TemporaryDirectory() as raw:
             root, _, manifest = self.review_manifest(Path(raw), size=256)
