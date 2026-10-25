@@ -49,8 +49,9 @@ in
   # Started at boot as the owner, like oMLX, and kept alive. Only the owner can use the engine:
   # Colima creates the socket 0600, and the tools are on the owner's PATH alone. Docker access is
   # owner-level access to the host, since Colima mounts $HOME writable into the VM.
+  # `command` waits for the Nix volume at boot; see the oMLX daemon.
+  launchd.daemons.colima.command = "${supervise}";
   launchd.daemons.colima.serviceConfig = {
-    ProgramArguments = [ "${supervise}" ];
     UserName = username;
     EnvironmentVariables = {
       HOME = home;
