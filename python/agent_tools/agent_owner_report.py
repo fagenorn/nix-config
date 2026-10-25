@@ -101,6 +101,7 @@ class Launch:
     registered_index: int | None
     transfer: str | None
     chain: int = 0  # which lineage of an eval trial's merge the launch came from
+    boot_whole: bool = True  # every call through the registering call is inside the event window
 
 
 @dataclass
@@ -501,7 +502,8 @@ def _launch(scan, children):
                  for index, call in enumerate(calls) if counted[index])
     registered = owner["registered_index"]
     kept_index = sum(counted[:registered]) if counted[registered] else None
-    return Launch(scan["path"], owner["launch"], kept, kept_index, owner["transfer"])
+    return Launch(scan["path"], owner["launch"], kept, kept_index, owner["transfer"],
+                  boot_whole=all(counted[:registered + 1]))
 
 
 def _phase_reached(calls):
@@ -740,10 +742,18 @@ def boot_slice(launch):
 
 
 def boot_facts(launch):
-    """B, start context, call count and slimmable tokens of a fresh owner's boot."""
-    if not launch.calls or launch.calls[0].is_root or launch.registered_index is None:
+    """B, start context, call count and slimmable tokens of a fresh owner's boot.
+
+    None for a root launch, for a boot the event window cuts (its counted calls would start
+    later than the boot, or at a call with a child out and so hold no boot call at all), and
+    for any boot slice with no call.
+    """
+    if (not launch.calls or launch.calls[0].is_root or launch.registered_index is None
+            or not launch.boot_whole):
         return None
     boot = boot_slice(launch)
+    if not boot:
+        return None
     group = phase_group(launch.calls[launch.registered_index].phase)
     return group, {"b": boot[-1].context, "start": boot[0].context, "calls": len(boot),
                    "slimmable": sum(call.slimmable for call in boot)}

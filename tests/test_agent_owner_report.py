@@ -248,6 +248,33 @@ class OwnerReportTest(unittest.TestCase):
         self.assertAlmostEqual(doc["unattributed"]["dollars"], cost(15_000, 15_000, write_price=8.0),
                                places=9)
 
+    def test_a_boot_the_event_window_cuts_is_left_out_of_the_boots(self):
+        # o1 boots from t = 10, dispatches w1 at t = 20 (out until t = 200) and registers at
+        # t = 120; o2 boots from t = 10 and registers at t = 120 with no child. The window opens
+        # at t = 50, so each boot's first calls are outside it: o1's counted boot would start at
+        # a call with a child out (no call left), o2's at its registering call (start 50k, not 30k).
+        session = Session(self.root)
+        for owner, action in (("o1", "7:1:1"), ("o2", "8:1:1")):
+            dispatch = session.call(None, 0, context=10_000, write=10_000, ttl="1h", agent_tool=True)
+            session.child(owner, tool_use_id=dispatch)
+            session.call(owner, 10, context=30_000, write=30_000)
+            if owner == "o1":
+                work = session.call(owner, 20, context=40_000, write=10_000, agent_tool=True)
+                session.child("w1", tool_use_id=work, parent=owner)
+                session.call("w1", 30, context=20_000, write=20_000)
+                session.call("w1", 200, context=21_000, write=1_000)
+            gate = session.call(owner, 120, context=50_000, write=10_000,
+                                bash=progress(3, action_id=action))
+            session.result(owner, 121, gate, gate_reply("continue", issue=int(action[0])))
+        session.write()
+        for extra in ((), ("--sweep",)):
+            with self.subTest(extra=extra):
+                doc = report(self.root, "--events-since", at(50), "--events-before", at(1_000), *extra)
+                self.assertEqual(doc["boots"], [])
+                self.assertEqual(len(doc["lineages"]), 2)
+                if extra:
+                    self.assertEqual(doc["calibration"]["boots"], [])
+
     def test_an_event_window_counts_only_the_calls_that_start_inside_it(self):
         self.chain(Session(self.root)).write()
         doc = report(self.root, "--events-since", at(90), "--events-before", at(200))
