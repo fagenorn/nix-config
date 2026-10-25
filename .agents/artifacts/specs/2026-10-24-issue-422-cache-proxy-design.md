@@ -158,7 +158,9 @@ tests run it in-process. Nothing runs at import time.
   under HTTP rules (`HEAD`, 1xx, 204, 304) is forwarded without one.
 - **Failures.** If the upstream connect or send fails before any response
   arrives, the client gets `502` with an Anthropic-shaped error body,
-  `{"type":"error","error":{"type":"api_error","message":"cache-proxy: …"}}`.
+  `{"type":"error","error":{"type":"api_error","message":"cache-proxy: …"}}`;
+  for a `HEAD` request the reply ends after its headers, which keep the
+  envelope's `Content-Length` (D28).
   The proxy never retries, because Claude Code owns retries. If the upstream
   fails mid-body, the client connection is closed without the terminating
   chunk, so a truncated stream never presents as complete. If the client hangs
@@ -176,9 +178,13 @@ tests run it in-process. Nothing runs at import time.
 - **Log (D8).** The proxy writes one JSON line per request to stderr. The line
   has `method`, `path`, `status`, `upstream_conn` (`new` or `reused`),
   `ttfb_ms`, `duration_ms`, `bytes` and `outcome` (`complete`, `client_closed`,
-  `upstream_error` or `rejected`). It never contains header values or bodies,
+  `upstream_error` or `rejected`). `bytes` counts the body bytes written to the
+  client, a reply the proxy makes itself included, so a bodiless `HEAD` reply
+  logs 0. It never contains header values or bodies,
   with one exception: when the upstream status is 400 or higher, it includes up
-  to 4 KiB of the error body, which is still forwarded unchanged.
+  to 4 KiB of the error body, which is still forwarded unchanged. An exception
+  no request step expected, such as a client reset on an idle connection, is
+  one `handler_error` line with `error`, never a traceback (D28).
 
 ### Service (D9)
 
@@ -213,7 +219,8 @@ variable that is empty in source and that the build rewrites to
    started under `claude-local`, whose shim URL is such a value.
 3. Otherwise, either because it is unset or because an outer launch set it to
    the proxy URL, the step probes `<url>/_proxy/health`. It runs the build's
-   `curl` with `-q --noproxy '*' -fsS --max-time 0.5`. If the answer is 2xx and
+   `curl` with `-q --noproxy '*' -sS --max-time 0.5` and checks the reported
+   status code itself (D28). If the answer is 2xx and
    its body, checked with the build's `jq`, names `"service":"cache-proxy"`,
    the step exports the proxy URL. Anything else unsets `ANTHROPIC_BASE_URL`,
    so the launch goes direct. That includes a foreign listener on the port. A
@@ -363,3 +370,5 @@ All tests are new unittest files added to `just agent-workflow-tests`.
 | D24 | Refines D20: Task 5's cutoff takes the attempt's `deadline_at` from the controller's context file, not a timestamp in the plan, and a dispatch without one returns NEEDS_CONTEXT before anything runs; attempt 2's is 2026-10-25T13:29:52Z. Its `results.jsonl` gate counts from Task 5's starting commit | D20's 2026-10-25T01:42:25Z was attempt 1's deadline and has passed; sdd receives the attempt's `deadline_at` and passes per-task context through `--context-file`; `origin/main` appended `results.jsonl` lines after the planning base | Pinning attempt 2's timestamp in the plan (stale again on any later attempt); dropping the cutoff (D20's overrun risk stands); counting from `7601d318` (a sync merge from `main` would satisfy the gate with no eval run) |
 | D25 | Refines D18 for Task 5's TTFT runs: the tool-search switch is read from its one whole-line `Tool-search switch:` match whose value is `ship` or `drop` and the script refuses any other value; each run is its own process group, killed whole at the 300 s bound and on exit; each run keeps raw usage per request (`message_start` and `message_delta` usage from the stream) beside the session total, and a run missing either is invalid, so AC1 is `met` only from a valid record | Second standards review (Codex): the report's prose line also begins `Tool-search switch:`, so the prefix match gave the script a two-line value and the arms differed; the wrapper waits on a separate `claude` child (`claude-account` run loop), so killing the wrapper left the stream open; one session total is not "the raw usage fields of each request" (issue AC1) | Editing the report's prose line (a recorded line, D22); `start_new_session` (a new session is more than the bound needs; a process group suffices, and the inherited launch-scope marker keeps custody either way); keeping only the session total (AC1's per-request wording unmet) |
 | D26 | Fact 3's 20 raw-usage lines and their intro sentence move unchanged from the spike report to a sibling, `docs/spikes/cache-proxy-spike-fact3-usage.md`, linked from § Fact 3; no recorded line of Task 1 moves, and the AC1 row points at the sibling. The move touches the record, not the measured surface, so AC1, AC5 and AC6 keep their `d4edc095` evidence | SDD's cumulative delivery gate refused 7601d31..5b402f0 as `decompose_required`: the report grew to 83,987 bytes, over the review-package `member_max_bytes` 65,536, and a whole-file diff cannot split; after the move the report is 58,725 bytes and the sibling 25,878 | Stopping for a split delivery (the ACs share one report); compacting or trimming the recorded usage (AC1 asks for every request's raw fields); moving Task 1's § Request log instead (a recorded section, D22) |
+| D27 | Fact 3's +511.5 ms at `d4edc095` gets no proxy-side latency mechanism: the root-cause measurements show none within the proxy. Locally, on darwin loopback, a 110 kB POST's first SSE event arrives 0.64 ms through the proxy against 0.32 ms direct, and Nagle on the client socket adds at most about 2 ms per event (median 0.40 ms off against 0.34 ms with `TCP_NODELAY`); live, every proxied `/v1/messages` request rides an upstream connection that Claude Code's own `HEAD /api/hello` preconnect already opened (`upstream_conn` `reused` in all 10 proxied runs of both measurements), and proxied TTFT minus the proxy-logged upstream `ttfb_ms` is client time with a median of about 1.3 s in both measurements (0.75–1.8 s), so the arm difference lies in the upstream's time to first byte for the request Claude Code sends behind a non-first-party base URL (344 fewer input-side tokens, 22,329 against 22,673) and in its variance; the wrapper's health probe costs about 25 ms. Fact 3 is re-measured at the fixed proxy and reported as observed | The bar: root causes before mechanisms; the forwarding contract (D6, D8) already relays the preconnect and reuses its connection, so there is no cold-TLS cost to remove | Setting `TCP_NODELAY` on client sockets (measured effect within noise, ≤ 2 ms against a 100 ms threshold); a cross-connection upstream pool (D8 rules it out and the upstream connection is already warm); re-measuring until fact 3 passes |
+| D28 | Refines D16 and the wrapper probe: a reply the proxy makes itself (`502`, `411`, `400`, the health path's answers) writes no body for `HEAD` but keeps the would-be body's `Content-Length`, and its log line's `bytes` is the body bytes actually written (0 for `HEAD` or a vanished client); D16's log events gain `handler_error` (an exception no request step expected, logged with `error`); the spec's probe prose follows the Phase-5 S1 amendment the code carries, `curl -q --noproxy '*' -sS --max-time 0.5 -w '\n%{http_code}'` with an explicit 2xx check in place of `-fsS` | HTTP: a HEAD response ends after its headers, so body bytes on a persistent connection are read as the next response's status line (final review COR-1); the log is the debugger and must count what was sent (COR-2); descriptive prose must match the code | Closing the connection after a failed HEAD (hides the bug and costs the client its connection); logging the envelope's length whether or not it was written |
