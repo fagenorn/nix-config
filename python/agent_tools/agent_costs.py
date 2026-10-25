@@ -18,8 +18,9 @@ Interpretation note — this is comparative telemetry, NOT billing data. The
 dominant token bucket, cache reads, measures logical context processing: every
 turn re-reads the session prefix from cache, so cache_read counts the tokens
 the model attended to, priced at the list cache-read rate. The estimated $
-figures apply public list prices per family and exist so runs can be compared
-against each other; they are not what anyone was billed.
+figures apply public list prices per model ID (agent_tools.model_pricing) and
+exist so runs can be compared against each other; they are not what anyone was
+billed.
 
 Beyond the per-issue cost table this also derives (heuristically where noted):
 issue outcome (completed/blocked/abandoned from each root session's final
@@ -51,17 +52,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_tools.canonical import telemetry_digest
-
-# List price per million tokens: (input, output, cache_write_1h, cache_write_5m, cache_read).
-# Cache writes cost 2x input for the 1-hour TTL and 1.25x for 5 minutes; reads 0.1x.
-# The Opus-class row is the Opus-class list price issue 421 pinned. model_family
-# also prices Opus 5.5, Fable and any unrecognised model with it, so their
-# figures are approximate.
-PRICING = {
-    "opus": (5.0, 25.0, 10.0, 6.25, 0.50),
-    "sonnet": (3.0, 15.0, 6.0, 3.75, 0.30),
-    "haiku": (1.0, 5.0, 2.0, 1.25, 0.10),
-}
+from agent_tools.model_pricing import usage_cost
 
 SCHEMA_VERSION = 1
 RECORD_KIND = "agent-cost-record"
@@ -132,21 +123,8 @@ def model_family(model):
         return "sonnet"
     if "haiku" in m:
         return "haiku"
-    # opus, fable and anything unrecognised are priced Opus-class.
+    # opus, fable and anything unrecognised group under "opus"; pricing is per model.
     return "opus"
-
-
-def cache_write_split(usage):
-    """(1-hour, 5-minute) cache-write tokens of one usage object.
-
-    A usage object that records no TTL breakdown is taken as all 5-minute writes.
-    """
-    split = usage.get("cache_creation") or {}
-    cw_1h = split.get("ephemeral_1h_input_tokens") or 0
-    cw_5m = split.get("ephemeral_5m_input_tokens") or 0
-    if cw_1h + cw_5m == 0:
-        return 0, usage.get("cache_creation_input_tokens") or 0
-    return cw_1h, cw_5m
 
 
 def classify_outcome(final_text):
@@ -370,7 +348,6 @@ def scan_file(path):
             c_out = usage.get("output_tokens") or 0
             c_read = usage.get("cache_read_input_tokens") or 0
             c_create = usage.get("cache_creation_input_tokens") or 0
-            cw_1h, cw_5m = cache_write_split(usage)
 
             fresh += f_in
             output += c_out
@@ -381,10 +358,7 @@ def scan_file(path):
                 peak_ctx = ctx
 
             family = model_family(model)
-            p_in, p_out, p_1h, p_5m, p_read = PRICING[family]
-            message_cost = (
-                f_in * p_in + c_out * p_out + cw_1h * p_1h + cw_5m * p_5m + c_read * p_read
-            ) / 1e6
+            message_cost, _ = usage_cost(model, usage)
             cost += message_cost
             cost_by_family[family] += message_cost
 
