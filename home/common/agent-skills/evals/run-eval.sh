@@ -38,7 +38,8 @@
 #      EVAL_POLICY  a phase-budget spec (the product knobs of agent_tools.phase_budget,
 #                 e.g. threshold=140000) exported to the claude run as AGENT_PHASE_BUDGET
 #                 and recorded as the row's `policy`. Requires EVAL_TREE; an invalid spec
-#                 is refused before any sandbox. Unset or empty: no override, `policy` null.
+#                 is refused before any sandbox. Unset or empty: no override, `policy` null,
+#                 and an AGENT_PHASE_BUDGET inherited from the caller is removed for the run.
 
 set -uo pipefail
 
@@ -442,9 +443,10 @@ run_trial() {
   # `agent-costs` read its transcripts, and Claude Code writes none for a `-p` run started
   # inside a Claude Code session unless CLAUDE_CODE_FORCE_SESSION_PERSISTENCE is set (issue
   # 424); the variable lives only in this subshell, and so does AGENT_PHASE_BUDGET, the
-  # policy under test.
+  # policy under test: set to EVAL_POLICY when that is set, otherwise removed, so a value
+  # inherited from the launching shell never meters a run recorded as `policy: null`.
   ( cd "$REPO" && export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 &&
-    { [ -z "${EVAL_POLICY:-}" ] || export AGENT_PHASE_BUDGET=$EVAL_POLICY; } &&
+    { if [ -n "${EVAL_POLICY:-}" ]; then export AGENT_PHASE_BUDGET=$EVAL_POLICY; else unset AGENT_PHASE_BUDGET; fi; } &&
     exec timeout "$EVAL_TIMEOUT" claude "${claude_args[@]}" ) \
     >"$WORK/result.json" 2>"$WORK/stderr.txt" </dev/null &
   CLAUDE_PID=$!

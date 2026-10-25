@@ -291,6 +291,11 @@ scenario policy
 run_env EVAL_TREE="$TREE" EVAL_SETTINGS="$SETTINGS_FIXTURE" EVAL_POLICY="threshold=140000"
 check "policy: exported to the run" grep -qx 'threshold=140000' "$STATE/agent-phase-budget"
 check "policy: recorded on the row" jq -e 'select(.policy == "threshold=140000")' "$COPY/results/results.jsonl"
+scenario inherited-budget
+run_env EVAL_TREE="$TREE" EVAL_SETTINGS="$SETTINGS_FIXTURE" AGENT_PHASE_BUDGET="threshold=90000"
+check "inherited budget: the run happened" test -e "$STATE/agent-phase-budget"
+check "inherited budget: without EVAL_POLICY the run does not carry it" test ! -s "$STATE/agent-phase-budget"
+check "inherited budget: the row records no policy" jq -e 'select(has("policy") and .policy == null)' "$COPY/results/results.jsonl"
 scenario bad-policy
 run_env EVAL_TREE="$TREE" EVAL_SETTINGS="$SETTINGS_FIXTURE" EVAL_POLICY="boot=slim"
 status=$?

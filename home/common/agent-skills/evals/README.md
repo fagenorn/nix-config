@@ -88,7 +88,8 @@ what this mode measures.
 `agent_tools.phase_budget`; the runner validates it with `phase_budget.parse` before any
 sandbox, so a spec the package rejects dies as `invalid EVAL_POLICY '<value>': <reason>`.
 It is exported as `AGENT_PHASE_BUDGET` to the claude run only, and the row records it as
-`policy`.
+`policy`. The claude run carries `AGENT_PHASE_BUDGET` exactly when `EVAL_POLICY` is set: with
+it unset, an `AGENT_PHASE_BUDGET` inherited from the launching shell is removed.
 
 A row from tree mode records `tree` (the checkout's absolute path), `tree_rev` (its
 `HEAD`), `tree_mode` (`"project-skills"`, the layout above) and `tree_dirty` (whether `git status --porcelain` shows changes under the
