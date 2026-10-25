@@ -1,6 +1,6 @@
 # Task 1: Experiment rig and the AC1 capture
 
-This task covers spec § AC1 capture, § Experiment rig and § TLS interception, per D1, D2, D5, D9 and D10. On mbp it builds the scratch rig that every live task reuses, then captures two direct and two proxied sessions. It commits the evidence report's first three sections and the acceptance record. The deadline never skips it (D11).
+This task covers spec § AC1 capture, § Experiment rig and § TLS interception, per D1, D2, D5, D9, D10, D14 and D16. On mbp it builds the scratch rig that every live task reuses, then captures two direct and two proxied sessions. It commits the evidence report's first three sections and the acceptance record. The deadline never skips it (D11).
 
 **Files:**
 - Create: `docs/spikes/cache-proxy-ttft-gap.md`
@@ -19,6 +19,7 @@ This task covers spec § AC1 capture, § Experiment rig and § TLS interception,
   - `rig/session.sh <out.jsonl> [KEY=VALUE…]`: one session of the timed command line.
   - `mitm/addon.py`, `mitm/reduce.py` and `mitm/ac1-rows.json`.
   - Two report lines: `Missing first-party headers: …` and `Missing first-party headers without a recorded value: …`.
+  - The report's whole line `Claude Code version: <V>` (D14).
   - The acceptance record, with all five rows.
 
 **Invariants:**
@@ -33,9 +34,9 @@ This task covers spec § AC1 capture, § Experiment rig and § TLS interception,
 Run (timeout 60 s): `test ! -e docs/spikes/cache-proxy-ttft-gap.md && for p in 27391 27392; do if lsof -nP -iTCP:$p -sTCP:LISTEN; then exit 1; fi; done && echo clean`
 Expected: `clean`. Then set `ACCOUNT="$(claude-account active)"` and `S=$(launch-scope scratch …)`, and run `mkdir -p "$S/i438/rig" "$S/i438/mitm" "$S/i438/cwd"`.
 
-- [ ] **Step 2: Build and make the rig**
+- [ ] **Step 2: Version gate, build and make the rig**
 
-Run (timeout 3600 s): `just build mbp`. Write `<S>/i438/rig/scrub.txt` with these lines: `ANTHROPIC_BASE_URL`, `ENABLE_TOOL_SEARCH`, `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING`, `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`, `CLAUDE_CODE_DISPATCH_V2D`, `CLAUDE_CODE_GZIP_REQUEST_BODIES`, `CLAUDE_CACHE_PROXY`, `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, `http_proxy`, `ALL_PROXY`, `all_proxy`, `NO_PROXY`, `no_proxy`, `NODE_EXTRA_CA_CERTS`, `ANTHROPIC_LOG`, `ANTHROPIC_CUSTOM_HEADERS`. Then save `<S>/i438/rig/mkrig.sh`:
+Run the plan root's § Version gate items 1–3 (D14). A BLOCKED there ends the task before any capture. Then run (timeout 3600 s): `launch-scope exec … -- just build mbp`. Write `<S>/i438/rig/scrub.txt` with these lines: `ANTHROPIC_BASE_URL`, `ENABLE_TOOL_SEARCH`, `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING`, `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`, `CLAUDE_CODE_DISPATCH_V2D`, `CLAUDE_CODE_GZIP_REQUEST_BODIES`, `CLAUDE_CACHE_PROXY`, `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, `http_proxy`, `ALL_PROXY`, `all_proxy`, `NO_PROXY`, `no_proxy`, `NODE_EXTRA_CA_CERTS`, `ANTHROPIC_LOG`, `ANTHROPIC_CUSTOM_HEADERS`. Then save `<S>/i438/rig/mkrig.sh`:
 
 ```bash
 #!/usr/bin/env bash
@@ -96,7 +97,9 @@ exec env $unset_args PATH="$rig/bin:$PATH" ENABLE_TOOL_SEARCH=true "$@" \
 ```
 
 Run (timeout 120 s): `chmod +x <S>/i438/rig/*.sh && bash <S>/i438/rig/mkrig.sh "$PWD" <S>/i438/rig && grep -c '^CACHE_PROXY_URL=http://127.0.0.1:27391$' <S>/i438/rig/mod/bin/claude-account && CLAUDE_ACCOUNT="$ACCOUNT" <S>/i438/rig/bin/claude --version`
-Expected: `1`, then `2.1.302 (Claude Code)`. Nothing listens on 27391 yet, so the probe fails and the launch goes direct.
+Expected: `1`, then `<V> (Claude Code)`, which § Version gate item 4 checks and records as `V`. Nothing listens on 27391 yet, so the probe fails and the launch goes direct.
+
+Recheck the spec's binary facts on V (D14; timeout 60 s). `BIN` is the native executable behind the rig copy's `DEFAULT_CLAUDE_BIN=` line; a wrapper script names it on its `exec` line. Run `for s in _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING 'The request body is not valid JSON' 'Failed to parse request: could not parse request body as JSON' 'bad json: '; do grep -aqF -- "$s" "$BIN" || echo "missing: $s"; done`. Expected: no output. A missing string is BLOCKED with it, because the spec's levers or rejection set no longer hold on V. TODO(execution): record in § Conditions how the 4,096-character gzip threshold and the gzip gate were rechecked on V, or `not rechecked`.
 
 - [ ] **Step 3: The instrument**
 
@@ -155,9 +158,10 @@ def response(flow):
         "usage_start": usage_start(flow)}, indent=1))
 ```
 
-Write `<S>/i438/mitm/reduce.py`, a standard-library script with two subcommands: `python3 -I reduce.py ac1 --direct <dir> <dir> --proxied <dir> <dir> --out-md <file> --out-json <file>`, and `python3 -I reduce.py check --against <ac1-rows.json> --proxied <dir> --out-json <file>`. Its rules are fixed here:
+Write `<S>/i438/mitm/reduce.py`, a standard-library script with three subcommands. The third is `python3 -I reduce.py sdklog --log <stderr> --out <dir>`, used only by the fallback (D16). The first two are `python3 -I reduce.py ac1 --direct <dir> <dir> --proxied <dir> <dir> --out-md <file> --out-json <file>`, and `python3 -I reduce.py check --against <ac1-rows.json> --proxied <dir> --out-json <file>`. Its rules are fixed here:
 
-- **Main request.** In each session directory, select the one record with `method` `POST`, a path of `/v1/messages` (a query string is allowed) and a body whose `stream` is `true`. Zero or several such records exit 1 with `main request not unique: <dir>`.
+- **Main request.** In each session directory, select the one record with `method` `POST`, a path of `/v1/messages` (a query string is allowed) and a body whose `stream` is `true`, or, for an `sdk-log` record, a logged `stream` of `true`. Zero or several such records exit 1 with `main request not unique: <dir>`.
+- **Fallback ingestion (D16).** `sdklog` writes, for each SDK `sending request` entry with method `POST` and URL path `/v1/messages`, a `<seq>.record.json` holding `"instrument": "sdk-log"`, the headers reduced by `addon.py`'s `kept` rules, `stream` from the logged options, and no body file. When no entry shows `stream`, it exits 1 with `fallback cannot identify the main request`, and the task reports BLOCKED. In an `sdk-log` session, header rows are named `sdk-header:<name>` and `sdk-header-order`, `beta-tokens` comes from the logged `anthropic-beta`, and every other row is `(unavailable)`. `ac1` and `check` take `--sdk-log <stderr>` once per proxied directory, in order, and add that session's `sdk-header:` rows to its mitmdump rows. A row whose direct value is `(unavailable)` is never a diff, `missing`, `diff`, `removed` or `added` row. `--out-json` adds `"fallback"` (true or false) and `"unavailable"` (those rows), and `--out-md` adds `Rows unavailable in the direct arm (SDK-log fallback): <rows|none>`. In fallback, missing first-party headers are computed over `sdk-header:` rows.
 - **Rows per session.** Each session yields a flat map from row to value:
   - `header:<name>`, for every name except `host`: the recorded value or digest, `(credential)` for a `null` value, or absent;
   - `header-order`: the names in order, `host` excluded;
@@ -189,7 +193,7 @@ Start mitmdump with the Bash tool's `run_in_background: true`: `cd <S>/i438/mitm
 Run (timeout 300 s): `launch-scope exec … -- <S>/i438/rig/session.sh <S>/i438/mitm/direct-1.jsonl HTTPS_PROXY=http://127.0.0.1:27392 NODE_EXTRA_CA_CERTS=<S>/i438/mitm/conf/mitmproxy-ca-cert.pem ANTHROPIC_BASE_URL=https://api.anthropic.com CLAUDE_ACCOUNT="$ACCOUNT"`
 Expected: exit 0. The output holds a `"type":"result"` line, and `records/direct-1/` holds exactly one main request. Stop mitmdump: `kill "$(lsof -nP -t -iTCP:27392 -sTCP:LISTEN)"`. Step 1 showed the port was free, so this listener is the one this task started. Repeat once with `direct-2` as both the record directory and the output name.
 
-If mitmdump cannot complete a direct session (a TLS refusal or an auth failure), use D1's fallback. Rerun both arms with `ANTHROPIC_LOG=debug` and stderr kept, and take the headers from each `sending request` record. Bodies then come from the proxied reverse captures only. The report must name the fallback and what it could not see.
+If mitmdump cannot complete a direct session (a TLS refusal or an auth failure), use D1's fallback as D16 defines it. Run each direct session without `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS`, with `ANTHROPIC_LOG=debug` and `2> <S>/i438/mitm/direct-<n>.stderr`, then `python3 -I reduce.py sdklog --log direct-<n>.stderr --out records/direct-<n>`. Run Step 5's proxied sessions with `ANTHROPIC_LOG=debug` and `2> <S>/i438/mitm/proxied-<n>.stderr` too, and pass both files to Step 6's `ac1` as `--sdk-log proxied-1.stderr --sdk-log proxied-2.stderr`. The report names the fallback and lists the unavailable rows.
 
 - [ ] **Step 5: Proxied captures (two sessions)**
 
@@ -205,9 +209,9 @@ Run (timeout 120 s): `cd <S>/i438/mitm && python3 -I reduce.py ac1 --direct reco
 Create `docs/spikes/cache-proxy-ttft-gap.md`, with these parts in this order:
 
 1. **Title and intro.** The title is `# Cache proxy: the routed time-to-first-token gap — issue 438`. Then one line: `Point-in-time evidence for https://github.com/fagenorn/nix-config/issues/438, by the plan .agents/artifacts/plans/2026-10-25-issue-438-proxy-ttft-gap.md; #422's record is docs/spikes/cache-proxy-spike.md.`
-2. **`## Conditions`.** The date and host `mbp`; `git rev-parse --short HEAD`; the Claude Code version from Step 2; the store paths from `rig/conditions.txt`; account `$ACCOUNT` by name only; ports 27391 and 27392; the mitmproxy version; the instrument per arm; and the timed command line from `session.sh`.
+2. **`## Conditions`.** The date and host `mbp`; `git rev-parse --short HEAD`; the whole line `Claude Code version: <V>` from Step 2, the binary-facts recheck and the TODO's answer; the store paths from `rig/conditions.txt`; account `$ACCOUNT` by name only; ports 27391 and 27392; the mitmproxy version; the instrument per arm; and the timed command line from `session.sh`.
 3. **`## AC1 — direct versus proxied request`.** `ac1.md` verbatim. Its body-encoding row's direct cell gets one note: `derived: the binary's gzip gate turns compression off under HTTPS_PROXY and NODE_EXTRA_CA_CERTS, so a plain direct launch sends this body gzipped (spec § What the pinned binary already says)`. It must contain exactly one line matching `^Missing first-party headers: ` and exactly one matching `^Missing first-party headers without a recorded value: `.
-4. **`## TLS interception (written evaluation)`.** Write these sentences: "`HTTPS_PROXY` with a locally trusted interception CA keeps `api.anthropic.com` as the base URL, so the request keeps its first-party shape and Remote Control stays available, but the client's gzip gate turns compression off. The AC1 direct sessions above are exactly such runs: «fill: one sentence naming the AC1 rows in which they differ from a plain direct launch, which is the body-encoding row unless the table shows more». It is not shipped, because a locally trusted CA would intercept the user's OAuth traffic on every launch (D5)."
+4. **`## TLS interception (written evaluation)`.** Write these sentences: "`HTTPS_PROXY` with a locally trusted interception CA keeps `api.anthropic.com` as the base URL, so the request keeps its first-party shape and Remote Control stays available, but the client's gzip gate turns compression off. The AC1 direct sessions above are exactly such runs: «fill: one sentence naming the AC1 rows in which they differ from a plain direct launch, which is the body-encoding row unless the table shows more». It is not shipped, because a locally trusted CA would intercept the user's OAuth traffic on every launch (D5)." Under the fallback, the second sentence instead says that no intercepted direct session completed and names the fallback (D16).
 
 Create the acceptance record with the schema line `| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |`. It has one row per issue criterion, AC1 to AC5. `Criterion` holds the issue's line verbatim. `Kind` and `Check or command` are copied from the plan root's § Acceptance map, and `Verdict` is `pending` (the controller grades). Row `AC1` gets Observed (the diff-row count, the beta difference and both `Missing first-party headers` values), Commit (`git rev-parse --short HEAD`) and Conditions (as in § Conditions). Rows AC2–AC5 get `pending Task 5`, `pending Task 6`, `pending Task 7` and `pending Task 7`, with `—` in Commit and Conditions.
 
@@ -220,6 +224,7 @@ set -euo pipefail
 f=docs/spikes/cache-proxy-ttft-gap.md; a=.agents/artifacts/plans/2026-10-25-issue-438-proxy-ttft-gap.acceptance.md
 test "$(grep -Ec '^Missing first-party headers: (none|[a-z0-9-]+=[^,]+(, [a-z0-9-]+=[^,]+)*)$' "$f")" -eq 1
 test "$(grep -Ec '^Missing first-party headers without a recorded value: ' "$f")" -eq 1
+test "$(grep -Ec '^Claude Code version: [0-9]+\.[0-9]+\.[0-9]+$' "$f")" -eq 1
 for h in '## Conditions' '## AC1 — direct versus proxied request' '## TLS interception (written evaluation)'; do grep -qx "$h" "$f"; done
 if grep -n '| header:host ' "$f"; then exit 1; fi
 if grep -nE 'sk-ant-|Bearer |oat01' "$f" "$a"; then exit 1; fi
@@ -234,11 +239,11 @@ Expected: `ac1-recorded`. At the starting commit the first `grep` fails, because
 
 - [ ] **Step 8: Clean up and commit**
 
-Run (timeout 60 s): `rm -rf <S>/i438/mitm/conf <S>/i438/mitm/records`. Keep `ac1-rows.json`, `addon.py` and `reduce.py`. Then:
+Run (timeout 60 s): `rm -rf <S>/i438/mitm/conf <S>/i438/mitm/records <S>/i438/mitm/*.stderr`. Keep `ac1-rows.json`, `addon.py` and `reduce.py`. Then:
 
 ```bash
 git add docs/spikes/cache-proxy-ttft-gap.md .agents/artifacts/plans/2026-10-25-issue-438-proxy-ttft-gap.acceptance.md
 git commit -m "docs(issue-438): AC1 capture of the direct and proxied requests"
 ```
 
-Report DONE with both `Missing first-party headers` values and the diff-row count.
+Report DONE with V, both `Missing first-party headers` values and the diff-row count.

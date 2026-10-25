@@ -29,7 +29,8 @@ against the live API, from the built but never activated outputs. Nothing is
 switched.
 
 1. **Capture (AC1).** Record exactly how a proxied request differs from a
-   direct one on the pinned Claude Code 2.1.302. One wire-level instrument
+   direct one on the Claude Code version `main` pins after the flake update
+   (2.1.310 or later; 2.1.302 at planning, D14). One wire-level instrument
    captures both arms (D1).
 2. **Screen.** Measure each of the issue's levers, and the two cheaper
    combinations they imply, with #422's time-to-first-token harness. The
@@ -54,7 +55,8 @@ service's fate under opt-in is D8, and the `HTTPS_PROXY` fallback is D5.
 
 ### What the pinned binary already says
 
-These facts come from the strings of the pinned 2.1.302 binary. They make the
+These facts come from the strings of the 2.1.302 binary pinned at planning,
+and are rechecked on the version `main` pins before AC1 (D14). They make the
 experiments precise, but they are not measurements. AC1 confirms them on the
 wire.
 
@@ -285,7 +287,7 @@ as its observation (D5).
       caller's own endpoint as first-party.
     - A copy with no proxy URL still changes nothing.
     - An AC5 comment beside the export names anthropics/claude-code#98464 and
-      "verified on Claude Code 2.1.302".
+      "verified on Claude Code <V>", the version it was verified on (D14).
   - **`claude-local`** is unchanged. README § Cache proxy documents that it
     inherits a shipped lever when started inside a routed session, next to the
     existing `ENABLE_TOOL_SEARCH` note (422 D11, D13).
@@ -301,7 +303,8 @@ as its observation (D5).
   - **Order.** Gzip is the last step before upstream, so #429's future body
     reshaping happens before it.
   - **Rejection.** A gzipped request may get a 400 whose error message is one
-    of Claude Code 2.1.302's body-parse rejections: "The request body is not
+    of the pinned Claude Code's body-parse rejections (found in 2.1.302 and
+    rechecked per D14): "The request body is not
     valid JSON", "Failed to parse request: could not parse request body as
     JSON", or a message matching `^bad json: `. The proxy then:
     1. reads that small answer without relaying it;
@@ -323,7 +326,7 @@ as its observation (D5).
 - **Header restore (E2 only).** A fixed tuple in the proxy holds the missing
   first-party headers from AC1. The proxy adds each one to a `POST` to exactly
   `/v1/messages` that lacks it, and never edits a header the client sent. A comment
-  names #98464 and 2.1.302, applying AC5's rule to an undocumented header. The
+  names #98464 and the version it was verified on (D14), applying AC5's rule to an undocumented header. The
   report records the known cost: the proxy cannot tell query sources apart, so
   it sends `v2d` where the client would send nothing, and the client's `v2p`
   fallback is lost.
@@ -443,3 +446,6 @@ merge time, and the #429 worktree is never touched.
 | D11 | Deadline cutoff for the live tasks (applies 422 D20, D24 to D4): `deadline_at` comes from the task's context file, and a dispatch without one returns NEEDS_CONTEXT before anything runs; the AC1 capture is never skipped, since both branches need it; each screen starts only with at least 70 minutes left before `deadline_at` − 60 min, and a screen the cutoff skips is recorded `not run: attempt deadline cutoff` and counts as not passing; the confirmation keeps 422 D20's 15 minutes, and a skipped confirmation reverts the winner and ships opt-in | 422 D20 (ship needs the last 60 minutes) and D24; after the last screen, the winner's implementation, build, confirmation, smoke run, a possible opt-in fallback and the record need about an hour | Running every screen regardless (the confirmation and the fallback would overrun the ship window); skipping AC1 under pressure (AC1 binds both branches) |
 | D12 | Proxy gzip details beyond D7 (plan): the client's `Content-Length` line is replaced in place by `Content-Encoding: gzip` and the compressed `Content-Length`; E2's headers are appended after the client's, in tuple order; the rejection read decodes only identity, `gzip`, `x-gzip` and `deflate` bodies with the standard library, and a 400 in another encoding or with any other message is relayed unchanged as a sized response from the buffered body, with gzip left on; `request_bytes` and `upstream_request_bytes` are `null` on a request rejected before forwarding, and after a resend `upstream_request_bytes` is the identity length | `agent_tools` is standard library only; 422 D6 (headers verbatim, so `Accept-Encoding` is never rewritten); the bar: the log stream is the debugger | Forcing `Accept-Encoding: identity` on gzipped requests (changes every response's encoding, against 422 D6); a brotli dependency (not standard library); resending on any 400 (an unrelated error would turn gzip off) |
 | D13 | The opt-in switch is checked first in `route_cache_proxy`, before the empty-URL return, so a bad `CLAUDE_CACHE_PROXY` dies at every launch of the account loop and even in an unsubstituted copy; an unsubstituted copy otherwise still changes nothing | The bar: fail loud at a closed set; D8's "dies before claude starts"; 422 D10 (an empty source URL never routes) | Checking only when a proxy URL is built in (a typo would pass silently in a source copy and fail only on hosts); validating at `cmd_run` entry instead (the routing policy would then live in two functions) |
+| D14 | Final evidence is taken on the Claude Code version `main` pins after fagenorn/nix-config#442 ("chore(flake): update all inputs (claude-code 2.1.310)"), never on 2.1.302. Before the final AC1 capture (Task 1) and the AC2 confirmation (Task 5), the executor runs the plan's § Version gate: `gh pr view 442` must report `MERGED` (primary; otherwise BLOCKED `blocked_on=external` and no final numbers); after `git fetch origin main`, the `claude-code` node of `origin/main:flake.lock` must differ from `3f4c5072:flake.lock` (cross-check); origin/main is merged into the branch by a normal merge commit (no rebase, no force); `just build mbp` runs through `launch-scope exec`; the built `claude --version` must be 2.1.310 or later and is recorded as the whole line `Claude Code version: <V>`, which Task 5 must match. The binary facts of § What the pinned binary already says are rechecked on V. AC5 comments and dictated prose name V, the version they were verified on; 2.1.302 numbers are exploratory context only and labelled so. Because the merge brings `main`'s history in after the base, AC4 compares against `git merge-base HEAD origin/main`, and Task 5's revert takes only the issue's `feat`/`fix` commits. Supersedes the "2.1.302" of D6 and D10 | Coordinator course correction during Phase 5 (agent message); the issue's "pinned Claude Code version" becomes the version main pins after the flake update | Final numbers on 2.1.302, since they would be stale against the version main pins |
+| D15 | Confirmation records (plan Phase-5 review): Task 5 writes the whole lines `Attempted head:` (always) and `Measured head:` (the build the timed run used, or `none` when Step 5 never ran), so a deadline skip records no measured head; the opt-in README and verdict clauses are state-specific, so `smoke-failed` never cites a passing Δ as the reason and an all-skipped screen set cites none; a measured-surface change after `Confirmation: passed` runs Task 5 § Reconfirmation, which reruns Steps 2–6, replaces the `Confirmation:` and `Measured head:` lines in place (one authoritative marker), appends the new run's evidence, rewrites row AC2 and, unless it passes, reverts the winner, clears § Verdict and rows AC3–AC5, and reruns Tasks 6 and 7 | Reviewer: a deadline skip has no `confirm-head`; a smoke failure can have a passing Δ; Steps 3–6 alone update no committed evidence, and a whole-task rerun meets Step 1's existing-marker refusal | Appending a second `Confirmation:` line (breaks every one-match gate); re-running Task 5 whole (refused by design) |
+| D16 | SDK-log fallback ingestion (refines D1's fallback; plan Phase-5 review): `reduce.py sdklog` turns each SDK `sending request` entry into a record with `"instrument": "sdk-log"` and no body; the main request is the one whose logged `stream` is true, else the fallback stops BLOCKED; in fallback both arms and every later wire check also run with `ANTHROPIC_LOG=debug`, and client-side headers become `sdk-header:` rows compared like for like; every row a body-less direct record cannot supply is `(unavailable)`, never a diff, `missing`, `removed` or `added` row, and is listed; `ac1-rows.json` carries `fallback` and `unavailable` | Reviewer: the reducer needs a body with `stream: true`, so a header-only direct baseline cannot feed it, and unknown fields must not read as absent | Treating unavailable rows as absent (every body row would become a spurious diff); comparing SDK-log headers with wire headers (instrument differences would read as lever effects) |

@@ -100,7 +100,7 @@ E1/C:
 
 ```bash
     # Undocumented (https://github.com/anthropics/claude-code/issues/98464),
-    # verified on Claude Code 2.1.302: it marks this base URL first-party, which restores
+    # verified on Claude Code <V>: it marks this base URL first-party, which restores
     # «fill: the rows E1's wire check removed, from docs/spikes/cache-proxy-ttft-gap.md § Screens» behind the proxy (#438).
     export _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1
 ```
@@ -111,7 +111,7 @@ E1/C:
 
 In `home/common/claude-code/README.md` § Cache proxy, add a sentence after the one that ends with the words `a dead proxy costs at most half a second.`:
 - E3: "A routed launch also exports `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1` unless the caller set it, because Claude Code turns fine-grained tool streaming off behind a non-first-party base URL (`docs/spikes/cache-proxy-ttft-gap.md`)."
-- E1/C: "A routed launch also exports the undocumented `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` (anthropics/claude-code#98464, verified on 2.1.302), which restores «fill: the same rows as the comment» (`docs/spikes/cache-proxy-ttft-gap.md`). Every launch the wrapper decides not to route unsets it, so a caller's own endpoint is never marked first-party."
+- E1/C: "A routed launch also exports the undocumented `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` (anthropics/claude-code#98464, verified on <V>), which restores «fill: the same rows as the comment» (`docs/spikes/cache-proxy-ttft-gap.md`). Every launch the wrapper decides not to route unsets it, so a caller's own endpoint is never marked first-party."
 
 Then replace the paragraph's last sentence, the one that begins with the words `One started inside a routed session inherits`:
 - E3 replacement: "One started inside a routed session inherits `ENABLE_TOOL_SEARCH=true` and `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1`; from 2.1.304 on, tool search is the default behind any gateway regardless."
@@ -122,8 +122,8 @@ Then replace the paragraph's last sentence, the one that begins with the words `
 Run (timeout 600 s): `env PYTHONPATH="$PWD/python" python3 -m unittest -v tests/test_claude_account_routing.py 2>&1 | tail -4`
 Expected: `OK`, with every test passing, the existing ones included.
 
-Run (timeout 60 s): `if grep -rn '«fill' home/common/claude-code/accounts/bin/claude-account home/common/claude-code/README.md; then exit 1; fi; git diff --quiet 3f4c5072 -- home/linux/claude-local && echo clean`
-Expected: `clean`. For E1/C also run: `grep -B3 'export _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1' home/common/claude-code/accounts/bin/claude-account | grep -c -e 'issues/98464' -e 'verified on Claude Code 2.1.302'`. Expected: `2`.
+Run (timeout 60 s): `if grep -rn '«fill' home/common/claude-code/accounts/bin/claude-account home/common/claude-code/README.md; then exit 1; fi; git diff --quiet "$(git merge-base HEAD origin/main)" -- home/linux/claude-local && echo clean`
+Expected: `clean`. For E1/C also run, with `$V` set as in the plan root (D14): `grep -B3 'export _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1' home/common/claude-code/accounts/bin/claude-account | grep -c -e 'issues/98464' -e "verified on Claude Code $V"`. Expected: `2`.
 
 Run (timeout 3600 s): `just build mbp`
 Expected: exit 0. The accounts-mod build runs `claude-account status`.

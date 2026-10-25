@@ -39,10 +39,10 @@ If it prints `E3`, `E1` or `none`, report DONE with `skipped: Screen winner is <
 
 - [ ] **Step 1: Write the failing tests**
 
-In `tests/test_cache_proxy.py`, add `import gzip` to the imports, and add these after `closed_port`:
+In `tests/test_cache_proxy.py`, change the module docstring's first line to `` `cache-proxy` forwards requests and streamed responses unchanged (#422), apart from #438's request gzip. `` (E2: `` …apart from #438's request gzip and first-party headers. ``), add `import gzip` to the imports, and add these after `closed_port`:
 
 ```python
-GZIP_MIN = 4096  # the client's own threshold (Claude Code 2.1.302), pinned here on purpose
+GZIP_MIN = 4096  # the client's own threshold (spec § What the pinned binary already says), pinned here on purpose
 PREFIX, SUFFIX = b'{"model":"x","messages":[{"role":"user","content":"', b'"}]}'
 LARGE = PREFIX + b"a" * (GZIP_MIN - len(PREFIX) - len(SUFFIX)) + SUFFIX
 REJECTIONS = ("The request body is not valid JSON",
@@ -181,12 +181,12 @@ Expected: FAIL or ERROR in every `GzipTest` test. The first fails with `zlib.err
 
 - [ ] **Step 3: Write the minimal implementation**
 
-In `python/agent_tools/cache_proxy.py`, add the module docstring sentence `A large POST to /v1/messages goes upstream gzipped, as Claude Code itself sends it to api.anthropic.com (#438).` Then implement the following:
+In `python/agent_tools/cache_proxy.py`, replace the module docstring's words `` forwards requests and responses unchanged apart from `Host` and hop-by-hop headers, `` with `` forwards requests and responses unchanged apart from `Host`, hop-by-hop headers and the request gzip below, `` (E2: `` …, hop-by-hop headers, the request gzip and the first-party headers below, ``), and add the sentence `A large POST to /v1/messages goes upstream gzipped, as Claude Code itself sends it to api.anthropic.com (#438).` (E2 adds: `Every POST to /v1/messages also gets the first-party headers in FIRST_PARTY_HEADERS that it lacks.`). Then implement the following:
 
 1. **Constants and pure helpers** (module level):
    - `decode_body(content_encoding, body)` returns `body` for no encoding or `identity`; `gzip.decompress(body)` for `gzip` and `x-gzip`; and for `deflate`, `zlib.decompress(body)`, falling back to `zlib.decompress(body, -15)`. It returns `None` for any other encoding or on any decode error (D12).
    - `is_body_parse_rejection(decoded)` is true only when `decoded` parses as a JSON object whose `error.message` is a string that is in `BODY_PARSE_REJECTIONS` or starts with `BODY_PARSE_PREFIX`.
-   - E2 only: `FIRST_PARTY_HEADERS` holds the pairs from the `Missing first-party headers:` line, in the line's order, under this AC5 comment: `# First-party headers Claude Code drops behind a non-first-party base URL, from the AC1 capture in docs/spikes/cache-proxy-ttft-gap.md. Undocumented (https://github.com/anthropics/claude-code/issues/98464); verified on Claude Code 2.1.302.`
+   - E2 only: `FIRST_PARTY_HEADERS` holds the pairs from the `Missing first-party headers:` line, in the line's order, under this AC5 comment: `# First-party headers Claude Code drops behind a non-first-party base URL, from the AC1 capture in docs/spikes/cache-proxy-ttft-gap.md. Undocumented (https://github.com/anthropics/claude-code/issues/98464); verified on Claude Code <V>.`
 2. **`ProxyServer.__init__`.** Set `self.gzip_enabled = True` and `self.gzip_lock = threading.Lock()`.
 3. **`disable_gzip(status, error_body)`.** Under the lock, if `gzip_enabled` is set, clear it and write `self.log.write("gzip_disabled", status=status, error_body=error_body[:ERROR_BODY_LIMIT].decode("utf-8", "replace"))`. Otherwise do nothing.
 4. **`_upstream_headers(self, encoded_length=None)`.** With an `int`, the client's `Content-Length` header becomes the two lines of § Invariants in its place. On a hot request (E2), append the missing `FIRST_PARTY_HEADERS`.
@@ -210,25 +210,25 @@ A rejected request (`_reject`) logs both as `null`, because they are reset at th
 
 In `python/README.md` § `cache-proxy`:
 
-1. Replace the words `nothing is added, decoded or retried)` with `apart from the request gzip below, nothing is added, decoded or retried)`.
+1. Replace the words `nothing is added, decoded or retried)` with `apart from the request gzip below, nothing is added, decoded or retried)` (E2: `apart from the request gzip and first-party headers below, nothing else is added, decoded or retried)`).
 2. After the sentence ending `holds one keep-alive upstream connection per client connection.`, insert:
 
-   > A `POST` to exactly `/v1/messages` with no `Content-Encoding` and a body of at least 4,096 bytes goes upstream gzipped at level 6, as Claude Code itself sends it to `api.anthropic.com`, with `Content-Encoding: gzip` and the compressed `Content-Length` in place of the client's (#438). If the API answers one with a 400 whose message is one of Claude Code 2.1.302's body-parse rejections, the identity body is resent once and gzip stays off for the rest of the process (one `gzip_disabled` line); any other answer is relayed as received.
+   > A `POST` to exactly `/v1/messages` with no `Content-Encoding` and a body of at least 4,096 bytes goes upstream gzipped at level 6, as Claude Code itself sends it to `api.anthropic.com`, with `Content-Encoding: gzip` and the compressed `Content-Length` in place of the client's (#438). If the API answers one with a 400 whose message is one of Claude Code <V>'s body-parse rejections, the identity body is resent once and gzip stays off for the rest of the process (one `gzip_disabled` line); any other answer is relayed as received.
 
-   For E2, append: `Such a POST that lacks «fill: the FIRST_PARTY_HEADERS names» gets it appended (undocumented first-party headers, anthropics/claude-code#98464, verified on 2.1.302).`
+   For E2, append: `Every POST to exactly /v1/messages, whatever its size, that lacks «fill: the FIRST_PARTY_HEADERS names» gets it appended after the client's headers (undocumented first-party headers, anthropics/claude-code#98464, verified on <V>).`
 3. In the known-limitation sentence, replace `and bodies are never decoded,` with `and bodies are decoded only to recognise a body-parse rejection of a gzipped request,`.
 
 4. In the paragraph's list of log fields (the one that starts with `method` and `path`), add `request_bytes` (the client body's length) and `upstream_request_bytes` (what the final upstream attempt sent; both `null` for a request rejected before forwarding) after `bytes`.
 
-In `home/common/claude-code/README.md` § Cache proxy, replace `It forwards requests unchanged today;` with `It forwards requests unchanged today apart from gzipping large request bodies (#438);`.
+In `home/common/claude-code/README.md` § Cache proxy, replace `It forwards requests unchanged today;` with `It forwards requests unchanged today apart from gzipping large request bodies (#438);` (E2: `… apart from gzipping large request bodies and adding the first-party headers Claude Code drops behind a loopback base URL to every /v1/messages POST (#438);`).
 
 - [ ] **Step 5: Verify**
 
 Run (timeout 600 s): `env PYTHONPATH="$PWD/python" python3 -m unittest -v tests/test_cache_proxy.py 2>&1 | tail -4`
 Expected: `OK`. Every `ForwardingTest` and `CommandTest` test still passes, including `test_request_headers_reach_upstream_verbatim_with_only_host_rewritten`, whose 13-byte body stays verbatim.
 
-Run (timeout 60 s): `if grep -n '«fill' python/agent_tools/cache_proxy.py python/README.md; then exit 1; fi; grep -c 'apart from the request gzip below' python/README.md; grep -c 'apart from gzipping large request bodies' home/common/claude-code/README.md`
-Expected: `1`, then `1`. For E2, also `grep -B3 '^FIRST_PARTY_HEADERS' python/agent_tools/cache_proxy.py | grep -c -e 'issues/98464' -e 'verified on Claude Code 2.1.302'` must print `2`.
+Run (timeout 60 s): `if grep -n '«fill' python/agent_tools/cache_proxy.py python/README.md; then exit 1; fi; grep -c 'apart from the request gzip' python/README.md; grep -c 'apart from gzipping large request bodies' home/common/claude-code/README.md; if grep -n 'and hop-by-hop headers,' python/agent_tools/cache_proxy.py; then exit 1; fi`
+Expected: `1`, then `1`. For E2, with `$V` set as in the plan root, also run `c=$(grep -B3 '^FIRST_PARTY_HEADERS' python/agent_tools/cache_proxy.py); grep -qF 'issues/98464' <<<"$c" && grep -qF "verified on Claude Code $V" <<<"$c" && echo ac5-ok`, which must print `ac5-ok`.
 
 Run (timeout 3600 s): `just build mbp`. Expected: exit 0.
 

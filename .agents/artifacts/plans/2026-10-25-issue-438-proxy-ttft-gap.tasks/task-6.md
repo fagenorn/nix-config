@@ -1,6 +1,6 @@
 # Task 6: Opt-in routing switch (AC3)
 
-This task covers spec § Opt-in branch, per D8 and D13. Unless the confirmation passed, `claude` stops routing by default: only `CLAUDE_CACHE_PROXY=1` probes and routes. The service stays declared. This task also fills acceptance row `AC3` on both branches.
+This task covers spec § Opt-in branch, per D8, D13 and D15. Unless the confirmation passed, `claude` stops routing by default: only `CLAUDE_CACHE_PROXY=1` probes and routes. The service stays declared. This task also fills acceptance row `AC3` on both branches.
 
 **Files:**
 - Modify: `home/common/claude-code/accounts/bin/claude-account` (`route_cache_proxy` and its comment)
@@ -152,7 +152,12 @@ In `home/common/claude-code/default.nix`, the comment above `cacheProxyPort` end
 
 In `home/common/claude-code/README.md` § Cache proxy:
 
-1. **First sentence.** Rewrite the paragraph's first sentence: "`claude` reaches the Anthropic API through `cache-proxy` (`python/README.md` § `cache-proxy`) only when launched with `CLAUDE_CACHE_PROXY=1`, and only while the proxy is healthy. Routing is opt-in because «fill: one clause with the deciding number — the confirmation's Δ from report § Confirmation when it ran, otherwise the smallest valid Δ from § Screens — against the +100 ms bound» (#438, `docs/spikes/cache-proxy-ttft-gap.md`)."
+1. **First sentence.** Rewrite the paragraph's first sentence: "`claude` reaches the Anthropic API through `cache-proxy` (`python/README.md` § `cache-proxy`) only when launched with `CLAUDE_CACHE_PROXY=1`, and only while the proxy is healthy. Routing is opt-in because «fill: the clause for the `Confirmation:` state, below» (#438, `docs/spikes/cache-proxy-ttft-gap.md`)." The clause per state (D15), with numbers from report § Confirmation or § Screens:
+   - `failed`: "the screen winner's confirmation at <measured head, short> measured a Δ of <Δ> ms, over the +100 ms bound";
+   - `smoke-failed`: "the screen winner's confirmation met the +100 ms bound (Δ <Δ> ms) but the tool-use smoke run failed";
+   - `invalid`: "no valid confirmation run could be made at <head, short>";
+   - `deadline-skipped`: "the confirmation did not run before the attempt deadline";
+   - `not-run`: "no candidate passed its screen against the +100 ms bound (smallest valid screened Δ <Δ> ms)", or, when no screen gave a valid timed run, "no candidate passed its screen, and none gave a valid timed run".
 2. **Service sentence.** Replace the sentence that begins with the words `The service starts at activation` with: "The service starts at activation (`just switch`) and stays declared, so opting in needs no rebuild; until something answers on the port, an opted-in launch goes direct too."
 3. **Second paragraph's opening.** In the second paragraph, replace the words from `` `claude-account run` leaves alone `` up to `since that is the caller's own endpoint.` with: "`claude-account run` reads `CLAUDE_CACHE_PROXY`. Unset, empty or `0` runs no probe: it unsets an `ANTHROPIC_BASE_URL` equal to the proxy URL, inherited from an opted-in parent, and leaves any other alone. Any other value stops the launch before claude starts, with `claude-account: CLAUDE_CACHE_PROXY must be 1, 0 or unset`. With `1`, it leaves alone an `ANTHROPIC_BASE_URL` set to anything but the proxy URL, since that is the caller's own endpoint."
 4. **One-launch sentence.** Replace the sentence `` `ANTHROPIC_BASE_URL=https://api.anthropic.com claude` goes direct for one launch. `` with: "`CLAUDE_CACHE_PROXY=1 claude` routes one launch. Exporting it in the shell routes every launch, and `CLAUDE_CACHE_PROXY=0 claude` then opts one launch out."
@@ -176,7 +181,7 @@ if grep -n '«fill' "${files[@]}"; then exit 1; fi
 grep -q 'CLAUDE_CACHE_PROXY=1 claude' home/common/claude-code/README.md
 if grep -n 'while the proxy is healthy\. It forwards' home/common/claude-code/README.md; then exit 1; fi
 grep -q 'CLAUDE_CACHE_PROXY=1' home/common/claude-code/default.nix
-git diff --quiet 3f4c5072 -- home/linux/claude-local
+git diff --quiet "$(git merge-base HEAD origin/main)" -- home/linux/claude-local
 a=.agents/artifacts/plans/2026-10-25-issue-438-proxy-ttft-gap.acceptance.md
 if grep '^| AC3 |' "$a" | grep -q 'pending Task 6'; then exit 1; fi
 echo opt-in-documented
