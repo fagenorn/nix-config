@@ -30,8 +30,7 @@ at a `**CHECKPOINT**`:
 
 Auto-resolving a checkpoint never skips `workflow-state progress`: persist the gate decision at
 every phase checkpoint and obey its returned action before the next phase starts. If it returns a
-durable handoff, invoke `handoff` at the per-run destination, finalize it through
-`workflow-state progress`, and stop. For every ordinarily owned terminal result, call
+durable handoff, obey `SKILL.md`'s `handoff` action. For every ordinarily owned terminal result, call
 `workflow-state finish` successfully before any notification to the dispatcher; persistence always
 precedes notification. A delegated-owner dispatch failure is such a result and must be persisted
 before notification.
