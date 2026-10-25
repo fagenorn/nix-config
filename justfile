@@ -179,6 +179,8 @@ agent-workflow-tests:
     tests/test_promotion_deployment.py \
     tests/test_promotion_demo.py \
     tests/test_context_map_lint.py \
+    tests/test_cache_proxy.py \
+    tests/test_claude_account_routing.py \
     tests/test_branch_protection.py
   bash home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 

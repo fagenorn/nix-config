@@ -93,9 +93,14 @@ class AdapterRouteTest(unittest.TestCase):
         }
         # Execute the actual endpoint, not a copied approximation of its merge.
         tree = ast.parse(SERVER_SOURCE.read_text())
-        names = {"_merge_anthropic_chat_template_kwargs", "_resolve_thinking_budget", "create_anthropic_message"}
-        nodes = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names]
-        for node in nodes:
+        names = {"_merge_anthropic_chat_template_kwargs", "_resolve_thinking_budget", "create_anthropic_message",
+                 "_cache_store_kwargs"}
+        constants = {"_CACHE_STORE_HEADER"}
+        nodes = [n for n in tree.body if isinstance(n, ast.Assign)
+                 and any(isinstance(t, ast.Name) and t.id in constants for t in n.targets)]
+        functions = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names]
+        nodes += functions
+        for node in functions:
             node.decorator_list = []
             node.args.defaults = []
         module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), *nodes], type_ignores=[])
