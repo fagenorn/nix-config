@@ -2368,6 +2368,22 @@ def parse_action_id(value: str) -> tuple[int, int, int]:
     return int(matched[1]), int(matched[3]), int(matched[4])
 
 
+def resolve_owner_identity(args: argparse.Namespace, command: str) -> None:
+    """Fill ``args.issue`` and ``args.attempt`` from ``--action-id``; flags given must agree.
+
+    The action id holds the issue and the attempt ordinal, so ``progress`` and ``suspend``
+    take either it or both flags (issue 432).
+    """
+    if args.action_id is None:
+        if args.issue is None or args.attempt is None:
+            raise WorkflowError(f"{command} needs --action-id or --issue and --attempt")
+        return
+    issue, attempt, _ = parse_action_id(args.action_id)
+    if args.issue not in (None, issue) or args.attempt not in (None, attempt):
+        raise WorkflowError("--issue/--attempt disagree with --action-id")
+    args.issue, args.attempt = issue, attempt
+
+
 def bootstrap_response(state: dict[str, Any]) -> dict[str, Any]:
     return _delivery().bootstrap(state)
 
@@ -4101,6 +4117,7 @@ def validate_durable_detail(repo_root: str, report_path: str) -> None:
 
 
 def command_progress(args: argparse.Namespace) -> int:
+    resolve_owner_identity(args, "progress")
     supplied = supplied_time(args.now, "--now")
     budget = phase_budget.current()
     # The ceiling is the threshold of the phase being entered plus the default headroom,
@@ -4182,6 +4199,7 @@ def command_suspend(args: argparse.Namespace) -> int:
     reaper, which cannot); the envelope carries back the re-entry line that
     resumes the run, so callers never compose it themselves (per D2, D14).
     """
+    resolve_owner_identity(args, "suspend")
     supplied = supplied_time(args.now, "--now")
     refuse_misbound(args.repo_root, args.run_id, issue=args.issue, remainder=False,
                     ordinal=args.attempt)
@@ -5654,8 +5672,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     suspend = subparsers.add_parser("suspend")
     add_run_arguments(suspend)
-    suspend.add_argument("--issue", required=True, type=positive_int)
-    suspend.add_argument("--attempt", required=True, type=positive_int)
+    suspend.add_argument("--issue", type=positive_int)
+    suspend.add_argument("--attempt", type=positive_int)
     suspend.add_argument(
         "--blocked-on", required=True, choices=sorted(OWNER_BLOCKED_ON_VALUES)
     )
@@ -5664,8 +5682,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     progress = subparsers.add_parser("progress")
     add_run_arguments(progress)
-    progress.add_argument("--issue", required=True, type=positive_int)
-    progress.add_argument("--attempt", required=True, type=positive_int)
+    progress.add_argument("--issue", type=positive_int)
+    progress.add_argument("--attempt", type=positive_int)
     progress.add_argument("--phase", required=True, type=nonnegative_int)
     progress.add_argument("--turn-count", type=nonnegative_int)
     progress.add_argument("--context-tokens", type=nonnegative_int)

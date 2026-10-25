@@ -1343,7 +1343,18 @@ class WorkflowSkillContractsTest(unittest.TestCase):
 
     def test_owner_has_executable_phase_gate_and_action_semantics(self):
         self.assertIn("workflow-state progress", self.from_issue)
-        self.assertIn("continue | fresh_start | handoff | delegate", self.from_issue)
+        # Issue 432: the gate and the suspension are literal templates whose identity is
+        # the action id alone.
+        templates = {line.split()[1]: line.split(" | ")[0].split()
+                     for line in self.from_issue.splitlines()
+                     if line.startswith(("workflow-state progress ", "workflow-state suspend "))}
+        self.assertEqual(
+            [word for word in templates["progress"] if word.startswith("--")],
+            ["--repo-root", "--run-id", "--action-id", "--phase", "--next-needs-context",
+             "--artifacts-sufficient", "--remainder-self-contained"])
+        self.assertEqual(
+            [word for word in templates["suspend"] if word.startswith("--")],
+            ["--repo-root", "--run-id", "--action-id", "--blocked-on"])
         # Issue 424: the ceilings live in agent_tools.phase_budget and the context meter
         # supplies the count, so no from-issue document restates either.
         for document in sorted(FROM_ISSUE_DIR.glob("*.md")):
@@ -1498,7 +1509,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertIn(
             "workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> "
-            "--issue <n> --attempt <k> --action-id <action_id> --blocked-on <value>",
+            "--action-id <action_id> --blocked-on <value>",
             suspension,
         )
         self.assertIn(
@@ -1516,7 +1527,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         self.assertIn(
             "workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> "
-            "--issue <n> --attempt <k> --action-id <action_id> --blocked-on <value> "
+            "--action-id <action_id> --blocked-on <value> "
             "| artifact-budget validate-report --boundary workflow-response --input -\n",
             suspension,
         )

@@ -100,8 +100,13 @@ creates every commit through `launch-commit`. Release it with `--event returned`
 
 **Artifact report boundary.** At every producer boundary, before the phase's `workflow-state progress` call, pipe the received stdout bytes unchanged through `artifact-budget validate-report --boundary producer --input -` before decoding JSON. For a non-null artifact, run `artifact-budget check --kind <reported-kind> --root <reported-path> --format json` yourself and compare the reported kind, path and all four metrics by integer value. Validator or checker exit 2, a missing or non-integer metric (booleans included), any mismatch, or `complete` with anything other than `within_budget` is a contract error and becomes `failed`; an accepted over-budget state follows only its producer's remediation and never advances. Retain only the root and compact metrics, never a member list or artifact contents.
 
-**Executable phase gate.** With lifecycle identity, at every phase boundary from Phase 0 through Phase 7, call `workflow-state progress` with `--action-id <action_id>`, the completed phase, the observed turn count when available (omit an unavailable `--turn-count`; never fabricate it), and truthful booleans for next-phase context need, artifact sufficiency and remainder self-containment, and obey the `action` of the validated `phase_gate` reply exactly, from the closed set `continue | fresh_start | handoff | delegate`:
+**Executable phase gate.** At every phase boundary from Phase 0 through Phase 7, with lifecycle identity, call (booleans truthful; `--turn-count <n>` only when observed, never fabricated):
 
+```text
+workflow-state progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> --phase <completed> --next-needs-context <bool> --artifacts-sufficient <bool> --remainder-self-contained <bool> | artifact-budget validate-report --boundary workflow-response --input -
+```
+
+and obey the `action` of the validated `phase_gate` reply exactly:
 1. **`continue`** — proceed in this conversation.
 2. **`fresh_start`** — start a fresh conversation from committed artifacts; do not carry conversational state.
 3. **`handoff`** — first release every worker this owner registered, then run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`. Beneath `ledger_repo_root`, create only the run's non-symlink `handoffs/` directory if missing, never the destination leaf. Invoke `handoff` with a destination beneath `.superpowers/workflows/<run-id>/handoffs/`, repeat `workflow-state progress` with `--handoff-path <exact-path>` to finalize `handed_off` on the same attempt, and persist the handoff. A direct `--auto` invocation not prompted `Relaunched owner` never stops: on this or a child's `Handed off (…)` line it dispatches one fresh `from-issue-phase-delegate` owner prompted only `/from-issue <num> --auto` and `Relaunched owner`, and relays its return. Any other owner returns only `Handed off (<exact-handoff-path>). Resume: /from-issue <num> --auto` and stops.
@@ -140,7 +145,7 @@ Suspend — do not finish — when an environmental interruption pauses the work
 Release every worker this owner registered (the helper refuses with `live workers: <ids>` while one is live), run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`, and then call:
 
 ```text
-workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --issue <n> --attempt <k> --action-id <action_id> --blocked-on <value> | artifact-budget validate-report --boundary workflow-response --input -
+workflow-state suspend --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> --blocked-on <value> | artifact-budget validate-report --boundary workflow-response --input -
 ```
 
 with `<value>` one of `usage_limit`, `transport`, `human_gate`, `external`, `agent_dispatch`, or sdd's `deadline` (the reaper alone owns `unknown`). A validated `kind: terminal` reply means the anti-zombie bound ended the attempt instead: handle it as the terminal replay in the terminal return procedure — print its `reentry`, relay it, and write no `finish` — and stop. Otherwise the reply is `kind: suspended`; print the canonical line as the final output:

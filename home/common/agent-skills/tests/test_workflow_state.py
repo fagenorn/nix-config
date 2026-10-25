@@ -8153,6 +8153,71 @@ class PhaseBudgetDefaultsTest(LifecycleHarness, unittest.TestCase):
             parser.parse_args([*self.MINIMAL, "--context-", "5"])
 
 
+class ActionIdIdentityTest(LifecycleHarness, unittest.TestCase):
+    """Issue 432: `progress` and `suspend` derive --issue and --attempt from --action-id."""
+
+    def gate_arguments(self, *identity, phase=1, now="2026-08-13T20:05:00Z"):
+        return ["progress", "--repo-root", self.root, "--run-id", self.run_id, *identity,
+                "--phase", phase, "--now", now, "--next-needs-context", "true",
+                "--artifacts-sufficient", "false", "--remainder-self-contained", "false"]
+
+    def suspend_arguments(self, *identity):
+        return ["suspend", "--repo-root", self.root, "--run-id", self.run_id, *identity,
+                "--blocked-on", "usage_limit", "--now", "2026-08-13T20:05:00Z"]
+
+    def started(self):
+        self.init_run()
+        self.spawn(issue=14, worktree=self.root / "wt-a")
+
+    def test_progress_with_only_an_action_id_records_on_its_issue_and_attempt(self):
+        self.started()
+        completed = self.run_cli(*self.gate_arguments("--action-id", "14:1:1", phase=2))
+        reply = json.loads(completed.stdout)
+        self.assertEqual((reply["issue"], reply["custody"]["action_id"], reply["action"]),
+                         (14, "14:1:1", "continue"))
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual((attempt["phase"], attempt["state"]), (2, "active"))
+
+    def test_a_flag_that_agrees_with_the_action_id_is_accepted(self):
+        self.started()
+        completed = self.run_cli(*self.gate_arguments(
+            "--issue", "14", "--attempt", "1", "--action-id", "14:1:1"))
+        self.assertEqual(json.loads(completed.stdout)["issue"], 14)
+
+    def test_a_flag_that_disagrees_with_the_action_id_is_refused_and_writes_nothing(self):
+        self.started()
+        before = self.state_path.read_bytes()
+        for identity in (("--issue", "15"), ("--attempt", "2"),
+                         ("--issue", "15", "--attempt", "1")):
+            with self.subTest(identity=identity):
+                for arguments in (self.gate_arguments("--action-id", "14:1:1", *identity),
+                                  self.suspend_arguments("--action-id", "14:1:1", *identity)):
+                    refused = self.run_cli(*arguments, ok=False)
+                    self.assertEqual(refused.returncode, 2)
+                    self.assertIn("--issue/--attempt disagree with --action-id", refused.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_a_call_with_neither_an_action_id_nor_both_flags_is_refused(self):
+        self.started()
+        for command, arguments in (
+                ("progress", self.gate_arguments("--issue", "14")),
+                ("progress", self.gate_arguments()),
+                ("suspend", self.suspend_arguments("--attempt", "1")),
+                ("suspend", self.suspend_arguments())):
+            with self.subTest(command=command, arguments=arguments[3:]):
+                refused = self.run_cli(*arguments, ok=False)
+                self.assertEqual(refused.returncode, 2)
+                self.assertIn(f"{command} needs --action-id or --issue and --attempt",
+                              refused.stderr)
+
+    def test_suspend_with_only_an_action_id_suspends_its_issue_and_attempt(self):
+        self.started()
+        reply = json.loads(self.run_cli(*self.suspend_arguments("--action-id", "14:1:1")).stdout)
+        self.assertEqual((reply["kind"], reply["issue"], reply["blocked_on"]),
+                         ("suspended", 14, "usage_limit"))
+        self.assertEqual(self.read_state()["issues"]["14"]["attempts"][0]["state"], "suspended")
+
+
 class PhaseGateReplyTest(LifecycleHarness, unittest.TestCase):
     """#191 D5: `progress` replies with one closed, validated `phase_gate`."""
 
