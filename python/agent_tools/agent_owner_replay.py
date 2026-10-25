@@ -122,9 +122,9 @@ def _arm(name, spec):
             rest.append(item)
     if never and any(item.partition("=")[0].startswith("threshold") for item in rest):
         raise ValueError(f"policy {name!r}: threshold=never excludes every other threshold")
-    budget = None if never else (parse(",".join(rest), knobs=REPLAY_KNOBS, base=ORIGIN)
-                                 if rest else ORIGIN)
-    return Arm(name, budget, boot=chosen.get("boot", "observed"),
+    # parsed for threshold=never too, so its other knobs are checked before they go unused
+    budget = parse(",".join(rest), knobs=REPLAY_KNOBS, base=ORIGIN) if rest else ORIGIN
+    return Arm(name, None if never else budget, boot=chosen.get("boot", "observed"),
                keepalive=chosen.get("keepalive") == "on", help=chosen.get("help", "keep"))
 
 
@@ -200,7 +200,7 @@ def fit(lineages: list[Lineage]) -> BootModel:
 @dataclass
 class _Entry:
     call: OwnerCall
-    cut_delta: int = 0  # a joined launch gives the hand-off's C - B back (negative)
+    cut_delta: int = 0  # a joined launch gives C - R back (negative; R: its registering call)
     boot_slim: int = 0  # slimmable tokens of the boot this registering call ends
     registers: bool = False
     growth: int = 0  # for a help call: what its result added to the next call's context
@@ -430,7 +430,9 @@ class _Replay:
                      if end <= call.start), None)
 
     def _hand_off(self, state, call, context):
-        model, group = self.model, phase_group(call.phase)
+        # a gate hands off to an owner entering the next phase; a mid-phase hand-off stays in it
+        entering = call.phase if call.gate is None else call.gate.phase + 1
+        model, group = self.model, phase_group(entering)
         slim = self.arm.boot == "slim"
         end = model.boot_end[group] - (model.slimmable[group] if slim else 0)
         overhead = model.overhead_calls * _dollars(call.model, read=context, output=model.boot_output)

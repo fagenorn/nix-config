@@ -188,6 +188,38 @@ class ReplayTest(unittest.TestCase):
         # (at 110k): calls 1, 11, ..., 91; a boot already at 135k would hand off at every call
         self.assertEqual(out.handoffs, 10)
 
+    def test_a_gate_handoff_boots_the_phase_the_fresh_owner_enters(self):
+        # B is 60k for Phases 0-5 and 80k for 6-7. The Phase-5 gate at 130k hands off (ceiling
+        # 110k + 10k headroom for Phase 6) into Phase 6: cut 130k − 80k = 50k, so 131k shows 81k.
+        model = dataclasses.replace(MODEL, boot_end={"0-5": 60_000, "6-7": 80_000})
+        gated = [c(0, 50_000, gate=gate(4), registers=True, phase=4),
+                 c(10, 130_000, gate=gate(5), phase=5), c(20, 131_000, phase=6)]
+        out = replay(lineage(launch(gated)), BASELINE, model)
+        self.assertEqual((out.handoffs, out.trace), (1, (50_000, 130_000, 81_000)))
+        # a mid-phase hand-off keeps the phase it is in: 115k in Phase 5 boots the 0-5 B, 60k
+        midway = [c(0, 50_000, gate=gate(4), registers=True, phase=4),
+                  c(10, 115_000, phase=5), c(20, 116_000, phase=5)]
+        out = replay(lineage(launch(midway)), BASELINE, model)
+        self.assertEqual((out.handoffs, out.trace), (1, (50_000, 115_000, 61_000)))
+
+    def test_a_per_phase_arm_hands_off_at_each_phase_s_own_threshold(self):
+        # threshold:0-5=110000,threshold:6-7=200000. Phase 3 reaches 115k: hand-off (cut 55k).
+        # The Phase-5 gate (125k − 55k = 70k) stays. Phase 6 shows 145k and 155k, under 200k;
+        # the baseline (110k everywhere) hands off again at 145k (cut 55k + 85k = 140k): 70k.
+        calls = [c(0, 50_000, gate=gate(2), registers=True, phase=2), c(10, 100_000),
+                 c(20, 115_000), c(30, 120_000), c(40, 125_000, gate=gate(5), phase=5),
+                 c(50, 200_000, phase=6), c(60, 210_000, phase=6)]
+        arm = parse_arm("split=threshold:0-5=110000,threshold:6-7=200000")
+        self.assertEqual(arm.budget.phase_thresholds, ((0, 5, 110_000), (6, 7, 200_000)))
+        split = replay(lineage(launch(calls)), arm, MODEL)
+        self.assertEqual((split.handoffs, split.trace),
+                         (1, (50_000, 100_000, 115_000, 65_000, 70_000, 145_000, 155_000)))
+        base = replay(lineage(launch(calls)), BASELINE, MODEL)
+        self.assertEqual((base.handoffs, base.trace[5:]), (2, (145_000, 70_000)))
+        # one 200k threshold everywhere would not hand off in Phase 3: 120k stays 120k
+        single = replay(lineage(launch(calls)), parse_arm("t=threshold=200000"), MODEL)
+        self.assertEqual(single.trace[2:4], (115_000, 120_000))
+
     def test_the_keep_rule_keeps_a_clear_win_and_rejects_noise(self):
         self.assertTrue(keep_rule([1.0, 1.2, 0.9, 1.1]).keep)
         # mean 0.05, sample sd ≈ 2.0, so the lower bound 0.05 − 1.2816 · 2.0/2 ≈ −1.23
@@ -203,7 +235,9 @@ class ReplayTest(unittest.TestCase):
         self.assertEqual((arm.boot, arm.keepalive, arm.help, arm.budget.guard),
                          ("slim", True, "drop", 40_000))
         self.assertIsNone(parse_arm("n=threshold=never").budget)
-        for bad in ("noequals", "=threshold=1", "x=boot=fat", "x=threshold=never,threshold=90000"):
+        self.assertIsNone(parse_arm("n=threshold=never,cap=2,guard=20000").budget)
+        for bad in ("noequals", "=threshold=1", "x=boot=fat", "x=threshold=never,threshold=90000",
+                    "x=threshold=never,cap=0", "x=threshold=never,typo=1", "x=cap=2,threshold=never,cap=3"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 parse_arm(bad)
 
@@ -265,7 +299,7 @@ class VirtualOwnerKindTest(unittest.TestCase):
 
     def joined(self, revived_at):
         # a root launch hands off at call 1 (C = 100k); its subagent relaunch registers at B = 80k
-        # (call 2), so the root owner gets C − B = 20k back (cut −20k) and keeps the relaunch's
+        # (call 2), so the root owner gets C − R = 20k back (cut −20k) and keeps the relaunch's
         # call 3, an observed death (81k all written) at t = `revived_at`.
         root = launch([c(0, 50_000, root=True, registers=True),
                        c(10, 100_000, root=True, gate=gate(3, "handoff")),
@@ -312,7 +346,7 @@ class MergedTrialTest(unittest.TestCase):
         self.assertAlmostEqual(
             out.dollars, sum(map(call_cost, unfinished.calls + unrelated.calls)), places=12)
         # the same two launches in ONE lineage are the observed hand-off chain and do join:
-        # a's call 2 and b's boot calls are dropped, and b's calls give C − B = 22k back
+        # a's call 2 and b's boot calls are dropped, and b's calls give C − R = 22k back
         joined = replay(lineage(unfinished, unrelated), never, MODEL)
         self.assertEqual(joined.trace, (50_000, 120_000, 120_000, 121_000))
 
@@ -409,6 +443,26 @@ class SweepTest(unittest.TestCase):
                          {"boot": "keep", "threshold": "reject", "combined": "keep"})
         self.assertEqual((final["boot"]["spec"], final["threshold"]["spec"], final["combined"]["spec"]),
                          ("boot=slim", "threshold=90000", "boot=slim"))
+
+
+class PerPhaseGridTest(unittest.TestCase):
+    """D7: the per-phase grid runs only when the boots of the two phase groups differ by > 25%."""
+    LEVELS = (110_000, 140_000, 170_000, 200_000)
+
+    def grid(self, boot_end):
+        calls = [c(0, 40_000, gate=gate(2), registers=True)] + [
+            c(10 * i, 40_000 + 1_000 * i) for i in range(1, 90)]
+        lineages = [lineage(launch(calls, name=f"t{n}")) for n in range(2)]
+        rows = replay_module.sweep(lineages, dataclasses.replace(MODEL, boot_end=boot_end))
+        return {row["spec"] for row in rows if row["step"] == "threshold" and ":" in row["spec"]}
+
+    def test_boots_more_than_25_percent_apart_add_the_16_arm_grid(self):
+        self.assertEqual(self.grid({"0-5": 60_000, "6-7": 90_000}),   # 50% apart
+                         {f"threshold:0-5={early},threshold:6-7={late}"
+                          for early in self.LEVELS for late in self.LEVELS})
+
+    def test_boots_within_25_percent_add_no_grid(self):
+        self.assertEqual(self.grid({"0-5": 60_000, "6-7": 72_000}), set())   # 20% apart
 
 
 class SweepCliTest(unittest.TestCase):
