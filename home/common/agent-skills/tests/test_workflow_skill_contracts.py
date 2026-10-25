@@ -1431,17 +1431,30 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assert_ordered(
             gate, "--handoff-path <exact-path>",
             "A direct `--auto` invocation not prompted `Relaunched owner` never stops",
-            "a child's `Handed off (…)` return", "`from-issue-phase-delegate`",
-            "`/from-issue <num> --auto` and `Relaunched owner`", "relays its return",
-            f"Any other owner returns only `{line}` and stops",
+            "a child's `Handed off (…)` line", "`from-issue-phase-delegate`",
+            "prompted only `/from-issue <num> --auto` and `Relaunched owner`",
+            "relays its return", f"Any other owner returns only `{line}` and stops",
         )
         self.assertNotIn("persist the handoff, and stop", gate)
+        # Every relay of a child's return defers a `Handed off` line to the
+        # handoff action, so the top-level run relaunches instead of stopping.
         delegate = normalized(self.from_issue.split("4. **`delegate`**", 1)[1])
-        self.assertIn("a `Suspended (…)` line or a `Handed off (…)` line", delegate)
-        self.assertIn("and obey `SKILL.md`'s `handoff` action", normalized(self.auto))
+        self.assertIn("Except at the rollover or a relaunch the prompt has the line", delegate)
+        self.assert_ordered(
+            delegate, "a `Suspended (…)` line or a `Handed off (…)` line",
+            "relay it (a `Handed off (…)` per the `handoff` action), write nothing and stop",
+        )
+        auto = normalized(self.auto)
+        self.assertIn("durable handoff, obey `SKILL.md`'s `handoff` action.", auto)
+        self.assertNotIn("finalize it through `workflow-state progress`, and stop", auto)
         earlier = normalized(ROLLOVER.read_text(encoding="utf-8")
                              .split("## Earlier controller stop", 1)[1])
-        self.assert_ordered(earlier, line, "`SKILL.md`'s `handoff` action")
+        self.assert_ordered(
+            earlier, "validate, relay, self-relaunch, and stop",
+            f"`{line}` line takes `SKILL.md`'s `handoff` action's relaunch, or its relay",
+            "dispatch a second owner but that relaunch",
+        )
+        self.assertNotIn("dispatch a second owner,", earlier)
 
     def test_direct_auto_observe_owner_terminal_loop_is_closed(self):
         direct = ACQUIRE_DIRECT.read_text(encoding="utf-8")
