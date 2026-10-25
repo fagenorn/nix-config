@@ -13,9 +13,9 @@ Verdict: `{"hits":["contract_change","concurrency_or_persistence","open_design_q
 ## Problem
 
 A subagent's prompt-cache entry lives five minutes after its last use. Over 14
-days about 2,646 subagent conversations lost their entry while they waited and
-then paid a full cache write (1.25× input) to rebuild a prefix they had built
-once already, about $2.5k at list price. Most were issue owners that ended
+days a subagent conversation lost its entry about 2,646 times while it waited,
+and each time paid a full cache write (1.25× input) to rebuild a prefix it had
+built once already, about $2.5k at list price. Most were issue owners that ended
 their turn and were woken by a child's hand-back after a median 12.6 minutes.
 The rest waited on a long foreground command. A cache read costs 0.1×, and
 #422's spike showed (fact 2) that replaying a conversation's request with
@@ -73,13 +73,15 @@ measure them. This one does not.
   upstream, after any other transform the proxy applies (#429's reorder
   included), the handler calls `observe(method, path, headers, body)`. That
   call returns a track. The track carries the request's `outcome` (D5) and
-  its conversation handle (D11). It gives the headers to send (D9), takes each
-  response chunk the relay writes, and takes one final `done(status,
-  relay_outcome)` call. A request leaves flight exactly once, whatever its
-  outcome, including an upstream failure before any response. That is why
-  `done` is called on every path. The keepalive reads only the bytes and
-  headers the proxy actually forwards, so that its replay matches what
-  upstream cached.
+  its conversation handle (D11), and gives the headers to send (D9). It then
+  takes `started(status)` when the response headers arrive, each response
+  chunk the relay writes, and one final `done(relay_outcome)`. An upstream
+  failure before any response calls only `done`. A request leaves flight
+  exactly once, whatever its outcome, so `done` is called on every path
+  (D19). The keepalive reads only the bytes and headers the proxy actually
+  forwards, so that its replay matches what upstream cached. Classification
+  parses a subagent body before it is sent. That costs about 2.5 ms for a
+  0.94 MB body on mbp, which is small next to upstream's time to first byte.
 - **Scheduling seam.** `tick()` reads the clock, applies the stop rules (D10)
   and returns the pings now due, each one a fully built request. `send(ping)`
   sends a ping and records its result. `run(stop)` is the production loop: it
@@ -106,8 +108,7 @@ measure them. This one does not.
 
 A **session** is the value of the request's `X-Claude-Code-Session-Id`
 header, which Claude Code sets once for the whole session, so its subagents
-share it. A
-**conversation** is the pair of that value and the value of
+share it. A **conversation** is the pair of that value and the value of
 `x-claude-code-agent-id`. Claude Code sets the agent header from the agent
 context of every non-main agent and never sets it for the main loop. The
 pair's **candidate** is the most recent request that may be replayed for that
@@ -140,9 +141,11 @@ checks in this order and stops at the first match:
    invalidate the message cache. The candidate is cleared.
 7. `tracked`: everything else. This request becomes the candidate.
 
-An effect on the candidate (replace, clear or keep) applies only when the
-response status is 2xx. A request that failed upstream may never have touched
-the cache. Every outcome other than `untracked` updates session activity,
+An effect on the candidate (replace, clear or keep) applies at `started`,
+and only when the status is 2xx (D19). A request that failed upstream may
+never have touched the cache. An entry is readable once its response starts
+streaming (#429 D14), so a long generation is already the candidate while it
+streams. Every outcome other than `untracked` updates session activity,
 whatever the status. Dispatch on the outcome fails loudly on a value outside
 the set. Main-session bodies and untracked bodies are never parsed, and only
 a candidate's body and headers are kept.
@@ -150,10 +153,11 @@ a candidate's body and headers are kept.
 ### The ping (D6, D7)
 
 - **Body.** The candidate's body is parsed strictly, `max_tokens` is set to
-  `1`, and the result is encoded as compact UTF-8 JSON
-  (`separators=(",", ":")`, `ensure_ascii=False`), keeping key order, the
-  encoding #429 uses (D16). Every
-  other field keeps its value, including `stream`, `thinking`,
+  `1`, and the result is encoded as compact ASCII JSON
+  (`separators=(",", ":")`, `ensure_ascii=True`), keeping key order (D20).
+  A lone surrogate escape, which a truncated tool output can carry, then stays
+  an escape and does not fail the UTF-8 encode. Every other field keeps its
+  value, including `stream`, `thinking`,
   `output_config`, `context_management`, `metadata` and every `cache_control`.
   The tokens the API caches are the same as in the original request, and the
   encoding is not part of the cache key.
@@ -172,10 +176,11 @@ a candidate's body and headers are kept.
   construction.
 - **Credentials (D7).** This changes #422's "the proxy holds no credential".
   The keepalive keeps each candidate's request headers, `authorization`
-  included, in process memory only, from the request's 2xx response until the
-  candidate is cleared, replaced or ended. They are never logged, persisted or
-  sent anywhere but the configured upstream. A 401 or any other non-2xx answer
-  to a ping ends the candidate, so an expired token costs one refused request.
+  included, in process memory only, from the request's 2xx response start
+  until the candidate is cleared, replaced or ended. They are never logged,
+  persisted or sent anywhere but the configured upstream. A 401 or any other
+  non-2xx answer to a ping ends the candidate, so an expired token costs one
+  refused request.
 
 ### Session activity (D8, D9)
 
@@ -215,9 +220,10 @@ the client gets are unchanged.
 ### Timing and stop rules (D10)
 
 - **Touch.** A conversation's **last touch** is the upstream send time of
-  either its last client request that got a 2xx with outcome `tracked`, or of
-  its last ping that got a 2xx. The send time is used, not the response's end,
-  because the entry's five minutes start when the prompt is processed. A long
+  either its last client request whose response started 2xx with outcome
+  `tracked`, or of its last ping that got a 2xx. The send time is used, not
+  the response's end, because the entry's five minutes start when the prompt
+  is processed. A long
   generation is therefore pinged while it is still in flight, which keeps that
   entry for the next turn.
 - **Due.** A ping is due when 270 seconds have passed since the last touch.
@@ -246,8 +252,10 @@ the client gets are unchanged.
 The issue's rule pings a subagent that has finished for good for as long as
 the rest of the session stays active, up to the 60-minute ceiling, because the
 proxy cannot tell "done" from "waiting to be woken". For example, a
-`SendMessage` can resume any finished agent. That cost is accepted and
-measured (D15, D17).
+`SendMessage` can resume any finished agent. The same holds when the only
+activity is a tool that is waiting on a permission answer, or one left
+pending by a process killed mid-tool. That cost is accepted, bounded by the
+ceiling and measured (D15, D17, D22).
 
 ### Log contract (D11)
 
@@ -255,8 +263,10 @@ These are additions to #422 D8/D16, written only with `--keepalive`:
 
 - **`request` lines** gain `keepalive` with the D5 outcome. Unless the outcome
   is `untracked`, they also gain `conversation`, the handle, and `stop_reason`
-  when the tap saw one. The handle is the first 12 hex digits of the digest
-  that `agent_tools.canonical.telemetry_digest` gives for
+  when the tap saw one. A request rejected before its body was read (`411`,
+  `400`) carries none of them (#429 D15). The handle is the first 12 hex
+  digits after `sha256:` in the digest that
+  `agent_tools.canonical.telemetry_digest` gives for
   `{"agent": <agent header or null>, "session": <session header>}`. It is a
   short stable handle and never the header value.
 - **`ping` lines** carry `conversation`, `model` (from the body), `idle_s`
@@ -333,7 +343,8 @@ and AGENTS.md do not change, so the instruction budget is untouched.
   line's `usage` is priced with `agent_costs.PRICING`, `model_family` and
   `cache_write_split`, which is the one home of prices. The threshold is on
   total < off total. Both `results.jsonl` lines are cited, together with each
-  arm's ping count and ping cost.
+  arm's ping count, outcomes and cost, and its `keepalive_end` reasons
+  (D21).
 - **Conditions.** Every run is one trial and is never repeated to pass (#422
   D27). Each run takes its cutoff from the controller's `deadline_at` (#422
   D20, D24). A run that would pass the cutoff is recorded `human-pending` with
@@ -377,6 +388,12 @@ received and the JSON lines the log recorded (D12).
   - a 4xx ping ends the conversation `ping_failed`, with its error body logged,
     and nothing is retried;
   - a client request after a ping ends the period `resumed`, with its count;
+  - a client request that arrives while a ping is in flight supersedes it, and
+    the ping's answer moves no touch;
+  - a candidate whose response has started 2xx but not finished is pinged at
+    its due time;
+  - a body carrying a lone surrogate escape gets a ping whose body is the same
+    JSON value;
   - the 65th candidate evicts the oldest.
 - **Through the proxy, in process.** A `ProxyServer` with a fake-clocked
   keepalive is placed in front of the fake upstream. A client request to it
@@ -437,3 +454,7 @@ received and the JSON lines the log recorded (D12).
 | D16 | Mark enumeration (D5) and the compact body encoding (D6) follow #429 D10 and D16 exactly. Whichever of #423 and #429 merges second points its copy at the first one's function in the same PR, so each has one home | The bar: DRY for knowledge that must change together; #429 is in flight in another worktree, and its concurrency note keeps the modules separate until one lands | A shared module created now (couples two in-flight branches through a third file); two permanent copies (they must change together) |
 | D17 | The issue's stop rule is applied as written: a subagent that will never resume is pinged while the session stays active, up to the ceiling. The waste is accepted and measured by AC3 and the `keepalive_end` lines; no completion heuristic is built | Issue decisions: "ping while the session has other active conversations; hard ceiling 60 min"; any finished agent can be resumed by `SendMessage`; pinging is net positive while a resume comes within about 11 pings | Parsing a parent's `Agent` tool results to retire finished children (couples the proxy to tool-result prose); a ceiling shorter than the issue's 60 min (contradicts the issue's decision) |
 | D18 | A keepalive exception never blocks client traffic: one escaping `observe`, a track call, `tick` or `send` is caught at the seam and written as one `keepalive_error` line (`stage`, `error`), the request is forwarded as an `untracked` one would be, and the loop keeps running; in-flight state is bounded by the 60-min ceiling, so a lost `done` cannot pin a session active | #422's posture that a dead proxy never stops work; #429 D13 (forward the original bytes, log the error before absorbing it); the bar: log the original error before a swallow | Letting the handler fail (a keepalive bug would break every routed session); a silent catch (hides the bug) |
+| D19 | Refines D2, D5 and D10: the track takes `started(status)` at the response headers, the chunks, then `done(relay_outcome)` (only `done` after a pre-response failure). Candidate effects and the touch apply at `started` with a 2xx status, and a subagent body is classified in `observe`, before the send | #429 D14: an entry is readable once its response starts streaming; a generation longer than 270 s must already be the candidate; measured on mbp: `json.loads` of a 0.94 MB body takes 2.5 ms, against an upstream time to first byte of seconds (#422 D27) | Applying effects at `done` (a long generation's entry expires unpinged); classifying after the response (keeps the latency path free, but loses the in-flight case for a 2.5 ms saving) |
+| D20 | Refines D6 and narrows D16 to marks: the ping body is compact ASCII JSON (`ensure_ascii=True`), keeping key order | Measured: Python decodes a lone surrogate escape into a `str` that `ensure_ascii=False` output then cannot encode as UTF-8 (`UnicodeEncodeError`), and Claude Code's JSON can carry one from a truncated tool output; the escape decodes to the same string upstream, so the cached tokens are unchanged | #429's `ensure_ascii=False` (a ping for such a conversation would fail at build); `surrogatepass` (sends invalid UTF-8 upstream) |
+| D21 | Refines D15: the AC3 report gives, per arm, the ping count, the ping outcomes and their cost, and the `keepalive_end` reasons beside the eval costs. The result is reported as observed, never re-run | `results.jsonl`: recent `from-issue 1` runs took 256–322 s, so few conversations reach a due time and run-to-run variance may exceed the pings' effect; the bar: truthful terminal states | Lengthening the eval or adding trials (changes the issue's AC3); omitting the ping breakdown (a cost difference could not be attributed) |
+| D22 | Refines D17: the first lever, if AC3 or the `keepalive_end` reasons show pings to conversations that never resume outweighing the saves, is to ping an ended-turn conversation only while one of its own children is active, through the `x-claude-code-parent-agent-id` header that Claude Code 2.1.302 sends. It is recorded and not built | Break-even: a resume saves about 1.15× the prefix and each ping costs 0.1×, so the full 13-ping ceiling period loses 1.3× when no resume follows; the issue's explicit stop rule is session-wide | Building the children rule now (narrows the issue's stated decision, and it would miss wakes from background-command notifications) |
