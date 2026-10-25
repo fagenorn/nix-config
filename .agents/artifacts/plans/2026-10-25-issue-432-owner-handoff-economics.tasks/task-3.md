@@ -1,6 +1,6 @@
 # Task 3: The policy home — `PhaseBudget`, `AGENT_PHASE_BUDGET` and a phase-aware meter
 
-Spec § Policy home and test seams 3–5; per D6 and D21. Today `phase_budget` is four constants: the gate reads them as argparse defaults, and the meter hands off at `CONTEXT_CEILING - CONTEXT_HEADROOM`. This task makes it one frozen `PhaseBudget` with a per-phase hand-off threshold, a knob grammar and an environment override for eval arms. It moves `select_phase_action` in unchanged and makes the gate and the meter read the threshold of the phase being entered. With the defaults (110,000 for every phase) no behaviour changes. The replay (Task 4) and the harness (Task 5) import this module.
+Spec § Policy home and test seams 3–5; per D6 and D21. Today `phase_budget` is four constants: the gate reads them as argparse defaults, and the meter hands off at `CONTEXT_CEILING - CONTEXT_HEADROOM`. This task makes it one frozen `PhaseBudget` with a per-phase hand-off threshold, a knob grammar and an environment override for eval arms. It moves `select_phase_action` in unchanged; the gate and the meter read the threshold of the phase being entered, so the defaults (110,000 everywhere) change no behaviour.
 
 **Files:**
 - Modify: `python/agent_tools/phase_budget.py` (rewrite)
@@ -31,7 +31,8 @@ ENVIRONMENT = "AGENT_PHASE_BUDGET"
 PRODUCT_KNOBS = frozenset({"threshold"})
 REPLAY_KNOBS = frozenset({"threshold", "guard", "cap"})
 
-def parse(spec: str, *, knobs: frozenset[str] = PRODUCT_KNOBS) -> PhaseBudget: ...
+def parse(spec: str, *, knobs: frozenset[str] = PRODUCT_KNOBS,
+          base: PhaseBudget | None = None) -> PhaseBudget: ...
 def current() -> PhaseBudget: ...                      # functools.cache: read once per process
 def handoff_threshold(budget: PhaseBudget, phase: int | None) -> int: ...
 def crossing_threshold(budget: PhaseBudget, phase: int | None, baseline: int | None) -> int: ...
@@ -41,7 +42,7 @@ def select_phase_action(*, direct, turn_count, context_tokens, turn_ceiling, con
 ```
 
 **Invariants (per D21):**
-- Grammar: `spec` is one or more items separated by `,`. Each item is `key=value`, where `key` is `threshold`, `threshold:<a>-<b>` (integers with `0 ≤ a ≤ b ≤ 7`), `guard` or `cap`, and `value` is a decimal integer: `threshold` ≥ 1, `guard` ≥ 0, `cap` ≥ 1. Ranged items append to `phase_thresholds` in order. A non-ranged key given twice, an empty item, a key outside `knobs` (`guard` and `cap` are outside `PRODUCT_KNOBS`) or a bad value raises `ValueError` whose message names the item.
+- Grammar: `spec` is one or more items separated by `,`. Each item is `key=value`, where `key` is `threshold`, `threshold:<a>-<b>` (integers with `0 ≤ a ≤ b ≤ 7`), `guard` or `cap`, and `value` is a decimal integer: `threshold` ≥ 1, `guard` ≥ 0, `cap` ≥ 1. Ranged items append to `phase_thresholds` in order. A non-ranged key given twice, an empty item, a key outside `knobs` (`guard` and `cap` are outside `PRODUCT_KNOBS`) or a bad value raises `ValueError` whose message names the item. Fields the spec does not name keep `base`'s values (`PhaseBudget()` when `base` is `None`), and ranged items append to `base.phase_thresholds` (D24).
 - `handoff_threshold(b, p)`: the last `phase_thresholds` entry covering `p`, else `b.threshold`; `p is None` → `b.threshold`.
 - `crossing_threshold(b, p, baseline)`: `handoff_threshold(b, p)`, raised to `baseline + b.guard` when `b.guard > 0` and `baseline is not None`.
 - `current()`: `PhaseBudget()` when `AGENT_PHASE_BUDGET` is unset, else `parse(<value>)` (product knobs), so an empty or invalid value raises. Production never sets it (D6).
@@ -91,6 +92,9 @@ class GrammarTest(unittest.TestCase):
         self.assertEqual((budget.guard, budget.cap), (40_000, 2))
         with self.assertRaises(ValueError):
             parse("cap=0", knobs=phase_budget.REPLAY_KNOBS)
+        based = parse("threshold=140000", knobs=phase_budget.REPLAY_KNOBS,
+                      base=PhaseBudget(guard=5, cap=3))
+        self.assertEqual((based.threshold, based.guard, based.cap), (140_000, 5, 3))
 
     def test_the_guard_raises_the_crossing_above_baseline(self):
         guarded = parse("guard=40000", knobs=phase_budget.REPLAY_KNOBS)

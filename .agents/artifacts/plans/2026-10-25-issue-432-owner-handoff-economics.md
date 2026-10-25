@@ -5,11 +5,11 @@
 
 **Goal:** `just agent-costs --report owners` prices owner lineages in list-price dollars per delivered issue and replays them under counterfactual hand-off policies. Eval 8 runs a real lifecycle-identity pipeline that calibrates the replay. Only the candidates the replay keeps are built, and they are confirmed against a live baseline arm, with the A/B and sweep report committed.
 
-**Architecture:** Measurement first (D1). A per-model price table (D2) and a shared transcript call reader (D19) feed a new owner report: lineages, descendants, delivery, eval grouping (D3, D4, D17, D20). A shift-model replay prices the threshold sweep and each candidate on paired per-issue differences (D5, D7, D8, D18, D21). It uses `agent_tools.phase_budget`, the one policy home, which the gate and the meter read through `AGENT_PHASE_BUDGET` (D6). The eval harness gains tree shims, derived settings, `EVAL_POLICY` and a `tracked-issue` setup for eval 8 (D15, D16). Candidates ship one commit each, and only when kept (D9–D14). Live arms follow D22 and D23.
+**Architecture:** Measurement first (D1): a per-model price table (D2) and a shared call reader (D19) feed an owner report of lineages, descendants, delivery and eval arms (D3, D4, D17, D20). A shift-model replay prices the sweep and each candidate on paired per-issue differences (D5, D7, D8, D18, D21) through `agent_tools.phase_budget`, the one policy home of gate and meter, overridable by `AGENT_PHASE_BUDGET` (D6). The harness gains tree shims, `EVAL_POLICY` and eval 8 (D15, D16); kept candidates ship one commit each (D9–D14), checked by live arms (D22, D23).
 
-**Tech stack:** Python 3.13 standard library (`dataclasses`, `statistics`, `json`, `functools`, `argparse`), `unittest` driving `python -m agent_tools.<module>` from source, Bash and `jq` (the eval runner, its setup and test), Nix (`just build`), Just.
+**Tech stack:** Python 3.13 standard library (`dataclasses`, `statistics`, `json`, `functools`, `argparse`), `unittest` driving `python -m agent_tools.<module>` from source, Bash and `jq`, Nix (`just build`), Just.
 
-Spec: `.agents/artifacts/specs/2026-10-25-issue-432-owner-handoff-economics-design.md`. This plan appends ledger rows D19–D23. Issue: https://github.com/fagenorn/nix-config/issues/432. Acceptance record and A/B report: `.agents/artifacts/plans/2026-10-25-issue-432-owner-handoff-economics.acceptance.md`. Task 6 creates it and Task 8 completes it.
+Spec: `.agents/artifacts/specs/2026-10-25-issue-432-owner-handoff-economics-design.md`. This plan appends ledger rows D19–D23, and its standards review D24–D27. Issue: https://github.com/fagenorn/nix-config/issues/432. Acceptance record and A/B report: `.agents/artifacts/plans/2026-10-25-issue-432-owner-handoff-economics.acceptance.md`. Task 6 creates it and Task 8 completes it.
 
 ## Global Constraints
 
@@ -40,7 +40,7 @@ Spec: `.agents/artifacts/specs/2026-10-25-issue-432-owner-handoff-economics-desi
 
 ## Delivery estimate and boundaries
 
-Estimates only. About 35 changed files, plus the acceptance record and the results rows. New modules: `model_pricing.py` (~120 lines), `transcript_calls.py` (~200, mostly moved), `agent_owner_report.py` (~650), `agent_owner_replay.py` (~600). New tests: ~1,700 lines across three files plus builders. Kept candidates add 20–200 lines each. The aggregate will likely exceed one review package. The five slices are independently deliverable: S1 = Tasks 1–2, S2 = Tasks 3–4, S3 = Tasks 5–6, S4 = Task 7 (one commit per kept candidate), S5 = Task 8. If a boundary forces a split, cut at the slice boundaries.
+Estimates: about 35 changed files plus the record and results rows; new modules `model_pricing.py` (~120 lines), `transcript_calls.py` (~200, mostly moved), `agent_owner_report.py` (~650), `agent_owner_replay.py` (~600); ~1,700 test lines; 20–200 lines per kept candidate. Likely over one review package. Independently deliverable slices, where any split cuts: S1 = Tasks 1–2, S2 = 3–4, S3 = 5–6, S4 = 7 (a commit per kept candidate), S5 = 8.
 
 ## Task index
 
@@ -50,7 +50,7 @@ Task 3 — The policy home: `PhaseBudget`, `AGENT_PHASE_BUDGET` and phase-aware 
 Task 4 — The replay, the sweep and the keep rule — `python/agent_tools/agent_owner_replay.py`, `python/agent_tools/agent_owner_report.py`, `python/agent_tools/agent_costs.py`, `tests/test_agent_owner_replay.py`, `justfile`, `python/README.md` — full — [task-4.md](2026-10-25-issue-432-owner-handoff-economics.tasks/task-4.md)
 Task 5 — Tree-mode `workflow-state` shim, derived settings and `EVAL_POLICY` — `home/common/agent-skills/evals/run-eval.sh`, `home/common/agent-skills/evals/tests/test-run-eval-tree.sh`, `home/common/agent-skills/evals/tests/fixtures/settings.json`, `home/common/agent-skills/evals/README.md` — full — [task-5.md](2026-10-25-issue-432-owner-handoff-economics.tasks/task-5.md)
 Task 6 — Eval 8, the `tracked-issue` setup and the acquisition probe — `home/common/agent-skills/evals/run-eval.sh`, `home/common/agent-skills/evals/assert-lib.sh`, `home/common/agent-skills/evals/setups/tracked-issue/setup.sh`, `home/common/agent-skills/evals/setups/tracked-issue/gh.py`, `home/common/agent-skills/evals/fixture-repo/issues/004-priorities-and-due-dates.md`, `home/common/agent-skills/evals/fixture-repo/tests/test_acceptance.py`, `home/common/agent-skills/skills/from-issue/evals/evals.json`, `home/common/agent-skills/tests/test_eval_cases.py`, `home/common/agent-skills/evals/tests/test-run-eval-tree.sh`, `home/common/agent-skills/evals/README.md`, `.agents/artifacts/plans/2026-10-25-issue-432-owner-handoff-economics.acceptance.md` — full — [task-6.md](2026-10-25-issue-432-owner-handoff-economics.tasks/task-6.md)
-Task 7 — Replay verdicts, then only the kept candidates (one commit each) — `.agents/artifacts/plans/2026-10-25-issue-432-owner-handoff-economics.acceptance.md`, and per kept candidate: `python/agent_tools/phase_budget.py`, `python/agent_tools/context_meter.py`, `python/agent_tools/context_meter_crossing.py`, `home/common/agent-skills/scripts/workflow-state.py`, `home/common/agent-skills/scripts/workflow_delivery.py`, `home/common/agent-skills/skills/sdd/SKILL.md`, `home/common/agent-skills/skills/from-issue/SKILL.md`, `home/common/agent-skills/skills/from-issue/delegated-owner.md`, `home/common/agent-skills/skills/from-issue/resume-pack.md`, their tests and READMEs — full — [task-7.md](2026-10-25-issue-432-owner-handoff-economics.tasks/task-7.md)
+Task 7 — Replay verdicts, then only the kept candidates (one commit each) — `.agents/artifacts/plans/2026-10-25-issue-432-owner-handoff-economics.acceptance.md`, and per kept candidate: `python/agent_tools/phase_budget.py`, `python/agent_tools/context_meter.py`, `python/agent_tools/context_meter_crossing.py`, `home/common/agent-skills/scripts/workflow-state.py`, `python/agent_tools/attempt_store.py`, `python/agent_tools/attempt_identity.py`, `home/common/agent-skills/skills/sdd/SKILL.md`, `home/common/agent-skills/skills/from-issue/SKILL.md`, `home/common/agent-skills/skills/from-issue/delegated-owner.md`, `home/common/agent-skills/skills/from-issue/resume-pack.md`, their tests and READMEs — full — [task-7.md](2026-10-25-issue-432-owner-handoff-economics.tasks/task-7.md)
 Task 8 — Live arms, the A/B and sweep report and the verdict — `.agents/artifacts/plans/2026-10-25-issue-432-owner-handoff-economics.acceptance.md`, `home/common/agent-skills/evals/results/results.jsonl` — full — [task-8.md](2026-10-25-issue-432-owner-handoff-economics.tasks/task-8.md)
 
 ## Acceptance map
@@ -58,20 +58,19 @@ Task 8 — Live arms, the A/B and sweep report and the verdict — `.agents/arti
 | AC | Kind | Task | Check |
 |----|------|------|-------|
 | AC1 | code | Task 6 | Eval 8's asserts 1–5 (`from-issue/evals/evals.json` id 8: lifecycle ledger phase ≥ 6, every owner gate call measured, an owner call ≥ 110,000, Phase 7 entered, an owner long child wait) and its shape test in `test_eval_cases.py`. They are graded on every Task-8 trial and recorded in acceptance-record row `AC1`. |
-| AC2 | code | Task 2 | `tests/test_agent_owner_report.py`: boot 29k→98k, 6-minute-gap rewrite priced as a 5-minute write, two-launch hand-off chain with a worker child, delivered/undelivered dollar formula, eval grouping (2 arms × 2 trials, mean and sd), approximate pricing. Run by `just agent-workflow-tests`. |
+| AC2 | code | Task 2 | `tests/test_agent_owner_report.py`: boot 29k→98k, 6-minute-gap rewrite priced as a 5-minute write, two-launch hand-off chain with a worker child, delivered/undelivered dollar formula, eval grouping (2 arms × 2 trials, mean and sd; an interrupted `PASS` trial left out, D26), approximate pricing. Run by `just agent-workflow-tests`. |
 | AC3 | code | Task 4 | `tests/test_agent_owner_replay.py` covers every toggle (threshold sweep and per-phase, boot slimming, guard, cap, keepalive, help), and Task 5's `test-run-eval-tree.sh` covers the `EVAL_POLICY` cases. Both run by `just agent-workflow-tests`. |
 | AC4 | evidence | Task 8 | `just agent-costs --report owners --sweep --days 14` on mbp at the final head, plus the eval-mode report. Acceptance-record row `AC4` and § A/B and sweep report: baseline and each candidate's $/delivered issue with sd, kept and rejected candidates with numbers, a sweep covering 90k, 110k, 140k, 170k (and the per-phase grid when boots differ > 25%), and the chosen value with the reason. |
 | AC5 | code | Task 7 | Each kept candidate's contract tests (named in Task 7), plus `just agent-workflow-tests`, `just agent-instruction-budget` (no `--raise-label`) and `just build` exiting 0 on the final head. |
-| AC6 | evidence | Task 8 | Eval 8 in tree mode on mbp, baseline arm at Task 6's commit and candidate arm at the final head, two trials each (D15, D22). Met when the candidate arm's mean $/delivered trial is below the baseline arm's and every trial is `PASS`. Otherwise, or with no candidate kept, the row reads not met (D23). Acceptance-record row `AC6`. |
+| AC6 | evidence | Task 8 | Command, at the final head after both arms: `just agent-costs --report owners --format json --eval-results home/common/agent-skills/evals/results/results.jsonl --eval from-issue:8 >"$SCRATCH/eval-arms.json"`, then `jq -c '.arms[]' "$SCRATCH/eval-arms.json"`. Conditions: eval 8 in tree mode on mbp, `EVAL_MODEL=opus`, `EVAL_MAX_USD=40`; arms `<Task 6 commit, 12 chars>/default` (baseline) and `<final head, 12 chars>/default` (candidate), two trials each (D15, D22). Met when each arm has `n` 2 and `delivered` 2 (only completed `PASS` trials count, D26) and the candidate's `dollars_per_delivered` is below the baseline's. Otherwise, or with no candidate kept, not met (D23, D26). Acceptance-record row `AC6`. |
 
 ## Decisions
 
-- Two-layer measurement per D1; pricing per D2 with the module layout of D19 (Task 1).
-- Owner identity, lineages and descendants per D3; delivery per D4; surface per D17; pins per D20 (Task 2).
-- Policy home per D6 with the grammar of D21 (Task 3).
-- Replay per D5, the sweep per D7, the keep rule per D8, the coordinate pass and bias per D18, model details per D21 (Task 4).
-- Harness per D16 (Task 5); eval 8 and spend per D15 (Task 6).
-- Candidates per D9–D14, product knobs per D21 (Task 7).
-- Live arms per D22, drop-back per D23, report per D8 (Task 8).
+- Task 1 per D1, D2, D19; Task 2 per D3, D4, D17, D20; Task 3 per D6, D21; Task 4 per D5, D7, D8, D18, D21; Task 5 per D16; Task 6 per D15; Task 7 per D9–D14, D21; Task 8 per D8, D22, D23.
+- Standards review: replay comparator and final subset per D24; cap inputs, migration and reset per D25; trial eligibility and baseline-only prediction per D26; `never` per D27.
+
+## Standards review provenance
+
+Reviewer `Codex` (gpt-6-astra, xhigh), isolated read-only, no focus, no fallback; base `48481846`, reviewed head `a8b3c000`. 7 Blocking and 3 Should-fix findings, no Discussion: 10 accepted, 0 rejected, 0 deferred (D24–D27).
 
 ---

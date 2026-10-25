@@ -1,6 +1,6 @@
 # Task 4: The replay, the sweep and the keep rule
 
-Spec § The replay and test seam 2; per D5, D7, D8, D18 and D21. It adds `--policy NAME=SPEC` (repeatable) and `--sweep` to `--report owners`. Each arm replays every lineage in scope under a counterfactual hand-off policy, using a shift model, and is compared with the baseline-policy replay on paired per-lineage savings. `--sweep` runs D18's coordinate pass and marks each candidate `keep` or `reject` (D8). This is AC3's dry-run toggle for every candidate. Task 7 reads its verdicts.
+Spec § The replay and test seam 2; per D5, D7, D8, D18 and D21. It adds `--policy NAME=SPEC` (repeatable) and `--sweep` to `--report owners`: each arm replays every lineage in scope with a shift model, paired per lineage against the baseline replay, and `--sweep` runs D18's coordinate pass with `keep`/`reject` verdicts (D8) that Task 7 reads. This is AC3's dry run.
 
 **Files:**
 - Create: `python/agent_tools/agent_owner_replay.py`
@@ -11,35 +11,35 @@ Spec § The replay and test seam 2; per D5, D7, D8, D18 and D21. It adds `--poli
 - Modify: `python/README.md` (§ agent-costs: the replay model, the arms grammar, the keep rule and the known pro-hand-off bias)
 
 **Interfaces:**
-- Consumes: Task 2's `OwnerCall`, `Gate`, `Launch`, `Lineage` (with `relauncher`), `call_cost`; Task 3's `PhaseBudget`, `parse(…, knobs=REPLAY_KNOBS)`, `handoff_threshold`, `crossing_threshold`, `select_phase_action`; Task 1's `model_pricing.rates`.
+- Consumes: Task 2's `OwnerCall`, `Gate`, `Launch`, `Lineage` (with `relauncher`), `call_cost`; Task 3's `PhaseBudget`, `parse(…, knobs=REPLAY_KNOBS, base=ORIGIN)`, `handoff_threshold`, `crossing_threshold`, `select_phase_action`; Task 1's `model_pricing.rates`.
 - Produces:
 
 ```python
 @dataclass(frozen=True)
 class Arm:
     name: str
-    budget: PhaseBudget | None        # None: the never-hand-off arm
-    boot: str = "observed"            # "observed" | "slim"
+    budget: PhaseBudget | None  # None: the never-hand-off arm
+    boot: str = "observed"  # "observed" | "slim"
     keepalive: bool = False
-    help: str = "keep"                # "keep" | "drop"
+    help: str = "keep"  # "keep" | "drop"
 
 @dataclass(frozen=True)
 class BootModel:
-    start: int                        # S
-    boot_calls: dict[str, int]        # m(p) by phase group "0-5" / "6-7"
-    boot_end: dict[str, int]          # B(p)
-    slimmable: dict[str, int]         # median slimmable tokens per boot, by group
-    overhead_calls: int               # h
-    boot_output: int                  # median output tokens of a boot call
-    defaults: tuple[str, ...]         # names of the values that fell back to defaults
+    start: int  # S
+    boot_calls: dict[str, int]  # m(p) by phase group "0-5" / "6-7"
+    boot_end: dict[str, int]  # B(p)
+    slimmable: dict[str, int]  # median slimmable tokens per boot, by group
+    overhead_calls: int  # h
+    boot_output: int  # median output tokens of a boot call
+    defaults: tuple[str, ...]  # names of the values that fell back to defaults
 
 @dataclass(frozen=True)
 class Outcome:
-    dollars: float                    # owner calls as replayed + descendant dollars
+    dollars: float  # owner calls as replayed + descendant dollars
     handoffs: int
     deaths: int
     peak: int
-    trace: tuple[int, ...]            # replayed context of each kept observed owner call, in order
+    trace: tuple[int, ...]  # replayed context of each kept observed owner call, in order
 
 @dataclass(frozen=True)
 class Verdict:
@@ -48,20 +48,21 @@ class Verdict:
     share: float
     keep: bool
 
-BASELINE: Arm   # Arm("baseline", PhaseBudget())
+ORIGIN: PhaseBudget  # the pre-issue-432 policy, in literals (D24)
+BASELINE: Arm  # Arm("baseline", ORIGIN)
 
 def parse_arm(text: str) -> Arm: ...
 def fit(lineages: list[Lineage]) -> BootModel: ...
-def observed(lineage: Lineage) -> Outcome: ...                 # the identity replay
+def observed(lineage: Lineage) -> Outcome: ...  # the identity replay
 def replay(lineage: Lineage, arm: Arm, model: BootModel) -> Outcome: ...
 def keep_rule(savings: list[float]) -> Verdict: ...
-def compare(lineages, model, arms: list[Arm]) -> list[dict]: ...   # rows for doc["simulated"]
-def sweep(lineages, model) -> list[dict]: ...                      # D18 coordinate pass rows
-def calibration(lineages, model) -> dict: ...                      # doc["calibration"]
+def compare(lineages, model, arms: list[Arm]) -> list[dict]: ...  # rows for doc["simulated"]
+def sweep(lineages, model) -> list[dict]: ...  # D18 coordinate pass rows
+def calibration(lineages, model) -> dict: ...  # doc["calibration"]
 ```
 
 **Invariants (the model; per D5, D21):**
-1. **Grammar.** `parse_arm("NAME=SPEC")` splits at the first `=`. SPEC items `boot=observed|slim`, `keepalive=off|on`, `help=keep|drop` and `threshold=never` are taken out first; the rest go to `phase_budget.parse(rest, knobs=REPLAY_KNOBS)`, and an empty rest means `PhaseBudget()`. `threshold=never` together with any other `threshold` item, an empty NAME, a NAME without `=`, or a bad value raises `ValueError`, which the CLI turns into `ap.error`.
+1. **Grammar.** `parse_arm("NAME=SPEC")` splits at the first `=`. SPEC items `boot=observed|slim`, `keepalive=off|on`, `help=keep|drop` and `threshold=never` are taken out first; the rest go to `phase_budget.parse(rest, knobs=REPLAY_KNOBS, base=ORIGIN)`, and an empty rest means `ORIGIN`. Unnamed knobs keep their pre-issue-432 values (D24). `threshold=never` together with any other `threshold` item, an empty NAME, a NAME without `=`, or a bad value raises `ValueError`, which the CLI turns into `ap.error`.
 2. **Identity.** `observed(l).dollars == Σ call_cost(c) for every owner call + l.descendant_dollars`, exactly. No normalisation, no boot and no overhead apply.
 3. **Normalisation** (every arm, before the policy). For each launch `k` with `transfer == "handoff"`, followed by launch `k+1` with a `registered_index`:
    - drop launch `k`'s calls after its first call whose `gate.action == "handoff"`, whose context is `C`;
@@ -80,7 +81,7 @@ def calibration(lineages, model) -> dict: ...                      # doc["calibr
 7. **Hand-off decision**, never for `budget is None`, for each kept call in order:
    - **Phase boundary**: a call with `gate` (and `not gate.handoff_path`) is re-decided by `select_phase_action(direct=l.direct, turn_count=gate.turn_count, context_tokens=context', turn_ceiling=b.turn_ceiling, context_ceiling=handoff_threshold(b, gate.phase + 1) + b.context_headroom, turn_headroom=b.turn_headroom, context_headroom=b.context_headroom, next_needs_context=…, artifacts_sufficient=…, remainder_self_contained=…)`. Only an answer of `handoff` hands off here, and the guard never applies.
    - **Mid-phase**: a registered virtual owner's `bash` call without `gate` measures `context'` against `crossing_threshold(b, phase, baseline if b.guard else None)`, where `baseline` is the virtual owner's registering `context'` (B after a simulated hand-off). The first measurement at or above it sets `pending`, and a later measurement below it re-arms the latch. The hand-off falls on the first `bash` call at or after `pending` with `children_out` false.
-   - **Cap**: with `b.cap`, a hand-off is skipped (and `pending` cleared) while `streak ≥ b.cap`. `streak` counts simulated hand-offs since the last `mark_progress` call or the last gate whose `phase` is above every earlier gate's phase in the lineage.
+   - **Cap**: with `b.cap`, a hand-off is skipped (and `pending` cleared) while `streak ≥ b.cap`. `streak` counts simulated hand-offs since the last call with `mark_progress == "advanced"` (D25) or the last gate whose `phase` is above every earlier gate's phase in the lineage.
 8. **Simulated hand-off** at call `i` with `C' = context'(i)` and group `g` of `phase(i)`. Call `i` is priced first, in the outgoing owner. Then add:
    - `h = model.overhead_calls` calls, each a read of `C'` plus `boot_output` output;
    - one relauncher wake: a read of `C'` when the virtual owner is root, else of the last `relauncher` context with `end ≤ start(i)`, else nothing;
@@ -99,12 +100,12 @@ def calibration(lineages, model) -> dict: ...                      # doc["calibr
 12. **Rows.** A row of `simulated` has exactly the keys `arm, step, spec, dollars_per_delivered, mean_saving, lower_bound, share_saving, handoffs_per_issue, deaths_per_issue, peak_p90, verdict, live_confirmation_required`. `verdict` is one of `baseline`, `chosen`, `not chosen`, `keep`, `reject` and `info`. `live_confirmation_required` is true when the arm's `handoffs_per_issue` exceeds the baseline's (D18). `dollars_per_delivered` is Σ arm dollars ÷ delivered lineages.
 13. **Sweep** (D7, D18). Steps run in order, each on the choices so far. At every step a non-default arm is `chosen` only when its saving against the step's simpler arm passes `keep_rule`; otherwise the simpler arm stays.
     - (`boot`) `boot=slim` against observed.
-    - (`threshold`) single arms at 90,000, 110,000, 140,000, 170,000 and 200,000, plus `never`. The lowest `dollars_per_delivered` is the candidate, compared with 110,000. When `fit`'s `|B(6-7) − B(0-5)| / B(0-5) > 0.25`, the 16-arm per-phase grid (`threshold:0-5=x,threshold:6-7=y` with x, y in {110k, 140k, 170k, 200k}) follows, its best compared with the chosen single.
+    - (`threshold`) single arms at 90,000, 110,000, 140,000, 170,000 and 200,000, plus `never`. `never` is an `info` reference row, never chosen (D27). The numeric arm with the lowest `dollars_per_delivered` is the candidate, compared with 110,000. When `fit`'s `|B(6-7) − B(0-5)| / B(0-5) > 0.25`, the 16-arm per-phase grid (`threshold:0-5=x,threshold:6-7=y` with x, y in {110k, 140k, 170k, 200k}) follows, its best compared with the chosen single.
     - (`guard`) 20,000, 40,000, 60,000 against 0.
     - (`cap`) 1, 2, 3 against none.
     - (`help`) drop against keep.
     - (`keepalive`) on against off, verdict `info` only.
-    - (`final`) one row for the combined choices, plus one per chosen non-default candidate alone, each against `BASELINE`, with verdict `keep` or `reject`. A candidate is kept only if both its alone row and the final row pass.
+    - (`final`) one row per chosen non-default candidate alone (arm = its step), then one `combined` row (absent when none passed alone) over exactly those that passed alone, its `spec` in step order; each against `BASELINE`, verdict `keep` or `reject`. A candidate is kept only if its alone row and the `combined` row pass, so the kept set is what `combined` priced (D24).
 14. **Calibration**: `{"identity_matches": bool, "identity_max_error": float, "boots": [{"phase_group", "observed_dollars", "modelled_dollars"}], "model": {"start", "boot_calls", "boot_end", "slimmable", "overhead_calls", "boot_output", "defaults"}}`. Each observed non-root boot's real cost (Σ `call_cost` of its boot calls) is compared with the modelled boot of its group.
 
 - [ ] **Step 1: Write the failing tests** — `tests/test_agent_owner_replay.py`:
@@ -122,7 +123,8 @@ from pathlib import Path
 
 from agent_tools import agent_owner_replay as replay_module
 from agent_tools.agent_owner_report import Gate, Launch, Lineage, OwnerCall, call_cost
-from agent_tools.agent_owner_replay import BASELINE, BootModel, keep_rule, observed, parse_arm, replay
+from agent_tools.agent_owner_replay import (BASELINE, ORIGIN, BootModel, keep_rule, observed,
+                                            parse_arm, replay)
 from agent_tools.phase_budget import PhaseBudget
 
 from . import test_agent_owner_report as report_tests   # a module import: its TestCase is not re-collected here
@@ -134,7 +136,7 @@ MODEL = BootModel(start=29_000, boot_calls={"0-5": 2, "6-7": 2},
 
 
 def c(t, context, *, write=1_000, root=False, phase=3, bash=True, gate=None, registers=False,
-      out=0, children=False, help=False, mark=False, slim=0, death=False):
+      out=0, children=False, help=False, mark=None, slim=0, death=False):
     return OwnerCall(start=float(t), end=float(t) + 1, model="claude-opus-5-5", fresh=0,
                      read=context - write, write_5m=0 if root else write,
                      write_1h=write if root else 0, output=out, death=death, is_root=root,
@@ -225,8 +227,10 @@ class ReplayTest(unittest.TestCase):
                  c(30, 190_000), c(40, 235_000), c(50, 280_000, gate=gate(2))]
         arm = parse_arm("c2=threshold=100000,cap=2")
         self.assertEqual(replay(lineage(launch(calls)), arm, MODEL).handoffs, 2)
-        marked = calls[:4] + [dataclasses.replace(calls[4], mark_progress=True), calls[5]]
+        marked = calls[:4] + [dataclasses.replace(calls[4], mark_progress="advanced"), calls[5]]
         self.assertEqual(replay(lineage(launch(marked)), arm, MODEL).handoffs, 3)
+        idle = calls[:4] + [dataclasses.replace(calls[4], mark_progress="unchanged"), calls[5]]
+        self.assertEqual(replay(lineage(launch(idle)), arm, MODEL).handoffs, 2)   # only `advanced` resets
 
     def test_help_drop_removes_the_call_and_its_growth(self):
         calls = [c(0, 50_000, gate=gate(2), registers=True), c(10, 51_000, help=True),
@@ -262,7 +266,7 @@ class ReplayTest(unittest.TestCase):
 
     def test_arm_grammar(self):
         self.assertEqual(parse_arm("t140=threshold=140000"),
-                         replay_module.Arm("t140", PhaseBudget(threshold=140_000)))
+                         replay_module.Arm("t140", dataclasses.replace(ORIGIN, threshold=140_000)))
         arm = parse_arm("mix=boot=slim,keepalive=on,help=drop,guard=40000")
         self.assertEqual((arm.boot, arm.keepalive, arm.help, arm.budget.guard),
                          ("slim", True, "drop", 40_000))
@@ -270,6 +274,14 @@ class ReplayTest(unittest.TestCase):
         for bad in ("noequals", "=threshold=1", "x=boot=fat", "x=threshold=never,threshold=90000"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 parse_arm(bad)
+
+    def test_the_baseline_is_the_pre_issue_432_policy_whatever_the_defaults(self):
+        # Task 7 may move PhaseBudget's defaults; the comparator and unnamed knobs stay (D24).
+        origin = PhaseBudget(turn_ceiling=120, turn_headroom=2, context_headroom=10_000,
+                             threshold=110_000, phase_thresholds=(), guard=0, cap=None)
+        self.assertEqual((ORIGIN, BASELINE.budget), (origin, origin))
+        self.assertEqual(parse_arm("g=guard=40000").budget, dataclasses.replace(origin, guard=40_000))
+        self.assertEqual(parse_arm("s=boot=slim").budget, origin)
 
 
 class SweepCliTest(unittest.TestCase):
@@ -290,7 +302,7 @@ class SweepCliTest(unittest.TestCase):
         self.assertTrue(doc["calibration"]["identity_matches"])
 ```
 
-Before implementing, check every asserted trace and dollar value by hand against invariants 3–9 with `MODEL` (h = 0, m = 2, B = 60,000, S = 29,000). Where a fixture and an invariant disagree, fix the fixture, never the invariant. Then record the arithmetic in a comment above each assertion that has none.
+Before implementing, check every asserted trace and dollar value by hand against invariants 3–9 with `MODEL` (h = 0, m = 2, B = 60,000, S = 29,000). Where a fixture and an invariant disagree, fix the fixture, never the invariant. Then record the arithmetic in a comment above each assertion that has none. Also add `test_the_combined_row_prices_exactly_the_alone_kept_subset`: on lineages (checked the same way) where `boot=slim` passes alone and the chosen threshold fails alone, `sweep`'s `combined` row has `spec == "boot=slim"`.
 
 - [ ] **Step 2: Run the tests and watch them fail**
 

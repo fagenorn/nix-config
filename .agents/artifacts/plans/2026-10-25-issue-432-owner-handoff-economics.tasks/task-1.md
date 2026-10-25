@@ -1,6 +1,6 @@
 # Task 1: Per-model pricing and the shared call reader
 
-Spec § Pricing; per D2 and D19. Today every report prices by family (`agent_costs.PRICING`, `model_family`): Opus 5.5 is priced at Opus-5 rates, and the cache report's call reader lives in private names of `agent_cache_report`. This task moves pricing to a per-model-ID table in one module and moves the reader into its own module. The reader gains the facts that Task 2's owner report needs. Both existing reports keep their output shapes; only their dollar figures move.
+Spec § Pricing; per D2 and D19. Pricing moves from per-family (`agent_costs.PRICING`, which prices Opus 5.5 at Opus-5 rates) to a per-model-ID table in one module, and the cache report's private call reader moves into its own module, gaining the facts Task 2 needs. Both existing reports keep their output shapes; only their dollar figures move.
 
 **Files:**
 - Create: `python/agent_tools/model_pricing.py`
@@ -33,7 +33,7 @@ Spec § Pricing; per D2 and D19. Today every report prices by family (`agent_cos
 
 - [ ] **Step 0: Confirm the source**
 
-Fetch the Anthropic pricing page (`https://docs.claude.com/en/docs/about-claude/pricing`, following redirects). Set `SOURCE_URL` to the final URL it resolves to. If any rate row on that page differs from spec § Pricing, stop this task as BLOCKED and name the row: the spec's table is the agreed contract, so a mismatch needs an owner decision.
+Fetch the Anthropic pricing page (`https://docs.claude.com/en/docs/about-claude/pricing`, following redirects). Set `SOURCE_URL` to the final URL it resolves to. If any rate row on that page differs from spec § Pricing, stop this task as BLOCKED and name the row (the spec's table is the contract).
 
 - [ ] **Step 1: Write the failing tests** (append to `tests/test_agent_costs.py`; `assistant`, `USAGE_1`, `cache_usage` are its existing helpers)
 

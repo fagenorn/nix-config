@@ -1,6 +1,6 @@
 # Task 6: Eval 8, the `tracked-issue` setup and the acquisition probe
 
-Spec § The live eval and test seam 6; per D15 and D16. Eval 8, `lifecycle-owner-economics`, runs `/from-issue 4 --auto` on the direct route. It uses a seeded four-part issue whose acceptance test takes about 5½ minutes, in a sandbox whose `gh` is a read-only shim. Its asserts read the owner report (Task 2). This task also proves acquisition by hand, with no model spend, and creates the acceptance record. Right after this task's commit the sdd controller runs Task 8 § Part A (D22).
+Spec § The live eval and test seam 6; per D15 and D16. Eval 8, `lifecycle-owner-economics`, runs `/from-issue 4 --auto` (direct route) on a seeded issue behind a read-only `gh` shim, graded through the owner report (Task 2). This task also proves acquisition by hand, with no model spend, and creates the acceptance record.
 
 **Files:**
 - Create: `home/common/agent-skills/evals/setups/tracked-issue/setup.sh` (`setup.sh <WORK> <REPO>`)
@@ -109,7 +109,7 @@ Under the root that `launch-scope scratch …` prints, build a sandbox the way `
 - `candidate_worktree` by reserving `.worktrees/worktree-issue-4-priorities`;
 - `delivery_contract` through `workflow-state build-delivery`, as acquire-direct.md shows.
 
-Repeat until the reply is `kind: owner`. Use the tree's `workflow-state` (`PYTHONPATH=$PWD/python python3 -P home/common/agent-skills/scripts/workflow-state.py`). Expected: a `kind: owner` reply with `action_id` `4:1:1`. Any refusal stops the task as BLOCKED with the refusal text: eval 8 cannot run until acquisition works. Then create the acceptance record. Follow the #424 record's header and table columns (`AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict`), with one row per acceptance-map row, `pending` in the evidence cells, and an `## Acquisition probe` section holding the commands and the final reply's `kind`, `action_id` and `deadline_at`. Remove the probe sandbox.
+Repeat until the reply is `kind: owner`. Use the tree's `workflow-state` (`PYTHONPATH=$PWD/python python3 -P home/common/agent-skills/scripts/workflow-state.py`). Expected: a `kind: owner` reply with `action_id` `4:1:1`. Any refusal stops the task as BLOCKED with the refusal text. Then create the acceptance record. Follow the #424 record's header and table columns (`AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict`), with one row per acceptance-map row, `pending` in the evidence cells, and an `## Acquisition probe` section holding the commands and the final reply's `kind`, `action_id` and `deadline_at`. Remove the probe sandbox.
 - [ ] **Step 5: Verify**
 
 Run: **Harness tests** (both).

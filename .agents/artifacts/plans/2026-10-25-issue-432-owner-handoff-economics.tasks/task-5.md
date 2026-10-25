@@ -1,6 +1,6 @@
 # Task 5: Tree-mode `workflow-state` shim, derived settings and `EVAL_POLICY`
 
-Spec § Tree mode and § `EVAL_POLICY`; per D16, with the grammar of D21. Today tree mode shims only the command-table rows, so the flat `workflow-state` and the store-path meter hook escape the tree. This task shims `workflow-state` and runs claude with derived settings whose meter hook points at the tree's `context-meter` shim. It also adds `EVAL_POLICY`, validated up front, exported as `AGENT_PHASE_BUDGET` and recorded as `policy`.
+Spec § Tree mode and § `EVAL_POLICY`; per D16, with the grammar of D21. Tree mode today lets the flat `workflow-state` and the store-path meter hook escape the tree; this task shims `workflow-state` and points a derived settings file's meter hook at the tree's `context-meter` shim. It also adds `EVAL_POLICY`, validated up front, exported as `AGENT_PHASE_BUDGET` and recorded as `policy`.
 
 **Files:**
 - Modify: `home/common/agent-skills/evals/run-eval.sh`

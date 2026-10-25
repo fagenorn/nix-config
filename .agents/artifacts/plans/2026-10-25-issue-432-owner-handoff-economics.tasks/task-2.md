@@ -1,6 +1,6 @@
 # Task 2: The owner report — lineages, delivery, eval grouping
 
-Spec § The owner report and test seam 1; per D3, D4, D17, D19 and D20. Adds `agent-costs --report owners`, in text or `--format json`. It builds one lineage per `(run_id, issue)` from owner transcripts and attributes every other transcript to its nearest owner. It prices every call by model ID (Task 1) and reports dollars per delivered issue with variance, for the live corpus and for eval trials (`--eval-results`). Task 4 adds the replay to the same module and document.
+Spec § The owner report and test seam 1; per D3, D4, D17, D19 and D20. Adds `agent-costs --report owners` (text or `--format json`): one lineage per `(run_id, issue)`, every other transcript attributed to its nearest owner, and dollars per delivered issue with variance for the live corpus and eval trials. Task 4 adds the replay to the same module.
 
 **Files:**
 - Create: `python/agent_tools/agent_owner_report.py`
@@ -17,7 +17,7 @@ Spec § The owner report and test seam 1; per D3, D4, D17, D19 and D20. Adds `ag
   - `context_meter_commands.Invocation` — frozen dataclass `(helper: str, subcommand: str | None, options: dict[str, str | None], absolute: bool)`. `helper` is the last path component of the command word (`workflow-state`, `sdd-gate`), and `absolute` is whether that word contains `/`. `subcommand` is the next word when it does not start with `-`. `options` maps every later word of the simple command that starts with `--` to its value: the text after `=`, else the following word unless that word starts with `-`, else `None`.
   - `context_meter_commands.invocations(tokens) -> list[Invocation]`, for each `workflow-state` or `sdd-gate` command word in `tokens`.
   - `agent_owner_report.Gate` — frozen dataclass `(phase: int, turn_count: int | None, next_needs_context: bool, artifacts_sufficient: bool, remainder_self_contained: bool, handoff_path: bool, action: str | None)`. `action` is the `phase_gate` reply's `action`, `None` when there is no such reply.
-  - `agent_owner_report.OwnerCall` — frozen dataclass `(start: float, end: float, model: str | None, fresh: int, read: int, write_5m: int, write_1h: int, output: int, death: bool, is_root: bool, phase: int | None, bash: bool, children_out: bool, gate: Gate | None, registers: bool, help: bool, mark_progress: bool, slimmable: int)`, with `context` = `fresh + read + write_5m + write_1h`. `start`/`end` are epoch seconds.
+  - `agent_owner_report.OwnerCall` — frozen dataclass `(start: float, end: float, model: str | None, fresh: int, read: int, write_5m: int, write_1h: int, output: int, death: bool, is_root: bool, phase: int | None, bash: bool, children_out: bool, gate: Gate | None, registers: bool, help: bool, mark_progress: str | None, slimmable: int)`, with `context` = `fresh + read + write_5m + write_1h`. `mark_progress` is a `mark-progress` reply's `outcome`, else `None` (D25). `start`/`end` are epoch seconds.
   - `agent_owner_report.Launch` — frozen dataclass `(transcript: str, launch: int | None, calls: tuple[OwnerCall, ...], registered_index: int | None, transfer: str | None)`. `transfer` is `"handoff"` when the transcript finalised a `--handoff-path` progress call, else its last `phase_gate` reply's action, else `None`.
   - `agent_owner_report.Lineage` — dataclass `(run_id: str, issue: int, direct: bool, launches: list[Launch], descendant_dollars: float, delivered: bool, facts: dict, relauncher: tuple[tuple[float, int], ...])`. `facts` holds the per-lineage JSON fields below; `relauncher` is the `(end, context)` series of the lineage's root owner transcript's calls, empty when the session root is not an owner of this lineage (Task 4's wake call).
   - `agent_owner_report.call_cost(call: OwnerCall) -> float` prices one call at `rates(call.model, call.context)`.
@@ -35,8 +35,8 @@ Spec § The owner report and test seam 1; per D3, D4, D17, D19 and D20. Adds `ag
 - Measured gate call: a progress call whose tool use has a `hook_notes` entry containing the measured-note prefix. `phase7_entered`: some progress `--phase 6` call has a `phase_gate` reply. `help_calls`: invocations of `workflow-state progress` carrying `--help`. `absolute_path_calls`: `workflow-state` invocations with `absolute` true.
 - Boot of a non-root owner transcript: its calls from the first through `registered_index`, inclusive. `B` = the registering call's context, `start` = the first call's context, phase group `"0-5"` or `"6-7"` by the registering call's phase. `slimmable` (D12, D21) is assigned to a boot call issuing tool uses. Take its growth `max(0, next.context − call.context)` and split it across the call's tool results by `ToolResult.size`. A tool use's share is slimmable when it is a `Read` whose `file_path` matches `\.tasks/task-(\d+)\.md$` with a number other than the resumed task, or ends in `ship-handoff.md` while the boot's phase is below 7. It is also slimmable when it re-reads (`Read`) a persisted output file whose path appeared after `saved to: ` in such a tool use's result. The resumed task is the `--task` of the transcript's first `sdd-gate review` invocation; with none, task members are not slimmable.
 - Dollars: `owner_dollars` = Σ `call_cost` over owner calls; `total_dollars` = owner + descendants. Per arm, `dollars_per_delivered` = Σ `total_dollars` of every row in the arm ÷ delivered rows (`None` when 0), `undelivered_dollars` = Σ of the undelivered rows, and `sd` = sample standard deviation of `total_dollars` over delivered rows (`None` below 2).
-- Eval mode (`--eval-results PATH --eval SKILL:ID`): rows whose `skill` and `id` match. A row's transcripts are the sessions of project directories whose name equals, or starts with `-` after, its `workdir` with every non-alphanumeric character replaced by `-`. The mtime window does not apply. A row is one lineage row: its lineages are merged (sums, max peak, any phase-7 entry), `arm` = `f"{tree_rev[:12]}/{policy or 'default'}"`, and `trial` and `verdict` come from the row. Live mode puts every lineage in arm `"live"`.
-- JSON document: `{"kind": "agent-owner-report", "schema_version": 1, "window", "pricing": {"source", "date", "approximate_calls"}, "lineages": [...], "arms": [...], "boots": [...], "simulated": [], "calibration": null, "unattributed": {"transcripts", "dollars", "unresolved_owners"}}`.
+- Eval mode (`--eval-results PATH --eval SKILL:ID`): rows whose `skill` and `id` match. A row's transcripts are the sessions of project directories whose name equals, or starts with `-` after, its `workdir` with every non-alphanumeric character replaced by `-`. The mtime window does not apply. A row is one lineage row: its lineages are merged (sums, max peak, any phase-7 entry), `arm` = `f"{tree_rev[:12]}/{policy or 'default'}"`, and `trial` and `verdict` come from the row. Only a row with `claude_exit` 0 is a sample; any other (124 from `EVAL_TIMEOUT`, a budget stop, a kill) forms no lineage, whatever its `verdict`, and is listed in `interrupted` as `{"trial", "tree_rev", "claude_exit"}` and counted in the text footer (D26). Live mode puts every lineage in arm `"live"`, with `interrupted` empty.
+- JSON document: `{"kind": "agent-owner-report", "schema_version": 1, "window", "pricing": {"source", "date", "approximate_calls"}, "lineages": [...], "arms": [...], "boots": [...], "simulated": [], "calibration": null, "unattributed": {"transcripts", "dollars", "unresolved_owners"}, "interrupted": [...]}`.
   - Each lineage row has exactly the keys `key, run_id, issue, arm, trial, verdict, direct, launches, handoffs, boots, deaths, long_child_waits, peak_context, owner_dollars, total_dollars, delivered, phase_reached, phase7_entered, gate_calls, measured_gate_calls, help_calls, absolute_path_calls`.
   - Each arm row: `arm, n, delivered, dollars_per_delivered, sd, undelivered_dollars, peak_p50, peak_p90`.
   - Each boots row: `phase_group, count, b_p50, b_p90, start_p50, calls_p50, slimmable_p50`.
@@ -56,6 +56,11 @@ from datetime import datetime, timedelta, timezone
 
 T0 = datetime(2026, 10, 25, 9, 0, tzinfo=timezone.utc)
 RUN = "rel_01a1test-0000-7000-8000-000000000001"
+
+
+def _line(value):
+    """Compact JSON, as transcripts are written (the reader's prefilter needs it)."""
+    return json.dumps(value, separators=(",", ":")) + "\n"
 
 
 def at(seconds):
@@ -128,25 +133,25 @@ class Session:
         message_id = self._id("msg_")
         for index, block in enumerate(blocks):
             stamp = seconds if end is None or index == 0 else end
-            self.lines[agent].append(json.dumps({
+            self.lines[agent].append(_line({
                 "type": "assistant", "isSidechain": agent is not None, "timestamp": at(stamp),
                 "message": {"id": message_id, "model": model, "role": "assistant",
-                            "content": [block], "usage": usage}}) + "\n")
+                            "content": [block], "usage": usage}}))
         return tool_id
 
     def result(self, agent, seconds, tool_id, text="ok"):
-        self.lines[agent].append(json.dumps({
+        self.lines[agent].append(_line({
             "type": "user", "isSidechain": agent is not None, "timestamp": at(seconds),
             "message": {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": tool_id, "content": text}]}}) + "\n")
+                {"type": "tool_result", "tool_use_id": tool_id, "content": text}]}}))
 
     def measured(self, agent, tool_id, tokens):
-        self.lines[agent].append(json.dumps({
+        self.lines[agent].append(_line({
             "type": "attachment", "isSidechain": agent is not None, "attachment": {
                 "type": "hook_additional_context", "hookName": "PreToolUse:Bash",
                 "toolUseID": tool_id,
                 "content": [f"context-meter: this workflow-state progress call carries "
-                            f"--context-tokens {tokens}, measured from your transcript."]}}) + "\n")
+                            f"--context-tokens {tokens}, measured from your transcript."]}}))
 
     def write(self):
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -284,9 +289,10 @@ class OwnerReportTest(unittest.TestCase):
 
     def test_eval_grouping_two_arms_two_trials(self):
         rows, dollars = [], {}
-        for index, (rev, verdict, write) in enumerate(
-                (("a" * 40, "PASS", 20_000), ("a" * 40, "PASS", 40_000),
-                 ("b" * 40, "PASS", 30_000), ("b" * 40, "FAIL", 50_000)), 1):
+        for index, (rev, verdict, write, exit_code) in enumerate(
+                (("a" * 40, "PASS", 20_000, 0), ("a" * 40, "PASS", 40_000, 0),
+                 ("b" * 40, "PASS", 30_000, 0), ("b" * 40, "FAIL", 50_000, 0),
+                 ("b" * 40, "PASS", 60_000, 124)), 1):   # trial 5 timed out with its asserts passing
             workdir = f"/private/tmp/eval-from-issue-8.T{index}"
             session = Session(self.root, project=workdir.replace("/", "-").replace(".", "-") + "-repo",
                               session=f"s{index}")
@@ -295,7 +301,8 @@ class OwnerReportTest(unittest.TestCase):
             session.write()
             dollars[index] = cost(write, write, write_price=8.0)
             rows.append({"skill": "from-issue", "id": 8, "trial": index, "verdict": verdict,
-                         "workdir": workdir, "tree_rev": rev, "policy": None})
+                         "workdir": workdir, "tree_rev": rev, "policy": None,
+                         "claude_exit": exit_code})
         results = self.root / "results.jsonl"
         results.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
         doc = report(self.root, "--eval-results", str(results), "--eval", "from-issue:8")
@@ -307,6 +314,7 @@ class OwnerReportTest(unittest.TestCase):
         self.assertAlmostEqual(b["dollars_per_delivered"], dollars[3] + dollars[4], places=9)
         self.assertEqual(sorted(row["verdict"] for row in doc["lineages"]),
                          ["FAIL", "PASS", "PASS", "PASS"])
+        self.assertEqual(doc["interrupted"], [{"trial": 5, "tree_rev": "b" * 40, "claude_exit": 124}])
 
     def test_an_unknown_model_is_priced_approximately(self):
         session = Session(self.root)
@@ -352,7 +360,7 @@ class OwnerReportTest(unittest.TestCase):
             self.assertIn(heading, out)
 ```
 
-In `chain`, the root's two gate calls before the hand-off are counted, its finalise call (`--handoff-path`) is a third gate call, and a2's gate is the fourth. Three of them carry measured notes. Before writing the module, check by hand that the fixture's numbers satisfy each asserted value, and fix the fixture (not the invariant) where they do not.
+In `chain`, the gate calls are the root's two progress calls, its finalise call and a2's gate; three carry measured notes. Before writing the module, check every asserted value by hand and fix the fixture (not the invariant) where one disagrees.
 
 - [ ] **Step 3: Run the tests and watch them fail**
 
