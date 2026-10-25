@@ -11,7 +11,7 @@ Agent(subagent_type="implementer", model="sonnet", effort="high") takes over fix
 - **Round 4 — the stuck-breaker.** Three failures on the same context escalate the model: from here every fix dispatch is Opus/high. Use the bounded Codex transport with the failing command or test, the diff so far (`BASE..HEAD`), the brief and report paths, and the open findings:
 
 <!-- agent-dispatch: id=sdd-codex-rescue-transport role=codex-transport model=sonnet effort=medium -->
-Agent(subagent_type="codex:rescue", model="sonnet", effort="medium") transports the bounded stuck-breaker diagnosis to the external Codex runtime without selecting that runtime's model.
+Agent(subagent_type="codex:codex-rescue", model="sonnet", effort="medium") transports the bounded stuck-breaker diagnosis to the external Codex runtime without selecting that runtime's model.
 
   **Verify its diagnosis against the live worktree before acting on it**, then escalate to a fresh Opus/high implementer:
 
