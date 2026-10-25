@@ -266,6 +266,25 @@ class ForwardingTest(ProxyCase):
         [record] = log.records(1)
         self.assertEqual((record["status"], record["outcome"]), (502, "upstream_error"))
         self.assertIn("ConnectionRefusedError", record["error"])
+        self.assertEqual(record["bytes"], int(response.getheader("Content-Length")))
+
+    def test_a_failed_head_ends_at_its_headers_and_the_connection_stays_usable(self):
+        port, log = self.proxy("http://127.0.0.1:%d" % closed_port())
+        with socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT) as sock:
+            # Raw bytes, so no client buffer can hide body bytes after the HEAD reply.
+            sock.sendall(b"HEAD /v1/models HTTP/1.1\r\nHost: x\r\n\r\n"
+                         b"GET /_proxy/health HTTP/1.1\r\nHost: x\r\n\r\n")
+            received = b""
+            while not received.endswith(cache_proxy.HEALTH_BODY):
+                chunk = sock.recv(65536)
+                self.assertTrue(chunk, f"the connection closed after {received!r}")
+                received += chunk
+        head, _, rest = received.partition(b"\r\n\r\n")
+        self.assertTrue(head.startswith(b"HTTP/1.1 502 "), head)
+        self.assertIn(b"Content-Length: ", head)
+        self.assertTrue(rest.startswith(b"HTTP/1.1 200 "), rest)
+        [record] = log.records(1)
+        self.assertEqual((record["method"], record["status"], record["bytes"]), ("HEAD", 502, 0))
 
     def test_an_upstream_reset_mid_stream_leaves_the_body_unterminated(self):
         def responder(sock, head, body):

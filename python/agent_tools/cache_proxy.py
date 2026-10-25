@@ -174,17 +174,24 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         conn.connect()
 
     def _answer(self, status, body, headers=()):
-        """Write a response this proxy makes itself; a vanished client only closes the connection."""
+        """Write a response this proxy makes itself and return the body bytes written.
+
+        A HEAD reply ends after its headers, keeping the would-be body's `Content-Length`;
+        a vanished client only closes the connection."""
         try:
             self.send_response_only(status)
             for name, value in headers:
                 self.send_header(name, value)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
+            if self.command == "HEAD":
+                return 0
             self.wfile.write(body)
             self.wfile.flush()
         except OSError:
             self.close_connection = True
+            return 0
+        return len(body)
 
     def _log_request(self, started, status, label, ttfb_ms, relay):
         fields = {"method": self.command, "path": self.path, "status": status,
@@ -197,10 +204,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.server.log.write("request", **fields)
 
     def _reject(self, started, status, kind, message):
-        body = envelope(kind, message)
-        self._answer(status, body, [("Content-Type", "application/json")])
+        written = self._answer(status, envelope(kind, message),
+                               [("Content-Type", "application/json")])
         self.close_connection = True
-        self._log_request(started, status, None, None, Relay("rejected", written=len(body)))
+        self._log_request(started, status, None, None, Relay("rejected", written=written))
 
     def _read_body(self, started):
         """The request body, or None when the request was rejected or the client left."""
@@ -266,9 +273,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         except UPSTREAM_FAILURES as error:
             self._close_upstream()
             detail = f"{type(error).__name__}: {error}"
-            self._answer(502, envelope("api_error", f"upstream request failed: {detail}"),
-                         [("Content-Type", "application/json")])
-            self._log_request(started, 502, label, None, Relay("upstream_error", detail))
+            written = self._answer(502, envelope("api_error", f"upstream request failed: {detail}"),
+                                   [("Content-Type", "application/json")])
+            self._log_request(started, 502, label, None,
+                              Relay("upstream_error", detail, written=written))
             return
         ttfb_ms = elapsed_ms(started)
         relay = self._relay(response)
