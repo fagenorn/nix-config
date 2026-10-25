@@ -1,8 +1,9 @@
-# Task 2: `cache-proxy` command
+# Task 2: Spike gate ruling and the `cache-proxy` command
 
-Spec § The `cache-proxy` command, § Forwarding contract and § Test seams, per D5, D6, D7, D8, D15 and D16. A new standard-library module `agent_tools.cache_proxy`, one command-table row, its tests in `just agent-workflow-tests`, and its `python/README.md` section.
+Step 0 appends the owner's gate ruling to the spike report (spec § Spike, per D21, D22 and D23). Steps 1–6 then add, per spec § The `cache-proxy` command, § Forwarding contract and § Test seams and D5, D6, D7, D8, D15 and D16, a new standard-library module `agent_tools.cache_proxy`, one command-table row, its tests in `just agent-workflow-tests`, and its `python/README.md` section.
 
 **Files:**
+- Modify: `docs/spikes/cache-proxy-spike.md` (Step 0 only: one appended section)
 - Create: `python/agent_tools/cache_proxy.py`
 - Create: `tests/test_cache_proxy.py`
 - Modify: `lib/agent-tools.nix` (add `"cache-proxy"` to `commands`, between `"agent-model-matrix"` and `"conformance"`)
@@ -10,7 +11,8 @@ Spec § The `cache-proxy` command, § Forwarding contract and § Test seams, per
 - Modify: `python/README.md` (new section after `## \`orchestrate-control\``)
 
 **Interfaces:**
-- Consumes: nothing from earlier tasks (Task 1's verdict must be `go`).
+- Consumes (Task 1, committed at `d6b19390`): the spike report's recorded lines `Fact 1: holds` and `Fact 2: holds`. Steps 1–6 consume nothing from earlier tasks.
+- Produces (Step 0; read by Task 5, acceptance row `AC1` and the controller): the report's last section `## Gate ruling — 2026-10-25` holding the line `Gate ruling: go` alone on its line.
 - Produces (Task 3 imports the first four; Task 4 runs the launcher):
   - `HEALTH_PATH = "/_proxy/health"`, `HEALTH_BODY = b'{"service":"cache-proxy","status":"ok"}'`
   - `parse_upstream(url: str) -> Upstream` — `Upstream(url, scheme, host, port, host_header)`, frozen dataclass; `url` is the argument without a trailing `/`; `host_header` omits the scheme's default port; anything but an `http`/`https` origin without path or query raises `argparse.ArgumentTypeError`.
@@ -19,6 +21,7 @@ Spec § The `cache-proxy` command, § Forwarding contract and § Test seams, per
   - `build_parser()`, `main(argv: list[str] | None = None) -> int`; the launcher `~/.agents/bin/cache-proxy` and store path `<hash>-agent-tools-cache-proxy`.
 
 **Invariants:**
+- Step 0 only appends: the report as committed at `d6b19390` stays a byte-identical prefix of the file, so its `Fact 4: fails` and `Verdict: no-go` lines stay as recorded (D22).
 - Bind host is `127.0.0.1` and no argument changes it; `--port` is required (exit 2 without it); nothing runs at import time.
 - Upstream request = client method, path with query and body bytes verbatim; headers in client order with duplicates, `Host` rewritten in place (prepended if absent), hop-by-hop (`connection`, `keep-alive`, `te`, `trailer`, `transfer-encoding`, `upgrade`, every `proxy-*`, every name a `Connection` header lists) dropped, nothing added (`putrequest(..., skip_host=True, skip_accept_encoding=True)`).
 - Client response = upstream status and reason, end-to-end headers in upstream order with duplicates, no `Server`/`Date` (use `send_response_only`, never `send_response`/`send_error`); a sized body keeps its `Content-Length`; an unsized body drops any `Content-Length`, gets `Transfer-Encoding: chunked` after the forwarded headers, and is written one chunk per upstream `read1(65536)`, flushed each time.
@@ -26,6 +29,58 @@ Spec § The `cache-proxy` command, § Forwarding contract and § Test seams, per
 - One upstream connection per client connection, reused only when the last response was read to the end, its socket is still open and `select` finds it not readable.
 - `GET /_proxy/health` → `200`, `Content-Type: application/json`, `HEALTH_BODY`; any other method → `405`, `Allow: GET`, empty body; neither is forwarded or logged (D16).
 - One `request` log line per forwarded or rejected request with `method`, `path`, `status`, `upstream_conn` (`new`, `reused`, or `null` when rejected), `ttfb_ms`, `duration_ms`, `bytes` (body bytes written to the client, de-chunked), `outcome` (`complete`, `client_closed`, `upstream_error`, `rejected`), plus `error` on `upstream_error` and `error_body` (first 4096 bytes, UTF-8 with replacement) when the upstream status is ≥ 400. No header value and no other body bytes are logged.
+
+- [ ] **Step 0: Record the owner's gate ruling in the spike report (D21, D22, D23)**
+
+The report `docs/spikes/cache-proxy-spike.md` records `Verdict: no-go` under the original gate, which needed facts 1, 2 and 4. The owner ruled fact 4 inconclusive and the gate go on facts 1 and 2. This step appends that ruling as the report's last section and changes nothing above it.
+
+Confirm the starting state (timeout 30 s):
+
+```bash
+set -euo pipefail
+f=docs/spikes/cache-proxy-spike.md
+grep -qx 'Fact 1: holds' "$f"
+grep -qx 'Fact 2: holds' "$f"
+if grep -q '^Gate ruling:' "$f"; then exit 1; fi
+echo ruling-absent
+```
+
+Expected: `ruling-absent`. If either fact line is missing, report BLOCKED with `spike gate: facts 1 and 2 do not both hold`; the amended gate (D21) is then not met, and nothing else in this plan runs.
+
+Append the following to the end of the file. The file already ends in a newline, so first add one blank line, then this text, and end with a newline:
+
+```markdown
+## Gate ruling — 2026-10-25
+
+Gate ruling: go
+
+This section was appended after the run. Everything above it is the 2026-10-24 run as recorded, and it is not edited. The recorded `Verdict: no-go` applied the original gate, under which facts 1, 2 and 4 all had to hold. On 2026-10-25 the issue owner ruled fact 4 inconclusive, not failed (https://github.com/fagenorn/nix-config/issues/422#issuecomment-6394974531). It failed only the structural rule, because the two siblings' `system` blocks differ in the billing header's `cc_version` suffix. Its token threshold was met, the breakpoint was never moved, and the attachment set was 862 tokens. The amended gate is facts 1 and 2, and both hold above, so the gate is go and the pass-through service proceeds (D21, D22). The shared sibling start-up prefix, including a proper re-test of fact 4, moves to https://github.com/fagenorn/nix-config/issues/429. Fact 3 does not gate: it is measured on the shipped proxy, as § Fact 3 says. A routed session loses Remote Control (§ Fact 1), a consequence the owner accepted.
+```
+
+Verify (timeout 60 s):
+
+```bash
+set -euo pipefail
+f=docs/spikes/cache-proxy-spike.md
+n=$(git show d6b19390:"$f" | wc -l)
+head -n "$n" "$f" | cmp -s - <(git show d6b19390:"$f")
+test "$(grep -c '^Gate ruling: ' "$f")" -eq 1
+grep -qx 'Gate ruling: go' "$f"
+test "$(grep '^## ' "$f" | tail -1)" = '## Gate ruling — 2026-10-25'
+for key in 'Fact 1: holds' 'Fact 2: holds' 'Fact 4: fails' 'Verdict: no-go'; do grep -qx "$key" "$f"; done
+grep -qF 'issues/422#issuecomment-6394974531' "$f"
+grep -qF 'issues/429' "$f"
+test -z "$(tail -c 1 "$f" | tr -d '\n')"
+if grep -nE 'sk-ant-|Bearer |oat01' "$f"; then exit 1; fi
+echo ruling-recorded
+```
+
+Expected: `ruling-recorded`. At the starting commit it fails at the `Gate ruling:` count (0). Then commit:
+
+```bash
+git add docs/spikes/cache-proxy-spike.md
+git commit -m "docs(spike): record the owner's go ruling on the spike gate (#422)"
+```
 
 - [ ] **Step 1: Write the failing tests** — `tests/test_cache_proxy.py`:
 

@@ -1,6 +1,6 @@
 # Task 5: Live evidence — time to first token and the A/B eval
 
-Spec § Live evidence, per D1, D14 and D18. On mbp, the built (never activated) `cache-proxy` service command runs in the foreground as the stand-in for the service, and the built `claude` wrapper goes first on `PATH`. The task measures fact 3 (time to first token, AC6), runs `just evals from-issue 1` with the proxy healthy and then stopped (AC5), and records both. Order: build, start proxy, TTFT, eval A, stop proxy, eval B, record. Wall-clock bound: about 100 minutes, almost all of it the two eval runs.
+Spec § Live evidence, per D14, D18, D20 and D24, with acceptance row `AC1` per D21, D22 and D23. On mbp, the built (never activated) `cache-proxy` service command runs in the foreground as the stand-in for the service, and the built `claude` wrapper goes first on `PATH`. The task measures fact 3 (time to first token, AC6), runs `just evals from-issue 1` with the proxy healthy and then stopped (AC5), records both, and completes acceptance row `AC1`. Order: build, start proxy, TTFT, eval A, stop proxy, eval B, record. Wall-clock bound: about 100 minutes, almost all of it the two eval runs.
 
 **Files:**
 - Modify: `docs/spikes/cache-proxy-spike.md` (the `## Fact 3 — time to first token` section)
@@ -9,21 +9,22 @@ Spec § Live evidence, per D1, D14 and D18. On mbp, the built (never activated) 
 - Scratch only: `<scratch>/i422/evidence/` (proxy logs, scripts, TTFT JSON), `<scratch>` from `launch-scope scratch …`
 
 **Interfaces:**
-- Consumes (Task 4, via `./result` after `just build mbp`): the plist `<hash>-org.nix-community.home.claude-cache-proxy.plist` (`ProgramArguments` = `/bin/sh`, `-c`, `/bin/wait4path /nix/store && exec <launcher> --port 27183`; `EnvironmentVariables.SSL_CERT_FILE`), and `<hash>-claude-code-with-accounts-<version>/bin/claude`. Consumes (Task 3): routing (healthy → proxy URL; caller-set `https://api.anthropic.com` → untouched). Consumes (Task 2): the request log lines (`"path":"/v1/messages…"`). Consumes (Task 1): `Tool-search switch:`, the pending fact-3 line, the acceptance record.
-- Produces: `Fact 3: holds|fails` in the report's fact-3 section; acceptance rows `AC1` (fact 3 recorded), `AC5`, `AC6` filled with observed values, commit and conditions.
+- Consumes (Task 4, via `./result` after `just build mbp`): the plist `<hash>-org.nix-community.home.claude-cache-proxy.plist` (`ProgramArguments` = `/bin/sh`, `-c`, `/bin/wait4path /nix/store && exec <launcher> --port 27183`; `EnvironmentVariables.SSL_CERT_FILE`), and `<hash>-claude-code-with-accounts-<version>/bin/claude`. Consumes (Task 3): routing (healthy → proxy URL; caller-set `https://api.anthropic.com` → untouched). Consumes (Task 2): the request log lines (`"path":"/v1/messages…"`). Consumes (Task 1): `Tool-search switch:`, the pending fact-3 line, the acceptance record. Consumes (Task 2 Step 0): the report's `Gate ruling: go` line, the gate this task reads instead of the recorded `Verdict:` line (D23). Consumes (controller): the attempt's `deadline_at`, from this task's context file (D24).
+- Produces: `Fact 3: holds|fails|human-pending` in the report's fact-3 section; acceptance rows `AC1` (completed), `AC5`, `AC6` filled with observed values, commit and conditions.
 
 **Invariants:**
 - No `just switch`, no `launchctl`, no `systemctl` (D14). The only listener on `127.0.0.1:27183` is the process this task starts, and it is stopped before eval B and before the task reports.
 - One account for every run: `ACCOUNT="$(claude-account active)"`, exported as `CLAUDE_ACCOUNT` (D18); a usage-limit refusal switches to another signed-in account with headroom from `claude-account status`, recorded in the conditions.
 - Proxied and direct TTFT runs differ only in `ANTHROPIC_BASE_URL` (D18).
 - Every eval result line stays in `results.jsonl`, including failed attempts; nothing is deleted.
+- In the spike report this task replaces only the pending fact-3 line; every recorded line, `Fact 4: fails` and `Verdict: no-go` included, and the `## Gate ruling — 2026-10-25` section stay as they are (D22).
 
-**Deadline cutoff (Phase-5 review D1, per the spec's ledger row for it).** The attempt deadline is 2026-10-25T01:42:25Z and shipping (review, CI, merge) needs its last 60 minutes. Before Step 4, Step 5 and Step 6, compute the minutes left until 00:42:25Z (`deadline − 60 min`). Step 4 (TTFT, ~10 min) runs only with at least 15 minutes left; each eval step runs only with at least 50 minutes left; there is no instrument rerun past the cutoff. A step skipped by the cutoff is not run at all: its acceptance row gets Observed `not run: attempt deadline cutoff`, the exact command to run in `Check or command`, and Verdict `human-pending`, and the fact-3 line becomes `Fact 3: human-pending` when Step 4 is skipped. Stop the proxy before reporting either way. A `human-pending` row makes sdd's `acceptance_state` `human_pending`, so ship holds the issue open with `needs-verification` instead of closing it.
+**Deadline cutoff (D20, its deadline source per D24).** The attempt deadline is the `deadline_at` the controller passes in this task's context file; attempt 2's is `2026-10-25T13:29:52Z`. If the context file names none, report NEEDS_CONTEXT at Step 1, before anything runs, and never assume a value. Shipping (review, CI, merge) needs the attempt's last 60 minutes. Before Step 4, Step 5 and Step 6, with `DEADLINE_AT` set to that value, compute the minutes left until `deadline_at − 60 min` (timeout 30 s): `python3 -I -c 'import datetime as d, sys; t = d.datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00")); print(int((t - d.timedelta(minutes=60) - d.datetime.now(d.timezone.utc)).total_seconds() // 60))' "$DEADLINE_AT"`. Step 4 (TTFT, ~10 min) runs only with at least 15 minutes left; each eval step runs only with at least 50 minutes left; there is no instrument rerun past the cutoff. A step skipped by the cutoff is not run at all: its acceptance row gets Observed `not run: attempt deadline cutoff`, the exact command to run in `Check or command`, and Verdict `human-pending`, and the fact-3 line becomes `Fact 3: human-pending` when Step 4 is skipped. Stop the proxy before reporting either way. A `human-pending` row makes sdd's `acceptance_state` `human_pending`, so ship holds the issue open with `needs-verification` instead of closing it.
 
 - [ ] **Step 1: Confirm the starting state**
 
 Run (timeout 30 s): `grep -qx 'Pending: measured on the shipped proxy by Task 5 (D14).' docs/spikes/cache-proxy-spike.md && grep -q '^| AC6 |.*pending Task 5' .agents/artifacts/plans/2026-10-24-issue-422-cache-proxy.acceptance.md && echo pending`
-Expected: `pending`. Then the port must be free (timeout 30 s): `if curl -q --noproxy '*' -s --max-time 1 http://127.0.0.1:27183/_proxy/health; then exit 1; fi`. If something answers, report BLOCKED with `lsof -nP -iTCP:27183 -sTCP:LISTEN`; never kill a process this task did not start.
+Expected: `pending`. The gate must read go (timeout 30 s): `grep -qx 'Gate ruling: go' docs/spikes/cache-proxy-spike.md`; without it, report BLOCKED with `spike gate ruling missing` (D23). Record this task's starting commit (timeout 30 s): `mkdir -p <scratch>/i422/evidence && git rev-parse HEAD > <scratch>/i422/evidence/task5-base`. Then the port must be free (timeout 30 s): `if curl -q --noproxy '*' -s --max-time 1 http://127.0.0.1:27183/_proxy/health; then exit 1; fi`. If something answers, report BLOCKED with `lsof -nP -iTCP:27183 -sTCP:LISTEN`; never kill a process this task did not start.
 
 - [ ] **Step 2: Build and locate the built service and wrapper**
 
@@ -139,7 +140,7 @@ Expected: one JSON line with `"valid": true`. An invalid run (a failed launch, a
 
 In `docs/spikes/cache-proxy-spike.md`, replace the line `Pending: measured on the shipped proxy by Task 5 (D14).` with: the line `Fact 3: holds` or `Fact 3: fails`; the conditions (date, built wrapper and launcher store paths, account, `--model haiku`, `ENABLE_TOOL_SEARCH` as set in both arms, client-side clock from launch to the first `content_block_delta` stream event); a table of the 20 runs (`pair`, `arm`, `ttft_ms`, `exit`, `proxy_lines`) followed by each run's raw `usage` object (Phase-5 review B3: AC1 requires the raw usage fields of every request); the two medians and the difference against the +100 ms threshold.
 
-In the acceptance record: `AC6` — Observed: both medians and the difference; Commit: `git rev-parse --short HEAD`; Conditions: as above; Verdict `met` iff fact 3 holds, else `not met`. `AC5` — Observed: each arm's `VERDICT`, proxy-log `/v1/messages` lines added (arm A, > 0) and unchanged (arm B), and each results line's `ts` and token totals; Verdict `met` iff both arms print `VERDICT: PASS` and both counts hold. `AC1` — Observed gains `fact 3 recorded (Task 5)`; Verdict `met` when the report carries facts 1–4.
+In the acceptance record: `AC6` — Observed: both medians and the difference; Commit: `git rev-parse --short HEAD`; Conditions: as above; Verdict `met` iff fact 3 holds, else `not met`. `AC5` — Observed: each arm's `VERDICT`, proxy-log `/v1/messages` lines added (arm A, > 0) and unchanged (arm B), and each results line's `ts` and token totals; Verdict `met` iff both arms print `VERDICT: PASS` and both counts hold. `AC1` — Observed gains `Gate ruling: go (report § Gate ruling — 2026-10-25)` and `fact 3 recorded (Task 5)`, or `fact 3 human-pending` under the cutoff; Commit: `git rev-parse --short HEAD`. Verdict `met` when the report carries `Fact 1: holds`, `Fact 2: holds`, the recorded `Fact 4:` line, `Gate ruling: go` and a `Fact 3: holds` or `Fact 3: fails` line followed by every run's raw usage (AC1 asks that the facts are recorded and that the gate holds; AC6 grades fact 3's threshold); `human-pending` when the line is `Fact 3: human-pending`.
 
 - [ ] **Step 8: Verify**
 
@@ -149,22 +150,26 @@ Run (timeout 60 s):
 set -euo pipefail
 f=docs/spikes/cache-proxy-spike.md
 a=.agents/artifacts/plans/2026-10-24-issue-422-cache-proxy.acceptance.md
+B=$(cat <scratch>/i422/evidence/task5-base)
 grep -Eqx 'Fact 3: (holds|fails|human-pending)' "$f"
 if grep -q 'Pending: measured on the shipped proxy' "$f"; then exit 1; fi
+for key in 'Fact 1: holds' 'Fact 2: holds' 'Fact 4: fails' 'Verdict: no-go' 'Gate ruling: go'; do grep -qx "$key" "$f"; done
+test "$(git diff --numstat d6b19390 -- "$f" | cut -f2)" = 1
 if grep -nE 'sk-ant-|Bearer |oat01' "$f" "$a"; then exit 1; fi
 for row in AC1 AC5 AC6; do
   line=$(grep "^| $row |" "$a")
   if printf '%s' "$line" | grep -Eq 'pending Task 5|pending fact 3'; then exit 1; fi
 done
-test "$(git diff --numstat 7601d318 -- home/common/agent-skills/evals/results/results.jsonl | cut -f2)" = 0
+read -r added deleted _ <<<"$(git diff --numstat "$B" -- home/common/agent-skills/evals/results/results.jsonl)"
+test "${deleted:-0}" = 0
 if ! grep '^| AC5 |' "$a" | grep -q 'human-pending'; then
-  test "$(git diff --numstat 7601d318 -- home/common/agent-skills/evals/results/results.jsonl | cut -f1)" -ge 2
+  test "${added:-0}" -ge 2
 fi
 if curl -q --noproxy '*' -s --max-time 1 http://127.0.0.1:27183/_proxy/health; then exit 1; fi
 echo evidence-recorded
 ```
 
-Expected: `evidence-recorded`. At the starting commit the first `grep` fails (no fact-3 line).
+Expected: `evidence-recorded`. At the starting commit the first `grep` fails (no fact-3 line). The `results.jsonl` lines are counted from this task's starting commit, so lines that a sync merge from `main` landed before this task never count, and an unchanged file (both evals skipped by the cutoff) passes the deletion check.
 
 - [ ] **Step 9: Commit**
 

@@ -1,5 +1,7 @@
 # Task 1: Live-API spike and go/no-go gate
 
+> **Status: complete, do not dispatch.** This task ran in attempt 1; its report and the acceptance record were committed at `d6b19390`, and the spike is never re-run (D22). Step 6's gate reading is superseded: the go gate is facts 1 and 2, which both hold (D21), and Task 2 Step 0 appends the owner's ruling to the report, whose `Gate ruling: go` line later work reads instead of `Verdict:` (D23). The steps below are the record of what ran.
+
 Spec § Spike, per D1, D2, D3, D4, D11, D18 and D19. A throwaway harness in launch scratch records Claude Code's requests through a custom base URL, replays them, and writes the committed report `docs/spikes/cache-proxy-spike.md`. Facts 1, 2 and 4 must all hold; any failure ends the attempt after this task's commit (D1). The harness itself is never committed.
 
 **Files:**
@@ -19,12 +21,12 @@ Spec § Spike, per D1, D2, D3, D4, D11, D18 and D19. A throwaway harness in laun
 - Every request the harness forwards or sends is in the report's request log with its raw `usage` object (JSON, keys sorted) or its status and first 2 KiB of error body.
 - `Verdict: go` only when all three fact lines say `holds`.
 
-- [ ] **Step 1: Confirm the starting state (the check that must flip)**
+- [x] **Step 1: Confirm the starting state (the check that must flip)**
 
 Run (timeout 30 s): `test ! -e docs/spikes/cache-proxy-spike.md && echo absent`
 Expected: `absent`. Then `ACCOUNT="$(claude-account active)"` and record it; it must be a profile name or `default`, not `custom (…)`. Wrapper store path: `readlink -f /etc/profiles/per-user/anis/bin/claude`. Version: `claude --version`.
 
-- [ ] **Step 2: Write the harness `<scratch>/i422/harness.py`**
+- [x] **Step 2: Write the harness `<scratch>/i422/harness.py`**
 
 One standard-library Python file, run as `python3 -I <scratch>/i422/harness.py <phase> --out <scratch>/i422/results --account "$ACCOUNT"` with `<phase>` one of `fact1`, `fact2`, `fact4`, `report` (`report` also takes `--doc docs/spikes/cache-proxy-spike.md` and `--meta <json file>` holding date, host, wrapper path, version, account). Each phase is one process, writes `<out>/<phase>.json` (its verdict inputs) and `<out>/<phase>-requests.jsonl`, and can be rerun alone; `report` only reads those files. Components:
 
@@ -40,18 +42,18 @@ Phases (thresholds per D3, D4, D19; the account's default model, no `--model`, p
 - **`fact4`** (bound 8 min). Prompt: `SPIKE-PARENT-422. Use the Agent tool twice, one call after the other, both with subagent_type general-purpose. First call: description "alpha", prompt "SPIKE-SIBLING-ALPHA. Reply with exactly: alpha". Second call: description "beta", prompt "SPIKE-SIBLING-BETA. Reply with exactly: beta". Then reply with exactly: done`. Each sibling's first request is the first `/v1/messages` POST whose `messages` has length 1 and whose `messages[0]` contains its own marker but neither `SPIKE-PARENT-422` nor the other sibling's marker, so the parent's initial request (which carries all three) is never selected; the two selected requests must have distinct `seq` values, else the run is invalid (instrument reason: rerun the phase). Fails (reason recorded) unless both first requests have list-valued `messages[0].content` of equal length differing at exactly one index `D` (the marker block), equal `system` and equal `tools`, and at least one other block. Attachments = every other block, in order. Transform: content = attachments + [block `D`]; the last attachment gets a copy of block `D`'s `cache_control` (or `{"type": "ephemeral"}`); if the body then has more than 4 `cache_control` objects, block `D`'s is removed (moved). Sends, in order, each with `max_tokens` 1 (or the smallest accepted value, found as in `fact2`, per D19): baseline sibling 1, baseline sibling 2, transformed sibling 1, transformed sibling 2. Attachment count: `POST /v1/messages/count_tokens` of `{"model", "messages": [{"role": "user", "content": <attachments without cache_control>}]}` minus the same with content `"."`; if either is refused, the D19 fallback (send transformed sibling 1 with content `[block D]` and subtract totals). Holds iff transformed sibling 2's `cache_read_input_tokens ≥` the count. Record the gain over baseline sibling 2.
 - **`report`.** Writes the document: a title `# Cache proxy spike — issue 422`; a run line (date, host `mbp`, Claude Code version, wrapper store path, account, models, `Accept-Encoding: identity` on the upstream leg); the five machine-readable lines; `## Fact 1 — base URL honoured` (both runs' tables and the shape fields, plus the finding that Claude Code documents Remote Control as unavailable behind a non-first-party base URL); `## Fact 2 — replay refreshes the TTL` (timeline table with offsets, `max_tokens`, status and raw usage, then each threshold with its numbers); `## Fact 4 — siblings share attachments` (attachment count and its method, the four sends' usage, the gain); `## Fact 3 — time to first token` with the pending line above; `## Request log` (every record: `seq`, `origin`, method, path, status, header names, kept values, raw usage).
 
-- [ ] **Step 3: Run the phases**
+- [x] **Step 3: Run the phases**
 
 Each in the foreground under `launch-scope exec`, with the timeouts 600 s, 900 s and 600 s:
 `python3 -I <scratch>/i422/harness.py fact1 --out <scratch>/i422/results --account "$ACCOUNT"`, then `fact2`, then `fact4`. A phase that fails for an instrument reason (harness bug, invalid timing window, a usage-limit refusal — then set `ACCOUNT` to another signed-in account with headroom from `claude-account status` and record it, per D18) is fixed and rerun alone; a fact that measures `fails` is a result, not a reason to rerun. If fact 1 fails, skip `fact2` and `fact4` and write them `fails` with reason `not run: fact 1 failed`.
 
-- [ ] **Step 4: Write the report and the acceptance record**
+- [x] **Step 4: Write the report and the acceptance record**
 
 Run (timeout 60 s): `python3 -I <scratch>/i422/harness.py report --out <scratch>/i422/results --doc docs/spikes/cache-proxy-spike.md --meta <scratch>/i422/meta.json`.
 
 Create `.agents/artifacts/plans/2026-10-24-issue-422-cache-proxy.acceptance.md` with the heading `# Acceptance record — issue #422` and the table header `| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |`, one row per criterion `AC1`–`AC6` in issue order, its `Criterion` the issue's criterion text verbatim and its `Check or command` the plan's Acceptance map cell. Fill `AC1`: Observed = the three fact lines and the verdict; Commit = `git rev-parse --short HEAD` at the run; Conditions = account, model, wrapper path; Verdict = `pending fact 3` on go, `not met` on no-go. `AC2`–`AC4`: Observed `in final verification`, Verdict `pending`. `AC5`, `AC6`: Observed `pending Task 5`, Verdict `pending`.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 Run (timeout 60 s) from the worktree root:
 
@@ -75,7 +77,7 @@ echo spike-report-ok
 
 Expected: `spike-report-ok`. At the starting commit it fails at the first `grep` (no report).
 
-- [ ] **Step 6: Commit, then apply the gate**
+- [x] **Step 6: Commit, then apply the gate**
 
 ```bash
 git add docs/spikes/cache-proxy-spike.md .agents/artifacts/plans/2026-10-24-issue-422-cache-proxy.acceptance.md
