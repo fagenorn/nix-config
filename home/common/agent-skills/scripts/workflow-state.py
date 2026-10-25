@@ -617,72 +617,6 @@ def is_reserved_direct_run_id(run_id: str) -> bool:
     return match is not None and int(match.group(2)) >= 1
 
 
-def select_phase_action(
-    *,
-    direct: bool,
-    turn_count: int | None,
-    context_tokens: int | None,
-    turn_ceiling: int,
-    context_ceiling: int,
-    turn_headroom: int,
-    context_headroom: int,
-    next_needs_context: bool,
-    artifacts_sufficient: bool,
-    remainder_self_contained: bool,
-) -> str:
-    """Select the phase-boundary action from run identity and phase inputs.
-
-    The phase budget is the turn and context ceilings with their headrooms; this
-    function never sees the attempt budget's wall clock, and ``delegate`` does not
-    reset it. A ``direct`` run (by its identity) selects a self-contained remainder
-    first, then an eligible ``fresh_start``, known near-ceiling usage, work that
-    needs no context, and otherwise ``continue``. Every non-direct run retains the
-    complete order: eligible ``fresh_start``, known near-ceiling usage, measured
-    self-contained delegation, work that needs no context, then ``continue``.
-
-    Unmeasurable usage is not a budget signal. A harness that exposes no
-    authoritative context-token count would otherwise pin every non-direct run to
-    ``handoff`` at its first phase gate, so an unknown count only withholds
-    ``delegate`` -- which still requires usage measured below both ceilings.
-    """
-    if direct:
-        if remainder_self_contained:
-            return "delegate"
-        if not next_needs_context and artifacts_sufficient:
-            return "fresh_start"
-        if (
-            turn_count is not None
-            and turn_count >= turn_ceiling - turn_headroom
-        ) or (
-            context_tokens is not None
-            and context_tokens >= context_ceiling - context_headroom
-        ):
-            return "handoff"
-        if not next_needs_context:
-            return "handoff"
-        return "continue"
-
-    if not next_needs_context and artifacts_sufficient:
-        return "fresh_start"
-    if (
-        turn_count is not None
-        and turn_count >= turn_ceiling - turn_headroom
-    ) or (
-        context_tokens is not None
-        and context_tokens >= context_ceiling - context_headroom
-    ):
-        return "handoff"
-    if (
-        remainder_self_contained
-        and turn_count is not None
-        and context_tokens is not None
-    ):
-        return "delegate"
-    if not next_needs_context:
-        return "handoff"
-    return "continue"
-
-
 def validate_phase_inputs(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or tuple(value.keys()) != PHASE_INPUT_FIELDS:
         if not isinstance(value, dict) or set(value) != set(PHASE_INPUT_FIELDS):
@@ -852,7 +786,7 @@ def validate_attempt(
         ):
             raise WorkflowError("invalid phase action")
         phase_inputs = validate_phase_inputs(value["phase_inputs"])
-        if select_phase_action(direct=direct, **phase_inputs) != value["phase_action"]:
+        if phase_budget.select_phase_action(direct=direct, **phase_inputs) != value["phase_action"]:
             raise WorkflowError("phase action does not match persisted inputs")
     if value["state"] == "handed_off":
         if value["phase_action"] != "handoff" or value["handoff_path"] is None:
@@ -4168,13 +4102,19 @@ def validate_durable_detail(repo_root: str, report_path: str) -> None:
 
 def command_progress(args: argparse.Namespace) -> int:
     supplied = supplied_time(args.now, "--now")
+    budget = phase_budget.current()
+    # The ceiling is the threshold of the phase being entered plus the default headroom,
+    # so a bare --context-headroom moves the margin and never the ceiling.
     phase_inputs = {
         "turn_count": args.turn_count,
         "context_tokens": args.context_tokens,
-        "turn_ceiling": args.turn_ceiling,
-        "context_ceiling": args.context_ceiling,
-        "turn_headroom": args.turn_headroom,
-        "context_headroom": args.context_headroom,
+        "turn_ceiling": budget.turn_ceiling if args.turn_ceiling is None else args.turn_ceiling,
+        "context_ceiling": (
+            phase_budget.handoff_threshold(budget, args.phase + 1) + budget.context_headroom
+            if args.context_ceiling is None else args.context_ceiling),
+        "turn_headroom": budget.turn_headroom if args.turn_headroom is None else args.turn_headroom,
+        "context_headroom": (
+            budget.context_headroom if args.context_headroom is None else args.context_headroom),
         "next_needs_context": args.next_needs_context,
         "artifacts_sufficient": args.artifacts_sufficient,
         "remainder_self_contained": args.remainder_self_contained,
@@ -4188,7 +4128,7 @@ def command_progress(args: argparse.Namespace) -> int:
     def progress(state: dict[str, Any] | None,
                  identity: RunIdentity) -> tuple[dict[str, Any], bool]:
         # The action depends on the run's identity, which only the locked read knows.
-        action = select_phase_action(direct=identity.direct, **phase_inputs)
+        action = phase_budget.select_phase_action(direct=identity.direct, **phase_inputs)
         if args.handoff_path is not None and action != "handoff":
             raise WorkflowError("handoff path is only valid for a handoff action")
         now_value = ledger_time(supplied)
@@ -5729,10 +5669,10 @@ def build_parser() -> argparse.ArgumentParser:
     progress.add_argument("--phase", required=True, type=nonnegative_int)
     progress.add_argument("--turn-count", type=nonnegative_int)
     progress.add_argument("--context-tokens", type=nonnegative_int)
-    progress.add_argument("--turn-ceiling", type=nonnegative_int, default=phase_budget.TURN_CEILING)
-    progress.add_argument("--context-ceiling", type=nonnegative_int, default=phase_budget.CONTEXT_CEILING)
-    progress.add_argument("--turn-headroom", type=nonnegative_int, default=phase_budget.TURN_HEADROOM)
-    progress.add_argument("--context-headroom", type=nonnegative_int, default=phase_budget.CONTEXT_HEADROOM)
+    progress.add_argument("--turn-ceiling", type=nonnegative_int, default=None)
+    progress.add_argument("--context-ceiling", type=nonnegative_int, default=None)
+    progress.add_argument("--turn-headroom", type=nonnegative_int, default=None)
+    progress.add_argument("--context-headroom", type=nonnegative_int, default=None)
     progress.add_argument("--next-needs-context", required=True, type=literal_boolean)
     progress.add_argument("--artifacts-sufficient", required=True, type=literal_boolean)
     progress.add_argument(

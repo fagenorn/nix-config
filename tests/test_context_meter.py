@@ -77,13 +77,13 @@ class MeterHarness(unittest.TestCase):
         value.update(overrides)
         return value
 
-    def run_meter(self, payload):
+    def run_meter(self, payload, env=None):
         """Run the command from source: (exit code, stdout object or None, stderr)."""
         stdin = payload if isinstance(payload, str) else json.dumps(payload)
         proc = subprocess.run(
             [sys.executable, "-m", "agent_tools.context_meter"], input=stdin,
             capture_output=True, text=True, timeout=60,
-            env={**os.environ, "HOME": str(self.home)}, cwd=str(self.root))
+            env={**os.environ, "HOME": str(self.home), **(env or {})}, cwd=str(self.root))
         self.assertNotEqual(proc.returncode, 2, proc.stderr)
         output = json.loads(proc.stdout) if proc.stdout.strip() else None
         if output is not None:
@@ -307,6 +307,13 @@ CROSSING = ("context-meter: your context is {} tokens, at or above the 110000-to
             "dispatched still running), run your phase gate: workflow-state progress for your "
             "last completed phase, with truthful booleans, then obey its action. This notice is "
             "not repeated.")
+
+
+def CROSSING_AT(tokens, threshold):
+    return CROSSING.replace("110000", str(threshold)).format(tokens)
+
+
+PROGRESS_PHASE_5 = PROGRESS.format(tokens="").replace("--phase 3", "--phase 5")
 MARK = "workflow-state mark-progress --repo-root /ledger --run-id run-1 --action-id 7:1:1"
 
 
@@ -315,14 +322,40 @@ class CrossingTest(MeterHarness):
         super().setUp()
         self.calls = 0
 
-    def call(self, context, command="git status --short", *, agent=True):
+    def call(self, context, command="git status --short", *, agent=True, env=None):
         self.calls += 1
         transcript = self.agent_transcript if agent else self.main_transcript
         self.append(transcript, assistant_record(context, message_id=f"c{self.calls}",
                                                  sidechain=agent))
-        code, output, stderr = self.run_meter(self.payload(command, agent=agent))
+        code, output, stderr = self.run_meter(self.payload(command, agent=agent), env)
         self.assertEqual((code, stderr), (0, ""))
         return None if output is None else output["hookSpecificOutput"].get("additionalContext")
+
+    def test_the_crossing_uses_the_override(self):
+        env = {"AGENT_PHASE_BUDGET": "threshold=90000"}
+        self.assertIsNone(self.call(85000, MARK, env=env))
+        self.assertEqual(self.call(95000, env=env), CROSSING_AT(95000, 90000))
+
+    def test_the_crossing_follows_the_owner_phase(self):
+        env = {"AGENT_PHASE_BUDGET": "threshold=110000,threshold:6-7=170000"}
+        # The registering call is a progress call the meter rewrites, so it is never due.
+        self.assertEqual(self.call(100000, PROGRESS_PHASE_5, env=env), MEASURED.format(100000))
+        self.assertIsNone(self.call(150000, env=env))
+        self.assertEqual(self.call(171000, env=env), CROSSING_AT(171000, 170000))
+
+    def test_a_registering_gate_with_no_phase_enters_phase_six(self):
+        env = {"AGENT_PHASE_BUDGET": "threshold=110000,threshold:6-6=170000"}
+        self.assertIsNone(self.call(100000, MARK, env=env))
+        self.assertIsNone(self.call(150000, env=env))
+        self.assertEqual(self.call(171000, env=env), CROSSING_AT(171000, 170000))
+
+    def test_an_old_two_key_record_is_accepted_and_upgraded(self):
+        state = self.home / ".agents" / "state" / "context-meter"
+        state.mkdir(parents=True)
+        path = state / f"{SESSION}.agent-{AGENT}.json"
+        path.write_text('{"notified": false, "owner": true}', encoding="utf-8")
+        self.assertEqual(self.call(112000), CROSSING_AT(112000, 110000))
+        self.assertEqual(json.loads(path.read_text()), {"notified": True, "owner": True, "phase": None})
 
     def test_105k_to_112k_injects_once_and_118k_does_not(self):
         self.assertIsNone(self.call(105000, MARK))

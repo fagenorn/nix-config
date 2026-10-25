@@ -8106,15 +8106,11 @@ class PhaseBudgetDefaultsTest(LifecycleHarness, unittest.TestCase):
                            turn_count=10, context_tokens=110000, **defaults)
         self.assertEqual(at["action"], "handoff")
 
-    def test_the_four_defaults_have_one_home(self):
-        from agent_tools import phase_budget
-        self.assertEqual((phase_budget.TURN_CEILING, phase_budget.TURN_HEADROOM,
-                          phase_budget.CONTEXT_CEILING, phase_budget.CONTEXT_HEADROOM),
-                         (120, 2, 120000, 10000))
+    def test_the_four_flags_default_to_none_and_resolve_in_the_policy_home(self):
         workflow = load_source_module(SCRIPT, "workflow_state_phase_budget_defaults")
         args = workflow.build_parser().parse_args(self.MINIMAL)
         self.assertEqual((args.turn_ceiling, args.turn_headroom, args.context_ceiling,
-                          args.context_headroom), (120, 2, 120000, 10000))
+                          args.context_headroom), (None, None, None, None))
         defaults = {}
         for node in ast.walk(ast.parse(SCRIPT.read_text(encoding="utf-8"))):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
@@ -8124,11 +8120,26 @@ class PhaseBudgetDefaultsTest(LifecycleHarness, unittest.TestCase):
                 defaults[node.args[0].value] = [
                     ast.unparse(keyword.value) for keyword in node.keywords
                     if keyword.arg == "default"]
-        self.assertEqual(defaults, {
-            "--turn-ceiling": ["phase_budget.TURN_CEILING"],
-            "--turn-headroom": ["phase_budget.TURN_HEADROOM"],
-            "--context-ceiling": ["phase_budget.CONTEXT_CEILING"],
-            "--context-headroom": ["phase_budget.CONTEXT_HEADROOM"]})
+        self.assertEqual(defaults, {flag: ["None"] for flag in self.BUDGET_FLAGS})
+
+    def test_the_override_sets_the_threshold_of_the_phase_being_entered(self):
+        # The in-process CLI shares one interpreter, so the per-process cache is cleared around it.
+        from agent_tools import phase_budget
+        phase_budget.current.cache_clear()
+        self.addCleanup(phase_budget.current.cache_clear)
+        self.cli_env["AGENT_PHASE_BUDGET"] = "threshold=110000,threshold:2-2=140000"
+        self.init_run()
+        self.spawn(issue=14, worktree=self.root / "wt-a")
+        defaults = dict(turn_ceiling=None, context_ceiling=None, turn_headroom=None,
+                        context_headroom=None)
+        into_two = self.progress(issue=14, attempt=1, phase=1, now="2026-08-13T20:05:00Z",
+                                 turn_count=10, context_tokens=120000, **defaults)
+        self.assertEqual(into_two["action"], "continue")
+        recorded = self.read_state()["issues"]["14"]["attempts"][0]["phase_inputs"]
+        self.assertEqual(recorded["context_ceiling"], 150000)
+        into_three = self.progress(issue=14, attempt=1, phase=2, now="2026-08-13T20:10:00Z",
+                                   turn_count=10, context_tokens=120000, **defaults)
+        self.assertEqual(into_three["action"], "handoff")
 
     def test_progress_reads_each_spelling_the_meter_removes_as_context_tokens(self):
         """The context meter drops every prefix of --context-tokens from --context-t on (D15)."""
