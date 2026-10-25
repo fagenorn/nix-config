@@ -171,12 +171,25 @@ claude_bin() {
   echo "$bin"
 }
 
-# Routes this launch through the cache proxy when its health check answers and
-# sends it direct otherwise. A base URL the caller set to anything but the proxy
-# is the caller's own endpoint and is left alone; one equal to the proxy URL was
-# inherited from a routed launch and is decided again. Silent either way:
-# stdout and stderr belong to claude.
+# Routes this launch through the cache proxy only when CLAUDE_CACHE_PROXY=1
+# (#438) and the proxy's health check answers, and sends it direct otherwise.
+# Unset, empty or 0 runs no probe and unsets a base URL equal to the proxy URL,
+# which a routed parent passed down; any other value is refused. With 1, a base
+# URL the caller set to anything but the proxy is the caller's own endpoint and
+# is left alone, and one equal to the proxy URL is decided again. Silent except
+# for the refusal: stdout and stderr belong to claude.
 route_cache_proxy() {
+  case "${CLAUDE_CACHE_PROXY:-}" in
+    1) ;;
+    "" | 0)
+      # Not opted in: no probe, and a proxy URL inherited from an opted-in parent goes too.
+      if [ -n "$CACHE_PROXY_URL" ] && [ "${ANTHROPIC_BASE_URL:-}" = "$CACHE_PROXY_URL" ]; then
+        unset ANTHROPIC_BASE_URL
+      fi
+      return 0
+      ;;
+    *) die "CLAUDE_CACHE_PROXY must be 1, 0 or unset" ;;
+  esac
   local health
   [ -n "$CACHE_PROXY_URL" ] || return 0
   if [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ "$ANTHROPIC_BASE_URL" != "$CACHE_PROXY_URL" ]; then

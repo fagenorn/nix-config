@@ -1,4 +1,4 @@
-"""The `claude` launcher routes through the cache proxy only when its health check answers (#422).
+"""The `claude` launcher routes through the cache proxy only when CLAUDE_CACHE_PROXY=1 and its health check answers (#422, #438).
 
 Each case runs the source `claude-account run` from a temporary copy of the accounts mod whose
 `CACHE_PROXY_URL=` line is substituted the way `home/common/claude-code/default.nix` substitutes
@@ -24,7 +24,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ACCOUNTS = REPO_ROOT / "home" / "common" / "claude-code" / "accounts"
 PLACEHOLDER = "CACHE_PROXY_URL="
 SCRUBBED = ("ANTHROPIC_BASE_URL", "ENABLE_TOOL_SEARCH", "CLAUDE_ACCOUNT", "CLAUDE_ACCOUNTS_DIR",
-            "CLAUDE_ACCOUNT_LAUNCHER", "CLAUDE_BIN", "CLAUDE_CODE_PLUGIN_DIRS", "CLAUDE_CONFIG_DIR")
+            "CLAUDE_ACCOUNT_LAUNCHER", "CLAUDE_BIN", "CLAUDE_CODE_PLUGIN_DIRS", "CLAUDE_CONFIG_DIR",
+            "CLAUDE_CACHE_PROXY")
 CALLER_URL = "http://127.0.0.1:9/caller"
 MARKER_BODY = b'{"service":"cache-proxy","status":"ok"}'
 TIMEOUT = 30
@@ -67,7 +68,7 @@ class RedirectHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-class RoutingTest(unittest.TestCase):
+class LauncherCase(unittest.TestCase):
     def setUp(self):
         for tool in ("bash", "curl", "jq", "env"):
             self.assertIsNotNone(shutil.which(tool), f"{tool} is required on PATH")
@@ -91,8 +92,10 @@ class RoutingTest(unittest.TestCase):
     def redirecting_listener(self):
         return self.serve(socketserver.ThreadingTCPServer(("127.0.0.1", 0), RedirectHandler))
 
-    def launch(self, proxy_url, env=None, substitute=True):
-        """`claude-account run` from a fresh copy; the environment the stand-in claude printed."""
+    switch = {}  # the CLAUDE_CACHE_PROXY setting every launch of the class starts from
+
+    def run_launcher(self, proxy_url, env=None, substitute=True):
+        """`claude-account run` from a fresh copy of the mod, as a finished process."""
         copy = Path(tempfile.mkdtemp(dir=self.root)) / "accounts"
         shutil.copytree(ACCOUNTS, copy)
         script = copy / "bin" / "claude-account"
@@ -105,9 +108,13 @@ class RoutingTest(unittest.TestCase):
         work.mkdir(exist_ok=True)
         child = {key: value for key, value in os.environ.items() if key not in SCRUBBED}
         child.update(HOME=str(home), CLAUDE_ACCOUNTS_DIR=str(self.root / "accounts-state"),
-                     CLAUDE_BIN=shutil.which("env"), **(env or {}))
-        completed = subprocess.run([shutil.which("bash"), str(script), "run"], cwd=work, env=child,
-                                   capture_output=True, text=True, timeout=TIMEOUT, check=False)
+                     CLAUDE_BIN=shutil.which("env"), **{**self.switch, **(env or {})})
+        return subprocess.run([shutil.which("bash"), str(script), "run"], cwd=work, env=child,
+                              capture_output=True, text=True, timeout=TIMEOUT, check=False)
+
+    def launch(self, proxy_url, env=None, substitute=True):
+        """The environment the stand-in claude printed; the launch must succeed silently."""
+        completed = self.run_launcher(proxy_url, env, substitute)
         self.assertEqual((completed.returncode, completed.stderr), (0, ""))
         return dict(line.split("=", 1) for line in completed.stdout.splitlines() if "=" in line)
 
@@ -118,6 +125,11 @@ class RoutingTest(unittest.TestCase):
     def assert_direct(self, environment):
         self.assertNotIn("ANTHROPIC_BASE_URL", environment)
         self.assertNotIn("ENABLE_TOOL_SEARCH", environment)
+
+class RoutingTest(LauncherCase):
+    """Opted-in launches keep #422's health-checked routing."""
+
+    switch = {"CLAUDE_CACHE_PROXY": "1"}
 
     def test_a_healthy_proxy_routes_the_launch(self):
         url = self.healthy_proxy()
@@ -162,6 +174,47 @@ class RoutingTest(unittest.TestCase):
         environment = self.launch(url, {"ANTHROPIC_BASE_URL": url}, substitute=False)
         self.assertEqual(environment.get("ANTHROPIC_BASE_URL"), url)
         self.assertNotIn("ENABLE_TOOL_SEARCH", environment)
+
+
+class OptInRoutingTest(LauncherCase):
+    """Routing is opt-in (#438 D8): only CLAUDE_CACHE_PROXY=1 probes and routes."""
+
+    def test_an_unset_switch_launches_direct_with_a_healthy_proxy(self):
+        self.assert_direct(self.launch(self.healthy_proxy()))
+
+    def test_an_empty_or_zero_switch_launches_direct_with_a_healthy_proxy(self):
+        url = self.healthy_proxy()
+        for value in ("", "0"):
+            with self.subTest(value=value):
+                self.assert_direct(self.launch(url, {"CLAUDE_CACHE_PROXY": value}))
+
+    def test_an_opted_in_launch_routes_and_goes_direct_when_the_proxy_is_down(self):
+        url = self.healthy_proxy()
+        self.assert_routed(self.launch(url, {"CLAUDE_CACHE_PROXY": "1"}), url)
+        self.assert_direct(self.launch("http://127.0.0.1:%d" % closed_port(), {"CLAUDE_CACHE_PROXY": "1"}))
+
+    def test_an_inherited_proxy_url_is_unset_when_not_opted_in(self):
+        url = self.healthy_proxy()
+        for switch in ({}, {"CLAUDE_CACHE_PROXY": "0"}):
+            with self.subTest(switch=switch):
+                self.assert_direct(self.launch(url, {"ANTHROPIC_BASE_URL": url, **switch}))
+
+    def test_a_caller_set_endpoint_is_left_alone_either_way(self):
+        url = self.healthy_proxy()
+        for switch in ({}, {"CLAUDE_CACHE_PROXY": "1"}):
+            with self.subTest(switch=switch):
+                environment = self.launch(url, {"ANTHROPIC_BASE_URL": CALLER_URL, **switch})
+                self.assertEqual(environment.get("ANTHROPIC_BASE_URL"), CALLER_URL)
+                self.assertNotIn("ENABLE_TOOL_SEARCH", environment)
+
+    def test_any_other_switch_value_fails_before_claude_starts(self):
+        url = self.healthy_proxy()
+        for substitute in (True, False):
+            with self.subTest(substitute=substitute):
+                completed = self.run_launcher(url, {"CLAUDE_CACHE_PROXY": "yes"}, substitute)
+                self.assertEqual((completed.returncode, completed.stdout), (1, ""))
+                self.assertEqual(completed.stderr,
+                                 "claude-account: CLAUDE_CACHE_PROXY must be 1, 0 or unset\n")
 
 
 if __name__ == "__main__":

@@ -35,7 +35,8 @@ let
 
   # The cache proxy (agent_tools.cache_proxy, #422). This port is its one home:
   # the service below listens on it and the launcher's CACHE_PROXY_URL is
-  # rewritten to it, so `claude` routes through the proxy while it is healthy.
+  # rewritten to it, so a `claude` launched with CLAUDE_CACHE_PROXY=1 routes
+  # through the proxy while it is healthy (opt-in since #438).
   cacheProxyPort = 27183;
   cacheProxyUrl = "http://127.0.0.1:${toString cacheProxyPort}";
   cacheProxyArgs = [
