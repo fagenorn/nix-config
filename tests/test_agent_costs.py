@@ -12,6 +12,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1999,6 +2000,162 @@ class CacheScanTest(unittest.TestCase):
 
     def test_an_unreadable_transcript_is_skipped(self):
         self.assertIsNone(scan_cache(self.root / "missing.jsonl"))
+
+
+def cache_tree(root):
+    """A main session, the hand-back parent and an Explore subagent with a skill listing."""
+    write_root(root, [user_prompt(0), cache_call("r1", 1, 0, 20_000, ttl="1h"),
+                      cache_call("r2", 30, 20_000, 500, ttl="1h")])
+    write_subagent(root, handback_death_lines(), name="agent-a1")
+    write_subagent(root, [user_prompt(0), attachment("skill_listing", 24_000, 0),
+                          cache_call("e1", 2, 3_323, 12_907), cache_call("e2", 4, 16_230, 900)],
+                   agent_type="Explore", name="agent-a2")
+    return root
+
+
+DEATH_ROW = r"(?m)^general-purpose\s+hand-back after end of turn\s+1\s+9\.0m\s+\$0$"
+
+
+class CacheReportCliTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = cache_tree(Path(self.tmp.name))
+
+    def report(self, *argv):
+        return run_main("--projects-dir", str(self.root), "--report", "cache", *argv)
+
+    def test_the_cache_report_prints_three_tables_and_the_totals(self):
+        out, code = self.report("--days", "0")
+        self.assertIsNone(code)
+        self.assertTrue(out.startswith("Cache report (all time, 3 transcripts, 7 calls)\n\n"),
+                        out[:200])
+        self.assertRegex(out, r"(?m)^agent type\s+cause\s+deaths\s+median gap\s+premium$")
+        self.assertRegex(out, DEATH_ROW)
+        self.assertIn("\nSubagent deaths 1 ($0 premium); main-session deaths 0 ($0)\n", out)
+        self.assertIn("\nReread above 120.00k tokens of context", out)
+        self.assertRegex(out, r"(?m)^agent type\s+transcripts\s+reread above\s+peak p50"
+                              r"\s+peak p90\s+peak max$")
+        self.assertRegex(out, r"(?m)^main\s+1\s+\$0\s+20\.50k\s+20\.50k\s+20\.50k$")
+        self.assertRegex(out, r"(?m)^agent type\s+subagents\s+1st write\s+1st read\s+skill listing"
+                              r"\s+instructions\s+MCP instructions\s+deferred tools"
+                              r"\s+agent listing\s+environment$")
+        self.assertRegex(out, r"(?m)^Explore\s+1\s+12\.91k\s+3\.32k\s+24\.00k(\s+-){5}$")
+        self.assertRegex(out, r"(?m)^general-purpose\s+1\s+30\.00k\s+0(\s+-){6}$")
+        self.assertTrue(out.endswith(f"\nNOTE: {agent_costs.DISCLAIMER}\n"))
+
+    def test_event_bounds_select_calls_by_start_and_name_the_window(self):
+        out, code = self.report("--events-since", "2026-10-12T09:05:00Z",
+                                "--events-before", "2026-10-12T09:10:00Z")
+        self.assertIsNone(code)
+        self.assertTrue(out.startswith(
+            "Cache report (events 2026-10-12T09:05:00Z → 2026-10-12T09:10:00Z, "
+            "1 transcripts, 1 calls)\n"), out[:200])
+        self.assertRegex(out, DEATH_ROW)
+
+    def test_an_empty_selection_exits_instead_of_printing_zeros(self):
+        out, code = self.report("--events-since", "2026-10-13T00:00:00Z",
+                                "--events-before", "2026-10-14T00:00:00Z")
+        self.assertEqual((out, code), ("", "no calls in window"))
+        with tempfile.TemporaryDirectory() as empty:
+            (Path(empty) / "-Users-me-empty").mkdir()
+            out, code = run_main("--projects-dir", empty, "--report", "cache", "--days", "0")
+        self.assertEqual((out, code), ("", "no transcripts in window"))
+
+    def test_top_caps_each_table_and_says_how_many_rows_it_dropped(self):
+        out, code = self.report("--days", "0", "--top", "1")
+        self.assertIsNone(code)
+        self.assertIn("\n... 2 more rows not shown (--top 3 for all)\n", out)  # reread
+        self.assertIn("\n... 1 more rows not shown (--top 2 for all)\n", out)  # start-up
+        self.assertRegex(out, DEATH_ROW)
+
+    def test_the_threshold_flag_reaches_the_scanner_and_the_caption(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_root(Path(tmp), [user_prompt(0)] + [
+                cache_call(f"r{i}", 10 * i, 900_000, 1_000, ttl="1h") for i in range(1, 11)])
+            default, _ = run_main("--projects-dir", tmp, "--report", "cache", "--days", "0")
+            raised, _ = run_main("--projects-dir", tmp, "--report", "cache", "--days", "0",
+                                 "--context-threshold", "500000")
+        # ten Opus reads of 900k: 10 x 780k x $0.50 / 1e6 = $3.90; above 500k, $2.00
+        self.assertRegex(default, r"(?m)^main\s+1\s+\$4\s+")
+        self.assertIn("\nReread above 120.00k tokens of context", default)
+        self.assertRegex(raised, r"(?m)^main\s+1\s+\$2\s+")
+        self.assertIn("\nReread above 500.00k tokens of context", raised)
+
+    def test_cache_report_usage_errors_exit_2_with_nothing_on_stdout(self):
+        cases = {
+            "json": ("--report", "cache", "--format", "json"),
+            "project": ("--report", "cache", "--project", "repo"),
+            "artifacts": ("--report", "cache", "--artifacts", str(self.root)),
+            "strata": ("--report", "cache", "--strata", "both"),
+            "one bound": ("--report", "cache", "--events-since", "2026-10-12T09:00:00Z"),
+            "inverted": ("--report", "cache", "--events-since", "2026-10-12T10:00:00Z",
+                         "--events-before", "2026-10-12T09:00:00Z"),
+            "no offset": ("--report", "cache", "--events-since", "2026-10-12T09:00:00",
+                          "--events-before", "2026-10-12T10:00:00Z"),
+            "zero threshold": ("--report", "cache", "--context-threshold", "0"),
+            "threshold on the issue report": ("--context-threshold", "120000"),
+            "bounds on the issue tables": ("--events-since", "2026-10-12T09:00:00Z",
+                                           "--events-before", "2026-10-12T10:00:00Z"),
+            "unknown report": ("--report", "deaths"),
+        }
+        for name, argv in cases.items():
+            with self.subTest(name), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(run_main("--projects-dir", str(self.root), *argv), ("", 2))
+
+    def test_the_module_run_reports_through_a_real_process_pool(self):
+        completed = subprocess.run(
+            [sys.executable, "-m", "agent_tools.agent_costs", "--projects-dir", str(self.root),
+             "--report", "cache", "--days", "0"],
+            capture_output=True, text=True, timeout=120, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        # the pool must not have fallen back to the sequential scan (Phase-5 PR421-02):
+        # scan_paths catches every pool failure, pickling included, and retries in-process
+        self.assertNotIn("Process pool unavailable", completed.stderr)
+        self.assertRegex(completed.stdout, DEATH_ROW)
+
+    def test_aggregation_over_several_transcripts_of_one_type(self):
+        # Phase-5 PR421-03: several same-type transcripts with distinct peaks, deaths and
+        # attachment sets, so sums, percentiles and carrier-only medians are observable
+        def result(agent_type, is_root, calls, deaths, reread, peak, startup):
+            return {"agent_type": agent_type, "is_root": is_root, "calls": calls,
+                    "deaths": [{"kind": k, "gap_s": g, "premium": p} for k, g, p in deaths],
+                    "reread_above": reread, "peak_ctx": peak, "startup": startup}
+        handback = "hand-back after end of turn"
+        results = [
+            result("general-purpose", False, 5,
+                   [(handback, 540.0, 1.5), ("child dispatch", 400.0, 0.8)], 1.5, 150_000,
+                   {"write": 30_000, "read": 0,
+                    "attachments": {"skill_listing": 24_000, "environment": 600}}),
+            result("general-purpose", False, 3, [(handback, 660.0, 2.0)], 0.75, 90_000,
+                   {"write": 10_000, "read": 20_000, "attachments": {"skill_listing": 20_000}}),
+            result("general-purpose", False, 2, [(handback, 600.0, 0.25)], 2.0, 200_000,
+                   {"write": 20_000, "read": 10_000, "attachments": {}}),
+            result("main", True, 4, [("message after end of turn", 3_700.0, 3.0)], 0.0,
+                   50_000, None),
+        ]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            agent_cache_report.print_report(results, window="all time", threshold=120_000,
+                                            top=30)
+        out = out.getvalue()
+        self.assertTrue(out.startswith("Cache report (all time, 4 transcripts, 14 calls)\n"))
+        rows = re.findall(r"(?m)^(general-purpose|main)\s+(hand-back after end of turn|"
+                          r"child dispatch|message after end of turn)\s+\d", out)
+        self.assertEqual(rows, [("general-purpose", handback), ("main", "message after end of turn"),
+                                ("general-purpose", "child dispatch")])  # premium descending
+        # three deaths, nearest-rank median of 540/600/660 s, premiums 1.5 + 2.0 + 0.25
+        self.assertRegex(out, r"(?m)^general-purpose\s+hand-back after end of turn\s+3\s+10\.0m\s+\$4$")
+        self.assertRegex(out, r"(?m)^general-purpose\s+child dispatch\s+1\s+6\.7m\s+\$1$")
+        self.assertIn("\nSubagent deaths 4 ($5 premium); main-session deaths 1 ($3)\n", out)
+        # reread 1.5 + 0.75 + 2.0 summed; peak median 150k is neither the first nor the max
+        self.assertRegex(out, r"(?m)^general-purpose\s+3\s+\$4\s+150\.00k\s+200\.00k\s+200\.00k$")
+        self.assertRegex(out, r"(?m)^main\s+1\s+\$0\s+50\.00k\s+50\.00k\s+50\.00k$")
+        # medians over the subagents that carried each attachment: environment is 600,
+        # not the 0 a missing-as-zero median of (0, 0, 600) would print
+        self.assertRegex(out, r"(?m)^general-purpose\s+3\s+20\.00k\s+10\.00k\s+20\.00k"
+                              r"(\s+-){4}\s+600$")
+        self.assertNotRegex(out, r"(?m)^main\s+\d+\s+[\d.]+k\s+[\d.]+k\s+-")  # no start-up row
 
 
 class ModuleEntryPointTest(unittest.TestCase):

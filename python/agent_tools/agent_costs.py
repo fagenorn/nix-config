@@ -29,6 +29,13 @@ model+effort mix per group, per-session peak context (max input+cache tokens of
 a single turn), stop_reason counts plus lingering agents killed at exit, and
 short user "proceed" nudges. `--artifacts DIR` adds a filesystem pass over
 spec/plan markdown: bytes, fenced-code share, and decision-section share.
+
+`--report cache` prints the cache report instead of the per-issue tables (issue
+421, agent_tools.agent_cache_report): cache deaths by agent type and cause, the
+cache-read cost of context above `--context-threshold` tokens (default 120,000)
+with peak-context percentiles, and subagent start-up overhead, over the calls
+whose start lies between `--events-since` and `--events-before` when both are
+given. python/README.md (agent-costs) holds its contract.
 """
 
 import argparse
@@ -1738,6 +1745,13 @@ def print_artifact_stats(per_class):
         )
 
 
+def _positive_int(text):
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"{text} is not a positive integer")
+    return value
+
+
 def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     ap = argparse.ArgumentParser(prog="agent-costs", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=35, help="window in days by file mtime (0 = all)")
@@ -1762,17 +1776,32 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
                     help="which strata to scan; meaningful only with --format json")
     ap.add_argument("--codex-sessions", default=os.path.expanduser("~/.codex/sessions"),
                     help="Codex rollout root")
-    ap.add_argument("--events-since", help="RFC3339 event-time lower bound (JSON only)")
-    ap.add_argument("--events-before", help="RFC3339 event-time upper bound (JSON only)")
+    ap.add_argument("--events-since", help="RFC3339 event-time lower bound (JSON or --report cache)")
+    ap.add_argument("--events-before", help="RFC3339 event-time upper bound (JSON or --report cache)")
+    ap.add_argument("--report", choices=("issues", "cache"), default="issues",
+                    help="per-issue tables (default) or the cache report")
+    ap.add_argument("--context-threshold", type=_positive_int, default=None, metavar="TOKENS",
+                    help="context size above which cache reads are totalled; --report cache only "
+                         "(default 120000)")
     args = ap.parse_args(argv)
 
     json_mode = args.format == "json"
+    cache_report = args.report == "cache"
+    if cache_report and json_mode:
+        ap.error("--report cache is text only; it cannot be combined with --format json")
+    if cache_report and args.project:
+        ap.error("--report cache does not take --project")
+    if cache_report and args.artifacts:
+        ap.error("--report cache does not take --artifacts")
+    if args.context_threshold is not None and not cache_report:
+        ap.error("--context-threshold is available only with --report cache")
     if not json_mode and args.strata != "claude":
         ap.error("--strata is meaningful only with --format json")
     if json_mode and args.artifacts:
         ap.error("--artifacts is not available with --format json")
-    if not json_mode and (args.events_since or args.events_before):
-        ap.error("--events-since/--events-before are available only with --format json")
+    if not (json_mode or cache_report) and (args.events_since or args.events_before):
+        ap.error("--events-since/--events-before are available only with --format json "
+                 "or --report cache")
     if bool(args.events_since) != bool(args.events_before):
         ap.error("--events-since and --events-before must be used together")
     event_start = event_end = None
@@ -1787,6 +1816,29 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     selected = ("claude", "codex") if args.strata == "both" else (args.strata,)
 
     cutoff = time.time() - args.days * 86400 if args.days > 0 else None
+
+    if cache_report:
+        from agent_tools import agent_cache_report  # imported only for the cache report (issue 421 D2)
+
+        root = Path(args.projects_dir)
+        if not root.is_dir():
+            sys.exit(f"no transcript root at {root}")
+        jobs = agent_cache_report.transcript_jobs(
+            root, event_start.timestamp() if event_start else cutoff)
+        if not jobs:
+            sys.exit("no transcripts in window")
+        threshold = args.context_threshold or agent_cache_report.DEFAULT_CONTEXT_THRESHOLD
+        results = agent_cache_report.scan_jobs(
+            jobs, since=event_start, before=event_end, threshold=threshold,
+            executor_factory=executor_factory)
+        if not any(result["calls"] > 0 for result in results):
+            sys.exit("no calls in window")
+        if event_start:
+            window = f"events {format_rfc3339_utc(event_start)} → {format_rfc3339_utc(event_end)}"
+        else:
+            window = f"last {args.days}d by file mtime" if cutoff else "all time"
+        agent_cache_report.print_report(results, window=window, threshold=threshold, top=args.top)
+        return
 
     root = codex_root = None
     groups, retained_results, kept_sessions, kept_files = {}, [], 0, 0
