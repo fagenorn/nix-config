@@ -151,7 +151,8 @@ grep -Eqx 'AC2: (met|missed|void|not run)' "$f"
 grep -qx 'AC3: pending (Task 5)' "$f"
 test "$(grep -c '^| AC[123] |' "$a")" -eq 3
 grep -q '^| AC3 |.*pending (Task 5)' "$a"
-if grep -q '^| AC2 |.*pending' "$a"; then exit 1; fi
+if grep '^| AC2 |' "$a" | sed 's/human-pending//g' | grep 'pending' >/dev/null; then exit 1; fi
+if grep -q '^| AC2 |.*not run: attempt deadline cutoff' "$a"; then grep -Eq '^\| AC2 \|.*\| human-pending \|$' "$a"; fi
 test "$(wc -c < "$f")" -le 65536
 if grep -nE 'sk-ant-|Bearer |oat01' "$f" "$a"; then exit 1; fi
 git diff --quiet "$CODE_HEAD" -- home lib justfile python tests

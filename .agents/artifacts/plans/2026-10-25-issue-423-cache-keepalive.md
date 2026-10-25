@@ -9,7 +9,7 @@
 
 **Tech stack:** Python 3 standard library (`json`, `http.client`, `threading`, `dataclasses`, `unittest`), Nix (home-manager `launchd.agents`, `systemd.user.services`), bash, `jq`, `just`.
 
-Spec: `.agents/artifacts/specs/2026-10-25-issue-423-cache-keepalive-design.md`. Its `## Decision ledger` rows are cited by ID, and this plan appended D23–D26. Issue: https://github.com/fagenorn/nix-config/issues/423
+Spec: `.agents/artifacts/specs/2026-10-25-issue-423-cache-keepalive-design.md`. Its `## Decision ledger` rows are cited by ID; this plan appended D23–D26, and its standards review D27–D29. Issue: https://github.com/fagenorn/nix-config/issues/423
 
 ## Global Constraints
 
@@ -53,16 +53,26 @@ Task 5 — AC3 evidence: the A/B pipeline eval, on then off — `docs/spikes/cac
 
 | AC | Kind | Task | Check |
 |----|------|------|-------|
-| AC1 | code | Task 3 | `tests/test_cache_keepalive.py` under `just agent-workflow-tests`. `ClassifyTest`, `HandleTest`, `PingRequestTest` and `SseReaderTest` (Task 1) cover eligibility and the ping's shape. `KeepaliveTest`, `FailingPingTest` and `RunLoopTest` (Task 2) cover the 270 s ping with a sibling active, no ping before 270 s, `session_idle`, repeats up to the 60-min `ceiling`, the pending-tool rule, mutual idleness, `ttl_1h`/main/`thinking_budget` never pinged, `no_tail_mark`, non-2xx client responses, `ping_failed` without retry, `resumed`, supersession, a streaming candidate, a lone surrogate, eviction and the loop's error lines. `KeepaliveProxyTest` and `KeepaliveCommandTest` (Task 3) cover identity forwarding, a ping that sends no byte to the idle client, the failure seams and the flag |
+| AC1 | code | Task 3 | `tests/test_cache_keepalive.py` under `just agent-workflow-tests`. `ClassifyTest`, `HandleTest`, `PingRequestTest` and `SseReaderTest` (Task 1) cover eligibility and the ping's shape. `KeepaliveTest`, `FailingPingTest` and `RunLoopTest` (Task 2) cover the 270 s ping with a sibling active, no ping before 270 s, `session_idle`, repeats up to the 60-min `ceiling`, the pending-tool rule, delayed older responses that never undo a newer request's effect (D27), mutual idleness, `ttl_1h`/main/`thinking_budget` never pinged, `no_tail_mark`, non-2xx client responses, `ping_failed` without retry, a ping body cut short of its length (D28), `resumed`, supersession, a streaming candidate, a lone surrogate, eviction and the loop's error lines. `KeepaliveProxyTest` and `KeepaliveCommandTest` (Task 3) cover identity forwarding, a ping that sends no byte to the idle client, the failure seams and the flag |
 | AC2 | evidence | Task 4 | Two fresh `claude -p` sessions on mbp, off then on, each through its own built launcher on `--port 0` with a caller-set `ANTHROPIC_BASE_URL` (D13, D14, D26). P's first call after child C's foreground `sleep 480`, from P's isolated transcript copy and `just agent-costs --report cache --projects-dir <copy> --events-since <measured call start> --events-before <start + 1 s>`. Threshold: creation ÷ predecessor context < 0.10 on and > 0.50 off; `Subagent deaths 1` with a `general-purpose`/`child dispatch` row off and `Subagent deaths 0` on; at least one `complete` `ping` line for P's conversation with `cache_read_input_tokens` > 0 on. Acceptance-record row `AC2` |
-| AC3 | evidence | Task 5 | `just evals from-issue 1` once per arm on mbp, on first, through the built wrapper and launcher with `EVAL_TIMEOUT=900` (D15, D21, D26). Threshold: the on run prints `VERDICT: PASS`, and its total, `.strata.claude.totals.cost_usd` from `just agent-costs --format json --days 0 --projects-dir <an isolated copy of that eval's transcripts>` plus its `ping` lines priced with `agent_costs.PRICING`, is lower than the off run's. Both appended `results.jsonl` lines are cited. Acceptance-record row `AC3`; an arm past the cutoff is `human-pending` |
+| AC3 | evidence | Task 5 | `just evals from-issue 1` once per arm on mbp, on first, through the built wrapper and launcher with `EVAL_TIMEOUT=900` (D15, D21, D26). Threshold: the on run prints `VERDICT: PASS`, and its total, `.strata.claude.totals.cost_usd` from `just agent-costs --format json --days 0 --projects-dir <an isolated copy of that eval's sessions, subagents in any project directory included (D29)>` plus its `ping` lines priced with `agent_costs.PRICING`, is lower than the off run's. Both appended `results.jsonl` lines are cited. Acceptance-record row `AC3`; an arm past the cutoff is `human-pending` |
 
 ## Decisions
 
 - Mechanism and switch: per D1 and D3. Module and seam: per D2, refined by D19 and D24.
 - Identity and eligibility: per D4 and D5, with D23 for `unparsed`. Mark enumeration and encoding: per D16 and D20.
-- The ping and held credentials: per D6 and D7. Activity and the response tap: per D8 and D9. Timing, stop rules and bounds: per D10. Log contract: per D11. Failure posture: per D18, refined by D24.
+- The ping and held credentials: per D6 and D7. Activity and the response tap: per D8 and D9, with request ordering per D27. Timing, stop rules and bounds: per D10. Log contract: per D11. Failure posture: per D18, refined by D24, with a short ping body per D28.
 - Tests: per D12, with D25 for their placement.
-- Evidence: venue per D13; AC2 per D14; AC3 per D15 and D21; the run pins, cutoff and void rules per D26. The accepted cost of pinging finished subagents: per D17 and D22.
+- Evidence: venue per D13; AC2 per D14; AC3 per D15, D21 and D29; the run pins, cutoff and void rules per D26. The accepted cost of pinging finished subagents: per D17 and D22.
+
+## Standards review provenance
+
+Reviewer `Codex` (gpt-6-astra, effort xhigh), base `3f4c5072`, isolated read-only fresh thread, no focus, no fallback. Accepted 5, rejected 0, deferred 0.
+
+- PR-001 (Blocking) accepted: request sequences order candidate effects and the pending mark, with two overlapping-request tests in Task 2 (D27).
+- PR-002 (Blocking) accepted: Task 5's collector copies each selected session's transcripts from every project directory (D29).
+- PR-003 (Blocking) accepted: Task 3 checks the systemd `ExecStart` string through `[.] | flatten`.
+- PR-004 (Blocking) accepted: Task 4's Step 8 accepts the `human-pending` cutoff verdict and rejects other `pending` text in row `AC2`.
+- PR-005 (Should fix) accepted: Task 2's ping sender checks the declared length, with a premature-EOF test (D28).
 
 ---

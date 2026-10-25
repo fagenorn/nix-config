@@ -1,6 +1,6 @@
 # Task 5: AC3 evidence — the A/B pipeline eval, on then off
 
-Spec § Live evidence (AC3, conditions), per D13, D15, D21 and D26, under #422 D14, D20, D24 and D27. On mbp, `just evals from-issue 1` runs once with the built `cache-proxy` launcher started with `--keepalive`, then once with it started without the flag. Each eval reaches its proxy through the built `claude` wrapper and a caller-set `ANTHROPIC_BASE_URL`. An arm's cost is its own transcripts' list price, plus, in the on arm, its pings priced from the proxy log. This task changes no code. The result is recorded as observed, never rerun (#422 D27).
+Spec § Live evidence (AC3, conditions), per D13, D15, D21, D26 and D29, under #422 D14, D20, D24 and D27. On mbp, `just evals from-issue 1` runs once with the built `cache-proxy` launcher started with `--keepalive`, then once with it started without the flag. Each eval reaches its proxy through the built `claude` wrapper and a caller-set `ANTHROPIC_BASE_URL`. An arm's cost is its own transcripts' list price, plus, in the on arm, its pings priced from the proxy log. This task changes no code. The result is recorded as observed, never rerun (#422 D27).
 
 **Files:**
 - Modify: `docs/spikes/cache-proxy-keepalive.md` (the line `AC3: pending (Task 5)`, then append the section `## AC3 — no regression`; every other line stays as Task 4 committed it)
@@ -16,7 +16,7 @@ Spec § Live evidence (AC3, conditions), per D13, D15, D21 and D26, under #422 D
 **Invariants:**
 - No `just switch`, `launchctl` or `systemctl`. Each proxy is a process this task started, on the port its own `listening` line names, and it is stopped before the next arm starts and before the task reports.
 - The arms run on, then off. They differ only in `--keepalive`. Both use one account, `EVAL_TIMEOUT=900`, the default `EVAL_MODEL`, and the same environment otherwise (D15, D26).
-- An arm's transcripts are exactly the root transcripts whose `cwd` is that eval's sandbox repository or lies below it, with their subagent directories, copied into the arm's own directory (#429 D19).
+- An arm's transcripts are exactly the sessions whose root transcript's `cwd` is that eval's sandbox repository or lies below it, each with every transcript of that session id in any project directory, copied into the arm's own directory (#429 D19, D29). A session that enters a worktree writes its subagents under the worktree's project directory, as `agent_costs.find_sessions` already handles.
 - Pings are priced only through `agent_costs` (D15). The off arm's log must have no `ping` line.
 - Report lines outside the `AC3:` line and the appended section, and acceptance rows other than `AC3`, are unchanged. The report stays at or under 65,536 bytes.
 
@@ -75,7 +75,7 @@ exec env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin SSL_CERT_FILE="$ca" 
 ```
 
 `$E/ac3.py`, run as `PYTHONPATH="$PWD/python" python3 $E/ac3.py <subcommand> …`. `$E` holds no other `.py` file.
-- **`collect <arm> <E> <repo> <since-epoch>`** considers every root transcript `<dir>/<sid>.jsonl` among `~/.claude/projects/*/` and `~/.claude-accounts/profiles/*/projects/*/`, after `os.path.realpath` removes duplicates, whose mtime is at or after `<since-epoch>`. It keeps those whose first record carrying `cwd` has `cwd == <repo>` or a `cwd` starting with `<repo>/`. It copies each, with its sibling directory `<sid>/` when present, into `<E>/<arm>-eval-projects/<dir>/`, and prints the session ids, one per line. At least one is required.
+- **`collect <arm> <E> <repo> <since-epoch>`** considers every root transcript `<dir>/<sid>.jsonl` among `~/.claude/projects/*/` and `~/.claude-accounts/profiles/*/projects/*/`, after `os.path.realpath` removes duplicates, whose mtime is at or after `<since-epoch>`. It keeps those whose first record carrying `cwd` has `cwd == <repo>` or a `cwd` starting with `<repo>/`. Then, for each kept session id `<sid>`, it copies every `<d>/<sid>.jsonl` and every `<d>/<sid>/` directory in any project directory `<d>` under those same roots, the root transcript's own included, into `<E>/<arm>-eval-projects/<basename of d>/`, so that `find_sessions`, which keys transcripts by session id across project directories, sees each session whole (D29). It prints the session ids, one per line. At least one is required.
 - **`pings <log>`** prints one JSON object from the proxy log. It holds `count` (the `ping` lines); `outcomes` (counts by `"<status> <outcome>"`); `cost_usd` (the sum, over the `ping` lines that have `usage`, of `(input * p_in + output * p_out + cw_1h * p_1h + cw_5m * p_5m + read * p_read) / 1e6`, with `p_* = PRICING[model_family(line["model"])]` and `cw_1h, cw_5m = cache_write_split(line["usage"])`); `end_reasons` (the `keepalive_end` lines, counted by `reason`); `messages_lines` (the `request` lines whose `path` starts with `/v1/messages`); `messages_with_keepalive` (those of them that carry `keepalive`); and `lines_with_keepalive` (every line that carries `keepalive`, the `listening` line included).
 
 - [ ] **Step 4: The on arm**

@@ -1,6 +1,6 @@
 # Task 2: The `Keepalive` state and scheduler
 
-Spec § Interface and seam, § Conversation identity and eligibility, § The ping, § Session activity, § Timing and stop rules and § Log contract, per D2, D5–D11, D17–D19, D23 and D24. This task adds `Keepalive`, `Track` and `Ping` to `agent_tools.cache_keepalive`. They are driven directly on a fake clock, and pings go to #422's `FakeUpstream`. The proxy does not call them yet; that is Task 3.
+Spec § Interface and seam, § Conversation identity and eligibility, § The ping, § Session activity, § Timing and stop rules and § Log contract, per D2, D5–D11, D17–D19, D23, D24, D27 and D28. This task adds `Keepalive`, `Track` and `Ping` to `agent_tools.cache_keepalive`. They are driven directly on a fake clock, and pings go to #422's `FakeUpstream`. The proxy does not call them yet; that is Task 3.
 
 **Files:**
 - Modify: `python/agent_tools/cache_keepalive.py`
@@ -256,6 +256,33 @@ class KeepaliveTest(KeepaliveCase):
         [(_, _, body)] = self.upstream.requests
         self.assertEqual(json.loads(body), dict(json.loads(raw), max_tokens=1))
 
+    def test_a_delayed_older_response_never_undoes_a_newer_requests_clear(self):
+        self.busy_main()
+        raw = encode(document(note="older"))
+        older = self.keepalive.observe("POST", MESSAGES, forwarded(AGENT_P, length=len(raw)), raw)
+        self.clock.advance(1)
+        self.exchange(AGENT_P, document(ttl="1h"))
+        older.started(200, "text/event-stream", None)
+        for piece in pieces(sse("end_turn")):
+            older.chunk(piece)
+        older.done("complete")
+        self.assertEqual(older.outcome, "tracked")
+        self.assertEqual((self.due(270), self.ends()), ([], []))
+        self.assertEqual(self.upstream.requests, [])
+
+    def test_an_older_tool_use_finishing_after_a_newer_request_is_not_pending(self):
+        raw = encode(document(note="older"))
+        older = self.keepalive.observe("POST", MESSAGES, forwarded(AGENT_P, length=len(raw)), raw)
+        older.started(200, "text/event-stream", None)
+        self.clock.advance(1)
+        self.exchange(AGENT_P, document(note="newer"))
+        for piece in pieces(sse("tool_use")):
+            older.chunk(piece)
+        older.done("complete")
+        self.assertEqual(older.stop_reason, "tool_use")
+        self.assertEqual(self.due(270), [])
+        self.assertEqual(self.ends(), [(self.handle(AGENT_P), "session_idle", 0)])
+
     def test_the_65th_candidate_evicts_the_one_whose_last_client_request_is_oldest(self):
         self.busy_main()
         agents = ["a%02d" % index for index in range(65)]
@@ -344,6 +371,31 @@ class FailingPingTest(KeepaliveCase):
         self.assertEqual((self.events("ping"), self.ends()),
                          ([], [(self.handle(AGENT_P), "ping_failed", 1)]))
 
+    def test_a_ping_body_cut_short_of_its_content_length_ends_ping_failed(self):
+        partial = b'{"type":"message","usage":{"input_tokens":3'
+
+        def short(sock, head, body):
+            sock.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                         b"Content-Length: 100\r\n\r\n" + partial)
+            return False
+
+        upstream = FakeUpstream(short)
+        self.addCleanup(upstream.close)
+        port = upstream.server.server_address[1]
+        self.keepalive = self.make(
+            lambda timeout: http.client.HTTPConnection("127.0.0.1", port, timeout=timeout))
+        self.busy_main()
+        self.exchange(AGENT_P)
+        [ping] = self.due(270)
+        self.keepalive.send(ping)
+        [line] = self.events("ping")
+        self.assertEqual((line["status"], line["outcome"], line["error"]),
+                         (200, "upstream_error", "body ended after %d of 100 bytes" % len(partial)))
+        self.assertNotIn("usage", line)
+        self.assertEqual(self.ends(), [(self.handle(AGENT_P), "ping_failed", 1)])
+        self.assertEqual(self.due(270), [])
+        self.assertEqual(len(upstream.requests), 1)
+
 
 class RunLoopTest(unittest.TestCase):
     def test_run_logs_tick_and_send_errors_and_keeps_running(self):
@@ -381,29 +433,29 @@ class RunLoopTest(unittest.TestCase):
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run (timeout 600 s): `env PYTHONPATH="$PWD/python" python3 -m unittest -v tests/test_cache_keepalive.py`
-Expected: Task 1's 18 tests pass. The 17 new ones error with `AttributeError: module 'agent_tools.cache_keepalive' has no attribute 'Keepalive'`.
+Expected: Task 1's 18 tests pass. The 20 new ones error with `AttributeError: module 'agent_tools.cache_keepalive' has no attribute 'Keepalive'`.
 
 - [ ] **Step 3: Write the minimal implementation**
 
 Add `import http.client`, `import threading`, `from dataclasses import dataclass, field` and `from agent_tools.cache_proxy import ERROR_BODY_LIMIT, READ_SIZE, UPSTREAM_FAILURES` to `cache_keepalive.py`. `cache_proxy` must not import this module at its top level (D24; Task 3 imports it inside `main`). Extend the module docstring with one paragraph: `Keepalive` holds each subagent conversation's candidate request, `tick` returns the pings now due, `send` sends one, and `run` is the production loop, which only a command's `main` starts.
 
-**State.** `_sessions: dict[str, dict[str | None, _Conversation]]` maps session to agent (`None` for main) to a record. A `_Conversation` has `session`, `agent`, `handle`; `in_flight: dict[Track, float]` (a track and its send time); `last_request: float | None`; `pending_since: float | None`; `epoch: int`; `pings: int` (the pings issued in the current idle period); `candidate: _Candidate | None`; and `ping: Ping | None` (the ping in flight). A `_Candidate` has `method`, `path`, `headers` (a tuple of the track's sent headers), `body`, `model` and `touch` (seconds).
+**State.** `_sessions: dict[str, dict[str | None, _Conversation]]` maps session to agent (`None` for main) to a record. A `_Conversation` has `session`, `agent`, `handle`; `in_flight: dict[Track, float]` (a track and its send time); `last_request: float | None`; `pending_since: float | None`; `epoch: int`; `applied: int` (the sequence of the newest track whose candidate effect applied, `0` at first); `pings: int` (the pings issued in the current idle period); `candidate: _Candidate | None`; and `ping: Ping | None` (the ping in flight). A `_Candidate` has `method`, `path`, `headers` (a tuple of the track's sent headers), `body`, `model` and `touch` (seconds).
 
 **Rules** (`now` is `clock()` read under the lock):
-1. **`observe`**. Classify the request (Task 1). For `untracked`, return an inert track. Otherwise get or create the conversation. If its `pings > 0`, write `keepalive_end` with `reason` `resumed`, `pings` and `idle_s = round(now - last_request, 1)`, then set `pings = 0` and keep the candidate (D24). Then set `last_request = now`, increment `epoch`, clear `pending_since`, and record the track in `in_flight` at `now`. The track keeps the request's `method`, `path`, sent headers and, for `tracked` only, its body and model.
-2. **`started(status, content_type, content_encoding)`**. Record the status. When the status is 2xx, apply the candidate effect (D5, D19, D23). `tracked` replaces the candidate with one whose `touch` is the track's send time, unless the current candidate's `touch` is later. Creating a candidate when `MAX_CANDIDATES` are already held first ends, with `evicted`, the other conversation that holds a candidate and has the oldest `last_request`. `unparsed`, `ttl_1h` and `thinking_budget` clear the candidate silently. `no_tail_mark` and `main` leave it. The effect is one dispatch over the outcome, whose default branch raises `ValueError` naming the value (D5; the seam records it, D18). A tap (`SseReader`) starts only for a 2xx status, a `content_type` whose media type is `text/event-stream`, and a `content_encoding` that is `None` or `identity`.
+1. **`observe`**. Classify the request (Task 1). For `untracked`, return an inert track. Otherwise get or create the conversation. If its `pings > 0`, write `keepalive_end` with `reason` `resumed`, `pings` and `idle_s = round(now - last_request, 1)`, then set `pings = 0` and keep the candidate (D24). Then set `last_request = now`, increment `epoch`, clear `pending_since`, and record the track in `in_flight` at `now`. The track keeps the request's `method`, `path`, sent headers, the new `epoch` as its sequence and, for `tracked` only, its body and model.
+2. **`started(status, content_type, content_encoding)`**. Record the status. When the status is 2xx, apply the candidate effect (D5, D19, D23). The four outcomes that change the candidate (`tracked`, `unparsed`, `ttl_1h`, `thinking_budget`) apply only when the track's sequence is not lower than `applied`, and then set `applied` to it; a delayed older response changes nothing, even after a newer one cleared the candidate (D27). `tracked` replaces the candidate with one whose `touch` is the track's send time. Creating a candidate when `MAX_CANDIDATES` are already held first ends, with `evicted`, the other conversation that holds a candidate and has the oldest `last_request`. `unparsed`, `ttl_1h` and `thinking_budget` clear the candidate silently. `no_tail_mark` and `main` leave it and `applied`. The effect is one dispatch over the outcome, whose default branch raises `ValueError` naming the value (D5; the seam records it, D18). A tap (`SseReader`) starts only for a 2xx status, a `content_type` whose media type is `text/event-stream`, and a `content_encoding` that is `None` or `identity`.
 3. **`chunk(data)`** feeds the tap, if there is one, outside the lock.
-4. **`done(outcome)`**. Only the first call counts. It removes the track from `in_flight`. The track's `stop_reason` becomes the tap's when `outcome == "complete"`, and `None` otherwise. When the status was 2xx, the outcome `complete` and the stop reason `tool_use`, set `pending_since = now`. `log_fields()` returns `keepalive` (the outcome) and `conversation`, plus `stop_reason` when it is not `None`.
+4. **`done(outcome)`**. Only the first call counts. It removes the track from `in_flight`. The track's `stop_reason` becomes the tap's when `outcome == "complete"`, and `None` otherwise. When the status was 2xx, the outcome `complete`, the stop reason `tool_use` and the track's sequence still the conversation's `epoch` (it has sent nothing since, D8, D27), set `pending_since = now`. `log_fields()` returns `keepalive` (the outcome) and `conversation`, plus `stop_reason` when it is not `None`.
 5. **Activity** of candidate X at `now` (D8). Some conversation of X's session, X and main included, has an `in_flight` send time under `WINDOW` old, or a `pending_since` under `WINDOW` old, or a `last_request` later than X's candidate `touch`. Pings never change any of these.
 6. **`tick`**. First prune: drop `in_flight` entries `WINDOW` or more old, then drop each conversation that has no candidate, no ping in flight and no `in_flight` entry, and whose `last_request` and `pending_since` are both absent or `WINDOW` or more old. Then, for each conversation with a candidate, no ping in flight and `now - touch >= DUE_AFTER`, in this order: if `now - last_request >= WINDOW`, end it with `ceiling`; if the session is not active, end it with `session_idle`; otherwise build a `Ping` under the lock, with `body = ping_body(candidate.body)`, `headers = tuple(ping_headers(list(candidate.headers), len(body)))` and `idle_s = round(now - last_request, 1)`. Set `ping` on the conversation, increment `pings`, and return it with the others.
 7. **End** (every reason but `resumed`) writes `keepalive_end` with `conversation`, `reason`, `pings` and `idle_s`, then clears the candidate and sets `pings = 0`.
-8. **`send(ping)`**. Read `sent = clock()`. Inside the guarded region, call `connect(PING_TIMEOUT)`, then `putrequest(method, path, skip_host=True, skip_accept_encoding=True)`, a `putheader` per pair and `endheaders(body)`, then `getresponse()`. Read the body to its end with `read1(READ_SIZE)`. Feed an SSE 2xx response (by the rule-2 type and encoding test) to an `SseReader`. Parse a 2xx `application/json` body read whole with `json.loads`, taking its `usage`'s `USAGE_FIELDS`. Keep up to `ERROR_BODY_LIMIT` bytes of a body whose status is 400 or more, and always close the connection. A `UPSTREAM_FAILURES` exception gives `outcome` `upstream_error` and `error` = `"<class>: <message>"`; any other exception settles the ping as failed and propagates, with no `ping` line written (D24). Write one `ping` line with `conversation`, `model`, `idle_s`, `status` (`None` without a response), `ttfb_ms`, `duration_ms` (both `round((clock() - sent) * 1000, 1)`, `ttfb_ms` `None` without a response), `outcome` (`complete` once the body was read to its end, else `upstream_error`), and also `usage` when any usage field was seen, `error` when set, and `error_body` (decoded `utf-8` with `replace`) when the status is 400 or more and the body is not empty. Then settle under the lock. If the conversation's `ping` is not this ping, do nothing. Otherwise clear it. If the candidate or the `epoch` changed since the ping was built, stop there (superseded). Otherwise a 2xx with outcome `complete` sets the candidate's `touch` to `sent`, and anything else ends the conversation with `ping_failed`.
+8. **`send(ping)`**. Read `sent = clock()`. Inside the guarded region, call `connect(PING_TIMEOUT)`, then `putrequest(method, path, skip_host=True, skip_accept_encoding=True)`, a `putheader` per pair and `endheaders(body)`, then `getresponse()`. Read the body to its end with `read1(READ_SIZE)`. A response that is not chunked and declares a length (its `length` right after `getresponse`) must deliver that many bytes: an end short of it gives `outcome` `upstream_error` and `error` = `"body ended after <n> of <declared> bytes"`, the relay's wording, and such a body is not parsed for usage (D28). Feed an SSE 2xx response (by the rule-2 type and encoding test) to an `SseReader`. Parse a 2xx `application/json` body read whole with `json.loads`, taking its `usage`'s `USAGE_FIELDS`. Keep up to `ERROR_BODY_LIMIT` bytes of a body whose status is 400 or more, and always close the connection. A `UPSTREAM_FAILURES` exception gives `outcome` `upstream_error` and `error` = `"<class>: <message>"`; any other exception settles the ping as failed and propagates, with no `ping` line written (D24). Write one `ping` line with `conversation`, `model`, `idle_s`, `status` (`None` without a response), `ttfb_ms`, `duration_ms` (both `round((clock() - sent) * 1000, 1)`, `ttfb_ms` `None` without a response), `outcome` (`complete` once the body was read to its end with every declared byte, else `upstream_error`), and also `usage` when any usage field was seen, `error` when set, and `error_body` (decoded `utf-8` with `replace`) when the status is 400 or more and the body is not empty. Then settle under the lock. If the conversation's `ping` is not this ping, do nothing. Otherwise clear it. If the candidate or the `epoch` changed since the ping was built, stop there (superseded). Otherwise a 2xx with outcome `complete` sets the candidate's `touch` to `sent`, and anything else ends the conversation with `ping_failed`.
 9. **`run(stop)`**: `while not stop.wait(TICK_INTERVAL):` call `tick()`. An exception writes `keepalive_error` with `stage` `tick` and `error` = `"<class>: <message>"`, and the loop continues. Each returned ping gets a daemon thread that calls `send` and writes any exception as `keepalive_error` with `stage` `send` (D18).
 
 - [ ] **Step 4: Verify**
 
 Run (timeout 600 s): `env PYTHONPATH="$PWD/python" python3 -m unittest -v tests/test_cache_keepalive.py tests/test_cache_proxy.py`
-Expected: PASS, 35 tests in `test_cache_keepalive` and every `test_cache_proxy` case, with nothing printed outside the unittest report.
+Expected: PASS, 38 tests in `test_cache_keepalive` and every `test_cache_proxy` case, with nothing printed outside the unittest report.
 
 Run (timeout 30 s): `if grep -nE '^(import|from) .*cache_keepalive' python/agent_tools/cache_proxy.py; then exit 1; fi; echo no-cycle`
 Expected: `no-cycle`.

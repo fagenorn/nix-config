@@ -236,7 +236,7 @@ Docs, written from the code as implemented (D3, spec § Docs):
 - [ ] **Step 4: Verify**
 
 Run (timeout 600 s): `env PYTHONPATH="$PWD/python" python3 -m unittest -v tests/test_cache_keepalive.py tests/test_cache_proxy.py`
-Expected: PASS, 43 tests in `test_cache_keepalive` and every `test_cache_proxy` case.
+Expected: PASS, 46 tests in `test_cache_keepalive` and every `test_cache_proxy` case.
 
 Run (timeout 30 s): `git diff --quiet HEAD -- tests/test_cache_proxy.py && test "$(grep -c '27183' home/common/claude-code/default.nix)" -eq 1 && if grep -q 'forwards requests unchanged today' home/common/claude-code/README.md; then exit 1; fi && grep -q -- '--keepalive' python/README.md && echo docs-ok`
 Expected: `docs-ok`.
@@ -250,7 +250,7 @@ for host in mbp eleven-m5; do
   nix eval --json ".#darwinConfigurations.$host$a" | jq -e '.[1:] == ["--port","27183","--keepalive"]'
 done
 nix eval --json '.#nixosConfigurations.anis-desktop.config.home-manager.users.anis.systemd.user.services.claude-cache-proxy.Service.ExecStart' \
-  | jq -e 'length == 1 and (.[0] | endswith(" --port 27183 --keepalive"))'
+  | jq -e '[.] | flatten | length == 1 and (.[0] | endswith(" --port 27183 --keepalive"))'
 echo nix-ok
 ```
 
