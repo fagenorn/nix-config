@@ -641,10 +641,11 @@ def collect(root: Path, *, cutoff, since, before, eval_rows, executor_factory):
 
     With `eval_rows` the mtime `cutoff` does not apply: each row with `claude_exit` 0
     is one lineage row built from the sessions of its workdir's project directories, and
-    every other row is listed as interrupted.
+    every other row is listed as interrupted. A clean-exit row that yields no lineage (no
+    matching session, or no resolved owner) is listed as unmatched, never dropped.
     """
     sessions = list(find_sessions(root, None if eval_rows is not None else cutoff))
-    interrupted, samples = [], []
+    interrupted, unmatched, samples = [], [], []
     if eval_rows is not None:
         samples = [row for row in eval_rows if _clean_exit(row)]
         interrupted = [_interrupted(row) for row in eval_rows if not _clean_exit(row)]
@@ -668,10 +669,13 @@ def collect(root: Path, *, cutoff, since, before, eval_rows, executor_factory):
                 unattributed[name] += value
             if found:
                 lineages.append(_merge_trial(row, found))
+            else:
+                unmatched.append(_interrupted(row))
     footer = {
         "pricing": {"source": SOURCE_URL, "date": SOURCE_DATE,
                     "approximate_calls": sum(scan["approximate_calls"] for scan in scans)},
         "unattributed": unattributed, "interrupted": interrupted,
+        "unmatched": unmatched,
     }
     return lineages, footer
 
@@ -750,6 +754,7 @@ def build_document(lineages, footer, *, window: str) -> dict:
         "pricing": footer["pricing"], "lineages": rows, "arms": _arm_rows(rows),
         "boots": _boot_rows(lineages), "simulated": [], "calibration": None,
         "unattributed": footer["unattributed"], "interrupted": footer["interrupted"],
+        "unmatched": footer["unmatched"],
     }
 
 
@@ -804,4 +809,6 @@ def print_document(doc: dict, *, top: int) -> None:
           f"{lost['unresolved_owners']:,} owners without an issue")
     if doc["interrupted"]:
         print(f"Interrupted trials left out (evidence gaps): {len(doc['interrupted']):,}")
+    if doc["unmatched"]:
+        print(f"Clean-exit trials with no owner lineage (evidence gaps): {len(doc['unmatched']):,}")
     print(f"NOTE: {DISCLAIMER}")

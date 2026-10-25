@@ -138,6 +138,24 @@ class OwnerReportTest(unittest.TestCase):
                          ["FAIL", "PASS", "PASS", "PASS"])
         self.assertEqual(doc["interrupted"], [{"trial": 5, "tree_rev": "b" * 40, "claude_exit": 124}])
 
+    def test_a_clean_exit_trial_with_no_matching_session_is_a_listed_gap(self):
+        session = Session(self.root, project="-private-tmp-eval-from-issue-8-T1-repo")
+        g = session.call(None, 0, context=20_000, write=20_000, ttl="1h", bash=progress(6))
+        session.result(None, 5, g, gate_reply("continue"))
+        session.write()
+        rows = [{"skill": "from-issue", "id": 8, "trial": 1, "verdict": "PASS",
+                 "workdir": "/private/tmp/eval-from-issue-8.T1", "tree_rev": "a" * 40,
+                 "policy": None, "claude_exit": 0},
+                {"skill": "from-issue", "id": 8, "trial": 2, "verdict": "PASS",
+                 "workdir": "/tmp/eval-from-issue-8.T2", "tree_rev": "a" * 40,
+                 "policy": None, "claude_exit": 0}]
+        results = self.root / "results.jsonl"
+        results.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        doc = report(self.root, "--eval-results", str(results), "--eval", "from-issue:8")
+        self.assertEqual([row["trial"] for row in doc["lineages"]], [1])
+        self.assertEqual(doc["unmatched"], [{"trial": 2, "tree_rev": "a" * 40, "claude_exit": 0}])
+        self.assertEqual(doc["interrupted"], [])
+
     def test_an_unknown_model_is_priced_approximately(self):
         session = Session(self.root)
         g = session.call(None, 0, context=10_000, write=10_000, ttl="1h", model="claude-opus-9",
