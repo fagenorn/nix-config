@@ -56,8 +56,10 @@ let
       '';
 
   # `claude` on PATH starts under the account the current project is bound to,
-  # for interactive and non-interactive callers alike. Both entries are scripts,
-  # not links: the launcher finds the mod relative to its own real location.
+  # for interactive and non-interactive callers alike. `claude-orchestrate` is the
+  # same launch with claude.ai connectors off, for orchestration sessions (issue 425);
+  # plain `claude` keeps them. All three entries are scripts, not links: the
+  # launcher finds the mod relative to its own real location.
   claudeWithAccounts = pkgs.symlinkJoin {
     name = "claude-code-with-accounts-${claudeUnwrapped.version}";
     paths = [ claudeUnwrapped ];
@@ -65,7 +67,8 @@ let
       rm "$out/bin/claude"
       printf '%s\n' '#!${pkgs.runtimeShell}' 'exec ${accountsMod}/bin/claude-account run "$@"' > "$out/bin/claude"
       printf '%s\n' '#!${pkgs.runtimeShell}' 'exec ${accountsMod}/bin/claude-account "$@"' > "$out/bin/claude-account"
-      chmod +x "$out/bin/claude" "$out/bin/claude-account"
+      printf '%s\n' '#!${pkgs.runtimeShell}' 'export ENABLE_CLAUDEAI_MCP_SERVERS=false' 'exec ${accountsMod}/bin/claude-account run "$@"' > "$out/bin/claude-orchestrate"
+      chmod +x "$out/bin/claude" "$out/bin/claude-account" "$out/bin/claude-orchestrate"
     '';
     inherit (claudeUnwrapped) meta version;
   };

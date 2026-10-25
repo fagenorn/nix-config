@@ -191,7 +191,7 @@ agent-instruction-load *args:
 agent-instruction-budget *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.instruction_load check --base origin/main {{args}}
 
-# Check the skill contracts, agent-tool launchers and generated Claude settings against what the Nix build installs.
+# Check the skill contracts, agent-tool launchers, generated Claude settings and Claude launchers against what the Nix build installs.
 agent-installed-skill-tests: build
   @set -- $(nix-store --query --requisites ./result \
     | grep -- '-home-manager-files$' || true); \
@@ -206,7 +206,14 @@ agent-installed-skill-tests: build
       echo "expected exactly one generated Claude settings artifact; found $#" >&2; \
       exit 1; \
     fi; \
-    AGENT_SKILLS_INSTALLED_HOME="$installed_home" CLAUDE_SETTINGS_PATH="$1" python3 -m unittest -v \
+    settings="$1"; \
+    set -- $(nix-store --query --requisites ./result \
+      | grep -- '-claude-code-with-accounts-[^/]*$' || true); \
+    if [ "$#" -ne 1 ]; then \
+      echo "expected exactly one built Claude Code package; found $#" >&2; \
+      exit 1; \
+    fi; \
+    AGENT_SKILLS_INSTALLED_HOME="$installed_home" CLAUDE_SETTINGS_PATH="$settings" CLAUDE_CODE_PACKAGE="$1" python3 -m unittest -v \
       home/common/agent-skills/tests/test_dispatch_contracts.py \
       home/common/agent-skills/tests/test_shell_example_contracts.py \
       home/common/agent-skills/tests/test_workflow_skill_contracts.py \
