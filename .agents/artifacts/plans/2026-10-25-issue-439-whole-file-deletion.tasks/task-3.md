@@ -17,7 +17,7 @@ Spec § Reviewer prompts and § Instruction budget, per D8, D9, D10 and D13. The
 **Invariants:**
 - Each of the four prompts contains both literals in backticks, with the corroboration rules exactly as Step 3 words them.
 - `final-review.md` and `ship-issue/REVIEW.md` are unchanged (D8).
-- In `instruction-load.json`, only `implementation-owner`'s `ceiling_bytes.claude` and `ceiling_bytes.codex` change, from 132694 to the hot measure the gate prints (133142 with the Step 3 text at base `3f4c5072`), and its `note` gains one sentence. No other ceiling, profile or key changes.
+- In `instruction-load.json`, only `implementation-owner`'s `ceiling_bytes.claude` and `ceiling_bytes.codex` change, from 132694 to the hot measure M the gate prints in Step 3 (133142 before D15's re-review qualification), and its `note` gains one sentence. No other ceiling, profile or key changes.
 - After the raise, `just agent-instruction-budget --raise-label` ends in `check: pass`. Without the flag, the gate's only failing line is the model `raise:` line.
 
 - [ ] **Step 1: Write the failing test**
@@ -120,6 +120,19 @@ Replace each block below exactly, old text → new text. Each block is unique in
 `home/common/agent-skills/skills/sdd/re-review-prompt.md`:
 
 ```text
+    diff or approve the fix. Version 3 keeps every whole handwritten file
+    diff, declares the adaptive unchanged context and packs with
+```
+→
+```text
+    diff or approve the fix. Version 3 keeps every whole handwritten file
+    diff that no generated-evidence entry replaces, declares the adaptive
+    unchanged context and packs with
+```
+
+and, later in the same paragraph:
+
+```text
     file when that context is insufficient. Version 2, and version 3 with
     `generated_evidence`, may replace an oversized auto-generated EF migration
     designer with a bounded entry: verify it against the companion
@@ -139,10 +152,10 @@ Replace each block below exactly, old text → new text. Each block is unique in
     re-run git commands.
 ```
 
-The files then measure 7609, 9075, 6679 and 5454 bytes (`wc -c`).
+Record each file's size with `wc -c` (the re-review figure grows with the Version 3 qualification above, per D15).
 
 Run the **Budget gate** (timeout 600 s): `bash -c 'just agent-instruction-budget 2>&1 | grep -E "^(ceiling|tightness|lint|raise):"'`.
-Expected: exactly two lines, `ceiling: profile implementation-owner on claude: hot measures 133142 bytes, above its ceiling 132694; …` and the same line for `codex`. Call the printed measure M. If any other line appears, or the two values differ, the prompt text deviates from this step: stop as BLOCKED with the gate output.
+Expected: exactly two lines, `ceiling: profile implementation-owner on claude: hot measures M bytes, above its ceiling 132694; …` and the same line for `codex`, with the same M on both, M above 132694 (133142 before D15's re-review qualification; at most a few dozen bytes more after it, if the re-review prompt is in the hot set). Call the printed measure M. If any other line appears, the two values differ, or M exceeds 133300, the prompt text deviates from this step: stop as BLOCKED with the gate output.
 
 In `home/common/agent-skills/instruction-load.json`, profile `implementation-owner`:
 1. Replace the unique block `"ceiling_bytes": {\n        "claude": 132694,\n        "codex": 132694\n      }` so that both values are M.

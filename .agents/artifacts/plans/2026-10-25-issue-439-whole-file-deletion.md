@@ -51,12 +51,17 @@ Task 3 — Reviewer prompts name both kinds, with the labelled budget raise — 
 | AC2 | code | Task 2 | `test_review_package.py::ReviewPackageCliTest::test_oversized_in_place_modification_still_stops` and `::test_oversized_rename_with_edit_still_stops` (exit 3, `decompose_required`, `member_bytes`), with `::test_exact_rename_of_an_oversized_file_keeps_its_rename_record` per D2. |
 | AC3 | code | Task 1 | `home/common/agent-skills/tests/test_artifact_budget.py::ArtifactBudgetCliTest::test_whole_file_deletion_evidence_is_strict_in_a_v3_manifest` (a v3 manifest is accepted; a non-null head, a null base and each malformed base exit 2 with empty stdout). |
 | AC4 | code | Task 3 | `home/common/agent-skills/tests/test_workflow_skill_contracts.py::WorkflowSkillContractsTest::test_sdd_documents_carry_their_machine_text`, where both kind literals are pinned in the task, conformance, correctness and re-review prompts (D8, D10). |
-| AC5 | code | Task 3 | sdd's final gate on the final head: `just agent-workflow-tests` ends `OK` and `just build` exits 0. The PR head's required CI then runs `just agent-workflow-tests` (`ci.yaml`) and the Instruction Budget check, which passes once the user applies the label (D9). |
+| AC5 | code | Task 3 | sdd's final gate on the final head: `just agent-workflow-tests` ends `OK` and `just build` exits 0. That local final gate is AC5's evidence. CI's `just agent-workflow-tests` step (`ci.yaml`) is advisory (`continue-on-error`), so a green check run proves nothing: cite CI only through the step's recorded suite outcome at the PR head. The Instruction Budget check passes once the user applies the label (D9). |
 
 ## Decisions
 
 - Validator: closed per-kind dispatch and the shared blob-identity helper per D6, with the v3 acceptance case per D7 (Task 1).
 - Generator: qualification by `--name-status -z` status per D1 and D14; renames per D2; binary deletions per D3; `line_count` per D4; EF first per D5; the closed kind check per D6; the literal tree lookup per D11; the per-record scope per D12 (Task 2).
-- Prompts: the four prompts per D8; the machine-text pin per D10; the wording and the raise to 133,142 B per D9 and D13 (Task 3).
+- Prompts: the four prompts per D8; the machine-text pin per D10; the wording and the raise to the measured M per D9, D13 and D15 (Task 3).
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no focus, no fallback. Base SHA `3f4c5072746747c44bee51b1a24c13288923b27f`.
+- Findings: 2 should-fix, both verified against the live files and accepted: PR439-01 (re-review prompt's Version 3 whole-diff sentence qualified; budget gate takes the measured M, per D15) and PR439-02 (AC5 map: CI's suite step is advisory, so the local final gate is the evidence). 0 rejected, 0 deferred. One discussion note: no Markdown standards shard exists under `standards/stacks/`; no action.
