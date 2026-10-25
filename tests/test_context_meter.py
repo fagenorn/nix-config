@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 
 SESSION = "5f0c9a52-3d1e-4c7b-9a61-0d2b7c4e8f10"
 AGENT = "a070d25dd72898f75"
@@ -321,6 +322,11 @@ class CrossingTest(MeterHarness):
     def setUp(self):
         super().setUp()
         self.calls = 0
+        # The crossing mechanics are pinned at 110,000; the product default is pinned by
+        # test_the_product_default_crosses_at_200000 and in test_phase_budget.
+        patch = unittest.mock.patch.dict(os.environ, {"AGENT_PHASE_BUDGET": "threshold=110000"})
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def call(self, context, command="git status --short", *, agent=True, env=None):
         self.calls += 1
@@ -335,6 +341,12 @@ class CrossingTest(MeterHarness):
         env = {"AGENT_PHASE_BUDGET": "threshold=90000"}
         self.assertIsNone(self.call(85000, MARK, env=env))
         self.assertEqual(self.call(95000, env=env), CROSSING_AT(95000, 90000))
+
+    def test_the_product_default_crosses_at_200000(self):
+        os.environ.pop("AGENT_PHASE_BUDGET")   # restored by the setUp patch
+        self.assertIsNone(self.call(150000, MARK))
+        self.assertIsNone(self.call(199000))
+        self.assertEqual(self.call(200000), CROSSING_AT(200000, 200000))
 
     def test_the_crossing_follows_the_owner_phase(self):
         env = {"AGENT_PHASE_BUDGET": "threshold=110000,threshold:6-7=170000"}

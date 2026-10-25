@@ -39,7 +39,7 @@ class PhaseBudget:
     turn_ceiling: int = 120
     turn_headroom: int = 2
     context_headroom: int = 10_000
-    threshold: int = 110_000
+    threshold: int = 200_000
     phase_thresholds: tuple[tuple[int, int, int], ...] = ()
     guard: int = 0
     cap: int | None = None

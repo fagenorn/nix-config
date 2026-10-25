@@ -10,9 +10,9 @@ from agent_tools.phase_budget import PhaseBudget, crossing_threshold, handoff_th
 
 
 class GrammarTest(unittest.TestCase):
-    def test_defaults_hand_off_at_110000_in_every_phase(self):
+    def test_defaults_hand_off_at_200000_in_every_phase(self):
         budget = PhaseBudget()
-        self.assertEqual([handoff_threshold(budget, p) for p in (None, 0, 5, 6, 7)], [110_000] * 5)
+        self.assertEqual([handoff_threshold(budget, p) for p in (None, 0, 5, 6, 7)], [200_000] * 5)
         self.assertEqual((budget.turn_ceiling, budget.turn_headroom, budget.context_headroom,
                           budget.guard, budget.cap), (120, 2, 10_000, 0, None))
 
@@ -38,11 +38,11 @@ class GrammarTest(unittest.TestCase):
         self.assertEqual((based.threshold, based.guard, based.cap), (140_000, 5, 3))
 
     def test_the_guard_raises_the_crossing_above_baseline(self):
-        guarded = parse("guard=40000", knobs=phase_budget.REPLAY_KNOBS)
+        guarded = parse("threshold=110000,guard=40000", knobs=phase_budget.REPLAY_KNOBS)
         self.assertEqual(crossing_threshold(guarded, 6, 98_000), 138_000)
         self.assertEqual(crossing_threshold(guarded, 6, 29_000), 110_000)
         self.assertEqual(crossing_threshold(guarded, 6, None), 110_000)
-        self.assertEqual(crossing_threshold(PhaseBudget(), 6, 98_000), 110_000)
+        self.assertEqual(crossing_threshold(PhaseBudget(threshold=110_000), 6, 98_000), 110_000)
 
 
 class EnvironmentTest(unittest.TestCase):
@@ -56,7 +56,7 @@ class EnvironmentTest(unittest.TestCase):
             capture_output=True, text=True, env=env, check=False)
 
     def test_unset_is_the_default(self):
-        self.assertEqual(self.current_in_child(None).stdout.split(), ["110000", "110000"])
+        self.assertEqual(self.current_in_child(None).stdout.split(), ["200000", "200000"])
 
     def test_the_override_uses_the_same_grammar(self):
         out = self.current_in_child("threshold=90000,threshold:6-7=170000")

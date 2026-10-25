@@ -8094,16 +8094,16 @@ class PhaseBudgetDefaultsTest(LifecycleHarness, unittest.TestCase):
     BUDGET_FLAGS = ("--turn-ceiling", "--turn-headroom", "--context-ceiling",
                     "--context-headroom")
 
-    def test_default_ceiling_hands_off_at_110000_and_continues_at_109999(self):
+    def test_default_ceiling_hands_off_at_200000_and_continues_at_199999(self):
         self.init_run()
         self.spawn(issue=14, worktree=self.root / "wt-a")
         defaults = dict(turn_ceiling=None, context_ceiling=None, turn_headroom=None,
                         context_headroom=None)
         below = self.progress(issue=14, attempt=1, phase=1, now="2026-08-13T20:05:00Z",
-                              turn_count=10, context_tokens=109999, **defaults)
+                              turn_count=10, context_tokens=199999, **defaults)
         self.assertEqual(below["action"], "continue")
         at = self.progress(issue=14, attempt=1, phase=2, now="2026-08-13T20:10:00Z",
-                           turn_count=10, context_tokens=110000, **defaults)
+                           turn_count=10, context_tokens=200000, **defaults)
         self.assertEqual(at["action"], "handoff")
 
     def test_the_four_flags_default_to_none_and_resolve_in_the_policy_home(self):
