@@ -136,6 +136,7 @@ agent-workflow-tests:
     tests/test_agent_tools_canonical.py \
     tests/test_agent_tools_siblings.py \
     tests/test_lane_triage.py \
+    tests/test_context_meter.py \
     tests/test_sdd_brief.py \
     tests/test_sdd_gate.py \
     tests/test_orchestrate_control.py \
