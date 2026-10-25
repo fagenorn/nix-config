@@ -189,9 +189,6 @@ route_cache_proxy() {
     export ANTHROPIC_BASE_URL="$CACHE_PROXY_URL"
     # Before Claude Code 2.1.304 a non-first-party base URL turns tool search off.
     [ -n "${ENABLE_TOOL_SEARCH+set}" ] || export ENABLE_TOOL_SEARCH=true
-    # Claude Code turns fine-grained tool streaming off behind a non-first-party base URL;
-    # turning it back on is the lever docs/spikes/cache-proxy-ttft-gap.md screened in (#438).
-    [ -n "${CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING+set}" ] || export CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1
   else
     unset ANTHROPIC_BASE_URL
   fi

@@ -24,10 +24,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ACCOUNTS = REPO_ROOT / "home" / "common" / "claude-code" / "accounts"
 PLACEHOLDER = "CACHE_PROXY_URL="
 SCRUBBED = ("ANTHROPIC_BASE_URL", "ENABLE_TOOL_SEARCH", "CLAUDE_ACCOUNT", "CLAUDE_ACCOUNTS_DIR",
-            "CLAUDE_ACCOUNT_LAUNCHER", "CLAUDE_BIN", "CLAUDE_CODE_PLUGIN_DIRS", "CLAUDE_CONFIG_DIR",
-            "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING")
+            "CLAUDE_ACCOUNT_LAUNCHER", "CLAUDE_BIN", "CLAUDE_CODE_PLUGIN_DIRS", "CLAUDE_CONFIG_DIR")
 CALLER_URL = "http://127.0.0.1:9/caller"
-FGTS = "CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING"
 MARKER_BODY = b'{"service":"cache-proxy","status":"ok"}'
 TIMEOUT = 30
 
@@ -120,7 +118,6 @@ class RoutingTest(unittest.TestCase):
     def assert_direct(self, environment):
         self.assertNotIn("ANTHROPIC_BASE_URL", environment)
         self.assertNotIn("ENABLE_TOOL_SEARCH", environment)
-        self.assertNotIn(FGTS, environment)
 
     def test_a_healthy_proxy_routes_the_launch(self):
         url = self.healthy_proxy()
@@ -158,21 +155,6 @@ class RoutingTest(unittest.TestCase):
         environment = self.launch(url, {"ENABLE_TOOL_SEARCH": "false"})
         self.assertEqual((environment.get("ANTHROPIC_BASE_URL"), environment.get("ENABLE_TOOL_SEARCH")),
                          (url, "false"))
-
-    def test_a_routed_launch_turns_fine_grained_tool_streaming_on(self):
-        url = self.healthy_proxy()
-        environment = self.launch(url)
-        self.assert_routed(environment, url)
-        self.assertEqual(environment.get(FGTS), "1")
-
-    def test_a_caller_set_fine_grained_streaming_value_is_kept(self):
-        url = self.healthy_proxy()
-        environment = self.launch(url, {FGTS: "0"})
-        self.assertEqual((environment.get("ANTHROPIC_BASE_URL"), environment.get(FGTS)), (url, "0"))
-
-    def test_a_caller_set_endpoint_gets_no_fine_grained_streaming(self):
-        environment = self.launch(self.healthy_proxy(), {"ANTHROPIC_BASE_URL": CALLER_URL})
-        self.assertNotIn(FGTS, environment)
 
     def test_an_unsubstituted_copy_never_routes(self):
         url = self.healthy_proxy()
