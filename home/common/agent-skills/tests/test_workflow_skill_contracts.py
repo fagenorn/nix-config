@@ -1420,6 +1420,29 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertNotIn("workflow-state init-run", direct)
         self.assertNotIn("workflow-state control", direct)
 
+    def test_direct_auto_handoff_relaunches_itself_instead_of_stopping(self):
+        # A top-level `/from-issue <num> --auto` has no dispatcher to relaunch it:
+        # its handoff dispatches a fresh `--auto` owner (whose own `direct-owner`
+        # call resumes the handed-off attempt) instead of asking the user to
+        # re-enter; every other owner returns the closed `Handed off` line.
+        line = "Handed off (<exact-handoff-path>). Resume: /from-issue <num> --auto"
+        gate = normalized(self.from_issue.split("3. **`handoff`**", 1)[1]
+                          .split("4. **`delegate`**", 1)[0])
+        self.assert_ordered(
+            gate, "--handoff-path <exact-path>",
+            "A direct `--auto` invocation not prompted `Relaunched owner` never stops",
+            "a child's `Handed off (…)` return", "`from-issue-phase-delegate`",
+            "`/from-issue <num> --auto` and `Relaunched owner`", "relays its return",
+            f"Any other owner returns only `{line}` and stops",
+        )
+        self.assertNotIn("persist the handoff, and stop", gate)
+        delegate = normalized(self.from_issue.split("4. **`delegate`**", 1)[1])
+        self.assertIn("a `Suspended (…)` line or a `Handed off (…)` line", delegate)
+        self.assertIn("and obey `SKILL.md`'s `handoff` action", normalized(self.auto))
+        earlier = normalized(ROLLOVER.read_text(encoding="utf-8")
+                             .split("## Earlier controller stop", 1)[1])
+        self.assert_ordered(earlier, line, "`SKILL.md`'s `handoff` action")
+
     def test_direct_auto_observe_owner_terminal_loop_is_closed(self):
         direct = ACQUIRE_DIRECT.read_text(encoding="utf-8")
         self.assert_ordered(
