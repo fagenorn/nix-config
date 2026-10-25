@@ -392,6 +392,16 @@ class AgentModelMatrixTest(unittest.TestCase):
             self.assertEqual(metadata["model"], data["roles"][role]["model"], path)
             self.assertEqual(metadata["effort"], data["roles"][role]["effort"], path)
 
+    def test_only_the_brief_driven_agents_omit_claude_md(self):
+        found = {
+            path.stem: frontmatter(path).get("omitClaudeMd")
+            for path in sorted(AGENTS.glob("*.md"))
+        }
+        self.assertEqual(
+            found,
+            {"implementer": None, "mechanic": "true", "reviewer": None, "reviewer-lite": "true"},
+        )
+
     def test_repository_contract_validates(self):
         module = agent_model_matrix
         self.assertEqual(module.validate(REPO_ROOT), [])
