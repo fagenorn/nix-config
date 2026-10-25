@@ -36,13 +36,12 @@ Subagent (reviewer, Opus/high for the native path selected above):
     axis. Version 3: honor the declared `packaging.context_lines` and
     `stable-first-fit-whole-file` packaging, treat every changed line as
     covered, and read the live file when the bounded context is short.
-    Version 2, or version 3 with non-empty `generated_evidence`: also check
-    each `ef-core-migration-designer` entry's identities and model-shape counts
-    against the companion migration and snapshot diff, and require the report's
+    With `generated_evidence` (version 2 or 3), corroborate each
+    `ef-core-migration-designer`'s identities and model-shape counts
+    against the companion migration and snapshot diff and the report's
     no-pending-model-change, generated-SQL and provider-backed migration
-    evidence; for each `whole-file-deletion` entry, confirm the plan or spec
-    intends the deletion and no surviving file references the deleted path.
-    Missing corroboration is a finding; generated evidence is never a waiver.
+    evidence, and each `whole-file-deletion` against an intending plan or
+    spec and no live reference to it; neither is a waiver.
     When the packet states the review is scoped and lists the paths under
     review, retain the manifest root and metrics only as range-coverage
     evidence: do not read its shards. Those listed paths are the whole of the
