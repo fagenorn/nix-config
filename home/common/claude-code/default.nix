@@ -279,6 +279,25 @@ let
       deny = [ ];
     };
 
+    # Hidden from the model's skill listing, each still runnable as /<name> (issue 425):
+    # skills synced from claude.ai by their full `anthropic-skills:` name, which Claude
+    # Code matches before the bare one, bundled skills by their bare name. A plugin's
+    # skills ignore this map, so the skill-creator kept listed is the plugin's (below).
+    skillOverrides = lib.genAttrs [
+      "artifact-design"
+      "artifact-diagramming"
+      "artifact-capabilities"
+      "dataviz"
+      "anthropic-skills:docx"
+      "anthropic-skills:pptx"
+      "anthropic-skills:xlsx"
+      "anthropic-skills:pdf"
+      "anthropic-skills:google-workspace"
+      "anthropic-skills:morning"
+      "anthropic-skills:import-memory"
+      "anthropic-skills:skill-creator"
+    ] (_: "user-invocable-only");
+
     # Plugins + their marketplaces, declared so the setup is portable to a fresh machine.
     # The patched plugin sources are Nix store paths; Claude's install/cache state under
     # ~/.claude/plugins stays mutable (never Nix-owned).
