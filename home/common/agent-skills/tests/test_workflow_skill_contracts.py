@@ -116,10 +116,12 @@ WORKER_SCRATCH_ARGV = ("launch-scope scratch --repo-root <ledger_repo_root> --ru
                        "--worker-id <worker_id>")
 PRODUCER_VALIDATION = "artifact-budget validate-report --boundary producer --input -"
 WHOLE_FILE_POLICY = "stable-first-fit-whole-file"
+GENERATED_EVIDENCE_KINDS = ("ef-core-migration-designer", "whole-file-deletion")
 
 # Machine-consumed text each sdd document must carry (#291 D6): helper argv, the
-# report fields its validator reads, the review-package packing policy id and
-# the payload placeholders the controller fills. No guidance sentence is pinned.
+# report fields its validator reads, the review-package packing policy id, the
+# generated-evidence kinds and the payload placeholders the controller fills. No
+# guidance sentence is pinned.
 SDD_MACHINE_TEXT = {
     SDD: (
         "validate-report --boundary sdd", 'detail_state: "none"', "report_path: null",
@@ -151,11 +153,14 @@ SDD_MACHINE_TEXT = {
         "--worker-id <worker_id> -- ",
         WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV, "launch fence refused:",
     ),
-    SDD_DIR / "task-reviewer-prompt.md": (WHOLE_FILE_POLICY,),
-    SDD_DIR / "re-review-prompt.md": (WHOLE_FILE_POLICY,),
-    SDD_DIR / "conformance-reviewer-prompt.md": (WHOLE_FILE_POLICY, "[ACCEPTANCE_CRITERIA]"),
+    SDD_DIR / "task-reviewer-prompt.md": (WHOLE_FILE_POLICY, *GENERATED_EVIDENCE_KINDS),
+    SDD_DIR / "re-review-prompt.md": (WHOLE_FILE_POLICY, *GENERATED_EVIDENCE_KINDS),
+    SDD_DIR / "conformance-reviewer-prompt.md": (
+        WHOLE_FILE_POLICY, *GENERATED_EVIDENCE_KINDS, "[ACCEPTANCE_CRITERIA]",
+    ),
     SDD_DIR / "correctness-reviewer-prompt.md": (
-        WHOLE_FILE_POLICY, "git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- ':(literal)<path>'",
+        WHOLE_FILE_POLICY, *GENERATED_EVIDENCE_KINDS,
+        "git diff [MERGE_BASE_SHA]..[HEAD_SHA] -- ':(literal)<path>'",
     ),
 }
 

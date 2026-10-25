@@ -392,6 +392,17 @@ def validate_detail_input(value: Mapping[str, object]) -> None:
         _validate_finding(finding)
 
 
+def _validate_blob_identity(value: dict) -> None:
+    """The blob id, length and SHA-256 that every generated-evidence side carries."""
+    if not _sha(value["blob_sha"]):
+        raise ArtifactBudgetError("invalid generated evidence blob")
+    if (not isinstance(value["content_sha256"], str)
+            or SHA256_RE.fullmatch(value["content_sha256"]) is None):
+        raise ArtifactBudgetError("invalid generated evidence digest")
+    if not _integer(value["bytes"]):
+        raise ArtifactBudgetError("invalid generated evidence metric")
+
+
 def _validate_ef_designer_side(value: object) -> None:
     keys = {
         "blob_sha", "bytes", "content_sha256", "migration_id", "product_version",
@@ -400,18 +411,41 @@ def _validate_ef_designer_side(value: object) -> None:
     if not _exact_keys(value, keys):
         raise ArtifactBudgetError("invalid generated evidence side")
     assert isinstance(value, dict)
-    if not _sha(value["blob_sha"]):
-        raise ArtifactBudgetError("invalid generated evidence blob")
-    if (not isinstance(value["content_sha256"], str)
-            or SHA256_RE.fullmatch(value["content_sha256"]) is None):
-        raise ArtifactBudgetError("invalid generated evidence digest")
+    _validate_blob_identity(value)
     if not _string(value["migration_id"]):
         raise ArtifactBudgetError("invalid generated migration id")
     if value["product_version"] is not None and not _string(value["product_version"]):
         raise ArtifactBudgetError("invalid generated product version")
-    for key in {"bytes", "entity_types", "properties", "indexes", "foreign_keys", "tables"}:
+    for key in {"entity_types", "properties", "indexes", "foreign_keys", "tables"}:
         if not _integer(value[key]):
             raise ArtifactBudgetError("invalid generated evidence metric")
+
+
+def _validate_ef_designer_sides(base: object, head: object) -> None:
+    """At least one side; each present side is EF-shaped."""
+    if base is None and head is None:
+        raise ArtifactBudgetError("generated evidence has no side")
+    for side in (base, head):
+        if side is not None:
+            _validate_ef_designer_side(side)
+
+
+def _validate_whole_file_deletion_sides(base: object, head: object) -> None:
+    """A null head and a base of exactly the blob identity plus `line_count`."""
+    if head is not None or base is None:
+        raise ArtifactBudgetError("invalid whole-file deletion sides")
+    if not _exact_keys(base, {"blob_sha", "bytes", "content_sha256", "line_count"}):
+        raise ArtifactBudgetError("invalid generated evidence side")
+    assert isinstance(base, dict)
+    _validate_blob_identity(base)
+    if not _integer(base["line_count"]):
+        raise ArtifactBudgetError("invalid generated evidence metric")
+
+
+GENERATED_EVIDENCE_SIDES = {
+    "ef-core-migration-designer": _validate_ef_designer_sides,
+    "whole-file-deletion": _validate_whole_file_deletion_sides,
+}
 
 
 def _validate_generated_evidence(value: object) -> None:
@@ -424,15 +458,13 @@ def _validate_generated_evidence(value: object) -> None:
             or any(part in {"", ".", ".."} for part in PurePosixPath(path).parts)
             or str(PurePosixPath(path)) != path):
         raise ArtifactBudgetError("invalid generated evidence path")
-    if value["kind"] != "ef-core-migration-designer":
+    kind = value["kind"]
+    validate_sides = GENERATED_EVIDENCE_SIDES.get(kind) if isinstance(kind, str) else None
+    if validate_sides is None:
         raise ArtifactBudgetError("invalid generated evidence kind")
     if not _integer(value["source_diff_bytes"], minimum=1):
         raise ArtifactBudgetError("invalid generated source bytes")
-    if value["base"] is None and value["head"] is None:
-        raise ArtifactBudgetError("generated evidence has no side")
-    for side in (value["base"], value["head"]):
-        if side is not None:
-            _validate_ef_designer_side(side)
+    validate_sides(value["base"], value["head"])
 
 
 def _validate_manifest(root: Path, root_raw: bytes) -> list[CapturedArtifact]:
