@@ -13,7 +13,7 @@ Taken on host mbp; each row's Commit is the head its evidence was taken on (http
 
 ## Acquisition probe
 
-Taken on host mbp before any paid trial, with no model spend. The sandbox is built the way `run_trial` builds one: the fixture copied, `git init -b main`, the initial commit, a bare origin and a push. Then `evals/setups/tracked-issue/setup.sh <WORK> <REPO>` ran (it wrote `<WORK>/bin/gh`, bound the tracker to `github` and committed `chore: track issues on github` to the sandbox's `main`). The sandbox and its ledger lived under a launch scratch directory, and the repository's own ledger was never named. `HOME` was a scratch directory holding only the platform manifest and host declaration, so no file under `~/.agents/share` was read or written.
+Taken on host mbp before any paid trial, with no model spend. The sandbox is built the way `run_trial` builds one: the fixture copied, `git init -b main`, the initial commit, a bare origin and a push. Then `evals/setups/tracked-issue/setup.sh <WORK> <REPO>` ran (it wrote `<WORK>/bin/gh`, bound the tracker to `github` and committed `chore: track issues on github` to the sandbox's `main`). The sandbox and its ledger lived under a launch scratch directory, and the repository's own ledger was never named. `HOME` was a scratch directory holding only the platform manifest and host declaration; the host declaration under the real `~/.agents/share` was read to copy it there, and no file under `~/.agents/share` was written.
 
 Each call was `PATH=<WORK>/bin:$PATH` and the tree's `workflow-state` (`PYTHONPATH=$PWD/python python3 -P home/common/agent-skills/scripts/workflow-state.py`), with acquire-direct.md's interface_version 2 request for issue 4 and `attempt_budget_minutes` 180:
 
