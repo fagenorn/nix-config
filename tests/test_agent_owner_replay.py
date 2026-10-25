@@ -1,7 +1,10 @@
 """The owner replay (issue 432, spec test seam 2)."""
+import contextlib
 import dataclasses
+import io
 import json
 import math
+import re
 import subprocess
 import sys
 import tempfile
@@ -9,6 +12,7 @@ import unittest
 from pathlib import Path
 
 from agent_tools import agent_owner_replay as replay_module
+from agent_tools import agent_owner_report
 from agent_tools.agent_owner_report import Gate, Launch, Lineage, OwnerCall, call_cost
 from agent_tools.agent_owner_replay import (BASELINE, ORIGIN, BootModel, keep_rule, observed,
                                             parse_arm, replay)
@@ -36,9 +40,9 @@ def gate(phase, action="continue", handoff=False):
                 remainder_self_contained=False, handoff_path=handoff, action=action)
 
 
-def lineage(*launches, descendants=0.0):
+def lineage(*launches, descendants=0.0, relauncher=()):
     return Lineage(run_id="r", issue=7, direct=True, launches=list(launches),
-                   descendant_dollars=descendants, delivered=True, facts={}, relauncher=())
+                   descendant_dollars=descendants, delivered=True, facts={}, relauncher=relauncher)
 
 
 def launch(calls, *, registered=0, transfer=None, name="t", number=1):
@@ -186,6 +190,124 @@ class ReplayTest(unittest.TestCase):
         self.assertEqual((ORIGIN, BASELINE.budget), (origin, origin))
         self.assertEqual(parse_arm("g=guard=40000").budget, dataclasses.replace(origin, guard=40_000))
         self.assertEqual(parse_arm("s=boot=slim").budget, origin)
+
+
+class VirtualOwnerKindTest(unittest.TestCase):
+    """Root virtual owners, the relauncher lookup and the made and revived deaths (invariants 4, 8).
+
+    Opus 5.5 rates per million tokens: read 0.20, 5-minute write 5, 1-hour write 8, output 20.
+    """
+    OVERHEAD = dataclasses.replace(MODEL, overhead_calls=2, boot_output=1_000)
+
+    def root_handoff(self, *tail):
+        # root owner: 50k registering call, then 111k crosses 110k (phase 3, a Bash call, no child)
+        return [c(0, 50_000, root=True, registers=True), c(10, 111_000, root=True), *tail]
+
+    def test_a_root_owner_hands_off_with_overhead_and_a_wake_read_of_its_own_context(self):
+        # C' = 111k, B = 60k, cut 51k. Dollars (relauncher (5 s, 30k) must be ignored for a root):
+        #   call 0: read 49k 0.0098 + 1h write 1k 0.008                          = 0.0178
+        #   call 1 (priced in the outgoing root): read 110k 0.022 + 1h write 0.008 = 0.0300
+        #   h = 2 overhead calls: (read 111k 0.0222 + output 1k 0.02) each        = 0.0844
+        #   wake: a read of C' = 111k                                              = 0.0222
+        #   boot, m = 2, S 29k -> B 60k, output 1k each: 29k write 0.145 + 0.02
+        #     + (read 29k 0.0058 + write 31k 0.155 + 0.02)                         = 0.3458
+        #   call 2: 112k − 51k = 61k: read 60k 0.012 + 5-minute write 1k 0.005     = 0.0170
+        calls = self.root_handoff(c(20, 112_000, root=True))
+        out = replay(lineage(launch(calls), relauncher=((5.0, 30_000),)), BASELINE, self.OVERHEAD)
+        self.assertEqual((out.handoffs, out.deaths, out.trace), (1, 0, (50_000, 111_000, 61_000)))
+        self.assertAlmostEqual(out.dollars, 0.5172, places=9)
+
+    def test_a_root_call_long_after_the_fresh_owner_is_a_made_death(self):
+        # As above, then a root call at t = 400: gap 400 − 21 = 379 s > 290 s after a virtual
+        # subagent whose context was 61k: the call (113k − 51k = 62k) is rewritten whole at the
+        # 5-minute rate, 62k · 5/M = 0.31, on top of the 0.5172 above.
+        calls = self.root_handoff(c(20, 112_000, root=True), c(400, 113_000, root=True))
+        out = replay(lineage(launch(calls)), BASELINE, self.OVERHEAD)
+        self.assertEqual((out.deaths, out.trace[-1]), (1, 62_000))
+        self.assertAlmostEqual(out.dollars, 0.5172 + 0.31, places=9)
+
+    def test_a_subagent_handoff_wakes_the_last_relauncher_context_before_it(self):
+        # relauncher contexts (5 s, 30k), (15 s, 40k), (500 s, 90k): the hand-off call starts at
+        # t = 20, so the wake reads 40k = 0.008. One overhead call: read 111k 0.0222 + output
+        # 500 · 20/M 0.01 = 0.0322. Boot (output 500 each): 29k write 0.145 + 0.01, then read 29k
+        # 0.0058 + write 31k 0.155 + 0.01 = 0.3258. Calls: 0.0148 (read 49k + write 1k), 0.027
+        # (read 110k + write 1k), 0.017 (61k: read 60k + write 1k). Sum 0.4248; no relauncher, 0.4168.
+        model = dataclasses.replace(MODEL, overhead_calls=1, boot_output=500)
+        calls = [c(0, 50_000, registers=True), c(20, 111_000), c(30, 112_000)]
+        held = lineage(launch(calls), relauncher=((5.0, 30_000), (15.0, 40_000), (500.0, 90_000)))
+        self.assertAlmostEqual(replay(held, BASELINE, model).dollars, 0.4248, places=9)
+        self.assertAlmostEqual(replay(lineage(launch(calls)), BASELINE, model).dollars, 0.4168,
+                               places=9)
+
+    def joined(self, revived_at):
+        # a root launch hands off at call 1 (C = 100k); its subagent relaunch registers at B = 80k
+        # (call 2), so the root owner gets C − B = 20k back (cut −20k) and keeps the relaunch's
+        # call 3, an observed death (81k all written) at t = `revived_at`.
+        root = launch([c(0, 50_000, root=True, registers=True),
+                       c(10, 100_000, root=True, gate=gate(3, "handoff")),
+                       c(20, 101_000, root=True)], transfer="handoff", name="r")
+        sub = launch([c(30, 29_000, write=29_000), c(40, 60_000, write=31_000),
+                      c(50, 80_000, write=2_000, registers=True),
+                      c(revived_at, 81_000, write=81_000, death=True)],
+                     registered=2, name="s", number=2)
+        return replay(lineage(root, sub), parse_arm("never=threshold=never"), MODEL)
+
+    def test_an_observed_subagent_death_joined_into_a_root_owner_is_revived_within_the_hour(self):
+        # call 3 at t = 700: gap 700 − 51 = 649 s <= 3,590 s, context' 81k + 20k = 101k; the
+        # revive writes 101k − 100k = 1k (5-minute: the observed call is a subagent's) and reads
+        # 100k. Calls: 0.0178 (read 49k + 1h write 1k), 0.0278 (read 99k + 1h write 1k), call 2
+        # (read 78k + 20k = 98k 0.0196 + 5-minute write 2k 0.01) 0.0296, revived 0.02 + 0.005.
+        out = self.joined(700)
+        self.assertEqual((out.deaths, out.trace), (0, (50_000, 100_000, 100_000, 101_000)))
+        self.assertAlmostEqual(out.dollars, 0.0178 + 0.0278 + 0.0296 + 0.025, places=9)
+
+    def test_a_death_past_the_hour_stays_a_death_and_the_restored_context_is_written(self):
+        # call 3 at t = 4000: gap 3,949 s > 3,590 s, no revive. The 20k of context given back
+        # joins the death's write (81k + 20k = 101k · 5/M = 0.505, no read), not a read (0.425).
+        out = self.joined(4_000)
+        self.assertEqual((out.deaths, out.trace[-1]), (1, 101_000))
+        self.assertAlmostEqual(out.dollars, 0.0178 + 0.0278 + 0.0296 + 0.505, places=9)
+
+
+class MergedTrialTest(unittest.TestCase):
+    def test_a_handoff_is_not_joined_to_the_first_launch_of_another_merged_lineage(self):
+        unfinished = launch([c(0, 50_000, registers=True), c(10, 120_000, gate=gate(3, "handoff")),
+                             c(20, 121_000)], transfer="handoff", name="a")
+        unrelated = launch([c(100, 29_000, write=29_000), c(110, 60_000, write=31_000),
+                            c(120, 98_000, gate=gate(3), registers=True), c(130, 99_000)],
+                           registered=2, name="b")
+        facts = {name: 0 for name in agent_owner_report._SUMMED}
+        facts.update(peak_context=0, phase_reached=None, phase7_entered=False)
+        first, second = (Lineage("r", 7, True, [one], 0.0, True, dict(facts), ())
+                         for one in (unfinished, unrelated))
+        merged = agent_owner_report._merge_trial({"verdict": "PASS", "trial": 1}, [first, second])
+        never = parse_arm("never=threshold=never")
+        # two lineages, two owners: every call of both is kept at its observed context
+        out = replay(merged, never, MODEL)
+        self.assertEqual(out.trace, (50_000, 120_000, 121_000, 29_000, 60_000, 98_000, 99_000))
+        self.assertAlmostEqual(
+            out.dollars, sum(map(call_cost, unfinished.calls + unrelated.calls)), places=12)
+        # the same two launches in ONE lineage are the observed hand-off chain and do join:
+        # a's call 2 and b's boot calls are dropped, and b's calls give C − B = 22k back
+        joined = replay(lineage(unfinished, unrelated), never, MODEL)
+        self.assertEqual(joined.trace, (50_000, 120_000, 120_000, 121_000))
+
+
+class SimulatedTextTest(unittest.TestCase):
+    def test_the_text_table_prints_every_simulated_row_not_just_the_top(self):
+        rows = [{"arm": f"a{n}", "step": "threshold", "spec": f"threshold={n}",
+                 "dollars_per_delivered": 1.0, "mean_saving": 0.0, "lower_bound": 0.0,
+                 "share_saving": 0.0, "handoffs_per_issue": 0.0, "deaths_per_issue": 0.0,
+                 "peak_p90": 0, "verdict": "not chosen", "live_confirmation_required": False}
+                for n in range(40)]
+        rows.append({**rows[0], "arm": "combined", "step": "final", "verdict": "keep"})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            agent_owner_report._print_simulated(rows)   # 41 rows, more than the default --top 30
+        shown = [line for line in out.getvalue().splitlines() if re.match(r"(a\d+|combined) ", line)]
+        self.assertEqual(len(shown), 41)
+        self.assertRegex(out.getvalue(), r"(?m)^combined +final .* keep +no$")
+        self.assertNotIn("more rows not shown", out.getvalue())
 
 
 class SweepTest(unittest.TestCase):

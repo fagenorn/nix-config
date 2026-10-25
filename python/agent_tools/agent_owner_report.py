@@ -100,6 +100,7 @@ class Launch:
     calls: tuple
     registered_index: int | None
     transfer: str | None
+    chain: int = 0  # which lineage of an eval trial's merge the launch came from
 
 
 @dataclass
@@ -613,7 +614,8 @@ def _merge_trial(row, lineages):
                  verdict=row.get("verdict"), direct=direct, delivered=delivered)
     return Lineage(
         first.run_id, first.issue, direct,
-        [launch for lineage in lineages for launch in lineage.launches],
+        [replace(launch, chain=position) for position, lineage in enumerate(lineages)
+         for launch in lineage.launches],
         sum(lineage.descendant_dollars for lineage in lineages), delivered, facts, first.relauncher)
 
 
@@ -785,20 +787,20 @@ def _print_capped(rows, top, headers, aligns):
         print(f"\n... {len(rows) - top} more rows not shown (--top {len(rows)} for all)")
 
 
-def _print_simulated(rows, top):
+def _print_simulated(rows):
     print("\nSimulated arms (savings are per lineage against the baseline replay; a sweep step's "
           "rows are against the step's simpler arm; hand-offs and deaths per issue):\n")
     if not rows:
         print(NONE_YET)
         return
-    _print_capped(
+    print_table(   # every row: a sweep's final and combined verdicts come last
         [[row["arm"], row["step"], row["spec"], _money(row["dollars_per_delivered"]),
           _money(row["mean_saving"]), _money(row["lower_bound"]), f"{row['share_saving']:.0%}",
           f"{row['handoffs_per_issue']:.2f}", f"{row['deaths_per_issue']:.2f}",
           human(row["peak_p90"]), row["verdict"],
           "yes" if row["live_confirmation_required"] else "no"] for row in rows],
-        top, ["arm", "step", "spec", "$ / delivered", "mean saving", "lower bound", "saves",
-              "hand-offs", "deaths", "peak p90", "verdict", "live check"],
+        ["arm", "step", "spec", "$ / delivered", "mean saving", "lower bound", "saves",
+         "hand-offs", "deaths", "peak p90", "verdict", "live check"],
         ["l", "l", "l"] + ["r"] * 7 + ["l", "l"])
     threshold_rows = [row for row in rows if row["step"] == "threshold"]
     cheapest = min(threshold_rows, key=lambda row: row["dollars_per_delivered"] or 0, default=None)
@@ -859,7 +861,7 @@ def print_document(doc: dict, *, top: int) -> None:
          for boot in doc["boots"]],
         top, ["phase", "boots", "B p50", "B p90", "start p50", "boot calls p50", "slimmable p50"],
         ["l"] + ["r"] * 6)
-    _print_simulated(doc["simulated"], top)
+    _print_simulated(doc["simulated"])
     _print_calibration(doc["calibration"], top)
     pricing, lost = doc["pricing"], doc["unattributed"]
     print(f"\nPricing: {pricing['source']} ({pricing['date']}); "

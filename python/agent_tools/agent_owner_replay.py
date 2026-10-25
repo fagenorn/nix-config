@@ -229,7 +229,11 @@ def _entries(launch, first, last, cut_delta):
 
 
 def _owners(lineage):
-    """The virtual owners of a lineage: each observed `handoff` relaunch undone (D5)."""
+    """The virtual owners of a lineage: each observed `handoff` relaunch undone (D5).
+
+    A hand-off joins only the next launch of its own chain (an eval trial merges several
+    lineages, whose launches carry different `chain` values and never join).
+    """
     launches = [launch for launch in lineage.launches if launch.calls]
     owners, joined = [], None
     for position, launch in enumerate(launches):
@@ -238,7 +242,7 @@ def _owners(lineage):
         first, delta = joined or (0, 0)
         last, joined = len(launch.calls), None
         if launch.transfer == "handoff" and following is not None \
-                and following.registered_index is not None:
+                and following.chain == launch.chain and following.registered_index is not None:
             answer = _answer(launch.calls, first)
             if answer is not None:
                 last = answer + 1
