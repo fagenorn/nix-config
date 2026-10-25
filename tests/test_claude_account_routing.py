@@ -23,9 +23,6 @@ from agent_tools import cache_proxy
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ACCOUNTS = REPO_ROOT / "home" / "common" / "claude-code" / "accounts"
 PLACEHOLDER = "CACHE_PROXY_URL="
-SCRUBBED = ("ANTHROPIC_BASE_URL", "ENABLE_TOOL_SEARCH", "CLAUDE_ACCOUNT", "CLAUDE_ACCOUNTS_DIR",
-            "CLAUDE_ACCOUNT_LAUNCHER", "CLAUDE_BIN", "CLAUDE_CODE_PLUGIN_DIRS", "CLAUDE_CONFIG_DIR",
-            "CLAUDE_CACHE_PROXY")
 CALLER_URL = "http://127.0.0.1:9/caller"
 MARKER_BODY = b'{"service":"cache-proxy","status":"ok"}'
 TIMEOUT = 30
@@ -69,6 +66,8 @@ class RedirectHandler(http.server.BaseHTTPRequestHandler):
 
 
 class LauncherCase(unittest.TestCase):
+    switch = {}  # the CLAUDE_CACHE_PROXY setting every launch of the class starts from
+
     def setUp(self):
         for tool in ("bash", "curl", "jq", "env"):
             self.assertIsNotNone(shutil.which(tool), f"{tool} is required on PATH")
@@ -92,8 +91,6 @@ class LauncherCase(unittest.TestCase):
     def redirecting_listener(self):
         return self.serve(socketserver.ThreadingTCPServer(("127.0.0.1", 0), RedirectHandler))
 
-    switch = {}  # the CLAUDE_CACHE_PROXY setting every launch of the class starts from
-
     def run_launcher(self, proxy_url, env=None, substitute=True):
         """`claude-account run` from a fresh copy of the mod, as a finished process."""
         copy = Path(tempfile.mkdtemp(dir=self.root)) / "accounts"
@@ -106,7 +103,8 @@ class LauncherCase(unittest.TestCase):
         home, work = self.root / "home", self.root / "work"
         home.mkdir(exist_ok=True)
         work.mkdir(exist_ok=True)
-        child = {key: value for key, value in os.environ.items() if key not in SCRUBBED}
+        # An allowlist: the stand-in claude prints its environment, and a failing assertion shows it.
+        child = {key: os.environ[key] for key in ("PATH", "TMPDIR") if key in os.environ}
         child.update(HOME=str(home), CLAUDE_ACCOUNTS_DIR=str(self.root / "accounts-state"),
                      CLAUDE_BIN=shutil.which("env"), **{**self.switch, **(env or {})})
         return subprocess.run([shutil.which("bash"), str(script), "run"], cwd=work, env=child,
@@ -125,6 +123,7 @@ class LauncherCase(unittest.TestCase):
     def assert_direct(self, environment):
         self.assertNotIn("ANTHROPIC_BASE_URL", environment)
         self.assertNotIn("ENABLE_TOOL_SEARCH", environment)
+
 
 class RoutingTest(LauncherCase):
     """Opted-in launches keep #422's health-checked routing."""
