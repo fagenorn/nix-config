@@ -515,12 +515,13 @@ class Keepalive:
             response = connection.getresponse()
             result.status = response.status
             result.ttfb_ms = round((self._clock() - sent) * 1000, 1)
-            self._read(response, result)
+            self._read(response, sent, result)
         finally:
             connection.close()
 
-    @staticmethod
-    def _read(response: http.client.HTTPResponse, result: _PingResult) -> None:
+    def _read(self, response: http.client.HTTPResponse, sent: float, result: _PingResult) -> None:
+        """Read the ping's response to its end, for at most `PING_TIMEOUT` from `sent` overall:
+        the socket timeout bounds each read, not a body that keeps trickling bytes (D31)."""
         content_type = response.getheader("Content-Type")
         reader = SseReader() if _is_stream(response.status, content_type,
                                            response.getheader("Content-Encoding")) else None
@@ -528,7 +529,13 @@ class Keepalive:
                                 and _media_type(content_type) == "application/json") else None
         declared = None if response.chunked else response.length
         received = 0
-        while chunk := response.read1(READ_SIZE):
+        while True:
+            if self._clock() - sent > PING_TIMEOUT:
+                result.outcome = "upstream_error"
+                result.error = f"ping exceeded {PING_TIMEOUT} s"
+                return
+            if not (chunk := response.read1(READ_SIZE)):
+                break
             received += len(chunk)
             if reader is not None:
                 reader.feed(chunk)

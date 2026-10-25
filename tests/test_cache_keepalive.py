@@ -605,6 +605,43 @@ class FailingPingTest(KeepaliveCase):
         self.assertEqual(self.due(270), [])
         self.assertEqual(len(upstream.requests), 1)
 
+    def test_a_ping_still_streaming_past_the_ping_timeout_ends_ping_failed(self):
+        def frame(data):
+            return b"%x\r\n%s\r\n" % (len(data), data)
+
+        start, rest = sse("end_turn").split(b"\n\n", 1)
+        beat = frame(b'event: ping\ndata: {"type": "ping"}\n\n')
+
+        def trickle(sock, head, body):
+            """message_start, then heartbeats sent once the fake clock is past the bound; the
+            stream ends whole only if the reader never stops."""
+            sock.sendall(SSE_HEAD + frame(start + b"\n\n"))
+            self.clock.advance(cache_keepalive.PING_TIMEOUT + 1)
+            try:
+                for _ in range(500):
+                    sock.sendall(beat)
+                sock.sendall(chunked(rest))
+            except OSError:
+                pass
+            return False
+
+        upstream = FakeUpstream(trickle)
+        self.addCleanup(upstream.close)
+        port = upstream.server.server_address[1]
+        self.keepalive = self.make(
+            lambda timeout: http.client.HTTPConnection("127.0.0.1", port, timeout=timeout))
+        self.busy_main()
+        self.exchange(AGENT_P)
+        [ping] = self.due(270)
+        self.keepalive.send(ping)
+        [line] = self.events("ping")
+        self.assertEqual((line["status"], line["outcome"], line["error"]),
+                         (200, "upstream_error", "ping exceeded 30.0 s"))
+        self.assertNotIn("usage", line)
+        self.assertEqual(self.ends(), [(self.handle(AGENT_P), "ping_failed", 1)])
+        self.assertEqual(self.due(270), [])
+        self.assertEqual(len(upstream.requests), 1)
+
 
 class RunLoopTest(unittest.TestCase):
     def test_run_logs_tick_and_send_errors_and_keeps_running(self):
