@@ -166,6 +166,11 @@ class ProgressRewriteTest(MeterHarness):
             "action=$(workflow-state progress --phase 3 --context-tokens 9 | jq -r .action)":
                 "action=$(workflow-state progress --context-tokens 87412 --phase 3"
                 " | jq -r .action)",
+            "$(workflow-state progress --phase 3)":
+                "$(workflow-state progress --context-tokens 87412 --phase 3)",
+            # a closing backtick ends the invocation
+            "out=`workflow-state progress --phase 3`":
+                "out=`workflow-state progress --context-tokens 87412 --phase 3`",
         }
         for command, expected in cases.items():
             with self.subTest(command=command):
@@ -192,7 +197,13 @@ class ProgressRewriteTest(MeterHarness):
         self.append(self.agent_transcript, assistant_record(87412, message_id="01"))
         for command in ("workflow-state progress --phase 3 --context-tokens $(printf 85000)",
                         "workflow-state progress --phase 3 --context-tokens=$(printf 85000)",
-                        "workflow-state progress --phase 3 --context-tokens=`printf 85000`"):
+                        "workflow-state progress --phase 3 --context-tokens=`printf 85000`",
+                        # the invocation continues past a substitution the subset cannot see
+                        "workflow-state progress --repo-root $(pwd) --context-tokens 5",
+                        "workflow-state progress --repo-root `pwd` --context-tokens 5",
+                        # a bare spelling's value may follow a redirection
+                        "workflow-state progress --context-tokens >/dev/null 5",
+                        "workflow-state progress --phase 3 --context-t 2>&1 5"):
             with self.subTest(command=command):
                 self.assertEqual(self.run_meter(self.payload(command)), (0, {
                     "systemMessage": "context-meter: left a workflow-state progress call "
@@ -324,6 +335,18 @@ class CrossingTest(MeterHarness):
         self.assertEqual(self.call(112000, PROGRESS.format(tokens="")), MEASURED.format(112000))
         self.assertIsNone(self.call(115000))
 
+    def test_an_unchanged_progress_call_at_the_threshold_still_gets_the_notice(self):
+        self.assertIsNone(self.call(105000, MARK))
+        self.append(self.agent_transcript, assistant_record(112000, message_id="unproved",
+                                                            sidechain=True))
+        command = "workflow-state progress --phase 3 --context-tokens=$(printf 5)"
+        self.assertEqual(self.run_meter(self.payload(command)), (0, {
+            "hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                   "additionalContext": CROSSING.format(112000)},
+            "systemMessage": "context-meter: left a workflow-state progress call "
+                             "unchanged (the rewrite failed its proof)."}, ""))
+        self.assertIsNone(self.call(115000))
+
     def test_sdd_gate_with_an_action_id_registers_an_owner(self):
         self.assertIsNone(self.call(100000, "sdd-gate next plan.md --skill-dir /skills --task 2"
                                             " --repo-root /ledger --run-id run-1"
@@ -375,12 +398,15 @@ class CrossingTest(MeterHarness):
     def test_a_corrupt_state_file_is_a_loud_non_blocking_error(self):
         self.assertIsNone(self.call(105000, MARK))
         state = self.home / ".agents/state/context-meter" / f"{SESSION}.agent-{AGENT}.json"
-        state.write_text("{not json", encoding="utf-8")
-        self.append(self.agent_transcript, assistant_record(112000, message_id="bad",
-                                                            sidechain=True))
-        code, output, stderr = self.run_meter(self.payload("git status --short"))
-        self.assertEqual((code, output), (1, None))
-        self.assertIn(str(state), stderr)
+        for number, content in enumerate(
+                ("{not json", '{"notified": true, "notified": false, "owner": true}')):
+            with self.subTest(content=content):
+                state.write_text(content, encoding="utf-8")
+                self.append(self.agent_transcript, assistant_record(
+                    112000, message_id=f"bad{number}", sidechain=True))
+                code, output, stderr = self.run_meter(self.payload("git status --short"))
+                self.assertEqual((code, output), (1, None))
+                self.assertIn(str(state), stderr)
 
 
 if __name__ == "__main__":

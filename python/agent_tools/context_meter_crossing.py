@@ -8,12 +8,12 @@ state file, `<session_id>.main.json` for a main session and
 under an exclusive `flock`, so the read-decide-write sequence is atomic.
 
 A measurement below the threshold clears `notified`; the first measurement at or
-above it sets `notified` and is due, unless the same call holds a progress
-invocation (that call reports the context itself, so the instruction would
-repeat the gate it is already running). Later measurements at or above the
+above it sets `notified` and is due, unless the same call is a progress call
+the meter rewrote to carry the measurement (that call reports the context
+itself, so the instruction would repeat the gate it is already running). Later measurements at or above the
 threshold are not due until one falls below it again. An unmeasured call changes
 nothing. An empty file is an owner being registered; any other content that is
-not exactly the record raises `ValueError`.
+not exactly the record (a repeated key included) raises `ValueError`.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import json
 import os
 from pathlib import Path
 
+from agent_tools.canonical import reject_duplicate_keys
 from agent_tools.context_meter_transcript import AgentIdentity
 
 RECORD_KEYS = {"notified", "owner"}
@@ -59,7 +60,7 @@ def _read(fd: int, path: Path) -> dict:
         return {"notified": False, "owner": True}
     message = f"context-meter: {path} is not an owner state record"
     try:
-        state = json.loads(raw)
+        state = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
     except ValueError as error:
         raise ValueError(message) from error
     if (not isinstance(state, dict) or set(state) != RECORD_KEYS

@@ -15,8 +15,11 @@ An agent that runs a registering call (a `workflow-state progress` or
 `mark-progress`, or an `sdd-gate`, with an `--action-id`) becomes an owner of a
 phase gate. For an owner every Bash call reads the transcript, and the first
 measurement at or above `CONTEXT_CEILING - CONTEXT_HEADROOM` adds one
-instruction to run the phase gate; it fires again only after a measurement below
-the threshold. The per-owner state lives under
+instruction to run the phase gate, unless that call is a progress call the meter
+rewrote to carry the measurement (it already runs the gate); it fires again only
+after a measurement below the threshold. The instruction and the measured note
+never share one output, since the note exists only on such a rewrite; a progress
+call left unchanged keeps its `systemMessage` beside the instruction. The per-owner state lives under
 `~/.agents/state/context-meter/` (see `context_meter_crossing`); a call that
 registers nothing from an agent with no state file reads no transcript and
 writes nothing.
@@ -24,7 +27,7 @@ writes nothing.
 The hook grants nothing. It never prints `permissionDecision`, `decision` or
 `continue` and never exits 2: the permission and lifecycle guards decide
 independently whether the call runs, and a failure here leaves the call as the
-agent wrote it. An unmeasurable context removes the agent's value and says so.
+agent wrote it. An unmeasurable context removes a progress call's value and says so.
 """
 
 from __future__ import annotations
@@ -60,19 +63,23 @@ def _unchanged(reason: str) -> dict:
 
 
 def _progress_output(command: str, tool_input: dict, tokens: list,
-                     measured: int | None, reason: str | None) -> dict:
+                     measured: int | None, reason: str | None) -> tuple[dict, bool]:
+    """The output for a call holding progress invocations, and whether it carries `measured`.
+
+    It carries the measurement only on a proved rewrite of a measured context.
+    """
     rewrite = rewrite_progress(command, tokens, measured)
     if not rewrite.proved:
-        return _unchanged("the rewrite failed its proof")
+        return _unchanged("the rewrite failed its proof"), False
     hook: dict = {"hookEventName": "PreToolUse"}
     if rewrite.command != command:
         hook["updatedInput"] = {**tool_input, "command": rewrite.command}
     if measured is None:
         hook["additionalContext"] = UNMEASURED_NOTE
         return {"hookSpecificOutput": hook,
-                "systemMessage": UNMEASURED_MESSAGE.format(reason=reason)}
+                "systemMessage": UNMEASURED_MESSAGE.format(reason=reason)}, False
     hook["additionalContext"] = MEASURED_NOTE.format(tokens=measured)
-    return {"hookSpecificOutput": hook}
+    return {"hookSpecificOutput": hook}, True
 
 
 def respond(payload: object, *, state_dir: Path, threshold: int) -> dict | None:
@@ -96,15 +103,18 @@ def respond(payload: object, *, state_dir: Path, threshold: int) -> dict | None:
     if not starts and not owner:
         return None
     measurement = measure(payload)
-    output = (_progress_output(command, tool_input, tokens, measurement.tokens,
-                               measurement.reason) if starts else None)
+    output, carries = (_progress_output(command, tool_input, tokens, measurement.tokens,
+                                        measurement.reason) if starts else (None, False))
     if owner and context_meter_crossing.record(
             state_dir, identity, register=register, measured=measurement.tokens,
-            progress=bool(starts), threshold=threshold):
-        return {"hookSpecificOutput": {
+            progress=carries, threshold=threshold):
+        crossing: dict = {"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "additionalContext": CROSSING_NOTE.format(
                 tokens=measurement.tokens, threshold=threshold)}}
+        if output is not None and "systemMessage" in output:
+            crossing["systemMessage"] = output["systemMessage"]
+        return crossing
     return output
 
 

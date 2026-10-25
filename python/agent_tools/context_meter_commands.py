@@ -15,6 +15,10 @@ invocation (the full option, an unambiguous argparse abbreviation down to
 `--context-tokens <n>`. It splices the original text, so every other byte
 survives, and it is emitted only when `proved`: the rewritten command must lex
 to exactly the original words minus the removed ones plus the inserted ones.
+An invocation whose simple command ends at an opening `(` or backtick (as in
+`--repo-root $(pwd)`) continues past a substitution the subset cannot see, and a
+bare spelling followed by redirections and then a value-shaped word takes that
+word as its value; both make the rewrite unprovable, so the command is left alone.
 """
 
 from __future__ import annotations
@@ -228,6 +232,34 @@ def _is_redirection(token: Token) -> bool:
     return token.kind == "op" and token.value not in SEPARATORS
 
 
+def _ends_at_opener(tokens: Sequence[Token], start: int, end: int) -> bool:
+    """Whether the simple command of the invocation at `start` ends at an opening operator.
+
+    `(` always opens. A backtick closes when an odd number of backticks precede
+    `start` (the invocation sits inside a backtick substitution) and opens otherwise.
+    """
+    if end >= len(tokens) or tokens[end].value not in OPENERS:
+        return False
+    if tokens[end].value == "(":
+        return True
+    preceding = sum(1 for token in tokens[:start] if token.kind == "op" and token.value == "`")
+    return preceding % 2 == 0
+
+
+def _value_after_redirection(tokens: Sequence[Token], index: int, end: int) -> bool:
+    """Whether redirections start at `index` and a value-shaped word follows them before `end`.
+
+    Bash takes `--context-tokens >/dev/null 5` as the option with the value `5`,
+    which a removal of the bare spelling alone would strand as a positional word.
+    """
+    if index >= end or not _is_redirection(tokens[index]):
+        return False
+    while index < end and _is_redirection(tokens[index]):
+        index += 2
+    return (index < end and tokens[index].kind == "word"
+            and not tokens[index].value.startswith("-"))
+
+
 def _glued_to_operator(tokens: Sequence[Token], index: int) -> bool:
     """Whether deleting word `index` would fuse its text with a following opener or redirection.
 
@@ -248,6 +280,8 @@ def _removals(tokens: Sequence[Token], start: int) -> tuple[set[int], bool]:
     """The word indices of one invocation's `--context-tokens` spellings, and whether provable."""
     end = simple_command_end(tokens, start + 1)
     removed: set[int] = set()
+    if _ends_at_opener(tokens, start, end):
+        return removed, False
     index = start + 2
     while index < end:
         token = tokens[index]
@@ -260,6 +294,8 @@ def _removals(tokens: Sequence[Token], start: int) -> tuple[set[int], bool]:
             if "=" not in token.value:
                 following = tokens[index + 1] if index + 1 < len(tokens) else None
                 if following is not None and following.kind == "op" and following.value in OPENERS:
+                    return removed, False
+                if _value_after_redirection(tokens, index + 1, end):
                     return removed, False
                 if (index + 1 < end and following is not None and following.kind == "word"
                         and not following.value.startswith("-")):
