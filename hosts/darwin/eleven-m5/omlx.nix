@@ -209,8 +209,11 @@ in
     RunAtLoad = true;
   };
 
+  # `command` (not ProgramArguments) makes nix-darwin wrap it in `/bin/wait4path /nix/store`: at
+  # boot launchd can load these before the Nix volume is mounted, and a missing executable parks
+  # the job until the next activation, KeepAlive notwithstanding.
+  launchd.daemons.omlx.command = "${serve}";
   launchd.daemons.omlx.serviceConfig = {
-    ProgramArguments = [ "${serve}" ];
     UserName = username;
     EnvironmentVariables.HOME = home;
     RunAtLoad = true;
@@ -219,8 +222,8 @@ in
     StandardErrorPath = "${home}/.omlx/logs/launchd.log";
   };
 
+  launchd.daemons.omlx-models.command = "${fetch}";
   launchd.daemons.omlx-models.serviceConfig = {
-    ProgramArguments = [ "${fetch}" ];
     UserName = username;
     EnvironmentVariables = {
       HOME = home;
