@@ -21,6 +21,10 @@ GIT=git
 CURL=curl
 DEFAULT_CLAUDE_BIN=
 
+# The cache proxy's URL. Empty here, so a source copy never routes; the Nix
+# build writes in the URL of the port it gives the cache-proxy service.
+CACHE_PROXY_URL=
+
 # What a profile shares with ~/.claude. Everything else (the login, caches,
 # per-process state) is the profile's own.
 SHARED=(settings.json CLAUDE.md keybindings.json skills agents commands
@@ -165,6 +169,29 @@ claude_bin() {
   local bin="${CLAUDE_BIN:-$DEFAULT_CLAUDE_BIN}"
   [ -n "$bin" ] || bin="$(command -v claude)" || die "claude is not on PATH"
   echo "$bin"
+}
+
+# Routes this launch through the cache proxy when its health check answers and
+# sends it direct otherwise. A base URL the caller set to anything but the proxy
+# is the caller's own endpoint and is left alone; one equal to the proxy URL was
+# inherited from a routed launch and is decided again. Silent either way:
+# stdout and stderr belong to claude.
+route_cache_proxy() {
+  local health
+  [ -n "$CACHE_PROXY_URL" ] || return 0
+  if [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ "$ANTHROPIC_BASE_URL" != "$CACHE_PROXY_URL" ]; then
+    return 0
+  fi
+  # The status is checked explicitly: `-f` alone would accept a 3xx carrying the marker.
+  if health="$("$CURL" -q --noproxy '*' -sS --max-time 0.5 -w '\n%{http_code}' "$CACHE_PROXY_URL/_proxy/health" 2>/dev/null)" &&
+    case "${health##*$'\n'}" in 2??) true ;; *) false ;; esac &&
+    printf '%s' "${health%$'\n'*}" | "$JQ" -e '.service == "cache-proxy"' >/dev/null 2>&1; then
+    export ANTHROPIC_BASE_URL="$CACHE_PROXY_URL"
+    # Before Claude Code 2.1.304 a non-first-party base URL turns tool search off.
+    [ -n "${ENABLE_TOOL_SEARCH+set}" ] || export ENABLE_TOOL_SEARCH=true
+  else
+    unset ANTHROPIC_BASE_URL
+  fi
 }
 
 cmd_list() {
@@ -325,7 +352,7 @@ cmd_run() {
   if [ -z "${CLAUDE_ACCOUNT:-}" ]; then
     case "${CLAUDE_CONFIG_DIR:-}" in
       ""|"$PROFILES"/*) ;;
-      *) exec "$(claude_bin)" "$@" ;;
+      *) route_cache_proxy; exec "$(claude_bin)" "$@" ;;
     esac
   fi
   name="$(resolve_account)"
@@ -340,6 +367,7 @@ cmd_run() {
       sync_profile "$name"
       export CLAUDE_CONFIG_DIR="$(profile_dir "$name")"
     fi
+    route_cache_proxy
     status=0
     "$(claude_bin)" "$@" || status=$?
     request="$ROOT/switch/$$"
