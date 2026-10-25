@@ -101,6 +101,8 @@ class Launch:
     registered_index: int | None
     transfer: str | None
     chain: int = 0  # which lineage of an eval trial's merge the launch came from
+    attempt: int | None = None  # the implementation attempt (custody) the launch belongs to
+    remainder: int | None = None  # the delivery remainder (custody) the launch belongs to
     boot_whole: bool = True  # every call through the registering call is inside the event window
 
 
@@ -327,8 +329,8 @@ def _owner_call(call, prev_end, read, phase, death, is_root, slimmable):
 
 
 def _own_identity(reads, run_id):
-    """Issue, attempt and launch an owner's own replies, then its flags, give (D20)."""
-    found = {"issue": None, "attempt": None, "launch": None}
+    """Issue, attempt, remainder and launch an owner's own replies, then its flags, give (D20)."""
+    found = {"issue": None, "attempt": None, "remainder": None, "launch": None}
     replies = [reply for read in reads for reply in read.replies
                if reply["run_id"] == run_id]
     for reply in replies:
@@ -441,13 +443,13 @@ def scan_owner_transcript(job, *, since, before):
 
 
 def _resolve_owners(scans):
-    """Fill an owner's missing issue, attempt and launch from a peer with its action ID."""
+    """Fill an owner's missing issue, attempt, remainder and launch from a peer with its action ID."""
     peers = defaultdict(list)
     for scan in scans:
         if scan["owner"] is not None:
             peers[(scan["owner"]["run_id"], scan["owner"]["action_id"])].append(scan["owner"])
     for owners in peers.values():
-        for name in ("issue", "attempt", "launch"):
+        for name in ("issue", "attempt", "remainder", "launch"):
             known = next((owner[name] for owner in owners if owner[name] is not None), None)
             for owner in owners:
                 if owner[name] is None:
@@ -503,7 +505,8 @@ def _launch(scan, children):
     registered = owner["registered_index"]
     kept_index = sum(counted[:registered]) if counted[registered] else None
     return Launch(scan["path"], owner["launch"], kept, kept_index, owner["transfer"],
-                  boot_whole=all(counted[:registered + 1]))
+                  boot_whole=all(counted[:registered + 1]), attempt=owner["attempt"],
+                  remainder=owner["remainder"])
 
 
 def _phase_reached(calls):
@@ -541,6 +544,17 @@ def _relauncher(launches):
     return ()
 
 
+def _launch_order(launch):
+    """A launch's place in its lineage: by attempt, then remainder, then launch ordinal (each
+    unknown last, an attempt's own launches before its remainders'), then first call time.
+
+    A launch ordinal counts within one attempt or remainder, so a retry's launch 1 follows the
+    first attempt's last launch, never its launch 1.
+    """
+    return (launch.attempt is None, launch.attempt or 0, launch.remainder is not None,
+            launch.remainder or 0, launch.launch is None, launch.launch or 0, launch.calls[0].start)
+
+
 def _lineage(run_id, issue, group, child_ends):
     """The lineage of one `(run_id, issue)`, from its `(scan, nearest owner scan)` members."""
     owners = [scan for scan, owner_scan in group if scan is owner_scan and scan["counted_calls"]]
@@ -552,8 +566,7 @@ def _lineage(run_id, issue, group, child_ends):
         extras.append({"handoffs": owner["handoffs"], "measured": owner["measured"],
                        "absolute": owner["absolute"], "phase7": owner["phase7"],
                        "waits": _long_waits(owner["calls"], owner["counted"], children)})
-    ordered = sorted(zip(launches, extras), key=lambda pair: (
-        pair[0].launch is None, pair[0].launch or 0, pair[0].calls[0].start))
+    ordered = sorted(zip(launches, extras), key=lambda pair: _launch_order(pair[0]))
     launches = [launch for launch, _ in ordered]
     extras = [extra for _, extra in ordered]
     descendants = sum(scan["dollars"] for scan, owner_scan in group if scan is not owner_scan)

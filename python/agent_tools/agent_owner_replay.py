@@ -229,11 +229,17 @@ def _entries(launch, first, last, cut_delta):
     return entries
 
 
+def _same_custody(launch, following):
+    return ((following.chain, following.attempt, following.remainder)
+            == (launch.chain, launch.attempt, launch.remainder))
+
+
 def _owners(lineage):
     """The virtual owners of a lineage: each observed `handoff` relaunch undone (D5).
 
-    A hand-off joins only the next launch of its own chain (an eval trial merges several
-    lineages, whose launches carry different `chain` values and never join).
+    A hand-off joins only the next launch of its own chain and its own attempt or remainder
+    (an eval trial merges several lineages, whose launches carry different `chain` values, and
+    a retry's launches carry another attempt; neither joins).
     """
     launches = [launch for launch in lineage.launches if launch.calls]
     owners, joined = [], None
@@ -243,7 +249,7 @@ def _owners(lineage):
         first, delta = joined or (0, 0)
         last, joined = len(launch.calls), None
         if launch.transfer == "handoff" and following is not None \
-                and following.chain == launch.chain and following.registered_index is not None:
+                and _same_custody(launch, following) and following.registered_index is not None:
             answer = _answer(launch.calls, first)
             if answer is not None:
                 last = answer + 1

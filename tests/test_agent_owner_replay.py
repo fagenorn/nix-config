@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from agent_tools import agent_owner_replay as replay_module
@@ -19,7 +20,7 @@ from agent_tools.agent_owner_replay import (BASELINE, ORIGIN, BootModel, keep_ru
 from agent_tools.phase_budget import PhaseBudget
 
 from . import test_agent_owner_report as report_tests   # a module import: its TestCase is not re-collected here
-from .owner_transcripts import Session
+from .owner_transcripts import Session, gate_reply, progress
 
 MODEL = BootModel(start=29_000, boot_calls={"0-5": 2, "6-7": 2},
                   boot_end={"0-5": 60_000, "6-7": 60_000}, slimmable={"0-5": 0, "6-7": 0},
@@ -45,9 +46,9 @@ def lineage(*launches, descendants=0.0, relauncher=()):
                    descendant_dollars=descendants, delivered=True, facts={}, relauncher=relauncher)
 
 
-def launch(calls, *, registered=0, transfer=None, name="t", number=1):
+def launch(calls, *, registered=0, transfer=None, name="t", number=1, attempt=None):
     return Launch(transcript=name, launch=number, calls=tuple(calls), registered_index=registered,
-                  transfer=transfer)
+                  transfer=transfer, attempt=attempt)
 
 
 def rising(start, stop, step, *, t0=0, **kwargs):
@@ -314,6 +315,58 @@ class MergedTrialTest(unittest.TestCase):
         # a's call 2 and b's boot calls are dropped, and b's calls give C − B = 22k back
         joined = replay(lineage(unfinished, unrelated), never, MODEL)
         self.assertEqual(joined.trace, (50_000, 120_000, 120_000, 121_000))
+
+
+class RetryAttemptTest(unittest.TestCase):
+    NEVER = parse_arm("never=threshold=never")
+
+    def test_a_retry_s_launches_follow_the_first_attempt_s_and_join_only_their_own(self):
+        # Attempt 1: a1 (launch 1) hands off at 120k, a2 (launch 2) boots 29k -> 98k. Attempt 2:
+        # b1 (launch 1) and b2 (launch 2), no hand-off. Ordered by launch alone they would run
+        # a1, b1, a2, b2 and a1's hand-off would join b1.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = Session(root)
+            for name, start in (("a1", 100), ("a2", 200), ("b1", 1_000), ("b2", 1_100)):
+                dispatch = session.call(None, start - 10, context=10_000, write=10_000, ttl="1h",
+                                        agent_tool=True)
+                session.child(name, tool_use_id=dispatch)
+            g = session.call("a1", 100, context=50_000, write=50_000, bash=progress(3))
+            session.result("a1", 101, g, gate_reply("continue"))
+            g = session.call("a1", 110, context=120_000, write=70_000, bash=progress(4))
+            session.result("a1", 111, g, gate_reply("handoff"))
+            g = session.call("a1", 120, context=121_000, write=1_000, bash=progress(4, handoff="/r/h.md"))
+            session.result("a1", 121, g, gate_reply("handoff", handoff_path="h.md"))
+            session.call("a2", 200, context=29_000, write=29_000)
+            session.call("a2", 210, context=60_000, write=31_000)
+            g = session.call("a2", 220, context=98_000, write=38_000, bash=progress(4, action_id="7:1:2"))
+            session.result("a2", 221, g, gate_reply("continue", launch=2))
+            session.call("a2", 230, context=99_000, write=1_000)
+            for name, start, context, number in (("b1", 1_000, 40_000, 1), ("b2", 1_100, 30_000, 2)):
+                g = session.call(name, start, context=context, write=context,
+                                 bash=progress(3, action_id=f"7:2:{number}"))
+                session.result(name, start + 1, g, gate_reply("continue", attempt=2, launch=number))
+                session.call(name, start + 10, context=context + 1_000, write=1_000)
+            session.write()
+            [found], _ = agent_owner_report.collect(root, cutoff=None, since=None, before=None,
+                                                     eval_rows=None,
+                                                     executor_factory=ThreadPoolExecutor)
+        self.assertEqual([Path(one.transcript).stem for one in found.launches],
+                         ["agent-a1", "agent-a2", "agent-b1", "agent-b2"])
+        # a1's hand-off joins a2 at its registering call (B 98k, C 120k: 22k back); b1 and b2
+        # are owners of their own at their observed contexts
+        self.assertEqual(replay(found, self.NEVER, MODEL).trace,
+                         (50_000, 120_000, 120_000, 121_000, 40_000, 41_000, 30_000, 31_000))
+
+    def test_a_handoff_never_joins_a_launch_of_another_attempt(self):
+        # a1 hands off, but the next launch is attempt 2's (attempt 1's relaunch is missing)
+        unfinished = launch([c(0, 50_000, registers=True), c(10, 120_000, gate=gate(3, "handoff")),
+                             c(20, 121_000)], transfer="handoff", name="a1", attempt=1)
+        retry = launch([c(100, 29_000, write=29_000), c(110, 60_000, write=31_000),
+                        c(120, 98_000, gate=gate(3), registers=True), c(130, 99_000)],
+                       registered=2, name="b1", attempt=2)
+        out = replay(lineage(unfinished, retry), self.NEVER, MODEL)
+        self.assertEqual(out.trace, (50_000, 120_000, 121_000, 29_000, 60_000, 98_000, 99_000))
 
 
 class SimulatedTextTest(unittest.TestCase):

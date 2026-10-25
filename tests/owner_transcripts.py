@@ -21,7 +21,8 @@ def at(seconds):
 def progress(phase, *, action_id="7:1:1", handoff=None, absolute=False):
     helper = "/Users/me/.agents/bin/workflow-state" if absolute else "workflow-state"
     words = [helper, "progress", "--repo-root", "/Users/me/repo", "--run-id", RUN,
-             "--issue", action_id.split(":")[0], "--attempt", "1", "--action-id", action_id,
+             "--issue", action_id.split(":")[0], "--attempt", action_id.split(":")[1],
+             "--action-id", action_id,
              "--phase", str(phase), "--next-needs-context", "true",
              "--artifacts-sufficient", "false", "--remainder-self-contained", "false"]
     if handoff:
@@ -29,9 +30,9 @@ def progress(phase, *, action_id="7:1:1", handoff=None, absolute=False):
     return " ".join(words) + " | artifact-budget validate-report --boundary workflow-response --input -"
 
 
-def gate_reply(action, *, issue=7, launch=1, handoff_path=None):
+def gate_reply(action, *, issue=7, attempt=1, launch=1, handoff_path=None):
     return json.dumps({"interface_version": 2, "kind": "phase_gate", "run_id": RUN, "issue": issue,
-                       "custody": {"action_id": f"{issue}:1:{launch}", "attempt": 1,
+                       "custody": {"action_id": f"{issue}:{attempt}:{launch}", "attempt": attempt,
                                    "kind": "implementation", "launch": launch},
                        "action": action, "handoff_path": handoff_path}) + "\nexit=0"
 
