@@ -1,4 +1,6 @@
-# Task 3: Reviewer prompts name both kinds, with the labelled budget raise
+# Task 3: Reviewer prompts name both kinds, within the existing budget
+
+**Superseded in part by spec D16:** no ceiling is raised and no label is needed. Commit 1a1aed46 reverted the raise steps below and reworded the three hot prompts to fit the existing `implementation-owner` ceiling; the steps that raise a ceiling or expect a `raise:` line no longer apply.
 
 Spec § Reviewer prompts and § Instruction budget, per D8, D9, D10 and D13. The generated-evidence paragraph of the task, conformance, correctness and re-review prompts names each kind by its literal. The `ef-core-migration-designer` rule stays as it is, and `whole-file-deletion` gets its corroboration rule. Both literals are pinned as machine text. The growth breaches only the `implementation-owner` hot ceilings, on both hosts, so this task raises exactly those two values to their measure and adds a raise note. The PR then needs the user-applied `instruction-budget-raise` label (D9). This task never applies that label.
 

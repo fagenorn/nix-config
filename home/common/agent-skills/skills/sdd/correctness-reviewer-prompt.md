@@ -41,7 +41,8 @@ Subagent (reviewer, Opus/high for the native path selected above):
     against the companion migration and snapshot diff and the report's
     no-pending-model-change, generated-SQL and provider-backed migration
     evidence, and each `whole-file-deletion` against an intending plan or
-    spec and no live reference to it; neither is a waiver.
+    spec and no live reference to the deleted path. Missing corroboration is
+    a finding, never a waiver.
     When the packet states the review is scoped and lists the paths under
     review, retain the manifest root and metrics only as range-coverage
     evidence: do not read its shards. Those listed paths are the whole of the
@@ -50,8 +51,7 @@ Subagent (reviewer, Opus/high for the native path selected above):
     path and fetch nothing wider: one invocation per path, the path passed as a
     single literal argument after `--`, never shell-joined with the other listed
     paths into one command line, and pathspec magic disabled by the `:(literal)`
-    prefix (a path may hold a space, newline, non-UTF-8 byte or leading `:`, and
-    anything but one literal argument splits or reinterprets it). A non-SDD
+    prefix. A non-SDD
     dispatcher that supplies no manifest may fetch the full range with
     `git diff --stat [MERGE_BASE_SHA]..[HEAD_SHA]` then
     `git diff [MERGE_BASE_SHA]..[HEAD_SHA]`. When checking a finding, read the
@@ -59,7 +59,7 @@ Subagent (reviewer, Opus/high for the native path selected above):
     evaluate a concrete risk you can name (cross-task contract drift, changed
     lock ordering, shared mutable state), one focused check per named risk,
     named in your report. Your review is read-only on this checkout: do not
-    mutate the working tree, the index, HEAD, or branch state in any way. Do not
+    mutate the working tree, the index, HEAD, or branch state. Do not
     re-run the full test suite; run at most one focused test to resolve a specific doubt
     reading the code raised.
 

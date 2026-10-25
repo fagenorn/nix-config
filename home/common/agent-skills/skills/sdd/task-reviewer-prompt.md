@@ -43,12 +43,13 @@ Subagent (reviewer, Opus/high as selected above):
     (shard order is packaging order, not Git path order): validate those
     fields, and read the live file, naming that check in your report, when the
     declared context cannot settle a hunk.
-    Version 2 or 3 `generated_evidence` replaces an oversized diff: check an
-    `ef-core-migration-designer` entry's identities and model-shape counts
-    against the companion migration and snapshot diff and the implementer's
-    no-pending-model-change, generated-SQL and provider-backed migration
-    evidence; a `whole-file-deletion` needs an intending plan or spec and no
-    live reference to it. Missing corroboration is a finding, never a waiver.
+    Version 2 or 3 `generated_evidence` replaces an oversized
+    `ef-core-migration-designer` or `whole-file-deletion` diff: check a
+    designer entry's identities and model-shape counts against the companion
+    migration and snapshot diff and the implementer's no-pending-model-change,
+    generated-SQL and provider-backed migration evidence; a deletion needs an
+    intending plan or spec and no live reference to the deleted path. Missing
+    or inconsistent corroboration is a finding, never a waiver.
 
     The diff's context lines ARE the changed files: Read one separately only
     when a hunk you must judge is cut off mid-function, and say so. Do not

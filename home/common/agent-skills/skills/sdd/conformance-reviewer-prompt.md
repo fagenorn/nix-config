@@ -51,13 +51,14 @@ Subagent (reviewer, Opus/high as selected above):
     snapshot diff and the plan's promised no-pending-model-change,
     generated-SQL and provider-backed migration evidence, and each
     `whole-file-deletion` against an intending plan or spec and no live
-    reference to it; neither is a waiver. A non-SDD
+    reference to the deleted path. Missing corroboration is a finding, never
+    a waiver. A non-SDD
     dispatcher that supplies no manifest may fetch the range itself:
     `git diff --stat [MERGE_BASE_SHA]..[HEAD_SHA]` then
     `git diff [MERGE_BASE_SHA]..[HEAD_SHA]`.
     When checking a finding, read the live file at HEAD, not a snapshot. Your
     review is read-only on this checkout: do not mutate the working tree, the
-    index, HEAD, or branch state in any way.
+    index, HEAD, or branch state.
 
     ## What to Check
 

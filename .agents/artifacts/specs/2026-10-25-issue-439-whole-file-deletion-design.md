@@ -146,11 +146,10 @@ At base, the prompt growth exceeds the 55 B left under the
 task, conformance, correctness and final-review documents. A draft measured
 about +130 B there. The other profiles that load these prompts have room.
 
-- The change raises exactly the breached ceilings to their measured value,
-  with a note in the existing form ("Ceiling raised for #439: … (#155 D10)").
-- The PR therefore needs the user to apply the `instruction-budget-raise`
-  label. The ship step names that request in the PR body and holds for it,
-  and never applies the label itself (per D9).
+- Per D16, which supersedes D9's raise: the change raises no ceiling. The
+  prompt paragraphs are worded to fit the existing `implementation-owner` hot
+  ceiling on both hosts, so the PR needs no `instruction-budget-raise` label
+  and holds for nothing.
 
 ### Documentation
 
@@ -200,9 +199,8 @@ All tests drive the source commands (agent-helpers rule 5).
    `SDD_MACHINE_TEXT` gains both kind literals for the four reviewer prompts
    (AC4, per D10).
 6. **Gates**: `just agent-workflow-tests` and `just build` (AC5, the repo's
-   verification commands). `just agent-instruction-budget --raise-label`
-   passes, and without the flag the only failing lines are the labelled-raise
-   lines.
+   verification commands). `just agent-instruction-budget` passes with no
+   label (D16).
 
 The deletion, binary and literal-path cases yield exit 3 or no evidence at the
 base commit, and the validator, kind-set and machine-text cases have nothing to
@@ -245,3 +243,4 @@ not change.
 | D13 | The plan fixes the four prompt paragraphs verbatim, each kind named by its literal and the EF rule kept whole. Re-checked per D9, no wording fits: the deletion clause alone is about 95 B in each of the three hot prompts against 55 B of headroom. D9 stands at the measured 133,142 B on both hosts (+503 B over 132,694 B), which replaces the design draft's "about +130 B" | `instruction_load` at base `3f4c5072` with the plan's text in a scratch tree: only the two `implementation-owner` hot ceilings breach; once raised, `check --raise-label` passes and the unlabelled check prints only the model `raise:` line | Terser wording to fit 55 B (needs about 450 B cut from unrelated guidance in the same prompts, which D9 rejects) |
 | D14 | The `--name-status -z` parse is a new `review_actual` helper with its own closed operation tuple; `review_forecast.edge_facts` keeps its parse and `ForecastError` | D12 leaves forecast and projection unchanged; edge_facts reports in its own error type to its own caller | Moving edge_facts onto the new helper (touches the forecast with no forcing case and changes its error type) |
 | D15 | `re-review-prompt.md`'s "Version 3 keeps every whole handwritten file diff" is qualified to diffs no generated-evidence entry replaces; the Task 3 raise takes the gate's measured M (refines D13's 133,142 B figure) | Phase-5 Codex plan review PR439-01: an oversized handwritten deletion now carries evidence, so the unqualified sentence would be false | Leaving the sentence (reviewers would expect a whole diff the package no longer holds) |
+| D16 | Supersedes D9 and D13's raise: the prompt growth fits main's existing `implementation-owner` hot ceiling (132,694 B, both hosts) with no raise and no `instruction-budget-raise` label. Commit 1a1aed46 reverted the Task 3 raise and tightened the three hot prompts' generated-evidence paragraphs; the PR review restored "Missing corroboration is a finding" (with "inconsistent" in the task prompt, as on main) and offset it by cutting the correctness prompt's pathspec rationale parenthetical and two "in any way" tails | The user will not apply the label, so the required Instruction Budget check must pass without it; `just agent-instruction-budget` passes against `origin/main` at the PR head | The D9 labelled raise (no label will be applied) |
