@@ -861,7 +861,7 @@ def print_document(doc: dict, *, top: int) -> None:
           human(arm["peak_p90"])] for arm in doc["arms"]],
         top, ["arm", "n", "delivered", "$ / delivered", "sd", "undelivered $", "peak p50", "peak p90"],
         ["l"] + ["r"] * 7)
-    print("\nFresh-owner boots by phase (B = context at the registering call; slimmable = boot "
+    print("\nFresh-owner boots by phase (B = context at the end of the boot, the registering call or the last call before the first child; slimmable = boot "
           "tokens a smaller resume would skip):\n")
     _print_capped(
         [[boot["phase_group"], f"{boot['count']:,}", human(boot["b_p50"]), human(boot["b_p90"]),
