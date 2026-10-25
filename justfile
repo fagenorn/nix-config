@@ -166,6 +166,7 @@ agent-workflow-tests:
     tests/test_guard_policy.py \
     tests/test_release_adapter_core.py \
     tests/test_agent_costs.py \
+    tests/test_agent_owner_report.py \
     tests/test_agent_model_drift_schema.py \
     tests/test_agent_model_drift_routing.py \
     tests/test_agent_model_drift_scheduling.py \

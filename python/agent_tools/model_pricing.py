@@ -6,7 +6,7 @@ ID, or to it plus a `-<8 digits>` date suffix, takes that row. Any other ID take
 the newest row of the family its name contains, and `rates` reports it as
 approximate. Haiku 5.5 is priced by the request's prompt size: a prompt over
 100,000 tokens (input plus cache reads plus cache writes) takes its second tier.
-The per-issue report and the cache report read this table.
+The per-issue, cache and owner reports read this table.
 """
 
 import re

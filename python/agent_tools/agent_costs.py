@@ -37,6 +37,12 @@ cache-read cost of context above `--context-threshold` tokens (default 120,000)
 with peak-context percentiles, and subagent start-up overhead, over the calls
 whose start lies between `--events-since` and `--events-before` when both are
 given. python/README.md (agent-costs) holds its contract.
+
+`--report owners` prints the owner report (issue 432, agent_tools.agent_owner_report):
+dollars per delivered issue by lineage (one per run and issue, owner transcripts and
+their descendants), per arm and for fresh-owner boots, as text or `--format json`.
+With `--eval-results PATH --eval SKILL:ID` it groups the trials of a lifecycle eval
+instead of live issues.
 """
 
 import argparse
@@ -1726,6 +1732,39 @@ def _positive_int(text):
     return value
 
 
+def _owners_report(ap, args, cutoff, event_start, event_end, executor_factory):
+    """Run `--report owners`: collect the lineages, print the text tables or the JSON document."""
+    from agent_tools import agent_owner_report  # imported only for the owner report (issue 432)
+
+    root = Path(args.projects_dir)
+    if not root.is_dir():
+        sys.exit(f"no transcript root at {root}")
+    eval_rows = None
+    if args.eval_results is not None:
+        skill, _, case = args.eval_case.partition(":")
+        if not skill or not case:
+            ap.error("--eval must be SKILL:ID")
+        try:
+            eval_rows = agent_owner_report.load_eval_rows(args.eval_results, skill, case)
+        except (OSError, ValueError) as error:
+            sys.exit(f"cannot read eval results: {error}")
+    lineages, footer = agent_owner_report.collect(
+        root, cutoff=event_start.timestamp() if event_start else cutoff, since=event_start,
+        before=event_end, eval_rows=eval_rows, executor_factory=executor_factory)
+    if eval_rows is not None:
+        window = f"eval {args.eval_case}"
+    elif event_start:
+        window = f"events {format_rfc3339_utc(event_start)} → {format_rfc3339_utc(event_end)}"
+    else:
+        window = f"last {args.days}d by file mtime" if cutoff else "all time"
+    document = agent_owner_report.build_document(lineages, footer, window=window)
+    if args.format == "json":
+        json.dump(document, sys.stdout, separators=(",", ":"))
+        print()
+    else:
+        agent_owner_report.print_document(document, top=args.top)
+
+
 def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     ap = argparse.ArgumentParser(prog="agent-costs", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=35, help="window in days by file mtime (0 = all)")
@@ -1750,10 +1789,16 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
                     help="which strata to scan; meaningful only with --format json")
     ap.add_argument("--codex-sessions", default=os.path.expanduser("~/.codex/sessions"),
                     help="Codex rollout root")
-    ap.add_argument("--events-since", help="RFC3339 event-time lower bound (JSON or --report cache)")
-    ap.add_argument("--events-before", help="RFC3339 event-time upper bound (JSON or --report cache)")
-    ap.add_argument("--report", choices=("issues", "cache"), default="issues",
-                    help="per-issue tables (default) or the cache report")
+    ap.add_argument("--events-since",
+                    help="RFC3339 event-time lower bound (JSON, --report cache or owners)")
+    ap.add_argument("--events-before",
+                    help="RFC3339 event-time upper bound (JSON, --report cache or owners)")
+    ap.add_argument("--report", choices=("issues", "cache", "owners"), default="issues",
+                    help="per-issue tables (default), the cache report or the owner report")
+    ap.add_argument("--eval-results", metavar="PATH",
+                    help="eval results JSONL to group by trial; --report owners only")
+    ap.add_argument("--eval", metavar="SKILL:ID", dest="eval_case",
+                    help="the eval whose results rows to group; --report owners only")
     ap.add_argument("--context-threshold", type=_positive_int, default=None, metavar="TOKENS",
                     help="context size above which cache reads are totalled; --report cache only "
                          "(default 120000)")
@@ -1761,6 +1806,18 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
 
     json_mode = args.format == "json"
     cache_report = args.report == "cache"
+    owners_report = args.report == "owners"
+    if owners_report:
+        if args.project:
+            ap.error("--report owners does not take --project")
+        if args.artifacts:
+            ap.error("--report owners does not take --artifacts")
+        if args.strata != "claude":
+            ap.error("--report owners reads Claude transcripts only")
+    if (args.eval_results is None) != (args.eval_case is None):
+        ap.error("--eval-results and --eval must be used together")
+    if args.eval_results is not None and not owners_report:
+        ap.error("--eval-results and --eval are available only with --report owners")
     if cache_report and json_mode:
         ap.error("--report cache is text only; it cannot be combined with --format json")
     if cache_report and args.project:
@@ -1773,9 +1830,9 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
         ap.error("--strata is meaningful only with --format json")
     if json_mode and args.artifacts:
         ap.error("--artifacts is not available with --format json")
-    if not (json_mode or cache_report) and (args.events_since or args.events_before):
+    if not (json_mode or cache_report or owners_report) and (args.events_since or args.events_before):
         ap.error("--events-since/--events-before are available only with --format json "
-                 "or --report cache")
+                 "or --report cache or owners")
     if bool(args.events_since) != bool(args.events_before):
         ap.error("--events-since and --events-before must be used together")
     event_start = event_end = None
@@ -1790,6 +1847,9 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     selected = ("claude", "codex") if args.strata == "both" else (args.strata,)
 
     cutoff = time.time() - args.days * 86400 if args.days > 0 else None
+
+    if owners_report:
+        return _owners_report(ap, args, cutoff, event_start, event_end, executor_factory)
 
     if cache_report:
         from agent_tools import agent_cache_report  # imported only for the cache report (issue 421 D2)

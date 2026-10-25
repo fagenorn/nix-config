@@ -3,8 +3,9 @@
 read_transcript makes one pass over a transcript and returns its calls (usage merged
 per message ID, in first-line order, context above 0), its user entries, the first
 attachment of each type, its tool results and the notes a PreToolUse:Bash hook
-attached to a tool use. The cache report (agent_cache_report) reads through it, and
-is_death is its cache-death rule. python/README.md (agent-costs) holds the contract.
+attached to a tool use. The cache report (agent_cache_report) and the owner report
+(agent_owner_report) read through it, and is_death is their cache-death rule.
+python/README.md (agent-costs) holds the contract.
 """
 
 import json
