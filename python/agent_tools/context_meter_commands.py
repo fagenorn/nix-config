@@ -2,7 +2,8 @@
 
 The lexer reads the subset of bash the rewrite needs: single and double quotes,
 backslash escapes and line continuations, comments, the control and redirection
-operators, and the IO-number rule (`2>&1`, `5>out`). It does not expand
+operators, and the IO-number rule (`2>&1`, `5>out`; only a `<`/`>`-led operator
+takes one, so the `5` of `5&>out` stays a word, as in bash). It does not expand
 anything. A heredoc, an unterminated quote, a trailing backslash, or a
 double-quoted interior holding an unescaped `$(` or backtick (a substitution
 the subset does not model, so a progress call inside it would go unseen) is
@@ -30,7 +31,6 @@ from typing import NamedTuple
 OPERATORS = ("&>>", "<<<", "<<-", "&&", "||", "|&", ";;", "&>", ">>", ">&", "<&", "<>",
              ">|", "<<", ";", "&", "|", "(", ")", "<", ">", "`")
 HEREDOC_OPERATORS = ("<<", "<<-")
-IO_NUMBER_OPERATORS = ("&>", "&>>")
 SEPARATORS = frozenset({"\n", ";", "&", "&&", "|", "||", "|&", ";;", "(", ")", "`"})
 OPTION = "--context-tokens"
 MINIMUM_SPELLING = "--context-t"
@@ -164,8 +164,7 @@ class _Lexer:
         if operator in HEREDOC_OPERATORS:
             return -1
         word = "".join(self.chars)
-        takes_number = operator[0] in "<>" or operator in IO_NUMBER_OPERATORS
-        if (takes_number and self.start is not None and self.plain
+        if (operator[0] in "<>" and self.start is not None and self.plain
                 and word.isascii() and word.isdigit()):
             start = self.start
             operator = word + operator

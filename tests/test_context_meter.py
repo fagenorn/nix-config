@@ -203,7 +203,10 @@ class ProgressRewriteTest(MeterHarness):
                         "workflow-state progress --repo-root `pwd` --context-tokens 5",
                         # a bare spelling's value may follow a redirection
                         "workflow-state progress --context-tokens >/dev/null 5",
-                        "workflow-state progress --phase 3 --context-t 2>&1 5"):
+                        "workflow-state progress --phase 3 --context-t 2>&1 5",
+                        # `&>` takes no IO number, so bash gives `5` to the option (C424-01)
+                        "workflow-state progress --phase 3 --context-tokens 5&>/dev/null",
+                        "workflow-state progress --phase 3 --context-tokens 5&>>log"):
             with self.subTest(command=command):
                 self.assertEqual(self.run_meter(self.payload(command)), (0, {
                     "systemMessage": "context-meter: left a workflow-state progress call "
@@ -270,6 +273,20 @@ class ProgressRewriteTest(MeterHarness):
                       json.dumps({"tool_name": "Bash", "tool_input": "workflow-state progress"})):
             with self.subTest(stdin=stdin):
                 self.assertEqual(self.run_meter(stdin), (0, None, ""))
+
+
+class LexerTest(unittest.TestCase):
+    def test_only_a_less_or_greater_led_operator_takes_an_io_number(self):
+        from agent_tools.context_meter_commands import lex
+        for command, expected in (
+                ("a 5>out", [("word", "a"), ("op", "5>"), ("word", "out")]),
+                ("a 2>&1", [("word", "a"), ("op", "2>&"), ("word", "1")]),
+                ("a 5&>out", [("word", "a"), ("word", "5"), ("op", "&>"), ("word", "out")]),
+                ("a 5&>>out", [("word", "a"), ("word", "5"), ("op", "&>>"),
+                               ("word", "out")])):
+            with self.subTest(command=command):
+                self.assertEqual([(token.kind, token.value) for token in lex(command)],
+                                 expected)
 
 
 class RewriteProofTest(unittest.TestCase):
@@ -346,6 +363,29 @@ class CrossingTest(MeterHarness):
             "systemMessage": "context-meter: left a workflow-state progress call "
                              "unchanged (the rewrite failed its proof)."}, ""))
         self.assertIsNone(self.call(115000))
+
+    def test_an_owners_untokenisable_call_is_still_measured(self):
+        # C424-02: a double-quoted `$(` is outside the lexer's subset
+        self.assertIsNone(self.call(105000, MARK))
+        self.assertEqual(self.call(112000, 'echo "$(date)"'), CROSSING.format(112000))
+        self.assertIsNone(self.call(90000, 'echo "$(date)"'))
+        self.assertEqual(self.call(111000), CROSSING.format(111000))
+        self.append(self.agent_transcript, assistant_record(90000, message_id="below",
+                                                            sidechain=True))
+        self.assertIsNone(self.run_meter(self.payload("git status --short"))[1])
+        self.append(self.agent_transcript, assistant_record(112000, message_id="untokenised",
+                                                            sidechain=True))
+        command = 'out="$(workflow-state progress --phase 3 --context-tokens 5)"'
+        self.assertEqual(self.run_meter(self.payload(command)), (0, {
+            "hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                   "additionalContext": CROSSING.format(112000)},
+            "systemMessage": "context-meter: left a workflow-state progress call "
+                             "unchanged (the command could not be tokenised)."}, ""))
+
+    def test_an_untokenisable_call_registers_no_owner(self):
+        command = 'echo "$(workflow-state mark-progress --action-id 7:1:1)"'
+        self.assertIsNone(self.call(105000, command))
+        self.assertIsNone(self.call(112000))
 
     def test_sdd_gate_with_an_action_id_registers_an_owner(self):
         self.assertIsNone(self.call(100000, "sdd-gate next plan.md --skill-dir /skills --task 2"

@@ -9,7 +9,8 @@ produces no output and reads no transcript. For one that does, it reads the
 calling agent's own context from its transcript and answers with the same command
 rewritten to carry that measurement in place of whatever `--context-tokens` the
 agent wrote, so the value the progress gate sees is measured, never self-reported. A progress
-call it cannot tokenise passes through unchanged with a message saying so.
+call it cannot tokenise passes through unchanged with a message saying so; an
+owner's untokenisable call is still measured for the crossing, but registers nothing.
 
 An agent that runs a registering call (a `workflow-state progress` or
 `mark-progress`, or an `sdd-gate`, with an `--action-id`) becomes an owner of a
@@ -91,20 +92,25 @@ def respond(payload: object, *, state_dir: Path, threshold: int) -> dict | None:
         return None
     command = tool_input["command"]
     tokens = lex(command)
+    output: dict | None = None
     if tokens is None:
+        # An existing owner's untokenisable call is still measured: only the rewrite
+        # and owner registration need the words.
+        starts, register = [], False
         if mentions_progress(command):
-            return _unchanged("the command could not be tokenised")
-        return None
-    starts = progress_starts(tokens)
-    register = registers_owner(tokens)
+            output = _unchanged("the command could not be tokenised")
+    else:
+        starts, register = progress_starts(tokens), registers_owner(tokens)
     identity = agent_identity(payload)
     owner = identity is not None and (
         register or context_meter_crossing.is_owner(state_dir, identity))
     if not starts and not owner:
-        return None
+        return output
     measurement = measure(payload)
-    output, carries = (_progress_output(command, tool_input, tokens, measurement.tokens,
-                                        measurement.reason) if starts else (None, False))
+    carries = False
+    if starts:
+        output, carries = _progress_output(command, tool_input, tokens, measurement.tokens,
+                                           measurement.reason)
     if owner and context_meter_crossing.record(
             state_dir, identity, register=register, measured=measurement.tokens,
             progress=carries, threshold=threshold):
