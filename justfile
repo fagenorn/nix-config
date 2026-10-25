@@ -136,6 +136,7 @@ agent-workflow-tests:
     tests/test_agent_tools_canonical.py \
     tests/test_agent_tools_siblings.py \
     tests/test_lane_triage.py \
+    tests/test_context_meter.py \
     tests/test_sdd_brief.py \
     tests/test_sdd_gate.py \
     tests/test_orchestrate_control.py \
@@ -193,7 +194,7 @@ agent-instruction-load *args:
 agent-instruction-budget *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.instruction_load check --base origin/main {{args}}
 
-# Check the skill contracts and agent-tool launchers against what the Nix build installs.
+# Check the skill contracts, agent-tool launchers, generated Claude settings and Claude launchers against what the Nix build installs.
 agent-installed-skill-tests: build
   @set -- $(nix-store --query --requisites ./result \
     | grep -- '-home-manager-files$' || true); \
@@ -201,13 +202,28 @@ agent-installed-skill-tests: build
       echo "expected exactly one built home-manager-files output; found $#" >&2; \
       exit 1; \
     fi; \
-    AGENT_SKILLS_INSTALLED_HOME="$1" python3 -m unittest -v \
+    installed_home="$1"; \
+    set -- $(nix-store --query --requisites ./result \
+      | grep -- '-claude-code-settings\.json$' || true); \
+    if [ "$#" -ne 1 ]; then \
+      echo "expected exactly one generated Claude settings artifact; found $#" >&2; \
+      exit 1; \
+    fi; \
+    settings="$1"; \
+    set -- $(nix-store --query --requisites ./result \
+      | grep -- '-claude-code-with-accounts-[^/]*$' || true); \
+    if [ "$#" -ne 1 ]; then \
+      echo "expected exactly one built Claude Code package; found $#" >&2; \
+      exit 1; \
+    fi; \
+    AGENT_SKILLS_INSTALLED_HOME="$installed_home" CLAUDE_SETTINGS_PATH="$settings" CLAUDE_CODE_PACKAGE="$1" python3 -m unittest -v \
       home/common/agent-skills/tests/test_dispatch_contracts.py \
       home/common/agent-skills/tests/test_shell_example_contracts.py \
       home/common/agent-skills/tests/test_workflow_skill_contracts.py \
       tests/test_agent_tools_launchers.py \
       tests/test_promotion_installed.py \
-      tests/test_impeccable_installed.py
+      tests/test_impeccable_installed.py \
+      tests/test_claude_code_installed.py
 
 # Full-shape retained tier (#249): the real retained objects and archive under `root`. Not part of agent-workflow-tests.
 agent-retained-tests root: build

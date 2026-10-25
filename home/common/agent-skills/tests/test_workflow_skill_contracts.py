@@ -1344,8 +1344,14 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_owner_has_executable_phase_gate_and_action_semantics(self):
         self.assertIn("workflow-state progress", self.from_issue)
         self.assertIn("continue | fresh_start | handoff | delegate", self.from_issue)
-        self.assertIn("--turn-ceiling 120 --context-ceiling 150000 --turn-headroom 2 "
-                      "--context-headroom 10000", self.from_issue)
+        # Issue 424: the ceilings live in agent_tools.phase_budget and the context meter
+        # supplies the count, so no from-issue document restates either.
+        for document in sorted(FROM_ISSUE_DIR.glob("*.md")):
+            text = document.read_text(encoding="utf-8")
+            for argv in ("--turn-ceiling", "--turn-headroom", "--context-ceiling",
+                         "--context-headroom", "--context-tokens"):
+                with self.subTest(document=document.name, argv=argv):
+                    self.assertNotIn(argv, text)
 
     def test_owner_lifecycle_is_optional_for_direct_use_and_covers_all_stops(self):
         identity = self.section(
@@ -1413,6 +1419,42 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         self.assertIn("--request-file -", direct)
         self.assertNotIn("workflow-state init-run", direct)
         self.assertNotIn("workflow-state control", direct)
+
+    def test_direct_auto_handoff_relaunches_itself_instead_of_stopping(self):
+        # A top-level `/from-issue <num> --auto` has no dispatcher to relaunch it:
+        # its handoff dispatches a fresh `--auto` owner (whose own `direct-owner`
+        # call resumes the handed-off attempt) instead of asking the user to
+        # re-enter; every other owner returns the closed `Handed off` line.
+        line = "Handed off (<exact-handoff-path>). Resume: /from-issue <num> --auto"
+        gate = normalized(self.from_issue.split("3. **`handoff`**", 1)[1]
+                          .split("4. **`delegate`**", 1)[0])
+        self.assert_ordered(
+            gate, "--handoff-path <exact-path>",
+            "A direct `--auto` invocation not prompted `Relaunched owner` never stops",
+            "a child's `Handed off (…)` line", "`from-issue-phase-delegate`",
+            "prompted only `/from-issue <num> --auto` and `Relaunched owner`",
+            "relays its return", f"Any other owner returns only `{line}` and stops",
+        )
+        self.assertNotIn("persist the handoff, and stop", gate)
+        # Every relay of a child's return defers a `Handed off` line to the
+        # handoff action, so the top-level run relaunches instead of stopping.
+        delegate = normalized(self.from_issue.split("4. **`delegate`**", 1)[1])
+        self.assertIn("Except at the rollover or a relaunch the prompt has the line", delegate)
+        self.assert_ordered(
+            delegate, "a `Suspended (…)` line or a `Handed off (…)` line",
+            "relay it (a `Handed off (…)` per the `handoff` action), write nothing and stop",
+        )
+        auto = normalized(self.auto)
+        self.assertIn("durable handoff, obey `SKILL.md`'s `handoff` action.", auto)
+        self.assertNotIn("finalize it through `workflow-state progress`, and stop", auto)
+        earlier = normalized(ROLLOVER.read_text(encoding="utf-8")
+                             .split("## Earlier controller stop", 1)[1])
+        self.assert_ordered(
+            earlier, "validate, relay, self-relaunch, and stop",
+            f"`{line}` line takes `SKILL.md`'s `handoff` action's relaunch, or its relay",
+            "dispatch a second owner but that relaunch",
+        )
+        self.assertNotIn("dispatch a second owner,", earlier)
 
     def test_direct_auto_observe_owner_terminal_loop_is_closed(self):
         direct = ACQUIRE_DIRECT.read_text(encoding="utf-8")

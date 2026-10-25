@@ -390,7 +390,6 @@ run_trial() {
     --model "$EVAL_MODEL"
     --dangerously-skip-permissions
     --output-format json
-    --no-session-persistence
     --add-dir "$WORK"
   )
   [ -n "${EVAL_MAX_USD:-}" ] && claude_args+=(--max-budget-usd "$EVAL_MAX_USD")
@@ -403,8 +402,12 @@ run_trial() {
   local start CLAUDE_EXIT
   start=$(date +%s)
   # `exec` makes the job's pid timeout's own, so the trap's TERM reaches timeout, which
-  # passes it on to claude.
-  ( cd "$REPO" && exec timeout "$EVAL_TIMEOUT" claude "${claude_args[@]}" ) \
+  # passes it on to claude. The run keeps its session because the context meter and
+  # `agent-costs` read its transcripts, and Claude Code writes none for a `-p` run started
+  # inside a Claude Code session unless CLAUDE_CODE_FORCE_SESSION_PERSISTENCE is set (issue
+  # 424); the variable lives only in this subshell.
+  ( cd "$REPO" && export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 &&
+    exec timeout "$EVAL_TIMEOUT" claude "${claude_args[@]}" ) \
     >"$WORK/result.json" 2>"$WORK/stderr.txt" </dev/null &
   CLAUDE_PID=$!
   wait "$CLAUDE_PID"
