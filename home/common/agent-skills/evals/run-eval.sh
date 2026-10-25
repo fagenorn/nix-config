@@ -415,6 +415,10 @@ run_trial() {
         git -C "$REPO" push -q origin main v0.1.0 || die "setup: could not publish main and v0.1.0"
       echo "setup: release-ready main at $(git -C "$REPO" rev-parse --short main)"
       ;;
+    tracked-issue)
+      bash "$SETUPS/tracked-issue/setup.sh" "$WORK" "$REPO" || die "setup: tracked-issue failed"
+      echo "setup: tracked-issue sandbox with a read-only gh at $WORK/bin/gh"
+      ;;
     *) die "unknown setup kind: $SETUP_KIND" ;;
   esac
   local BASE_MAIN
@@ -445,7 +449,10 @@ run_trial() {
   # 424); the variable lives only in this subshell, and so does AGENT_PHASE_BUDGET, the
   # policy under test: set to EVAL_POLICY when that is set, otherwise removed, so a value
   # inherited from the launching shell never meters a run recorded as `policy: null`.
+  # A tracked-issue run also gets the sandbox's read-only gh first on PATH, so every agent
+  # of the run inherits it.
   ( cd "$REPO" && export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 &&
+    { if [ "$SETUP_KIND" = tracked-issue ]; then export PATH="$WORK/bin:$PATH"; fi; } &&
     { if [ -n "${EVAL_POLICY:-}" ]; then export AGENT_PHASE_BUDGET=$EVAL_POLICY; else unset AGENT_PHASE_BUDGET; fi; } &&
     exec timeout "$EVAL_TIMEOUT" claude "${claude_args[@]}" ) \
     >"$WORK/result.json" 2>"$WORK/stderr.txt" </dev/null &

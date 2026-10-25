@@ -20,7 +20,7 @@ SKILL_ROOTS = (
 )
 BUDGET = REPO_ROOT / "home/common/agent-skills/scripts/artifact_budget.py"
 POLICY = REPO_ROOT / "home/common/agent-skills/artifact-budget-policy.json"
-SETUP_KINDS = {"dirty-worktree", "shippable-worktree", "planned-worktree", "release-ready"}
+SETUP_KINDS = {"dirty-worktree", "shippable-worktree", "planned-worktree", "release-ready", "tracked-issue"}
 PIPELINE_SKILLS = ("from-issue", "ship-issue", "sdd", "ship-release", "orchestrate-issues")
 ASSERT_LIB = EVALS_DIR / "assert-lib.sh"
 
@@ -172,6 +172,24 @@ class EvalCasesTest(unittest.TestCase):
             for relative in ("tinytask/cli.py", "README.md", "tests/test_cli.py"):
                 with self.subTest(file=relative):
                     self.assertNotIn("--all", (work / relative).read_text(encoding="utf-8"))
+
+    def test_eval_eight_is_the_tracked_issue_owner_economics_pipeline(self):
+        case = find_case("from-issue", 8)
+        self.assertEqual(case["name"], "lifecycle-owner-economics")
+        self.assertEqual(case["mode"], "pipeline")
+        self.assertEqual(case["setup"], {"kind": "tracked-issue"})
+        self.assertIn("/from-issue 4 --auto", case["prompt"])
+        self.assertEqual(len(case["asserts"]), 6)
+        reading = [check for check in case["asserts"] if "owner_report" in check["shell"]]
+        self.assertEqual(len(reading), 5)
+        self.assertTrue((EVALS_DIR / "fixture-repo/issues/004-priorities-and-due-dates.md").is_file())
+        fixture = EVALS_DIR / "fixture-repo"
+        done = subprocess.run(
+            [sys.executable, "-m", "unittest", "tests.test_acceptance"], cwd=fixture,
+            env={"PATH": os.environ["PATH"], "PYTHONDONTWRITEBYTECODE": "1"},
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("OK (skipped=1)", done.stderr)
 
     def test_each_pipeline_skill_has_a_scripted_pipeline_case(self):
         for skill in PIPELINE_SKILLS:

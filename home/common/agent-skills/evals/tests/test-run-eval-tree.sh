@@ -42,7 +42,8 @@ cat >"$FAKE_BIN/claude" <<'FAKE'
 # timed-out run does. Any non -p invocation (an auth probe) is recorded as `other=`.
 # A -p run also leaves, in $FAKE_STATE: the --settings file it was given (settings.json),
 # where `workflow-state` resolved (which-workflow-state), that file's content
-# (workflow-state-shim) and AGENT_PHASE_BUDGET (agent-phase-budget).
+# (workflow-state-shim), AGENT_PHASE_BUDGET (agent-phase-budget) and the `gh` it
+# resolves (gh=).
 if [ "${1:-}" != -p ]; then
   printf 'other=%s\n' "$*" >>"$FAKE_STATE/record"
   exit 0
@@ -52,6 +53,7 @@ fi
   printf 'run_config_dir=%s\n' "${CLAUDE_CONFIG_DIR:-}"
   printf 'force_session_persistence=%s\n' "${CLAUDE_CODE_FORCE_SESSION_PERSISTENCE:-}"
   printf 'resolve_project=%s\n' "$(command -v resolve-project)"
+  printf 'gh=%s\n' "$(command -v gh)"
   printf 'cwd=%s\n' "$(pwd -P)"
   printf 'args=%s\n' "$(printf '%s' "$*" | tr '\n' ' ')"
 } >>"$FAKE_STATE/record"
@@ -361,7 +363,7 @@ smoke_tmp_holds_only_its_sandbox() {
     esac
   done
 }
-for id in 1 2 3; do
+for id in 1 2 3 4; do
   scenario "setup-smoke-$id"
   mkdir -p "$S/skills/setup-smoke/evals"
   cp "$EVALS_SRC/tests/fixtures/setup-smoke-evals.json" "$S/skills/setup-smoke/evals/evals.json"
@@ -374,6 +376,23 @@ for id in 1 2 3; do
   check "setup smoke $id: deployed mode makes no temp root" smoke_tmp_holds_only_its_sandbox "$id"
   check "setup smoke $id: deployed mode passes no --setting-sources" test -z "$(grep -- '--setting-sources' "$STATE/record")"
 done
+# The tracked-issue kind puts the sandbox's read-only gh shim first on the claude run's PATH
+# (setup smoke 4 ran above); the other kinds leave PATH alone.
+gh_is_the_sandbox_shim() {
+  case "$(sed -n 's/^gh=//p' "$SCRATCH/setup-smoke-4/state/record" | head -n 1)" in
+    "$SCRATCH"/setup-smoke-4/tmp/eval-setup-smoke-4.*/bin/gh) true ;;
+    *) false ;;
+  esac
+}
+check "setup smoke 4: claude resolves gh to the sandbox's bin/gh" gh_is_the_sandbox_shim
+other_kinds_keep_gh_off_the_path() {
+  local id value
+  for id in 1 2 3; do
+    value=$(sed -n 's/^gh=//p' "$SCRATCH/setup-smoke-$id/state/record" | head -n 1)
+    case "$value" in */eval-setup-smoke-*/bin/gh) return 1 ;; esac
+  done
+}
+check "setup smoke 1-3: claude never resolves gh to a sandbox shim" other_kinds_keep_gh_off_the_path
 
 if [ "$FAILURES" -ne 0 ]; then
   for log in "$SCRATCH"/*/log; do

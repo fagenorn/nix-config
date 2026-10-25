@@ -1,6 +1,6 @@
 {
   "skill_name": "from-issue",
-  "notes": "Pipeline evals. Each runs against a fresh copy of home/common/agent-skills/evals/fixture-repo. Resolve once into a retained ResolvedProject; its tracker capability is unsupported, so each issue arrives as a file path and artifact paths come only from bindings.paths.artifacts. Resolver refusal is fatal before effects and no policy value is defaulted or inferred. Cheap-first: the standard run stops after Phase 5 and grades the artifacts — spec, plan, worktree placement — instead of executing implementation.",
+  "notes": "Pipeline evals. Each runs against a fresh copy of home/common/agent-skills/evals/fixture-repo. Resolve once into a retained ResolvedProject; its tracker capability is unsupported, so each issue arrives as a file path and artifact paths come only from bindings.paths.artifacts. Resolver refusal is fatal before effects and no policy value is defaulted or inferred. Cheap-first: the standard run stops after Phase 5 and grades the artifacts — spec, plan, worktree placement — instead of executing implementation. Eval 8 is the exception: its tracked-issue setup binds the tracker to a read-only GitHub shim, it runs the whole flow to the forge boundary, and it is graded through the owner report, so it needs EVAL_TREE.",
   "evals": [
     {
       "id": 1,
@@ -138,6 +138,42 @@
       "note": "#352: the inline route stays only for a context that cannot launch a subagent at all.",
       "prompt": "Plan-only: run no command and change nothing. You are a from-issue owner in `--auto` mode at Phase 7 for issue 41, with lifecycle identity (action_id `41:1:1`) and a `ship-handoff/v2` you built and validated yourself. Your prompt carried no `Delegated owner: return the ship handoff` line. This host gives you no subagent-launch tool of any kind. Explain step by step how the issue is delivered, which ledger checks you make and when, and what you do if the ship-issue run itself reports `capability_gap: agent_dispatch`.",
       "expected_output": "A `from-issue-ship-owner` launch this context cannot make counts as the line `capability_gap: agent_dispatch`, so the owner takes `ship-handoff.md`'s dispatch-gap fallback; it is not a generic delegated owner, which never takes it. With lifecycle identity it first runs the `check-launch` fence with its own `action_id`: on `current: false` or any helper failure it writes nothing, prints `/from-issue 41 --auto` on its own line and stops. Otherwise it invokes `ship-issue` through its own Skill tool with the same validated handoff bytes and carries out the ship-owner prompt's task list itself: every phase, the auto-mode rules and the `## Delivery loop`, writing only `checkpoint-delivery` inside the loop. It handles the result as the ship report handling says: validate the `ship-summary/v2`, run `check-launch` again before the terminal write, then `workflow-state finish` with the validated summary on stdin, after releasing its workers and reaping. A `capability_gap: agent_dispatch` line from the inline run is the genuine gap: it never starts a second inline run, and the owner follows the suspension procedure with `blocked_on` `agent_dispatch`, makes no `finish` call and prints the `Suspended (...)` line with the re-entry command."
+    },
+    {
+      "id": 8,
+      "name": "lifecycle-owner-economics",
+      "mode": "pipeline",
+      "setup": {
+        "kind": "tracked-issue"
+      },
+      "prompt": "/from-issue 4 --auto\n\nResolve once into a retained ResolvedProject. The tracker capability is supported (GitHub, repository `fixture/tinytask`), so issue 4 is read through the tracker adapter. A resolver refusal is fatal and values are never defaulted or inferred.\n\nI authorize you to make every design and plan decision yourself: self-answer each question you would otherwise ask me, record each decision in the ledgers, and never wait for me.\n\nThis sandbox's GitHub is a read-only shim: it serves issue 4 and its dependency reads, and it cannot publish, so `gh pr create` and `gh pr merge` are refused. Run the whole flow, and stop when ship-issue stops at the forge boundary.\n\nReport what was built, the worktree it is in and where the run stopped.",
+      "expected_output": "A lifecycle-identity owner (direct `--auto`) works issue 4 through the whole flow in a worktree and stops at the read-only shim's forge boundary. The tree's owner report, built from the trial's transcripts, shows an issue-4 lineage that reached phase 6 or later, whose every `workflow-state progress` gate call carried the meter's measured count, with an owner call of at least 110,000 context tokens, Phase 7 entered and an owner wait on a child that ran over 300 s (the acceptance soak). The feature branch's ordinary suite passes and `--priority` is in the CLI. Tree mode only: the asserts read the tree's `agent-costs`.",
+      "asserts": [
+        {
+          "name": "an issue-4 lineage reached phase 6 or later",
+          "shell": "owner_lineage_has \"$(owner_report)\" 'any(.phase_reached >= 6)' || fail \"no issue-4 lineage reached phase 6\""
+        },
+        {
+          "name": "every issue-4 lineage gated with a measured context count",
+          "shell": "owner_lineage_has \"$(owner_report)\" 'length > 0 and all(.gate_calls >= 1 and .measured_gate_calls == .gate_calls)' || fail \"an issue-4 lineage has no gate call, or a gate call without a measured count\""
+        },
+        {
+          "name": "an owner call reached 110,000 tokens of context",
+          "shell": "owner_lineage_has \"$(owner_report)\" 'any(.peak_context >= 110000)' || fail \"no issue-4 owner call reached 110000 tokens of context\""
+        },
+        {
+          "name": "Phase 7 was entered",
+          "shell": "owner_lineage_has \"$(owner_report)\" 'any(.phase7_entered)' || fail \"no issue-4 lineage entered Phase 7\""
+        },
+        {
+          "name": "an owner waited on a child for over 300 s",
+          "shell": "owner_lineage_has \"$(owner_report)\" 'any(.long_child_waits >= 1)' || fail \"no issue-4 owner had a long child wait\""
+        },
+        {
+          "name": "the feature branch's suite passes and the feature is present",
+          "shell": "[ -n \"$WT\" ] && (cd \"$WT\" && python3 -m unittest discover >/dev/null 2>&1 && grep -q -- '--priority' tinytask/cli.py) || fail \"the worktree is missing, its suite fails, or tinytask/cli.py has no --priority\""
+        }
+      ]
     }
   ]
 }
