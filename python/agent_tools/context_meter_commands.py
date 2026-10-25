@@ -3,8 +3,11 @@
 The lexer reads the subset of bash the rewrite needs: single and double quotes,
 backslash escapes and line continuations, comments, the control and redirection
 operators, and the IO-number rule (`2>&1`, `5>out`). It does not expand
-anything. A heredoc, an unterminated quote or a trailing backslash is outside
-the subset, so the lexer returns `None` and the caller leaves the command alone.
+anything. A heredoc, an unterminated quote, a trailing backslash, or a
+double-quoted interior holding an unescaped `$(` or backtick (a substitution
+the subset does not model, so a progress call inside it would go unseen) is
+outside the subset, so the lexer returns `None` and the caller leaves the
+command alone.
 
 A rewrite deletes every spelling of `--context-tokens` from each progress
 invocation (the full option, an unambiguous argparse abbreviation down to
@@ -122,7 +125,11 @@ class _Lexer:
         return self.tokens
 
     def double_quoted(self, index: int) -> int:
-        """Append the interior of the `"…"` opening at `index`; the next index, or -1."""
+        """Append the interior of the `"…"` opening at `index`; the next index, or -1.
+
+        -1 also refuses an unescaped `$(` or backtick: the subset does not lex the
+        substitution, and treating it as literal text would hide a progress call in it.
+        """
         command = self.command
         self.begin(index)
         self.plain = False
@@ -140,6 +147,8 @@ class _Lexer:
                 elif following != "\n":
                     self.chars.append(char + following)
                 cursor += 2
+            elif char == "`" or command.startswith("$(", cursor):
+                return -1
             else:
                 self.chars.append(char)
                 cursor += 1
@@ -165,7 +174,11 @@ class _Lexer:
 
 
 def lex(command: str) -> list[Token] | None:
-    """The words and operators of `command`, or `None` outside the supported subset."""
+    """The words and operators of `command`, or `None` outside the supported subset.
+
+    Outside the subset are a heredoc, an unterminated quote, a trailing backslash
+    and a double-quoted interior with an unescaped `$(` or backtick.
+    """
     return _Lexer(command).lex()
 
 

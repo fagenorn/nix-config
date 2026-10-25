@@ -115,7 +115,7 @@ class ProgressRewriteTest(MeterHarness):
 
     def test_other_commands_pass_through_untouched(self):
         self.append(self.agent_transcript, assistant_record(87412, message_id="01"))
-        for command in ("git status --short",
+        for command in ("git status --short", 'echo "$(date)"',
                         "echo 'workflow-state progress --context-tokens 5'",
                         "cat notes.md # workflow-state progress --context-tokens 5",
                         "workflow-state progressive --context-tokens 5",
@@ -243,7 +243,9 @@ class ProgressRewriteTest(MeterHarness):
     def test_an_untokenisable_progress_call_passes_through_with_a_message(self):
         self.append(self.agent_transcript, assistant_record(87412, message_id="01"))
         for command in ("workflow-state progress --context-tokens 5 'unterminated",
-                        "workflow-state progress --phase 3 <<'EOF'\nbody\nEOF"):
+                        "workflow-state progress --phase 3 <<'EOF'\nbody\nEOF",
+                        'out="$(workflow-state progress --phase 3 --context-tokens 5)"',
+                        'out="`workflow-state progress --phase 3`"'):
             with self.subTest(command=command):
                 self.assertEqual(self.run_meter(self.payload(command)), (0, {
                     "systemMessage": "context-meter: left a workflow-state progress call "

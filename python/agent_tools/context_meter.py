@@ -5,7 +5,8 @@ A command that contains no `workflow-state progress` invocation produces no
 output and reads no transcript. For one that does, it reads the calling agent's
 own context from its transcript and answers with the same command rewritten to
 carry that measurement in place of whatever `--context-tokens` the agent wrote,
-so the value the progress gate sees is measured, never self-reported.
+so the value the progress gate sees is measured, never self-reported. A progress
+call it cannot tokenise passes through unchanged with a message saying so.
 
 The hook grants nothing. It never prints `permissionDecision`, `decision` or
 `continue` and never exits 2: the permission and lifecycle guards decide
