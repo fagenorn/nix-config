@@ -20,7 +20,7 @@ Claude Code version: 2.1.310
 | Row | Direct | Proxied |
 |---|---|---|
 | beta-tokens | advanced-tool-use-2025-11-20, advisor-tool-2026-03-01, afk-mode-2026-01-31, cache-diagnosis-2026-04-07, claude-code-20250219, context-management-2025-06-27, dangerous-tool-use-2026-09-03, effort-2025-11-24, extended-cache-ttl-2025-04-11, inline-tools-2026-09-15, interleaved-thinking-2025-05-14, message-threads-2026-08-12, mid-conversation-system-clear-at-2026-08-21, mid-conversation-tool-changes-2026-07-01, oauth-2025-04-20, per-turn-control-2026-07-01, prompt-caching-scope-2026-01-05, thinking-binding-controls-2026-08-01, thinking-display-updates-2026-08-18, thinking-token-count-2026-05-13 | advanced-tool-use-2025-11-20, advisor-tool-2026-03-01, afk-mode-2026-01-31, claude-code-20250219, context-management-2025-06-27, dangerous-tool-use-2026-09-03, effort-2025-11-24, extended-cache-ttl-2025-04-11, inline-tools-2026-09-15, interleaved-thinking-2025-05-14, mid-conversation-tool-changes-2026-07-01, oauth-2025-04-20, per-turn-control-2026-07-01, thinking-display-updates-2026-08-18, thinking-token-count-2026-05-13 |
-| body-bytes | raw 69521, decoded 69521 | raw 67692, decoded 67692 |
+| body-bytes | raw 69521 (derived: the binary's gzip gate turns compression off under HTTPS_PROXY and NODE_EXTRA_CA_CERTS, so a plain direct launch sends this body gzipped (spec § What the pinned binary already says)), decoded 69521 | raw 67692, decoded 67692 |
 | body-encoding | identity (derived: the binary's gzip gate turns compression off under HTTPS_PROXY and NODE_EXTRA_CA_CERTS, so a plain direct launch sends this body gzipped (spec § What the pinned binary already says)) | identity |
 | body:diagnostics | {previous_message_id} | (absent) |
 | body:keys | context_management, diagnostics, max_tokens, messages, metadata, model, output_config, safeguards, stream, system, thinking, thread, tools | context_management, max_tokens, messages, metadata, model, output_config, safeguards, stream, system, thinking, tools |
@@ -54,6 +54,8 @@ Claude Code version: 2.1.310
 | tools:count | 13 | 12 |
 | tools:names | Agent, Bash, Edit, ListAgents, Read, ReportFindings, ScheduleWakeup, Skill, ToolSearch, Workflow, DeferredToolPlaceholder, Write, advisor | Agent, Bash, Edit, ListAgents, Read, ReportFindings, ScheduleWakeup, Skill, ToolSearch, Workflow, DeferredToolPlaceholder, Write |
 
+`body-encoding` is shown although both arms read identity; it is not one of the 33 diff rows.
+
 Beta tokens only direct: cache-diagnosis-2026-04-07, message-threads-2026-08-12, mid-conversation-system-clear-at-2026-08-21, prompt-caching-scope-2026-01-05, thinking-binding-controls-2026-08-01
 Beta tokens only proxied: none
 Within-arm varying rows: header:x-claude-code-prompt-id, header:x-claude-code-session-id, header:x-client-request-id, usage:cache_creation, usage:cache_creation_input_tokens, usage:cache_read_input_tokens
@@ -74,6 +76,39 @@ x-anthropic-billing-header: cc_version=2.1.310.754; cc_entrypoint=sdk-cli;
 Missing first-party headers: anthropic-dispatch-id=v2d
 Missing first-party headers without a recorded value: connection, x-claude-code-request-class
 
+`connection` is a hop-by-hop header and is not a forwarding candidate for E2's `FIRST_PARTY_HEADERS`.
+
 ## TLS interception (written evaluation)
 
-`HTTPS_PROXY` with a locally trusted interception CA keeps `api.anthropic.com` as the base URL, so the request keeps its first-party shape and Remote Control stays available, but the client's gzip gate turns compression off. The AC1 direct sessions above are exactly such runs: they differ from a plain direct launch in the body-encoding row, which shows identity here where a plain direct launch sends this body gzipped, and this evidence does not isolate any other row that the interception changes. It is not shipped, because a locally trusted CA would intercept the user's OAuth traffic on every launch (D5).
+`HTTPS_PROXY` with a locally trusted interception CA keeps `api.anthropic.com` as the base URL, so the request keeps its first-party shape and Remote Control stays available, but the client's gzip gate turns compression off. The AC1 direct sessions above are exactly such runs: they differ from a plain direct launch in the body-encoding row, which shows identity here where a plain direct launch sends this body gzipped, and in the raw half of the body-bytes row, which is derived from the same interception (a plain direct launch's raw size is smaller than the decoded 69521 shown), and this evidence does not isolate any other row that the interception changes. It is not shipped, because a locally trusted CA would intercept the user's OAuth traffic on every launch (D5).
+
+## Screens
+
+- Date 2026-10-25, commit `84b37547`, rig as in § Conditions, account `p1`, attempt `deadline_at` 2026-10-26T02:14:43Z. The deadline cutoff computation read 164 minutes before R0 and 158 before E2, against the 70-minute minimum, so no candidate was skipped for the deadline. Wire check: one `claude -p` session through mitmdump behind the candidate's proxy, reduced by `reduce.py check` against the AC1 rows. Timed run: `python3 -I ttft.py --rig <rig> --proxy-log <candidate>.log --out <candidate>.json` with one `--proxied-env KEY=VALUE` per lever variable (E3 `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1`, E1 `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1`, none for R0 and E2), against the stock proxy for R0, E3 and E1 and against the scratch prototype for E2. Timing runs never went through mitmdump.
+
+| Candidate | Lever | Wire check | Valid | Median proxied ms | Median direct ms | Δ ms | Passes | Quartiles proxied | Quartiles direct | Median within-pair ms |
+|---|---|---|---|---|---|---|---|---|---|---|
+| R0 | none (stock proxy) | — | true | 2820.5 | 2526.5 | 294.0 | false | [2562.25, 2820.5, 2902.75] | [2333.25, 2526.5, 2800.75] | 160.0 |
+| E3 | `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1` | holds | true | 2564.5 | 2522.5 | 42.0 | true | [2102.75, 2564.5, 3179.5] | [2281.75, 2522.5, 3278.5] | -57.5 |
+| G | request-body gzip in the proxy | not run: a candidate ranked before it passed | | | | | | | | |
+| E1 | `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1` | holds | true | 2774.5 | 2317.5 | 457.0 | false | [2435.25, 2774.5, 3125.75] | [2029.75, 2317.5, 2751.5] | 318.0 |
+| C | G with E1 | not run: a candidate ranked before it passed | | | | | | | | |
+| E2 | forward `anthropic-dispatch-id=v2d` (prototype, with gzip) | holds | true | 2560.5 | 2590.0 | -29.5 | true | [2373.75, 2560.5, 2750.25] | [1713.75, 2590.0, 3033.75] | 220.5 |
+
+E3 counted TTFT ms — proxied: [1974, 2096, 3111, 2635, 2105, 2494, 2387, 3385, 5019, 2805]; direct: [2420, 1999, 2176, 2351, 2317, 3261, 2625, 2748, 3376, 3331]
+E3 proxy ttfb_ms: [1247.9, 762.2, 1561.7, 1460.6, 894.0, 859.2, 1206.8, 1908.6, 2201.5, 1389.8]; upstream_conn: [reused x10]
+
+E1 counted TTFT ms — proxied: [2394, 3267, 3182, 2449, 2562, 3107, 2987, 2995, 2515, 2246]; direct: [2762, 2324, 2748, 2313, 1987, 2194, 1738, 2857, 2322, 2044]
+E1 proxy ttfb_ms: [1097.1, 2056.5, 2367.3, 1205.9, 1194.5, 1591.8, 1166.4, 1287.9, 1036.2, 850.0]; upstream_conn: [reused x10]
+
+E2 counted TTFT ms — proxied: [2738, 2274, 2524, 2661, 2105, 2787, 2597, 2502, 2862, 2407]; direct: [3152, 2750, 3031, 1883, 1472, 2430, 1777, 1524, 2778, 3042]
+E2 proxy ttfb_ms: [997.2, 1046.6, 1259.3, 1146.4, 1314.6, 1530.3, 1221.5, 1173.8, 1510.3, 1169.3]; upstream_conn: [reused x10]
+
+R0 counted TTFT ms — proxied: [2914, 2581, 2847, 2899, 2534, 3419, 2551, 2866, 2566, 2794]; direct: [2383, 2425, 2223, 2779, 2370, 2628, 1915, 2881, 2866, 2758]
+R0 proxy ttfb_ms: [1617.4, 1241.8, 1657.9, 1678.7, 1294.7, 2684.7, 1188.0, 1216.9, 1293.3, 1162.1]; upstream_conn: [reused x10]
+
+E3 wire check: the proxied main request carried `eager_input_streaming` in the key set of all eleven tools it sent (`tools:Agent:keys` through `tools:Write:keys`), where the AC1 proxied request had none and no `fine-grained-tool-streaming` beta token; those eleven `tools:*:keys` rows moved to the direct arm's values, and no row was added. The lever did not add a beta token in this session.
+E1 wire check: removed `body:diagnostics`, `header:anthropic-dispatch-id`, `header:x-claude-code-request-class`, `system:0:len`, `system:1:cache_control`, `system:2:cache_control`, `system:2:len`, `system:3:cache_control`, `system:count`, the eleven `tools:*:keys` rows, `tools:advisor:keys`, `tools:count` and `tools:names`; added none.
+E2 wire check: `header:anthropic-dispatch-id` appeared once with value `v2d` and was the only diff row removed, none added; the prototype's gzip also held (`header:content-encoding` gzip, `body-bytes` raw 24386 against decoded 67692, body valid JSON).
+
+Screen winner: E3
