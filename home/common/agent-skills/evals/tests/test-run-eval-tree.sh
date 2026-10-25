@@ -29,7 +29,7 @@ export HOME="$SCRATCH/home"
 mkdir -p "$HOME/.agents/share"
 cp "$TREE/home/common/agent-skills/platform-manifest.json" \
   "$TREE/home/common/agent-skills/host-declaration.json" "$HOME/.agents/share/"
-unset CLAUDE_CONFIG_DIR EVAL_TREE EVAL_SETTINGS EVAL_MAX_USD EVAL_TRIALS
+unset CLAUDE_CONFIG_DIR CLAUDE_CODE_FORCE_SESSION_PERSISTENCE EVAL_TREE EVAL_SETTINGS EVAL_MAX_USD EVAL_TRIALS
 
 FAKE_BIN="$SCRATCH/fakebin"
 mkdir -p "$FAKE_BIN"
@@ -46,6 +46,7 @@ fi
 {
   printf 'run=1\n'
   printf 'run_config_dir=%s\n' "${CLAUDE_CONFIG_DIR:-}"
+  printf 'force_session_persistence=%s\n' "${CLAUDE_CODE_FORCE_SESSION_PERSISTENCE:-}"
   printf 'resolve_project=%s\n' "$(command -v resolve-project)"
   printf 'cwd=%s\n' "$(pwd -P)"
   printf 'args=%s\n' "$(printf '%s' "$*" | tr '\n' ' ')"
@@ -149,6 +150,7 @@ tracked_claude_is_fixtures_own() {
     { echo "tracked .claude/ files differ from the fixture's own"; return 1; }
 }
 args_have() { grep -q -- "^args=.*$1" "$STATE/record"; }
+args_lack() { ! grep -q -- "^args=.*$1" "$STATE/record"; }
 row_has_tree_and_tokens() {
   last_row | jq -e --arg tree "$TREE" --arg rev "$(git -C "$TREE" rev-parse HEAD)" \
     --argjson exit "$1" '
@@ -191,6 +193,8 @@ check "claude ran with --settings naming EVAL_SETTINGS" args_have "--settings $S
 check "claude ran with --dangerously-skip-permissions" args_have '--dangerously-skip-permissions'
 check "claude ran with --output-format json" args_have '--output-format json'
 check "claude ran with --add-dir" args_have '--add-dir '
+check "claude ran without --no-session-persistence" args_lack '--no-session-persistence'
+check "claude ran with CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1" test "$(recorded force_session_persistence)" = 1
 shim_root_is_temp() { case "$(basename "$ROOT")" in run-eval-tree.*) [ "$(recorded resolve_project)" = "$ROOT/bin/resolve-project" ] ;; *) false ;; esac; }
 check "resolve-project resolves to a run-eval-tree temp root's shim" shim_root_is_temp
 check "the shim root sits in TMPDIR" test "$(dirname "$ROOT")" = "$(cd "$RUN_TMP" && pwd -P)"
