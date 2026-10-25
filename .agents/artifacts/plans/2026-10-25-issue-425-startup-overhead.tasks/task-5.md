@@ -23,6 +23,7 @@ From the worktree root, `SCRATCH` being the path `launch-scope scratch --repo-ro
 hostname -s                    # expect: mbp
 git status --short             # expect: no output
 CODE_HEAD=$(git rev-parse HEAD)
+ACCOUNT=$(claude-account active)   # a profile name or default, as in Task 4
 grep -q '^| AC4 |.*pending (Task 5)' .agents/artifacts/plans/2026-10-25-issue-425-startup-overhead.acceptance.md
 ```
 
@@ -32,8 +33,10 @@ Run the **Build** (Global Constraints), then `SETTINGS=$(nix-store --query --req
 
 ```bash
 launch-scope exec --repo-root <ledger repo root> --run-id <run-id> --worker-id <worker-id> -- \
-  bash -c 'start=$(date -u +%s); EVAL_TREE="$PWD" EVAL_SETTINGS="$1" ENABLE_CLAUDEAI_MCP_SERVERS=false just evals from-issue 1 >"$2/ac4-eval.txt" 2>&1; status=$?; echo "exit $status seconds $(( $(date -u +%s) - start )) at $(date -u +%Y-%m-%dT%H:%M:%SZ)"; exit $status' _ "$SETTINGS" "$SCRATCH"
+  bash -c 'start=$(date -u +%s); CLAUDE_ACCOUNT="$3" EVAL_TREE="$PWD" EVAL_SETTINGS="$1" ENABLE_CLAUDEAI_MCP_SERVERS=false just evals from-issue 1 >"$2/ac4-eval.txt" 2>&1; status=$?; echo "exit $status seconds $(( $(date -u +%s) - start )) at $(date -u +%Y-%m-%dT%H:%M:%SZ)"; exit $status' _ "$SETTINGS" "$SCRATCH" "$ACCOUNT"
 ```
+
+`ACCOUNT` is `$(claude-account active)` read before this step, as in Task 4: the eval runs `claude` from its temporary sandbox repository, which no binding covers, so without `CLAUDE_ACCOUNT` the launcher would fall back to the `default` account rather than the caller's. Record the account in the AC4 row's `Conditions`.
 
 Expected: `exit 0 seconds <n> at <instant>`. A non-zero exit with a `VERDICT:` line is a recorded miss (Step 4). A non-zero exit without one (the harness died before grading) stops the task as BLOCKED with `tail -20 "$SCRATCH/ac4-eval.txt"`.
 

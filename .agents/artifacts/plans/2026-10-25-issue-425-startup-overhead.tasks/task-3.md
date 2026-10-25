@@ -164,7 +164,7 @@ and its `postBuild` with:
     '';
 ```
 
-In `home/common/claude-code/README.md`, `## Accounts`, insert this paragraph directly after the paragraph that begins `` `default.nix` builds the folder into one store path (`accountsMod`) `` and before the one that begins `` In a session, `/account` lists ``:
+In `home/common/claude-code/README.md`, `## Accounts`, insert this paragraph directly after the paragraph that begins `` `default.nix` builds the folder into one store path (`accountsMod`) `` and before the one that begins `` In a session, `/account` lists ``. In the `` `default.nix` builds the folder `` paragraph itself, replace `and execs the pinned binary.` with `and starts the pinned binary (waiting on it, so the `/account` switch below can relaunch it).`, so it agrees with the switch paragraph and with `run`, which waits on `claude` rather than exec'ing it:
 
 ```markdown
 `claudeWithAccounts` also puts `claude-orchestrate` on PATH, the command that starts an orchestration session (issue 425): a script that exports `ENABLE_CLAUDEAI_MCP_SERVERS=false`, replacing any inherited value, and execs `claude-account run "$@"`, so the account, the mod and the `/account` switch are `run`'s, and the setting survives a switch because `run` relaunches `claude --resume` from its own process. Claude Code then skips the claude.ai connector fetch for that session, so neither it nor any of its subagents carries claude.ai connector instructions or tools; other MCP servers (palmier-pro, a project's `.mcp.json`) still load, and the claude.ai-synced skills stay governed by `skillOverrides` (`## Settings`). Plain `claude` leaves the variable alone and keeps the connectors. Start an orchestration with `claude-orchestrate`, then run `/orchestrate-issues …` inside it. `tests/test_claude_code_installed.py` runs both built launchers against a stub `CLAUDE_BIN` and checks the arguments and environment each hands it.
@@ -179,7 +179,7 @@ Run in bash (timeout 600 s), from the worktree root:
 ```bash
 set -e
 pkg=$(nix-store --query --requisites ./result | grep -- '-claude-code-with-accounts-[^/]*$')
-test "$(wc -l < "$pkg/bin/claude-orchestrate")" = 3
+test "$(wc -l < "$pkg/bin/claude-orchestrate")" -eq 3
 grep -qx 'export ENABLE_CLAUDEAI_MCP_SERVERS=false' "$pkg/bin/claude-orchestrate"
 if grep -q ENABLE_CLAUDEAI "$pkg/bin/claude" "$pkg/bin/claude-account"; then exit 1; fi
 ```

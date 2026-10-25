@@ -51,7 +51,7 @@ Task 5 — AC4 eval evidence — `.agents/artifacts/plans/2026-10-25-issue-425-s
 | AC1 | code | Task 1 | `home/common/agent-skills/tests/test_agent_model_matrix.py::AgentModelMatrixTest::test_only_the_brief_driven_agents_omit_claude_md` (`omitClaudeMd` is `true` for `mechanic` and `reviewer-lite`, absent for `implementer` and `reviewer`), run by `just agent-workflow-tests` in sdd's final gate. |
 | AC2 | code | Task 3 | `tests/test_claude_code_installed.py`: `ClaudeSettingsInstalledTest::test_skill_overrides_hide_exactly_the_listed_skills` (the artifact `just show-claude-settings` prints), `ClaudeLaunchersInstalledTest::test_claude_orchestrate_turns_claude_ai_connectors_off` and `::test_plain_claude_leaves_claude_ai_connectors_alone`, run by `just agent-installed-skill-tests`, which builds mbp first; the anis-desktop evaluation is the PR's required `Nix Eval` job (D10). |
 | AC3 | evidence | Task 4 | On mbp at the final code head, no activation: the Task 4 harness run before (deployed `claude`, deployed settings, base agents) and after (built `claude-orchestrate`, `--settings` the built file, branch agents), each read with `just agent-costs --report cache --projects-dir <that run's isolated copy> --events-since <start> --events-before <end>` and `scan_transcript`; thresholds: `reviewer-lite` first-request write+read at least 2,500 tokens smaller, `mechanic` `skill_listing` at least 30 % smaller, zero `claude.ai …` names in the after run's `mcp_instructions_delta` records. Acceptance-record row `AC3`; a void run is no measurement and nothing is tuned (D7, D9). |
-| AC4 | evidence | Task 5 | On mbp at the final code head: `EVAL_TREE=<worktree> EVAL_SETTINGS=<built settings> ENABLE_CLAUDEAI_MCP_SERVERS=false just evals from-issue 1`; threshold: `VERDICT: PASS` and exit 0. Acceptance-record row `AC4` (D7). |
+| AC4 | evidence | Task 5 | On mbp at the final code head: `CLAUDE_ACCOUNT=<the caller's account> EVAL_TREE=<worktree> EVAL_SETTINGS=<built settings> ENABLE_CLAUDEAI_MCP_SERVERS=false just evals from-issue 1`; threshold: `VERDICT: PASS` and exit 0. Acceptance-record row `AC4` (D7). |
 
 Nothing is owner-run at delivery. The one check outside the worktree is the anis-desktop evaluation, which CI's `Nix Eval` job runs on the PR (D10).
 
@@ -62,5 +62,10 @@ Nothing is owner-run at delivery. The one check outside the worktree is the anis
 - The launcher shape per D4 (Task 3); the installed-tier seam per D6 (Tasks 2, 3); docs per D8 (Tasks 2, 3).
 - The anis-desktop evaluation left to CI per D10 (Task 3, AC2).
 - Evidence before activation per D7; the AC3 harness, its isolation and its void rules per D9 (Tasks 4, 5).
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no focus; base `04a396606d69fe6b720596c20846934b040abaa6`; no fallback.
+- Accepted 3, rejected 0, deferred 0: R425-01 (Blocking — Task 3 Step 4 compares the padded BSD `wc -l` output numerically), R425-02 (Should fix — Task 5 passes and records `CLAUDE_ACCOUNT`, read as in Task 4), R425-03 (Should fix — Task 3 also corrects the README's "execs the pinned binary" sentence, since `run` waits on `claude`).
 
 ---
