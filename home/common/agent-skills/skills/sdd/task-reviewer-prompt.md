@@ -43,12 +43,14 @@ Subagent (reviewer, Opus/high as selected above):
     (shard order is packaging order, not Git path order): validate those
     fields, and read the live file, naming that check in your report, when the
     declared context cannot settle a hunk. Version 2, and version 3 with
-    `generated_evidence`, replace an oversized auto-generated EF migration
-    designer with a bounded entry: check its identities and model-shape counts
-    against the companion migration and snapshot diff, and require the
-    implementer report to show no-pending-model-change, generated-SQL and
-    provider-backed migration evidence. Missing or inconsistent corroboration
-    is a finding; generated evidence is never a waiver to approve.
+    `generated_evidence`, replace an oversized `ef-core-migration-designer` or
+    `whole-file-deletion` diff with a bounded entry. For a designer, check its
+    identities and model-shape counts against the companion migration and
+    snapshot diff, and require the implementer report to show
+    no-pending-model-change, generated-SQL and provider-backed migration
+    evidence; for a deletion, confirm the plan or spec intends the deletion and
+    no surviving file references the deleted path. Missing or inconsistent
+    corroboration is a finding; generated evidence is never a waiver to approve.
 
     The diff's context lines ARE the changed files: Read one separately only
     when a hunk you must judge is cut off mid-function, and say so. Do not

@@ -37,10 +37,12 @@ Subagent (reviewer, Opus/high for the native path selected above):
     `stable-first-fit-whole-file` packaging, treat every changed line as
     covered, and read the live file when the bounded context is short.
     Version 2, or version 3 with non-empty `generated_evidence`: also check
-    each bounded auto-generated EF designer evidence entry's identities and
-    model-shape counts against the companion migration and snapshot diff, and
-    require the report's no-pending-model-change, generated-SQL and
-    provider-backed migration evidence; it is never a waiver.
+    each `ef-core-migration-designer` entry's identities and model-shape counts
+    against the companion migration and snapshot diff, and require the report's
+    no-pending-model-change, generated-SQL and provider-backed migration
+    evidence; for each `whole-file-deletion` entry, confirm the plan or spec
+    intends the deletion and no surviving file references the deleted path.
+    Missing corroboration is a finding; generated evidence is never a waiver.
     When the packet states the review is scoped and lists the paths under
     review, retain the manifest root and metrics only as range-coverage
     evidence: do not read its shards. Those listed paths are the whole of the
