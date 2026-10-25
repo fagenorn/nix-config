@@ -336,14 +336,6 @@ class LifecycleHarness:
             phase,
             "--now",
             now,
-            "--turn-ceiling",
-            turn_ceiling,
-            "--context-ceiling",
-            context_ceiling,
-            "--turn-headroom",
-            turn_headroom,
-            "--context-headroom",
-            context_headroom,
             "--next-needs-context",
             str(next_needs_context).lower(),
             "--artifacts-sufficient",
@@ -351,6 +343,11 @@ class LifecycleHarness:
             "--remainder-self-contained",
             str(remainder_self_contained).lower(),
         ]
+        for flag, value in (("--turn-ceiling", turn_ceiling), ("--context-ceiling", context_ceiling),
+                            ("--turn-headroom", turn_headroom),
+                            ("--context-headroom", context_headroom)):
+            if value is not None:
+                args.extend((flag, value))
         if turn_count is not None:
             args.extend(("--turn-count", turn_count))
         if context_tokens is not None:
@@ -8086,6 +8083,63 @@ class DelegatedShipLaunchTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(self.state_path.read_bytes(), before)
         self.assertEqual(self.check_launch(action_id="14:1:1")["reason"],
                          "superseded_launch")
+
+
+class PhaseBudgetDefaultsTest(LifecycleHarness, unittest.TestCase):
+    """Issue 424: the phase-budget defaults live in agent_tools.phase_budget alone."""
+
+    MINIMAL = ["progress", "--repo-root", "/ledger", "--run-id", "run-1", "--issue", "1",
+               "--attempt", "1", "--phase", "0", "--next-needs-context", "true",
+               "--artifacts-sufficient", "false", "--remainder-self-contained", "false"]
+    BUDGET_FLAGS = ("--turn-ceiling", "--turn-headroom", "--context-ceiling",
+                    "--context-headroom")
+
+    def test_default_ceiling_hands_off_at_110000_and_continues_at_109999(self):
+        self.init_run()
+        self.spawn(issue=14, worktree=self.root / "wt-a")
+        defaults = dict(turn_ceiling=None, context_ceiling=None, turn_headroom=None,
+                        context_headroom=None)
+        below = self.progress(issue=14, attempt=1, phase=1, now="2026-08-13T20:05:00Z",
+                              turn_count=10, context_tokens=109999, **defaults)
+        self.assertEqual(below["action"], "continue")
+        at = self.progress(issue=14, attempt=1, phase=2, now="2026-08-13T20:10:00Z",
+                           turn_count=10, context_tokens=110000, **defaults)
+        self.assertEqual(at["action"], "handoff")
+
+    def test_the_four_defaults_have_one_home(self):
+        from agent_tools import phase_budget
+        self.assertEqual((phase_budget.TURN_CEILING, phase_budget.TURN_HEADROOM,
+                          phase_budget.CONTEXT_CEILING, phase_budget.CONTEXT_HEADROOM),
+                         (120, 2, 120000, 10000))
+        workflow = load_source_module(SCRIPT, "workflow_state_phase_budget_defaults")
+        args = workflow.build_parser().parse_args(self.MINIMAL)
+        self.assertEqual((args.turn_ceiling, args.turn_headroom, args.context_ceiling,
+                          args.context_headroom), (120, 2, 120000, 10000))
+        defaults = {}
+        for node in ast.walk(ast.parse(SCRIPT.read_text(encoding="utf-8"))):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "add_argument" and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value in self.BUDGET_FLAGS):
+                defaults[node.args[0].value] = [
+                    ast.unparse(keyword.value) for keyword in node.keywords
+                    if keyword.arg == "default"]
+        self.assertEqual(defaults, {
+            "--turn-ceiling": ["phase_budget.TURN_CEILING"],
+            "--turn-headroom": ["phase_budget.TURN_HEADROOM"],
+            "--context-ceiling": ["phase_budget.CONTEXT_CEILING"],
+            "--context-headroom": ["phase_budget.CONTEXT_HEADROOM"]})
+
+    def test_progress_reads_each_spelling_the_meter_removes_as_context_tokens(self):
+        """The context meter drops every prefix of --context-tokens from --context-t on (D15)."""
+        parser = load_source_module(
+            SCRIPT, "workflow_state_context_tokens_spellings").build_parser()
+        for spelling in ("--context-t", "--context-tok", "--context-tokens"):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(parser.parse_args([*self.MINIMAL, spelling, "5"]).context_tokens, 5)
+                self.assertEqual(parser.parse_args([*self.MINIMAL, f"{spelling}=7"]).context_tokens, 7)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args([*self.MINIMAL, "--context-", "5"])
 
 
 class PhaseGateReplyTest(LifecycleHarness, unittest.TestCase):
