@@ -29,7 +29,7 @@ export HOME="$SCRATCH/home"
 mkdir -p "$HOME/.agents/share"
 cp "$TREE/home/common/agent-skills/platform-manifest.json" \
   "$TREE/home/common/agent-skills/host-declaration.json" "$HOME/.agents/share/"
-unset CLAUDE_CONFIG_DIR CLAUDE_CODE_FORCE_SESSION_PERSISTENCE EVAL_TREE EVAL_SETTINGS EVAL_MAX_USD EVAL_TRIALS \
+unset CLAUDE_CONFIG_DIR CLAUDE_CODE_FORCE_SESSION_PERSISTENCE CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS EVAL_TREE EVAL_SETTINGS EVAL_MAX_USD EVAL_TRIALS \
   EVAL_POLICY AGENT_PHASE_BUDGET
 
 FAKE_BIN="$SCRATCH/fakebin"
@@ -42,7 +42,8 @@ cat >"$FAKE_BIN/claude" <<'FAKE'
 # timed-out run does. Any non -p invocation (an auth probe) is recorded as `other=`.
 # A -p run also leaves, in $FAKE_STATE: the --settings file it was given (settings.json),
 # where `workflow-state` resolved (which-workflow-state), that file's content
-# (workflow-state-shim), AGENT_PHASE_BUDGET (agent-phase-budget) and the `gh` it
+# (workflow-state-shim), AGENT_PHASE_BUDGET (agent-phase-budget),
+# CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS (print-bg-wait-ceiling) and the `gh` it
 # resolves (gh=).
 if [ "${1:-}" != -p ]; then
   printf 'other=%s\n' "$*" >>"$FAKE_STATE/record"
@@ -67,6 +68,7 @@ done
 command -v workflow-state >"$FAKE_STATE/which-workflow-state"
 cat "$(command -v workflow-state)" >"$FAKE_STATE/workflow-state-shim" 2>/dev/null
 printenv AGENT_PHASE_BUDGET >"$FAKE_STATE/agent-phase-budget"
+printenv CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS >"$FAKE_STATE/print-bg-wait-ceiling"
 if [ -d .claude ]; then
   ( find .claude -type l | sed 's|^\./||' | sort | while IFS= read -r link; do
       printf '%s\t%s\n' "$link" "$(readlink "$link")"
@@ -211,6 +213,7 @@ check "claude ran with --output-format json" args_have '--output-format json'
 check "claude ran with --add-dir" args_have '--add-dir '
 check "claude ran without --no-session-persistence" args_lack '--no-session-persistence'
 check "claude ran with CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1" test "$(recorded force_session_persistence)" = 1
+check "claude ran with CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0" test "$(cat "$STATE/print-bg-wait-ceiling" 2>/dev/null)" = 0
 shim_root_is_temp() { case "$(basename "$ROOT")" in run-eval-tree.*) [ "$(recorded resolve_project)" = "$ROOT/bin/resolve-project" ] ;; *) false ;; esac; }
 check "resolve-project resolves to a run-eval-tree temp root's shim" shim_root_is_temp
 check "the shim root sits in TMPDIR" test "$(dirname "$ROOT")" = "$(cd "$RUN_TMP" && pwd -P)"

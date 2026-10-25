@@ -449,9 +449,11 @@ run_trial() {
   # 424); the variable lives only in this subshell, and so does AGENT_PHASE_BUDGET, the
   # policy under test: set to EVAL_POLICY when that is set, otherwise removed, so a value
   # inherited from the launching shell never meters a run recorded as `policy: null`.
+  # CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 makes the `-p` run wait for its background agents
+  # rather than stop them 10 minutes after the last turn (issue 432); EVAL_TIMEOUT bounds it.
   # A tracked-issue run also gets the sandbox's read-only gh first on PATH, so every agent
   # of the run inherits it.
-  ( cd "$REPO" && export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 &&
+  ( cd "$REPO" && export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 &&
     { if [ "$SETUP_KIND" = tracked-issue ]; then export PATH="$WORK/bin:$PATH"; fi; } &&
     { if [ -n "${EVAL_POLICY:-}" ]; then export AGENT_PHASE_BUDGET=$EVAL_POLICY; else unset AGENT_PHASE_BUDGET; fi; } &&
     exec timeout "$EVAL_TIMEOUT" claude "${claude_args[@]}" ) \

@@ -175,7 +175,9 @@ hours), so two trials can cost twice that. Compare arms from the rows with
   context meter and `agent-costs` read transcripts. The sandbox's transcripts land in the
   login's projects directory, `~/.claude/projects/`, under the sandbox path's project name
   (every non-alphanumeric character of the path replaced by `-`), so `agent-costs` counts
-  eval spend.
+  eval spend. The run also gets `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`, so `-p` waits for
+  its background agents instead of stopping them 10 minutes after the last turn;
+  `EVAL_TIMEOUT` still bounds it.
 - Sandboxes are kept after the run and their path is printed, so you can inspect the spec
   and plan a failing assert complained about. Clean up with `rm -rf $TMPDIR/eval-*`.
 - Asserts may carry a `"contract": "..."` key documenting a target artifact contract
