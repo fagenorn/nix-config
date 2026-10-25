@@ -9,7 +9,7 @@
 
 **Tech stack:** Python 3 standard library (`socketserver`, `http.server`, `http.client`, `ssl`, `argparse`, `unittest`), bash, Nix (home-manager `launchd.agents`, `systemd.user.services`), `curl`, `jq`, `just`.
 
-Spec: `.agents/artifacts/specs/2026-10-24-issue-422-cache-proxy-design.md`; its `## Decision ledger` rows are cited by ID, D16–D19 appended by this plan, D20 by its standards review, and D23–D24 by its amendment after the owner's spike ruling (D21, D22). Issue: https://github.com/fagenorn/nix-config/issues/422
+Spec: `.agents/artifacts/specs/2026-10-24-issue-422-cache-proxy-design.md`; its `## Decision ledger` rows are cited by ID, D16–D19 appended by this plan, D20 by its standards review, D23–D24 by its amendment after the owner's spike ruling (D21, D22), and D25 by the amended plan's standards review. Issue: https://github.com/fagenorn/nix-config/issues/422
 
 ## Global Constraints
 
@@ -64,11 +64,13 @@ Task 5 — Live evidence: time to first token and the A/B eval — `docs/spikes/
 
 Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, model gpt-6-astra, effort xhigh), isolated read-only mode, base SHA 7601d3186a03bc2fd363d2c6241ea72925feb835, no focus, no fallback. Findings: B1–B4 blocking, S1–S3 should-fix, D1 and U1 discussion. Accepted and applied: B1 (fact-4 sibling selection excludes the parent), B2 (stage before the first build), B3 (TTFT runs keep raw usage), B4 (AC1 row carries its commands), S1 (explicit 2xx health check + redirect test), S2 (bounded child lifetime, explicit empty-median invalid), S3 (every client write under the client-closed handling + disconnect test), D1 (deadline cutoff in Task 5, per D20). U1 (issue body unreadable from the reviewer sandbox) rejected as a sandbox limit, not a plan defect: the ACs were supplied verbatim. Counts: 8 accepted, 1 rejected, 0 deferred. The amendment after the owner's spike ruling (D21–D24: Task 1 complete, Task 2 Step 0, the `AC1` row, Task 5's gate reads and deadline source) postdates this review.
 
+Second review, of the amended plan at `017acb1c`: Codex (`codex-companion task --fresh --reviewer plan-review`, model gpt-6-astra, effort xhigh), isolated read-only mode, base SHA 7601d3186a03bc2fd363d2c6241ea72925feb835, focus on the amendment's consistency, no fallback. Findings: one blocking, three should-fix, no actionable discussion item. Accepted and applied: B1 (Task 5 reads the tool-search switch from its one whole-line match; the report's prose line made the prefix match two lines), S1 (each TTFT run is its own process group, killed whole at the bound, because the wrapper waits on a separate `claude` child), S2 (TTFT runs keep raw usage per request and AC1's `met` needs a valid record), S3 (the appended ruling names § Fact 3's later replacement as its one exception); D25 records B1, S1 and S2. Counts: 4 accepted, 0 rejected, 0 deferred.
+
 ## Decisions
 
 - Spike gate, harness custody, fact definitions: per D1, D2, D3, D4 and D19 (appended), the gate amended by D21 and the report's treatment by D22; the ruling section, its readers and Task 1's completed state per D23 (appended).
 - Command contract and forwarding: per D5, D6, D7, D8, refined by D16 (appended).
 - Service shape and the port's one home: per D9. Wrapper routing and tool search: per D10, D11, D12. `claude-local`: per D13.
-- Live evidence: per D14, refined by D18 (appended); its deadline cutoff per D20, which takes the controller's `deadline_at` per D24 (appended). Test seams: per D15, refined by D17 (appended), which also moves AC4's anis-desktop half to CI.
+- Live evidence: per D14, refined by D18 (appended); its deadline cutoff per D20, which takes the controller's `deadline_at` per D24 (appended); the TTFT runs' switch read, process-group bound and per-request usage per D25 (appended). Test seams: per D15, refined by D17 (appended), which also moves AC4's anis-desktop half to CI.
 
 ---
