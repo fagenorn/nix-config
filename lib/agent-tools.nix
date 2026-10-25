@@ -43,6 +43,7 @@ let
     "adopt-project"
     "agent-evidence"
     "agent-model-matrix"
+    "cache-proxy"
     "conformance"
     "context-map-lint"
     "derive-review-feasibility-fixtures"
