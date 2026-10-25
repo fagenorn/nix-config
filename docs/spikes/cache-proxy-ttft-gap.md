@@ -62,9 +62,9 @@ Within-arm varying rows: header:x-claude-code-prompt-id, header:x-claude-code-se
 
 Lines only in the direct arm's first session:
 ~~~~
-x-anthropic-billing-header: cc_version=2.1.310.754; cc_entrypoint=sdk-cli; cch=7b324; cc_prompt_id=ec928bef-e1d8-471d-87e5-b37765bf2624; cc_turn_origin=sdk; cc_prompt_index=0; cc_turn_index=1;
+x-anthropic-billing-header: cc_version=2.1.310.754; cc_entrypoint=sdk-cli; cch=<session-scoped>; cc_prompt_id=<session-scoped>; cc_turn_origin=sdk; cc_prompt_index=0; cc_turn_index=1;
  - If the user asks about "ultrareview" or how to run it, explain that /code-review ultra launches a multi-agent cloud review of the current branch (or /code-review ultra <PR#> for a GitHub PR); /ultrareview is a deprecated alias for the same command. It is user-triggered and billed; you cannot launch it yourself, so do not attempt to via Bash or otherwise. It needs a git repository (offer to "git init" if not in one); the no-arg form bundles the local branch and does not need a GitHub remote.
-<total_tokens>15000000 tokens left</total_tokens>
+<harness token-budget line, session-scoped>
 WebSearch takes a `mode`. Use "standard" by default: it is the normal search, quick and cheap. Use "extended" only when a "standard" result comes back thin, off-target or possibly outdated, or from the start for hard-to-find or niche facts, very recent events, prices and availability, and multi-step research: it is thorough and fresh but several times the cost. When you plan several searches, send them in the same turn.
 ~~~~
 
