@@ -128,6 +128,12 @@ class ProxyServer(socketserver.ThreadingTCPServer):
         self.tls = ssl.create_default_context() if upstream.scheme == "https" else None
         super().__init__((HOST, port), ProxyHandler)
 
+    def handle_error(self, request, client_address):
+        """An exception no handler step expected (for one, a client reset on an idle
+        connection): one structured line, never the traceback socketserver prints."""
+        error = sys.exc_info()[1]
+        self.log.write("handler_error", error=f"{type(error).__name__}: {error}")
+
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -209,7 +215,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if len(lengths) > 1 or not (text.isascii() and text.isdigit()):
             self._reject(started, 400, "invalid_request_error", "invalid Content-Length")
             return None
-        body = self.rfile.read(int(text))
+        try:
+            body = self.rfile.read(int(text))
+        except OSError:
+            body = b""
         if len(body) < int(text):
             self.close_connection = True
             return None
@@ -338,7 +347,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cache-proxy", description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=port_number, required=True,
                         help="loopback port to listen on (0 picks a free one)")
-    parser.add_argument("--upstream", type=parse_upstream, default=parse_upstream(DEFAULT_UPSTREAM),
+    parser.add_argument("--upstream", type=parse_upstream, default=DEFAULT_UPSTREAM,
                         help="origin to forward to (default: %(default)s)")
     return parser
 

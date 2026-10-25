@@ -7,9 +7,11 @@ case's scripted responder; `CommandTest` runs `python -m agent_tools.cache_proxy
 
 import http.client
 import json
+import contextlib
 import select
 import socket
 import socketserver
+import struct
 import subprocess
 import sys
 import threading
@@ -354,6 +356,39 @@ class ForwardingTest(ProxyCase):
         self.assertEqual(fake.requests, [])
         [record] = log.records(1)
         self.assertEqual((record["outcome"], record["upstream_conn"]), ("rejected", None))
+
+
+    def test_a_client_reset_leaves_only_json_lines_and_the_server_keeps_serving(self):
+        fake = self.upstream(json_reply)
+        port, log = self.proxy(fake.url)
+        traceback_text = RecordingStream()
+        with contextlib.redirect_stderr(traceback_text):
+            self.reset_after(port, b"POST /v1/messages HTTP/1.1\r\nHost: x\r\n"
+                                   b"Content-Length: 100\r\n\r\n0123456789")
+            with traceback_text.condition:
+                traceback_text.condition.wait_for(lambda: traceback_text.lines, 0.5)
+        self.assertEqual((traceback_text.lines, traceback_text.partial), ([], ""))
+        client = self.client(port)
+        client.request("GET", "/_proxy/health")
+        self.assertEqual(client.getresponse().status, 200)
+        self.assertEqual(fake.requests, [])
+        self.assertEqual([json.loads(line)["event"] for line in log.lines], [])
+
+    def test_a_client_reset_on_an_idle_connection_is_one_handler_error_line(self):
+        port, log = self.proxy(self.upstream(json_reply).url)
+        self.reset_after(port, b"")
+        [record] = log.records(1)
+        self.assertEqual(record["event"], "handler_error")
+        self.assertTrue(record["error"].startswith("ConnectionResetError: "), record)
+
+    @staticmethod
+    def reset_after(port, data):
+        """Send `data`, then close with a RST instead of a FIN."""
+        with socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            if data:
+                sock.sendall(data)
+                time.sleep(0.1)  # let the proxy block in the body read before the reset
 
 
 class CommandTest(unittest.TestCase):
