@@ -6,7 +6,7 @@ For every module-owned direct autonomous run, Phase 5 is the controller's last p
 
 Finish Phase 5 and disposition every Blocking and accepted Should-fix finding. Apply accepted review edits and ledger writes, then commit the reviewed plan and ledger. After the last mutation, run fresh `artifact-budget check --kind design-spec` and `artifact-budget check --kind implementation-plan`, retain each checker's four metrics, and require both `within_budget`. If a commit hook changes either artifact, repeat check and commit until the roots and retained measurements agree. Require a clean worktree, then resolve the full 40-hex lowercase current commit as `reviewed_head_sha`.
 
-Once no conversational dependency remains, call `workflow-state progress` for completed Phase 5 with truthful available usage and the exact gate values `next_needs_context=false`, `artifacts_sufficient=true` and `remainder_self_contained=true`. Require the persisted action `delegate`, then dispatch exactly one fresh issue owner at the existing `from-issue-phase-delegate` tier. This includes mechanical-only direct autonomous runs.
+Once no conversational dependency remains, call `workflow-state progress` for completed Phase 5 with the exact gate values `next_needs_context=false`, `artifacts_sufficient=true` and `remainder_self_contained=true`. Require the persisted action `delegate`, then dispatch exactly one fresh issue owner at the existing `from-issue-phase-delegate` tier. This includes mechanical-only direct autonomous runs.
 
 The continuation is one closed JSON object. Its `owner` is the validated interface-2 owner object this controller acquired, unchanged, with all 19 members; angle-bracketed strings stand for the helper's own values:
 

@@ -1344,8 +1344,14 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_owner_has_executable_phase_gate_and_action_semantics(self):
         self.assertIn("workflow-state progress", self.from_issue)
         self.assertIn("continue | fresh_start | handoff | delegate", self.from_issue)
-        self.assertIn("--turn-ceiling 120 --context-ceiling 150000 --turn-headroom 2 "
-                      "--context-headroom 10000", self.from_issue)
+        # Issue 424: the ceilings live in agent_tools.phase_budget and the context meter
+        # supplies the count, so no from-issue document restates either.
+        for document in sorted(FROM_ISSUE_DIR.glob("*.md")):
+            text = document.read_text(encoding="utf-8")
+            for argv in ("--turn-ceiling", "--turn-headroom", "--context-ceiling",
+                         "--context-headroom", "--context-tokens"):
+                with self.subTest(document=document.name, argv=argv):
+                    self.assertNotIn(argv, text)
 
     def test_owner_lifecycle_is_optional_for_direct_use_and_covers_all_stops(self):
         identity = self.section(

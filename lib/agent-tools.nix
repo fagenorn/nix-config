@@ -45,6 +45,7 @@ let
     "agent-model-matrix"
     "conformance"
     "context-map-lint"
+    "context-meter"
     "derive-review-feasibility-fixtures"
     "diff-scope"
     "guard-policy"

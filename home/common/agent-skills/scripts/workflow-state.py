@@ -19,7 +19,7 @@ import sys
 import tempfile
 from typing import Any, Callable, Iterator, NamedTuple
 
-from agent_tools import attempt_store
+from agent_tools import attempt_store, phase_budget
 from agent_tools.attempt_custody import (
     AUTO_RESUMABLE_BLOCKED_ON,
     BLOCKED_ON_VALUES,
@@ -5729,10 +5729,10 @@ def build_parser() -> argparse.ArgumentParser:
     progress.add_argument("--phase", required=True, type=nonnegative_int)
     progress.add_argument("--turn-count", type=nonnegative_int)
     progress.add_argument("--context-tokens", type=nonnegative_int)
-    progress.add_argument("--turn-ceiling", type=nonnegative_int, default=120)
-    progress.add_argument("--context-ceiling", type=nonnegative_int, default=150000)
-    progress.add_argument("--turn-headroom", type=nonnegative_int, default=2)
-    progress.add_argument("--context-headroom", type=nonnegative_int, default=10000)
+    progress.add_argument("--turn-ceiling", type=nonnegative_int, default=phase_budget.TURN_CEILING)
+    progress.add_argument("--context-ceiling", type=nonnegative_int, default=phase_budget.CONTEXT_CEILING)
+    progress.add_argument("--turn-headroom", type=nonnegative_int, default=phase_budget.TURN_HEADROOM)
+    progress.add_argument("--context-headroom", type=nonnegative_int, default=phase_budget.CONTEXT_HEADROOM)
     progress.add_argument("--next-needs-context", required=True, type=literal_boolean)
     progress.add_argument("--artifacts-sufficient", required=True, type=literal_boolean)
     progress.add_argument(

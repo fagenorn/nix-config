@@ -177,9 +177,22 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             for hook in matches[0].get("hooks", [])
             if hook.get("type") == "command"
         ]
-        if len(command_hooks) != 1:
-            raise AssertionError(f"expected one command hook, found {command_hooks!r}")
-        command_hook = command_hooks[0]
+        # Issue 424: the context meter is the entry's second command hook.
+        guards = [hook for hook in command_hooks if str(hook.get("command", "")).endswith(
+            "/bin/claude-bash-lifecycle-guard")]
+        meters = [hook for hook in command_hooks if str(hook.get("command", "")).endswith(
+            "-agent-tools-context-meter")]
+        if len(command_hooks) != 2 or len(guards) != 1 or len(meters) != 1:
+            raise AssertionError(
+                f"expected exactly the guard and the context meter, found {command_hooks!r}")
+        meter = meters[0]
+        if meter.get("timeout") != 10 or meter.get("args", []) != []:
+            raise AssertionError(f"context meter must take no args and time out at 10: {meter!r}")
+        cls.meter = Path(meter["command"])
+        if " " in meter["command"] or not cls.meter.is_absolute() or not os.access(
+                cls.meter, os.X_OK):
+            raise AssertionError(f"meter is not an executable absolute path: {meter!r}")
+        command_hook = guards[0]
         if command_hook.get("timeout") != 30:
             raise AssertionError(f"expected hook timeout 30, found {command_hook.get('timeout')!r}")
         if command_hook.get("args", []) != []:

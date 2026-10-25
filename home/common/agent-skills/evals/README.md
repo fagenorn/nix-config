@@ -109,6 +109,13 @@ of another skill names its own stop in its prompt.
   `EVAL_MAX_USD` (optional ceiling), `EVAL_TRIALS` (default 1), `EVAL_TREE` (a checkout
   to evaluate instead of the deployed skills) and `EVAL_SETTINGS` (the settings file
   tree mode passes as `--settings`; default `$HOME/.claude/settings.json`), both described above.
+- Every pipeline run keeps its session: the runner passes no `--no-session-persistence` and
+  starts `claude` with `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`, because Claude Code writes
+  no transcript for a `-p` run started inside a Claude Code session without it, and the
+  context meter and `agent-costs` read transcripts. The sandbox's transcripts land in the
+  login's projects directory, `~/.claude/projects/`, under the sandbox path's project name
+  (every non-alphanumeric character of the path replaced by `-`), so `agent-costs` counts
+  eval spend.
 - Sandboxes are kept after the run and their path is printed, so you can inspect the spec
   and plan a failing assert complained about. Clean up with `rm -rf $TMPDIR/eval-*`.
 - Asserts may carry a `"contract": "..."` key documenting a target artifact contract
