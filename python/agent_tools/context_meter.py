@@ -1,11 +1,14 @@
-"""`context-meter`: a PreToolUse hook that measures the context of a progress call (issue 424).
+"""`context-meter`: a PreToolUse hook that measures an agent's context (issue 424).
+
+It does two jobs: it rewrites a progress call to carry the measured context, and
+it tells an owner of a phase gate once per crossing of the hand-off threshold.
 
 Claude Code runs it before every Bash tool call with the call as JSON on stdin.
-A command that contains no `workflow-state progress` invocation produces no
-output and reads no transcript. For one that does, it reads the calling agent's
-own context from its transcript and answers with the same command rewritten to
-carry that measurement in place of whatever `--context-tokens` the agent wrote,
-so the value the progress gate sees is measured, never self-reported. A progress
+A command from a non-owner that contains no `workflow-state progress` invocation
+produces no output and reads no transcript. For one that does, it reads the
+calling agent's own context from its transcript and answers with the same command
+rewritten to carry that measurement in place of whatever `--context-tokens` the
+agent wrote, so the value the progress gate sees is measured, never self-reported. A progress
 call it cannot tokenise passes through unchanged with a message saying so.
 
 An agent that runs a registering call (a `workflow-state progress` or
