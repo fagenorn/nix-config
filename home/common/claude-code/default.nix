@@ -33,11 +33,26 @@ let
   # Advances on `just update` (nix flake update) + the next rebuild.
   claudeUnwrapped = inputs.claude-code.packages.${pkgs.system}.default;
 
+  # The cache proxy (agent_tools.cache_proxy, #422). This port is its one home:
+  # the service below listens on it and the launcher's CACHE_PROXY_URL is
+  # rewritten to it, so `claude` routes through the proxy while it is healthy.
+  cacheProxyPort = 27183;
+  cacheProxyUrl = "http://127.0.0.1:${toString cacheProxyPort}";
+  cacheProxyArgs = [
+    "${agentTools.launchers.cache-proxy}"
+    "--port"
+    (toString cacheProxyPort)
+  ];
+  # launchd and systemd start services with a minimal environment, so upstream
+  # TLS verification is pinned to the nixpkgs CA bundle.
+  cacheProxyCaFile = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+
   # The `accounts` mod (./accounts): one config directory per Claude account,
   # bound per project. Mod and launcher are one store path because the mod runs
   # `$.plugin.root/bin/claude-account` and the launcher names its own folder in
   # CLAUDE_CODE_PLUGIN_DIRS. The launcher's tools are rewritten to store paths
-  # rather than prefixed onto PATH, which the claude it execs would inherit.
+  # rather than prefixed onto PATH, which the claude it execs would inherit, and its
+  # CACHE_PROXY_URL to the cache proxy's URL.
   accountsMod =
     pkgs.runCommand "claude-accounts-mod"
       {
@@ -50,7 +65,8 @@ let
           --replace-fail 'JQ=jq' 'JQ=${pkgs.jq}/bin/jq' \
           --replace-fail 'GIT=git' 'GIT=${pkgs.git}/bin/git' \
           --replace-fail 'CURL=curl' 'CURL=${pkgs.curl}/bin/curl' \
-          --replace-fail 'DEFAULT_CLAUDE_BIN=' 'DEFAULT_CLAUDE_BIN=${claudeUnwrapped}/bin/claude'
+          --replace-fail 'DEFAULT_CLAUDE_BIN=' 'DEFAULT_CLAUDE_BIN=${claudeUnwrapped}/bin/claude' \
+          --replace-fail 'CACHE_PROXY_URL=' 'CACHE_PROXY_URL=${cacheProxyUrl}'
         patchShebangs "$out/bin"
         HOME="$(mktemp -d)" "$out/bin/claude-account" status
       '';
@@ -336,6 +352,29 @@ in
     lifecycleGuard
     claudeGuardPolicy
   ];
+
+  # The cache proxy as a user service on each platform (#422); README § Cache proxy.
+  launchd.agents.claude-cache-proxy = lib.mkIf pkgs.stdenv.isDarwin {
+    enable = true;
+    config = {
+      ProgramArguments = cacheProxyArgs;
+      EnvironmentVariables.SSL_CERT_FILE = cacheProxyCaFile;
+      RunAtLoad = true;
+      KeepAlive = true;
+      StandardOutPath = "${config.home.homeDirectory}/Library/Logs/claude-cache-proxy.log";
+      StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/claude-cache-proxy.log";
+    };
+  };
+
+  systemd.user.services.claude-cache-proxy = lib.mkIf pkgs.stdenv.isLinux {
+    Unit.Description = "Claude Code cache proxy (pass-through to the Anthropic API)";
+    Service = {
+      ExecStart = lib.concatStringsSep " " cacheProxyArgs;
+      Environment = [ "SSL_CERT_FILE=${cacheProxyCaFile}" ];
+      Restart = "always";
+    };
+    Install.WantedBy = [ "default.target" ];
+  };
 
   # Claude-only bridge orchestration. Keeping this outside the shared
   # ~/.agents/skills tree prevents Codex from recursively invoking itself.
