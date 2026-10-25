@@ -198,6 +198,27 @@ def progress_starts(tokens: Sequence[Token]) -> list[int]:
             and tokens[index + 1].kind == "word" and tokens[index + 1].value == "progress"]
 
 
+def registers_owner(tokens: Sequence[Token]) -> bool:
+    """Whether a call makes its agent an owner of a phase gate.
+
+    A `workflow-state progress` or `mark-progress`, or an `sdd-gate`, with an
+    `--action-id` after it in the same simple command.
+    """
+    for index, token in enumerate(tokens):
+        if token.kind != "word":
+            continue
+        name = token.value.rsplit("/", 1)[-1]
+        following = tokens[index + 1] if index + 1 < len(tokens) else None
+        gate = name == "sdd-gate" or (
+            name == "workflow-state" and following is not None and following.kind == "word"
+            and following.value in ("progress", "mark-progress"))
+        if gate and any(word.kind == "word" and (word.value == "--action-id"
+                                                  or word.value.startswith("--action-id="))
+                        for word in tokens[index + 1:simple_command_end(tokens, index)]):
+            return True
+    return False
+
+
 def _is_spelling(value: str) -> bool:
     name = value.partition("=")[0]
     return name.startswith(MINIMUM_SPELLING) and OPTION.startswith(name)

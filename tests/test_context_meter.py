@@ -1,11 +1,13 @@
 """context-meter (issue 424): the PreToolUse hook that measures an agent's context."""
 
+import fcntl
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 SESSION = "5f0c9a52-3d1e-4c7b-9a61-0d2b7c4e8f10"
@@ -270,6 +272,115 @@ class RewriteProofTest(unittest.TestCase):
                                 expected))
         self.assertFalse(proved("workflow-state progress --context-tokens 87412 '--phase 3",
                                 expected))
+
+
+CROSSING = ("context-meter: your context is {} tokens, at or above the 110000-token hand-off "
+            "threshold. At the next safe point (the step in hand committed, no worker you "
+            "dispatched still running), run your phase gate: workflow-state progress for your "
+            "last completed phase, with truthful booleans, then obey its action. This notice is "
+            "not repeated.")
+MARK = "workflow-state mark-progress --repo-root /ledger --run-id run-1 --action-id 7:1:1"
+
+
+class CrossingTest(MeterHarness):
+    def setUp(self):
+        super().setUp()
+        self.calls = 0
+
+    def call(self, context, command="git status --short", *, agent=True):
+        self.calls += 1
+        transcript = self.agent_transcript if agent else self.main_transcript
+        self.append(transcript, assistant_record(context, message_id=f"c{self.calls}",
+                                                 sidechain=agent))
+        code, output, stderr = self.run_meter(self.payload(command, agent=agent))
+        self.assertEqual((code, stderr), (0, ""))
+        return None if output is None else output["hookSpecificOutput"].get("additionalContext")
+
+    def test_105k_to_112k_injects_once_and_118k_does_not(self):
+        self.assertIsNone(self.call(105000, MARK))
+        self.assertEqual(self.call(112000), CROSSING.format(112000))
+        self.assertIsNone(self.call(118000))
+
+    def test_dropping_below_the_threshold_rearms_the_trigger(self):
+        self.assertIsNone(self.call(105000, MARK))
+        self.assertEqual(self.call(112000), CROSSING.format(112000))
+        self.assertIsNone(self.call(90000))
+        self.assertEqual(self.call(111000), CROSSING.format(111000))
+        self.assertIsNone(self.call(113000))
+
+    def test_a_non_owner_is_never_notified(self):
+        for context, command in (
+                (105000, "git status --short"), (112000, "git log -1"),
+                (113000, "sdd-gate next plan.md --skill-dir /skills --task 2"),
+                (114000, "workflow-state check-launch --repo-root /ledger --run-id run-1"
+                         " --action-id 7:1:1"),
+                (115000, "launch-scope exec --repo-root /ledger --run-id run-1"
+                         " --action-id 7:1:1 -- sdd-gate next plan.md --task 2"),
+                (118000, "git status --short")):
+            with self.subTest(command=command):
+                self.assertIsNone(self.call(context, command))
+
+    def test_a_progress_call_at_the_threshold_sets_notified_without_injecting(self):
+        self.assertEqual(self.call(112000, PROGRESS.format(tokens="")), MEASURED.format(112000))
+        self.assertIsNone(self.call(115000))
+
+    def test_sdd_gate_with_an_action_id_registers_an_owner(self):
+        self.assertIsNone(self.call(100000, "sdd-gate next plan.md --skill-dir /skills --task 2"
+                                            " --repo-root /ledger --run-id run-1"
+                                            " --action-id=7:1:1"))
+        self.assertEqual(self.call(110000), CROSSING.format(110000))
+
+    def test_a_main_session_owner_is_keyed_apart_from_its_subagents(self):
+        self.assertIsNone(self.call(105000, MARK, agent=False))
+        self.assertIsNone(self.call(112000))
+        self.assertEqual(self.call(112000, agent=False), CROSSING.format(112000))
+
+    def test_an_unmeasured_call_changes_nothing(self):
+        self.assertIsNone(self.call(105000, MARK))
+        self.agent_transcript.unlink()
+        self.assertIsNone(self.run_meter(self.payload("git status --short"))[1])
+        self.assertEqual(self.call(112000), CROSSING.format(112000))
+
+    def test_an_owner_update_waits_for_the_state_lock(self):
+        self.assertIsNone(self.call(105000, MARK))
+        self.append(self.agent_transcript, assistant_record(112000, message_id="locked",
+                                                            sidechain=True))
+        state = self.home / ".agents/state/context-meter" / f"{SESSION}.agent-{AGENT}.json"
+        with state.open("r+") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            meter = subprocess.Popen(
+                [sys.executable, "-m", "agent_tools.context_meter"], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                env={**os.environ, "HOME": str(self.home)}, cwd=str(self.root))
+            try:
+                meter.stdin.write(json.dumps(self.payload("git status --short")))
+                meter.stdin.close()
+                meter.stdin = None  # communicate() would flush the closed stream (P424-03)
+                time.sleep(1.5)
+                self.assertIsNone(meter.poll(), "the meter finished while the state lock was held")
+            except BaseException:
+                meter.kill()
+                meter.communicate()
+                raise
+        try:
+            stdout, stderr = meter.communicate(timeout=60)
+        finally:
+            if meter.poll() is None:
+                meter.kill()
+                meter.communicate()
+        self.assertEqual((meter.returncode, stderr), (0, ""))
+        self.assertEqual(json.loads(stdout)["hookSpecificOutput"]["additionalContext"],
+                         CROSSING.format(112000))
+
+    def test_a_corrupt_state_file_is_a_loud_non_blocking_error(self):
+        self.assertIsNone(self.call(105000, MARK))
+        state = self.home / ".agents/state/context-meter" / f"{SESSION}.agent-{AGENT}.json"
+        state.write_text("{not json", encoding="utf-8")
+        self.append(self.agent_transcript, assistant_record(112000, message_id="bad",
+                                                            sidechain=True))
+        code, output, stderr = self.run_meter(self.payload("git status --short"))
+        self.assertEqual((code, output), (1, None))
+        self.assertIn(str(state), stderr)
 
 
 if __name__ == "__main__":
