@@ -213,6 +213,31 @@ class ProgressRewriteTest(MeterHarness):
             with self.subTest(command=command):
                 self.assertEqual(self.rewritten(self.run_meter(self.payload(command))[1]),
                                  expected)
+        # next to a redirection, bash itself must see the intended argv (P424-01)
+        redirections = {
+            "workflow-state progress>out --phase 3":
+                "workflow-state progress --context-tokens 87412 >out --phase 3",
+            "workflow-state progress --phase 3 --context-tokens 5>out":
+                "workflow-state progress --context-tokens 87412 --phase 3 5>out",
+        }
+        for command, expected in redirections.items():
+            with self.subTest(command=command):
+                rewritten = self.rewritten(self.run_meter(self.payload(command))[1])
+                self.assertEqual(rewritten, expected)
+                shown = subprocess.run(
+                    ["bash", "-c", 'workflow-state() { printf "%s\\n" "$@" >&2; }; ' + rewritten],
+                    cwd=str(self.root), capture_output=True, text=True, check=True)
+                self.assertEqual(shown.stderr.splitlines(),
+                                 ["progress", "--context-tokens", "87412", "--phase", "3"])
+
+    def test_an_unprovable_removal_leaves_the_command_unchanged_with_a_message(self):
+        self.append(self.agent_transcript, assistant_record(87412, message_id="01"))
+        for command in ("workflow-state progress --phase 3 --context-tokens $(printf 85000)",
+                        "workflow-state progress --phase 3 --context-tokens=$(printf 85000)"):
+            with self.subTest(command=command):
+                self.assertEqual(self.run_meter(self.payload(command)), (0, {
+                    "systemMessage": "context-meter: left a workflow-state progress call "
+                                     "unchanged (the rewrite failed its proof)."}, ""))
 
     def test_a_subagent_reads_its_own_transcript_and_a_main_session_its_session_transcript(self):
         self.append(self.main_transcript, assistant_record(150000, message_id="m1"),
@@ -303,11 +328,11 @@ Run the meter tests (Global Constraints). Expected: errors — `No module named 
 - `measure`, in order, returning the first reason that applies: identity `None` → `session or agent id is not a plain identifier`; `transcript_path` not a non-empty `str` → `no transcript path`; the path is `Path(transcript_path)` for a main session and `Path(transcript_path).parent / session_id / "subagents" / f"agent-{agent_id}.jsonl"` for a subagent; open it `rb`, seek to `max(0, size - WINDOW_BYTES)` and read to the end (`FileNotFoundError` → `transcript not found`, any other `OSError` → `transcript unreadable`); split on `b"\n"`, drop the first piece when the read started past offset 0, and walk the rest from the end. A piece qualifies when `json.loads` gives a `dict` with `type == "assistant"`, a `dict` `message` whose `model` is not `"<synthetic>"`, a `dict` `usage` whose three fields `input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` are each absent, `None` or a non-`bool` `int` ≥ 0, with a sum > 0, and, for a main session only, `isSidechain` is not `True`. Unparseable pieces and non-objects are skipped. The first qualifying piece's sum is `Measurement(sum, None)`; none → `no usage record in the last 1048576 bytes` (built from `WINDOW_BYTES`).
 
 `context_meter_commands.py` (module docstring: the lexer subset and spellings of D15):
-- `lex` scans once, left to right. Space and tab end a word. `'…'` appends its interior literally; `"…"` appends its interior, where a backslash before `$`, `` ` ``, `"`, `\` appends that character, before a newline appends nothing, and before anything else appends both; an unterminated quote returns `None`. Outside quotes a backslash before a newline is a line continuation (appends nothing, does not end the word), before any other character appends that character, and as the last character returns `None`. `#` where no word has started skips to the next newline. A newline is the operator `"\n"`. At `;`, `&`, `|`, `(`, `)`, `<`, `>` or a backtick the current word ends and the longest match from `("&>>", "<<<", "<<-", "&&", "||", "|&", ";;", "&>", ">>", ">&", "<&", "<>", ">|", "<<", ";", "&", "|", "(", ")", "<", ">", "`")` is one `op` token; `<<` or `<<-` (a heredoc) returns `None`. Every other character is part of a word.
+- `lex` scans once, left to right. Space and tab end a word. `'…'` appends its interior literally; `"…"` appends its interior, where a backslash before `$`, `` ` ``, `"`, `\` appends that character, before a newline appends nothing, and before anything else appends both; an unterminated quote returns `None`. Outside quotes a backslash before a newline is a line continuation (appends nothing, does not end the word), before any other character appends that character, and as the last character returns `None`. `#` where no word has started skips to the next newline. A newline is the operator `"\n"`. At `;`, `&`, `|`, `(`, `)`, `<`, `>` or a backtick the current word ends and the longest match from `("&>>", "<<<", "<<-", "&&", "||", "|&", ";;", "&>", ">>", ">&", "<&", "<>", ">|", "<<", ";", "&", "|", "(", ")", "<", ">", "`")` is one `op` token; `<<` or `<<-` (a heredoc) returns `None`. A word of ASCII digits only that ends exactly where a `<` or `>`-led operator (or `&>`, `&>>`) starts is no word: it becomes that operator's prefix, so `2>&1` is the one `op` `2>&` and `5>out` the `op` `5>` with target `out` (bash's IO-number rule, P424-01). Every other character is part of a word.
 - `SEPARATORS = {"\n", ";", "&", "&&", "|", "||", "|&", ";;", "(", ")", "`"}`; `simple_command_end(tokens, index)` is the index of the first `op` token after `index` whose value is in `SEPARATORS`, else `len(tokens)`. Every other operator is a redirection, and the word after a redirection is its target, never an option.
 - `progress_starts` returns each index `i` where `tokens[i]` is a word whose value's basename (`value.rsplit("/", 1)[-1]`) is `workflow-state` and `tokens[i + 1]` is the word `progress`.
 - A spelling is a word value `name` (or the part before the first `=`) with `name.startswith("--context-t") and "--context-tokens".startswith(name)`.
-- `rewrite_progress`: for each start `i`, scan `j` from `i + 2` to `simple_command_end(tokens, i + 1)`: a redirection skips itself and its target; the word `--` stops the scan; a spelling with `=` removes its word; a bare spelling removes its word and, when the next token is a word inside the simple command that does not start with `-`, that word too. When `measured` is not `None`, ` --context-tokens <measured>` is inserted at the `progress` word's `end`. Removing word `k` deletes `command[tokens[k - 1].end:tokens[k].end]`. Splice with this exact pass, which orders an insertion before a deletion at the same offset:
+- `rewrite_progress`: for each start `i`, scan `j` from `i + 2` to `simple_command_end(tokens, i + 1)`: a redirection skips itself and its target; the word `--` stops the scan; a spelling with `=` removes its word; a bare spelling removes its word and, when the next token is a word inside the simple command that does not start with `-`, that word too. When `measured` is not `None`, ` --context-tokens <measured>` is inserted at the `progress` word's `end`, followed by one space when the character at that offset is not a space, tab or newline and the offset is not the end of `command` (so `progress>out` cannot turn the value into an IO number, P424-01). Removing word `k` deletes `command[tokens[k - 1].end:tokens[k].end]`. A removal is unprovable — `rewrite_progress` returns `Rewrite(command, False)` with nothing spliced — when a removed word's `end` equals the `start` of the next token and that token is an `op` (a word glued to an operator, such as the `$` of `$(…)`), or when a bare spelling's next token inside the simple command is the `op` `(` or `` ` `` (P424-02). Splice with this exact pass, which orders an insertion before a deletion at the same offset:
 
 ```python
 def _splice(command: str, deletions: list[tuple[int, int]], insertions: dict[int, str]) -> str:
@@ -335,7 +360,7 @@ def _splice(command: str, deletions: list[tuple[int, int]], insertions: dict[int
 
 - [ ] **Step 4: Verify**
 
-Run the meter tests. Expected: `Ran 10 tests` and `OK`; any failing subtest names the case that is not yet met.
+Run the meter tests. Expected: `Ran 11 tests` and `OK`; any failing subtest names the case that is not yet met.
 
 Then check the recipe line:
 

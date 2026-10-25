@@ -115,11 +115,22 @@ class CrossingTest(MeterHarness):
                 [sys.executable, "-m", "agent_tools.context_meter"], stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 env={**os.environ, "HOME": str(self.home)}, cwd=str(self.root))
-            meter.stdin.write(json.dumps(self.payload("git status --short")))
-            meter.stdin.close()
-            time.sleep(1.5)
-            self.assertIsNone(meter.poll(), "the meter finished while the state lock was held")
-        stdout, stderr = meter.communicate(timeout=60)
+            try:
+                meter.stdin.write(json.dumps(self.payload("git status --short")))
+                meter.stdin.close()
+                meter.stdin = None  # communicate() would flush the closed stream (P424-03)
+                time.sleep(1.5)
+                self.assertIsNone(meter.poll(), "the meter finished while the state lock was held")
+            except BaseException:
+                meter.kill()
+                meter.communicate()
+                raise
+        try:
+            stdout, stderr = meter.communicate(timeout=60)
+        finally:
+            if meter.poll() is None:
+                meter.kill()
+                meter.communicate()
         self.assertEqual((meter.returncode, stderr), (0, ""))
         self.assertEqual(json.loads(stdout)["hookSpecificOutput"]["additionalContext"],
                          CROSSING.format(112000))
@@ -162,7 +173,7 @@ Run the meter tests (timeout 600 s). Expected: `FAILED`; the `CrossingTest` case
 
 - [ ] **Step 4: Verify**
 
-Run the meter tests. Expected: `Ran 19 tests` and `OK`.
+Run the meter tests. Expected: `Ran 20 tests` and `OK`.
 
 - [ ] **Step 5: Commit**
 

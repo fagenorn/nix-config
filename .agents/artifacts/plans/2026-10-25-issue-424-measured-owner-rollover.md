@@ -75,6 +75,13 @@ Task 6 — Evidence on mbp and the acceptance record — `.agents/artifacts/plan
 - Failure posture per D6 (Tasks 1, 3); module boundaries and fixed texts per D14 (Tasks 1, 3).
 - Phase-budget home per D7, skill text per D11 (Task 2).
 - Owners per D8 with the `--action-id` qualifier of D15; crossing state per D9; the two notes per D10 (Task 3).
-- Verification and evidence per D12, D16; eval sessions kept per D13 (Tasks 4–6).
+- Redirection-safe insertion and refused glued removals per D17 (Task 1).
+- Verification and evidence per D12, D16; eval sessions kept per D13 (Tasks 4–6); the AC5 audit's recogniser per D18 (Task 6).
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, `codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), fresh isolated read-only thread; no fallback.
+- Base SHA: 04a396606d69fe6b720596c20846934b040abaa6; reviewed plan commit 6f46e3b0. Focus: none.
+- Findings: 3 Blocking (P424-01 redirection-adjacent insertion, P424-02 glued substitution removal, P424-03 lock test `communicate()` on a closed stdin), 1 Should fix (P424-04 audit spelling coverage), 0 Discussion. Accepted 4, rejected 0, deferred 0: P424-01/02 per D17 in Task 1, P424-03 in Task 3, P424-04 per D18 in Task 6.
 
 ---

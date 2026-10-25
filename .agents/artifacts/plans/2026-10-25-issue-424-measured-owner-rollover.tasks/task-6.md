@@ -71,12 +71,20 @@ Expected: at least 1 transcript. None means the run kept no session (D13): BLOCK
 
 - [ ] **Step 4: Audit the transcripts and read the peak table**
 
-Write this script to `$SCRATCH/audit.py` and run `python3 -I "$SCRATCH/audit.py" "$SCRATCH/eval-projects" >"$SCRATCH/ac5-audit.txt"`:
+Write this script to `$SCRATCH/audit.py` and, from the worktree root, run `python3 -I "$SCRATCH/audit.py" "$SCRATCH/eval-projects" "$PWD/python" >"$SCRATCH/ac5-audit.txt"`. It recognises progress calls with the meter's own lexer, so every spelling the meter rewrites (a quoted `"workflow-state"` included) is counted (P424-04):
 
 ```python
 import json, pathlib, re, sys
 
-PROGRESS = re.compile(r"(?:^|[\s;&|(/])workflow-state\s+progress(?:\s|$)")
+sys.path.insert(0, sys.argv[2])
+from agent_tools.context_meter_commands import lex, mentions_progress, progress_starts
+
+
+def is_progress(command):
+    tokens = lex(command)
+    return mentions_progress(command) if tokens is None else bool(progress_starts(tokens))
+
+
 NOTE = re.compile(r"carries --context-tokens (\d+), measured")
 FIELDS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 root = pathlib.Path(sys.argv[1])
@@ -99,7 +107,7 @@ for path in sorted(root.rglob("*.jsonl")):
             for block in message.get("content") or []:
                 if (isinstance(block, dict) and block.get("type") == "tool_use"
                         and block.get("name") == "Bash"
-                        and PROGRESS.search(str((block.get("input") or {}).get("command", "")))):
+                        and is_progress(str((block.get("input") or {}).get("command", "")))):
                     uses[block["id"]] = True
         attachment = record.get("attachment") if record.get("type") == "attachment" else None
         if (isinstance(attachment, dict) and attachment.get("type") == "hook_additional_context"
