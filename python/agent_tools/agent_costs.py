@@ -47,8 +47,9 @@ from agent_tools.canonical import telemetry_digest
 
 # List price per million tokens: (input, output, cache_write_1h, cache_write_5m, cache_read).
 # Cache writes cost 2x input for the 1-hour TTL and 1.25x for 5 minutes; reads 0.1x.
-# The Opus-class row is the Opus 5.x list price (issue 421); model_family also
-# prices Fable and any unrecognised model with it.
+# The Opus-class row is the Opus-class list price issue 421 pinned. model_family
+# also prices Opus 5.5, Fable and any unrecognised model with it, so their
+# figures are approximate.
 PRICING = {
     "opus": (5.0, 25.0, 10.0, 6.25, 0.50),
     "sonnet": (3.0, 15.0, 6.0, 3.75, 0.30),
