@@ -5,15 +5,20 @@ Later classes drive `Keepalive` on a fake clock against #422's `FakeUpstream`, p
 `ProxyServer` in front of it, and run `python -m agent_tools.cache_proxy --keepalive`.
 """
 
+import functools
 import http.client
 import json
+import select
+import socket
+import subprocess
+import sys
 import threading
 import unittest
 from unittest import mock
 
 from agent_tools import cache_keepalive, cache_proxy
 from agent_tools.canonical import telemetry_digest
-from tests.test_cache_proxy import TIMEOUT, FakeUpstream, RecordingStream, closed_port
+from tests.test_cache_proxy import TIMEOUT, FakeUpstream, RecordingStream, closed_port, json_reply
 
 MESSAGES = "/v1/messages?beta=true"
 SESSION = "5e2b6c1a-0d3f-4c55-9a51-6f0c2d1e7a90"
@@ -632,6 +637,191 @@ class RunLoopTest(unittest.TestCase):
         self.assertEqual([(record["event"], record["stage"], record["error"]) for record in records],
                          [("keepalive_error", "tick", "RuntimeError: tick boom"),
                           ("keepalive_error", "send", "RuntimeError: send boom")])
+
+
+class KeepaliveProxyTest(unittest.TestCase):
+    """`ProxyServer` with a keepalive in front of `FakeUpstream` (D2, D9, D18, D24)."""
+
+    def setUp(self):
+        self.clock = FakeClock()
+        self.stream = RecordingStream()
+        self.log = cache_proxy.LineLog(self.stream)
+
+    def start(self, responder, keepalive=None):
+        fake = FakeUpstream(responder)
+        self.addCleanup(fake.close)
+        upstream = cache_proxy.parse_upstream(fake.url)
+        if keepalive is None:
+            keepalive = cache_keepalive.Keepalive(
+                self.log, functools.partial(cache_proxy.open_upstream, upstream, None), self.clock)
+        server = cache_proxy.ProxyServer(0, upstream, self.log, keepalive=keepalive)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return fake, server.server_address[1], keepalive
+
+    def send(self, port, agent, raw):
+        """One raw POST on a new client connection; returns (socket, status, body)."""
+        headers = [(name, "127.0.0.1:%d" % port if name == "Host" else value)
+                   for name, value in forwarded(agent, length=len(raw))]
+        sock = socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT)
+        self.addCleanup(sock.close)
+        sock.sendall(b"POST %s HTTP/1.1\r\n" % MESSAGES.encode()
+                     + b"".join(("%s: %s\r\n" % pair).encode() for pair in headers) + b"\r\n" + raw)
+        reply = http.client.HTTPResponse(sock)
+        reply.begin()
+        return sock, reply.status, reply.read()
+
+    def test_a_ping_reaches_upstream_on_its_own_connection_and_no_byte_reaches_the_client(self):
+        fake, port, keepalive = self.start(sse_reply("tool_use"))
+        value = document()
+        raw = encode(value)
+        sock, status, body = self.send(port, AGENT_P, raw)
+        self.assertEqual((status, body), (200, sse("tool_use")))
+        [(number, head, received)] = fake.requests
+        self.assertEqual(received, raw)
+        host = "127.0.0.1:%d" % fake.server.server_address[1]
+        expected = [(name, host if name == "Host" else "identity" if name == "Accept-Encoding"
+                     else header) for name, header in forwarded(AGENT_P, length=len(raw))]
+        self.assertEqual(head.split(b"\r\n"), [b"POST %s HTTP/1.1" % MESSAGES.encode()]
+                         + [("%s: %s" % pair).encode() for pair in expected] + [b""])
+        [record] = self.stream.records(1)
+        self.assertEqual(
+            {key: record[key] for key in ("keepalive", "conversation", "stop_reason", "outcome")},
+            {"keepalive": "tracked", "conversation": cache_keepalive.conversation_handle(SESSION, AGENT_P),
+             "stop_reason": "tool_use", "outcome": "complete"})
+        self.clock.advance(270)
+        [ping] = keepalive.tick()
+        keepalive.send(ping)
+        self.assertEqual([entry[0] for entry in fake.requests], [number, number + 1])
+        self.assertEqual(json.loads(fake.requests[1][2]), dict(value, max_tokens=1))
+        self.assertEqual(select.select([sock], [], [], 0.3)[0], [])
+
+    def test_a_keepalive_whose_observe_raises_forwards_unchanged_and_logs_one_error(self):
+        class Raising:
+            def observe(self, method, path, headers, body):
+                raise KeyError("boom")
+
+        fake, port, _ = self.start(json_reply, Raising())
+        raw = encode(document())
+        _, status, body = self.send(port, AGENT_P, raw)
+        self.assertEqual((status, body), (200, b"{}"))
+        [(_, head, received)] = fake.requests
+        self.assertIn(b"Accept-Encoding: gzip, deflate, br, zstd", head.split(b"\r\n"))
+        self.assertEqual(received, raw)
+        error, request = self.stream.records(2)
+        self.assertEqual((error["event"], error["stage"], error["error"]),
+                         ("keepalive_error", "observe", "KeyError: 'boom'"))
+        self.assertEqual((request["event"], request["keepalive"]), ("request", "untracked"))
+        self.assertNotIn("conversation", request)
+
+    def test_a_track_that_raises_is_dropped_and_the_response_still_arrives_whole(self):
+        log = self.log
+
+        class Track:
+            outcome, conversation, stop_reason = "tracked", "0123456789ab", None
+
+            def __init__(self, headers):
+                self.headers = headers
+
+            def started(self, status, content_type, content_encoding):
+                pass
+
+            def chunk(self, data):
+                raise ValueError("tap")
+
+            def done(self, outcome):
+                log.write("unexpected_done")
+
+            def log_fields(self):
+                return {"keepalive": "tracked"}
+
+        class Tapping:
+            def observe(self, method, path, headers, body):
+                return Track(headers)
+
+        _, port, _ = self.start(sse_reply(), Tapping())
+        _, status, body = self.send(port, AGENT_P, encode(document()))
+        self.assertEqual((status, body), (200, sse("end_turn")))
+        error, request = self.stream.records(2)
+        self.assertEqual((error["event"], error["stage"], error["error"]),
+                         ("keepalive_error", "track", "ValueError: tap"))
+        self.assertEqual((request["event"], request["keepalive"]), ("request", "untracked"))
+        self.assertEqual(len(self.stream.lines), 2)
+
+    def test_a_request_rejected_before_its_body_is_read_has_no_keepalive_field(self):
+        _, port, _ = self.start(json_reply)
+        with socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT) as sock:
+            sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n")
+            reply = http.client.HTTPResponse(sock)
+            reply.begin()
+            reply.read()
+        self.assertEqual(reply.status, 411)
+        [record] = self.stream.records(1)
+        self.assertEqual(record["outcome"], "rejected")
+        self.assertNotIn("keepalive", record)
+
+    def test_an_upstream_failure_ends_the_request_flight(self):
+        def responder(sock, head, body):
+            if b"x-claude-code-agent-id: " + AGENT_Q.encode() in head:
+                return False  # closed without a response: the proxy answers 502
+            sock.sendall(SSE_HEAD + chunked(sse("end_turn")))
+            return True
+
+        _, port, keepalive = self.start(responder)
+        self.assertEqual(self.send(port, AGENT_Q, encode(document(note="q")))[1], 502)
+        self.assertEqual(self.send(port, AGENT_P, encode(document()))[1], 200)
+        self.stream.records(2)
+        self.clock.advance(270)
+        self.assertEqual(keepalive.tick(), [])
+        ends = [json.loads(line) for line in self.stream.lines if '"keepalive_end"' in line]
+        self.assertEqual([(end["conversation"], end["reason"]) for end in ends],
+                         [(cache_keepalive.conversation_handle(SESSION, AGENT_P), "session_idle")])
+
+
+class KeepaliveCommandTest(unittest.TestCase):
+    def start(self, *args):
+        fake = FakeUpstream(json_reply)
+        self.addCleanup(fake.close)
+        process = subprocess.Popen([sys.executable, "-m", "agent_tools.cache_proxy", "--port", "0",
+                                    "--upstream", fake.url, *args],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.addCleanup(process.stderr.close)
+        self.addCleanup(process.wait, TIMEOUT)
+        self.addCleanup(process.terminate)
+        return process
+
+    @staticmethod
+    def record(process):
+        ready, _, _ = select.select([process.stderr], [], [], TIMEOUT)
+        if not ready:
+            raise AssertionError("no log line within the timeout")
+        return json.loads(process.stderr.readline())
+
+    def round_trip(self, process):
+        listening = self.record(process)
+        connection = http.client.HTTPConnection("127.0.0.1", listening["port"], timeout=TIMEOUT)
+        self.addCleanup(connection.close)
+        connection.request("POST", "/v1/messages", body=b"{}")
+        self.assertEqual(connection.getresponse().read(), b"{}")
+        return listening, self.record(process)
+
+    def test_help_lists_the_keepalive_flag(self):
+        completed = subprocess.run([sys.executable, "-m", "agent_tools.cache_proxy", "--help"],
+                                   capture_output=True, text=True, timeout=TIMEOUT, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--keepalive", completed.stdout)
+
+    def test_the_flag_marks_the_listening_line_and_each_request_line(self):
+        listening, request = self.round_trip(self.start("--keepalive"))
+        self.assertEqual((listening["event"], listening["keepalive"]), ("listening", True))
+        self.assertEqual((request["event"], request["keepalive"]), ("request", "untracked"))
+
+    def test_without_the_flag_no_line_carries_keepalive(self):
+        listening, request = self.round_trip(self.start())
+        self.assertEqual((listening["event"], request["event"]), ("listening", "request"))
+        self.assertNotIn("keepalive", listening)
+        self.assertNotIn("keepalive", request)
 
 
 if __name__ == "__main__":
