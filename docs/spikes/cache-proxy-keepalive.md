@@ -3,7 +3,7 @@
 Run: 2026-10-25 on host mbp; Claude Code 2.1.302; wrapper `/nix/store/yfb2jcxlmwm1bfdsfqrzillw3n0aghmh-claude-code-with-accounts-2.1.302/bin/claude`; launcher `/nix/store/m71c14g6sdi9b93a1nfwn3f3d0lqxdaf-agent-tools-cache-proxy`; account `p1`; code `bba10c48`; model `sonnet`.
 
 AC2: met
-AC3: pending (Task 5)
+AC3: met
 
 ## AC2 — keepalive works
 
@@ -75,3 +75,33 @@ The pinned Claude Code 2.1.302 Bash tool refuses a standalone `sleep 480` with `
 The on arm was not run with `sleep 480`. The amended command (D30) then got one trial per arm, and neither needed a rerun.
 
 One trial per arm, not tuned (#422 D27).
+
+## AC3 — no regression
+
+| Arm | VERDICT | wall_s | Sessions | Transcript cost | Pings | Ping outcomes | Ping cost | keepalive_end reasons | Total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| on | PASS (9/9 asserts) | 246 | 1 (041eb2e7-d7ff-4403-9f49-c9eb787be16f, with one subagent transcript) | $1.4483 | 0 | none | $0.0000 | none | $1.4483 |
+| off | PASS (9/9 asserts) | 316 | 1 (9c76f317-ef81-40f8-ac86-7e02eb3887de) | $1.6356 | 0 | none | $0.0000 | none | $1.6356 |
+
+The on total is lower than the off total ($1.4483 against $1.6356), so the threshold is met. The on arm sent no ping: its proxy log holds one `listening` line carrying `keepalive: true` and 26 `/v1/messages` `request` lines, every one carrying a `keepalive` field, and no `ping` or `keepalive_end` line. The off arm's log holds one `listening` line without a `keepalive` key and 36 `/v1/messages` `request` lines, none carrying `keepalive`, and no `ping` line. Neither log holds a `handler_error` line. The `keepalive_end` count is zero because each proxy was stopped with `kill` after its eval ended and no conversation had ended earlier.
+
+The two appended `results.jsonl` lines:
+
+| Arm | ts | verdict | wall_s | workdir |
+| --- | --- | --- | --- | --- |
+| on | 2026-10-25T17:32:50Z | PASS | 246 | `/private/var/folders/t4/b5y8ggd92zb044029__7wr9w0000gp/T/eval-from-issue-1.OfAn2F` |
+| off | 2026-10-25T17:39:14Z | PASS | 316 | `/private/var/folders/t4/b5y8ggd92zb044029__7wr9w0000gp/T/eval-from-issue-1.x1Rsvo` |
+
+### Conditions
+
+Host `mbp`; code `ca015155`; account `p1`; wrapper `/nix/store/yfb2jcxlmwm1bfdsfqrzillw3n0aghmh-claude-code-with-accounts-2.1.302/bin/claude`; launcher `/nix/store/m71c14g6sdi9b93a1nfwn3f3d0lqxdaf-agent-tools-cache-proxy`; `EVAL_TIMEOUT=900`; model `sonnet` (the `EVAL_MODEL` default).
+
+Each proxy: `sh run-proxy.sh <log> <pidfile> <ca bundle> /nix/store/m71c14g6sdi9b93a1nfwn3f3d0lqxdaf-agent-tools-cache-proxy [--keepalive]`, which runs the launcher with `--port 0` under `env -i`, as in AC2. The on arm's launcher got `--keepalive`; the off arm's did not.
+
+Each arm, run from the worktree root with `<port>` the one its proxy's `listening` line named: `env PATH="/nix/store/yfb2jcxlmwm1bfdsfqrzillw3n0aghmh-claude-code-with-accounts-2.1.302/bin:$PATH" ANTHROPIC_BASE_URL="http://127.0.0.1:<port>" ENABLE_TOOL_SEARCH=true CLAUDE_ACCOUNT="p1" EVAL_TIMEOUT=900 just evals from-issue 1`.
+
+Costs: `just agent-costs --format json --days 0 --projects-dir <arm projects copy>`, whose `.strata.claude` reads `cost_basis` `list-price`. An arm's total is its transcripts' `totals.cost_usd` plus its pings' cost priced through `agent_costs.PRICING`, which is zero here.
+
+One trial per arm, never rerun (#422 D27).
+
+`from-issue 1` runs take about 4–6 minutes, so few conversations reach the 270 s due time, and run-to-run variance can exceed the pings' effect. Here the on arm's lower total is variance, not keepalive savings: no ping was sent.
