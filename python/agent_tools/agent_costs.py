@@ -936,7 +936,7 @@ def human(n):
 
 
 def percentile(values, p):
-    """Nearest-rank percentile; 0 for an empty list."""
+    """The sorted value at index round(p/100 * (n-1)), half-to-even and clamped; 0 for none."""
     if not values:
         return 0
     ordered = sorted(values)

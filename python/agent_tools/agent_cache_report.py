@@ -76,7 +76,7 @@ class _Call:
 
 
 def _count(value):
-    """A usage field as a token count; a missing, null or non-numeric value reads as 0."""
+    """A usage field as a token count; anything but an int (a bool, float or null) reads as 0."""
     if isinstance(value, int) and not isinstance(value, bool):
         return value
     return 0

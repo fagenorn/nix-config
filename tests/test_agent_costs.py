@@ -1,9 +1,11 @@
-"""Offline tests for agent_tools.agent_costs against tiny synthetic transcripts.
+"""Offline tests for agent_tools.agent_costs and agent_cache_report on tiny synthetic transcripts.
 
 Covers the load-bearing counting rules (message-ID usage dedup, the tool-use-ID
 and tool-result-ID guards), token accounting, model/effort extraction, peak
 per-turn context, outcome derivation, the proceed-nudge matcher, and the
-artifact pass. Runs entirely offline: fixtures are built in a temp dir.
+artifact pass; and agent_tools.agent_cache_report: its transcript scanner, the
+`--report cache` CLI and the report's aggregation. Runs entirely offline:
+fixtures are built in a temp dir.
 
 Run: just agent-workflow-tests
 """
@@ -2144,7 +2146,7 @@ class CacheReportCliTest(unittest.TestCase):
                           r"child dispatch|message after end of turn)\s+\d", out)
         self.assertEqual(rows, [("general-purpose", handback), ("main", "message after end of turn"),
                                 ("general-purpose", "child dispatch")])  # premium descending
-        # three deaths, nearest-rank median of 540/600/660 s, premiums 1.5 + 2.0 + 0.25
+        # three deaths, median of 540/600/660 s, premiums 1.5 + 2.0 + 0.25
         self.assertRegex(out, r"(?m)^general-purpose\s+hand-back after end of turn\s+3\s+10\.0m\s+\$4$")
         self.assertRegex(out, r"(?m)^general-purpose\s+child dispatch\s+1\s+6\.7m\s+\$1$")
         self.assertIn("\nSubagent deaths 4 ($5 premium); main-session deaths 1 ($3)\n", out)
@@ -2156,6 +2158,30 @@ class CacheReportCliTest(unittest.TestCase):
         self.assertRegex(out, r"(?m)^general-purpose\s+3\s+20\.00k\s+10\.00k\s+20\.00k"
                               r"(\s+-){4}\s+600$")
         self.assertNotRegex(out, r"(?m)^main\s+\d+\s+[\d.]+k\s+[\d.]+k\s+-")  # no start-up row
+
+    def test_peak_percentiles_take_the_rounded_index_of_the_sorted_peaks(self):
+        # CR421-01: the value at index round(p/100 x (n-1)), half-to-even, not nearest
+        # rank. Four peaks: p50 is index round(1.5) = 2, 30k (nearest rank: 20k). Six
+        # peaks: p90 is index round(4.5) = 4, the fifth value 50k (nearest rank: 60k).
+        def result(agent_type, peak):
+            return {"agent_type": agent_type, "is_root": False, "calls": 1, "deaths": [],
+                    "reread_above": 0.0, "peak_ctx": peak, "startup": None}
+        four = [10_000, 20_000, 30_000, 40_000]
+        six = [10_000, 20_000, 30_000, 40_000, 50_000, 60_000]
+        results = ([result("explore", peak) for peak in four]
+                   + [result("plan", peak) for peak in six])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            agent_cache_report.print_report(results, window="all time", threshold=120_000,
+                                            top=30)
+        out = out.getvalue()
+        human = agent_costs.human
+        for agent_type, count, p50, p90, peak_max in (
+                ("explore", 4, 30_000, 40_000, 40_000),
+                ("plan", 6, 30_000, 50_000, 60_000)):
+            with self.subTest(agent_type):
+                cells = r"\s+".join(re.escape(human(v)) for v in (p50, p90, peak_max))
+                self.assertRegex(out, rf"(?m)^{agent_type}\s+{count}\s+\$0\s+{cells}$")
 
 
 class ModuleEntryPointTest(unittest.TestCase):
