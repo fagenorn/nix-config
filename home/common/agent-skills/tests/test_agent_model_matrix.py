@@ -43,7 +43,7 @@ EXPECTED_SUBAGENT_TYPES = {
     "bookkeeper": {"mechanic"},
     "explorer": {"Explore"},
     "researcher": {"general-purpose"},
-    "codex-transport": {"codex:rescue", "codex:codex-reviewer"},
+    "codex-transport": {"codex:codex-rescue", "codex:codex-reviewer"},
 }
 
 EXPECTED_OWNER_SITES = {

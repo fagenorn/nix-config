@@ -58,7 +58,7 @@ ALLOWED_SUBAGENT_TYPES = {
     "bookkeeper": {"mechanic"},
     "explorer": {"Explore"},
     "researcher": {"general-purpose"},
-    "codex-transport": {"codex:rescue", "codex:codex-reviewer"},
+    "codex-transport": {"codex:codex-rescue", "codex:codex-reviewer"},
 }
 CUSTOM_AGENT_ROLES = {"implementer", "reviewer", "reviewer-lite", "mechanic"}
 WORKFLOW_FAMILIES = {
