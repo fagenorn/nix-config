@@ -116,8 +116,14 @@ the timed runs) from the same scratch cwd, through the experiment wrapper
   except lines that contain the home directory path or a credential shape.
   Those are recorded only as a count and a byte length.
 
-Raw flows stay in scratch and are deleted after reduction. A credential-shape
-scan runs before every commit (422 D2).
+**Credential hygiene.** No raw flow file is ever written. A scratch mitmproxy
+addon writes one reduced record per request: credential headers by name only,
+allowlisted values, and the body to its own scratch file. In the direct arm,
+mitmdump intercepts only `api.anthropic.com:443` (`allow_hosts`) and tunnels
+every other host untouched. `Host` is left out of the diff, because both legs
+rewrite it by design (422 D6). The CA directory and the records are deleted
+after reduction, and a credential-shape scan runs before every commit
+(422 D2).
 
 **Missing first-party header.** A header present in every direct capture,
 absent from every proxied one, and constant in value is a *missing first-party
@@ -129,9 +135,25 @@ refusal or auth failure), headers come from the SDK's own debug log
 in both arms. Bodies then come only from the proxied reverse capture. The
 report records which instrument ran and what it could not see.
 
-**After the screens.** One more capture session runs the winner's proxied arm
-and diffs it against the direct captures. The evidence then shows what the
-lever changed on the wire.
+**Before each screen and the confirmation.** One capture session runs that
+candidate's proxied arm and diffs it against the direct captures. It shows
+that the lever reached the wire and what it changed. Each lever has its own
+wire check:
+
+- **E3:** the fine-grained-streaming marker appears in the tool definitions
+  or the betas.
+- **E1:** the rows of the AC1 diff that depend on the first-party test
+  disappear. When AC1 shows no such row, the check is vacuous and is recorded
+  as vacuous.
+- **G:** the body carries `Content-Encoding: gzip` and decodes to the client's
+  JSON.
+- **E2:** every restored header is present, and the body is gzipped as for G.
+- **C:** both the E1 and the G checks hold.
+
+If a check fails, the screen or confirmation is invalid, not failed. The rig
+(or, for the confirmation, the product) is fixed, and the candidate is
+captured again before any timing. That is instrument validity, not a
+re-measurement.
 
 ### Experiment rig
 
@@ -195,17 +217,21 @@ in writing only (D5).
   literal bound. The diagnostics are recorded and never decide.
 - **Cost rank.** Candidates are ranked by three keys, compared in order:
   1. the number of undocumented reliances shipped;
-  2. client-decided request content before proxy-synthesized headers;
+  2. client-decided request content before proxy-synthesized headers (gzip
+     changes the encoding, not the content);
   3. wrapper-only before proxy changes.
 
   The resulting order is E3, G, E1, C, E2.
 - **Screens.**
-  - R0, E3, E1 and E2 always run.
+  - R0 runs first, then the candidates in rank order.
+  - E3, E1 and E2 always run.
   - G and C run only if no candidate ranked before them has passed.
+  - No candidate is added after AC1.
   - No screen is ever repeated to get a different result.
 - **Winner.** The winner is the first passing candidate in rank order. R0 can
   never win: it would ship the gap, and two failures are already on record.
-  With no winner, the opt-in branch ships.
+  With no winner, the opt-in branch ships. If R0 passes, the report states
+  that the screens could not separate the levers from noise.
 - **Confirmation.** The winner is implemented, built and confirmed by one run
   at the final head. The run uses the built proxy on 27391 and the
   experiment wrapper copied from the built mod. It sets no harness levers:
@@ -264,11 +290,14 @@ as its observation (D5).
     inherits a shipped lever when started inside a routed session, next to the
     existing `ENABLE_TOOL_SEARCH` note (422 D11, D13).
 - **Proxy gzip (G, C, E2).**
-  - **Scope.** The proxy gzips a `POST` whose path starts with `/v1/messages`,
-    that has no client `Content-Encoding` and whose body is at least 4,096
-    bytes. It sends `gzip.compress(body, compresslevel=6)` with
-    `Content-Encoding: gzip` and the compressed `Content-Length`. Every other
-    request is forwarded as today.
+  - **Scope.** The proxy gzips a `POST` whose path is exactly `/v1/messages`
+    (a query string is allowed), that has no client `Content-Encoding` and
+    whose body is at least 4,096 bytes. That is the hot path, and the one the
+    client itself gzips. Paths below it, such as `count_tokens` and
+    `batches`, stay verbatim. The proxy sends
+    `gzip.compress(body, compresslevel=6)` with `Content-Encoding: gzip` and
+    the compressed `Content-Length`. Every other request is forwarded as
+    today.
   - **Order.** Gzip is the last step before upstream, so #429's future body
     reshaping happens before it.
   - **Rejection.** A gzipped request may get a 400 whose error message is one
@@ -281,6 +310,9 @@ as its observation (D5).
     4. turns gzip off for the rest of its process, logging one
        `gzip_disabled` line with the status and error body.
 
+    The off switch is one process-wide, one-way flag shared by the handler
+    threads.
+
     This copies the client's own policy, and it is the single exception to
     422 D6's no-retries rule.
   - **Log.** Request log lines gain `request_bytes` and
@@ -289,8 +321,8 @@ as its observation (D5).
     the forwarding contract with this one change, instead of saying nothing
     is added.
 - **Header restore (E2 only).** A fixed tuple in the proxy holds the missing
-  first-party headers from AC1. The proxy adds each one to a `/v1/messages*`
-  request that lacks it, and never edits a header the client sent. A comment
+  first-party headers from AC1. The proxy adds each one to a `POST` to exactly
+  `/v1/messages` that lacks it, and never edits a header the client sent. A comment
   names #98464 and 2.1.302, applying AC5's rule to an undocumented header. The
   report records the known cost: the proxy cannot tell query sources apart, so
   it sends `v2d` where the client would send nothing, and the client's `v2p`
@@ -303,11 +335,12 @@ as its observation (D5).
 - **The switch.** `CLAUDE_CACHE_PROXY` is a closed set of values:
   - **`1`.** Today's routing: probe, export, and re-decide an inherited proxy
     URL.
-  - **Unset or empty.** No probe runs. An `ANTHROPIC_BASE_URL` equal to the
+  - **Unset, empty or `0`.** No probe runs. A `0` lets one launch opt out
+    when the user's shell exports `1`. An `ANTHROPIC_BASE_URL` equal to the
     proxy URL is unset, so a child that opts out under an opted-in parent goes
     direct. Any other caller-set URL is left alone.
   - **Anything else.** `claude-account` dies with
-    `CLAUDE_CACHE_PROXY must be 1 or unset` before claude starts.
+    `CLAUDE_CACHE_PROXY must be 1, 0 or unset` before claude starts.
 - **The service** stays declared on both hosts, so opting in needs no rebuild,
   and #429 builds on it.
 - **Docs.** The port comment in the claude-code Nix module and README § Cache
@@ -354,7 +387,7 @@ merge time, and the #429 worktree is never touched.
     direct launch after a failed probe and a caller-set launch do not carry
     the variable, even when it is inherited.
   - **Opt-in branch.**
-    - default with a healthy proxy: direct;
+    - default or `0` with a healthy proxy: direct;
     - `1` with a healthy proxy: routed;
     - `1` with the proxy down: direct;
     - default with an inherited proxy URL: the URL is unset;
@@ -366,8 +399,9 @@ merge time, and the #429 worktree is never touched.
   the bytes it receives (#422's proxy test seam).
   - The upstream receives gzip with the right headers, and it decompresses to
     the client's bytes.
-  - Small bodies, non-messages paths and bodies the client already encoded
-    arrive verbatim, so the existing verbatim-headers test still covers them.
+  - Small bodies, paths other than exactly `/v1/messages` (such as
+    `/v1/messages/count_tokens`) and bodies the client already encoded arrive
+    verbatim, so the existing verbatim-headers test still covers them.
   - A body-parse 400 produces one identity resend, a 200 to the client,
     identity on the next request and exactly one `gzip_disabled` line.
   - E2's headers are added once and never duplicated.
@@ -396,12 +430,12 @@ merge time, and the #429 worktree is never touched.
 
 | ID | Choice | Grounding | Rejected alternative |
 |----|--------|-----------|----------------------|
-| D1 | AC1 uses one wire-level instrument for both arms: mitmdump from a devenv ad hoc shell (CA in scratch, port 27392); the direct arm goes through `HTTPS_PROXY` plus `NODE_EXTRA_CA_CERTS` with a caller-set first-party URL, and the proxied arm through the stock proxy with mitmdump as its upstream in reverse mode; two sessions per arm on the timed command line; the committed diff holds header names, allowlisted values (422 D2 plus dispatch and encoding headers), body structure and scanned differing text lines, while raw flows stay in scratch and are deleted; body encoding is code-derived for direct (the gzip gate); the fallback is the SDK debug log for headers when mitmdump fails | Issue scope 1 ("logging-only TLS-intercepting setup or Claude Code's own debug logging"); the spike captured the proxied arm only; 422 D2 never persists credentials; user CLAUDE.md: missing tools via devenv ad hoc; the binary's SDK log records headers before the gzip middleware and passes bodies only through the console inspector | SDK debug log as the primary instrument (bodies truncated, transport not seen); capturing only the proxied arm again (AC1 needs both); a hosts-file interception keeping native gzip (needs root and a system CA) |
+| D1 | AC1 uses one wire-level instrument for both arms: mitmdump from a devenv ad hoc shell (CA in scratch, port 27392); the direct arm goes through `HTTPS_PROXY` plus `NODE_EXTRA_CA_CERTS` with a caller-set first-party URL, and the proxied arm through the stock proxy with mitmdump as its upstream in reverse mode; two sessions per arm on the timed command line; no raw flow file is written: a scratch addon keeps credential headers by name only and bodies in scratch, interception is limited to `api.anthropic.com`, `Host` is left out of the diff, and everything is deleted after reduction; the committed diff holds header names, allowlisted values (422 D2 plus dispatch and encoding headers), body structure and scanned differing text lines; body encoding is code-derived for direct (the gzip gate); a capture of each candidate's proxied arm before its screen and before the confirmation must pass that lever's wire check, and a failed check invalidates the run instead of failing it; the fallback is the SDK debug log for headers when mitmdump fails | Issue scope 1 ("logging-only TLS-intercepting setup or Claude Code's own debug logging"); the spike captured the proxied arm only; 422 D2 never persists credentials; user CLAUDE.md: missing tools via devenv ad hoc; the binary's SDK log records headers before the gzip middleware and passes bodies only through the console inspector | SDK debug log as the primary instrument (bodies truncated, transport not seen); capturing only the proxied arm again (AC1 needs both); a hosts-file interception keeping native gzip (needs root and a system CA); saving mitmproxy flow files (the OAuth bearer would sit on disk, against 422 D2) |
 | D2 | Experiments use port 27391 for every cache-proxy and run both arms through a scratch copy of the built accounts mod with its one proxy-URL line substituted, so the wrapper's probe and exports are measured; proxy-side levers are screened as uncommitted scratch prototypes, and only the winner is built; levers go on the proxied arm only and the direct arm stays the fixed user baseline (422 D14, D18) | User constraint: ports other than 27183, 8160 and 4322, and no switch; the built wrapper hard-codes 27183; AC2 compares what a user gets each way | A caller-set proxy URL on the proxied arm (skips the probe and the wrapper's exports, so not what ships); implementing every lever in the product before screening (dead code for every loser); setting levers in both arms (E3 would change the baseline) |
 | D3 | The harness is 422's `ttft.py` with five changes only: one discarded but validity-checked warm-up pair; repeatable `--proxied-env KEY=VALUE`; a scrub of every lever, proxy, CA, log and opt-in variable from the inherited environment; the matching proxy-log `ttfb_ms` and `upstream_conn` per proxied run; and per-arm quartiles plus the median within-pair difference as diagnostics | Each candidate changes the proxied request, so its first proxied run pays a cache write while the direct arm stays warm (run 2's pair 0 wrote cache in both arms); this session's environment would otherwise leak into both arms | No warm-up (systematically biased against every new candidate); more than 10 counted pairs (AC2 fixes 10 per arm); a new harness (422 D18 and D25 conditions already reviewed twice) |
-| D4 | The decision rule is fixed before measurement: a pass is a valid run with Δ of medians ≤ 100 ms (AC2's literal bound), and diagnostics never decide; the rank by undocumented reliances, then client-decided content, then wrapper-only gives E3, G, E1, C, E2; R0, E3, E1 and E2 always screen, while G and C screen only if nothing ranked before them passed; screens are never repeated, and an invalid run is rerun once; the first passing candidate in rank is built and confirmed by one run at the final head; a failed, twice-invalid or deadline-skipped confirmation, or a failed tool-use smoke run, reverts the winner and ships opt-in; a change to the measured surface needs one new binding confirmation | Issue: "ship the cheapest combination", "each measured", AC2/AC3 and "shipping routing-by-default with the gap is not acceptable"; 422 D27 rejects re-measuring until a pass; AC5 shows the author weighs undocumented reliance; run 2: Δ +221.5 ms against a +80 ms within-pair median | A significance test (n = 10 has no power at 100 ms, and AC2's literal bound governs); a full factorial (more runs, more fluke passes); falling through to the next passer after a failed confirmation (multiple confirmations inflate false passes); R0 as a candidate (it ships the gap) |
+| D4 | The decision rule is fixed before measurement: a pass is a valid run with Δ of medians ≤ 100 ms (AC2's literal bound), and diagnostics never decide; the rank by undocumented reliances, then client-decided content (gzip is encoding, not content), then wrapper-only gives E3, G, E1, C, E2; R0 screens first and the candidates follow in rank order; E3, E1 and E2 always screen, while G and C screen only if nothing ranked before them passed; no candidate is added after AC1; screens are never repeated, and an invalid run is rerun once; if R0 passes, the report says the screens could not separate the levers from noise; the first passing candidate in rank is built and confirmed by one run at the final head; a failed, twice-invalid or deadline-skipped confirmation, or a failed tool-use smoke run, reverts the winner and ships opt-in; a change to the measured surface needs one new binding confirmation | Issue: "ship the cheapest combination", "each measured", AC2/AC3 and "shipping routing-by-default with the gap is not acceptable"; 422 D27 rejects re-measuring until a pass; AC5 shows the author weighs undocumented reliance; run 2: Δ +221.5 ms against a +80 ms within-pair median | A significance test (n = 10 has no power at 100 ms, and AC2's literal bound governs); a full factorial (more runs, more fluke passes); falling through to the next passer after a failed confirmation (multiple confirmations inflate false passes); R0 as a candidate (it ships the gap); an `ANTHROPIC_CUSTOM_HEADERS` copy of E2's headers (the same synthesized-header costs, and not among the issue's experiments) |
 | D5 | TLS interception through `HTTPS_PROXY` is evaluated in writing, with the AC1 direct capture as its observation, and never shipped | Phase-0 disposition (evaluate only); the binary's gzip gate excludes HTTPS proxies and custom CAs, so its request matches E1's except where Claude Code checks the host itself | Timing it (E1 measures that request shape without a CA on the user's OAuth traffic); shipping it (a locally trusted CA intercepting every launch) |
 | D6 | Wrapper levers are exported only on routed launches; E3 is exported unless caller-set (reverses 422 D11's "fine-grained tool streaming stays off" if E3 ships); E1's variable belongs to the wrapper, so it is exported `1` when routed and unset when the wrapper decides not to route, with the AC5 comment naming anthropics/claude-code#98464 and 2.1.302; `claude-local` is not edited, and its inheritance inside a routed session is documented | AC5; 422 D10 (decisions are per launch, and value identity marks inheritance); 422 D11 and D13 (inheritance documented, a claude-local unset rejected as a second home); the variable is undocumented, so no caller sets it | Declaring levers in the settings `env` (would reach direct and `claude-local` sessions too); leaving an inherited variable alone on caller-set launches (it would mark a caller's own gateway first-party); a claude-local unset (out of scope, second home) |
-| D7 | Proxy gzip covers `POST /v1/messages*` with no client encoding and a body of at least 4,096 bytes, at level 6, as the final upstream step; a body-parse 400 to a gzipped request gets one identity resend and a lifetime latch logged as `gzip_disabled`, the single exception to 422 D6's no-retries rule; log lines gain `request_bytes` and `upstream_request_bytes`; E2 adds only the AC1-derived constant headers, to requests that lack them, with the query-source and `v2p`-fallback costs recorded | The binary's own gate, threshold and rejection policy (a resend then a latch); the bar: the log stream is the debugger; #429 reshapes bodies later | Relaying the rejection (every routed request fails once per proxy lifetime, and the client never resends because it did not gzip); no rejection path (one API-side rollout would break every routed launch); level 9 (CPU for no wire gain at this size); rewriting `anthropic-beta` (the body may lack the matching fields) |
-| D8 | The opt-in branch uses `CLAUDE_CACHE_PROXY` as a closed set: `1` keeps today's routing; unset or empty means no probe, with an inherited proxy URL unset and any other caller URL untouched; any other value dies before claude starts; the service stays declared; any winner commits are reverted, so the product diff is the switch | AC3 ("opt-in only"); the wrapper's `CLAUDE_*` variable family; the bar: fail loud at a closed set; #429 builds on the service; Phase-0 default for question 4 | A Nix option (opting in would need a rebuild, while an exported variable can still be persisted in shell config); removing the service (opt-in would need a rebuild); keeping a screened but unconfirmed lever in opt-in routing (an undocumented reliance without a passing measurement) |
+| D7 | Proxy gzip covers `POST` to exactly `/v1/messages` (a query string is allowed) with no client encoding and a body of at least 4,096 bytes, at level 6, as the final upstream step; a body-parse 400 to a gzipped request gets one identity resend and sets a process-wide one-way latch logged as `gzip_disabled`, the single exception to 422 D6's no-retries rule; log lines gain `request_bytes` and `upstream_request_bytes`; E2 adds only the AC1-derived constant headers, to requests that lack them, with the query-source and `v2p`-fallback costs recorded | The binary's own gate, threshold and rejection policy (a resend then a latch); the bar: the log stream is the debugger; #429 reshapes bodies later | Relaying the rejection (every routed request fails once per proxy lifetime, and the client never resends because it did not gzip); no rejection path (one API-side rollout would break every routed launch); gzipping every path under `/v1/messages` (a sub-endpoint that refuses gzip with another message would fail every time); level 9 (CPU for no wire gain at this size); rewriting `anthropic-beta` (the body may lack the matching fields) |
+| D8 | The opt-in branch uses `CLAUDE_CACHE_PROXY` as a closed set: `1` keeps today's routing; unset, empty or `0` means no probe, with an inherited proxy URL unset and any other caller URL untouched; any other value dies before claude starts; the service stays declared; any winner commits are reverted, so the product diff is the switch | AC3 ("opt-in only"); the wrapper's `CLAUDE_*` variable family; the bar: fail loud at a closed set; #429 builds on the service; Phase-0 default for question 4 | A Nix option (opting in would need a rebuild, while an exported variable can still be persisted in shell config); removing the service (opt-in would need a rebuild); keeping a screened but unconfirmed lever in opt-in routing (an undocumented reliance without a passing measurement) |
 | D9 | Evidence lives in a new report beside #422's spike report, with `Shipped lever:` and `Routing default:` as whole-line markers for the acceptance record, raw usage in a sibling when over one review member, and #422's report unedited | The bar: point-in-time records keep their text; 422 D25 (whole-line machine reads); 422 D26 (sibling for usage, a record move is not a surface change) | Appending to the #422 spike report (a closed issue's record); acceptance reading prose lines (D25's two-line value bug) |
