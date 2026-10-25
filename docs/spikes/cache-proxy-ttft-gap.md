@@ -176,3 +176,20 @@ Per-run usage objects are in [cache-proxy-ttft-gap-usage.md](cache-proxy-ttft-ga
 Confirmation: failed
 
 The winner's product commits were reverted at 07f57262.
+
+## Verdict
+
+Shipped lever: none
+
+Routing default: opt-in
+
+No lever shipped: the screen winner's confirmation at 1250a968 measured a Δ of 206.0 ms, over the +100 ms bound, so `claude` routes only with `CLAUDE_CACHE_PROXY=1` (AC3). The measurements are § Screens and § Confirmation above.
+
+AC5: not applicable: no undocumented variable or header shipped.
+
+The rule's limits (spec § Decision rule):
+
+- Run 2 of #422 gave Δ = +221.5 ms but a median within-pair difference of +80 ms, and the per-arm interquartile ranges spanned about 0.45–1.0 s.
+- One n = 10 run cannot separate a lever's effect from noise at 100 ms.
+- With the run count capped and one confirmation, a lever that does nothing must pass twice by chance to ship, and a lever that works can still fail its confirmation.
+- AC2's bound is the issue author's, and it stays the verdict.
