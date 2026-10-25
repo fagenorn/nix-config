@@ -89,7 +89,44 @@ Transformed sibling 2 cache_read_input_tokens = 27171; baseline sibling 2 cache_
 
 Fact 3: fails
 
-Conditions: measured 2026-10-25 on mbp by Task 5 (D14, D18) on the built, never activated outputs. Wrapper `/nix/store/6q4nvil03zchd7mzgrklnyns7s22qlnp-claude-code-with-accounts-2.1.302/bin/claude`; launcher `/nix/store/xql5j6rd8ch4lsdgs97lb7f214pbcjv2-agent-tools-cache-proxy --port 27183` run in the foreground with the built launchd agent's command and environment, upstream `https://api.anthropic.com`. Account `p1` (`CLAUDE_ACCOUNT=p1`), `--model haiku`, `claude -p --output-format stream-json --verbose --include-partial-messages "Reply with exactly: ok"`, `ENABLE_TOOL_SEARCH=true` in both arms (the report's `Tool-search switch: ship`). The two arms differ only in `ANTHROPIC_BASE_URL`: unset for proxied (the wrapper routes it to `http://127.0.0.1:27183`), `https://api.anthropic.com` for direct. Ten alternating pairs, the order flipping each pair. TTFT is the client-side monotonic clock from launching the child to the first `content_block_delta` stream event.
+Two measurements are recorded. The line above is the second, current one, at `48419bfe` (the proxy with its HEAD-reply and logged-bytes fixes). The first, at `d4edc095`, is kept below as an earlier run. The root-cause findings for the difference are spec ledger row D27.
+
+### Run 2 — `48419bfe` (current)
+
+Conditions: measured 2026-10-25 on mbp in the final-review fix wave, following Task 5 (D14, D18) on the built, never activated outputs. Wrapper `/nix/store/6q4nvil03zchd7mzgrklnyns7s22qlnp-claude-code-with-accounts-2.1.302/bin/claude`; launcher `/nix/store/fkv680xn8nm99dnawz80s38dcs57lq67-agent-tools-cache-proxy --port 27183` run in the foreground with the built launchd agent's command and environment, upstream `https://api.anthropic.com`. Account `p1` (`CLAUDE_ACCOUNT=p1`), `--model haiku`, `claude -p --output-format stream-json --verbose --include-partial-messages "Reply with exactly: ok"`, `ENABLE_TOOL_SEARCH=true` in both arms (the report's `Tool-search switch: ship`). The harness sets only `ANTHROPIC_BASE_URL` differently: unset for proxied, so the wrapper runs its health probe (a `curl` and a `jq` spawn, about 25 ms measured locally) and routes to `http://127.0.0.1:27183`; `https://api.anthropic.com` for direct, which the wrapper leaves untouched without probing. The arms do not send identical requests: behind the non-first-party base URL Claude Code sends a smaller prompt, 22,332 input-side tokens per proxied request against 22,676 direct (344 fewer). Four runs sent a still smaller prompt: proxied pairs 3 and 8 (20,447 tokens, the two fastest proxied runs, 1676 and 1706 ms) and direct pairs 5 and 9 (20,791). Pair 0's runs, and proxied pair 3 and direct pair 5, wrote cache entries; the rest read the whole prefix from cache. Every proxied `/v1/messages` request reused the upstream connection the client's `HEAD /api/hello` preconnect opened. Ten alternating pairs, the order flipping each pair. TTFT is the client-side monotonic clock from launching the child to the first `content_block_delta` stream event.
+
+| pair | arm | ttft_ms | exit | proxy_lines |
+|------|-----|---------|------|-------------|
+| 0 | proxied | 3502 | 0 | 1 |
+| 0 | direct | 2371 | 0 | 0 |
+| 1 | direct | 2537 | 0 | 0 |
+| 1 | proxied | 2669 | 0 | 1 |
+| 2 | proxied | 2355 | 0 | 1 |
+| 2 | direct | 2827 | 0 | 0 |
+| 3 | direct | 2606 | 0 | 0 |
+| 3 | proxied | 1676 | 0 | 1 |
+| 4 | proxied | 3386 | 0 | 1 |
+| 4 | direct | 2399 | 0 | 0 |
+| 5 | direct | 2401 | 0 | 0 |
+| 5 | proxied | 2429 | 0 | 1 |
+| 6 | proxied | 3516 | 0 | 1 |
+| 6 | direct | 3560 | 0 | 0 |
+| 7 | direct | 2366 | 0 | 0 |
+| 7 | proxied | 2712 | 0 | 1 |
+| 8 | proxied | 1706 | 0 | 1 |
+| 8 | direct | 2937 | 0 | 0 |
+| 9 | direct | 2240 | 0 | 0 |
+| 9 | proxied | 2844 | 0 | 1 |
+
+Median TTFT: proxied 2690.5 ms, direct 2469.0 ms. Difference (proxied minus direct) 221.5 ms against the +100 ms threshold: over it, so fact 3 fails.
+
+Raw usage of every run (pair, arm), as the stream reported it, is in [`cache-proxy-spike-fact3-usage-2.md`](cache-proxy-spike-fact3-usage-2.md): each API request's `start` (message_start) and `delta` (message_delta) usage objects, then the session `usage` total (D26).
+
+### Run 1 — `d4edc095` (earlier run)
+
+Result then: fails, +511.5 ms.
+
+Conditions: measured 2026-10-25 on mbp by Task 5 (D14, D18) on the built, never activated outputs. Wrapper `/nix/store/6q4nvil03zchd7mzgrklnyns7s22qlnp-claude-code-with-accounts-2.1.302/bin/claude`; launcher `/nix/store/xql5j6rd8ch4lsdgs97lb7f214pbcjv2-agent-tools-cache-proxy --port 27183` run in the foreground with the built launchd agent's command and environment, upstream `https://api.anthropic.com`. Account `p1` (`CLAUDE_ACCOUNT=p1`), `--model haiku`, the same `claude -p` command line, `ENABLE_TOOL_SEARCH=true` in both arms. As in run 2, the harness sets only `ANTHROPIC_BASE_URL` differently, the proxied arm includes the wrapper's health probe, and the requests differ: 22,331 input-side tokens per proxied request against 22,675 direct (344 fewer). Proxied pair 2 is an outlier: it sent 20,446 tokens, wrote part of them to cache, and was that arm's fastest run (1979 ms). Ten alternating pairs, the order flipping each pair; TTFT as in run 2.
 
 | pair | arm | ttft_ms | exit | proxy_lines |
 |------|-----|---------|------|-------------|
