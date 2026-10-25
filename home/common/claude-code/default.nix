@@ -233,6 +233,15 @@ let
             command = "${lifecycleGuard}/bin/claude-bash-lifecycle-guard";
             timeout = 30;
           }
+          # The context meter (issue 424): rewrites each `workflow-state progress` call to
+          # carry this agent's measured context and, once per crossing of the hand-off
+          # threshold, tells an owner to run its phase gate. It never grants or denies,
+          # so the guard above still judges every call.
+          {
+            type = "command";
+            command = "${agentTools.launchers.context-meter}";
+            timeout = 10;
+          }
         ];
       }
     ];
