@@ -1,9 +1,11 @@
-"""Offline tests for agent_tools.agent_costs against tiny synthetic transcripts.
+"""Offline tests for agent_tools.agent_costs and agent_cache_report on tiny synthetic transcripts.
 
 Covers the load-bearing counting rules (message-ID usage dedup, the tool-use-ID
 and tool-result-ID guards), token accounting, model/effort extraction, peak
 per-turn context, outcome derivation, the proceed-nudge matcher, and the
-artifact pass. Runs entirely offline: fixtures are built in a temp dir.
+artifact pass; and agent_tools.agent_cache_report: its transcript scanner, the
+`--report cache` CLI and the report's aggregation. Runs entirely offline:
+fixtures are built in a temp dir.
 
 Run: just agent-workflow-tests
 """
@@ -12,13 +14,16 @@ import contextlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+from agent_tools import agent_cache_report
 from agent_tools import agent_costs
 from agent_tools.canonical import telemetry_digest
 
@@ -177,6 +182,18 @@ class ScanFileTest(unittest.TestCase):
         # sonnet: in 3.0, out 15.0, cache_write_5m 3.75, cache_read 0.30 per Mtok
         expected = (10 * 3.0 + 20 * 15.0 + 5 * 3.75 + 100 * 0.30) / 1e6
         self.assertAlmostEqual(r["cost"], expected, places=12)
+
+    def test_opus_class_list_price_is_five_and_twenty_five_per_mtok(self):
+        usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000,
+                 "cache_read_input_tokens": 1_000_000,
+                 "cache_creation_input_tokens": 3_000_000,
+                 "cache_creation": {"ephemeral_1h_input_tokens": 1_000_000,
+                                    "ephemeral_5m_input_tokens": 2_000_000}}
+        r = self.scan([assistant("m1", usage=usage, model="claude-opus-5-5")])
+        # $5 in + $25 out + 1M x $10 (1h write, 2x) + 2M x $6.25 (5m write, 1.25x)
+        # + 1M x $0.50 (read, 0.1x); the stale $15/$75 row gives $159.
+        self.assertAlmostEqual(r["cost"], 5.0 + 25.0 + 10.0 + 12.5 + 0.5, places=9)
+        self.assertAlmostEqual(r["cost_by_family"]["opus"], 53.0, places=9)
 
     def test_proceed_nudges_counted_and_bounded(self):
         def user(text, sidechain=False):
@@ -592,7 +609,8 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(direct["output"], 120)
         self.assertEqual(direct["cache_create"], 30)
         self.assertEqual(direct["cache_read"], 600)
-        self.assertAlmostEqual(direct["cost"], 0.0113625, places=12)
+        # six Opus-class USAGE_1 calls: (10 x 5 + 20 x 25 + 5 x 6.25 + 100 x 0.50) x 6 / 1e6
+        self.assertAlmostEqual(direct["cost"], 0.0037875, places=12)
         self.assertIn("6 turns", successful_stdout)
         self.assertIn("fresh 60", successful_stdout)
         self.assertIn("cache_create 30", successful_stdout)
@@ -1651,6 +1669,519 @@ class StrataCliTest(unittest.TestCase):
                              "--format", "json")
         self.assertIsNone(code)
         self.assertEqual(json.loads(raw)["strata"]["claude"]["runs"], [])
+
+
+CACHE_T0 = datetime(2026, 10, 12, 9, 0, tzinfo=timezone.utc)
+
+
+def at(seconds):
+    """A record timestamp `seconds` after CACHE_T0, in the transcripts' millisecond Z form."""
+    return ((CACHE_T0 + timedelta(seconds=seconds))
+            .isoformat(timespec="milliseconds").replace("+00:00", "Z"))
+
+
+def cache_usage(read, create, *, fresh=2, out=40, ttl="5m"):
+    """A usage object shaped like production's; the TTL split says where the writes went."""
+    return {
+        "input_tokens": fresh, "cache_read_input_tokens": read,
+        "cache_creation_input_tokens": create,
+        "cache_creation": {"ephemeral_5m_input_tokens": create if ttl == "5m" else 0,
+                           "ephemeral_1h_input_tokens": create if ttl == "1h" else 0},
+        "output_tokens": out, "service_tier": "standard",
+    }
+
+
+def cache_call(msg_id, seconds, read, create, *, blocks=None, model="claude-opus-5-5",
+               ttl="5m", stop_reason=None):
+    """One assistant record of a call; a call written as several blocks repeats the id."""
+    return assistant(msg_id, usage=cache_usage(read, create, ttl=ttl),
+                     content=blocks or [{"type": "text", "text": "Working."}],
+                     model=model, stop_reason=stop_reason, timestamp=at(seconds))
+
+
+def tool_use(tool_id, name):
+    return {"type": "tool_use", "id": tool_id, "name": name, "input": {}}
+
+
+def tool_result(tool_id, seconds, *, ends_turn=False):
+    value = {"type": "user", "isSidechain": True, "timestamp": at(seconds),
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": tool_id, "content": "ok"}]},
+             "toolUseResult": {"success": True}}
+    if ends_turn:
+        value["toolEndsTurn"] = True
+    return record(value)
+
+
+def user_prompt(seconds, text="Read the dispatch brief."):
+    return record({"type": "user", "isSidechain": True, "timestamp": at(seconds),
+                   "message": {"role": "user", "content": text}})
+
+
+def wake(origin, seconds):
+    """A message delivered to an idle agent, as the harness records it."""
+    return record({"type": "user", "isSidechain": True, "isMeta": True,
+                   "timestamp": at(seconds), "origin": origin,
+                   "message": {"role": "user", "content": origin.get("body", "")}})
+
+
+HANDBACK = {"kind": "peer", "from": "a716bbfa2863138b8", "senderTaskId": "a716bbfa2863138b8",
+            "name": "implementer", "handback": True,
+            "body": "[Subagent hand-back] The text below is the final report of a subagent "
+                    "this session delegated to.",
+            "handbackReportText": "- **Status:** DONE"}
+PEER_MESSAGE = {"kind": "peer", "from": "a4190e79ff437611b", "senderTaskId": "a4190e79ff437611b",
+                "name": "implementer", "body": "- **Status:** DONE"}
+TASK_NOTIFICATION = {"kind": "task-notification", "producer": "session-task"}
+
+
+def attachment(kind, chars, seconds, *, rendered=True):
+    """A start-up attachment whose rendered content is `chars` characters in two items."""
+    value = {"type": "attachment", "isSidechain": True, "timestamp": at(seconds),
+             "attachment": {"type": kind}}
+    if rendered:
+        half = chars // 2
+        value["rendered"] = [{"content": "a" * (chars - half)}, {"content": "b" * half}]
+        value["renderedRole"] = "system"
+    return record(value)
+
+
+def write_root(root, lines, *, session="s1"):
+    project = root / "-Users-me-repo"
+    project.mkdir(parents=True, exist_ok=True)
+    path = project / f"{session}.jsonl"
+    path.write_text("".join(lines), encoding="utf-8")
+    return path
+
+
+def write_subagent(root, lines, *, agent_type="general-purpose", name="agent-a1"):
+    """A subagent transcript and, unless agent_type is None, its sibling .meta.json."""
+    subagents = root / "-Users-me-repo" / "s1" / "subagents"
+    subagents.mkdir(parents=True, exist_ok=True)
+    path = subagents / f"{name}.jsonl"
+    path.write_text("".join(lines), encoding="utf-8")
+    if agent_type is not None:
+        (subagents / f"{name}.meta.json").write_text(json.dumps(
+            {"agentType": agent_type, "description": "fixture", "toolUseId": "toolu_fixture"}),
+            encoding="utf-8")
+    return path
+
+
+def scan_cache(path, *, is_root=False, since=None, before=None, threshold=120_000):
+    return agent_cache_report.scan_transcript(
+        (path, is_root), since=since, before=before, threshold=threshold)
+
+
+def handback_death_lines():
+    """A parent that dispatches a background child, ends its turn, is woken by the
+    child's hand-back 9 minutes later and rewrites its whole context."""
+    return [
+        user_prompt(0),
+        cache_call("m1", 1, 0, 30_000, blocks=[{"type": "text", "text": "Dispatching."}]),
+        cache_call("m1", 2, 0, 30_000, blocks=[tool_use("toolu_child", "Agent")]),
+        tool_result("toolu_child", 2),  # a background dispatch returns at once
+        cache_call("m2", 3, 30_000, 2_000, stop_reason="end_turn"),  # context 32,002
+        wake(HANDBACK, 543),
+        cache_call("m3", 545, 0, 32_500),
+    ]
+
+
+DONE_TEXT = ({"type": "text", "text": "Waiting for the hand-back."},)
+
+
+def pair_lines(*, prev=(30_000, 10_000), rewrite=40_500, gap=600, ttl="5m",
+               prev_blocks=DONE_TEXT, between=()):
+    """A call with a context of 2 + read + create at t=10, then one creating `rewrite`
+    tokens `gap` seconds later, with the `between` records in the file between them."""
+    read, create = prev
+    return [user_prompt(0),
+            cache_call("p1", 10, read, create, blocks=list(prev_blocks), ttl=ttl),
+            *between,
+            cache_call("p2", 10 + gap, 0, rewrite, ttl=ttl)]
+
+
+class CacheScanTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_a_hand_back_after_end_of_turn_is_one_death_with_its_premium(self):
+        result = scan_cache(write_subagent(self.root, handback_death_lines()))
+        self.assertEqual(result["agent_type"], "general-purpose")
+        self.assertEqual(result["calls"], 3)
+        self.assertEqual(len(result["deaths"]), 1)
+        death = result["deaths"][0]
+        self.assertEqual(death["kind"], "hand-back after end of turn")
+        self.assertEqual(death["gap_s"], 542.0)
+        # the rewrite is min(32,500 created, 32,002 prior context), at the Opus
+        # 5-minute write price less the read a warm cache would have paid
+        self.assertAlmostEqual(death["premium"], 32_002 * (6.25 - 0.50) / 1e6, places=12)
+        # a main session's 1-hour TTL makes the same 9 minutes no death
+        main = scan_cache(write_root(self.root, handback_death_lines()), is_root=True)
+        self.assertEqual(main["deaths"], [])
+
+    def test_each_cause_kind_is_decided_by_its_record(self):
+        cases = [
+            ("child dispatch", (tool_use("t1", "Agent"),), [tool_result("t1", 605)]),
+            ("child dispatch", (tool_use("t1", "Task"),), [tool_result("t1", 605)]),
+            ("long foreground command", (tool_use("t1", "Bash"),), [tool_result("t1", 605)]),
+            ("other tool", (tool_use("t1", "Read"),), [tool_result("t1", 605)]),
+            # the last of the predecessor's own results decides
+            ("child dispatch", (tool_use("t1", "Read"), tool_use("t2", "Agent")),
+             [tool_result("t1", 11), tool_result("t2", 605)]),
+            # a hand-back delivered after a foreground tool's result leaves the gap to the tool
+            ("long foreground command", (tool_use("t1", "Bash"),),
+             [tool_result("t1", 605), wake(HANDBACK, 605)]),
+            # the subagent's own turn-ending hand-back is no tool wait
+            ("message after end of turn", (tool_use("t1", "SubagentHandback"),),
+             [tool_result("t1", 11, ends_turn=True), wake(PEER_MESSAGE, 605)]),
+            # a result for an earlier call's tool use is not the predecessor's
+            ("task notification after end of turn", DONE_TEXT,
+             [tool_result("t0", 12), wake(TASK_NOTIFICATION, 605)]),
+            ("hand-back after end of turn", DONE_TEXT, [wake(HANDBACK, 605)]),
+            ("message after end of turn", DONE_TEXT, [user_prompt(605, "continue")]),
+            ("unclassified", DONE_TEXT, []),
+        ]
+        for index, (kind, blocks, between) in enumerate(cases):
+            with self.subTest(index=index, kind=kind):
+                path = write_subagent(self.root, pair_lines(prev_blocks=blocks, between=between),
+                                      name=f"agent-c{index}")
+                self.assertEqual([death["kind"] for death in scan_cache(path)["deaths"]], [kind])
+
+    def test_the_gap_context_and_rewrite_boundaries(self):
+        cases = [
+            ("gap at TTL - 10 s", pair_lines(gap=290), False, 0),
+            ("gap past TTL - 10 s", pair_lines(gap=291), False, 1),
+            ("main-session gap at TTL - 10 s", pair_lines(gap=3_590, ttl="1h"), True, 0),
+            ("main-session gap past it", pair_lines(gap=3_591, ttl="1h"), True, 1),
+            ("prior context of exactly 5k", pair_lines(prev=(0, 4_998), rewrite=5_000), False, 0),
+            ("prior context over 5k", pair_lines(prev=(0, 4_999), rewrite=5_001), False, 1),
+            ("rewrite of exactly half", pair_lines(rewrite=20_001), False, 0),
+            ("rewrite of over half", pair_lines(rewrite=20_002), False, 1),
+        ]
+        for index, (name, lines, is_root, deaths) in enumerate(cases):
+            with self.subTest(name):
+                path = (write_root(self.root, lines, session=f"b{index}") if is_root
+                        else write_subagent(self.root, lines, name=f"agent-b{index}"))
+                self.assertEqual(len(scan_cache(path, is_root=is_root)["deaths"]), deaths)
+
+    def test_premium_weights_the_write_price_by_the_calls_own_ttl_split(self):
+        usage = cache_usage(0, 40_000, ttl="1h")
+        usage["cache_creation"] = {"ephemeral_1h_input_tokens": 30_000,
+                                   "ephemeral_5m_input_tokens": 10_000}
+        lines = [user_prompt(0), cache_call("p1", 10, 26_000, 10_000, ttl="1h"),  # 36,002
+                 assistant("p2", usage=usage, model="claude-opus-5-5", timestamp=at(3_710))]
+        result = scan_cache(write_root(self.root, lines), is_root=True)
+        self.assertEqual(len(result["deaths"]), 1)
+        weighted = (30_000 * 10.0 + 10_000 * 6.25) / 40_000
+        self.assertAlmostEqual(result["deaths"][0]["premium"],
+                               36_002 * (weighted - 0.50) / 1e6, places=12)
+
+    def test_repeated_records_of_one_call_merge_usage_by_per_field_maximum(self):
+        # Phase-5 PR421-01: two records per call whose usage differs, so the per-field
+        # maximum is distinguishable from the first copy, the last copy and their sum
+        def usage(read, create, cw_1h, cw_5m):
+            value = cache_usage(read, create, ttl="1h")
+            value["cache_creation"] = {"ephemeral_1h_input_tokens": cw_1h,
+                                       "ephemeral_5m_input_tokens": cw_5m}
+            return value
+        opus = "claude-opus-5-5"
+        lines = [user_prompt(0),
+                 assistant("p1", usage=usage(20_000, 10_000, 10_000, 0), model=opus, timestamp=at(10)),
+                 assistant("p1", usage=usage(26_000, 4_000, 4_000, 0), model=opus, timestamp=at(10)),
+                 assistant("p2", usage=usage(0, 20_000, 20_000, 0), model=opus, timestamp=at(3_710)),
+                 assistant("p2", usage=usage(0, 40_000, 20_000, 20_000), model=opus,
+                           timestamp=at(3_710))]
+        result = scan_cache(write_root(self.root, lines), is_root=True, threshold=25_000)
+        self.assertEqual(result["calls"], 2)
+        # p1's context is 2 + max(read) 26,000 + max(create) 10,000 = 36,002; p2's is 40,002
+        self.assertEqual(result["peak_ctx"], 2 + 0 + 40_000)
+        self.assertEqual(len(result["deaths"]), 1)
+        weighted = (20_000 * 10.0 + 20_000 * 6.25) / 40_000
+        self.assertAlmostEqual(result["deaths"][0]["premium"],
+                               36_002 * (weighted - 0.50) / 1e6, places=12)
+        # only p1's maximum read passes the 25k threshold
+        self.assertAlmostEqual(result["reread_above"], 1_000 * 0.50 / 1e6, places=12)
+
+    def test_a_zero_usage_message_is_no_call_and_does_not_hide_a_death(self):
+        synthetic = assistant(
+            "synthetic-1", model="<synthetic>", stop_reason="stop_sequence", timestamp=at(400),
+            usage={"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
+                   "cache_creation_input_tokens": 0},
+            content=[{"type": "text", "text": "API Error: Request timed out."}])
+        result = scan_cache(write_subagent(self.root, pair_lines(between=[synthetic])))
+        self.assertEqual(result["calls"], 2)
+        self.assertEqual([death["kind"] for death in result["deaths"]], ["unclassified"])
+
+    def test_only_reads_past_the_threshold_are_priced(self):
+        path = write_subagent(self.root, [
+            user_prompt(0),
+            cache_call("m1", 1, 100_000, 1_000),                               # below
+            cache_call("m2", 11, 120_000, 1_000),                              # at
+            cache_call("m3", 21, 150_000, 1_000),                              # above, Opus
+            cache_call("m4", 31, 130_000, 1_000, model="claude-sonnet-5-5"),   # above, Sonnet
+        ])
+        result = scan_cache(path)
+        self.assertEqual(result["calls"], 4)
+        self.assertAlmostEqual(result["reread_above"],
+                               (30_000 * 0.50 + 10_000 * 0.30) / 1e6, places=12)
+        self.assertEqual(result["peak_ctx"], 2 + 150_000 + 1_000)
+        self.assertEqual(result["deaths"], [])
+        self.assertAlmostEqual(scan_cache(path, threshold=140_000)["reread_above"],
+                               10_000 * 0.50 / 1e6, places=12)
+
+    def test_first_call_and_attachments_before_the_second_call_are_the_start_up(self):
+        path = write_subagent(self.root, [
+            user_prompt(0),
+            attachment("environment", 600, 0),
+            attachment("date", 50, 0),                    # not a start-up type
+            attachment("skill_listing", 24_000, 0),
+            attachment("instructions", 5_000, 0),
+            attachment("deferred_tools_delta", 3_000, 0),
+            attachment("skill_listing", 9_999, 0),        # a later copy: the first one counts
+            cache_call("m1", 2, 3_323, 12_907, blocks=[tool_use("toolu_r1", "Read")]),
+            attachment("mcp_instructions_delta", 1_200, 3),   # rides the second request
+            tool_result("toolu_r1", 3),
+            cache_call("m2", 4, 16_230, 900),
+            attachment("agent_listing_delta", 2_500, 5),      # after the second call
+            cache_call("m3", 6, 17_130, 400),
+        ], agent_type="Explore")
+        result = scan_cache(path)
+        self.assertEqual(result["agent_type"], "Explore")
+        self.assertEqual(result["startup"], {
+            "write": 12_907, "read": 3_323,
+            "attachments": {"environment": 600, "skill_listing": 24_000, "instructions": 5_000,
+                            "deferred_tools_delta": 3_000, "mcp_instructions_delta": 1_200},
+        })
+
+    def test_an_attachment_without_rendered_content_is_not_measured(self):
+        path = write_subagent(self.root, [
+            user_prompt(0),
+            attachment("instructions", 5_000, 0, rendered=False),
+            attachment("environment", 600, 0),
+            cache_call("m1", 2, 3_000, 10_000),
+        ])
+        self.assertEqual(scan_cache(path)["startup"]["attachments"], {"environment": 600})
+
+    def test_agent_type_comes_from_the_meta_file_and_main_sessions_have_no_start_up(self):
+        lines = [user_prompt(0), cache_call("m1", 1, 3_000, 10_000)]
+        main = scan_cache(write_root(self.root, lines), is_root=True)
+        self.assertEqual((main["agent_type"], main["is_root"], main["startup"]), ("main", True, None))
+        bare = scan_cache(write_subagent(self.root, lines, agent_type=None, name="agent-a2"))
+        self.assertEqual((bare["agent_type"], bare["is_root"]), ("unknown", False))
+        self.assertEqual(bare["startup"], {"write": 10_000, "read": 3_000, "attachments": {}})
+
+    def test_bounds_count_calls_by_start_time_half_open(self):
+        path = write_subagent(self.root, [
+            user_prompt(0),
+            cache_call("m1", 0, 3_000, 10_000),
+            cache_call("m2", 100, 13_000, 1_000),
+            cache_call("m3", 200, 14_000, 1_000),
+            assistant("m4", usage=cache_usage(15_000, 1_000), model="claude-opus-5-5"),  # untimed
+        ])
+        bounded = scan_cache(path, since=CACHE_T0 + timedelta(seconds=100),
+                             before=CACHE_T0 + timedelta(seconds=200))
+        self.assertEqual((bounded["calls"], bounded["peak_ctx"]), (1, 2 + 13_000 + 1_000))
+        self.assertIsNone(bounded["startup"])  # the first call is outside the window
+        self.assertEqual(scan_cache(path)["calls"], 4)  # unbounded: untimed calls count too
+        empty = scan_cache(path, since=CACHE_T0 + timedelta(days=1),
+                           before=CACHE_T0 + timedelta(days=2))
+        self.assertEqual((empty["calls"], empty["peak_ctx"], empty["reread_above"]),
+                         (0, None, 0.0))
+
+    def test_a_death_counts_when_the_rewriting_call_is_in_the_window(self):
+        path = write_subagent(self.root, handback_death_lines())
+        inside = scan_cache(path, since=CACHE_T0 + timedelta(seconds=500),
+                            before=CACHE_T0 + timedelta(seconds=600))
+        self.assertEqual(inside["calls"], 1)
+        self.assertEqual([death["kind"] for death in inside["deaths"]],
+                         ["hand-back after end of turn"])
+        before_it = scan_cache(path, since=CACHE_T0, before=CACHE_T0 + timedelta(seconds=545))
+        self.assertEqual(before_it["deaths"], [])
+
+    def test_an_unreadable_transcript_is_skipped(self):
+        self.assertIsNone(scan_cache(self.root / "missing.jsonl"))
+
+
+def cache_tree(root):
+    """A main session, the hand-back parent and an Explore subagent with a skill listing."""
+    write_root(root, [user_prompt(0), cache_call("r1", 1, 0, 20_000, ttl="1h"),
+                      cache_call("r2", 30, 20_000, 500, ttl="1h")])
+    write_subagent(root, handback_death_lines(), name="agent-a1")
+    write_subagent(root, [user_prompt(0), attachment("skill_listing", 24_000, 0),
+                          cache_call("e1", 2, 3_323, 12_907), cache_call("e2", 4, 16_230, 900)],
+                   agent_type="Explore", name="agent-a2")
+    return root
+
+
+DEATH_ROW = r"(?m)^general-purpose\s+hand-back after end of turn\s+1\s+9\.0m\s+\$0$"
+
+
+class CacheReportCliTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = cache_tree(Path(self.tmp.name))
+
+    def report(self, *argv):
+        return run_main("--projects-dir", str(self.root), "--report", "cache", *argv)
+
+    def test_the_cache_report_prints_three_tables_and_the_totals(self):
+        out, code = self.report("--days", "0")
+        self.assertIsNone(code)
+        self.assertTrue(out.startswith("Cache report (all time, 3 transcripts, 7 calls)\n\n"),
+                        out[:200])
+        self.assertRegex(out, r"(?m)^agent type\s+cause\s+deaths\s+median gap\s+premium$")
+        self.assertRegex(out, DEATH_ROW)
+        self.assertIn("\nSubagent deaths 1 ($0 premium); main-session deaths 0 ($0)\n", out)
+        self.assertIn("\nReread above 120.00k tokens of context", out)
+        self.assertRegex(out, r"(?m)^agent type\s+transcripts\s+reread above\s+peak p50"
+                              r"\s+peak p90\s+peak max$")
+        self.assertRegex(out, r"(?m)^main\s+1\s+\$0\s+20\.50k\s+20\.50k\s+20\.50k$")
+        self.assertRegex(out, r"(?m)^agent type\s+subagents\s+1st write\s+1st read\s+skill listing"
+                              r"\s+instructions\s+MCP instructions\s+deferred tools"
+                              r"\s+agent listing\s+environment$")
+        self.assertRegex(out, r"(?m)^Explore\s+1\s+12\.91k\s+3\.32k\s+24\.00k(\s+-){5}$")
+        self.assertRegex(out, r"(?m)^general-purpose\s+1\s+30\.00k\s+0(\s+-){6}$")
+        self.assertTrue(out.endswith(f"\nNOTE: {agent_costs.DISCLAIMER}\n"))
+
+    def test_event_bounds_select_calls_by_start_and_name_the_window(self):
+        out, code = self.report("--events-since", "2026-10-12T09:05:00Z",
+                                "--events-before", "2026-10-12T09:10:00Z")
+        self.assertIsNone(code)
+        self.assertTrue(out.startswith(
+            "Cache report (events 2026-10-12T09:05:00Z → 2026-10-12T09:10:00Z, "
+            "1 transcripts, 1 calls)\n"), out[:200])
+        self.assertRegex(out, DEATH_ROW)
+
+    def test_an_empty_selection_exits_instead_of_printing_zeros(self):
+        out, code = self.report("--events-since", "2026-10-13T00:00:00Z",
+                                "--events-before", "2026-10-14T00:00:00Z")
+        self.assertEqual((out, code), ("", "no calls in window"))
+        with tempfile.TemporaryDirectory() as empty:
+            (Path(empty) / "-Users-me-empty").mkdir()
+            out, code = run_main("--projects-dir", empty, "--report", "cache", "--days", "0")
+        self.assertEqual((out, code), ("", "no transcripts in window"))
+
+    def test_top_caps_each_table_and_says_how_many_rows_it_dropped(self):
+        out, code = self.report("--days", "0", "--top", "1")
+        self.assertIsNone(code)
+        self.assertIn("\n... 2 more rows not shown (--top 3 for all)\n", out)  # reread
+        self.assertIn("\n... 1 more rows not shown (--top 2 for all)\n", out)  # start-up
+        self.assertRegex(out, DEATH_ROW)
+
+    def test_the_threshold_flag_reaches_the_scanner_and_the_caption(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_root(Path(tmp), [user_prompt(0)] + [
+                cache_call(f"r{i}", 10 * i, 900_000, 1_000, ttl="1h") for i in range(1, 11)])
+            default, _ = run_main("--projects-dir", tmp, "--report", "cache", "--days", "0")
+            raised, _ = run_main("--projects-dir", tmp, "--report", "cache", "--days", "0",
+                                 "--context-threshold", "500000")
+        # ten Opus reads of 900k: 10 x 780k x $0.50 / 1e6 = $3.90; above 500k, $2.00
+        self.assertRegex(default, r"(?m)^main\s+1\s+\$4\s+")
+        self.assertIn("\nReread above 120.00k tokens of context", default)
+        self.assertRegex(raised, r"(?m)^main\s+1\s+\$2\s+")
+        self.assertIn("\nReread above 500.00k tokens of context", raised)
+
+    def test_cache_report_usage_errors_exit_2_with_nothing_on_stdout(self):
+        cases = {
+            "json": ("--report", "cache", "--format", "json"),
+            "project": ("--report", "cache", "--project", "repo"),
+            "artifacts": ("--report", "cache", "--artifacts", str(self.root)),
+            "strata": ("--report", "cache", "--strata", "both"),
+            "one bound": ("--report", "cache", "--events-since", "2026-10-12T09:00:00Z"),
+            "inverted": ("--report", "cache", "--events-since", "2026-10-12T10:00:00Z",
+                         "--events-before", "2026-10-12T09:00:00Z"),
+            "no offset": ("--report", "cache", "--events-since", "2026-10-12T09:00:00",
+                          "--events-before", "2026-10-12T10:00:00Z"),
+            "zero threshold": ("--report", "cache", "--context-threshold", "0"),
+            "threshold on the issue report": ("--context-threshold", "120000"),
+            "bounds on the issue tables": ("--events-since", "2026-10-12T09:00:00Z",
+                                           "--events-before", "2026-10-12T10:00:00Z"),
+            "unknown report": ("--report", "deaths"),
+        }
+        for name, argv in cases.items():
+            with self.subTest(name), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(run_main("--projects-dir", str(self.root), *argv), ("", 2))
+
+    def test_the_module_run_reports_through_a_real_process_pool(self):
+        completed = subprocess.run(
+            [sys.executable, "-m", "agent_tools.agent_costs", "--projects-dir", str(self.root),
+             "--report", "cache", "--days", "0"],
+            capture_output=True, text=True, timeout=120, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        # the pool must not have fallen back to the sequential scan (Phase-5 PR421-02):
+        # scan_paths catches every pool failure, pickling included, and retries in-process
+        self.assertNotIn("Process pool unavailable", completed.stderr)
+        self.assertRegex(completed.stdout, DEATH_ROW)
+
+    def test_aggregation_over_several_transcripts_of_one_type(self):
+        # Phase-5 PR421-03: several same-type transcripts with distinct peaks, deaths and
+        # attachment sets, so sums, percentiles and carrier-only medians are observable
+        def result(agent_type, is_root, calls, deaths, reread, peak, startup):
+            return {"agent_type": agent_type, "is_root": is_root, "calls": calls,
+                    "deaths": [{"kind": k, "gap_s": g, "premium": p} for k, g, p in deaths],
+                    "reread_above": reread, "peak_ctx": peak, "startup": startup}
+        handback = "hand-back after end of turn"
+        results = [
+            result("general-purpose", False, 5,
+                   [(handback, 540.0, 1.5), ("child dispatch", 400.0, 0.8)], 1.5, 150_000,
+                   {"write": 30_000, "read": 0,
+                    "attachments": {"skill_listing": 24_000, "environment": 600}}),
+            result("general-purpose", False, 3, [(handback, 660.0, 2.0)], 0.75, 90_000,
+                   {"write": 10_000, "read": 20_000, "attachments": {"skill_listing": 20_000}}),
+            result("general-purpose", False, 2, [(handback, 600.0, 0.25)], 2.0, 200_000,
+                   {"write": 20_000, "read": 10_000, "attachments": {}}),
+            result("main", True, 4, [("message after end of turn", 3_700.0, 3.0)], 0.0,
+                   50_000, None),
+        ]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            agent_cache_report.print_report(results, window="all time", threshold=120_000,
+                                            top=30)
+        out = out.getvalue()
+        self.assertTrue(out.startswith("Cache report (all time, 4 transcripts, 14 calls)\n"))
+        rows = re.findall(r"(?m)^(general-purpose|main)\s+(hand-back after end of turn|"
+                          r"child dispatch|message after end of turn)\s+\d", out)
+        self.assertEqual(rows, [("general-purpose", handback), ("main", "message after end of turn"),
+                                ("general-purpose", "child dispatch")])  # premium descending
+        # three deaths, median of 540/600/660 s, premiums 1.5 + 2.0 + 0.25
+        self.assertRegex(out, r"(?m)^general-purpose\s+hand-back after end of turn\s+3\s+10\.0m\s+\$4$")
+        self.assertRegex(out, r"(?m)^general-purpose\s+child dispatch\s+1\s+6\.7m\s+\$1$")
+        self.assertIn("\nSubagent deaths 4 ($5 premium); main-session deaths 1 ($3)\n", out)
+        # reread 1.5 + 0.75 + 2.0 summed; peak median 150k is neither the first nor the max
+        self.assertRegex(out, r"(?m)^general-purpose\s+3\s+\$4\s+150\.00k\s+200\.00k\s+200\.00k$")
+        self.assertRegex(out, r"(?m)^main\s+1\s+\$0\s+50\.00k\s+50\.00k\s+50\.00k$")
+        # medians over the subagents that carried each attachment: environment is 600,
+        # not the 0 a missing-as-zero median of (0, 0, 600) would print
+        self.assertRegex(out, r"(?m)^general-purpose\s+3\s+20\.00k\s+10\.00k\s+20\.00k"
+                              r"(\s+-){4}\s+600$")
+        self.assertNotRegex(out, r"(?m)^main\s+\d+\s+[\d.]+k\s+[\d.]+k\s+-")  # no start-up row
+
+    def test_peak_percentiles_take_the_rounded_index_of_the_sorted_peaks(self):
+        # CR421-01: the value at index round(p/100 x (n-1)), half-to-even, not nearest
+        # rank. Four peaks: p50 is index round(1.5) = 2, 30k (nearest rank: 20k). Six
+        # peaks: p90 is index round(4.5) = 4, the fifth value 50k (nearest rank: 60k).
+        def result(agent_type, peak):
+            return {"agent_type": agent_type, "is_root": False, "calls": 1, "deaths": [],
+                    "reread_above": 0.0, "peak_ctx": peak, "startup": None}
+        four = [10_000, 20_000, 30_000, 40_000]
+        six = [10_000, 20_000, 30_000, 40_000, 50_000, 60_000]
+        results = ([result("explore", peak) for peak in four]
+                   + [result("plan", peak) for peak in six])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            agent_cache_report.print_report(results, window="all time", threshold=120_000,
+                                            top=30)
+        out = out.getvalue()
+        human = agent_costs.human
+        for agent_type, count, p50, p90, peak_max in (
+                ("explore", 4, 30_000, 40_000, 40_000),
+                ("plan", 6, 30_000, 50_000, 60_000)):
+            with self.subTest(agent_type):
+                cells = r"\s+".join(re.escape(human(v)) for v in (p50, p90, peak_max))
+                self.assertRegex(out, rf"(?m)^{agent_type}\s+{count}\s+\$0\s+{cells}$")
 
 
 class ModuleEntryPointTest(unittest.TestCase):

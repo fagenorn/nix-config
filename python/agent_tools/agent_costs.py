@@ -19,8 +19,7 @@ dominant token bucket, cache reads, measures logical context processing: every
 turn re-reads the session prefix from cache, so cache_read counts the tokens
 the model attended to, priced at the list cache-read rate. The estimated $
 figures apply public list prices per family and exist so runs can be compared
-against each other and against the 35-day baseline; they are not what anyone
-was billed.
+against each other; they are not what anyone was billed.
 
 Beyond the per-issue cost table this also derives (heuristically where noted):
 issue outcome (completed/blocked/abandoned from each root session's final
@@ -30,6 +29,13 @@ model+effort mix per group, per-session peak context (max input+cache tokens of
 a single turn), stop_reason counts plus lingering agents killed at exit, and
 short user "proceed" nudges. `--artifacts DIR` adds a filesystem pass over
 spec/plan markdown: bytes, fenced-code share, and decision-section share.
+
+`--report cache` prints the cache report instead of the per-issue tables (issue
+421, agent_tools.agent_cache_report): cache deaths by agent type and cause, the
+cache-read cost of context above `--context-threshold` tokens (default 120,000)
+with peak-context percentiles, and subagent start-up overhead, over the calls
+whose start lies between `--events-since` and `--events-before` when both are
+given. python/README.md (agent-costs) holds its contract.
 """
 
 import argparse
@@ -47,10 +53,12 @@ from pathlib import Path
 from agent_tools.canonical import telemetry_digest
 
 # List price per million tokens: (input, output, cache_write_1h, cache_write_5m, cache_read).
-# Matches the pricing model the transcript-mining report used, so numbers stay
-# comparable to its 35-day baseline. claude-fable-5 is priced as Opus-class.
+# Cache writes cost 2x input for the 1-hour TTL and 1.25x for 5 minutes; reads 0.1x.
+# The Opus-class row is the Opus-class list price issue 421 pinned. model_family
+# also prices Opus 5.5, Fable and any unrecognised model with it, so their
+# figures are approximate.
 PRICING = {
-    "opus": (15.0, 75.0, 30.0, 18.75, 1.50),
+    "opus": (5.0, 25.0, 10.0, 6.25, 0.50),
     "sonnet": (3.0, 15.0, 6.0, 3.75, 0.30),
     "haiku": (1.0, 5.0, 2.0, 1.25, 0.10),
 }
@@ -126,6 +134,19 @@ def model_family(model):
         return "haiku"
     # opus, fable and anything unrecognised are priced Opus-class.
     return "opus"
+
+
+def cache_write_split(usage):
+    """(1-hour, 5-minute) cache-write tokens of one usage object.
+
+    A usage object that records no TTL breakdown is taken as all 5-minute writes.
+    """
+    split = usage.get("cache_creation") or {}
+    cw_1h = split.get("ephemeral_1h_input_tokens") or 0
+    cw_5m = split.get("ephemeral_5m_input_tokens") or 0
+    if cw_1h + cw_5m == 0:
+        return 0, usage.get("cache_creation_input_tokens") or 0
+    return cw_1h, cw_5m
 
 
 def classify_outcome(final_text):
@@ -349,11 +370,7 @@ def scan_file(path):
             c_out = usage.get("output_tokens") or 0
             c_read = usage.get("cache_read_input_tokens") or 0
             c_create = usage.get("cache_creation_input_tokens") or 0
-            split = usage.get("cache_creation") or {}
-            cw_1h = split.get("ephemeral_1h_input_tokens") or 0
-            cw_5m = split.get("ephemeral_5m_input_tokens") or 0
-            if cw_1h + cw_5m == 0:
-                cw_5m = c_create  # no TTL breakdown recorded; assume 5m
+            cw_1h, cw_5m = cache_write_split(usage)
 
             fresh += f_in
             output += c_out
@@ -919,7 +936,7 @@ def human(n):
 
 
 def percentile(values, p):
-    """Nearest-rank percentile; 0 for an empty list."""
+    """The sorted value at index round(p/100 * (n-1)), half-to-even and clamped; 0 for none."""
     if not values:
         return 0
     ordered = sorted(values)
@@ -1728,6 +1745,13 @@ def print_artifact_stats(per_class):
         )
 
 
+def _positive_int(text):
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"{text} is not a positive integer")
+    return value
+
+
 def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     ap = argparse.ArgumentParser(prog="agent-costs", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=35, help="window in days by file mtime (0 = all)")
@@ -1752,17 +1776,32 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
                     help="which strata to scan; meaningful only with --format json")
     ap.add_argument("--codex-sessions", default=os.path.expanduser("~/.codex/sessions"),
                     help="Codex rollout root")
-    ap.add_argument("--events-since", help="RFC3339 event-time lower bound (JSON only)")
-    ap.add_argument("--events-before", help="RFC3339 event-time upper bound (JSON only)")
+    ap.add_argument("--events-since", help="RFC3339 event-time lower bound (JSON or --report cache)")
+    ap.add_argument("--events-before", help="RFC3339 event-time upper bound (JSON or --report cache)")
+    ap.add_argument("--report", choices=("issues", "cache"), default="issues",
+                    help="per-issue tables (default) or the cache report")
+    ap.add_argument("--context-threshold", type=_positive_int, default=None, metavar="TOKENS",
+                    help="context size above which cache reads are totalled; --report cache only "
+                         "(default 120000)")
     args = ap.parse_args(argv)
 
     json_mode = args.format == "json"
+    cache_report = args.report == "cache"
+    if cache_report and json_mode:
+        ap.error("--report cache is text only; it cannot be combined with --format json")
+    if cache_report and args.project:
+        ap.error("--report cache does not take --project")
+    if cache_report and args.artifacts:
+        ap.error("--report cache does not take --artifacts")
+    if args.context_threshold is not None and not cache_report:
+        ap.error("--context-threshold is available only with --report cache")
     if not json_mode and args.strata != "claude":
         ap.error("--strata is meaningful only with --format json")
     if json_mode and args.artifacts:
         ap.error("--artifacts is not available with --format json")
-    if not json_mode and (args.events_since or args.events_before):
-        ap.error("--events-since/--events-before are available only with --format json")
+    if not (json_mode or cache_report) and (args.events_since or args.events_before):
+        ap.error("--events-since/--events-before are available only with --format json "
+                 "or --report cache")
     if bool(args.events_since) != bool(args.events_before):
         ap.error("--events-since and --events-before must be used together")
     event_start = event_end = None
@@ -1777,6 +1816,29 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     selected = ("claude", "codex") if args.strata == "both" else (args.strata,)
 
     cutoff = time.time() - args.days * 86400 if args.days > 0 else None
+
+    if cache_report:
+        from agent_tools import agent_cache_report  # imported only for the cache report (issue 421 D2)
+
+        root = Path(args.projects_dir)
+        if not root.is_dir():
+            sys.exit(f"no transcript root at {root}")
+        jobs = agent_cache_report.transcript_jobs(
+            root, event_start.timestamp() if event_start else cutoff)
+        if not jobs:
+            sys.exit("no transcripts in window")
+        threshold = args.context_threshold or agent_cache_report.DEFAULT_CONTEXT_THRESHOLD
+        results = agent_cache_report.scan_jobs(
+            jobs, since=event_start, before=event_end, threshold=threshold,
+            executor_factory=executor_factory)
+        if not any(result["calls"] > 0 for result in results):
+            sys.exit("no calls in window")
+        if event_start:
+            window = f"events {format_rfc3339_utc(event_start)} → {format_rfc3339_utc(event_end)}"
+        else:
+            window = f"last {args.days}d by file mtime" if cutoff else "all time"
+        agent_cache_report.print_report(results, window=window, threshold=threshold, top=args.top)
+        return
 
     root = codex_root = None
     groups, retained_results, kept_sessions, kept_files = {}, [], 0, 0
