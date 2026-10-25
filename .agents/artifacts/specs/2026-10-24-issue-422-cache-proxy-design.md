@@ -5,8 +5,10 @@ Design for https://github.com/fagenorn/nix-config/issues/422. Base: `7601d318`
 
 ## Triage
 
-Input: `{"signals": {"contract_change": {"value": "hit", "evidence": "new agent-tools command-table row and the claude wrapper gains ANTHROPIC_BASE_URL routing behaviour"}, "concurrency_or_persistence": {"value": "hit", "evidence": "threaded HTTP proxy streaming responses plus a launchd/systemd user service lifecycle"}, "open_design_questions": {"value": "hit", "evidence": "the live-API spike is a go/no-go gate; port, health endpoint and service wiring are undecided"}, "criteria_shape": {"value": "hit", "evidence": "six acceptance criteria, three of them live evidence no deterministic code check verifies"}}, "paths": ["python/agent_tools/cache_proxy.py", "lib/agent-tools.nix", "home/common/claude-code/accounts/bin/claude-account", "home/common/claude-code/default.nix", "home/common/claude-code/README.md", "python/README.md", "tests/test_cache_proxy.py", "justfile", "docs/spikes/cache-proxy-spike.md"]}`
-Verdict: `{"hits":["contract_change","concurrency_or_persistence","open_design_questions","criteria_shape"],"lane":"full","mode":"shadow"}`
+This attempt's record (the second attempt, after the owner's spike ruling):
+
+Input signals: contract_change=hit ("new cache-proxy command row, new /_proxy/health endpoint and claude-account routing behaviour"), concurrency_or_persistence=hit ("threaded HTTP proxy with keep-alive upstream connections, run as a launchd/systemd user service"), open_design_questions=no ("spec and plan settled; the user ruled the spike gate go on facts 1 and 2"), criteria_shape=hit ("six acceptance criteria, three of them live evidence runs no deterministic check verifies")
+Verdict: `{"hits":["contract_change","concurrency_or_persistence","criteria_shape"],"lane":"full","mode":"shadow"}`
 ran: full (shadow)
 
 ## Problem
@@ -17,20 +19,24 @@ or a sibling that starts a little later, pays full input price for a prefix
 another request already built. The planned remedy is a local proxy on
 the API path that can later refresh and reshape requests. Before anything is
 built on that idea, it must be shown on the live API, with the user's normal
-subscription login, that Claude Code can be pointed at a local proxy at all,
-that a one-token replay refreshes a cache entry, and that reordering a
-subagent's opening message lets siblings share its start-up attachments. If
-that holds, the user needs the proxy installed as a service that every `claude`
-launch uses, without a dead proxy ever stopping work.
+subscription login, that Claude Code can be pointed at a local proxy at all
+and that a one-token replay refreshes a cache entry. The spike also measured
+whether reordering a subagent's opening message lets siblings share its
+start-up attachments. The owner ruled that result inconclusive and moved it to
+#429 (D21). With the first two shown, the user needs the proxy installed as a
+service that every `claude` launch uses, without a dead proxy ever stopping
+work.
 
 ## Solution
 
 Two stages, gated.
 
-1. **Spike.** A throwaway harness on mbp establishes facts 1, 2 and 4 of the
+1. **Spike.** A throwaway harness on mbp measures facts 1, 2 and 4 of the
    issue against the live API and writes a committed report with the raw usage
-   object of every request. Facts 1, 2 and 4 must all hold for the attempt to
-   continue (D1).
+   object of every request. Facts 1 and 2 gate the attempt. Fact 4 was ruled
+   inconclusive and gates nothing (D1, as amended by D21). The 2026-10-24 run
+   recorded both gating facts as holding, and the attempt proceeds on the
+   owner's go ruling (D22).
 2. **Pass-through.** A standard-library `agent_tools` module, run by a new
    `cache-proxy` command, forwards every request and streamed response
    unchanged. It runs as a user service on both host families. The `claude`
@@ -42,8 +48,9 @@ Two stages, gated.
 
 ### Spike
 
-The spike is the plan's first task and a hard gate (D1). Its harness is one
-throwaway Python process in the launch's scratch directory (D2): a recording
+The spike is the plan's first task and a hard gate on facts 1 and 2 (D1,
+D21). Its harness is one throwaway Python process in the launch's scratch
+directory (D2): a recording
 pass-through to `https://api.anthropic.com`, a driver that runs `claude -p`
 through the installed `claude` wrapper with `ANTHROPIC_BASE_URL` set to the
 harness, and a replayer. The replayer authenticates with the bearer header the
@@ -78,7 +85,10 @@ credential values.
   its entry expired (D3). If the API rejects `max_tokens=1` under the captured
   thinking configuration, the fact fails. The rejection body is recorded, along
   with the smallest `max_tokens` the API accepts, for the user's information.
-- **Fact 4: siblings share attachments.** One session dispatches two subagents
+- **Fact 4: siblings share attachments.** The owner ruled this fact
+  inconclusive and moved it, together with a proper re-test, to #429 (D21). It
+  no longer gates this issue. The definition below stays as the record of what
+  the reported run measured. One session dispatches two subagents
   of the same type with different delegation prompts, and the harness captures
   each one's first request. The transform moves the shared start-up attachment
   blocks ahead of the delegation prompt and puts a `cache_control` breakpoint on
@@ -93,11 +103,20 @@ credential values.
   If the siblings' attachments differ, the fact fails and the report says how
   (D4).
 
-A failed fact 1 ends the attempt. So does a failed fact 2 or 4, which is
-reported by name. In each case the spike report is committed in the worktree,
-no PR is opened, and the issue stays open for the user's decision (D1). Before
-the report is committed, a scan for credential shapes (`sk-ant-`, `Bearer `,
-`oat01`) must find nothing.
+A failed fact 1 ends the attempt. So does a failed fact 2, which is reported
+by name. In each case the spike report is committed in the worktree, no PR is
+opened, and the issue stays open for the user's decision (D1). Fact 4's result
+never ends the attempt (D21). Before the report is committed, a scan for
+credential shapes (`sk-ant-`, `Bearer `, `oat01`) must find nothing.
+
+The 2026-10-24 run recorded facts 1 and 2 as holding. It recorded fact 4 as
+failing, on its structural rule alone, so the report's computed `Verdict:` line
+reads `no-go` under the original three-fact gate. The owner then ruled fact 4
+inconclusive and the gate go (D21). The spike is not re-run. The report keeps
+every recorded line and measurement as it stands. It gains an appended, dated
+ruling section that links the owner's comment and states the amended gate's go.
+From then on, later work reads that section, not the recorded `Verdict:` line,
+to decide whether it proceeds (D22).
 
 ### The `cache-proxy` command
 
@@ -310,6 +329,9 @@ All tests are new unittest files added to `just agent-workflow-tests`.
 - Changes to `claude-local`, to `claude-account login` or `status`, to
   CLAUDE.md, and to host activation (`just switch` stays the user's).
 - Restoring fine-grained tool streaming or Remote Control on routed sessions.
+- The shared sibling start-up prefix (fact 4): the attachment reorder, its
+  breakpoint and a proper re-test, all owned by #429 (D21). Fact 4's recorded
+  result stays in the spike report.
 
 ## Decision ledger
 
@@ -335,3 +357,5 @@ All tests are new unittest files added to `just agent-workflow-tests`.
 | D18 | Live-evidence conditions (refines D14): every live run uses one account, `CLAUDE_ACCOUNT` = the executing session's `claude-account active`, switched only on a usage-limit refusal to another signed-in account with headroom and recorded; spike sessions use the account's default model; TTFT pairs run `claude -p --model haiku --output-format stream-json --verbose --include-partial-messages` from a scratch directory with the same caller-set `ENABLE_TOOL_SEARCH` in both arms (only if the switch ships), first content = the first `stream_event` whose `event.type` is `content_block_delta`, and each proxied run must add ≥ 1 `/v1/messages` proxy-log line while each direct run adds 0; eval arms run healthy first, then stopped, each in one foreground command bounded by `EVAL_TIMEOUT` (2700 s) | TTFT variance must be small against a +100 ms threshold; identical requests apart from the base URL; the attempt deadline | The default model for TTFT (its first-token variance swamps 100 ms); the switch on the routed arm only (shrinks that arm's prompt and biases the comparison toward the proxy) |
 | D19 | Spike measurement definitions (refines D3, D4, D11): fact 2's control holds when B's re-send creates ≥ 1,000 tokens (the block floor); fact 4's attachment count = count-tokens of a user message holding only the shared attachment blocks minus one holding `.` (same model, no system or tools), and if count-tokens refuses the bearer, transformed sibling 1's total input (`input + cache_read + cache_creation`) minus the same body's with the attachment blocks removed (one extra `max_tokens=1` request); fact 4's sends use the smallest `max_tokens` the API accepts under the captured thinking configuration when it refuses 1 (a cache read does not depend on it; fact 2 alone fails on that refusal, per D3); the tool-search switch ships only when the fact-1 captures show tool search absent without `ENABLE_TOOL_SEARCH=true` and present with it (present = a tool with `defer_loading: true` or a tool `type` starting `tool_search_tool`); the report carries the machine-readable lines `Fact 1:`, `Fact 2:`, `Fact 4:`, `Tool-search switch:` and `Verdict:` | Spec § Spike leaves these thresholds and the fallback count unstated; later tasks branch on the report | The arm difference as the fallback count (transformed sibling 2's read minus the baseline's makes the gate pass by construction) |
 | D20 | Live evidence runs under a deadline cutoff: TTFT needs ≥ 15 min and each eval ≥ 50 min left before deadline − 60 min, with no rerun past it; a skipped run records `human-pending` with its exact command, making `acceptance_state` `human_pending` (issue held open with `needs-verification`), and Task 1's spike gate is never skipped | Phase-5 Codex review D1: the evals' up-to-180 min exceed the window before the 2026-10-25T01:42:25Z attempt deadline; ship needs review, CI and merge time | Running every live step regardless (would overrun the deadline and lose the delivery) or dropping AC5/AC6 (the issue's contract) |
+| D21 | Reverses D1's fact-4 gate and, with it, D4's gate clause: the go gate is facts 1 and 2 only, and both hold. Fact 4 is inconclusive, not failed, and leaves this issue for #429, together with its reorder and a proper re-test. D4's and D19's fact-4 definitions now only record how the reported run measured the fact. Fact 3 is still measured on the shipped proxy (D14). Routed sessions' loss of Remote Control stays as D11 records it, now a consequence the owner has accepted | Owner's ruling, issue 422 `#issuecomment-6394974531`: fact 4 failed only the structural rule (the billing-header `cc_version` suffix), while the siblings still shared about 26k cached tokens, the breakpoint was never moved and the attachment set was 862 tokens. The edited AC1: "go requires facts 1 and 2 to hold (fact 4 ruled inconclusive and moved out; its recorded result stays in the report)" | Holding the attempt on D1's no-go (contradicts the ruling); re-testing fact 4 here (#429 owns it, and the pass-through does not depend on it) |
+| D22 | The spike is not re-run. The report keeps its recorded fact lines, its `Verdict: no-go` and its measurements unchanged. It gains an appended, dated ruling section that links the owner's comment and states the amended gate's go. Later work reads that section, not the recorded `Verdict:` line | the-bar: point-in-time records are not rewritten, and terminal states are truthful (a PR-linked report that reads only `no-go` would contradict the delivery); AC1: "its recorded result stays in the report" | Rewriting `Fact 4:` or `Verdict:` to match the ruling (falsifies what the run computed); putting the ruling only in the PR body (the linked evidence would still read no-go); re-running the spike under the new gate (spends live quota re-measuring facts already ruled on) |
