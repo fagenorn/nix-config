@@ -82,8 +82,10 @@ a phase:
   model is not `<synthetic>`. In a main transcript, records with `isSidechain: true` are
   skipped. The file is read backwards from the end within a fixed byte window, a partial
   last line is skipped, and finding no qualifying record inside the window means unmeasured.
-  When PreToolUse fires, the record that carries the current tool call is already written,
-  so the value is the context of the call that issued the command.
+  From a session's second tool call on, the record that carries the current tool call is
+  already written when PreToolUse fires, so the value is the context of the call that issued
+  the command; a session's first tool call is unmeasured, because its record is not yet
+  written (D20).
 
 ### Progress rewrite (per D5)
 
@@ -255,3 +257,4 @@ a phase:
 | D18 | (Phase-5 review) The AC5 audit recognises progress calls with the meter's own `lex`/`progress_starts` (regex only for an untokenisable command) | Codex plan review P424-04: the audit regex missed the quoted `"workflow-state" progress` spelling the meter rewrites | a widened regex (a second recogniser that can drift from the meter) |
 | D19 | (SDD Task 1 review) A double-quoted interior holding an unescaped `$(` or backtick makes the command untokenisable | a progress call inside `"$(…)"` would otherwise be invisible to the meter and run its self-reported count silently | lexing into double-quoted substitutions (a nested-command parser, D15 keeps the subset small) |
 | D20 | (SDD Task 6) A session's first tool call is unmeasured: Claude Code 2.1.302 runs PreToolUse before that turn's usage record reaches the transcript, so the meter fails open (no `--context-tokens`, user-visible `systemMessage`, per D6); the live probe warms up with one call first | observed on the one-call probe (no usage record), measured 19851 on the second call of a two-call probe | waiting or polling inside the hook for the record (adds latency to every Bash call and still races) |
+| D21 | (SDD final review, Codex C424-01) Progress invocations stay recognised as the adjacent words `workflow-state progress` at any position (D15), not only in command position | wrapped calls such as `timeout 60 workflow-state progress …` or `launch-scope exec … -- workflow-state progress …` stay measured, and the live probe relies on it; the cost is that unquoted data words spelling a progress call (for example `echo workflow-state progress --context-tokens 1`) are rewritten too, with the measured note shown | command-position recognition (silently misses wrapped calls) |
