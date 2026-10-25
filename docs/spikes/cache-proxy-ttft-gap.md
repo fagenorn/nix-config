@@ -112,3 +112,67 @@ E1 wire check: removed `body:diagnostics`, `header:anthropic-dispatch-id`, `head
 E2 wire check: `header:anthropic-dispatch-id` appeared once with value `v2d` and was the only diff row removed, none added; the prototype's gzip also held (`header:content-encoding` gzip, `body-bytes` raw 24386 against decoded 67692, body valid JSON).
 
 Screen winner: E3
+
+## Confirmation
+
+### Conditions
+
+- Date 2026-10-25, host `mbp`, Claude Code 2.1.310 (the version § Conditions records), account `p1` (by name only), attempt `deadline_at` 2026-10-26T02:14:43Z. Run after a `just build mbp` of the head below; the screen winner is E3.
+
+Attempted head: 1250a968d831d2f5734bc202364162e388108eee
+
+Measured head: 1250a968d831d2f5734bc202364162e388108eee
+
+- Store paths of the rig built from that head: wrapper module `/nix/store/p6zv0k1zsn6b8x7fxz0crmngx80nij3n-claude-accounts-mod`, agent plist `/nix/store/21j65c6xa7dhnrhwncvm2xlm9ngqfsi9-org.nix-community.home.claude-cache-proxy.plist`, launcher `/nix/store/ra815ss9bn1lcxi1v2sg2z3c8smpp2g1-agent-tools-cache-proxy`; the claude binary and interpreter are the paths § Conditions records.
+- Harness command line, with no levers: `python3 -I <S>/i438/rig/ttft.py --rig <S>/i438/rig --proxy-log <S>/i438/runs/confirm.log --out <S>/i438/runs/confirm.json`. The built proxy ran on 27391 with its default upstream; the lever came from the built wrapper alone (`CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1`, exported by `claude-account` for routed launches).
+
+### Wire check
+
+One `claude -p` session through the built wrapper and built proxy on 27391, with mitmdump on 27392 as upstream, no lever variables set by the session. The E3 wire check holds: the proxied main request carried `eager_input_streaming` in the key set of eleven of its twelve tools (`tools:Agent:keys` through `tools:Write:keys`, all but `DeferredToolPlaceholder`), where the AC1 proxied request had none; no `fine-grained-tool-streaming` beta token appeared, which the check allows. `reduce.py check` removed those eleven `tools:*:keys` rows against AC1 and added none, and the body was valid JSON (`body_json_ok` true). The result is `confirm-wire.json` in scratch.
+
+### Run
+
+| pair | arm | ttft_ms | exit | proxy_lines | proxy ttfb_ms | upstream_conn |
+|---|---|---|---|---|---|---|
+| warm-up | proxied | 3001 | 0 | 1 | 1432.5 | reused |
+| warm-up | direct | 2274 | 0 | 0 | — | — |
+| 0 | proxied | 2004 | 0 | 1 | 852.8 | reused |
+| 0 | direct | 2318 | 0 | 0 | — | — |
+| 1 | direct | 2177 | 0 | 0 | — | — |
+| 1 | proxied | 2669 | 0 | 1 | 1481.7 | reused |
+| 2 | proxied | 2445 | 0 | 1 | 1159.9 | reused |
+| 2 | direct | 1691 | 0 | 0 | — | — |
+| 3 | direct | 2076 | 0 | 0 | — | — |
+| 3 | proxied | 2462 | 0 | 1 | 1351.0 | reused |
+| 4 | proxied | 1873 | 0 | 1 | 1126.4 | reused |
+| 4 | direct | 2615 | 0 | 0 | — | — |
+| 5 | direct | 3267 | 0 | 0 | — | — |
+| 5 | proxied | 3029 | 0 | 1 | 1764.8 | reused |
+| 6 | proxied | 2324 | 0 | 1 | 994.4 | reused |
+| 6 | direct | 1762 | 0 | 0 | — | — |
+| 7 | direct | 2409 | 0 | 0 | — | — |
+| 7 | proxied | 3528 | 0 | 1 | 2427.4 | reused |
+| 8 | proxied | 1728 | 0 | 1 | 952.2 | reused |
+| 8 | direct | 2660 | 0 | 0 | — | — |
+| 9 | direct | 1983 | 0 | 0 | — | — |
+| 9 | proxied | 2633 | 0 | 1 | 1499.3 | reused |
+
+### Medians
+
+Median TTFT, proxied 2453.5 ms, direct 2247.5 ms; Δ = proxied − direct = 206.0 ms against the +100 ms threshold (D4). The run was valid (twenty counted runs, every exit 0, one proxied `/v1/messages` line per proxied run) and did not pass. It was run once and not repeated (D4).
+
+### Diagnostics
+
+- Quartiles proxied: [1971.25, 2453.5, 2759.0]; direct: [1927.75, 2247.5, 2626.25] (ms).
+- Median within-pair difference (proxied − direct): 439.0 ms.
+- Proxy ttfb_ms over the ten proxied runs: [852.8, 1481.7, 1159.9, 1351.0, 1126.4, 1764.8, 994.4, 2427.4, 952.2, 1499.3]; upstream_conn: reused on all ten.
+
+### Smoke
+
+Not run: the confirmation did not pass, and the smoke run follows only a pass.
+
+Per-run usage objects are in [cache-proxy-ttft-gap-usage.md](cache-proxy-ttft-gap-usage.md).
+
+Confirmation: failed
+
+The winner's product commits were reverted at 07f57262.
