@@ -730,14 +730,22 @@ def phase_group(phase):
     return "6-7" if phase is not None and phase >= 6 else "0-5"
 
 
+def boot_slice(launch):
+    """The calls of a fresh owner's boot: through its registering call, and no further than the
+    last call before the first with a child out, because a dispatched child is the owner's
+    first unit of work and the replay's observed increments already carry it."""
+    boot = launch.calls[:launch.registered_index + 1]
+    out = next((index for index, call in enumerate(boot) if call.children_out), len(boot))
+    return boot[:out]
+
+
 def boot_facts(launch):
     """B, start context, call count and slimmable tokens of a fresh owner's boot."""
     if not launch.calls or launch.calls[0].is_root or launch.registered_index is None:
         return None
-    boot = launch.calls[:launch.registered_index + 1]
-    registering = boot[-1]
-    group = phase_group(registering.phase)
-    return group, {"b": registering.context, "start": boot[0].context, "calls": len(boot),
+    boot = boot_slice(launch)
+    group = phase_group(launch.calls[launch.registered_index].phase)
+    return group, {"b": boot[-1].context, "start": boot[0].context, "calls": len(boot),
                    "slimmable": sum(call.slimmable for call in boot)}
 
 

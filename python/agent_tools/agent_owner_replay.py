@@ -21,6 +21,7 @@ from agent_tools.agent_owner_report import (
     Lineage,
     OwnerCall,
     boot_facts,
+    boot_slice,
     call_cost,
     phase_group,
 )
@@ -184,7 +185,7 @@ def fit(lineages: list[Lineage]) -> BootModel:
     answered = [len(launch.calls) - _answer(launch.calls, 0) - 1
                 for lineage in lineages for launch in lineage.launches
                 if launch.transfer == "handoff" and _answer(launch.calls, 0) is not None]
-    outputs = [call.output for launch, _ in boots for call in launch.calls[:launch.registered_index + 1]]
+    outputs = [call.output for launch, _ in boots for call in boot_slice(launch)]
     if not outputs:
         outputs = [call.output for lineage in lineages for launch in lineage.launches
                    for call in launch.calls]
@@ -629,7 +630,7 @@ def calibration(lineages, model) -> dict:
             if found is None:
                 continue
             group = found[0]
-            boot = launch.calls[:launch.registered_index + 1]
+            boot = boot_slice(launch)
             boots.append({"phase_group": group,
                           "observed_dollars": sum(call_cost(call) for call in boot),
                           "modelled_dollars": _boot_dollars(boot[-1].model, model, group, False)})

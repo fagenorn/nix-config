@@ -164,6 +164,29 @@ class ReplayTest(unittest.TestCase):
                           model.slimmable["0-5"]), (29_000, 4, 98_000, 20_000))
         self.assertIn("overhead_calls", model.defaults)
 
+    def test_a_boot_ends_before_the_first_call_with_a_child_out(self):
+        # launch 40k, a dispatching call at 100k, a child-out call at 130k, then the registering
+        # call at 135k: the owner's first unit of work is not part of B
+        boot = launch([c(0, 40_000, phase=6), c(10, 100_000, phase=6),
+                       c(20, 130_000, phase=6, children=True),
+                       c(30, 135_000, phase=6, children=True, gate=gate(5), registers=True)],
+                      registered=3, name="b")
+        group, facts = agent_owner_report.boot_facts(boot)
+        self.assertEqual((group, facts["b"], facts["calls"]), ("6-7", 100_000, 2))
+        self.assertEqual(replay_module.fit([lineage(boot)]).boot_end["6-7"], 100_000)
+
+    def test_a_fresh_owner_booted_below_the_threshold_hands_off_a_bounded_number_of_times(self):
+        boot = launch([c(0, 40_000, phase=6), c(10, 100_000, phase=6),
+                       c(20, 130_000, phase=6, children=True),
+                       c(30, 135_000, phase=6, children=True, gate=gate(5), registers=True)],
+                      registered=3, name="b")
+        model = replay_module.fit([lineage(boot)])   # B(6-7) = 100k, not 135k
+        calls = [c(10 * i, 112_000 + 1_000 * i, phase=6, registers=i == 0) for i in range(100)]
+        out = replay(lineage(launch(calls)), BASELINE, model)
+        # each hand-off resets the context to B = 100k, so the next one follows 10 calls later
+        # (at 110k): calls 1, 11, ..., 91; a boot already at 135k would hand off at every call
+        self.assertEqual(out.handoffs, 10)
+
     def test_the_keep_rule_keeps_a_clear_win_and_rejects_noise(self):
         self.assertTrue(keep_rule([1.0, 1.2, 0.9, 1.1]).keep)
         # mean 0.05, sample sd ≈ 2.0, so the lower bound 0.05 − 1.2816 · 2.0/2 ≈ −1.23
