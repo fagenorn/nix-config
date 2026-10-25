@@ -42,7 +42,9 @@ given. python/README.md (agent-costs) holds its contract.
 dollars per delivered issue by lineage (one per run and issue, owner transcripts and
 their descendants), per arm and for fresh-owner boots, as text or `--format json`.
 With `--eval-results PATH --eval SKILL:ID` it groups the trials of a lifecycle eval
-instead of live issues.
+instead of live issues. `--policy NAME=SPEC` (repeatable) and `--sweep` replay the lineages
+under hand-off policies (agent_tools.agent_owner_replay) and fill the simulated-arms and
+calibration tables.
 """
 
 import argparse
@@ -1734,7 +1736,15 @@ def _positive_int(text):
 
 def _owners_report(ap, args, cutoff, event_start, event_end, executor_factory):
     """Run `--report owners`: collect the lineages, print the text tables or the JSON document."""
-    from agent_tools import agent_owner_report  # imported only for the owner report (issue 432)
+    from agent_tools import agent_owner_replay, agent_owner_report  # only for the owner report (issue 432)
+
+    try:
+        arms = [agent_owner_replay.parse_arm(text) for text in args.policy or ()]
+    except ValueError as error:
+        ap.error(str(error))
+    names = [arm.name for arm in arms] + [agent_owner_replay.BASELINE.name]
+    if len(set(names)) != len(names):
+        ap.error("--policy names must be distinct and not 'baseline'")
 
     root = Path(args.projects_dir)
     if not root.is_dir():
@@ -1757,7 +1767,8 @@ def _owners_report(ap, args, cutoff, event_start, event_end, executor_factory):
         window = f"events {format_rfc3339_utc(event_start)} → {format_rfc3339_utc(event_end)}"
     else:
         window = f"last {args.days}d by file mtime" if cutoff else "all time"
-    document = agent_owner_report.build_document(lineages, footer, window=window)
+    document = agent_owner_report.build_document(lineages, footer, window=window, arms=arms,
+                                                 sweep=args.sweep)
     if args.format == "json":
         json.dump(document, sys.stdout, separators=(",", ":"))
         print()
@@ -1799,6 +1810,11 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
                     help="eval results JSONL to group by trial; --report owners only")
     ap.add_argument("--eval", metavar="SKILL:ID", dest="eval_case",
                     help="the eval whose results rows to group; --report owners only")
+    ap.add_argument("--policy", action="append", metavar="NAME=SPEC",
+                    help="a hand-off policy arm to replay against the baseline; repeatable; "
+                         "--report owners only")
+    ap.add_argument("--sweep", action="store_true",
+                    help="replay the sweep of candidate policies; --report owners only")
     ap.add_argument("--context-threshold", type=_positive_int, default=None, metavar="TOKENS",
                     help="context size above which cache reads are totalled; --report cache only "
                          "(default 120000)")
@@ -1814,6 +1830,8 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
             ap.error("--report owners does not take --artifacts")
         if args.strata != "claude":
             ap.error("--report owners reads Claude transcripts only")
+    if (args.policy or args.sweep) and not owners_report:
+        ap.error("--policy and --sweep are available only with --report owners")
     if (args.eval_results is None) != (args.eval_case is None):
         ap.error("--eval-results and --eval must be used together")
     if args.eval_results is not None and not owners_report:

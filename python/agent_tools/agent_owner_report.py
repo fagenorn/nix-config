@@ -6,8 +6,9 @@ A transcript is an owner's when one of its Bash calls is a registering command (
 every other transcript is attributed to its nearest owner through the `parentAgentId`
 of its `.meta.json`. scan_owner_transcript reads one transcript through
 agent_tools.transcript_calls and prices it through agent_tools.model_pricing; collect
-assembles lineages, build_document projects them (with arms and fresh-owner boots) as
-the `agent-owner-report` document, and print_document prints its tables.
+assembles lineages, build_document projects them (with arms and fresh-owner boots, and
+the replay of agent_tools.agent_owner_replay when asked) as the `agent-owner-report`
+document, and print_document prints its tables.
 agent_costs.main runs the report for `--report owners`. python/README.md (agent-costs)
 holds the contract.
 """
@@ -42,6 +43,9 @@ DISPATCH_TOOLS = ("Agent", "Task")
 BOOT_GROUPS = ("0-5", "6-7")
 LIVE_ARM = "live"
 NONE_YET = "(none: pass --policy or --sweep)"
+BIAS_NOTE = ("The shift model keeps observed increments after a hand-off and cannot see a fresh "
+             "owner's re-reads, so it favours hand-offs (D18); an arm with more hand-offs than "
+             "the baseline is kept only if the live arm confirms it.")
 
 _MENTIONS = re.compile(r"workflow-state|sdd-gate")
 _FINISH_COMMAND = re.compile(r"(?<![\w-])workflow-state\s+finish(?![\w-])")
@@ -719,13 +723,18 @@ def _arm_rows(rows):
     return result
 
 
-def _boot(launch):
+def phase_group(phase):
+    """The boot group (BOOT_GROUPS) of a working phase; an unknown phase is in "0-5"."""
+    return "6-7" if phase is not None and phase >= 6 else "0-5"
+
+
+def boot_facts(launch):
     """B, start context, call count and slimmable tokens of a fresh owner's boot."""
     if not launch.calls or launch.calls[0].is_root or launch.registered_index is None:
         return None
     boot = launch.calls[:launch.registered_index + 1]
     registering = boot[-1]
-    group = "6-7" if registering.phase is not None and registering.phase >= 6 else "0-5"
+    group = phase_group(registering.phase)
     return group, {"b": registering.context, "start": boot[0].context, "calls": len(boot),
                    "slimmable": sum(call.slimmable for call in boot)}
 
@@ -734,7 +743,7 @@ def _boot_rows(lineages):
     groups = {name: [] for name in BOOT_GROUPS}
     for lineage in lineages:
         for launch in lineage.launches:
-            boot = _boot(launch)
+            boot = boot_facts(launch)
             if boot is not None:
                 groups[boot[0]].append(boot[1])
     return [{"phase_group": name, "count": len(boots),
@@ -746,13 +755,21 @@ def _boot_rows(lineages):
             for name, boots in groups.items() if boots]
 
 
-def build_document(lineages, footer, *, window: str) -> dict:
-    """The `agent-owner-report` document; Task 4 fills `simulated` and `calibration`."""
+def build_document(lineages, footer, *, window: str, arms=None, sweep=False) -> dict:
+    """The `agent-owner-report` document; `arms` (replay Arms) and `sweep` fill the replay."""
     rows = [lineage.facts for lineage in lineages]
+    simulated, calibration = [], None
+    if arms or sweep:
+        from agent_tools import agent_owner_replay  # imports this module, so only here
+        model = agent_owner_replay.fit(lineages)
+        simulated = agent_owner_replay.compare(lineages, model, arms or [])
+        if sweep:
+            simulated += agent_owner_replay.sweep(lineages, model)
+        calibration = agent_owner_replay.calibration(lineages, model)
     return {
         "kind": REPORT_KIND, "schema_version": SCHEMA_VERSION, "window": window,
         "pricing": footer["pricing"], "lineages": rows, "arms": _arm_rows(rows),
-        "boots": _boot_rows(lineages), "simulated": [], "calibration": None,
+        "boots": _boot_rows(lineages), "simulated": simulated, "calibration": calibration,
         "unattributed": footer["unattributed"], "interrupted": footer["interrupted"],
         "unmatched": footer["unmatched"],
     }
@@ -766,6 +783,50 @@ def _print_capped(rows, top, headers, aligns):
     print_table(rows[:top], headers, aligns)
     if len(rows) > top:
         print(f"\n... {len(rows) - top} more rows not shown (--top {len(rows)} for all)")
+
+
+def _print_simulated(rows, top):
+    print("\nSimulated arms (savings are per lineage against the baseline replay; a sweep step's "
+          "rows are against the step's simpler arm; hand-offs and deaths per issue):\n")
+    if not rows:
+        print(NONE_YET)
+        return
+    _print_capped(
+        [[row["arm"], row["step"], row["spec"], _money(row["dollars_per_delivered"]),
+          _money(row["mean_saving"]), _money(row["lower_bound"]), f"{row['share_saving']:.0%}",
+          f"{row['handoffs_per_issue']:.2f}", f"{row['deaths_per_issue']:.2f}",
+          human(row["peak_p90"]), row["verdict"],
+          "yes" if row["live_confirmation_required"] else "no"] for row in rows],
+        top, ["arm", "step", "spec", "$ / delivered", "mean saving", "lower bound", "saves",
+              "hand-offs", "deaths", "peak p90", "verdict", "live check"],
+        ["l", "l", "l"] + ["r"] * 7 + ["l", "l"])
+    threshold_rows = [row for row in rows if row["step"] == "threshold"]
+    cheapest = min(threshold_rows, key=lambda row: row["dollars_per_delivered"] or 0, default=None)
+    if cheapest is not None and cheapest["verdict"] == "info":
+        print("\nthreshold=never is the cheapest threshold arm; it is a reference, never chosen.")
+
+
+def _print_calibration(calibration, top):
+    print("\nCalibration:\n")
+    if calibration is None:
+        print(NONE_YET)
+        return
+    print(f"Identity replay matches the priced lineages: "
+          f"{'yes' if calibration['identity_matches'] else 'NO'} "
+          f"(max error ${calibration['identity_max_error']:.9f})")
+    model = calibration["model"]
+    print(f"Boot model: start {human(model['start'])}; boot calls {model['boot_calls']}; "
+          f"B {model['boot_end']}; slimmable {model['slimmable']}; hand-off overhead calls "
+          f"{model['overhead_calls']}; boot output {model['boot_output']}; defaults: "
+          f"{', '.join(model['defaults']) or 'none'}\n")
+    groups = {boot["phase_group"] for boot in calibration["boots"]}
+    _print_capped(
+        [[group, f"{len(members):,}",
+          _money(percentile([boot["observed_dollars"] for boot in members], 50)),
+          _money(percentile([boot["modelled_dollars"] for boot in members], 50))]
+         for group in BOOT_GROUPS if group in groups
+         for members in [[boot for boot in calibration["boots"] if boot["phase_group"] == group]]],
+        top, ["phase", "boots", "observed p50", "modelled p50"], ["l", "r", "r", "r"])
 
 
 def print_document(doc: dict, *, top: int) -> None:
@@ -798,10 +859,8 @@ def print_document(doc: dict, *, top: int) -> None:
          for boot in doc["boots"]],
         top, ["phase", "boots", "B p50", "B p90", "start p50", "boot calls p50", "slimmable p50"],
         ["l"] + ["r"] * 6)
-    print("\nSimulated arms:\n")
-    print(NONE_YET)
-    print("\nCalibration:\n")
-    print(NONE_YET)
+    _print_simulated(doc["simulated"], top)
+    _print_calibration(doc["calibration"], top)
     pricing, lost = doc["pricing"], doc["unattributed"]
     print(f"\nPricing: {pricing['source']} ({pricing['date']}); "
           f"{pricing['approximate_calls']:,} calls priced approximately")
@@ -811,4 +870,6 @@ def print_document(doc: dict, *, top: int) -> None:
         print(f"Interrupted trials left out (evidence gaps): {len(doc['interrupted']):,}")
     if doc["unmatched"]:
         print(f"Clean-exit trials with no owner lineage (evidence gaps): {len(doc['unmatched']):,}")
+    if doc["simulated"]:
+        print(BIAS_NOTE)
     print(f"NOTE: {DISCLAIMER}")
