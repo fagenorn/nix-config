@@ -25,7 +25,7 @@ FIXTURE_MATRIX = {
         {"id": "demo-review",
          "call": 'Agent(subagent_type="reviewer", model="opus", effort="high") reviews the demo.'},
         {"id": "demo-plugin",
-         "call": 'Agent(subagent_type="codex:rescue", model="sonnet", effort="medium") transports.'},
+         "call": 'Agent(subagent_type="codex:codex-rescue", model="sonnet", effort="medium") transports.'},
     ],
     "scenarios": {},
 }
@@ -603,7 +603,7 @@ WORKFLOW = ".github/workflows/instruction-budget.yaml"
 DEMO = "home/common/agent-skills/skills/demo/SKILL.md"
 LOOSE = "home/common/agent-skills/skills/demo/LOOSE.md"
 GATE_SITE = {"id": "demo-plugin", "path": DEMO,
-             "call": 'Agent(subagent_type="codex:rescue", model="sonnet", effort="medium") '
+             "call": 'Agent(subagent_type="codex:codex-rescue", model="sonnet", effort="medium") '
                      'transports.'}
 # A lint-clean three-tree repository carrying the gate workflow; GATE_MODEL's
 # ceilings are hand-counted: demo 75, solo 74, stub 74, frame 11; descriptions 31 each.

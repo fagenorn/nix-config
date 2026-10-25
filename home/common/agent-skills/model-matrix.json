@@ -390,7 +390,7 @@
       "id": "sdd-codex-rescue-transport",
       "path": "home/common/agent-skills/skills/sdd/fix-loop.md",
       "marker": "<!-- agent-dispatch: id=sdd-codex-rescue-transport role=codex-transport model=sonnet effort=medium -->",
-      "call": "Agent(subagent_type=\"codex:rescue\", model=\"sonnet\", effort=\"medium\") transports the bounded stuck-breaker diagnosis to the external Codex runtime without selecting that runtime's model.",
+      "call": "Agent(subagent_type=\"codex:codex-rescue\", model=\"sonnet\", effort=\"medium\") transports the bounded stuck-breaker diagnosis to the external Codex runtime without selecting that runtime's model.",
       "role": "codex-transport",
       "model": "sonnet",
       "effort": "medium",
