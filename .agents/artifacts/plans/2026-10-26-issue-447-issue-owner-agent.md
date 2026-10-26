@@ -59,5 +59,10 @@ The one check outside the worktree before merge is the anis-desktop evaluation (
 - The definition's fields and the server-level Docs entry per D1; body-less and unlisted per D2; tiers per D3 (Task 2).
 - The role-to-type mapping and the sites kept on `general-purpose` per D4; both new tests in the matrix module per D5 (Tasks 2, 3).
 - Evidence before activation per D6; the probe as Task 1, its stop rules and the byte-identical commit per D7; the post-merge route for the Artifact trio and the 11k threshold per D8 (Task 1).
+- Task 1's tightened child, stop-rule and post-merge window checks per D9 (Task 1).
+
+## Standards review provenance
+
+Reviewer: Codex (gpt-6-astra, xhigh), isolated read-only `codex-companion task --fresh --reviewer plan-review`; base `ca6ba1ae2b37e56c1361a8656c29af1f39b89348`; no focus; no fallback. Findings: 3 accepted (R1 blocking: the post-merge after-window lacked `--events-before`; R2 should-fix: the child check accepted failure text; R3 should-fix: Step 6 missed D7's no-removal stop), 0 rejected, 0 deferred; applied in Task 1 per D9.
 
 ---

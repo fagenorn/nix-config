@@ -169,6 +169,7 @@ def subagent(path):
         "names": sorted(names),
         "tools_line": tools_line,
         "child_line": last(lines, "CHILD:"),
+        "last_line": lines[-1].strip() if lines else None,
     }
 
 
@@ -227,7 +228,8 @@ def main():
         control, owner, back = gp[0], (fg[0] if fg else None), (bg[0] if bg else None)
         children = [r for r in rows if owner and r["agent_type"] == "Explore" and r["parent"] == owner["id"]]
         spawned = owner is not None and owner["first_request"] is not None and owner["tools_line"] is not None
-        child_ok = spawned and bool(children) and "anis" in (owner["child_line"] or "").lower()
+        child_ok = (spawned and (owner["child_line"] or "").lower() == "child: anis"
+                    and any((c["last_line"] or "").strip("` ").lower() == "anis" for c in children))
         per_tool = {tool: {"control": "present" if control["listed"][tool] else "not in pool",
                            "foreground": status(control["listed"][tool], owner["listed"][tool] if owner else None),
                            "background": status(control["listed"][tool], back["listed"][tool] if back else None)}
@@ -294,14 +296,14 @@ Create `.agents/artifacts/plans/2026-10-26-issue-447-issue-owner-agent.acceptanc
    - `Verdict`: `—` in every row.
 4. `## Feasibility` — one table `Tool | general-purpose control | issue-owner foreground | issue-owner background`, rows `Artifact`, `ArtifactComments`, `ArtifactData`, `mcp__claude_ai_Claude_Docs` from `.checks.per_tool`; then one line each for `spawned and returned`, `child returned anis`, `kept tools (Agent/Task, Skill, Bash, Read, Edit, Write, ToolSearch)`, and every tool in `.checks.kept_listed` named as kept by frontmatter. A tool `not in pool` in the control is confirmed by the post-merge check.
 5. `## Probe output` — the `sed` output of Step 4 in one fenced `text` block, then `summary.json` in one fenced `json` block.
-6. `## Post-merge check (AC3)` — this text, with `<SWITCH>` left for whoever runs it after the user's `just switch` (UTC, `%Y-%m-%dT%H:%M:%SZ`):
+6. `## Post-merge check (AC3)` — this text, with `<SWITCH>` and `<END>` left for whoever runs it after the user's `just switch` (UTC, `%Y-%m-%dT%H:%M:%SZ`; `<END>` is the instant the check runs, and `agent-costs` requires both bounds together):
 
    ```text
-   just agent-costs --report cache --events-since <SWITCH>                                   # after: issue-owner row
+   just agent-costs --report cache --events-since <SWITCH> --events-before <END>              # after: issue-owner row
    just agent-costs --report cache --events-since <SWITCH minus 7 days> --events-before <SWITCH>  # before: general-purpose row
    ```
 
-   Met when the before table's `general-purpose` (1st write + 1st read) minus the after table's `issue-owner` (1st write + 1st read) is at least 11,000 tokens, and `jq -r 'select(.type == "attachment" and .attachment.type == "deferred_tools_delta") | .attachment.addedNames[]'` over every subagent transcript whose `meta.json` `agentType` is `issue-owner` since `<SWITCH>` prints no `Artifact`, `ArtifactComments`, `ArtifactData` or `mcp__claude_ai_Claude_Docs__*` name. Record the two rows, the difference and the verdict in row `AC3`; until then the issue is held open (D8).
+   Met when the before table's `general-purpose` (1st write + 1st read) minus the after table's `issue-owner` (1st write + 1st read) is at least 11,000 tokens, and `jq -r 'select(.type == "attachment" and .attachment.type == "deferred_tools_delta") | .attachment.addedNames[]'` over every subagent transcript whose `meta.json` `agentType` is `issue-owner` since `<SWITCH>` prints no `Artifact`, `ArtifactComments`, `ArtifactData` or `mcp__claude_ai_Claude_Docs__*` name. Record the two rows, `<SWITCH>`, `<END>`, the difference and the verdict in row `AC3`; until then the issue is held open (D8).
 
 Report DONE_WITH_CONCERNS naming each tool in `.checks.kept_listed` and any missed threshold.
 
@@ -314,7 +316,7 @@ test "$(grep -c '^| AC[1-3] |' "$f")" = 3
 grep -q '^| AC3 |.*smaller by' "$f"
 grep -q '02f2999e7eccfb3eec026aa843452f04b16273f975b48fb8f6cbc91f7254ae56' "$f"
 for s in '## Feasibility' '## Probe output' '## Post-merge check (AC3)'; do grep -qx "$s" "$f"; done
-jq -e '(.void | length) == 0 and .checks.spawned_and_returned and .checks.child_returned_anis and .checks.kept_tools' "$P/summary.json"
+jq -e '(.void | length) == 0 and .checks.spawned_and_returned and .checks.child_returned_anis and .checks.kept_tools and ((.checks.control_carried | length) == 0 or (.checks.kept_listed | length) < (.checks.control_carried | length))' "$P/summary.json"
 ```
 
 Expected: every command exits 0. The `jq` line fails at the commit you start from (no probe has run) and whenever a D7 stop rule applies.
