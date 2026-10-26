@@ -12,7 +12,7 @@ Take one tracker issue from triage to merged code by chaining the canonical skil
 ## Files beside this one
 - `<tracker-cli>` is `bindings.tracker.cli`; before invoking it, unset only the names `bindings.tracker.credential_env.unset_before_invocation` lists.
 - Phases 2–5 ground through `doc-grounded-questions` before their first question, option set or review pass; that skill owns the pass and its git-dir `GROUNDING.md` cache.
-- **`AUTO.md`** — autonomous-mode rules. Read it *once*, now, only if the invocation contains the literal token `--auto`. With a resume pack, defer that read until the pack's checks pass: a failed pack restores the whole read, and a verified pack reads only the opening, `The self-answer pattern` and `When *not* to auto-resolve`, plus its phase's route section — `Phases 2–4 run as subagents` for Phases 2–4; for Phases 5–7, `Other Phase 5–7 routes` (the direct-autonomous controller at Phase 5 reads `rollover.md`, and the delegated owner `delegated-owner.md`, in its place) and `Interface_version 2 delivery relay`.
+- **`AUTO.md`** — autonomous-mode rules. Read it once, now, only with the literal token `--auto`; with a resume pack, after its checks pass. A failed pack reads it whole; a verified pack reads the opening and `The self-answer pattern`, then for Phases 0–5 `When *not* to auto-resolve`, for Phases 2–4 `Phases 2–4 run as subagents`, and for Phases 5–7: `Other Phase 5–7 routes` (the direct-autonomous controller at Phase 5 reads `rollover.md`, and the delegated owner `delegated-owner.md`, in its place) and `Interface_version 2 delivery relay`.
 - **`acquire-dispatcher.md`** — a complete dispatcher envelope, or a generic `delegate` owner.
 - **`acquire-direct.md`** — `--auto` with no dispatcher envelope.
 - **`acquire-durable.md`** — an interactive user's explicit request for durable orchestration.
@@ -23,8 +23,8 @@ Take one tracker issue from triage to merged code by chaining the canonical skil
 - **`standards-review.md`** — Phase 5.
 - **`REVIEW-CONTRACT.md`** — Phase-5 reviewer contract: hand it over **by absolute path**, never read it in.
 - **`rollover.md`** — the direct autonomous controller's Phase-5 transfer and its stop afterwards.
-- **`delegated-owner.md`** — every delegated owner; read it first, before any resume pack.
-- **`ship-handoff.md`** — Phase 7.
+- **`delegated-owner.md`** — every delegated owner, first: only `## Checks and Phases 6–7` or `## Generic delegate`, as its route selects.
+- **`ship-handoff.md`** — `## Phase 7 — Ship` on, or a generic delegate's handoff.
 
 ## Lifecycle identity
 Select the acquisition route by the first condition that holds:
@@ -120,7 +120,7 @@ Agent(subagent_type="general-purpose", model="opus", effort="high") delegates th
 Agent(subagent_type="mechanic", model="haiku", effort="low") executes the ledger-only remainder: the exact workflow-state commands and verbatim JSON relay, with no content judgment.
    Give it the exact commands, identities, and paths inline; it decides nothing and edits nothing.
 
-On the direct-autonomous route, `rollover.md` replaces the generic Phase-5 delegation above and `delegated-owner.md` its Phase-6 and Phase-7 `delegate` gates. Every other Phase-6 `delegate` is the Phase-7 ship-owner dispatch. Without lifecycle identity, apply the same action order locally with the default ceilings of `workflow-state progress` and default interactive handoff behavior.
+On the direct-autonomous route, `rollover.md` replaces the generic Phase-5 delegation above and `delegated-owner.md` its Phase-6 and Phase-7 `delegate` gates. Every other Phase-6 `delegate` is the Phase-7 ship-owner dispatch. Without lifecycle identity, apply that order locally with the default ceilings of `workflow-state progress` and the default interactive handoff.
 
 If `workflow-state progress` is rejected with `cannot record progress at or after attempt deadline` or `progress requires an active attempt`, do not retry it: release every worker this owner registered, run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`, then print the canonical re-entry line `/from-issue <num> --auto` and stop, writing no `finish`.
 
@@ -209,7 +209,7 @@ sdd returns only canonical JSON: pipe the received bytes through `artifact-budge
 <!-- agent-dispatch: id=from-issue-ship-owner role=ship-owner model=opus effort=high -->
 Agent(subagent_type="general-purpose", model="opus", effort="high") launches `ship-issue` as a fresh ship owner, not inline via `Skill`.
 
-Read `ship-handoff.md` for the exact subagent prompt, the inline fallback when `ship-issue` is absent, and the `## Remainder owner prompt` this same site launches for a validated `delivery_remainder` object; the remainder owner writes its own `finish`, so relay its validated reply unchanged and skip the terminal write.
+Read `ship-handoff.md` for the subagent prompt, the inline fallback when `ship-issue` is absent, and the `## Remainder owner prompt` this same site launches for a validated `delivery_remainder` object; the remainder owner writes its own `finish`, so relay its validated reply unchanged and skip the terminal write.
 
 From-issue owns the terminal durable write: handle the ship report, and any Phase-6 execution failure or Phase-7 stopped/failed report, as `ship-handoff.md` § Ship report handling says.
 

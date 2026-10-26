@@ -976,7 +976,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_from_issue_phase_seven_ships_inline_on_the_dispatch_gap(self):
         # The fallback ends in the suspension procedure, never a direct
         # `workflow-state suspend` (the verb stays in that procedure).
-        phase_seven = self.section(self.from_issue, "## Phase 7", "## Notes")
+        phase_seven = self.section(self.from_issue, "\n## Phase 7", "## Notes")
         handling = self.section(self.ship_handoff, "## Ship report handling",
                                 "## Inline fallback (no ship-issue skill)")
         for text in (phase_seven, handling):
@@ -1950,6 +1950,42 @@ class SlimBootContractsTest(unittest.TestCase):
             position = entry.find(anchor, position + 1)
             self.assertGreaterEqual(position, 0, anchor)
         self.assertIn("`action_id`", entry)
+
+    def bullet(self, name):
+        index = self.section(self.read(FROM_ISSUE), "## Files beside this one",
+                             "## Lifecycle identity")
+        start = index.index(f"- **`{name}`**")
+        end = index.find(" - **`", start + 1)
+        return index[start:] if end < 0 else index[start:end]
+
+    @staticmethod
+    def headings(path):
+        return {line.lstrip("#").strip()
+                for line in path.read_text(encoding="utf-8").splitlines() if line.startswith("#")}
+
+    def test_every_section_and_file_the_verified_pack_reads_exists(self):
+        for name, document in (("AUTO.md", AUTO), ("resume-pack.md", FROM_ISSUE),
+                               ("delegated-owner.md", DELEGATED_OWNER),
+                               ("ship-handoff.md", FROM_ISSUE)):
+            for span in re.findall(r"`([^`]+)`", self.bullet(name)):
+                with self.subTest(bullet=name, span=span):
+                    if span.endswith(".md"):
+                        self.assertTrue((FROM_ISSUE_DIR / span).is_file())
+                    elif not (span.startswith("-") or "<" in span or span in ("sdd", "ship-issue")):
+                        self.assertIn(span.removeprefix("## "), self.headings(document))
+        for heading in ("`## Checks and Phases 6–7`", "`## Generic delegate`"):
+            self.assertIn(heading, self.bullet("delegated-owner.md"))
+
+    def test_phases_6_7_read_neither_the_stop_rules_nor_the_ship_handoff(self):
+        auto = self.bullet("AUTO.md")
+        self.assertEqual(auto.count("`When *not* to auto-resolve`"), 1)
+        late = auto[auto.index("Phases 5–7:"):]
+        for wanted in ("`Other Phase 5–7 routes`", "`Interface_version 2 delivery relay`"):
+            self.assertIn(wanted, late)
+        self.assertNotIn("`When *not* to auto-resolve`", late)
+        self.assertIn("`## Phase 7 — Ship`", self.bullet("ship-handoff.md"))
+        for name in ("AUTO.md", "resume-pack.md", "delegated-owner.md"):
+            self.assertNotIn("`ship-handoff.md`", self.bullet(name))
 
 
 class InterimChildResultContractsTest(unittest.TestCase):

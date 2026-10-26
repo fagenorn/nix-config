@@ -1,6 +1,6 @@
 # Autonomous mode (`--auto`)
 
-It replaces the checkpoint behavior in `SKILL.md`; everything else in `SKILL.md` still applies.
+It replaces `SKILL.md`'s checkpoint behavior; everything else there still applies.
 
 You don't get to skip thinking — you only stop waiting for the user.
 
