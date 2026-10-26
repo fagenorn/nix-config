@@ -53,6 +53,22 @@ class Cutover(DeliveredCustody):
             capture_output=True, check=True)
         subprocess.run(["tar", "-x", "-C", str(cls.base)], input=archive.stdout, check=True)
 
+    @staticmethod
+    def base_compatible(mutate):
+        """The base helper's resolver predates `verification_conditions` (#437) and refuses
+        it; no case here is about verification, so both generations' projects drop it."""
+        def apply(contract):
+            contract["bindings"]["workflow"].pop("verification_conditions", None)
+            if mutate is not None:
+                mutate(contract)
+        return apply
+
+    def project(self, mutate=None):
+        return super().project(self.base_compatible(mutate))
+
+    def worktree_project(self, mutate=None):
+        return super().worktree_project(self.base_compatible(mutate))
+
     def cli(self, *args, stdin=None, ok=True, cwd=None):
         if self.generation == "head":
             return super().cli(*args, stdin=stdin, ok=ok, cwd=cwd)
