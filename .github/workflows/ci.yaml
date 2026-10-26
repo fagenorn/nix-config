@@ -83,6 +83,10 @@ jobs:
         id: checkout
         continue-on-error: true
         uses: actions/checkout@v4
+        # Full history: suite modules build fixtures from pinned ancestor
+        # commits and refuse to skip when one is missing (issue 436).
+        with:
+          fetch-depth: 0
       - name: Install Nix
         id: install_nix
         continue-on-error: true
