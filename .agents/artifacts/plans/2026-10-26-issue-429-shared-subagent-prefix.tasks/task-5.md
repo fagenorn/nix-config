@@ -12,6 +12,7 @@ Spec § Evidence runs (AC4), per D5, D6, D18 and D23, under #422 D27. On mbp, `j
 **Interfaces:**
 - Consumes (Task 3, via `./result`): the plist whose `ProgramArguments.2` is `/bin/wait4path /nix/store && exec <launcher> --port 27183 --keepalive --reorder`, its `SSL_CERT_FILE`, and `<hash>-claude-code-with-accounts-<version>/bin/claude`; `request` lines carry `reorder` only under `--reorder`, and `ping` lines carry `usage`.
 - Consumes: `just evals from-issue 1` (`home/common/agent-skills/evals/run-eval.sh`), which resolves `claude` from `PATH`, sets `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` itself, prints `workdir: <WORK>` (the sandbox repo is `<WORK>/repo`), `PASS  <assert>`/`FAIL  <assert>` lines and one `VERDICT: …` line, and appends one JSON line (`ts`, `skill`, `id`, `verdict`, `wall_s`, `workdir`, `cost_usd`, …) to `results.jsonl`. Its default timeout is 2,700 s.
+- Consumes: `agent_tools.agent_costs.find_sessions(root: Path, cutoff: float | None)`, which yields `(home dir, root files, subagent files)` per session id across all project dirs (`python/agent_tools/agent_costs.py`).
 - Consumes: `just agent-costs --format json --days 0 --projects-dir <dir>`, whose record holds `.strata.claude.cost_basis` (`list-price`) and `.strata.claude.totals.cost_usd`; the acceptance row `AC4` reading `pending (Task 5)`.
 - Produces: row `AC4`'s evidence columns; up to two `results.jsonl` lines (none for an arm skipped at the cutoff); the appended section.
 
@@ -76,7 +77,7 @@ echo "eval $arm exit $status window $start $end"
 EOF
 ```
 
-Also write `$E/copy.py`, a short standard-library script taking `<repo> <dest> <start>`: for every `$HOME/.claude-accounts/profiles/p2/projects/<dir>/<session>.jsonl` modified at or after `<start>` that holds a record whose `cwd` is `<repo>` or under `<repo>/` (the eval sandbox and its worktrees), it copies that file and its sibling `<session>/` directory into `<dest>/<dir>/`, and it exits non-zero when it copies nothing.
+Also write `$E/copy.py`, a short standard-library script taking `<python dir> <repo> <dest> <start>` (D30). A session that enters a worktree writes its subagent transcripts under the worktree's project dir while its root transcript stays put, so the copy is keyed by session id across every project dir, as `agent_costs.find_sessions` keys it. With `P = $HOME/.claude-accounts/profiles/p2/projects`, the script puts `<python dir>` first on `sys.path` and imports `agent_tools.agent_costs`. It selects the session ids of the groups `find_sessions(P, <start as epoch seconds>)` yields whose root files include one holding a record whose `cwd` is `<repo>` or under `<repo>/` (the eval sandbox and its worktrees); a group's id is its root transcript's stem. For each selected id and each project dir `<dir>` of `P`, it copies `<dir>/<id>.jsonl` and the whole `<dir>/<id>/` directory, where present, into `<dest>/<dir>/`, with `shutil.copy2` and `shutil.copytree`. Then it checks completeness: the root and subagent files `find_sessions(P, None)` yields for the selected ids, as paths relative to `P`, equal those `find_sessions(<dest>, None)` yields, relative to `<dest>`. It exits non-zero when it selects nothing or the two sets differ.
 
 - [ ] **Step 3: The on arm (timeout 3600 s)**
 
@@ -97,7 +98,7 @@ for arm in on off; do
   work=$(sed -n 's/^workdir: //p' "$E/eval-$arm.txt" | tail -1); test -n "$work"
   grep -E '^(PASS|FAIL)  |^VERDICT:' "$E/eval-$arm.txt"
   rm -rf "$E/$arm-projects"
-  python3 -I "$E/copy.py" "$work/repo" "$E/$arm-projects" "$start"
+  python3 -I "$E/copy.py" "$PWD/python" "$work/repo" "$E/$arm-projects" "$start"
   just agent-costs --format json --days 0 --projects-dir "$E/$arm-projects" > "$E/cost-$arm.json"
   jq -e '.strata.claude.cost_basis == "list-price" and .strata.claude.totals.runs >= 1' "$E/cost-$arm.json"
   jq -r '.strata.claude.totals.cost_usd' "$E/cost-$arm.json"

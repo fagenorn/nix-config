@@ -277,6 +277,30 @@ class SubagentPrefixTest(unittest.TestCase):
         _, mark = self.applied(self.variant([("system-1", self.HOUR)], top={"type": "ephemeral"}))
         self.assertEqual(mark, {"type": "ephemeral"})
 
+    def with_inner(self, value, mark):
+        """`value` plus a later user message whose tool_result holds `mark` in its inner content."""
+        value["messages"].append({"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": "toolu_inner",
+            "content": [{"type": "text", "text": "inner", "cache_control": mark}]}]})
+        return value
+
+    def test_an_inner_content_mark_takes_a_slot(self):
+        places = [("tool0", self.HOUR), ("tool1", self.HOUR), ("system-1", self.HOUR)]
+        self.applied(self.variant(places))
+        value = self.with_inner(self.variant(places), {"type": "ephemeral"})
+        output, mark = self.applied(value, "applied_at_cap")
+        self.assertIsNone(mark)
+        self.assertEqual(marks(output), marks(value))
+
+    def test_an_inner_content_mark_sets_the_ttl_and_its_order(self):
+        _, mark = self.applied(self.with_inner(self.variant([("system-1", self.HOUR)]),
+                                               {"type": "ephemeral", "ttl": "5m"}))
+        self.assertEqual(mark, {"type": "ephemeral", "ttl": "5m"})
+        value = self.with_inner(self.variant([("system-1", {"type": "ephemeral", "ttl": "5m"})]),
+                                dict(self.HOUR))
+        self.assert_unchanged(*self.run_transform(subagent_prefix.SubagentPrefix(), value),
+                              "shape")
+
     def test_a_budget_line_after_the_prompt_stays_after_it(self):
         output, mark = self.applied(self.with_budget(1))
         content = output["messages"][0]["content"]
