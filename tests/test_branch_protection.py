@@ -480,6 +480,9 @@ class WorkflowShape(unittest.TestCase):
             "another step's continuation must not satisfy missing checkout",
         )
         self.assertTrue(has_summary_always_guard(steps))
+        # Issue 436: five suite modules build fixtures from pinned ancestor
+        # commits and refuse to skip, so the advisory checkout fetches history.
+        self.assertIn("          fetch-depth: 0", steps["Checkout"])
 
         stdout, summary = execute_summary()
         self.assertEqual(stdout, summary)
