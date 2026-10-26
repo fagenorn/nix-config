@@ -1,4 +1,4 @@
-"""The `claude` launcher routes through the cache proxy only when CLAUDE_CACHE_PROXY=1 and its health check answers (#422, #438).
+"""The `claude` launcher routes through the cache proxy while its health check answers, unless CLAUDE_CACHE_PROXY=0 (#422, #438, #450).
 
 Each case runs the source `claude-account run` from a temporary copy of the accounts mod whose
 `CACHE_PROXY_URL=` line is substituted the way `home/common/claude-code/default.nix` substitutes
@@ -176,7 +176,7 @@ class LauncherCase(unittest.TestCase):
 
 
 class RoutingTest(LauncherCase):
-    """Opted-in launches keep #422's health-checked routing."""
+    """Launches with CLAUDE_CACHE_PROXY=1 keep #422's health-checked routing."""
 
     switch = {"CLAUDE_CACHE_PROXY": "1"}
 
@@ -247,41 +247,39 @@ class RoutingTest(LauncherCase):
         self.assertNotIn(REMINDER, environment)
 
 
-class OptInRoutingTest(LauncherCase):
-    """Routing is opt-in (#438 D8): only CLAUDE_CACHE_PROXY=1 probes and routes."""
+class DefaultRoutingTest(LauncherCase):
+    """Routing is on by default (#450 D3): unset, empty or 1 probes and routes, and only 0 opts out."""
 
-    def test_an_unset_switch_launches_direct_with_a_healthy_proxy(self):
-        self.assert_direct(self.launch(self.healthy_proxy()))
+    def test_an_unset_or_empty_switch_routes_after_one_probe(self):
+        url = self.healthy_proxy()
+        for switch in ({}, {"CLAUDE_CACHE_PROXY": ""}):
+            with self.subTest(switch=switch):
+                self.proxy_requests.clear()
+                self.assert_routed(self.launch(url, switch), url)
+                self.assertEqual(self.proxy_requests, [cache_proxy.HEALTH_PATH])
+
+    def test_a_zero_switch_launches_direct_without_a_probe(self):
+        self.assert_direct(self.launch(self.healthy_proxy(), {"CLAUDE_CACHE_PROXY": "0"}))
         self.assert_not_probed()
 
-    def test_an_empty_or_zero_switch_launches_direct_with_a_healthy_proxy(self):
+    def test_an_inherited_proxy_url_is_unset_under_zero_and_decided_again_otherwise(self):
         url = self.healthy_proxy()
-        for value in ("", "0"):
-            with self.subTest(value=value):
-                self.assert_direct(self.launch(url, {"CLAUDE_CACHE_PROXY": value}))
-                self.assert_not_probed()
-
-    def test_an_opted_in_launch_routes_and_goes_direct_when_the_proxy_is_down(self):
-        url = self.healthy_proxy()
-        self.assert_routed(self.launch(url, {"CLAUDE_CACHE_PROXY": "1"}), url)
+        self.assert_direct(self.launch(url, {"ANTHROPIC_BASE_URL": url, "CLAUDE_CACHE_PROXY": "0"}))
+        self.assert_not_probed()
+        self.assert_routed(self.launch(url, {"ANTHROPIC_BASE_URL": url}), url)
         self.assertEqual(self.proxy_requests, [cache_proxy.HEALTH_PATH])
-        self.assert_direct(self.launch("http://127.0.0.1:%d" % closed_port(), {"CLAUDE_CACHE_PROXY": "1"}))
-
-    def test_an_inherited_proxy_url_is_unset_when_not_opted_in(self):
-        url = self.healthy_proxy()
-        for switch in ({}, {"CLAUDE_CACHE_PROXY": "0"}):
-            with self.subTest(switch=switch):
-                self.assert_direct(self.launch(url, {"ANTHROPIC_BASE_URL": url, **switch}))
-                self.assert_not_probed()
+        down = "http://127.0.0.1:%d" % closed_port()
+        self.assert_direct(self.launch(down, {"ANTHROPIC_BASE_URL": down}))
 
     def test_a_caller_set_endpoint_is_left_alone_either_way(self):
         url = self.healthy_proxy()
-        for switch in ({}, {"CLAUDE_CACHE_PROXY": "1"}):
+        for switch in ({}, {"CLAUDE_CACHE_PROXY": "0"}):
             with self.subTest(switch=switch):
                 environment = self.launch(url, {"ANTHROPIC_BASE_URL": CALLER_URL, **switch})
                 self.assertEqual(environment.get("ANTHROPIC_BASE_URL"), CALLER_URL)
                 self.assertNotIn("ENABLE_TOOL_SEARCH", environment)
                 self.assertNotIn(REMINDER, environment)
+        self.assert_not_probed()
 
     def test_any_other_switch_value_fails_before_claude_starts(self):
         url = self.healthy_proxy()
@@ -291,6 +289,7 @@ class OptInRoutingTest(LauncherCase):
                 self.assertEqual((completed.returncode, completed.stdout), (1, ""))
                 self.assertEqual(completed.stderr,
                                  "claude-account: CLAUDE_CACHE_PROXY must be 1, 0 or unset\n")
+
 
 
 if __name__ == "__main__":
