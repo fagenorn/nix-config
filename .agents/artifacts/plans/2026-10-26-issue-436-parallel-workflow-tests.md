@@ -9,7 +9,7 @@
 
 **Tech stack:** Python 3.12+ standard library (`argparse`, `subprocess`, `threading`, `unittest`), Just, GitHub Actions YAML.
 
-Spec: `.agents/artifacts/specs/2026-10-26-issue-436-parallel-workflow-tests-design.md`. Its `## Decision ledger` rows are cited by ID; this plan appends D11–D13. Issue: https://github.com/fagenorn/nix-config/issues/436.
+Spec: `.agents/artifacts/specs/2026-10-26-issue-436-parallel-workflow-tests-design.md`. Its `## Decision ledger` rows are cited by ID; this plan appends D11–D13, and Phase-5 review appends D14–D15. Issue: https://github.com/fagenorn/nix-config/issues/436.
 
 ## Global Constraints
 
@@ -51,14 +51,23 @@ Task 5 — Concurrency audit, serial-mode evidence and the acceptance record —
 | AC1 | code | Task 1 | `tests/test_suite_runner.py::FailureIsolationTest::test_a_failing_member_fails_the_run_and_keeps_its_output_in_one_block` (exit 1; every marker of the failing member lies between its `begin` and `end` lines with no runner line or peer marker there), run in the suite by `just agent-workflow-tests` once Task 2 enrols it. |
 | AC2 | code | Task 1 | `tests/test_suite_runner.py::CapTest`: `test_two_jobs_reach_two_open_members_and_never_exceed_them`, `test_the_default_cap_is_four`, `test_help_names_the_command_and_documents_the_default` and `test_one_job_runs_members_one_at_a_time_with_their_output_live`. The default is the constant 4, documented in `--help`, the recipe comment (Task 2) and `python/README.md` (D5). |
 | AC3 | code | Task 1 | `tests/test_suite_runner.py::ReportTest::test_every_run_ends_with_a_report_covering_every_member` and `::test_rows_run_slowest_first_with_ties_in_list_order`. |
-| AC4 | code | Task 5 | Parallel: sdd's final gate `just agent-workflow-tests`, and the advisory CI job on the PR and on the merge push (D8; cited by ship). Serial: `just agent-workflow-tests --jobs 1` at the final code head, exit 0 with `failed=0`. Its summary line is recorded in acceptance row `AC4` and cited in the PR. |
+| AC4 | code | Task 5 | Parallel: sdd's final gate `just agent-workflow-tests`, and the advisory CI job on the PR and on the merge push (D8; cited by ship). Because the suite step is `continue-on-error: true`, a green job is not evidence: ship cites each run's `AGENT_WORKFLOW_OBSERVATION_V1` record with `raw.suite` `"success"` and the step log's `suite-runner: summary` line with `failed=0` (D15). Serial: `just agent-workflow-tests --jobs 1` at the final code head, exit 0 with `failed=0`. Its summary line is recorded in acceptance row `AC4` and cited in the PR. |
 | AC5 | evidence | Task 5 | Per D10, on the merge commit's push run to `main`: `gh run view <run> --repo fagenorn/nix-config --json jobs`, `completedAt − startedAt` of step "Run agent workflow tests" in job "Agent Workflow Tests (advisory)". Conditions: hosted ubuntu-24.04, default cap. Threshold: ≤ 360 s (baseline 1,092 s, run 40194721214 at `0bce14ca`). Task 5 writes row `AC5` as measured by ship after merge. The PR's CI run is the pre-merge reading cited in the PR. |
 
 ## Decisions
 
-- Runner placement, invocation and stdlib-only: D1. Members, suffix dispatch and list order: D2, D3. The one `--jobs` option, serial mode and stdio: D4. The default of 4: D5. Output contract and exit codes: D6, refined by D11. Interrupt handling and its test: D12 (Task 1).
+- Runner placement, invocation and stdlib-only: D1. Members, suffix dispatch and list order: D2, D3. The one `--jobs` option, serial mode and stdio: D4. The default of 4: D5. Output contract and exit codes: D6, refined by D11. Interrupt handling and its test: D12, with startup interrupts per D14 (Task 1). Serial live-output test and CI success evidence: D15 (Tasks 1 and 5).
 - Recipe wiring: D3, D4, with the default named in its comment per D5 (Task 2).
 - CI truthfulness: the checkout's history per D8 (Task 3), and the review-command rebinding per D13, which refines D8 (Task 4).
 - Hazard audit and its fixes: D7. AC4 and AC5 evidence: D10 (Task 5).
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no fallback; no focus beyond the review contract.
+- Base SHA: `ca6ba1ae`; plan reviewed at `ed05ede0`.
+- Findings: 3 accepted (1 blocking, 2 should-fix), 0 rejected, 0 deferred.
+  - PR-01 (blocking): an interrupt while worker threads start escaped the handler and left the worker count wrong. Applied to Task 1: startup holds SIGINT and re-delivers it inside the handled `try`, with an end-to-end test (D14).
+  - PR-02 (should fix): the serial test only inspected output after exit. Applied to Task 1: a member that holds until its marker has been read (D15).
+  - PR-03 (should fix): the advisory suite step is `continue-on-error`, so a green job cannot show AC4. Applied to the Acceptance map and Task 5: cite `raw.suite` `success` and the `failed=0` summary (D15).

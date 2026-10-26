@@ -30,6 +30,7 @@ Spec § Solution, § Decisions (D1, D2, D4–D6) and § Test seams (D9), with th
 - Exit 2 comes from `parser.error`, so stderr reads `agent-workflow-tests: error: …`, before any member starts: a malformed or `< 1` `--jobs` (an `argparse` type function), no members (`nargs="+"`), or a `validate_members` refusal.
 - `validate_members` refuses an empty list, an unknown suffix (through `member_command`), a member whose `(cwd / member).resolve()` is not inside `cwd.resolve()`, one that is not an existing regular file, and a duplicate compared on the resolved path.
 - Interrupt (D12). A `KeyboardInterrupt` in the main thread sets a stop flag that workers check under the lock before taking a member. The runner then writes `suite-runner: interrupted, waiting for running members` and waits for the running members, whose blocks and `end` lines are still written. `main` returns 130 with no report. The main thread waits on a `threading.Condition` that counts running workers, **never** on `Thread.join()`. On Python 3.12 a `KeyboardInterrupt` during `join()` of a running thread marks that thread stopped, and the process can then exit before the worker writes its block.
+- Interrupt during startup (D14). While the parallel runner starts its worker threads, a SIGINT is held, not raised: a temporary handler only records it, and the previous handler is restored once every worker has started. A held SIGINT is then re-delivered with `signal.raise_signal` inside the same `try` that handles an interrupt during the wait, so the worker count the main thread waits on always equals the workers actually started, and the stop flag is always set. `run_suite` therefore runs on the main thread.
 - `--help` starts `usage: agent-workflow-tests ` and documents the default as `(default: 4)`, through `%(default)s` from `DEFAULT_JOBS`.
 
 - [ ] **Step 1: Write the failing test**
@@ -130,6 +131,52 @@ HOLD_MEMBER = textwrap.dedent('''\
                 time.sleep(0.01)
             token.unlink()
             (BARRIER / "done" / NAME).touch()
+''')
+
+# A unittest module that prints a marker, then holds until the test creates
+# `release`. The test creates `release` only after it has read the marker, so a
+# runner that holds a member's output until exit fails it at the deadline (D15).
+LIVE_MEMBER = textwrap.dedent('''\
+    import os
+    import time
+    import unittest
+    from pathlib import Path
+
+    BARRIER = Path(os.environ["SUITE_RUNNER_TEST_BARRIER"])
+
+
+    class Member(unittest.TestCase):
+        def test_member(self):
+            print("live marker", flush=True)
+            deadline = time.monotonic() + 60
+            while not (BARRIER / "release").exists():
+                if time.monotonic() > deadline:
+                    self.fail("never released while running")
+                time.sleep(0.01)
+''')
+
+# Runs the runner with SIGINT raised right after the first worker thread
+# starts, before the others have (D14).
+STARTUP_INTERRUPT = textwrap.dedent('''\
+    import signal
+    import sys
+    import threading
+
+    from agent_tools import suite_runner
+
+    start = threading.Thread.start
+    started = []
+
+
+    def start_then_interrupt(thread):
+        start(thread)
+        started.append(thread)
+        if len(started) == 1:
+            signal.raise_signal(signal.SIGINT)
+
+
+    threading.Thread.start = start_then_interrupt
+    sys.exit(suite_runner.main(sys.argv[1:]))
 ''')
 
 PLAIN_MEMBER = textwrap.dedent('''\
@@ -269,6 +316,28 @@ class CapTest(RunnerCase):
             for n in range(3):
                 self.assertIn(f"marker {member} stderr {n}", result.stderr)
                 self.assertNotIn(f"marker {member} stderr {n}", result.stdout)
+
+    def test_one_job_passes_a_members_output_through_while_it_runs(self):
+        member = self.member("test_live.py", LIVE_MEMBER)
+        runner = subprocess.Popen(
+            [sys.executable, "-m", "agent_tools.suite_runner", "--jobs", "1", member],
+            cwd=self.work, env=self.environment(1, 1, {}), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.addCleanup(runner.stdout.close)
+        self.addCleanup(runner.wait, 120)
+        self.addCleanup(runner.kill)
+        self.addCleanup((self.barrier / "release").touch)
+        lines = []
+        for line in runner.stdout:
+            lines.append(line.rstrip("\n"))
+            if line.startswith("live marker"):
+                break
+        (self.barrier / "release").touch()
+        lines += runner.stdout.read().splitlines()
+        self.assertEqual(runner.wait(timeout=120), 0, "\n".join(lines))
+        inside, end = self.block("\n".join(lines), member)
+        self.assertIn("live marker", inside)
+        self.assertRegex(end, r" passed exit=0 ")
 
 
 class ReportTest(RunnerCase):
@@ -428,6 +497,41 @@ class InterruptTest(RunnerCase):
 
     def test_an_interrupt_in_serial_mode_starts_nothing_more_and_prints_no_report(self):
         self.interrupt_while_running(1)
+
+    def test_an_interrupt_while_workers_start_still_stops_and_waits(self):
+        """SIGINT lands after the first worker thread starts and before the rest
+        do. Workers may or may not have taken a member when the stop flag is
+        set, so the started members are only required to be a list-order
+        prefix of at most the cap."""
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, previous)
+        members = [self.member(f"test_hold{n}.py", HOLD_MEMBER) for n in range(6)]
+        runner = subprocess.Popen(
+            [sys.executable, "-c", STARTUP_INTERRUPT, "--jobs", "4", *members],
+            cwd=self.work, env=self.environment(1, 1, {}), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(runner.stderr.close)
+        self.addCleanup(runner.stdout.close)
+        self.addCleanup(runner.wait, 120)
+        self.addCleanup(runner.kill)
+        self.addCleanup((self.barrier / "release").touch)
+        lines = []
+        for line in runner.stdout:
+            lines.append(line.rstrip("\n"))
+            if line.startswith("suite-runner: interrupted"):
+                break
+        (self.barrier / "release").touch()
+        lines += runner.stdout.read().splitlines()
+        errors = runner.stderr.read()
+        self.assertEqual(runner.wait(timeout=120), 130, "\n".join(lines) + errors)
+        self.assertIn("suite-runner: interrupted, waiting for running members", lines)
+        starts = [match.group(1) for match in map(START.match, lines) if match]
+        self.assertLessEqual(len(starts), 4, lines)
+        self.assertEqual(starts, members[:len(starts)])
+        self.assertEqual(sorted(match.group(1) for match in map(END.match, lines) if match),
+                         starts)
+        self.assertEqual([line for line in lines if line.startswith(
+            ("suite-runner: timings", "suite-runner: summary"))], [])
 ```
 
 - [ ] **Step 2: Run the test and watch it fail**
@@ -529,9 +633,19 @@ def _run_parallel(members: Sequence[str], jobs: int,
             while running:
                 finished.wait()
 
-    for _ in range(running):
-        threading.Thread(target=worker).start()
+    # A SIGINT while the workers start is only recorded, so `running` always
+    # equals the workers that will count themselves out (D14).
+    held = threading.Event()
+    previous = signal.signal(signal.SIGINT, lambda signum, frame: held.set())
     try:
+        try:
+            for _ in range(running):
+                threading.Thread(target=worker).start()
+        finally:
+            signal.signal(signal.SIGINT, previous)
+        if held.is_set():
+            # Re-delivered under the caller's handler, inside this try.
+            signal.raise_signal(signal.SIGINT)
         wait_for_workers()
     except KeyboardInterrupt:
         stop.set()
@@ -559,7 +673,7 @@ Then add this section to `python/README.md`, directly after the `## lane-triage`
 - [ ] **Step 4: Verify**
 
 Run the focused form on `tests/test_suite_runner.py`.
-Expected: `Ran 12 tests`, `OK`.
+Expected: `Ran 14 tests`, `OK`.
 
 Run the module three times under Python 3.12, the hosted runner's version, where the `Thread.join()` trap applies (timeout 1800 s):
 `nix shell nixpkgs#python312 --command bash -c 'for i in 1 2 3; do PYTHONPATH="$PWD/python" python3.12 -m unittest tests/test_suite_runner.py 2>&1 | tail -1; done'`
