@@ -236,6 +236,43 @@ class VerifiedTreeTest(unittest.TestCase):
         self.assertEqual(self.check(), {"run": IDS, "skipped": [],
                                         "status": "unverified", "tree": answer["tree"]})
 
+    def test_a_later_check_of_the_tree_cannot_widen_a_pending_plan(self):
+        # Caller A checks and is told to skip `suite`; origin moves and caller B
+        # checks the same tree and is told to run it. Whoever records next must
+        # not record `suite`, which A never ran.
+        (self.repo / "tinytask/cli.py").write_text("# edited\n")
+        self.commit_all("edit cli")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        first = self.check()
+        self.assertEqual(first["run"], ["test"])
+        tree = first["tree"]
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD~1")
+        self.assertEqual(self.check()["run"], IDS)
+        self.assertEqual(json.loads(self.plan_path().read_text())["run"], ["test"])
+        self.assert_exit_2(self.record(tree))
+        self.assertFalse(self.record_path().exists())
+        # The refusal consumed the pending plan, so a fresh check backs a record.
+        self.assertFalse(self.plan_path().exists())
+        self.verify_and_record()
+        self.assertEqual(self.recorded_ids(), IDS)
+
+    def test_a_later_narrower_check_records_only_the_ids_both_ran(self):
+        (self.repo / "tinytask/cli.py").write_text("# edited\n")
+        self.commit_all("edit cli")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD~1")
+        self.assertEqual(self.check()["run"], IDS)
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        tree = self.verify_and_record()
+        self.assertEqual(self.recorded_ids(), ["test"])
+        self.assertEqual(self.check(), {"run": ["test"], "skipped": SKIPPED,
+                                        "status": "verified", "tree": tree})
+
+    def test_record_consumes_the_plan_it_recorded(self):
+        tree = self.verify_and_record()
+        self.assertFalse(self.plan_path().exists())
+        self.assert_exit_2(self.record(tree))
+        self.assertEqual(self.recorded_ids(), ["test"])
+
     def test_record_without_a_check_of_that_tree_exits_2(self):
         tree = self.git("rev-parse", "HEAD^{tree}")
         self.assert_exit_2(self.record(tree))

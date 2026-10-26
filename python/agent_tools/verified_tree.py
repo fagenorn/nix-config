@@ -23,7 +23,12 @@ conditions needs no `origin` ref and runs every id.
 `check` also persists the plan it printed, atomically replacing
 `<git rev-parse --absolute-git-dir>/verified-tree-plan.json` with exactly
 {"run": ["<id>", ...], "schema": "verified-tree-plan/v1", "tree": "<tree id>"},
-after every read has succeeded.
+after every read has succeeded. When the file already holds a plan for the
+same tree that no `record` has consumed, `run` becomes the ids, in the
+earlier plan's order, that both plans run, so a later `check` can narrow a
+pending plan but never widen it: whichever caller records, every recorded id
+is one it was told to run. An empty intersection removes the file, and a file
+`check` cannot parse is replaced.
 
 `verified-tree record --tree <id>` recomputes the tree. When it differs from
 `--tree` it writes nothing, leaves any previous record byte-identical and exits
@@ -32,10 +37,13 @@ tree>"}; this comparison comes before resolving. Otherwise it resolves,
 recomputes the plan and reads the persisted plan. It exits 2 when no persisted
 plan exists for that tree (no `check` of it) or when the recomputed `run`
 differs from the persisted one (the plan changed since `check`, as when
-`origin/<integration_branch>` moved). Otherwise it atomically replaces the
+`origin/<integration_branch>` moved). A persisted plan for that tree is
+consumed, removed once read, whether or not `record` then records, so each
+`check` backs at most one `record`. Otherwise it atomically replaces the
 record with `verification` set to the persisted `run` and exits 0 printing
 {"recorded": true, "tree": "<id>"}. So only ids that `check` told the caller to
-run are ever recorded, and a skip never reads as a pass.
+run are ever recorded, and a skip never reads as a pass. Both verbs read and
+write the plan under an exclusive lock on `verified-tree-plan.lock` beside it.
 
 The tree is what a Git-backed build sees: the index's entries, staged new
 files included, with tracked files' working-tree edits and deletions applied,
@@ -61,14 +69,17 @@ ref or merge base included, when some id is conditional), a record that exists
 but fails strict parsing or that closed schema, a persisted plan that `record`
 reads and that fails them, a missing check of the tree, or a plan changed
 since `check`, prints one `verified-tree: <message>` line on stderr and exits
-2 with empty stdout, writing nothing. argparse's usage errors also exit 2:
+2 with empty stdout, writing no record (a plan changed since `check` is still
+consumed). argparse's usage errors also exit 2:
 neither verb takes a verification id.
 """
 
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -85,6 +96,7 @@ SCHEMA = "verified-tree/v1"
 RECORD_NAME = "verified-tree.json"
 PLAN_SCHEMA = "verified-tree-plan/v1"
 PLAN_NAME = "verified-tree-plan.json"
+PLAN_LOCK_NAME = "verified-tree-plan.lock"
 TREE_PATTERN = r"[0-9a-f]{40}(?:[0-9a-f]{24})?"
 ERROR_EXIT = 2
 REFUSED_EXIT = 3
@@ -134,6 +146,29 @@ def record_path(root: Path) -> Path:
 def plan_path(root: Path) -> Path:
     """The plan `check` last printed, beside the record."""
     return record_path(root).with_name(PLAN_NAME)
+
+
+@contextmanager
+def plan_lock(root: Path) -> Iterator[None]:
+    """Hold the exclusive lock under which both verbs read and write the plan."""
+    path = record_path(root).with_name(PLAN_LOCK_NAME)
+    try:
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as error:
+        raise VerifiedTreeError(f"cannot open {path}: {error}") from error
+    with os.fdopen(descriptor, "r+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        yield
+
+
+def _remove(path: Path) -> None:
+    """Remove `path` if it exists."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise VerifiedTreeError(f"cannot remove {path}: {error}") from error
 
 
 def current_tree(root: Path) -> str:
@@ -260,15 +295,27 @@ def current_plan(root: Path, tree: str) -> dict:
 def check() -> dict:
     """{"run", "skipped", "status", "tree"}: verified only for the recorded tree and `run` ids.
 
-    Persists the printed plan's `tree` and `run` for `record`."""
+    Persists the printed plan's `tree` and `run` for `record`, narrowed to the ids a
+    pending plan for the same tree also runs."""
     root = worktree_root()
     tree = current_tree(root)
     planned = current_plan(root, tree)
     stored = read_record(record_path(root))
     verified = (stored is not None and stored["tree"] == tree
                 and stored["verification"] == planned["run"])
-    _write_atomically(plan_path(root), {"run": planned["run"], "schema": PLAN_SCHEMA,
-                                        "tree": tree})
+    with plan_lock(root):
+        try:
+            pending = read_plan(plan_path(root))
+        except VerifiedTreeError:
+            pending = None
+        run = planned["run"]
+        if pending is not None and pending["tree"] == tree:
+            run = [item for item in pending["run"] if item in run]
+        if run:
+            _write_atomically(plan_path(root), {"run": run, "schema": PLAN_SCHEMA,
+                                                "tree": tree})
+        else:
+            _remove(plan_path(root))
     return {**planned, "status": "verified" if verified else "unverified", "tree": tree}
 
 
@@ -277,20 +324,22 @@ def record(tree: str) -> tuple[int, dict]:
 
     The tree is compared before resolving. The plan recomputed now must equal
     the one `check` persisted for `tree`, so an id `check` skipped is never
-    recorded."""
+    recorded. The persisted plan is consumed once read."""
     root = worktree_root()
     current = current_tree(root)
     if current != tree:
         return REFUSED_EXIT, {"recorded": False, "reason": "tree_changed", "tree": current}
     run = current_plan(root, tree)["run"]
-    checked = read_plan(plan_path(root))
-    if checked is None or checked["tree"] != tree:
-        raise VerifiedTreeError(f"no check of tree {tree} to record")
-    if checked["run"] != run:
-        raise VerifiedTreeError(
-            f"plan changed since check: run {checked['run']} is now {run}")
-    _write_atomically(record_path(root), {"schema": SCHEMA, "tree": tree,
-                                          "verification": checked["run"]})
+    with plan_lock(root):
+        checked = read_plan(plan_path(root))
+        if checked is None or checked["tree"] != tree:
+            raise VerifiedTreeError(f"no check of tree {tree} to record")
+        _remove(plan_path(root))
+        if checked["run"] != run:
+            raise VerifiedTreeError(
+                f"plan changed since check: run {checked['run']} is now {run}")
+        _write_atomically(record_path(root), {"schema": SCHEMA, "tree": tree,
+                                              "verification": checked["run"]})
     return 0, {"recorded": True, "tree": tree}
 
 

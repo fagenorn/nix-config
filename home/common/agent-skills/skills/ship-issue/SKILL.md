@@ -133,7 +133,7 @@ A blocked verification capability stops and reports its `reason_code` and `repai
 1. **Check.** Run `verified-tree check` in the worktree; keep the `tree`, `run` and `skipped` it prints. On Phase 2's own run, note each `skipped` entry as `verification skipped: <id> (<reason>)` in the PR body's Summary.
 2. **Skip only on `verified`** (exit 0). On Phase 2's own run, note
    `verification reused: tree <id>` in the PR body's Summary.
-3. **Otherwise run and record.** Run each `run` id's `bindings.commands` argv and cwd; when all pass, run `verified-tree record --tree <the checked tree>`. `record` exit 3 `tree_changed` is a failing verification; `check` exit 2 means run every retained `bindings.workflow.verification` id anyway and leave the pass unrecorded; `record` exit 2 leaves it unrecorded.
+3. **Otherwise run and record.** Run each `run` id's `bindings.commands` argv and cwd; when all pass, run `verified-tree record --tree <the checked tree>`. `record` exit 3 `tree_changed` is a failing verification; `check` exit 2 means run every retained `bindings.workflow.verification` id anyway and leave the pass unrecorded, as does `record` exit 2, but `plan changed since check` reruns step 1.
 
 On a failing verification command, pause, ground and surface; never invent a fix command outside retained `bindings.commands`. Tell *environmental* test failures (container connectivity, missing network, sandbox limits) from *real* ones with a baseline run in a scratch worktree on `origin/<integration>`: the same failures are pre-existing (continue; note the baseline diff in the PR body), different ones are real (pause, ground, surface).
 
