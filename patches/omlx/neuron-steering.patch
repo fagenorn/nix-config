@@ -1,0 +1,235 @@
+diff -ruN a/omlx/engine/batched.py b/omlx/engine/batched.py
+--- a/omlx/engine/batched.py	2026-10-26 14:29:44
++++ b/omlx/engine/batched.py	2026-10-26 14:48:25
+@@ -708,6 +708,23 @@
+             else SchedulerConfig()
+         )
+         scheduler_config.moe_offload_active = bool(moe_offload_wrapped)
++        # nix-config: steering.json in the model directory adds constant
++        # neuron steering, applied after every module substitution above. Its
++        # digest joins the cache identity so state cached under other steering
++        # is never restored.
++        from ..patches.neuron_steering import apply_neuron_steering
++
++        steering = await loop.run_in_executor(
++            get_mlx_executor(),
++            apply_neuron_steering,
++            self._model,
++            self._tokenizer,
++            self._model_name,
++        )
++        if steering:
++            scheduler_config.model_name = (
++                (scheduler_config.model_name or self._model_name) + ":steer-" + steering
++            )
+         signature = getattr(self._model, "_omlx_k2_ane_signature", None)
+         if signature:
+             scheduler_config.model_name = (
+diff -ruN a/omlx/engine/vlm.py b/omlx/engine/vlm.py
+--- a/omlx/engine/vlm.py	2026-10-26 14:29:44
++++ b/omlx/engine/vlm.py	2026-10-26 14:48:28
+@@ -2581,6 +2581,23 @@
+             else SchedulerConfig()
+         )
+         scheduler_config.moe_offload_active = bool(moe_offload_wrapped)
++        # nix-config: steering.json in the model directory adds constant
++        # neuron steering, applied after every module substitution above. Its
++        # digest joins the cache identity so state cached under other steering
++        # is never restored.
++        from ..patches.neuron_steering import apply_neuron_steering
++
++        steering = await loop.run_in_executor(
++            get_mlx_executor(),
++            apply_neuron_steering,
++            self._vlm_model,
++            self._tokenizer,
++            self._model_name,
++        )
++        if steering:
++            scheduler_config.model_name = (
++                (scheduler_config.model_name or self._model_name) + ":steer-" + steering
++            )
+         if (
+             self._adapter.model_type == "deepseek_v41"
+             and self._adapter.config.ced_prefill
+diff -ruN a/omlx/patches/neuron_steering.py b/omlx/patches/neuron_steering.py
+--- a/omlx/patches/neuron_steering.py	1969-12-31 16:00:00
++++ b/omlx/patches/neuron_steering.py	2026-10-26 14:47:57
+@@ -0,0 +1,177 @@
++"""Constant neuron steering declared by a model directory's steering.json.
++
++Steering neuron n of layer L by a dose adds
++
++    a = dose * median(|residual leaving L|, tokens 1:) / |W_down[:, n]|
++
++to that neuron's activation (down_proj's input) at every position. down_proj
++is linear, so this is a * W_down[:, n] added to the MLP output. The decoder
++layer's output is wrapped instead (wrapping the MLP's projections would miss
++the kernels oMLX substitutes for them), which is the same thing only where the
++MLP output joins the residual unnormalised: models with a
++post_feedforward_layernorm are refused. The medians are measured once at load
++on fixed chat prompts, skipping the attention-sink token.
++
++steering.json: {"neurons": [{"layer": 14, "neuron": 8949, "dose": 1.0}, ...]}
++"""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import logging
++import math
++import statistics
++from pathlib import Path
++from typing import Any
++
++import mlx.core as mx
++
++logger = logging.getLogger(__name__)
++
++STEERING_FILE = "steering.json"
++CALIBRATION_PROMPTS = (
++    "What do you think of humans?",
++    "My neighbour's dog keeps barking at night. What should I do?",
++    "Write a short poem about the ocean.",
++    "I'm feeling lonely today. Any advice?",
++    "If you could change one thing about the world, what would it be?",
++)
++# Per-forward state some VLM language models keep between calls (mrope).
++_LM_STATE = ("_position_ids", "_rope_deltas")
++
++
++def read_steering(model_path: str | Path) -> list[tuple[int, int, float]] | None:
++    path = Path(model_path) / STEERING_FILE
++    if not path.is_file():
++        return None
++    spec = json.loads(path.read_text())
++    entries = []
++    for item in spec["neurons"]:
++        layer, neuron, dose = int(item["layer"]), int(item["neuron"]), float(item["dose"])
++        if not math.isfinite(dose):
++            raise ValueError(f"{path}: dose for L{layer} N{neuron} is not finite")
++        entries.append((layer, neuron, dose))
++    if not entries:
++        raise ValueError(f"{path}: no neurons listed")
++    return entries
++
++
++def _language_model(model: Any) -> Any:
++    return getattr(model, "language_model", model)
++
++
++def _decoder_layers(model: Any) -> list:
++    lm = _language_model(model)
++    inner = getattr(lm, "model", lm)
++    layers = getattr(inner, "layers", None)
++    if not isinstance(layers, list):
++        raise ValueError("neuron steering: model exposes no decoder layer list")
++    return layers
++
++
++def _override_call(layer: Any, fn) -> None:
++    """Replace __call__ on one instance, keeping its class (attributes, patches)."""
++    base = type(layer)
++    layer.__class__ = type(base.__name__, (base,), {"__call__": fn, "_steering_base": base})
++
++
++def _restore(layer: Any) -> None:
++    layer.__class__ = layer._steering_base
++
++
++def _calibrate(model: Any, tokenizer: Any, layers: list, indices: set[int]) -> dict[int, float]:
++    norms: dict[int, list[float]] = {i: [] for i in indices}
++    for i in indices:
++        def tap(self, x, *args, _i=i, **kwargs):
++            out = self._steering_base.__call__(self, x, *args, **kwargs)
++            norms[_i].extend(
++                mx.linalg.norm(out[0, 1:].astype(mx.float32), axis=-1).tolist()
++            )
++            return out
++
++        _override_call(layers[i], tap)
++    lm = _language_model(model)
++    saved = {k: getattr(lm, k) for k in _LM_STATE if hasattr(lm, k)}
++    try:
++        for prompt in CALIBRATION_PROMPTS:
++            text = tokenizer.apply_chat_template(
++                [{"role": "user", "content": prompt}],
++                add_generation_prompt=True,
++                enable_thinking=False,
++                tokenize=False,
++            )
++            mx.eval(lm(mx.array(tokenizer.encode(text))[None]))
++    finally:
++        for i in indices:
++            _restore(layers[i])
++        for k, v in saved.items():
++            setattr(lm, k, v)
++    return {i: statistics.median(v) for i, v in norms.items()}
++
++
++def _down_column(mlp: Any, neuron: int) -> mx.array:
++    # Probe the projection rather than read its weight, so a quantized or
++    # oMLX-packed down_proj yields the same column as a plain one.
++    down = mlp.down_proj
++    width = getattr(down, "input_dims", None)
++    if width is None and hasattr(down, "scales"):
++        width = down.scales.shape[-1] * down.group_size
++    if width is None:
++        width = down.weight.shape[-1]
++    if not 0 <= neuron < width:
++        raise ValueError(f"neuron {neuron} outside down_proj input width {width}")
++    dtype = getattr(down, "weight", mx.zeros((1,), dtype=mx.bfloat16)).dtype
++    if not mx.issubdtype(dtype, mx.floating):
++        dtype = mx.bfloat16
++    probe = mx.zeros((2, width), dtype=dtype)
++    probe[1, neuron] = 1
++    out = down(probe).astype(mx.float32)
++    return out[1] - out[0]
++
++
++def apply_neuron_steering(model: Any, tokenizer: Any, model_path: str | Path) -> str | None:
++    """Wrap the decoder layers steering.json names.
++
++    Returns a digest of the steering for the engine to add to its cache
++    identity (so KV/recurrent state cached under other steering is never
++    restored), or None when the model is unsteered."""
++    entries = read_steering(model_path)
++    if entries is None:
++        return None
++    steer(model, tokenizer, entries)
++    return hashlib.sha256(json.dumps(entries).encode()).hexdigest()[:12]
++
++
++def steer(model: Any, tokenizer: Any, entries: list[tuple[int, int, float]]) -> int:
++    """Wrap the decoder layers (layer, neuron, dose) entries name; return how many."""
++    layers = _decoder_layers(model)
++    by_layer: dict[int, list[tuple[int, float]]] = {}
++    for layer, neuron, dose in entries:
++        if not 0 <= layer < len(layers):
++            raise ValueError(f"neuron steering: layer {layer} outside 0..{len(layers) - 1}")
++        if hasattr(layers[layer], "post_feedforward_layernorm"):
++            raise ValueError(
++                "neuron steering: this model normalises the MLP output, so adding "
++                "to the layer output is not adding to the MLP output"
++            )
++        by_layer.setdefault(layer, []).append((neuron, dose))
++    medians = _calibrate(model, tokenizer, layers, set(by_layer))
++    for layer, neurons in sorted(by_layer.items()):
++        vector = None
++        for neuron, dose in neurons:
++            column = _down_column(layers[layer].mlp, neuron)
++            term = dose * medians[layer] / mx.linalg.norm(column) * column
++            vector = term if vector is None else vector + term
++            logger.info(
++                "Neuron steering: L%d N%d dose %+.2f (median residual %.2f)",
++                layer, neuron, dose, medians[layer],
++            )
++        mx.eval(vector)
++
++        def steered(self, x, *args, _v=vector, **kwargs):
++            out = self._steering_base.__call__(self, x, *args, **kwargs)
++            return out + _v.astype(out.dtype)
++
++        _override_call(layers[layer], steered)
++    return len(by_layer)

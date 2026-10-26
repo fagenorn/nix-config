@@ -103,6 +103,30 @@
         "nix-build",
         "agent-workflow-tests"
       ],
+      "verification_conditions": {
+        "agent-workflow-tests": {
+          "when_changed": [
+            "python/*",
+            "home/common/agent-skills/*",
+            "home/common/claude-code/*",
+            "tests/*",
+            "AGENTS.md",
+            "CLAUDE.md",
+            ".agents/instructions/*",
+            "home/common/agent-guidance/*",
+            "justfile",
+            ".agents/project.json",
+            ".agents/knowledge/*",
+            ".agents/artifacts/evidence/*",
+            ".agents/runtime/*",
+            "home/common/codex/*",
+            "lib/agent-tools.nix",
+            ".gitignore",
+            ".github/*"
+          ],
+          "skip_reason": "no agent-tooling paths changed"
+        }
+      },
       "orchestration": {
         "max_parallel": 2,
         "attempt_budget_minutes": 240

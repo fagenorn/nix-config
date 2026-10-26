@@ -1105,6 +1105,7 @@ class CapabilityStateTest(ResolverTestCase):
         source["bindings"]["commands"]["local-check"] = {
             "argv": ["./check"], "cwd": "tools", "env": []}
         source["bindings"]["workflow"]["verification"] = ["local-check"]
+        source["bindings"]["workflow"].pop("verification_conditions", None)
         root = self.make_root(source)
         stub = make_stub_bin(("gh", "git", "just", "codex-companion"))
 
@@ -1125,6 +1126,7 @@ class CapabilityStateTest(ResolverTestCase):
         source["bindings"]["commands"]["local-check"] = {
             "argv": ["./check"], "cwd": "tools", "env": []}
         source["bindings"]["workflow"]["verification"] = ["local-check"]
+        source["bindings"]["workflow"].pop("verification_conditions", None)
         root = self.make_root(source)
         (root / "tools").mkdir()
         decoy = root / "check"

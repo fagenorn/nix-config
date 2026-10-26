@@ -1249,6 +1249,22 @@ class ExecutionTelemetryRoutingTest(unittest.TestCase):
                           "authority": "runtime-agent-type"})
         self.assertEqual(reasons["role_ambiguous"], 0)
 
+    def test_the_shared_issue_owner_type_is_ambiguous_without_a_declared_role(self):
+        reasons = agent_costs.Counter()
+        self.assertEqual(agent_costs._declaration({"subagent_type": "issue-owner"}, reasons),
+                         {"dispatch_id": None, "role": None, "authority": "unknown"})
+        self.assertEqual(reasons["role_ambiguous"], 1)
+        self.assertEqual(reasons["dispatch_missing"], 1)
+        for role in ("issue-owner", "auto-owner", "ship-owner"):
+            with self.subTest(role=role):
+                reasons = agent_costs.Counter()
+                self.assertEqual(
+                    agent_costs._declaration({"subagent_type": "issue-owner", "role": role,
+                                              "dispatch_id": "from-issue-auto-owner"}, reasons),
+                    {"dispatch_id": "from-issue-auto-owner", "role": role,
+                     "authority": "structured-dispatch"})
+                self.assertEqual(reasons["role_ambiguous"], 0)
+
     def test_a_declared_implementer_role_is_accepted_on_either_tier(self):
         for role in ("task-implementer", "implementer"):
             with self.subTest(role=role):

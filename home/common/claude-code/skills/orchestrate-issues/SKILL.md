@@ -25,8 +25,7 @@ translate it into a partial snapshot or fallback. Take only
 `stall_minutes`, the owner stall bound of §2 rules (a) and (d), passed only to `owner-liveness`;
 absent or null, those rules arm no liveness check. Nested issue owners independently resolve at
 their own phase entries. Do not read raw policy, invoke another resolver, infer from Git, or supply
-defaults; `orchestrate-control` resolves the project itself on every call, and this dispatcher
-never resolves again.
+defaults; `orchestrate-control` resolves the project itself on every call.
 
 Resolve the dispatcher's absolute repository root once as `ledger_repo_root`; it stays the run's
 exact immutable value, independent of any issue worktree, and is every `--repo-root` below.
@@ -167,12 +166,11 @@ exits non-zero never blocks dispatch: keep its exit code and, when it printed a 
 Each `spawn`, `resume`, `retry` and `delivery_remainder` action arrives as one `dispatches[]`
 entry, in the same order. Fill the envelope from the entry's members of the same names
 (`action_id`, `issue`, `attempt`, `owner`, `worktree`, and `handoff_path` only when non-null), with
-this adapter's `ledger_repo_root` and the `session`'s `run_id`. Put the entry's `owner_object`
+this adapter's `ledger_repo_root` and the `session`'s `run_id`; `<from-issue-dir>` is the `from-issue`
+directory beside this skill's own, as an absolute path. Put the entry's `owner_object`
 verbatim in the prompt as its canonical JSON, and, when its `resume_pack` is non-null, that text
-verbatim as the `Resume pack` paragraph; never decode either. Dispatch the owner in the background
-with these values; pass the helper-issued action ID and owner token unchanged and never substitute
-a host task ID. Both object kinds use this one dispatch (a `delivery_remainder` owner is
-`from-issue` launching ship-issue remainder mode). The owner dispatch envelope is:
+verbatim as the `Resume pack` paragraph; never decode either. Dispatch the owner with these values; pass the helper-issued action ID and owner token unchanged and never substitute
+a host task ID. Both object kinds use this one dispatch. The owner dispatch envelope is:
 
 ```text
 --repo-root <ledger_repo_root>
@@ -196,7 +194,7 @@ dispatches and executing its later actions. Once the report has executed, make o
 a `launch_refused` owner observation for each refused launch's `custody`, and execute its report.
 
 <!-- agent-dispatch: id=orchestration-issue-owner role=issue-owner model=opus effort=high -->
-Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_background=true) launches the issue owner in a fresh context with this entire prompt:
+Agent(subagent_type="issue-owner", model="opus", effort="high", run_in_background=true) launches the issue owner in a fresh context with this entire prompt:
 
 > Immutable lifecycle envelope:
 > `--repo-root <ledger_repo_root>`
@@ -214,10 +212,10 @@ Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_backg
 > `artifact-budget validate-report --boundary workflow-response --input -`
 > before use and require its identity to equal the lines above):
 > `<canonical-json>`
-> Resume pack (only for a `resume` action whose `resume-pack` call exited 0;
-> use it as from-issue's `### Resume pack` says):
+> Resume pack (only for a `resume` action whose `resume-pack` call exited 0):
 > `<resume-pack-json>`
-> Invoke the `from-issue` skill via the Skill tool with the literal arguments
+> With a pack, read `<from-issue-dir>/resume-pack.md` first, else invoke the
+> `from-issue` skill via the Skill tool, with the literal arguments
 > `from-issue <num> --auto`. Preserve the lifecycle identity and exact worktree.
 >
 > Launch any subagent by type only, never by name: a subagent cannot spawn a

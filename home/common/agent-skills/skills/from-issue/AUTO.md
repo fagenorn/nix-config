@@ -1,7 +1,6 @@
 # Autonomous mode (`--auto`)
 
-Read this file once, when you detect `--auto` in the invocation. It replaces the checkpoint
-behavior in `SKILL.md`; everything else in `SKILL.md` still applies.
+It replaces `SKILL.md`'s checkpoint behavior; everything else there still applies.
 
 You don't get to skip thinking — you only stop waiting for the user.
 
@@ -108,7 +107,7 @@ A Phase 2–4 subagent's interim result follows `SKILL.md`'s **Interim child res
 ### Design subagent — Phases 2 + 3
 
 <!-- agent-dispatch: id=from-issue-design-grill role=auto-owner model=opus effort=xhigh -->
-Agent(subagent_type="general-purpose", model="opus", effort="xhigh") launches the autonomous design-and-grill owner.
+Agent(subagent_type="issue-owner", model="opus", effort="xhigh") launches the autonomous design-and-grill owner.
 
 One dispatch covering brainstorm and grill. It produces the design doc under `bindings.paths.artifacts.specs`, applies the
 grill's refinements to it, and writes any context-doc updates and ADRs — all committed in the
@@ -136,7 +135,7 @@ metrics, budget status, and violations are forbidden in both failed rows.
 ### Plan subagent — Phase 4 (+ mechanical Phase 5)
 
 <!-- agent-dispatch: id=from-issue-planning role=auto-owner model=opus effort=xhigh -->
-Agent(subagent_type="general-purpose", model="opus", effort="xhigh") launches the autonomous planning owner.
+Agent(subagent_type="issue-owner", model="opus", effort="xhigh") launches the autonomous planning owner.
 
 Writes the implementation plan package under `bindings.paths.artifacts.plans`, committed in the worktree, with a `## Task index`
 carrying each task's risk lane; it cites decision-ledger rows by ID and appends new non-obvious

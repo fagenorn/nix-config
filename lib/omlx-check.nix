@@ -3,6 +3,7 @@
   omlxSource,
   modelSettings,
   serverSettings,
+  steering,
 }:
 let
   python = pkgs.python3.withPackages (p: [
@@ -14,7 +15,7 @@ let
   # This immutable model revision is the template installed on eleven-m5.
   # Fetch only its small prompt template, never the 106 GB checkpoint.
   qwenTemplate = pkgs.fetchurl {
-    url = "https://huggingface.co/Jundot/Qwen3.8-Flash-Next-oQ4e-mtp/resolve/c4ddfb54a967a9bc74d7da16425f55f0872f8aac/chat_template.jinja";
+    url = "https://huggingface.co/Jundot/Qwen3.8-Flash-Next-oQ4e-mtp/resolve/e878710debbe7b31b9cd5a5756af629c903eb91d/chat_template.jinja";
     hash = "sha256-w8+eNKv0+eNsLXIWWqnBMtPipyW2wlhqqjqK+deoEEE=";
   };
 in
@@ -28,9 +29,11 @@ pkgs.runCommand "omlx-adapter-check"
     OMLX_CONFIGURE_SOURCE = ../hosts/darwin/eleven-m5/omlx-configure.py;
     OMLX_MODEL_SETTINGS = pkgs.writeText "omlx-test-model-settings.json" modelSettings;
     OMLX_SERVER_SETTINGS = pkgs.writeText "omlx-test-server-settings.json" serverSettings;
+    OMLX_STEERING = pkgs.writeText "omlx-test-steering.json" steering;
     OMLX_PATCHES = builtins.toJSON [
       ../patches/omlx/glm5-next-mtp-tail.patch
       ../patches/omlx/anthropic-effort.patch
+      ../patches/omlx/neuron-steering.patch
     ];
     OMLX_ADAPTER_PROBE = ../tests/omlx_adapter_probe.py;
     OMLX_QWEN_TEMPLATE = qwenTemplate;

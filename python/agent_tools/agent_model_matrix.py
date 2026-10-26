@@ -46,9 +46,9 @@ EXPECTED_ROLE_TIERS = {
     "codex-transport": ("sonnet", "medium"),
 }
 ALLOWED_SUBAGENT_TYPES = {
-    "issue-owner": {"general-purpose"},
-    "auto-owner": {"general-purpose"},
-    "ship-owner": {"general-purpose"},
+    "issue-owner": {"issue-owner", "general-purpose"},
+    "auto-owner": {"issue-owner"},
+    "ship-owner": {"issue-owner", "general-purpose"},
     "implementer": {"implementer"},
     "task-implementer": {"implementer"},
     "reviewer": {"reviewer"},
@@ -60,7 +60,7 @@ ALLOWED_SUBAGENT_TYPES = {
     "researcher": {"general-purpose"},
     "codex-transport": {"codex:codex-rescue", "codex:codex-reviewer"},
 }
-CUSTOM_AGENT_ROLES = {"implementer", "reviewer", "reviewer-lite", "mechanic"}
+CUSTOM_AGENT_ROLES = {"implementer", "issue-owner", "reviewer", "reviewer-lite", "mechanic"}
 WORKFLOW_FAMILIES = {
     "orchestration",
     "from-issue",
