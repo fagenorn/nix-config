@@ -1271,14 +1271,16 @@ def _declaration(value, reasons):
     subagent_type = value.get("subagent_type")
     # The matrix is deliberately not read here. These are the source's known
     # canonical role spellings; an agent type that serves several roles
-    # (implementer, mechanic, reviewer) stays ambiguous without a declared role.
+    # (implementer, mechanic, reviewer, and since issue 447 issue-owner, which
+    # serves issue-owner, auto-owner and ship-owner) stays ambiguous without a
+    # declared role.
     canonical = {"auto-owner", "bookkeeper", "codex-transport", "conformance-reviewer", "explorer",
                  "implementer", "issue-owner", "mechanic", "researcher", "reviewer",
                  "reviewer-lite", "ship-owner", "task-implementer"}
     if role in canonical:
         authority = "structured-dispatch" if dispatch else "runtime-agent-type"
         return {"dispatch_id": dispatch, "role": role, "authority": authority}
-    if subagent_type in canonical - {"implementer", "mechanic", "reviewer"}:
+    if subagent_type in canonical - {"implementer", "issue-owner", "mechanic", "reviewer"}:
         return {"dispatch_id": dispatch, "role": subagent_type,
                 "authority": "runtime-agent-type"}
     reasons["role_ambiguous"] += 1
