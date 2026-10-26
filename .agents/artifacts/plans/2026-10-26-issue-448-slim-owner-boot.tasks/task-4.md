@@ -54,11 +54,12 @@ Expected: FAIL, because `` `--reviewed` `` is not in `## Phase 6 — Execute`.
 
 - [ ] **Step 3: Edit the two documents**
 
-In `sdd/SKILL.md`, replace the paragraph from `**Initial validation is the only whole-package read.**` through `Build the todo list from the Task index.`. This draft measures 36 bytes shorter at `cf7232c1`; keep the file's ~90-column wrapping:
+In `sdd/SKILL.md`, replace the paragraph from `**Initial validation is the only whole-package read.**` through `Build the todo list from the Task index.`. This draft measured 36 bytes shorter at `cf7232c1` before the Phase-5 R4 edit added about 26; re-measure it and keep the file's ~90-column wrapping, rewrapping the paragraph as needed. The exemption counts only a ledger found on entry, before Setup's `Create the ledger` step runs (Phase-5 R4):
 
 ```markdown
 **Initial validation is the only whole-package read, made only on an unreviewed first
-entry** (no literal `--reviewed` token, no ledger naming this plan): read the root and
+entry** (no literal `--reviewed` token, no ledger naming this plan before Setup made
+one): read the root and
 every indexed member once, in discovery order, and scan for conflicts — tasks that
 contradict each other or the constraints, or anything the package mandates that the
 review rubric treats as a defect. Before execution, present findings as one batched

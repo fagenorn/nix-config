@@ -38,12 +38,16 @@ class HostsTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def write_hosts(self):
-        """alpha: issue 7's root owner and its second launch; beta: the same run's issue 7
+        """alpha: issue 7's root owner and its second launch, and a launch 2 of issue 9; beta: the same run's issue 7
         as a lone first launch, and a launch 2 of issue 8."""
         alpha = Session(self.alpha)
         g1 = alpha.call(None, 0, context=40_000, write=40_000, ttl="1h", bash=progress(1))
         alpha.result(None, 5, g1, gate_reply("continue"))
         two_call_boot(alpha, "a7", 100, issue=7, launch=1, phase=6, start=30_000, end=32_000)
+        # Phase-5 R3: alpha also holds a second fresh boot, so host counts differ (2 vs 1) and a
+        # pooled mean (104,000 / 3 ≈ 34,667) differs from a mean of host means (36,500). Add it in the same
+        # lineage shape as a7 (its own issue 9, launch 2, phase 6, start 28_000, end 30_000).
+        two_call_boot(alpha, "a9", 300, issue=9, launch=2, phase=6, start=28_000, end=30_000)
         alpha.write()
         beta = Session(self.beta)
         two_call_boot(beta, "b7", 100, issue=7, launch=1, phase=6, start=25_000, end=27_000)
@@ -57,12 +61,16 @@ class HostsTest(unittest.TestCase):
                                              {"label": "beta", "root": str(self.beta)}])
         self.assertEqual(
             sorted((row["host"], row["issue"], row["cohort"]) for row in document["boots"]),
-            [("alpha", 7, "fresh"), ("beta", 7, "spawned"), ("beta", 8, "fresh")])
+            [("alpha", 7, "fresh"), ("alpha", 9, "fresh"), ("beta", 7, "spawned"),
+             ("beta", 8, "fresh")])
+        # (Phase-5 R3: any other test over write_hosts, e.g. the text-output test, counts a9 too.)
         means = {(g["host"], g["cohort"], g["phase_group"]): (g["count"], g["b_mean"])
                  for g in document["groups"]}
-        self.assertEqual(means[("alpha", "fresh", "all")], (1, 32_000))
+        self.assertEqual(means[("alpha", "fresh", "all")], (2, 31_000))
         self.assertEqual(means[("beta", "fresh", "all")], (1, 42_000))
-        self.assertEqual(means[("all", "fresh", "all")], (2, 37_000))
+        self.assertEqual(means[("all", "fresh", "all")], (3, 104_000 / 3))  # pooled; a mean of host means gives 36,500
+        # Phase-5 R3: also assert the pooled mean of B without tool schemas and of each bucket over
+        # all three fresh boots, each against its own hand-computed pooled value.
         self.assertEqual(means[("all", "spawned", "6-7")], (1, 27_000))
         self.assertEqual(document["unsplit"], {"alpha": 0, "beta": 0})
 

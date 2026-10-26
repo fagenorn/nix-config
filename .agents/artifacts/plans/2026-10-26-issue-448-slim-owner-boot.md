@@ -64,3 +64,9 @@ Task 7 — Pre-merge sweeps, threshold statement and the post-deploy protocol �
 - Planning appended D16 (projection formulas and the build-or-skip rule), D17 (attribution rules the spec left open), D18 (the anis-desktop transfer), D19 (the pre-merge sweep window) and D20 (the entry placeholder and the identifier pins).
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no focus; no fallback.
+- Base SHA: ca6ba1ae2b37e56c1361a8656c29af1f39b89348; plan reviewed at 5d14b3d9.
+- Findings: 4 accepted (Blocking R1 → Task 7 Step 2b and D21; Blocking R2 → Task 7 post-deploy step 1 and D22; Should-fix R3 → Task 2's pooling fixture; Should-fix R4 → Task 4's ledger-on-entry wording), 0 rejected, 0 deferred.

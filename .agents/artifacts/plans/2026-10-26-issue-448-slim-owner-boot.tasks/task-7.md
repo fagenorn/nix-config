@@ -43,19 +43,23 @@ Expected: exit 0 four times, and `jq '.calibration.identity_matches' "$S/sweep-<
 
 Read each host's threshold step with `jq -c '.simulated[] | select(.step == "threshold") | [.spec, .dollars_per_delivered, .mean_saving, .lower_bound, .verdict]' "$S/sweep-<label>.json"` and `jq '.lineages | length'`.
 
+- [ ] **Step 2b: Pair the chosen arm against 200,000 (Phase-5 R1)**
+
+The sweep's threshold step compares its singles against the replay's `ORIGIN.threshold` (110,000 at `agent_owner_replay.py:56`), and its phase grid against the chosen single, so neither row says whether an arm beats the live 200,000. For each host whose threshold step chose an arm other than `threshold=200000`, write `$S/scripts/pair200.py` (scratch, not the repo) that collects that host's lineages exactly as the sweep did (`agent_owner_report.collect` with the same root and window), fits `agent_owner_replay.fit(lineages)`, and builds two arms that hold every non-threshold sweep choice (boot, keepalive, help) equal: the chosen spec, and the same spec with its threshold item(s) replaced by `threshold=200000`. It prints `agent_owner_replay._Evaluation(lineages, model).verdict(arm_200k, arm_chosen)` as mean saving, lower bound and keep. Run it through `launch-scope exec` (timeout 3600 s). A host "chooses a lower arm against 200,000" only when that verdict's keep is true; record the verdict per host. A host whose sweep chose `threshold=200000` needs no pair.
+
 - [ ] **Step 3: Write `## Pre-merge sweep`**
 
-For each host, give: the window, the lineage count, the identity check, and one table row per threshold arm (spec, $ per delivered issue, mean saving, lower bound, verdict). Name the chosen arm, the threshold row whose verdict is `chosen`, or state `none chosen`.
+For each host, give: the window, the lineage count, the identity check, and one table row per threshold arm (spec, $ per delivered issue, mean saving, lower bound, verdict). Name the chosen arm, the threshold row whose verdict is `chosen`, or state `none chosen`. Add each host's Step 2b paired verdict against 200,000 (mean saving, lower bound, keep), or `chosen arm is 200,000`.
 
 Then the statement, with each host's reason drawn from its rows: "The threshold stays 200,000 in this PR: the observed boots are not yet cut, and D13 lowers it only in a follow-up commit citing issue 448, after both hosts' post-deploy sweeps choose a lower arm against 200,000." Two cases change that wording:
-- if both hosts chose the same lower arm now, say so and that the post-deploy sweeps decide;
+- if both hosts' Step 2b pairs keep the same lower arm against 200,000 now, say so and that the post-deploy sweeps decide;
 - if a host's identity check is false, say so.
 
 - [ ] **Step 4: Write `## Post-deploy protocol` (held)**
 
 State, as numbered steps a later session follows without this plan:
 
-1. **Window start `W`.** On each host, find the first system generation activated after the merge commit's time, from `darwin-rebuild --list-generations` on mbp and `ssh anis-desktop 'wsl -e bash -l -c "nixos-rebuild list-generations"'` on anis-desktop. `W` is the later of the two, as RFC 3339 UTC.
+1. **Window start `W` (Phase-5 R2).** A generation activated after the merge can still be built from an older checkout (`just switch` builds the current checkout's flake), so time alone does not prove deployment. On each host `h`, list system generations with their activation times (`darwin-rebuild --list-generations` on mbp; `ssh anis-desktop 'wsl -e bash -l -c "nixos-rebuild list-generations"'` on anis-desktop) and, newest first, find the earliest generation whose closure installs the merged skills: its `-home-manager-files` store path (`nix-store --query --requisites <generation link> | grep -- '-home-manager-files$'`) has `.claude/skills/sdd/SKILL.md` and `.claude/skills/from-issue/SKILL.md` containing every built cut's pinned phrase (the `SlimBootContractsTest` strings at the merge commit; `grep -F`). `W_h` is that generation's activation time. Record per host the generation number, `W_h` and the matched store path. A host with no such generation has not deployed: record nothing and run again later. `W` is the later of the `W_h`, as RFC 3339 UTC.
 2. **Copy and measure.** Copy anis-desktop with § Method's scripts and commands, passing `W` as the window start. Then run `just agent-costs --report boot --format json --events-since W --events-before <now> --projects-dir "mbp=$HOME/.claude/projects" --projects-dir "anis-desktop=<copy>" --top 100000`.
 3. **Close rule.** Every host × phase-group stratum that holds a `fresh` boot in § Baseline must hold 5 or more `fresh` boots in the window, and the window 20 or more in all. Otherwise record nothing and run again later.
 4. **Weights.** Copy from § Baseline, for each such stratum `(h, g)`: the count `n0(h, g)` and the mean B without tool schemas `m0(h, g)`. Add `N0 = Σ n0` and the headline `M0` (host `all`, `fresh`, `all`).
@@ -63,7 +67,7 @@ State, as numbered steps a later session follows without this plan:
    - `M1 = Σ n0(h, g) / N0 × m1(h, g)`, where `m1` is the window's mean B without tool schemas for the same stratum.
    - **Met when `M0 − M1 ≥ 25,000`.**
    - Each host's fall, `M0(h) − Σ_g n0(h, g) / N0(h) × m1(h, g)`, is reported alongside for information.
-6. **Sweeps.** Run § Pre-merge sweep's command per host over `[W, now]`. A lower threshold is set only when both hosts choose it against 200,000, in a follow-up commit citing issue 448 (D13).
+6. **Sweeps.** Run § Pre-merge sweep's command per host over `[W, now]`. A lower threshold is set only when both hosts' Step 2b pairs, re-run over `[W, now]`, keep it against 200,000, in a follow-up commit citing issue 448 (D13).
 7. **Record.** Fill row `AC3`'s evidence columns and its verdict. On `met`, close the issue; otherwise keep it held.
 
 - [ ] **Step 5: Fill the evidence columns**
