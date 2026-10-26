@@ -7,7 +7,7 @@ description: 'Delivers a finished feature-branch worktree: integration-branch sy
 
 ## Project bindings (resolve first)
 
-Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. The only sanctioned exception is `workflow-state build-delivery`, which performs its own sealed, read-only resolution when it builds a delivery object; this skill still never resolves again itself. Use `bindings.tracker`, `bindings.vcs`, `bindings.commands`, `bindings.workflow.review.code`, and `bindings.workflow.verification`; dereference verification IDs through `bindings.commands`.
+Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. The only sanctioned exception is `workflow-state build-delivery`, which performs its own sealed, read-only resolution when it builds a delivery object (and `verified-tree`, which reads `bindings.workflow.verification` and its conditions itself); this skill still never resolves again itself. Use `bindings.tracker`, `bindings.vcs`, `bindings.commands`, `bindings.workflow.review.code`, and `bindings.workflow.verification`; dereference verification IDs through `bindings.commands`.
 
 For code review, select `bindings.workflow.review.code` and route retained
 `capabilities.review.code` first. `blocked` stops; authored `unsupported` takes
@@ -130,10 +130,10 @@ Run `git merge --no-commit --no-ff origin/<integration>`; unless it reports `Alr
 
 A blocked verification capability stops and reports its `reason_code` and `repair_id`; authored unsupported follows only its documented no-verification route.
 
-1. **Check.** Run `verified-tree check --verification <id>` in the worktree, repeating `--verification` for every id in retained `bindings.workflow.verification`, in order; keep the `tree` it prints.
+1. **Check.** Run `verified-tree check` in the worktree; keep the `tree`, `run` and `skipped` it prints. On Phase 2's own run, note each `skipped` entry as `verification skipped: <id> (<reason>)` in the PR body's Summary.
 2. **Skip only on `verified`** (exit 0). On Phase 2's own run, note
    `verification reused: tree <id>` in the PR body's Summary.
-3. **Otherwise run and record.** Run every id's `bindings.commands` argv and cwd; when all pass, run `verified-tree record --tree <the checked tree>` with the same `--verification` ids. `record` exit 3 `tree_changed` is a failing verification; `check` exit 2 means run anyway and leave the pass unrecorded; `record` exit 2 leaves it unrecorded.
+3. **Otherwise run and record.** Run each `run` id's `bindings.commands` argv and cwd; when all pass, run `verified-tree record --tree <the checked tree>`. `record` exit 3 `tree_changed` is a failing verification; `check` exit 2 means run every retained `bindings.workflow.verification` id anyway and leave the pass unrecorded; `record` exit 2 leaves it unrecorded.
 
 On a failing verification command, pause, ground and surface; never invent a fix command outside retained `bindings.commands`. Tell *environmental* test failures (container connectivity, missing network, sandbox limits) from *real* ones with a baseline run in a scratch worktree on `origin/<integration>`: the same failures are pre-existing (continue; note the baseline diff in the PR body), different ones are real (pause, ground, surface).
 
