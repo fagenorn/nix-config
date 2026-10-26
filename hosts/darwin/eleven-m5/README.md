@@ -23,6 +23,28 @@ budget. This bounds routine reasoning while preserving an explicit request's
 default budget is attached to generation parameters. GLM's reasoning settings
 are not changed. A budget is a reasoning-token bound, not a latency guarantee.
 
+## Neuron steering presets
+
+A model entry's `steer.<preset>` list serves that model a second time as
+`<alias>-<preset>` (for example `qwen3.5-4b-evil`). Each entry,
+`"L<layer> N<neuron> <dose>"`, adds a constant `a` to neuron n's down_proj input
+at every position:
+`a = dose × median(‖residual leaving L‖, tokens 1:) / ‖W_down[:, n]‖`. The patch
+wraps the decoder layer, since oMLX substitutes kernels for the MLP projections.
+It measures the medians once at load on five fixed chat prompts, where they
+vary by about ±5%. `omlx-configure` keeps one directory per preset, holding
+symlinks to the downloaded weights and a `steering.json`. It removes the
+directories of presets that are no longer declared, and refuses to replace a
+directory it did not create. A preset waits until its base model finishes
+downloading, then the downloader syncs it. Each loaded preset costs its base
+model's memory again.
+
+To try candidate neurons before declaring them, run
+`omlx-steer "L14 N8949 +1" "L13 N7956 -1"`. Optional flags are `--model`,
+`--scale`, `--prompt` and `--no-baseline`. It prints baseline and steered
+replies side by side. It loads the model itself, outside the server, using oMLX's
+Python and the patched module, so its output matches what a preset serves.
+
 Run `nix build --no-link .#checks.aarch64-darwin.omlx-adapter` for the portable
 adapter/configuration tests, then `just build eleven-m5` for the host. CI builds
 the corresponding x86_64-linux check as part of the required Nix Eval job. The

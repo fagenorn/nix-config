@@ -21,6 +21,7 @@ class OmlxConfigureTest(unittest.TestCase):
             "__init__.py", "_version.py", "server.py", "exceptions.py",
             "model_settings.py", "model_profiles.py",
             "patches/mlx_vlm_glm5_next_compat/__init__.py",
+            "engine/batched.py", "engine/vlm.py",
         ):
             destination = self.package / "omlx" / name
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -54,6 +55,7 @@ class OmlxConfigureTest(unittest.TestCase):
             "--patch-bin", shutil.which("patch"),
             "--model-settings", os.environ["OMLX_MODEL_SETTINGS"],
             "--server-settings", os.environ["OMLX_SERVER_SETTINGS"],
+            "--steering", os.environ["OMLX_STEERING"],
         ]
         for patch in json.loads(os.environ["OMLX_PATCHES"]):
             self.command.extend(["--patch", patch])
@@ -129,6 +131,70 @@ class OmlxConfigureTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("settings.json", result.stderr)
         self.assertEqual(before, schema.read_bytes())
+
+    def test_steering_presets_follow_the_downloaded_base(self):
+        presets = json.loads(Path(os.environ["OMLX_STEERING"]).read_text())
+        evil = presets["Qwen3.5-4B-bf16-evil"]
+        self.assertEqual(evil["base"], "Qwen3.5-4B-bf16")
+        self.assertEqual(evil["neurons"], [
+            {"layer": 14, "neuron": 8949, "dose": 1},
+            {"layer": 13, "neuron": 7956, "dose": -1},
+        ])
+        models_dir = self.state / "models"
+        preset = models_dir / "Qwen3.5-4B-bf16-evil"
+        # Before the base finishes downloading the preset waits.
+        result = self.configure()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Qwen3.5-4B-bf16-evil", json.loads(result.stdout)["pending_steering"])
+        self.assertFalse(preset.exists())
+        settings = json.loads(self.models.read_text())["models"]
+        self.assertEqual(settings["Qwen3.5-4B-bf16-evil"]["model_alias"], "qwen3.5-4b-evil")
+        self.assertFalse(settings["Qwen3.5-4B-bf16-evil"]["is_default"])
+        base = models_dir / "Qwen3.5-4B-bf16"
+        base.mkdir()
+        for name in ("config.json", "model.safetensors", ".omlx-download-complete"):
+            (base / name).write_text(name)
+        (self.state / ".restart-needed").unlink()
+        result = self.configure()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["changed_steering"], ["Qwen3.5-4B-bf16-evil"])
+        self.assertTrue((self.state / ".restart-needed").exists())
+        self.assertEqual((preset / "config.json").read_text(), "config.json")
+        self.assertTrue((preset / "model.safetensors").is_symlink())
+        self.assertFalse((preset / ".omlx-download-complete").exists())
+        self.assertEqual(json.loads((preset / "steering.json").read_text())["neurons"], evil["neurons"])
+        (self.state / ".restart-needed").unlink()
+        result = self.configure()
+        self.assertFalse(json.loads(result.stdout)["changed"])
+        self.assertFalse((self.state / ".restart-needed").exists())
+        # A file the base no longer has is unlinked; one it gained is linked.
+        (base / "model.safetensors").unlink()
+        (base / "tokenizer.json").write_text("tokenizer")
+        result = self.configure()
+        self.assertEqual(json.loads(result.stdout)["changed_steering"], ["Qwen3.5-4B-bf16-evil"])
+        self.assertFalse((preset / "model.safetensors").is_symlink())
+        self.assertTrue((preset / "tokenizer.json").is_symlink())
+
+    def test_undeclared_preset_is_removed_and_foreign_directory_refused(self):
+        models_dir = self.state / "models"
+        stale = models_dir / "Old-evil"
+        stale.mkdir(parents=True)
+        (stale / ".omlx-steering-preset").touch()
+        (stale / "steering.json").write_text("{}")
+        (stale / "config.json").symlink_to(self.models)
+        result = self.configure()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Old-evil", json.loads(result.stdout)["changed_steering"])
+        self.assertFalse(stale.exists())
+        foreign = models_dir / "Qwen3.5-4B-bf16-evil"
+        foreign.mkdir()
+        (foreign / "weights.safetensors").write_text("someone's model")
+        before = self.models.read_bytes()
+        result = self.configure()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not a steering preset directory", result.stderr)
+        self.assertEqual(before, self.models.read_bytes())
+        self.assertTrue((foreign / "weights.safetensors").exists())
 
     def test_missing_installation_fails(self):
         shutil.rmtree(self.package / "omlx")
