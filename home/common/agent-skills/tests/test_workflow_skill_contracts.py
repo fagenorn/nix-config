@@ -142,7 +142,7 @@ SDD_MACHINE_TEXT = {
     ),
     SDD_DIR / "final-review.md": (
         "review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD",
-        "verified-tree check --verification <id>",
+        "`verified-tree check`",
         "verified-tree record --tree <the checked tree>",
         "launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
         "--worker-id <worker_id> -- <git commit arguments>",
@@ -248,7 +248,7 @@ SHIP_ISSUE_MACHINE_TEXT = {
         '--head <branch> --title "<title>" --body',
         "Lifecycle worker:",
         WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV,
-        "verified-tree check --verification <id>",
+        "`verified-tree check`",
         "verified-tree record --tree <the checked tree>",
         REQUIRED_WATCH, ALL_CHECKS_WATCH, ADVISORY_CALL,
         "Acceptance state: <effective acceptance state>",
