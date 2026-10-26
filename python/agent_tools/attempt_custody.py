@@ -52,6 +52,9 @@ REMAINDER_BLOCKED_ON_VALUES = frozenset({"owner_unavailable"})
 SUSPENSION_CAUSES = BLOCKED_ON_VALUES | REMAINDER_BLOCKED_ON_VALUES
 AUTO_RESUMABLE_BLOCKED_ON = frozenset(
     {"usage_limit", "transport", "unknown", "host_capacity", "deadline"})
+# A suspension cause only a person clears: an attempt or a delivery remainder parked on one
+# resumes only on a human-directed re-entry (issue 458 D3).
+HUMAN_GATED_BLOCKED_ON = BLOCKED_ON_VALUES - AUTO_RESUMABLE_BLOCKED_ON
 STALL_LIMIT = 3
 LIVE_STATES = ("active", "handed_off", "suspended")
 # The unparking reason of a `host_capacity` suspension a later release woke, and the reason of

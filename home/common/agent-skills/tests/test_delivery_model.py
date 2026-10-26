@@ -114,7 +114,8 @@ class DeliveryModelTest(unittest.TestCase):
                 remainder_deadline="2026-09-21T03:01:00Z",
                 owner_unavailable=False, tracker_halted=False,
                 recorded_worktree={"path": "/worktree",
-                                   "state": "matching_issue_branch"})
+                                   "state": "matching_issue_branch"},
+                human_directed=True)
             self.assertEqual(
                 (policy["operation"], issue["attempts"][0]["state"],
                  issue["delivery_remainders"][0]["owner"],

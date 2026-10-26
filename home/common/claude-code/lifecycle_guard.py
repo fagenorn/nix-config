@@ -175,6 +175,7 @@ FORM_TABLE = {
         "forms": (
             ("tag", "git push origin refs/tags/<vX.Y.Z>", None),
             ("branch", "git push [-u] origin <branch>", None),
+            ("delete", "git push origin --delete refs/heads/<branch>", None),
         ),
         "whole_text_characters": True,
         "exact_spelling": False,
@@ -2149,7 +2150,7 @@ def validate_push(text, context, compiled):
                       accepted_forms(compiled, context))
     if match.form.id == "tag":
         return validate_tag_push(match.values["vX.Y.Z"], context, compiled)
-    if match.form.id != "branch":
+    if match.form.id not in ("branch", "delete"):
         raise AssertionError(f"unhandled push form {match.form.id}")
     branch = match.values["branch"]
     reason = branch_name_problem(context.git_bin, branch, context.timeout)
@@ -2159,6 +2160,12 @@ def validate_push(text, context, compiled):
         return refuse("push", reason, accepted_forms(compiled, context))
     if context.base_branch is None:
         return refuse("push", "cannot resolve the repository default branch")
+    if match.form.id == "delete":
+        # Issue 458 D2: a remote deletion never names a permanent branch, the
+        # default branch or the repository's declared integration branch.
+        if branch in (context.base_branch, context.integration_bases.get(context.repository)):
+            return refuse("push", f"refusing to delete the permanent branch {branch}")
+        return 0
     if branch == context.base_branch:
         return refuse("push", f"refusing to push the default branch {branch}")
     return 0

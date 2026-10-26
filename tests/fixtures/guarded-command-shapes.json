@@ -56,12 +56,12 @@
     },
     {
       "id": "branch.remote",
-      "template": "git push origin --delete <branch>",
+      "template": "git push origin --delete refs/heads/<branch>",
       "sites": ["SKILL.md", "HUMAN-GATE.md"],
       "label": "push",
-      "bare": {"exit": 2, "reason": "unknown flag --delete"},
-      "prefixed": {"exit": 2, "reason": "unknown flag --delete"},
-      "env_prefixed": {"exit": 2, "reason": "unknown flag --delete"}
+      "bare": {"exit": 0},
+      "prefixed": {"exit": 0},
+      "env_prefixed": {"exit": 0}
     }
   ],
   "refused_shapes": [
@@ -104,7 +104,9 @@
     {"id": "merge.flag-before-path", "template": "gh --repo <resolved-repository> pr merge <pr-num> --merge --delete-branch",
      "label": "merge", "verdict": {"exit": 2, "reason": "--repo is out of place"}},
     {"id": "merge.flag-between-path", "template": "gh pr --repo <resolved-repository> merge <pr-num> --merge --delete-branch",
-     "label": "merge", "verdict": {"exit": 2, "reason": "--repo is out of place"}}
+     "label": "merge", "verdict": {"exit": 2, "reason": "--repo is out of place"}},
+    {"id": "branch.remote-bare", "template": "git push origin --delete <branch>",
+     "label": "push", "verdict": {"exit": 2, "reason": "missing refs/heads/<branch>"}}
   ],
   "form_values": {
     "<n>": "402",
