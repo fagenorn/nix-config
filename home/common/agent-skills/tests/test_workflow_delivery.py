@@ -23,7 +23,8 @@ def direct_policy(runtime, issue, request):
         now="2026-09-21T00:01:00Z", dispatch_permitted=True,
         remainder_deadline="2026-09-21T03:01:00Z", owner_unavailable=False,
         tracker_halted=False,
-        recorded_worktree={"path": WORKTREE, "state": "matching_issue_branch"})
+        recorded_worktree={"path": WORKTREE, "state": "matching_issue_branch"},
+        human_directed=True)
 
 
 def resolved_snapshot(root):
@@ -63,7 +64,8 @@ class WorkflowDeliveryRuntimeTest(unittest.TestCase):
         _, delivery = cleanup_contract_and_delivery(runtime.model)
         common = dict(
             now="2026-09-21T00:01:00Z", owner_unavailable=False,
-            dispatch_permitted=True, remainder_deadline="2026-09-21T03:01:00Z")
+            dispatch_permitted=True, remainder_deadline="2026-09-21T03:01:00Z",
+            human_directed=True)
         cases = (("close", None),
                  ("worktree", {"path": WORKTREE, "state": "absent"}))
         for stage, recorded in cases:
@@ -105,7 +107,7 @@ class WorkflowDeliveryRuntimeTest(unittest.TestCase):
             now="2026-09-21T00:01:00Z", owner_unavailable=True,
             dispatch_permitted=True, remainder_deadline="2026-09-21T03:01:00Z",
             tracker_halted=False, recorded_worktree=None,
-            preview={"next_stage_id": "close"})
+            preview={"next_stage_id": "close"}, human_directed=True)
         state = suspended_remainder(delivery)
         record = state["delivery_remainders"][0]
         record.update(state="active", deadline_at="2026-09-21T00:00:30Z")

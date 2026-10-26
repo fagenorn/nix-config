@@ -2631,11 +2631,12 @@ def _apply_one_issue_policy(
     through the recorded-worktree ladder: a quota wall, a transport failure or a
     silent owner is an interruption the retry itself survives, so re-entry alone
     clears it (per D2, D9). ``human_directed`` says a person asked for this
-    re-entry by name, which is the only thing that clears a
-    `human_gate`/`external`/`agent_dispatch` suspension: a direct owner always
-    carries it, and an orchestrated sweep carries it exactly when the caller
-    listed the issue numbers itself. A `--label`/`--milestone` sweep never does,
-    so it leaves those parked and reports them.
+    re-entry by name, which is the only thing that clears a suspension on a
+    cause in ``HUMAN_GATED_BLOCKED_ON`` (`human_gate`/`external`/`agent_dispatch`),
+    whether it parks an attempt or a delivery remainder (issue 458 D3): a direct
+    owner always carries it, and an orchestrated sweep carries it exactly when
+    the caller listed the issue numbers itself. A `--label`/`--milestone` sweep
+    never does, so it leaves those parked and reports them.
 
     An expired attempt is reaped before any lane predicate is derived: the
     single ``demote_expired_attempt`` call turns it into a ``suspended``
@@ -2709,7 +2710,8 @@ def _apply_one_issue_policy(
             remainder_deadline=attempt_deadline(now, attempt_budget_minutes),
             owner_unavailable=current_owner_unavailable,
             tracker_halted=bool(tracker and tracker_halt_reason(tracker)),
-            recorded_worktree=None if worktree is None else worktree["recorded"])
+            recorded_worktree=None if worktree is None else worktree["recorded"],
+            human_directed=human_directed)
         if plan is not None:
             return plan
     expired = bool(

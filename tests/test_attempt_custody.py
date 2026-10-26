@@ -48,6 +48,7 @@ class VocabularyTest(unittest.TestCase):
                          ac.BLOCKED_ON_VALUES - {"unknown", "host_capacity"})
         self.assertEqual(ac.AUTO_RESUMABLE_BLOCKED_ON, {
             "usage_limit", "transport", "unknown", "host_capacity", "deadline"})
+        self.assertEqual(ac.HUMAN_GATED_BLOCKED_ON, {"human_gate", "external", "agent_dispatch"})
         self.assertEqual(ac.STALL_LIMIT, 3)
         self.assertEqual(ac.FENCING_REASONS, (
             "custody_misbound", "superseded_launch", "launch_identity_required",
