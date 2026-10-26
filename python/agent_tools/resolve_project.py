@@ -281,7 +281,7 @@ def any_path_matches(paths: list[str], globs: list[str]) -> bool:
 
     Both are compared as spelled, so `*` also crosses `/` (#279 D4, issue 437
     D3). It is the one matcher for contract path globs; `lane-triage` calls it
-    for `risk_paths`.
+    for `risk_paths` and `verified-tree` for `when_changed`.
     """
     return any(fnmatch.fnmatchcase(path, glob) for path in paths for glob in globs)
 
