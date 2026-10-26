@@ -976,7 +976,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_from_issue_phase_seven_ships_inline_on_the_dispatch_gap(self):
         # The fallback ends in the suspension procedure, never a direct
         # `workflow-state suspend` (the verb stays in that procedure).
-        phase_seven = self.section(self.from_issue, "## Phase 7", "## Notes")
+        phase_seven = self.section(self.from_issue, "\n## Phase 7", "## Notes")
         handling = self.section(self.ship_handoff, "## Ship report handling",
                                 "## Inline fallback (no ship-issue skill)")
         for text in (phase_seven, handling):
@@ -1895,14 +1895,6 @@ class ResumePackContractsTest(unittest.TestCase):
             "artifact-budget validate-report --boundary workflow-response", "`resume-pack`",
             "### Resume pack")
 
-    def test_from_issue_owner_verifies_the_pack_and_reads_only_the_phase(self):
-        self.assert_ordered(
-            self.read(RESUME_PACK), self.PACK, "`check-launch`",
-            "`git -C <worktree> rev-parse HEAD` must equal `worktree.head`",
-            "`git -C <worktree> status --porcelain` must list exactly "
-            "`worktree.dirty_paths` entries")
-        self.assertIn("`action_id`", self.read(RESUME_PACK))
-
     def test_from_issue_direct_reentry_and_delegate_carry_the_pack(self):
         self.assert_ordered(
             self.read(ACQUIRE_DIRECT), "**`kind: owner`**", "`launch_kind` is `resume`",
@@ -1913,6 +1905,92 @@ class ResumePackContractsTest(unittest.TestCase):
 
     def test_auto_rollover_passes_the_pack_beside_the_continuation(self):
         self.assertIn(self.PACK, self.read(ROLLOVER))
+
+
+class SlimBootContractsTest(unittest.TestCase):
+    """Issue 448: the fresh-owner boot reads only what its phase needs."""
+
+    @staticmethod
+    def read(path):
+        return normalized(path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def section(text, heading, next_heading):
+        start = text.index(heading)
+        return text[start:text.index(next_heading, start + len(heading))]
+
+    def test_phase_6_hands_sdd_the_reviewed_token_and_sdd_skips_the_package_read(self):
+        phase_6 = self.section(self.read(FROM_ISSUE), "## Phase 6 — Execute", "## Phase 7 — Ship")
+        self.assertIn("`--reviewed`", phase_6)
+        setup = self.section(self.read(SDD), "## Setup", "### Cumulative delivery gate")
+        self.assertIn("`--reviewed`", setup)
+        self.assertIn("`<plan stem>.tasks/task-<N>.md`", setup)
+        delegated = self.section(self.read(DELEGATED_OWNER), "## Checks and Phases 6–7",
+                                 "## Generic delegate")
+        self.assertIn("`--reviewed`", delegated)
+
+    CHECK_LAUNCH = ("workflow-state check-launch --repo-root <ledger_repo_root> "
+                    "--run-id <run-id> --action-id <action_id>")
+    ENTRY = "<from-issue-dir>/resume-pack.md"
+
+    def test_pack_carrying_prompts_name_the_resume_entry(self):
+        resume = self.section(self.read(FROM_ISSUE), "### Resume pack", "## The flow")
+        self.assertIn(self.ENTRY, resume)
+        orchestrate = self.read(ORCHESTRATE)
+        fresh = orchestrate[orchestrate.index("<!-- agent-dispatch: id=orchestration-issue-owner"):]
+        self.assertLess(fresh.index("Resume pack"), fresh.index(self.ENTRY))
+        self.assertIn("from-issue <num> --auto", fresh[fresh.index(self.ENTRY):])
+
+    def test_the_entry_runs_its_checks_before_any_skill_section(self):
+        entry = self.read(RESUME_PACK)
+        position = -1
+        for anchor in (ResumePackContractsTest.PACK, self.CHECK_LAUNCH,
+                       "artifact-budget validate-report --boundary workflow-response --input -",
+                       "`reviewed_head_sha`",
+                       "`git -C <worktree> rev-parse HEAD`", "`worktree.head`",
+                       "`git -C <worktree> status --porcelain`", "`worktree.dirty_paths`",
+                       "`## Files beside this one`"):
+            position = entry.find(anchor, position + 1)
+            self.assertGreaterEqual(position, 0, anchor)
+        self.assertIn("`action_id`", entry)
+
+    def bullet(self, name):
+        index = self.section(self.read(FROM_ISSUE), "## Files beside this one",
+                             "## Lifecycle identity")
+        start = index.index(f"- **`{name}`**")
+        end = index.find(" - **`", start + 1)
+        return index[start:] if end < 0 else index[start:end]
+
+    @staticmethod
+    def headings(path):
+        return {line.lstrip("#").strip()
+                for line in path.read_text(encoding="utf-8").splitlines() if line.startswith("#")}
+
+    def test_every_section_and_file_the_verified_pack_reads_exists(self):
+        for name, document in (("AUTO.md", AUTO), ("resume-pack.md", FROM_ISSUE),
+                               ("delegated-owner.md", DELEGATED_OWNER),
+                               ("ship-handoff.md", FROM_ISSUE)):
+            for span in re.findall(r"`([^`]+)`", self.bullet(name)):
+                with self.subTest(bullet=name, span=span):
+                    if span.endswith(".md"):
+                        self.assertTrue((FROM_ISSUE_DIR / span).is_file())
+                    elif not (span.startswith("-") or "<" in span or span in ("sdd", "ship-issue")):
+                        self.assertIn(span.removeprefix("## "), self.headings(document))
+        for heading in ("`## Checks and Phases 6–7`", "`## Generic delegate`"):
+            self.assertIn(heading, self.bullet("delegated-owner.md"))
+
+    def test_phases_6_7_read_neither_the_stop_rules_nor_the_ship_handoff(self):
+        auto = self.bullet("AUTO.md")
+        stop_rules = "`When *not* to auto-resolve`"
+        self.assertEqual(auto.count(stop_rules), 1)
+        position = -1
+        for span in (stop_rules, "`Phases 2–4 run as subagents`", "`Other Phase 5–7 routes`",
+                     "`Interface_version 2 delivery relay`"):
+            position = auto.find(span, position + 1)
+            self.assertGreaterEqual(position, 0, span)
+        self.assertIn("`## Phase 7 — Ship`", self.bullet("ship-handoff.md"))
+        for name in ("AUTO.md", "resume-pack.md", "delegated-owner.md"):
+            self.assertNotIn("`ship-handoff.md`", self.bullet(name))
 
 
 class InterimChildResultContractsTest(unittest.TestCase):

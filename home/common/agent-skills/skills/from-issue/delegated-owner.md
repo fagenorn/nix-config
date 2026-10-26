@@ -6,7 +6,7 @@ First pipe the continuation's `owner` object through `artifact-budget validate-r
 
 A resume pack beside the continuation is used as the resume pack's checks say, and only after every check above has passed: it replaces none of them.
 
-Then adopt the owner envelope as the existing lifecycle identity; do not call `direct-owner` or perform any other acquisition. Begin at Phase 6, invoke `sdd` with the reviewed plan, and validate the SDD producer report under the existing contract.
+Then adopt the owner envelope as the existing lifecycle identity; do not call `direct-owner` or perform any other acquisition. Begin at Phase 6, invoke `sdd` with `--reviewed`, and validate the SDD producer report under the existing contract.
 
 After SDD is validated, call `workflow-state progress` for completed Phase 6 with `next_needs_context=false`, `artifacts_sufficient=true`, `remainder_self_contained=true`, and require persisted `delegate`. For this owner, that delegate is the existing fresh Phase-7 ship owner with `auto: true`; do not dispatch a second issue owner. The one departure is Phase 7's dispatch-gap fallback: when that ship owner returns `capability_gap: agent_dispatch`, or this context cannot launch it, ship inline exactly as Phase 7 says, including its suspension on a genuine gap.
 
