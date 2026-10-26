@@ -285,7 +285,7 @@ SHIP_ISSUE_MACHINE_TEXT = {
     SHIP_ISSUE_HUMAN_GATE: (
         "gh issue close <num>", "gh issue reopen <num>", "gh label create needs-verification",
         "gh issue edit <num> --add-label needs-verification", "gh issue comment <num>",
-        "git push origin --delete <branch>", "git ls-remote --heads origin <branch>",
+        "git push origin --delete refs/heads/<branch>", "git ls-remote --heads origin <branch>",
         "git worktree remove <worktree-path>", "git branch -d <branch>",
         "validate-report --boundary ship-summary", "## Never route around a denial",
     ),

@@ -260,7 +260,7 @@ Build the subject from retained `bindings.tracker.repo_slug` and `bindings.vcs` 
 gh pr merge <pr-num> --repo <resolved-repository> --merge --subject "<rendered subject>" --match-head-commit <reviewed HEAD_SHA> --delete-branch
 ```
 
-**Judge success by the verify, never by the exit code** (CI-MERGE.md): `gh pr view <pr-num> --json state,mergeCommit` → `MERGED` plus a non-null `mergeCommit.oid`. Then ask the REMOTE whether the branch still exists, `git ls-remote --heads origin <branch>`; PR metadata proves nothing. Non-empty output → `git push origin --delete <branch>` (`## gh hygiene`).
+**Judge success by the verify, never by the exit code** (CI-MERGE.md): `gh pr view <pr-num> --json state,mergeCommit` → `MERGED` plus a non-null `mergeCommit.oid`. Then ask the REMOTE whether the branch still exists, `git ls-remote --heads origin <branch>`; PR metadata proves nothing. Non-empty output → `git push origin --delete refs/heads/<branch>` (`## gh hygiene`).
 
 ## Phase 8 — Cleanup
 

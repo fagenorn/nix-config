@@ -1339,6 +1339,34 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertEqual("lifecycle guard: unsafe push: cannot resolve the repository "
                          "default branch", line)
 
+    def test_the_remote_deletion_form_deletes_only_the_named_branch(self):
+        """Issue 458 D1, D5: run by git against a local bare remote that holds a branch
+        and a tag of one name, ship-issue's filled spelling deletes the branch alone."""
+        form = next(form for form in self.SHAPES["skill_forms"]
+                    if form["id"] == "branch.remote")
+        command = self.shape_command(form["template"])
+        name = self.SHAPES["values"]["<branch>"]
+        base = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+        remote, work = base / "remote.git", base / "work"
+        identity = ["-c", "user.name=t", "-c", "user.email=t@t",
+                    "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"]
+
+        def git(*argv, cwd=work):
+            return subprocess.run(["git", *identity, *argv], cwd=cwd, check=True,
+                                  capture_output=True, text=True).stdout
+
+        subprocess.run(["git", "init", "--quiet", "--bare", str(remote)], check=True,
+                       capture_output=True)
+        work.mkdir()
+        git("init", "--quiet")
+        git("remote", "add", "origin", str(remote))
+        git("commit", "--quiet", "--allow-empty", "-m", "init")
+        git("tag", name)
+        git("push", "--quiet", "origin", f"HEAD:refs/heads/{name}", f"refs/tags/{name}")
+        subprocess.run(shlex.split(command), cwd=work, check=True, capture_output=True)
+        self.assertEqual("", git("ls-remote", "--heads", "origin", name))
+        self.assertIn(f"refs/tags/{name}", git("ls-remote", "--tags", "origin", name))
+
     # Guarded command shapes (#351): the forms ship-issue spells and the dressed
     # shapes agents reach for, from the fixture the shell-example suite also reads.
     SHAPES = json.loads((Path(__file__).parent / "fixtures/guarded-command-shapes.json")

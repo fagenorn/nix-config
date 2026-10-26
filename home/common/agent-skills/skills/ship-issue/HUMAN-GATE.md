@@ -47,7 +47,7 @@ The same grant covers the rest of the chain, in this order:
   the merge closed it, `gh label create needs-verification` when the label is
   missing, `gh issue edit <num> --add-label needs-verification` and
   `gh issue comment <num>`;
-- `git push origin --delete <branch>` (`## gh hygiene`), only when
+- `git push origin --delete refs/heads/<branch>` (`## gh hygiene`), if
   `git ls-remote --heads origin <branch>` is non-empty;
 - `git worktree remove <worktree-path>`, run from the main repo root;
 - `git branch -d <branch>` (`## gh hygiene`).
