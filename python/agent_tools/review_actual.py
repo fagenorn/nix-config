@@ -39,6 +39,8 @@ PACKING_POLICY = {
                              "subject_json_bytes_per_reserved_byte": 6},
 }
 PACKING_POLICY_SHA256 = telemetry_digest(PACKING_POLICY)
+RECORD_OPERATIONS = ("A", "M", "D", "T", "R100")
+GENERATED_EVIDENCE_KINDS = ("ef-core-migration-designer", "whole-file-deletion")
 
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 DIFF_BOUNDARY = re.compile(br"(?m)^diff --git ")
@@ -140,6 +142,8 @@ def actual_inputs_from_trees(repo: Path, base_tree: str, head_tree: str, *,
     stats = _parse_numstat(git_diff(repo, base_tree, head_tree, "--numstat", "-z"))
     if len(set(paths)) != len(paths) or len(paths) != stats["files_changed"]:
         raise GenerationError("diff coverage does not match numstat")
+    operations = _record_operations(
+        git_diff(repo, base_tree, head_tree, "--name-status", "-z"), paths)
     for number, choice in enumerate(_packing_choices()):
         context = None if number == 0 else choice["context_lines"]
         raw = git_diff(repo, base_tree, head_tree, "--binary", f"-U{choice['context_lines']}")
@@ -147,11 +151,13 @@ def actual_inputs_from_trees(repo: Path, base_tree: str, head_tree: str, *,
         if len(chunks) != len(paths):
             raise GenerationError("diff coverage does not match paths")
         records = []
-        for path, chunk in zip(paths, chunks):
+        for path, operation, chunk in zip(paths, operations, chunks):
             evidence = None
             payload = chunk
             if len(chunk) > limits.member_max_bytes:
                 item = _ef_designer_evidence(repo, base_tree, head_tree, path, len(chunk))
+                if item is None and operation == "D":
+                    item = _whole_file_deletion_evidence(repo, base_tree, path, len(chunk))
                 if item is not None:
                     compact = _canonical({"review-package-generated-evidence": item})
                     if len(compact) <= limits.member_max_bytes:
@@ -198,7 +204,7 @@ def _build_candidate(item: CandidateInput, limits: ReviewLimits, *,
         if record.generated_evidence is not None:
             evidence = record.generated_evidence
             if (evidence.get("path") != record.path
-                    or evidence.get("kind") != "ef-core-migration-designer"
+                    or evidence.get("kind") not in GENERATED_EVIDENCE_KINDS
                     or evidence.get("source_diff_bytes") != record.source_bytes
                     or record.source_bytes <= limits.member_max_bytes
                     or len(record.payload) > limits.member_max_bytes
@@ -322,10 +328,46 @@ def _changed_paths(raw: bytes) -> list[str]:
         raise GenerationError("Git path is not UTF-8") from exc
 
 
+def _record_operations(raw: bytes, paths: list[str]) -> tuple[str, ...]:
+    """Each record's `--name-status -z` operation, in the order of the name-only `paths`."""
+    if not raw:
+        if paths:
+            raise GenerationError("Git status does not match paths")
+        return ()
+    items = raw.split(b"\0")
+    if items[-1] != b"":
+        raise GenerationError("malformed Git status list")
+    items.pop()
+    operations: list[str] = []
+    destinations: list[bytes] = []
+    position = 0
+    while position < len(items):
+        try:
+            operation = items[position].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise GenerationError("unsupported Git record operation") from exc
+        if operation not in RECORD_OPERATIONS:
+            raise GenerationError("unsupported Git record operation")
+        names = 2 if operation == "R100" else 1
+        listed = items[position + 1 : position + 1 + names]
+        if len(listed) != names or any(not name for name in listed):
+            raise GenerationError("malformed Git status list")
+        operations.append(operation)
+        destinations.append(listed[-1])
+        position += 1 + names
+    try:
+        decoded = [name.decode("utf-8", errors="strict") for name in destinations]
+    except UnicodeDecodeError as exc:
+        raise GenerationError("Git path is not UTF-8") from exc
+    if decoded != paths:
+        raise GenerationError("Git status does not match paths")
+    return tuple(operations)
+
+
 def _blob_at(repo: Path, commit: str, path: str) -> tuple[str, bytes] | None:
     try:
         listed = subprocess.run(
-            ["git", "-C", str(repo), "ls-tree", "-z", commit, "--", path],
+            ["git", "--literal-pathspecs", "-C", str(repo), "ls-tree", "-z", commit, "--", path],
             check=True,
             capture_output=True,
         ).stdout
@@ -354,6 +396,11 @@ def _blob_at(repo: Path, commit: str, path: str) -> tuple[str, bytes] | None:
     return sha, raw
 
 
+def _blob_identity(blob: tuple[str, bytes]) -> dict[str, object]:
+    sha, raw = blob
+    return {"blob_sha": sha, "bytes": len(raw), "content_sha256": hashlib.sha256(raw).hexdigest()}
+
+
 def _ef_designer_side(blob: tuple[str, bytes] | None) -> dict[str, object] | None:
     if blob is None:
         return None
@@ -371,9 +418,7 @@ def _ef_designer_side(blob: tuple[str, bytes] | None) -> dict[str, object] | Non
     except UnicodeDecodeError as exc:
         raise GenerationError("invalid EF migration metadata") from exc
     return {
-        "blob_sha": sha,
-        "bytes": len(raw),
-        "content_sha256": hashlib.sha256(raw).hexdigest(),
+        **_blob_identity(blob),
         "migration_id": migration_id,
         "product_version": product_version,
         "entity_types": raw.count(b"modelBuilder.Entity("),
@@ -406,6 +451,24 @@ def _ef_designer_evidence(
         "source_diff_bytes": source_diff_bytes,
         "base": _ef_designer_side(base_blob),
         "head": _ef_designer_side(head_blob),
+    }
+
+
+def _whole_file_deletion_evidence(
+    repo: Path, base: str, path: str, source_diff_bytes: int,
+) -> dict[str, object]:
+    """Bounded evidence for a path the range deletes outright: its base blob, and a head that is null because the status is `D`."""
+    blob = _blob_at(repo, base, path)
+    if blob is None:
+        raise GenerationError("deleted path has no base blob")
+    raw = blob[1]
+    line_count = raw.count(b"\n") + (1 if raw and not raw.endswith(b"\n") else 0)
+    return {
+        "path": path,
+        "kind": "whole-file-deletion",
+        "source_diff_bytes": source_diff_bytes,
+        "base": {**_blob_identity(blob), "line_count": line_count},
+        "head": None,
     }
 
 
