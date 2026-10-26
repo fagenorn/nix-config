@@ -496,8 +496,10 @@ class CheckerMutationTest(unittest.TestCase):
 
 def _has_body(path):
     """Whether an agent definition has text after its closing frontmatter
-    delimiter; a body-less definition (issue 447, D2) carries no clause."""
-    return bool(path.read_text(encoding="utf-8").split("\n---\n", 1)[1].strip())
+    delimiter, read by the same parser as a body carrier's region; a body-less
+    definition (issue 447, D2) carries no clause."""
+    carrier = Carrier(relative=path.name, tree="agents", kind="body")
+    return bool(_body_region(carrier, path.read_text(encoding="utf-8")).strip())
 
 
 class CarrierDeclarationTest(unittest.TestCase):
