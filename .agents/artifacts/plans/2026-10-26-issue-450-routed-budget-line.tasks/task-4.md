@@ -295,7 +295,7 @@ echo "comment $X, built $V"; test "$X" = "$V"
 ```
 
 - If `V` is below 2.1.310, report BLOCKED `claude-code below 2.1.310: <V>`.
-- If `X` differs from `V`, change only that comment's version to `V` and run the focused tests (`OK`, 17 tests). Commit it with `launch-commit … -- -m "fix(issue-450): the budget-line comment names Claude Code <V>"`, then go back to Step 1. This is the one change allowed before M is fixed (spec § Sequence, step 2).
+- If `X` differs from `V`, change only that comment's version to `V` and run the focused tests (`OK`, 17 tests while `    "" | 1) ;;` is in `claude-account`; 18 once Task 6 has reverted the switch). Commit it with `launch-commit … -- -m "fix(issue-450): the budget-line comment names Claude Code <V>"`, then go back to Step 1. This is the one change allowed before M is fixed (spec § Sequence, step 2).
 - If they are equal: `git rev-parse HEAD > <S>/i450/M`. That head is M.
 
 - [ ] **Step 4: Ports and the service**

@@ -213,7 +213,7 @@ grep -qF '(on by default since #450).' "$n"
 if git diff -U0 HEAD -- "$n" | grep -E '^[-+]' | grep -Ev '^(\+\+\+|---) ' | grep -Ev '^[-+][[:space:]]*(#.*)?$'; then exit 1; fi
 grep -q '^class DefaultRoutingTest(LauncherCase):$' tests/test_claude_account_routing.py
 if grep -q '^class OptInRoutingTest' tests/test_claude_account_routing.py; then exit 1; fi
-test "$(git diff --name-only HEAD | sort | tr '\n' ' ')" = "home/common/claude-code/README.md home/common/claude-code/accounts/bin/claude-account home/common/claude-code/default.nix tests/test_claude_account_routing.py "
+test "$(git diff --name-only HEAD | LC_ALL=C sort | tr '\n' ' ')" = "home/common/claude-code/README.md home/common/claude-code/accounts/bin/claude-account home/common/claude-code/default.nix tests/test_claude_account_routing.py "
 echo default-on-candidate-ok
 ```
 
