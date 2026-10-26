@@ -171,6 +171,28 @@ claude_bin() {
   echo "$bin"
 }
 
+# Prints `healthy` when the cache proxy at host $1, port $2 answers GET /_proxy/health with a
+# 2xx status and a body naming "service":"cache-proxy", and nothing otherwise. Only bash
+# builtins run here, so the probe starts no curl or jq process (#450); the caller bounds it.
+cache_proxy_health() {
+  local status line length="" body=""
+  {
+    printf 'GET /_proxy/health HTTP/1.0\r\nHost: %s:%s\r\nConnection: close\r\n\r\n' "$1" "$2" >&3
+    IFS= read -r status <&3 || return 1
+    case "$status" in "HTTP/1."[01]" 2"[0-9][0-9]" "*) ;; *) return 1 ;; esac
+    while IFS= read -r line <&3; do
+      line="${line%$'\r'}"
+      [ -n "$line" ] || break
+      case "${line,,}" in
+        content-length:*) length="${line#*:}"; length="${length//[!0-9]/}" ;;
+      esac
+    done
+    [ -n "$length" ] || return 1
+    IFS= read -r -N "$length" body <&3 || return 1
+    case "$body" in *'"service":"cache-proxy"'*) echo healthy ;; esac
+  } 3<>"/dev/tcp/$1/$2"
+}
+
 # Routes this launch through the cache proxy only when CLAUDE_CACHE_PROXY=1
 # (#438) and the proxy's health check answers, and sends it direct otherwise.
 # Unset, empty or 0 runs no probe and unsets a base URL equal to the proxy URL,
@@ -190,15 +212,19 @@ route_cache_proxy() {
       ;;
     *) die "CLAUDE_CACHE_PROXY must be 1, 0 or unset" ;;
   esac
-  local health
+  local verdict="" waited=0 hostport="${CACHE_PROXY_URL#http://}"
   [ -n "$CACHE_PROXY_URL" ] || return 0
   if [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ "$ANTHROPIC_BASE_URL" != "$CACHE_PROXY_URL" ]; then
     return 0
   fi
-  # The status is checked explicitly: `-f` alone would accept a 3xx carrying the marker.
-  if health="$("$CURL" -q --noproxy '*' -sS --max-time 0.5 -w '\n%{http_code}' "$CACHE_PROXY_URL/_proxy/health" 2>/dev/null)" &&
-    case "${health##*$'\n'}" in 2??) true ;; *) false ;; esac &&
-    printf '%s' "${health%$'\n'*}" | "$JQ" -e '.service == "cache-proxy"' >/dev/null 2>&1; then
+  # One 0.5 s deadline covers the connect, the request and the answer, so a dead or hung proxy
+  # costs at most half a second. Only a probe the deadline cut off is signalled: one that
+  # answered or hit EOF is exiting by itself. Either way it is reaped, so a claude exec'd
+  # below inherits no exited child.
+  IFS= read -r -t 0.5 verdict < <(cache_proxy_health "${hostport%:*}" "${hostport##*:}" 2>/dev/null) || waited=$?
+  if [ "$waited" -gt 128 ]; then kill "$!" 2>/dev/null || true; fi
+  wait "$!" 2>/dev/null || true
+  if [ "$verdict" = healthy ]; then
     export ANTHROPIC_BASE_URL="$CACHE_PROXY_URL"
     # Before Claude Code 2.1.304 a non-first-party base URL turns tool search off.
     [ -n "${ENABLE_TOOL_SEARCH+set}" ] || export ENABLE_TOOL_SEARCH=true
