@@ -51,7 +51,8 @@ trade-off (Scope 3).
 3. **Ship one branch.** If AC3's bound holds, the candidate ships: routing is
    on by default, and `CLAUDE_CACHE_PROXY=0` opts a launch out. If it does not
    hold, or no valid run exists, the switch commit is reverted and routing
-   stays opt-in, with #450's numbers as the stated reason (D4).
+   stays opt-in, with #450's numbers as the stated reason (D4). The reminder
+   and the probe ship in both branches.
 4. **Record.** Append the root cause, the corrected method and the
    re-measurement to #438's evidence report without rewriting #438's own text
    (D9). Then run `just build mbp` at the final head, and CI `Nix Eval` must
@@ -104,9 +105,11 @@ caller-set rule is D1, and the harness is D6.
     is 2xx and the body contains `"service":"cache-proxy"`.
 - **The deadline.** The launcher's own shell reads that line with one
   `read -t 0.5`. That single deadline covers connect, request and answer.
-  Afterwards the launcher kills the substitution's process, named by `$!`, so
-  a probe stuck in connect never outlives the decision. The probe's stderr is
-  silenced.
+  - If the read times out, the launcher kills the substitution's process,
+    named by `$!`, so a probe stuck in connect never outlives the decision.
+  - After a verdict or EOF, the process is finishing on its own and is not
+    signalled, so a recycled PID is never hit.
+  - The probe's stderr is silenced.
 - **What stays as it is.**
   - The order of checks: the switch is checked first (438 D13), then the
     empty-URL return.
@@ -139,18 +142,21 @@ caller-set rule is D1, and the harness is D6.
     is unset, and any other caller URL is untouched.
   - The switch commit changes only this mapping, its tests and the
     default-on wording. Nothing in the routed path changes, so reverting the
-    commit is clean.
+    commit is clean. The commit comes after the reminder and probe commits.
+  - The flip applies on both hosts. Only mbp is measured, as Scope 2 says.
 - **Opt-in.** Reverting the switch commit restores #438's mapping and tests.
 - **Docs, default-on.** README § Cache proxy says that `claude` routes while
   the proxy is healthy, and that `CLAUDE_CACHE_PROXY=0 claude` opts one launch
   out, which also keeps that launch's Remote Control. The port comment in the
   claude-code Nix module says routing is on by default since #450.
 - **Docs, opt-in.** The README keeps #438's opt-in text. Its reason sentence
-  names #450's estimate and the CI's upper end in place of 1250a968's Δ. The
-  Nix comment reads "opt-in; #450 re-measured".
+  replaces 1250a968's Δ with #450's outcome: the estimate and the CI's upper
+  end, or "no valid measurement". The Nix comment reads "opt-in; #450
+  re-measured".
 - **Docs, either branch.** The README describes the reminder export (D1) and
   the fork-free probe (D2). The sentence "a dead proxy costs at most half a
-  second" stays true.
+  second" stays true. The README and the Nix comment are the only living docs
+  that state the default; `python/README.md` defers to the README.
 - **Selection.** AC3's verdict alone picks the branch (D8).
 
 ### Sequence and the measured head (AC3, AC4)
@@ -161,7 +167,9 @@ caller-set rule is D1, and the harness is D6.
 2. **Version gate.** Build the head and run the wire check (D7) to get
    `<V>`. If the AC1 comment names another version, correct the comment, a
    comment-only change, and rebuild. That head is M.
-3. At M: the probe benchmark (D5), then the timed run (D6–D8).
+3. At M: the probe benchmark (D5), then the timed run (D6–D8). The benchmark
+   gates the run: if AC2 is missed, the probe is fixed and M rebuilt before
+   any timed pair runs.
 4. **Branch.**
    - Within the bound: M's product code ships.
    - Outside the bound, or no valid run: revert the switch commit and apply
@@ -216,7 +224,8 @@ both count. Evidence and doc commits do not.
   - The environment is a scrubbed allowlist plus `CLAUDE_ACCOUNT=p1` and the
     harness's timing instrument, set the same way in both arms.
   - The arms are `CLAUDE_CACHE_PROXY` unset (routed) and `0` (direct).
-    Nothing else differs: the launcher decides every other routing variable.
+    Nothing else differs: the launcher decides every other routing variable,
+    and the generated settings' `env` sets none.
 - **The harness** is a scratch derivative of the investigation's `harness.py`.
   For each run it records:
   - the client's `ttft_ms` and `time_to_request_ms`, and the harness-side wall
@@ -236,13 +245,17 @@ both count. Evidence and doc commits do not.
   seed fixed in the harness and recorded.
 - **Within the bound** when the CI's upper end is ≤ +100 ms. That selects
   default-on; anything else selects opt-in.
-- **Thinking-first:** the run's first `content_block_start` event is a
-  thinking block.
-- **Diagnostics are recorded and never decide.** They are: per-arm medians and
-  quartiles of `ttft_ms`; the mean of `d`; the thinking-first count and rate
-  per arm; the thinking delay per arm (median `ttft_ms` of thinking-first runs
-  minus text-first runs); the paired median of harness wall TTFT; and proxy
-  `ttfb_ms`.
+- **The first block** is a closed set. A run's first `content_block_start` is
+  `thinking` or `redacted_thinking` (thinking-first) or `text` (text-first).
+  Any other type makes the pair invalid.
+- **Diagnostics are recorded and never decide.** They are:
+  - per-arm medians and quartiles of `ttft_ms`, and the mean of `d`;
+  - the thinking-first count and rate per arm, and the thinking delay per arm
+    (median `ttft_ms` of thinking-first runs minus text-first runs);
+  - the paired median of harness wall TTFT, and the paired median of startup
+    (wall TTFT minus `ttft_ms`) with its own bootstrap CI, so that a routed
+    startup cost the rule does not count still shows;
+  - proxy `ttfb_ms`.
 
 **Validity and stops.**
 
@@ -256,7 +269,8 @@ both count. Evidence and doc commits do not.
 - **Usage limit.** A run that fails on a usage limit stops the harness at
   once. The executor suspends with `blocked_on=usage_limit` and never switches
   accounts. On resume at the same M and pin, the run continues in the same file
-  and the gap is recorded. Otherwise it restarts at the new head.
+  after one new discarded warm-up pair, and the gap is recorded. Otherwise it
+  restarts at the new head.
 - **No optional stopping.** The run is never extended or repeated to move the
   CI.
 
@@ -358,11 +372,11 @@ both count. Evidence and doc commits do not.
 | ID | Choice | Grounding | Rejected alternative |
 |----|--------|-----------|----------------------|
 | D1 | Routed launches export `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=padded-countdown` unless caller-set (the `${VAR+set}` rule), unrouted launches export nothing, the comment carries anthropics/claude-code#98464 and `verified on Claude Code <V>` from the wire check; inherited values on later direct or `claude-local` launches are accepted | Phase-0 disposition (same rule as `ENABLE_TOOL_SEARCH`); 438 D6 routed-only levers; 438 AC5; binary 2.1.310: first-party default is `padded-countdown` for capable models | Wrapper-owned unset on every unrouted launch (438 D6's E1 style): erases a user's deliberate value, and an inherited `padded-countdown` equals the first-party default for capable models |
-| D2 | The probe is a bash `/dev/tcp` HTTP/1.0 GET in a process substitution: 2xx plus the marker substring, host and port from the built `http://host:port` URL, one `read -t 0.5` over connect, request and answer, the substitution killed afterwards; bash ≥ 4.4 required | Issue Scope 1 (about 25 ms saved); grounding timings (curl 22.6 ms, jq 5.0 ms, sketch 2.55 ms, hung listener 509 ms); README's 0.5 s bound | Drop only jq (saves about 5 of the 25 ms); `/dev/tcp` without the shell-side deadline (a connect to a full backlog blocks well past 0.5 s, breaking the bound) |
-| D3 | Default-on keeps the closed set and refusal: unset, empty or `1` probe and route, `0` is today's unprobed opt-out; the switch commit touches only that mapping, its tests and the wording | Issue Scope 3 (`CLAUDE_CACHE_PROXY=0` as the opt-out); 438 D8, D13 | Empty meaning opt-out under default-on: empty means unset everywhere else in this switch |
-| D4 | The default-on candidate is committed before measuring, M is the reviewed candidate head, a pass ships M's product code, and a miss or no valid run reverts only the switch commit (the one product change allowed after M); #438's measured-surface rule otherwise | Caller constraint (measure the final wrapper code); 438 § Decision rule (implement, confirm at the final head, revert on a miss) | Measure the opt-in code and then flip: ships an unmeasured default path, or needs a second 100-pair run |
+| D2 | The probe is a bash `/dev/tcp` HTTP/1.0 GET in a process substitution: 2xx plus the marker substring, host and port from the built `http://host:port` URL, one `read -t 0.5` over connect, request and answer, the substitution killed only on a timeout (never after a verdict or EOF, so a recycled PID is never hit); bash ≥ 4.4 required | Issue Scope 1 (about 25 ms saved); grounding timings (curl 22.6 ms, jq 5.0 ms, sketch 2.55 ms, hung listener 509 ms); README's 0.5 s bound | Drop only jq (saves about 5 of the 25 ms); `/dev/tcp` without the shell-side deadline (a connect to a full backlog blocks well past 0.5 s, breaking the bound) |
+| D3 | Default-on keeps the closed set and refusal: unset, empty or `1` probe and route, `0` is today's unprobed opt-out; the switch commit touches only that mapping, its tests and the wording, after the reminder and probe commits; the flip applies on both hosts, with only mbp measured | Issue Scope 3 (`CLAUDE_CACHE_PROXY=0` as the opt-out) and Scope 2 (mbp); 438 D8, D13 | Empty meaning opt-out under default-on: empty means unset everywhere else in this switch. A per-host default: configuration the issue did not ask for |
+| D4 | The default-on candidate is committed before measuring, M is the reviewed candidate head, a pass ships M's product code, and a miss or no valid run reverts only the switch commit (the one product change allowed after M); the AC2 benchmark gates the timed run; #438's measured-surface rule otherwise | Caller constraint (measure the final wrapper code); 438 § Decision rule (implement, confirm at the final head, revert on a miss) | Measure the opt-in code and then flip: ships an unmeasured default path, or needs a second 100-pair run |
 | D5 | AC2 is 200 alternating pairs per version of `claude-account run` with an `env` stand-in and a scratch config dir, routed `1` against direct `0`, before (base `51e2b7c9` text under M's substitutions) against after (M); the metric is the paired median increment, met when after < before; after's median is `p` | AC2; 438 D2 wrapper-copy rig | Timing the probe function alone: misses the subshell and exports a real launch pays |
 | D6 | Timed rig: M's built proxy on 27450 with the service's arguments, M's built mod copy, account `p1`, `--model haiku`, the #422/#438 prompt, arms differing only in `CLAUDE_CACHE_PROXY` unset or `0`, one warm-up pair then 100 counted pairs, order flipping each pair; the service PID is checked unchanged | Issue Scope 2; caller hard constraints; 438 D2, D3; continuity with e1–e4 | The investigation's harness as is: it calls the binary directly, bypassing the wrapper code under test |
 | D7 | A one-session wire check through a scratch proxy copy that records only whether the body has `<total_tokens>` runs before the timed run and sets `<V>`; an absent line stops the work and returns it to the owner | AC1 intent; the investigation's on-wire finding; the bar (verify before claiming done) | Inferring the line from the thinking-first rate alone: a behavioural signal, not proof that the line is on the wire |
-| D8 | Rule: `d = (ttft_ms routed + p) − ttft_ms direct`; the median with a 10,000-resample percentile bootstrap at a fixed seed; within the bound when the upper end is ≤ +100 ms; diagnostics never decide; invalid pairs replaced up to 10, one rerun of an invalid run, then opt-in; a usage limit suspends with `blocked_on=usage_limit` and resumes at the same M; never extended | AC3; the investigation's noise analysis; 438 D4 (diagnostics never decide; one rerun); the bar (truthful terminal states) | Harness wall TTFT as the metric: adds about 1.1 s of startup noise and is not the client's `ttft_ms` the issue names. Extending pairs until the CI clears: optional stopping biases the bound |
+| D8 | Rule: `d = (ttft_ms routed + p) − ttft_ms direct`; the median with a 10,000-resample percentile bootstrap at a fixed seed; within the bound when the upper end is ≤ +100 ms; diagnostics never decide, startup's paired CI included; the first block is a closed set (`thinking` or `redacted_thinking`, or `text`; anything else invalidates the pair); invalid pairs replaced up to 10, one rerun of an invalid run, then opt-in; a usage limit suspends with `blocked_on=usage_limit` and resumes at the same M after a new warm-up pair; never extended | AC3; the investigation's noise analysis; 438 D4 (diagnostics never decide; one rerun); the bar (truthful terminal states) | Harness wall TTFT as the metric: adds about 1.1 s of startup noise and is not the client's `ttft_ms` the issue names. Extending pairs until the CI clears: optional stopping biases the bound |
 | D9 | Evidence is appended as `## Issue 450` to #438's report, with #438's text and markers verbatim plus one pointer line, a new whole-line marker `Issue 450 routing default: <on\|opt-in>`, and per-run rows in a sibling file | Issue Scope 4; the bar (point-in-time records keep their text); #422's re-measurement in place; 438 D9 | Rewriting #438's `Routing default:` marker: invalidates #438's acceptance record, which cites it |
