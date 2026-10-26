@@ -169,6 +169,7 @@ agent-workflow-tests *args:
     tests/test_agent_costs.py \
     tests/test_agent_owner_report.py \
     tests/test_agent_owner_replay.py \
+    tests/test_agent_boot_report.py \
     tests/test_agent_model_drift_schema.py \
     tests/test_agent_model_drift_routing.py \
     tests/test_agent_model_drift_scheduling.py \

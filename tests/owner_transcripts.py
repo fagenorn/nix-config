@@ -67,7 +67,7 @@ class Session:
         self.meta[agent_id] = meta
 
     def call(self, agent, seconds, *, context, write, fresh=2, out=40, ttl="5m",
-             model="claude-opus-5-5", bash=None, agent_tool=False, read_file=None, end=None):
+             model="claude-opus-5-5", bash=None, agent_tool=False, read_file=None, end=None, tool=None):
         """One API call; returns the id of its tool use, if it made one."""
         write = min(write, context - fresh)
         usage = {"input_tokens": fresh, "cache_read_input_tokens": context - write - fresh,
@@ -76,9 +76,10 @@ class Session:
                                     "ephemeral_1h_input_tokens": write if ttl == "1h" else 0},
                  "service_tier": "standard"}
         blocks, tool_id = [{"type": "text", "text": "Working."}], None
-        if bash is not None or agent_tool or read_file is not None:
+        if tool is not None or bash is not None or agent_tool or read_file is not None:
             tool_id = self._id("toolu_")
-            name, tool_input = (("Bash", {"command": bash}) if bash is not None else
+            name, tool_input = (tool if tool is not None else
+                                ("Bash", {"command": bash}) if bash is not None else
                                 ("Agent", {"subagent_type": "general-purpose", "prompt": "x"})
                                 if agent_tool else ("Read", {"file_path": read_file}))
             blocks.append({"type": "tool_use", "id": tool_id, "name": name, "input": tool_input})
@@ -96,6 +97,33 @@ class Session:
             "type": "user", "isSidechain": agent is not None, "timestamp": at(seconds),
             "message": {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": tool_id, "content": text}]}}))
+
+    def shape(self, agent, *, system, tools):
+        """An `api-request-shape` record: the system blocks' texts and the tool definitions."""
+        self.lines[agent].append(_line({
+            "type": "api-request-shape", "agentId": agent, "shapeHash": self._id("shape-"),
+            "shape": {"system": [{"type": "text", "text": text} for text in system],
+                      "tools": list(tools)}}))
+
+    def blob(self, agent, role, blocks):
+        """An `api-request-blob` record holding one message; returns its hash."""
+        digest = self._id("blob-")
+        self.lines[agent].append(_line({
+            "type": "api-request-blob", "agentId": agent, "hash": digest,
+            "message": {"role": role, "content": list(blocks)}}))
+        return digest
+
+    def request(self, agent, tail):
+        """An `api-request` record whose tail names blob hashes."""
+        self.lines[agent].append(_line({
+            "type": "api-request", "agentId": agent, "id": self._id("req-"), "tail": list(tail)}))
+
+    def skill_body(self, agent, seconds, tool_id, text):
+        """The meta user message that carries the body a Skill call loaded."""
+        self.lines[agent].append(_line({
+            "type": "user", "isSidechain": agent is not None, "isMeta": True,
+            "sourceToolUseID": tool_id, "timestamp": at(seconds),
+            "message": {"role": "user", "content": [{"type": "text", "text": text}]}}))
 
     def measured(self, agent, tool_id, tokens):
         self.lines[agent].append(_line({
