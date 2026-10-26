@@ -221,7 +221,7 @@ both count. Evidence and doc commits do not.
   `claude-account run -p --model haiku --output-format stream-json --verbose --include-partial-messages "Reply with exactly: ok"`.
   - It comes from a copy of M's built mod with the proxy URL set to
     `http://127.0.0.1:27450`.
-  - The environment is a scrubbed allowlist plus `CLAUDE_ACCOUNT=p1` and the
+  - The environment is a scrubbed allowlist plus `CLAUDE_ACCOUNT=p2` (D17) and the
     harness's timing instrument, set the same way in both arms.
   - The arms are `CLAUDE_CACHE_PROXY` unset (routed) and `0` (direct).
     Nothing else differs: the launcher decides every other routing variable,
@@ -300,7 +300,7 @@ both count. Evidence and doc commits do not.
     ±245–300 ms. The rule above replaces it, and #438's numbers stand as
     recorded;
   - the conditions: date, host, M, the built store paths, `<V>`, account
-    `p1`, the ports, the seed and any suspension;
+    `p2` (D17), the ports, the seed and any suspension;
   - the AC2 table;
   - the wire-check result;
   - the AC3 summary with its diagnostics;
@@ -387,3 +387,4 @@ both count. Evidence and doc commits do not.
 | D14 | Whole-line markers in § Issue 450, each exactly once: `Issue 450 measured head: <40-hex>`, `Issue 450 probe term: <p> ms`, `Issue 450 timed run: <summary or no valid measurement>` and D9's `Issue 450 routing default: <on\|opt-in>`; § Root cause and § Method are committed with the benchmark, before any timed pair runs | 438 D9 marker precedent (`grep -Ex`); D8 (rule fixed before any number exists) | Reading scratch JSON across tasks: per-worker scratch may be reaped or differ |
 | D15 | A change after M whose every changed line in the measured surface is a `#` comment or blank is a doc change and needs no re-measurement (the opt-in Nix comment, a review wording fix); a re-measurement after an `opt-in` verdict that lands within the bound is BLOCKED to the owner rather than re-flipped in the plan | D4 (doc commits do not count); spec § Routing default (the opt-in Nix comment changes after M) | Every byte as product: a comment fix would force a new live run. Re-applying the switch after the opt-in docs: conflicts with them and ships an unreviewed flip |
 | D16 | Timed-harness custody and resume (Phase-5 review): clients keep `AGENT_LAUNCH_SCOPE`, SIGTERM unwinds the harness so the client group is killed, a timer enforces the per-launch deadline (`timeout` is an invalid pair); the handoff keeps `runs.invalid-1.jsonl` as the durable mark that D8's one rerun is used; resume keeps the header's routed switch and also resumes a suspended re-measurement; an opt-in re-measurement opts its wire-check launch in. Refines D8, D13 | Codex plan review R450-01..05; `python/agent_tools/launch_scope.py` residual note (a process that leaves the session and scrubs `AGENT_LAUNCH_SCOPE` escapes the reap) | Leave the stop paths as planned: a reaped harness could orphan a client, a stalled client could spend the whole run budget, and a usage-limited rerun or re-measurement could not resume at the same M |
+| D17 | Measurement account: every measurement launch of Tasks 4 and 5 uses `CLAUDE_ACCOUNT=p2` by name, replacing D6's `p1`; credentials are never read, the account never changes mid-run, a usage limit still suspends with `blocked_on=usage_limit`, and the measurement stays to what the plan requires because p2 also serves the owning session and its agents. Reverses D6's account choice only | User decision, this session (2026-10-26): p1 is on its weekly limit until Oct 31 18:00 Europe/Lisbon and t1 until Oct 30, each verified with a one-shot `claude -p`; the user chose "Use p2 now" | Wait for p1's reset: stalls the issue five days. t1: also limited |

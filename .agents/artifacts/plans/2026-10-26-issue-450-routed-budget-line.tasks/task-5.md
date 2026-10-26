@@ -135,7 +135,7 @@ from urllib.parse import urlsplit
 PAIRS = 100
 MAX_INVALID = 10
 WARMUP_ATTEMPTS = 3
-ACCOUNT = "p1"
+ACCOUNT = "p2"  # D17
 PROMPT = "Reply with exactly: ok"
 CLAUDE_ARGS = ["-p", "--model", "haiku", "--output-format", "stream-json", "--verbose",
                "--include-partial-messages", PROMPT]
@@ -595,7 +595,7 @@ Issue 450 routing default: «fill: on if the timed-run line says within, else op
    - The verdict sentence is, within: `The CI's upper end, «hi» ms, is within the +100 ms bound, so routing is on by default and CLAUDE_CACHE_PROXY=0 opts a launch out (AC4).` Outside: `The CI's upper end, «hi» ms, is over the +100 ms bound, so routing stays opt-in with CLAUDE_CACHE_PROXY=1 (AC4).`
    - No-valid branch: § Timed run (AC3) holds only the Command bullet, a bullet `Two runs at M were invalid: «fill: each run's stop and pair reasons».`, the service bullet, the rows link and the line `Issue 450 timed run: no valid measurement`. The default is `opt-in`, with the sentence `Two runs at M were invalid, so there is no valid measurement and routing stays opt-in (D8, AC4).`
 3. Insert the pointer paragraph as the report's line 3, followed by a blank line: `§ Issue 450 below is the current basis for the routing default; the sections before it are #438's point-in-time record.`
-4. Fill row `AC3`. Observed: `«pairs» valid pairs («invalid» replaced); estimate «e» ms, 95% CI [«lo», «hi»] ms, «within or outside» the bound; thinking-first routed «k»/100, direct «k»/100`, or `no valid measurement: two invalid runs (report § Timed run (AC3))`. Commit: M, short. Conditions: `host mbp; Claude Code «V»; account p1; M's proxy on 27450; seed 450`.
+4. Fill row `AC3`. Observed: `«pairs» valid pairs («invalid» replaced); estimate «e» ms, 95% CI [«lo», «hi»] ms, «within or outside» the bound; thinking-first routed «k»/100, direct «k»/100`, or `no valid measurement: two invalid runs (report § Timed run (AC3))`. Commit: M, short. Conditions: `host mbp; Claude Code «V»; account p2; M's proxy on 27450; seed 450`.
 
 Run (timeout 60 s):
 

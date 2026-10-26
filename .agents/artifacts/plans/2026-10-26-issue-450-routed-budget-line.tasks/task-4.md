@@ -309,7 +309,7 @@ Start the runner with the Bash tool's `run_in_background: true`: `launch-scope e
 Run one routed session (timeout 300 s):
 
 ```bash
-cd <S>/i450/cwd && launch-scope exec … -- env -i HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" PATH="$PATH" TMPDIR="$TMPDIR" SHELL="$SHELL" TERM="${TERM:-dumb}" ${LANG:+LANG="$LANG"} ${LC_ALL:+LC_ALL="$LC_ALL"} CLAUDE_ACCOUNT=p1 CLAUDE_CODE_EMIT_STARTUP_TIMING=1 <S>/i450/mod-27451/bin/claude-account run -p --model haiku --output-format stream-json --verbose --include-partial-messages "Reply with exactly: ok" > <S>/i450/runs/wire-session.jsonl
+cd <S>/i450/cwd && launch-scope exec … -- env -i HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" PATH="$PATH" TMPDIR="$TMPDIR" SHELL="$SHELL" TERM="${TERM:-dumb}" ${LANG:+LANG="$LANG"} ${LC_ALL:+LC_ALL="$LC_ALL"} CLAUDE_ACCOUNT=p2 CLAUDE_CODE_EMIT_STARTUP_TIMING=1 <S>/i450/mod-27451/bin/claude-account run -p --model haiku --output-format stream-json --verbose --include-partial-messages "Reply with exactly: ok" > <S>/i450/runs/wire-session.jsonl
 ```
 
 Stop the runner: `kill "$(cat <S>/i450/wire-27451.pid)"`, then one `sleep 2`, then `if lsof -nP -iTCP:27451 -sTCP:LISTEN; then exit 1; fi`. Read the outcome (timeout 30 s):
@@ -370,7 +370,7 @@ The 2026-10-26 investigation on Claude Code 2.1.310 (mbp, account `p1`; its full
 
 ### Measurement conditions
 
-- Date «fill: date -u +%F», host `mbp`, account `p1` (by name only), Claude Code «fill: V» (`«fill: CLAUDE_BIN_PATH»`).
+- Date «fill: date -u +%F», host `mbp`, account `p2` (by name only; p1 was on its weekly usage limit, so the user chose p2, D17), Claude Code «fill: V» (`«fill: CLAUDE_BIN_PATH»`).
 - Built from M: wrapper module `«fill: MOD»`, agent plist `«fill: PLIST»`, launcher `«fill: LAUNCHER»`, interpreter `«fill: INTERP»`, CA bundle `«fill: CA»`.
 - Experiment proxy on 27450: the launcher with `--port 27450 --keepalive` and `SSL_CERT_FILE` as the service sets it. Wire-check runner on 27451. The installed service on 27183 was only listed: its listener's PID was «fill: service-pid.before, or none» before the benchmark and «fill: service-pid.after, or none» after it.
 - Bootstrap seed 450, 10,000 resamples.
@@ -417,7 +417,7 @@ PY
 ```
 
 Fill rows `AC1` and `AC2` (Observed, Commit, Conditions); the controller writes `Verdict`:
-- AC1: Observed `in final verification; wire check: «k» of «n» routed /v1/messages requests carried the total_tokens line on Claude Code «V»`. Commit: M, short. Conditions: `host mbp; account p1; wire-check runner on 27451`.
+- AC1: Observed `in final verification; wire check: «k» of «n» routed /v1/messages requests carried the total_tokens line on Claude Code «V»`. Commit: M, short. Conditions: `host mbp; account p2; wire-check runner on 27451`.
 - AC2: Observed `median increment before «b» ms, after «a» ms (IQR «before iqr», «after iqr» ms); valid; after < before`. Commit: M, short. Conditions: `host mbp; Claude Code «V»; M's proxy on 27450; 200 interleaved pairs per version; early exec with env for claude`.
 
 Run (timeout 60 s):
@@ -442,6 +442,6 @@ Expected: `part-1-recorded`. At the starting commit `verbatim450.py` exits with 
 Run this entry when § Issue 450 exists and the Global Constraints' measured-surface check against its M prints a change, or the pin moved (a review fix, a ship sync). If nothing changed, report DONE `no re-measurement due`.
 
 1. Rename any `$(git rev-parse --git-dir)/issue-450-suspended` to `issue-450-superseded-<short M>`.
-2. Run Steps 1–8 at the new head. Step 3 may correct the comment again; the new M is the head after it. Step 0's "measured already" refusal does not apply. If `grep -qxF '    "" | 1) ;;' home/common/claude-code/accounts/bin/claude-account` fails, Task 6 has reverted the switch and routing is opt-in: add `CLAUDE_CACHE_PROXY=1` after `CLAUDE_ACCOUNT=p1` in Step 5's routed session, and say so in the re-measurement record (R450-03).
+2. Run Steps 1–8 at the new head. Step 3 may correct the comment again; the new M is the head after it. Step 0's "measured already" refusal does not apply. If `grep -qxF '    "" | 1) ;;' home/common/claude-code/accounts/bin/claude-account` fails, Task 6 has reverted the switch and routing is opt-in: add `CLAUDE_CACHE_PROXY=1` after `CLAUDE_ACCOUNT=p2` in Step 5's routed session, and say so in the re-measurement record (R450-03).
 3. Append at the end of the report `### Re-measurement at <short new M>`, holding in prose Step 9's conditions bullets, the wire-check result, the AC2 table and the sentence `This re-measurement binds; the measurement above it is superseded (D4). Its timed run follows below.` Replace in place the whole lines `Issue 450 measured head:` and `Issue 450 probe term:`, so each still occurs once. Rewrite the wire-check part of row AC1, and row AC2.
 4. Run Step 9's gate, giving `verbatim450.py` `--pointer` when the report already has the pointer paragraph. Commit with `launch-commit … -- -m "docs(issue-450): re-measurement at <short new M>, benchmark"`. Task 5's § Re-measurement then runs the timed run.
