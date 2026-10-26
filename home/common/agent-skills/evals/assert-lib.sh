@@ -347,3 +347,35 @@ code_map_valid() {
   done
   return "$bad"
 }
+
+# owner_report — print the path of $WORK/owners.json, the trial's owner report, building it
+# once: the transcripts of every ~/.claude/projects/<mangled $WORK>* directory (the repo and
+# its worktrees) are copied to $WORK/projects, and the tree's `agent-costs --report owners`
+# reads that copy. Tree mode only, since the tree's report is the code under measurement.
+owner_report() {
+  local mangled projects dir copied=0
+  [ -n "${EVAL_TREE:-}" ] || fail "eval 8 needs EVAL_TREE (tree mode)" || return 1
+  [ -s "$WORK/owners.json" ] && { echo "$WORK/owners.json"; return 0; }
+  mangled=$(printf '%s' "$WORK" | sed 's/[^[:alnum:]]/-/g')
+  projects="$HOME/.claude/projects"
+  mkdir -p "$WORK/projects" || fail "cannot create $WORK/projects" || return 1
+  for dir in "$projects/$mangled"*; do
+    [ -d "$dir" ] || continue
+    cp -R "$dir" "$WORK/projects/" || fail "cannot copy $dir" || return 1
+    copied=$((copied + 1))
+  done
+  [ "$copied" -gt 0 ] || fail "no transcripts under $projects for $WORK" || return 1
+  PYTHONPATH="$EVAL_TREE/python" python3 -P -m agent_tools.agent_costs --report owners --format json \
+    --days 0 --projects-dir "$WORK/projects" >"$WORK/owners.json.tmp" 2>"$WORK/owners.err" ||
+    { sed 's/^/agent-costs: /' "$WORK/owners.err"; fail "agent-costs --report owners failed"; return 1; }
+  mv "$WORK/owners.json.tmp" "$WORK/owners.json" && echo "$WORK/owners.json"
+}
+
+# owner_lineage_has <report-or-reason> <jq-test> — the jq test is true over the array of
+# issue 4's lineages (`[.lineages[] | select(.issue == 4)]`, so `any(...)`, `all(...)` and
+# `length` apply). The first argument is what `$(owner_report)` printed: the report's path,
+# or, when it failed, its reason, which is passed on.
+owner_lineage_has() {
+  [ -f "$1" ] || { printf '%s\n' "$1"; return 1; }
+  jq -e "[.lineages[] | select(.issue == 4)] | $2" "$1" >/dev/null
+}

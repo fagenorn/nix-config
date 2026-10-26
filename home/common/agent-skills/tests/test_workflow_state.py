@@ -8094,27 +8094,23 @@ class PhaseBudgetDefaultsTest(LifecycleHarness, unittest.TestCase):
     BUDGET_FLAGS = ("--turn-ceiling", "--turn-headroom", "--context-ceiling",
                     "--context-headroom")
 
-    def test_default_ceiling_hands_off_at_110000_and_continues_at_109999(self):
+    def test_default_ceiling_hands_off_at_200000_and_continues_at_199999(self):
         self.init_run()
         self.spawn(issue=14, worktree=self.root / "wt-a")
         defaults = dict(turn_ceiling=None, context_ceiling=None, turn_headroom=None,
                         context_headroom=None)
         below = self.progress(issue=14, attempt=1, phase=1, now="2026-08-13T20:05:00Z",
-                              turn_count=10, context_tokens=109999, **defaults)
+                              turn_count=10, context_tokens=199999, **defaults)
         self.assertEqual(below["action"], "continue")
         at = self.progress(issue=14, attempt=1, phase=2, now="2026-08-13T20:10:00Z",
-                           turn_count=10, context_tokens=110000, **defaults)
+                           turn_count=10, context_tokens=200000, **defaults)
         self.assertEqual(at["action"], "handoff")
 
-    def test_the_four_defaults_have_one_home(self):
-        from agent_tools import phase_budget
-        self.assertEqual((phase_budget.TURN_CEILING, phase_budget.TURN_HEADROOM,
-                          phase_budget.CONTEXT_CEILING, phase_budget.CONTEXT_HEADROOM),
-                         (120, 2, 120000, 10000))
+    def test_the_four_flags_default_to_none_and_resolve_in_the_policy_home(self):
         workflow = load_source_module(SCRIPT, "workflow_state_phase_budget_defaults")
         args = workflow.build_parser().parse_args(self.MINIMAL)
         self.assertEqual((args.turn_ceiling, args.turn_headroom, args.context_ceiling,
-                          args.context_headroom), (120, 2, 120000, 10000))
+                          args.context_headroom), (None, None, None, None))
         defaults = {}
         for node in ast.walk(ast.parse(SCRIPT.read_text(encoding="utf-8"))):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
@@ -8124,11 +8120,26 @@ class PhaseBudgetDefaultsTest(LifecycleHarness, unittest.TestCase):
                 defaults[node.args[0].value] = [
                     ast.unparse(keyword.value) for keyword in node.keywords
                     if keyword.arg == "default"]
-        self.assertEqual(defaults, {
-            "--turn-ceiling": ["phase_budget.TURN_CEILING"],
-            "--turn-headroom": ["phase_budget.TURN_HEADROOM"],
-            "--context-ceiling": ["phase_budget.CONTEXT_CEILING"],
-            "--context-headroom": ["phase_budget.CONTEXT_HEADROOM"]})
+        self.assertEqual(defaults, {flag: ["None"] for flag in self.BUDGET_FLAGS})
+
+    def test_the_override_sets_the_threshold_of_the_phase_being_entered(self):
+        # The in-process CLI shares one interpreter, so the per-process cache is cleared around it.
+        from agent_tools import phase_budget
+        phase_budget.current.cache_clear()
+        self.addCleanup(phase_budget.current.cache_clear)
+        self.cli_env["AGENT_PHASE_BUDGET"] = "threshold=110000,threshold:2-2=140000"
+        self.init_run()
+        self.spawn(issue=14, worktree=self.root / "wt-a")
+        defaults = dict(turn_ceiling=None, context_ceiling=None, turn_headroom=None,
+                        context_headroom=None)
+        into_two = self.progress(issue=14, attempt=1, phase=1, now="2026-08-13T20:05:00Z",
+                                 turn_count=10, context_tokens=120000, **defaults)
+        self.assertEqual(into_two["action"], "continue")
+        recorded = self.read_state()["issues"]["14"]["attempts"][0]["phase_inputs"]
+        self.assertEqual(recorded["context_ceiling"], 150000)
+        into_three = self.progress(issue=14, attempt=1, phase=2, now="2026-08-13T20:10:00Z",
+                                   turn_count=10, context_tokens=120000, **defaults)
+        self.assertEqual(into_three["action"], "handoff")
 
     def test_progress_reads_each_spelling_the_meter_removes_as_context_tokens(self):
         """The context meter drops every prefix of --context-tokens from --context-t on (D15)."""
@@ -8140,6 +8151,71 @@ class PhaseBudgetDefaultsTest(LifecycleHarness, unittest.TestCase):
                 self.assertEqual(parser.parse_args([*self.MINIMAL, f"{spelling}=7"]).context_tokens, 7)
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             parser.parse_args([*self.MINIMAL, "--context-", "5"])
+
+
+class ActionIdIdentityTest(LifecycleHarness, unittest.TestCase):
+    """Issue 432: `progress` and `suspend` derive --issue and --attempt from --action-id."""
+
+    def gate_arguments(self, *identity, phase=1, now="2026-08-13T20:05:00Z"):
+        return ["progress", "--repo-root", self.root, "--run-id", self.run_id, *identity,
+                "--phase", phase, "--now", now, "--next-needs-context", "true",
+                "--artifacts-sufficient", "false", "--remainder-self-contained", "false"]
+
+    def suspend_arguments(self, *identity):
+        return ["suspend", "--repo-root", self.root, "--run-id", self.run_id, *identity,
+                "--blocked-on", "usage_limit", "--now", "2026-08-13T20:05:00Z"]
+
+    def started(self):
+        self.init_run()
+        self.spawn(issue=14, worktree=self.root / "wt-a")
+
+    def test_progress_with_only_an_action_id_records_on_its_issue_and_attempt(self):
+        self.started()
+        completed = self.run_cli(*self.gate_arguments("--action-id", "14:1:1", phase=2))
+        reply = json.loads(completed.stdout)
+        self.assertEqual((reply["issue"], reply["custody"]["action_id"], reply["action"]),
+                         (14, "14:1:1", "continue"))
+        attempt = self.read_state()["issues"]["14"]["attempts"][0]
+        self.assertEqual((attempt["phase"], attempt["state"]), (2, "active"))
+
+    def test_a_flag_that_agrees_with_the_action_id_is_accepted(self):
+        self.started()
+        completed = self.run_cli(*self.gate_arguments(
+            "--issue", "14", "--attempt", "1", "--action-id", "14:1:1"))
+        self.assertEqual(json.loads(completed.stdout)["issue"], 14)
+
+    def test_a_flag_that_disagrees_with_the_action_id_is_refused_and_writes_nothing(self):
+        self.started()
+        before = self.state_path.read_bytes()
+        for identity in (("--issue", "15"), ("--attempt", "2"),
+                         ("--issue", "15", "--attempt", "1")):
+            with self.subTest(identity=identity):
+                for arguments in (self.gate_arguments("--action-id", "14:1:1", *identity),
+                                  self.suspend_arguments("--action-id", "14:1:1", *identity)):
+                    refused = self.run_cli(*arguments, ok=False)
+                    self.assertEqual(refused.returncode, 2)
+                    self.assertIn("--issue/--attempt disagree with --action-id", refused.stderr)
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_a_call_with_neither_an_action_id_nor_both_flags_is_refused(self):
+        self.started()
+        for command, arguments in (
+                ("progress", self.gate_arguments("--issue", "14")),
+                ("progress", self.gate_arguments()),
+                ("suspend", self.suspend_arguments("--attempt", "1")),
+                ("suspend", self.suspend_arguments())):
+            with self.subTest(command=command, arguments=arguments[3:]):
+                refused = self.run_cli(*arguments, ok=False)
+                self.assertEqual(refused.returncode, 2)
+                self.assertIn(f"{command} needs --action-id or --issue and --attempt",
+                              refused.stderr)
+
+    def test_suspend_with_only_an_action_id_suspends_its_issue_and_attempt(self):
+        self.started()
+        reply = json.loads(self.run_cli(*self.suspend_arguments("--action-id", "14:1:1")).stdout)
+        self.assertEqual((reply["kind"], reply["issue"], reply["blocked_on"]),
+                         ("suspended", 14, "usage_limit"))
+        self.assertEqual(self.read_state()["issues"]["14"]["attempts"][0]["state"], "suspended")
 
 
 class PhaseGateReplyTest(LifecycleHarness, unittest.TestCase):

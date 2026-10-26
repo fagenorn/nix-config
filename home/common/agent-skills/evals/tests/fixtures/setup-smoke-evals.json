@@ -36,6 +36,19 @@
         { "name": "an assert reads no input on stdin", "shell": "[ -z \"$(cat)\" ] || fail \"stdin carried input: the assert stream leaked into an assert\"" },
         { "name": "clean main checkout and no worktree", "shell": "[ -z \"$PRE_WT\" ] && [ \"$WT_COUNT\" -eq 0 ] && [ -z \"$(git -C \"$REPO\" status --porcelain)\" ] && [ \"$(git -C \"$REPO\" rev-parse --abbrev-ref HEAD)\" = main ] && [ -z \"$(git -C \"$REPO\" branch --list 'feat/*')\" ]" }
       ]
+    },
+    {
+      "id": 4, "name": "tracked-issue-shape", "mode": "pipeline",
+      "setup": { "kind": "tracked-issue" },
+      "prompt": "setup smoke", "expected_output": "setup state only",
+      "asserts": [
+        {"name": "shim serves the open issue", "shell": "\"$WORK/bin/gh\" issue view 4 --json title,state | grep -q '\"state\":\"OPEN\"'"},
+        {"name": "shim lists no pull requests", "shell": "[ \"$(\"$WORK/bin/gh\" pr list)\" = '[]' ]"},
+        {"name": "shim refuses pr create by name", "shell": "err=$(\"$WORK/bin/gh\" pr create 2>&1); code=$?; [ \"$code\" -eq 1 ] && grep -q 'pr create' <<<\"$err\""},
+        {"name": "every shim call is logged", "shell": "jq -c . \"$WORK/gh-calls.jsonl\" | tail -n 3 | tr '\\n' ' ' | grep -qF '{\"argv\":[\"issue\",\"view\",\"4\",\"--json\",\"title,state\"],\"exit\":0} {\"argv\":[\"pr\",\"list\"],\"exit\":0} {\"argv\":[\"pr\",\"create\"],\"exit\":1}'"},
+        {"name": "the resolver reports the github tracker", "shell": "resolve-project resolve --repo-root \"$REPO\" | jq -e '.bindings.tracker.kind == \"github\" and .capabilities.tracker.state == \"available\"' >/dev/null"},
+        {"name": "the tracker commit reached origin", "shell": "[ \"$(git -C \"$ORIGIN\" rev-parse main)\" = \"$(git -C \"$REPO\" rev-parse main)\" ] && [ \"$(git -C \"$REPO\" log -1 --format=%s)\" = \"chore: track issues on github\" ] && [ -z \"$(git -C \"$REPO\" status --porcelain)\" ]"}
+      ]
     }
   ]
 }

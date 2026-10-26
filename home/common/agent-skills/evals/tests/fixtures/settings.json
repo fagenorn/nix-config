@@ -1,6 +1,8 @@
 {
   "env": { "EVAL_FIXTURE": "1" },
-  "hooks": { "PreToolUse": [] },
+  "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [
+    { "type": "command", "command": "/nix/store/0000-claude-bash-lifecycle-guard/bin/claude-bash-lifecycle-guard", "timeout": 30 },
+    { "type": "command", "command": "/nix/store/0000-agent-tools-context-meter", "timeout": 10 } ] } ] },
   "permissions": { "allow": [], "defaultMode": "auto" },
   "enabledPlugins": { "example@market": true },
   "extraKnownMarketplaces": { "market": { "source": { "source": "directory", "path": "/nonexistent" } } }

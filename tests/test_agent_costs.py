@@ -25,6 +25,7 @@ from unittest import mock
 
 from agent_tools import agent_cache_report
 from agent_tools import agent_costs
+from agent_tools import model_pricing
 from agent_tools.canonical import telemetry_digest
 
 
@@ -176,24 +177,24 @@ class ScanFileTest(unittest.TestCase):
         r = self.scan(lines)
         self.assertEqual(r["peak_ctx"], 301)
 
-    def test_cost_uses_model_family_pricing(self):
+    def test_cost_uses_per_model_pricing(self):
         lines = [assistant("m1", usage=USAGE_1, model="claude-sonnet-5")]
         r = self.scan(lines)
-        # sonnet: in 3.0, out 15.0, cache_write_5m 3.75, cache_read 0.30 per Mtok
-        expected = (10 * 3.0 + 20 * 15.0 + 5 * 3.75 + 100 * 0.30) / 1e6
+        # Sonnet 5: in 2.0, out 10.0, cache_write_5m 2.50, cache_read 0.20 per Mtok
+        expected = (10 * 2.0 + 20 * 10.0 + 5 * 2.50 + 100 * 0.20) / 1e6
         self.assertAlmostEqual(r["cost"], expected, places=12)
 
-    def test_opus_class_list_price_is_five_and_twenty_five_per_mtok(self):
+    def test_opus_5_5_list_price_is_four_and_twenty_per_mtok(self):
         usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000,
                  "cache_read_input_tokens": 1_000_000,
                  "cache_creation_input_tokens": 3_000_000,
                  "cache_creation": {"ephemeral_1h_input_tokens": 1_000_000,
                                     "ephemeral_5m_input_tokens": 2_000_000}}
         r = self.scan([assistant("m1", usage=usage, model="claude-opus-5-5")])
-        # $5 in + $25 out + 1M x $10 (1h write, 2x) + 2M x $6.25 (5m write, 1.25x)
-        # + 1M x $0.50 (read, 0.1x); the stale $15/$75 row gives $159.
-        self.assertAlmostEqual(r["cost"], 5.0 + 25.0 + 10.0 + 12.5 + 0.5, places=9)
-        self.assertAlmostEqual(r["cost_by_family"]["opus"], 53.0, places=9)
+        # Opus 5.5 row: $4 in + $20 out + 1M x $8 (1h write) + 2M x $5 (5m write)
+        # + 1M x $0.20 (read) = $42.20; the Opus 5 row gives $53.
+        self.assertAlmostEqual(r["cost"], 42.2, places=9)
+        self.assertAlmostEqual(r["cost_by_family"]["opus"], 42.2, places=9)
 
     def test_proceed_nudges_counted_and_bounded(self):
         def user(text, sidechain=False):
@@ -609,8 +610,9 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(direct["output"], 120)
         self.assertEqual(direct["cache_create"], 30)
         self.assertEqual(direct["cache_read"], 600)
-        # six Opus-class USAGE_1 calls: (10 x 5 + 20 x 25 + 5 x 6.25 + 100 x 0.50) x 6 / 1e6
-        self.assertAlmostEqual(direct["cost"], 0.0037875, places=12)
+        # five Opus 5 USAGE_1 calls at 10 x 5 + 20 x 25 + 5 x 6.25 + 100 x 0.50 = 631.25 per 1e6,
+        # and the helper's unlisted ID at the Opus 5.5 row: 10 x 4 + 20 x 20 + 5 x 5 + 100 x 0.20 = 485
+        self.assertAlmostEqual(direct["cost"], (5 * 631.25 + 485) / 1e6, places=12)
         self.assertIn("6 turns", successful_stdout)
         self.assertIn("fresh 60", successful_stdout)
         self.assertIn("cache_create 30", successful_stdout)
@@ -1814,9 +1816,9 @@ class CacheScanTest(unittest.TestCase):
         death = result["deaths"][0]
         self.assertEqual(death["kind"], "hand-back after end of turn")
         self.assertEqual(death["gap_s"], 542.0)
-        # the rewrite is min(32,500 created, 32,002 prior context), at the Opus
+        # the rewrite is min(32,500 created, 32,002 prior context), at the Opus 5.5
         # 5-minute write price less the read a warm cache would have paid
-        self.assertAlmostEqual(death["premium"], 32_002 * (6.25 - 0.50) / 1e6, places=12)
+        self.assertAlmostEqual(death["premium"], 32_002 * (5.0 - 0.20) / 1e6, places=12)
         # a main session's 1-hour TTL makes the same 9 minutes no death
         main = scan_cache(write_root(self.root, handback_death_lines()), is_root=True)
         self.assertEqual(main["deaths"], [])
@@ -1874,9 +1876,9 @@ class CacheScanTest(unittest.TestCase):
                  assistant("p2", usage=usage, model="claude-opus-5-5", timestamp=at(3_710))]
         result = scan_cache(write_root(self.root, lines), is_root=True)
         self.assertEqual(len(result["deaths"]), 1)
-        weighted = (30_000 * 10.0 + 10_000 * 6.25) / 40_000
+        weighted = (30_000 * 8.0 + 10_000 * 5.0) / 40_000   # the Opus 5.5 1h and 5m writes
         self.assertAlmostEqual(result["deaths"][0]["premium"],
-                               36_002 * (weighted - 0.50) / 1e6, places=12)
+                               36_002 * (weighted - 0.20) / 1e6, places=12)
 
     def test_repeated_records_of_one_call_merge_usage_by_per_field_maximum(self):
         # Phase-5 PR421-01: two records per call whose usage differs, so the per-field
@@ -1898,11 +1900,11 @@ class CacheScanTest(unittest.TestCase):
         # p1's context is 2 + max(read) 26,000 + max(create) 10,000 = 36,002; p2's is 40,002
         self.assertEqual(result["peak_ctx"], 2 + 0 + 40_000)
         self.assertEqual(len(result["deaths"]), 1)
-        weighted = (20_000 * 10.0 + 20_000 * 6.25) / 40_000
+        weighted = (20_000 * 8.0 + 20_000 * 5.0) / 40_000   # the Opus 5.5 1h and 5m writes
         self.assertAlmostEqual(result["deaths"][0]["premium"],
-                               36_002 * (weighted - 0.50) / 1e6, places=12)
-        # only p1's maximum read passes the 25k threshold
-        self.assertAlmostEqual(result["reread_above"], 1_000 * 0.50 / 1e6, places=12)
+                               36_002 * (weighted - 0.20) / 1e6, places=12)
+        # only p1's maximum read passes the 25k threshold, at the Opus 5.5 read price
+        self.assertAlmostEqual(result["reread_above"], 1_000 * 0.20 / 1e6, places=12)
 
     def test_a_zero_usage_message_is_no_call_and_does_not_hide_a_death(self):
         synthetic = assistant(
@@ -1919,17 +1921,17 @@ class CacheScanTest(unittest.TestCase):
             user_prompt(0),
             cache_call("m1", 1, 100_000, 1_000),                               # below
             cache_call("m2", 11, 120_000, 1_000),                              # at
-            cache_call("m3", 21, 150_000, 1_000),                              # above, Opus
-            cache_call("m4", 31, 130_000, 1_000, model="claude-sonnet-5-5"),   # above, Sonnet
+            cache_call("m3", 21, 150_000, 1_000),                              # above, Opus 5.5
+            cache_call("m4", 31, 130_000, 1_000, model="claude-sonnet-5-5"),   # above, Sonnet 5.5
         ])
         result = scan_cache(path)
         self.assertEqual(result["calls"], 4)
         self.assertAlmostEqual(result["reread_above"],
-                               (30_000 * 0.50 + 10_000 * 0.30) / 1e6, places=12)
+                               (30_000 * 0.20 + 10_000 * 0.10) / 1e6, places=12)
         self.assertEqual(result["peak_ctx"], 2 + 150_000 + 1_000)
         self.assertEqual(result["deaths"], [])
         self.assertAlmostEqual(scan_cache(path, threshold=140_000)["reread_above"],
-                               10_000 * 0.50 / 1e6, places=12)
+                               10_000 * 0.20 / 1e6, places=12)
 
     def test_first_call_and_attachments_before_the_second_call_are_the_start_up(self):
         path = write_subagent(self.root, [
@@ -2044,6 +2046,7 @@ class CacheReportCliTest(unittest.TestCase):
                               r"\s+agent listing\s+environment$")
         self.assertRegex(out, r"(?m)^Explore\s+1\s+12\.91k\s+3\.32k\s+24\.00k(\s+-){5}$")
         self.assertRegex(out, r"(?m)^general-purpose\s+1\s+30\.00k\s+0(\s+-){6}$")
+        self.assertRegex(out, r"(?m)^Pricing: https://\S+ \(2026-10-25\); 0 calls priced approximately$")
         self.assertTrue(out.endswith(f"\nNOTE: {agent_costs.DISCLAIMER}\n"))
 
     def test_event_bounds_select_calls_by_start_and_name_the_window(self):
@@ -2078,10 +2081,11 @@ class CacheReportCliTest(unittest.TestCase):
             default, _ = run_main("--projects-dir", tmp, "--report", "cache", "--days", "0")
             raised, _ = run_main("--projects-dir", tmp, "--report", "cache", "--days", "0",
                                  "--context-threshold", "500000")
-        # ten Opus reads of 900k: 10 x 780k x $0.50 / 1e6 = $3.90; above 500k, $2.00
-        self.assertRegex(default, r"(?m)^main\s+1\s+\$4\s+")
+        # ten Opus 5.5 reads of 900k: 10 x 780k x $0.20 / 1e6 = $1.56, which rounds to $2;
+        # above 500k, 10 x 400k x $0.20 / 1e6 = $0.80, which rounds to $1
+        self.assertRegex(default, r"(?m)^main\s+1\s+\$2\s+")
         self.assertIn("\nReread above 120.00k tokens of context", default)
-        self.assertRegex(raised, r"(?m)^main\s+1\s+\$2\s+")
+        self.assertRegex(raised, r"(?m)^main\s+1\s+\$1\s+")
         self.assertIn("\nReread above 500.00k tokens of context", raised)
 
     def test_cache_report_usage_errors_exit_2_with_nothing_on_stdout(self):
@@ -2119,8 +2123,9 @@ class CacheReportCliTest(unittest.TestCase):
     def test_aggregation_over_several_transcripts_of_one_type(self):
         # Phase-5 PR421-03: several same-type transcripts with distinct peaks, deaths and
         # attachment sets, so sums, percentiles and carrier-only medians are observable
-        def result(agent_type, is_root, calls, deaths, reread, peak, startup):
+        def result(agent_type, is_root, calls, deaths, reread, peak, startup, approximate=0):
             return {"agent_type": agent_type, "is_root": is_root, "calls": calls,
+                    "approximate_calls": approximate,
                     "deaths": [{"kind": k, "gap_s": g, "premium": p} for k, g, p in deaths],
                     "reread_above": reread, "peak_ctx": peak, "startup": startup}
         handback = "hand-back after end of turn"
@@ -2128,9 +2133,11 @@ class CacheReportCliTest(unittest.TestCase):
             result("general-purpose", False, 5,
                    [(handback, 540.0, 1.5), ("child dispatch", 400.0, 0.8)], 1.5, 150_000,
                    {"write": 30_000, "read": 0,
-                    "attachments": {"skill_listing": 24_000, "environment": 600}}),
+                    "attachments": {"skill_listing": 24_000, "environment": 600}},
+                   approximate=2),
             result("general-purpose", False, 3, [(handback, 660.0, 2.0)], 0.75, 90_000,
-                   {"write": 10_000, "read": 20_000, "attachments": {"skill_listing": 20_000}}),
+                   {"write": 10_000, "read": 20_000, "attachments": {"skill_listing": 20_000}},
+                   approximate=1),
             result("general-purpose", False, 2, [(handback, 600.0, 0.25)], 2.0, 200_000,
                    {"write": 20_000, "read": 10_000, "attachments": {}}),
             result("main", True, 4, [("message after end of turn", 3_700.0, 3.0)], 0.0,
@@ -2150,6 +2157,7 @@ class CacheReportCliTest(unittest.TestCase):
         self.assertRegex(out, r"(?m)^general-purpose\s+hand-back after end of turn\s+3\s+10\.0m\s+\$4$")
         self.assertRegex(out, r"(?m)^general-purpose\s+child dispatch\s+1\s+6\.7m\s+\$1$")
         self.assertIn("\nSubagent deaths 4 ($5 premium); main-session deaths 1 ($3)\n", out)
+        self.assertIn("; 3 calls priced approximately\n", out)  # the transcripts' 2 + 1
         # reread 1.5 + 0.75 + 2.0 summed; peak median 150k is neither the first nor the max
         self.assertRegex(out, r"(?m)^general-purpose\s+3\s+\$4\s+150\.00k\s+200\.00k\s+200\.00k$")
         self.assertRegex(out, r"(?m)^main\s+1\s+\$0\s+50\.00k\s+50\.00k\s+50\.00k$")
@@ -2165,7 +2173,8 @@ class CacheReportCliTest(unittest.TestCase):
         # peaks: p90 is index round(4.5) = 4, the fifth value 50k (nearest rank: 60k).
         def result(agent_type, peak):
             return {"agent_type": agent_type, "is_root": False, "calls": 1, "deaths": [],
-                    "reread_above": 0.0, "peak_ctx": peak, "startup": None}
+                    "approximate_calls": 0, "reread_above": 0.0, "peak_ctx": peak,
+                    "startup": None}
         four = [10_000, 20_000, 30_000, 40_000]
         six = [10_000, 20_000, 30_000, 40_000, 50_000, 60_000]
         results = ([result("explore", peak) for peak in four]
@@ -2194,6 +2203,52 @@ class ModuleEntryPointTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertTrue(completed.stdout.startswith("usage: agent-costs "),
                         completed.stdout[:200])
+
+
+class ModelPricingTest(unittest.TestCase):
+    def test_opus_5_5_is_priced_at_its_own_row(self):
+        self.assertEqual(model_pricing.rates("claude-opus-5-5", 1_000),
+                         (model_pricing.Rates(4.0, 20.0, 5.0, 8.0, 0.20), False))
+
+    def test_a_date_suffix_matches_its_base_row(self):
+        self.assertEqual(model_pricing.rates("claude-haiku-4-5-20251001", 1_000),
+                         (model_pricing.Rates(1.0, 5.0, 1.25, 2.0, 0.10), False))
+
+    def test_haiku_5_5_switches_tier_above_100k_prompt(self):
+        low, _ = model_pricing.rates("claude-haiku-5-5", 100_000)
+        high, _ = model_pricing.rates("claude-haiku-5-5", 100_001)
+        self.assertEqual(low, model_pricing.Rates(0.10, 0.50, 0.125, 0.20, 0.01))
+        self.assertEqual(high, model_pricing.Rates(0.50, 2.50, 0.625, 1.0, 0.05))
+
+    def test_unknown_ids_take_the_family_newest_row_and_are_approximate(self):
+        self.assertEqual(model_pricing.rates("claude-opus-9-9", 1),
+                         (model_pricing.Rates(4.0, 20.0, 5.0, 8.0, 0.20), True))
+        self.assertEqual(model_pricing.rates("claude-sonnet-7", 1)[1], True)
+        self.assertEqual(model_pricing.rates("mystery-model", 1),
+                         (model_pricing.Rates(4.0, 20.0, 5.0, 8.0, 0.20), True))
+        self.assertEqual(model_pricing.rates(None, 1)[1], True)
+
+    def test_older_rows_are_exact(self):
+        self.assertEqual(model_pricing.rates("claude-sonnet-4-6", 1),
+                         (model_pricing.Rates(3.0, 15.0, 3.75, 6.0, 0.30), False))
+        self.assertEqual(model_pricing.rates("claude-opus-4-8", 1),
+                         (model_pricing.Rates(5.0, 25.0, 6.25, 10.0, 0.50), False))
+        self.assertEqual(model_pricing.rates("claude-fable-5", 1),
+                         (model_pricing.Rates(10.0, 50.0, 12.5, 20.0, 1.0), False))
+
+    def test_synthetic_costs_nothing(self):
+        self.assertEqual(model_pricing.usage_cost("<synthetic>", cache_usage(5_000, 5_000)),
+                         (0.0, False))
+
+    def test_usage_cost_prices_each_bucket(self):
+        usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000,
+                 "cache_read_input_tokens": 1_000_000,
+                 "cache_creation_input_tokens": 3_000_000,
+                 "cache_creation": {"ephemeral_1h_input_tokens": 1_000_000,
+                                    "ephemeral_5m_input_tokens": 2_000_000}}
+        cost, approximate = model_pricing.usage_cost("claude-opus-5-5", usage)
+        self.assertAlmostEqual(cost, 4.0 + 20.0 + 8.0 + 2 * 5.0 + 0.20, places=9)
+        self.assertFalse(approximate)
 
 
 if __name__ == "__main__":
