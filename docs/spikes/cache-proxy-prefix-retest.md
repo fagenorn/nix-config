@@ -355,3 +355,50 @@ Rules in order: `inconclusive` on an instrument failure or when a valid on pair 
 Attempt 2 request log: 36 requests, 0 unaccounted
 
 Every request's raw usage is in the [usage file](cache-proxy-prefix-retest-2-usage.md).
+
+## AC3 evidence — shared prefix
+
+Appended by Task 4; the sections above are unchanged (D10).
+
+| Arm | Session | Window | Sibling 2 1st read | Sibling 2 1st write | Threshold | Met |
+|-----|---------|--------|--------------------|---------------------|-----------|-----|
+| on (`--keepalive --reorder`) | `4bf91cab-51ae-408e-b368-98ebc2b1f008` | 2026-10-26T20:46:08.210Z .. 2026-10-26T20:46:16.309Z | 15,190 | 6,656 | read >= 10,000 | met |
+| off (`--keepalive`) | `81f91fdb-b91d-4bf7-ac4a-70182ba5b5c3` | 2026-10-26T20:47:10.148Z .. 2026-10-26T20:47:25.071Z | 8,378 | 13,465 | none | n/a |
+| on - off | | | 6,812 | -6,809 | read difference >= 4,000 | met |
+
+### Start-up table, on
+
+```text
+Subagent start-up (first request's cache write and read; characters of each start-up attachment sent before the second request; medians over the subagents that carried it):
+
+agent type       subagents  1st write  1st read  skill listing  instructions  MCP instructions  deferred tools  agent listing  environment
+---------------  ---------  ---------  --------  -------------  ------------  ----------------  --------------  -------------  -----------
+general-purpose          1      6.66k    15.19k         14.22k        15.37k             2.05k             786          2.77k        1.49k
+
+Pricing: https://platform.claude.com/docs/en/about-claude/pricing (2026-10-25); 0 calls priced approximately
+NOTE: cache reads measure logical context re-processing (tokens the model
+```
+
+### Start-up table, off
+
+```text
+Subagent start-up (first request's cache write and read; characters of each start-up attachment sent before the second request; medians over the subagents that carried it):
+
+agent type       subagents  1st write  1st read  skill listing  instructions  MCP instructions  deferred tools  agent listing  environment
+---------------  ---------  ---------  --------  -------------  ------------  ----------------  --------------  -------------  -----------
+general-purpose          1     13.46k     8.38k         14.22k        15.37k             2.05k             786          2.77k        1.49k
+
+Pricing: https://platform.claude.com/docs/en/about-claude/pricing (2026-10-25); 0 calls priced approximately
+NOTE: cache reads measure logical context re-processing (tokens the model
+```
+
+### Conditions
+
+- Host mbp; code head `c1e49bbc`; account `p2` (`CLAUDE_ACCOUNT=p2`, credentials not read); `--model sonnet`; one trial per arm, not tuned (#422 D27).
+- Wrapper: `/nix/store/pgkj4j3c9avd1scqkgb029qr1b55avng-claude-code-with-accounts-2.1.310/bin/claude`, first on `PATH`. Launcher: `/nix/store/vmr7f7gcqldpb3awf5ypfdb8x20a9a8b-agent-tools-cache-proxy`, built by `just build` and never activated; each instance ran in the foreground as `<launcher> --port 0 <flags>` under `env -i` with the built CA bundle, and was stopped by its pid.
+- On instance: flags `--keepalive --reorder`, port 49315. Off instance: flag `--keepalive`, port 49370. Neither is a port of the installed service or of the other proxies on the refused list.
+- Environment per run: the caller's, plus `ANTHROPIC_BASE_URL=http://127.0.0.1:<instance port>`, `ENABLE_TOOL_SEARCH=true`, `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=padded-countdown`, `CLAUDE_ACCOUNT=p2` and `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`. Each run came from a new detached scratch worktree at the code head, with a fresh nonce (on `512b24a4`, off `22beca63`), removed afterwards.
+- Runs: on 2026-10-26T20:45:55.750Z .. 2026-10-26T20:46:15.309Z, total_cost_usd 0.1700839; off 2026-10-26T20:46:43.251Z .. 2026-10-26T20:47:24.071Z, total_cost_usd 0.16671929999999996. Both `subtype` success, exit 0, two `general-purpose` subagents, sibling 2 first record after sibling 1's last, every upstream status 200, no 429.
+- Proxy lines: on 7 `/v1/messages` lines, 2 `"reorder":"applied"`, 2 `applied_at_cap`, 4 `not_subagent`; off 7 `/v1/messages` lines, no `reorder` field at all. Keepalive pings: on 0, off 0 (neither run idled past the ping threshold).
+- Reading: sibling 1's windowed start-up is `None` in both runs because the window opens at sibling 2's first record; sibling 2's start-up row matches the `1st read` column above within its `k` rounding.
+- Run: `env PYTHONPATH="$PWD/python" python3 $E/ac3.py run <on|off> $E <port>`, then `… measure <on|off> $E <proxy log>`; table: `just agent-costs --report cache --projects-dir $E/<arm>-projects --events-since <window since> --events-before <window before>`.
