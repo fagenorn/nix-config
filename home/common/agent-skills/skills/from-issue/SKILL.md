@@ -112,7 +112,7 @@ and obey the `action` of the validated `phase_gate` reply exactly:
 3. **`handoff`** — first release every worker this owner registered, then run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`. Beneath `ledger_repo_root`, create only the run's non-symlink `handoffs/` directory if missing, never the destination leaf. Invoke `handoff` with a destination beneath `.superpowers/workflows/<run-id>/handoffs/`, repeat `workflow-state progress` with `--handoff-path <exact-path>` to finalize `handed_off` on the same attempt, and persist the handoff. A direct `--auto` invocation not prompted `Relaunched owner` never stops: on this or a child's `Handed off (…)` line it dispatches one fresh `from-issue-phase-delegate` owner prompted only `/from-issue <num> --auto` and `Relaunched owner`, and relays its return. Any other owner returns only `Handed off (<exact-handoff-path>). Resume: /from-issue <num> --auto` and stops.
 4. **`delegate`** —
 <!-- agent-dispatch: id=from-issue-phase-delegate role=issue-owner model=opus effort=high -->
-Agent(subagent_type="general-purpose", model="opus", effort="high") delegates the remainder to a fresh issue owner with the lifecycle envelope and artifact paths.
+Agent(subagent_type="issue-owner", model="opus", effort="high") delegates the remainder to a fresh issue owner with the lifecycle envelope and artifact paths.
    Before dispatching it, run `workflow-state resume-pack --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` with this owner's own `action_id` and, on exit 0, put its stdout in the prompt as a `Resume pack` paragraph.
    Except at the rollover or a relaunch the prompt has the line `Delegated owner: return the ship handoff`. Its return, in order: (a) only the re-entry line, a `Suspended (…)` line or a `Handed off (…)` line (the delegated owner already reaped before its own exit), or bytes valid at `--boundary workflow-response` as `terminal` or `terminal_failed` (these alone mean it already ended the launch itself): relay it (a `Handed off (…)` per the `handoff` action), write nothing and stop, with no reap; (b) bytes valid at `--boundary ship-handoff`, `state: complete`, with this owner's identity: call `workflow-state progress` for Phase 6, then run Phase 7 with those bytes unchanged as the handoff; (c) anything else: a contract failure via the terminal return procedure.
    Exception — **ledger-only remainder**: when every content artifact is final and only `workflow-state` transitions plus verbatim result relay remain, delegate to the cheap bookkeeper instead:
@@ -207,7 +207,7 @@ sdd returns only canonical JSON: pipe the received bytes through `artifact-budge
 ## Phase 7 — Ship
 
 <!-- agent-dispatch: id=from-issue-ship-owner role=ship-owner model=opus effort=high -->
-Agent(subagent_type="general-purpose", model="opus", effort="high") launches `ship-issue` as a fresh ship owner, not inline via `Skill`.
+Agent(subagent_type="issue-owner", model="opus", effort="high") launches `ship-issue` as a fresh ship owner, not inline via `Skill`.
 
 Read `ship-handoff.md` for the subagent prompt, the inline fallback when `ship-issue` is absent, and the `## Remainder owner prompt` this same site launches for a validated `delivery_remainder` object; the remainder owner writes its own `finish`, so relay its validated reply unchanged and skip the terminal write.
 

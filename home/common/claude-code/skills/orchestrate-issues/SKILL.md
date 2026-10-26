@@ -194,7 +194,7 @@ dispatches and executing its later actions. Once the report has executed, make o
 a `launch_refused` owner observation for each refused launch's `custody`, and execute its report.
 
 <!-- agent-dispatch: id=orchestration-issue-owner role=issue-owner model=opus effort=high -->
-Agent(subagent_type="general-purpose", model="opus", effort="high", run_in_background=true) launches the issue owner in a fresh context with this entire prompt:
+Agent(subagent_type="issue-owner", model="opus", effort="high", run_in_background=true) launches the issue owner in a fresh context with this entire prompt:
 
 > Immutable lifecycle envelope:
 > `--repo-root <ledger_repo_root>`
