@@ -142,6 +142,31 @@ STARTUP_INTERRUPT = textwrap.dedent('''\
     sys.exit(suite_runner.main(sys.argv[1:]))
 ''')
 
+# Runs the runner with SIGINT raised right after its first member's process
+# launches in serial mode, before the runner waits for it.
+SERIAL_LAUNCH_INTERRUPT = textwrap.dedent('''\
+    import signal
+    import subprocess
+    import sys
+
+    from agent_tools import suite_runner
+
+    popen = subprocess.Popen
+    launched = []
+
+
+    def popen_then_interrupt(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        launched.append(process)
+        if len(launched) == 1:
+            signal.raise_signal(signal.SIGINT)
+        return process
+
+
+    subprocess.Popen = popen_then_interrupt
+    sys.exit(suite_runner.main(sys.argv[1:]))
+''')
+
 PLAIN_MEMBER = textwrap.dedent('''\
     import unittest
 
@@ -412,30 +437,28 @@ class UsageTest(RunnerCase):
 
 
 class InterruptTest(RunnerCase):
-    def interrupt_while_running(self, jobs: int) -> None:
-        """SIGINT the runner alone once `jobs` held members are live, and release
-        them only after the runner says it is waiting for them. The held members
-        write nothing to stdout, so every stdout line is the runner's."""
-        # A caught handler is reset to the default across exec, so the runner
-        # takes SIGINT as KeyboardInterrupt even when this process inherited
-        # SIGINT ignored.
+    def launch(self, *argv: str) -> subprocess.Popen:
+        """Start `python <argv>` in the work directory over held members. A caught
+        handler is reset to the default across exec, so the runner takes SIGINT
+        as KeyboardInterrupt even when this process inherited SIGINT ignored."""
         previous = signal.signal(signal.SIGINT, signal.default_int_handler)
         self.addCleanup(signal.signal, signal.SIGINT, previous)
-        members = [self.member(f"test_hold{n}.py", HOLD_MEMBER) for n in range(4)]
         runner = subprocess.Popen(
-            [sys.executable, "-m", "agent_tools.suite_runner", "--jobs", str(jobs), *members],
-            cwd=self.work, env=self.environment(1, 1, {}), stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            [sys.executable, *argv], cwd=self.work, env=self.environment(1, 1, {}),
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True)
         self.addCleanup(runner.stderr.close)
         self.addCleanup(runner.stdout.close)
         self.addCleanup(runner.wait, 120)
         self.addCleanup(runner.kill)
         self.addCleanup((self.barrier / "release").touch)
-        deadline = time.monotonic() + 60
-        while len(list((self.barrier / "live").iterdir())) < jobs:
-            self.assertLess(time.monotonic(), deadline, "the held members never started")
-            time.sleep(0.01)
-        runner.send_signal(signal.SIGINT)
+        return runner
+
+    def finish_interrupted(self, runner: subprocess.Popen) -> list[str]:
+        """Release the held members only once the runner says it is waiting for
+        them, then require exit 130, the interrupted line, an end line for each
+        started member and no report. The held members write nothing to stdout,
+        so every stdout line is the runner's."""
         lines = []
         for line in runner.stdout:
             lines.append(line.rstrip("\n"))
@@ -448,12 +471,23 @@ class InterruptTest(RunnerCase):
         errors = runner.stderr.read()
         self.assertEqual(runner.wait(timeout=120), 130, "\n".join(lines) + errors)
         self.assertIn("suite-runner: interrupted, waiting for running members", lines)
-        self.assertEqual([match.group(1) for match in map(START.match, lines) if match],
-                         members[:jobs])
+        starts = [match.group(1) for match in map(START.match, lines) if match]
         self.assertEqual(sorted(match.group(1) for match in map(END.match, lines) if match),
-                         members[:jobs])
+                         sorted(starts))
         self.assertEqual([line for line in lines if line.startswith(
             ("suite-runner: timings", "suite-runner: summary"))], [])
+        return starts
+
+    def interrupt_while_running(self, jobs: int) -> None:
+        """SIGINT the runner alone once `jobs` held members are live."""
+        members = [self.member(f"test_hold{n}.py", HOLD_MEMBER) for n in range(4)]
+        runner = self.launch("-m", "agent_tools.suite_runner", "--jobs", str(jobs), *members)
+        deadline = time.monotonic() + 60
+        while len(list((self.barrier / "live").iterdir())) < jobs:
+            self.assertLess(time.monotonic(), deadline, "the held members never started")
+            time.sleep(0.01)
+        runner.send_signal(signal.SIGINT)
+        self.assertEqual(self.finish_interrupted(runner), members[:jobs])
 
     def test_an_interrupt_in_parallel_mode_starts_nothing_more_and_prints_no_report(self):
         self.interrupt_while_running(2)
@@ -466,35 +500,22 @@ class InterruptTest(RunnerCase):
         do. Workers may or may not have taken a member when the stop flag is
         set, so the started members are only required to be a list-order
         prefix of at most the cap."""
-        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
-        self.addCleanup(signal.signal, signal.SIGINT, previous)
         members = [self.member(f"test_hold{n}.py", HOLD_MEMBER) for n in range(6)]
-        runner = subprocess.Popen(
-            [sys.executable, "-c", STARTUP_INTERRUPT, "--jobs", "4", *members],
-            cwd=self.work, env=self.environment(1, 1, {}), stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        self.addCleanup(runner.stderr.close)
-        self.addCleanup(runner.stdout.close)
-        self.addCleanup(runner.wait, 120)
-        self.addCleanup(runner.kill)
-        self.addCleanup((self.barrier / "release").touch)
-        lines = []
-        for line in runner.stdout:
-            lines.append(line.rstrip("\n"))
-            if line.startswith("suite-runner: interrupted"):
-                break
-        (self.barrier / "release").touch()
-        lines += runner.stdout.read().splitlines()
-        errors = runner.stderr.read()
-        self.assertEqual(runner.wait(timeout=120), 130, "\n".join(lines) + errors)
-        self.assertIn("suite-runner: interrupted, waiting for running members", lines)
-        starts = [match.group(1) for match in map(START.match, lines) if match]
-        self.assertLessEqual(len(starts), 4, lines)
+        runner = self.launch("-c", STARTUP_INTERRUPT, "--jobs", "4", *members)
+        starts = self.finish_interrupted(runner)
+        self.assertLessEqual(len(starts), 4, starts)
         self.assertEqual(starts, members[:len(starts)])
-        self.assertEqual(sorted(match.group(1) for match in map(END.match, lines) if match),
-                         starts)
-        self.assertEqual([line for line in lines if line.startswith(
-            ("suite-runner: timings", "suite-runner: summary"))], [])
+
+    def test_an_interrupt_as_a_serial_member_launches_still_waits_for_it(self):
+        """SIGINT lands after the first member's process launches and before the
+        runner waits for it. The runner exits only once that member has, so its
+        done marker is there and its live token is gone."""
+        members = [self.member(f"test_hold{n}.py", HOLD_MEMBER) for n in range(3)]
+        runner = self.launch("-c", SERIAL_LAUNCH_INTERRUPT, "--jobs", "1", *members)
+        self.assertEqual(self.finish_interrupted(runner), members[:1])
+        self.assertEqual(sorted(path.name for path in (self.barrier / "done").iterdir()),
+                         members[:1])
+        self.assertEqual(list((self.barrier / "live").iterdir()), [])
 
 
 class RecipeWiringTest(unittest.TestCase):

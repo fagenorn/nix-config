@@ -106,27 +106,48 @@ class _Output:
         self.stream.flush()
 
 
+class _HeldSigint:
+    """Records a SIGINT instead of raising it, from construction until
+    `release`, which restores the caller's handler and re-delivers a recorded
+    SIGINT under it (D14). Construct it before the `try` that handles the
+    interrupt and release it inside that `try`, so a SIGINT on either side of
+    the held span reaches that handler or nothing has started yet."""
+
+    def __init__(self) -> None:
+        self.held = threading.Event()
+        self.previous = signal.signal(signal.SIGINT, lambda signum, frame: self.held.set())
+
+    def release(self) -> None:
+        signal.signal(signal.SIGINT, self.previous)
+        if self.held.is_set():
+            signal.raise_signal(signal.SIGINT)
+
+
 def _run_serial(members: Sequence[str], out: _Output) -> list[MemberResult]:
     results = []
     for index, member in enumerate(members):
         out.write(_line(f"{PREFIX} start {member}") + _line(f"{PREFIX} begin {member}"))
         started = time.monotonic()
+        process = None
+        # A SIGINT while the member launches is held, so a launched member is
+        # always waited for.
+        hold = _HeldSigint()
         try:
-            process = subprocess.Popen(member_command(member))
-        except OSError as error:
-            out.write(_line(str(error)))
-            returncode = None
-        else:
             try:
-                returncode = process.wait()
-            except KeyboardInterrupt:
-                # The member shares the terminal's process group, so a Ctrl-C
-                # reaches it too: wait for it, close its block, then stop.
-                out.write(_line(INTERRUPTED))
-                returncode = process.wait()
-                out.write(_line(end_line(MemberResult(
-                    index, member, returncode, time.monotonic() - started))))
-                raise
+                process = subprocess.Popen(member_command(member))
+            except OSError as error:
+                out.write(_line(str(error)))
+            finally:
+                hold.release()
+            returncode = None if process is None else process.wait()
+        except KeyboardInterrupt:
+            # The member shares the terminal's process group, so a Ctrl-C
+            # reaches it too: wait for it, close its block, then stop.
+            out.write(_line(INTERRUPTED))
+            returncode = None if process is None else process.wait()
+            out.write(_line(end_line(MemberResult(
+                index, member, returncode, time.monotonic() - started))))
+            raise
         result = MemberResult(index, member, returncode, time.monotonic() - started)
         out.write(_line(end_line(result)))
         results.append(result)
@@ -190,19 +211,15 @@ def _run_parallel(members: Sequence[str], jobs: int,
             while running:
                 finished.wait()
 
-    # A SIGINT while the workers start is only recorded, so `running` always
-    # equals the workers that will count themselves out (D14).
-    held = threading.Event()
-    previous = signal.signal(signal.SIGINT, lambda signum, frame: held.set())
+    # A SIGINT while the workers start is held, so `running` always equals
+    # the workers that will count themselves out (D14).
+    hold = _HeldSigint()
     try:
         try:
             for _ in range(running):
                 threading.Thread(target=worker).start()
         finally:
-            signal.signal(signal.SIGINT, previous)
-        if held.is_set():
-            # Re-delivered under the caller's handler, inside this try.
-            signal.raise_signal(signal.SIGINT)
+            hold.release()
         wait_for_workers()
     except KeyboardInterrupt:
         stop.set()
@@ -217,8 +234,8 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO) -> int:
     """Run every member and write the report; 0 when all passed, else 1.
 
     A KeyboardInterrupt propagates after the running members have finished and
-    written their blocks. Must be called from the main thread: the parallel
-    runner holds SIGINT while it starts its workers.
+    written their blocks. Must be called from the main thread: the runner holds
+    SIGINT while it launches a serial member or starts its parallel workers.
     """
     output = _Output(out)
     started = time.monotonic()
