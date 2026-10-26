@@ -23,6 +23,9 @@ from pathlib import Path
 from agent_tools import suite_runner
 from agent_tools.suite_runner import MemberResult
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+EVAL_TREE_SCRIPT = "home/common/agent-skills/evals/tests/test-run-eval-tree.sh"
+
 # A unittest module that meets its peers at the barrier. It holds a live token
 # until `min(cap, members not yet done)` tokens are live, writes three stdout
 # and three stderr markers while that token is still live, and records the most
@@ -492,3 +495,24 @@ class InterruptTest(RunnerCase):
                          starts)
         self.assertEqual([line for line in lines if line.startswith(
             ("suite-runner: timings", "suite-runner: summary"))], [])
+
+
+class RecipeWiringTest(unittest.TestCase):
+    def test_the_recipe_hands_its_curated_members_to_the_runner(self):
+        lines = (REPO_ROOT / "justfile").read_text(encoding="utf-8").splitlines()
+        start = lines.index("agent-workflow-tests *args:")
+        body = []
+        for line in lines[start + 1:]:
+            if not line.startswith("  "):
+                break
+            body.append(line)
+        self.assertEqual(
+            body[0],
+            '  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.suite_runner {{args}} \\')
+        self.assertTrue(all(line.endswith(" \\") for line in body[:-1]), body)
+        self.assertFalse(body[-1].endswith("\\"), body[-1])
+        members = [line.strip().removesuffix(" \\") for line in body[1:]]
+        self.assertTrue(all(line.startswith("    ") for line in body[1:]), body)
+        self.assertEqual(members[-1], EVAL_TREE_SCRIPT)
+        self.assertIn("tests/test_suite_runner.py", members)
+        suite_runner.validate_members(members, REPO_ROOT)
