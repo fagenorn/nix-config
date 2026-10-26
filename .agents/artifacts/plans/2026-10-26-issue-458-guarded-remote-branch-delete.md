@@ -70,4 +70,8 @@ Task 4 — `orchestrate-control` spends direction on the first sweep — `python
 - Planning appended D8 (the gated set's home, the required `human_directed` keyword, the import and the park position) and D9 (the test seams the spec left open: the vocabulary pin, the direct-call and helper consent, the `owner_unavailable` ledger rewrite).
 - Planning trials at `7a92d5b4` (scratch worktree, discarded) measured the claims the tasks carry: the delete form's refusal texts through the matcher, the arm's verdicts through a scratch copy of the guard, the guard suite's three push-form expectations, the 11 workflow tests that relied on an undirected resume, the parked-remainder and first-sweep tests red at base and green after (the auto-resumable test green at both), and `check: pass` for the two `ship-issue` edits.
 
+## Standards review provenance
+
+Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no focus, base `b3236d3f`, no fallback. Accepted 1 (SF-1: Task 1 Step 3 also amends the tag-push arm's "any other namespaced push keeps its refusal" clause), rejected 0, deferred 0. The one Discussion item recorded only that the reviewer's sandbox could not reach the GitHub API; the packet carried the issue summary and acceptance criteria, so no plan change.
+
 ---

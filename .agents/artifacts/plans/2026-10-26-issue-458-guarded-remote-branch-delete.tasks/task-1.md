@@ -133,6 +133,7 @@ Expected: FAIL in all five — the allowed deletions exit 2 `unknown flag --dele
 
      The **remote-deletion arm** (issue 458) is the push verb's third form, judged after the tag and branch arms: exactly `git push origin --delete refs/heads/<branch>`, with the push verb's whole-text character rule, credential-scrub prefixes and one `git -C <dir>`. The `refs/heads/` literal is the point: git resolves a bare `--delete <name>` against the remote's refs and deletes a tag when only a tag matches, while the qualified name can only be a branch, so the bare spelling stays refused (`missing refs/heads/<branch>`). After standing authorization the value takes the branch arm's name rule (so `refs/heads/refs/heads/x` is a namespaced ref), then needs a resolvable `origin/HEAD`, and the default branch and the repository's declared integration branch are refused as `unsafe push: refusing to delete the permanent branch <branch>`. The arm reads no forge state: GitHub itself refuses to delete a protected branch, and `ship-issue` runs the deletion only after verifying the merge and seeing `git ls-remote --heads origin <branch>` non-empty.
 
+   - In the tag-push arm's sentence, replace `any other namespaced push keeps its refusal` with `any other namespaced push keeps its refusal, except the remote-deletion arm's qualified `refs/heads/<branch>``.
    - In the refusal taxonomy paragraph's state-refusal list, replace `a default-branch push, head equal to base` with `a default-branch push, a permanent-branch deletion, head equal to base`.
 
 - [ ] **Step 4: Verify**
