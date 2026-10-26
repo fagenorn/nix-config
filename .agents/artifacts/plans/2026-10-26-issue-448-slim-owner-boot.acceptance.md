@@ -145,7 +145,7 @@ A cut is kept when its projection is at least 1,000 tokens per fresh boot (D16);
 
 | Cut | Rule | Inputs | Projection (tokens per fresh boot) | Verdict | Built |
 |-----|------|--------|------------------------------------|---------|-------|
-| 1 | one task file per dispatch (D6) | A = 8,630 (medians 8,948 B over 134 plans and 12,108 B over 546 task files, ÷ 2.44, at ca6ba1ae); 79 of 103 fresh boots in 6-7 | 8,808 | keep | — |
+| 1 | one task file per dispatch (D6) | A = 8,630 (medians 8,948 B over 134 plans and 12,108 B over 546 task files, ÷ 2.44, at ca6ba1ae); 79 of 103 fresh boots in 6-7 | 8,808 | keep | built; net -8 bytes |
 | 2 | resume entry (D7) | s(0-5) = 0.3400, s(6-7) = 0.2728 | 3,119 | keep | — |
 | 3 | support-file sections (D8) | share_A = 0.3690, share_D = 0.1289; 79 of 103 fresh boots in 6-7 | 1,559 | keep | — |
 | 4 | sdd resume section (D9) | the two gate sections are 0.1059 of sdd/SKILL.md; 79 of 103 fresh boots in 6-7 | 616 (information) | reject (D9) | not built |

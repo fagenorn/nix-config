@@ -1915,6 +1915,26 @@ class ResumePackContractsTest(unittest.TestCase):
         self.assertIn(self.PACK, self.read(ROLLOVER))
 
 
+class SlimBootContractsTest(unittest.TestCase):
+    """Issue 448: the fresh-owner boot reads only what its phase needs."""
+
+    @staticmethod
+    def read(path):
+        return normalized(path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def section(text, heading, next_heading):
+        start = text.index(heading)
+        return text[start:text.index(next_heading, start + len(heading))]
+
+    def test_phase_6_hands_sdd_the_reviewed_token_and_sdd_skips_the_package_read(self):
+        phase_6 = self.section(self.read(FROM_ISSUE), "## Phase 6 — Execute", "## Phase 7 — Ship")
+        self.assertIn("`--reviewed`", phase_6)
+        setup = self.section(self.read(SDD), "## Setup", "### Cumulative delivery gate")
+        self.assertIn("`--reviewed`", setup)
+        self.assertIn("`<plan stem>.tasks/task-<N>.md`", setup)
+
+
 class InterimChildResultContractsTest(unittest.TestCase):
     """#261: an owner treats a child's interim return as still running."""
 

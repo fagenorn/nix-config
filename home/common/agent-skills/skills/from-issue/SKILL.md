@@ -191,7 +191,7 @@ Read `standards-review.md` and follow it, its caller input gate first on every r
 **CHECKPOINT** — Record that standards review is clean. Apply the shared checkpoint rule.
 
 ## Phase 6 — Execute
-Invoke `sdd`: it reads the plan header, dispatches an implementer per task, and reviews each output by risk lane. With lifecycle identity, invoke it with this owner's `ledger_repo_root`, `run_id` and `action_id` as its lifecycle identity, so sdd's `### Lifecycle workers` registers each writing agent under this launch and records a progress marker after each completed task, and hand it the `deadline_at` this owner holds (a later `declare-lane` reply's value supersedes the acquired one).
+Invoke `sdd` with the literal token `--reviewed`: it dispatches an implementer per task and reviews each output by risk lane. With lifecycle identity, pass this owner's `ledger_repo_root`, `run_id` and `action_id` as its lifecycle identity, so sdd's `### Lifecycle workers` registers each writing agent under this launch and records a progress marker after each completed task, and hand it the `deadline_at` this owner holds (a later `declare-lane` reply's value supersedes the acquired one).
 
 If the plan is `mechanical-only`, use one mechanic plus one first-pass reviewer for the whole change. With lifecycle identity, register the mechanic the same way (`workflow-state register-worker` before dispatch, the `Lifecycle worker:` line in its prompt, release on return) and run `workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` once before dispatching the mechanic and once after its change is committed; a refusal changes nothing and is not a suspension cause.
 
