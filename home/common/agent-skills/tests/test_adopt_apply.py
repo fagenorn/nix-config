@@ -119,6 +119,8 @@ def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
            for command, argv in (commands or {}).items()},
     }
     contract["bindings"]["workflow"]["verification"] = ["verify"]
+    # This repository's conditions name its own verification ids, gone here.
+    contract["bindings"]["workflow"].pop("verification_conditions", None)
     contract["bindings"]["workflow"]["review"] = {
         "plan": "review", "code": "review"}
     contract["bindings"]["vcs"]["commit"] = {
