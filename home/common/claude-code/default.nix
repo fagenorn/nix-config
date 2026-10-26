@@ -429,8 +429,12 @@ in
   # subagents dispatch explicitly as reviewer (opus/high), implementer
   # (sonnet/high for a planned sdd task and its first fix rounds, opus/high
   # for stuck-task escalation and the final-review fixer), mechanic
-  # (sonnet/high) or reviewer-lite (sonnet/medium). Skills reference them by
-  # name; home/common/agent-skills/model-matrix.json owns every tier.
+  # (sonnet/high) or reviewer-lite (sonnet/medium). from-issue and
+  # orchestrate-issues launch their issue owners as issue-owner (opus/high,
+  # xhigh for the autonomous design and planning owners), a definition with
+  # no body that blocks the Artifact tools and the claude.ai Docs connector.
+  # Skills reference them by name; home/common/agent-skills/model-matrix.json
+  # owns every tier.
   home.file.".claude/agents" = {
     source = ./agents;
     recursive = true;

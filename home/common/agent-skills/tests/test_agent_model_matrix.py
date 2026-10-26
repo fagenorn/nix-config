@@ -31,9 +31,9 @@ EXPECTED_TIERS = {
 }
 
 EXPECTED_SUBAGENT_TYPES = {
-    "issue-owner": {"general-purpose"},
-    "auto-owner": {"general-purpose"},
-    "ship-owner": {"general-purpose"},
+    "issue-owner": {"issue-owner", "general-purpose"},
+    "auto-owner": {"issue-owner"},
+    "ship-owner": {"issue-owner", "general-purpose"},
     "implementer": {"implementer"},
     "task-implementer": {"implementer"},
     "reviewer": {"reviewer"},
@@ -138,6 +138,11 @@ EXPECTED_OWNER_SITES = {
         "medium",
     ),
 }
+OWNER_ROLES = {"issue-owner", "auto-owner", "ship-owner"}
+OWNER_SKILL_DIRECTORIES = (
+    "home/common/agent-skills/skills/from-issue",
+    "home/common/claude-code/skills/orchestrate-issues",
+)
 
 EXPECTED_SDD_SITES = {
     "sdd-mechanic-implementation": (
@@ -450,6 +455,38 @@ class AgentModelMatrixTest(unittest.TestCase):
                 f"model={model} effort={effort} -->",
             )
             self.assertIn("Agent(", site["call"], site_id)
+
+    def test_from_issue_and_orchestration_owner_sites_launch_issue_owner(self):
+        # Issue 447 (D4, D5): the five owner sites of from-issue and
+        # orchestrate-issues launch the issue-owner type, none general-purpose.
+        data = json.loads(MATRIX.read_text(encoding="utf-8"))
+        owner_sites = {
+            site["id"]: site
+            for site in data["dispatch_sites"]
+            if site["role"] in OWNER_ROLES
+            and any(site["path"].startswith(f"{d}/") for d in OWNER_SKILL_DIRECTORIES)
+        }
+        self.assertEqual(
+            set(owner_sites),
+            {
+                "orchestration-issue-owner",
+                "from-issue-phase-delegate",
+                "from-issue-design-grill",
+                "from-issue-planning",
+                "from-issue-ship-owner",
+            },
+        )
+        for site_id, site in owner_sites.items():
+            self.assertTrue(
+                site["call"].startswith('Agent(subagent_type="issue-owner", '), site_id
+            )
+            text = (REPO_ROOT / site["path"]).read_text(encoding="utf-8")
+            self.assertIn(site["call"], text, site_id)
+        for directory in OWNER_SKILL_DIRECTORIES:
+            for path in sorted((REPO_ROOT / directory).rglob("*")):
+                if path.is_file():
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                    self.assertNotIn('subagent_type="general-purpose"', text, path)
 
     def test_sdd_dispatches_select_exact_tiers(self):
         data = json.loads(MATRIX.read_text(encoding="utf-8"))
