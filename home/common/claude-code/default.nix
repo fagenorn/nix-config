@@ -36,7 +36,7 @@ let
   # The cache proxy (agent_tools.cache_proxy, #422). This port is its one home:
   # the service below listens on it and the launcher's CACHE_PROXY_URL is
   # rewritten to it, so a `claude` launched with CLAUDE_CACHE_PROXY=1 routes
-  # through the proxy while it is healthy (opt-in since #438).
+  # through the proxy while it is healthy (opt-in; #450 re-measured).
   # `--keepalive` (#423) turns on the keepalive pings; dropping it and rebuilding turns them off.
   cacheProxyPort = 27183;
   cacheProxyUrl = "http://127.0.0.1:${toString cacheProxyPort}";
