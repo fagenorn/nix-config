@@ -69,5 +69,11 @@ Task 6 — Routing default, record and build (AC4, AC5) — `.agents/artifacts/p
 - Default-on candidate, opt-out and revert: per D3 and D4. Measured surface, with comment-only changes exempt: per D4 and D15.
 - Benchmark: per D5. Timed rig: per D6. Wire check: per D7. Decision rule, validity and stops: per D8, with harness stops and resume per D13.
 - The two measuring tasks and their shared rig: per D12. Evidence report, markers and pointer: per D9 and D14.
+- Timed-harness custody, timeout, rerun durability and resume of a re-measurement: per D16.
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no focus; base `51e2b7c9`; no fallback.
+- Findings: 5 (4 Blocking, 1 Should fix, 0 Discussion); 5 accepted after verification against the live plan and `python/agent_tools/launch_scope.py`, 0 rejected, 0 deferred. Applied in Task 5's harness, Step 5 and § Resume and in Task 4's § Re-measurement; recorded as D16.
 
 ---

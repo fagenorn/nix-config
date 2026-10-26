@@ -128,7 +128,7 @@ nothing else differs. One JSON object per line goes to --out: a header, each run
 verdict and a terminal record. Nothing credential-shaped is read or written. Exit 0 complete,
 3 rig_invalid, 4 run_invalid, 5 usage_limit.
 """
-import argparse, json, os, re, signal, subprocess, sys, time
+import argparse, json, os, re, signal, subprocess, sys, threading, time
 from datetime import datetime
 from urllib.parse import urlsplit
 
@@ -139,7 +139,9 @@ ACCOUNT = "p1"
 PROMPT = "Reply with exactly: ok"
 CLAUDE_ARGS = ["-p", "--model", "haiku", "--output-format", "stream-json", "--verbose",
                "--include-partial-messages", PROMPT]
-KEEP = ("HOME", "USER", "LOGNAME", "PATH", "LANG", "LC_ALL", "TMPDIR", "SHELL", "TERM")
+# AGENT_LAUNCH_SCOPE stays, so launch-scope can still reap a client that left the session (R450-01).
+KEEP = ("HOME", "USER", "LOGNAME", "PATH", "LANG", "LC_ALL", "TMPDIR", "SHELL", "TERM",
+        "AGENT_LAUNCH_SCOPE")
 INSTRUMENT = {"CLAUDE_CODE_EMIT_STARTUP_TIMING": "1"}
 FIRST_BLOCKS = {"thinking": "thinking", "redacted_thinking": "thinking", "text": "text"}
 LIMIT_TEXT = re.compile(r"usage limit|rate limit|hit your limit|limit reached|out of extra usage", re.I)
@@ -193,7 +195,19 @@ def run_once(args, arm):
     record = {"kind": "run", "arm": arm, "t_launch": round(launched, 1), "first_block": None,
               "wall_ttft_ms": None}
     result = None
-    deadline = time.time() + RUN_SECONDS
+    expired = threading.Event()
+
+    def expire():
+        # A silent client never yields a line, so the deadline is a timer, not a check in the loop (R450-05).
+        expired.set()
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    timer = threading.Timer(RUN_SECONDS, expire)
+    timer.daemon = True
+    timer.start()
     try:
         for line in process.stdout:
             now = time.time() * 1000
@@ -210,9 +224,8 @@ def run_once(args, arm):
                     record["wall_ttft_ms"] = round(now - launched, 1)
             if event.get("type") == "result":
                 result = event
-            if time.time() > deadline:
-                break
     finally:
+        timer.cancel()
         try:
             process.wait(timeout=15)
         except subprocess.TimeoutExpired:
@@ -225,7 +238,8 @@ def run_once(args, arm):
     record["t_exit_ms"] = round(time.time() * 1000 - launched, 1)
     record["ttft_ms"] = result.get("ttft_ms") if result else None
     record["time_to_request_ms"] = result.get("time_to_request_ms") if result else None
-    record["error_kind"] = error_kind(record["exit"], result)
+    record["timed_out"] = expired.is_set()
+    record["error_kind"] = "timeout" if record["timed_out"] else error_kind(record["exit"], result)
     if record["error_kind"] is not None and result is not None:
         record["api_error_status"] = result.get("api_error_status")
         record["error_excerpt"] = str(result.get("result", ""))[:300]
@@ -257,6 +271,8 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--routed-switch", choices=("unset", "1"), default="unset")
     args = parser.parse_args()
+    # SIGTERM (a reap or a host stop) raises SystemExit, so run_once's finally kills the client's group (R450-01).
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
     mod_text = open(os.path.join(args.mod, "bin", "claude-account")).read()
     records = []
     if os.path.exists(args.out):
@@ -524,10 +540,10 @@ launch-scope exec … -- python3 -I <S>/i450/rig/ttft450.py --mod <S>/i450/mod-2
 tail -n 2 <S>/i450/runs/harness.out; echo "harness exit $status"
 ```
 
-On any exit but 0, first copy the runs file to the handoff (D13): `H="$(git rev-parse --git-dir)/issue-450-suspended"; mkdir -p "$H"; cp <S>/i450/runs/runs.jsonl "$H/"`. Then:
+With `H="$(git rev-parse --git-dir)/issue-450-suspended"`, on any exit but 0, first copy the active runs file and, when it exists, the invalid first run to the handoff (D13; R450-02): `mkdir -p "$H"; cp <S>/i450/runs/runs.jsonl "$H/"; if test -f <S>/i450/runs/runs.invalid-1.jsonl; then cp <S>/i450/runs/runs.invalid-1.jsonl "$H/"; fi`. A `runs.invalid-1.jsonl` in `<S>/i450/runs` or `$H` is the durable record that D8's one rerun is consumed. Then:
 - 0: Step 6.
 - 5 (`usage_limit`): Step 6, then BLOCKED with `blocked_on=usage_limit`, the valid-pair count and the handoff path; § Resume continues the run.
-- 4 (`run_invalid`): the first time, `mv <S>/i450/runs/runs.jsonl <S>/i450/runs/runs.invalid-1.jsonl` and run this step once more. The second time there is no valid measurement (D8): Step 6, then Step 8's no-valid branch.
+- 4 (`run_invalid`): when `<S>/i450/runs/runs.invalid-1.jsonl` does not exist, this was the first run: `mv <S>/i450/runs/runs.jsonl <S>/i450/runs/runs.invalid-1.jsonl`, `rm -f "$H/runs.jsonl"`, `cp <S>/i450/runs/runs.invalid-1.jsonl "$H/"`, and run this step once more without `--resume` (a fresh rerun with a new header). When it exists, the rerun was invalid too and there is no valid measurement (D8): Step 6, then Step 8's no-valid branch.
 - 3 (`rig_invalid`): Step 6, then BLOCKED `timed run: warm-up invalid three times` with `jq -c 'select(.kind == "warmup") | .reasons' <S>/i450/runs/runs.jsonl`. No counted pair ran, so it is not an invalid run (D13).
 - Anything else: Step 6, then BLOCKED with the tail of `harness.out`.
 
@@ -608,7 +624,7 @@ Expected: `timed-run-recorded`. At the starting commit, `verbatim450.py --pointe
 
 ## Resume (usage limit; D8, D13)
 
-Run this entry, not Steps 0–8, after a `usage_limit` stop. With `H="$(git rev-parse --git-dir)/issue-450-suspended"` and `M` from the report's `Issue 450 measured head:` line, require (timeout 60 s): `tail -n 1 "$H/runs.jsonl" | jq -e '.kind == "usage_limit"'`, `head -n 1 "$H/runs.jsonl" | jq -e --arg m "$M" '.head == $m'`, no `Issue 450 timed run:` line in the report, and a measured-surface check from M to HEAD that prints nothing, with M's pin. A changed surface goes to Task 4's § Re-measurement instead. Then run Steps 1–4 (a rebuild of M gives byte-identical mod copies; the harness refuses any other), write `M` to `<S>/i450/M`, `cp "$H/runs.jsonl" <S>/i450/runs/runs.jsonl`, and run Step 5 with `--resume` added, then Steps 6–8. Step 8's Suspensions bullet gives, for each `usage_limit` record, its `ts` and the next `resume` record's `ts` in UTC, with the valid-pair count at the stop; its service bullet gives each line of `$H/service-pids` and this segment's PIDs.
+Run this entry, not Steps 0–8, after a `usage_limit` stop. With `H="$(git rev-parse --git-dir)/issue-450-suspended"` and `M` from the report's `Issue 450 measured head:` line, require (timeout 60 s): `tail -n 1 "$H/runs.jsonl" | jq -e '.kind == "usage_limit"'`, `head -n 1 "$H/runs.jsonl" | jq -e --arg m "$M" '.head == $m'`, and a measured-surface check from M to HEAD that prints nothing, with M's pin. A changed surface goes to Task 4's § Re-measurement instead. The suspended run is the first timed run when the report has no `Issue 450 timed run:` line, and a re-measurement when it has one and the sibling's `Timed run head:` differs from M; any other state is BLOCKED (R450-04). Then run Steps 1–4 (a rebuild of M gives byte-identical mod copies; the harness refuses any other), write `M` to `<S>/i450/M`, `cp "$H/runs.jsonl" <S>/i450/runs/runs.jsonl`, and, when `$H/runs.invalid-1.jsonl` exists, `cp "$H/runs.invalid-1.jsonl" <S>/i450/runs/` (R450-02). Run Step 5 with `--resume` and `--routed-switch "$(head -n 1 "$H/runs.jsonl" | jq -r .routed_switch)"` added, so the resumed segment keeps the header's switch, then Steps 6–7. A first timed run then takes Step 8; a re-measurement takes § Re-measurement steps 3–5 instead. Step 8's Suspensions bullet gives, for each `usage_limit` record, its `ts` and the next `resume` record's `ts` in UTC, with the valid-pair count at the stop; its service bullet gives each line of `$H/service-pids` and this segment's PIDs.
 
 ## Re-measurement (D4, D15)
 
