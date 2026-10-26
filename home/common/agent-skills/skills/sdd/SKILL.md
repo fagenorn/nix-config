@@ -33,16 +33,16 @@ Track progress in a ledger file:
 - After compaction, or if the workspace is gone, trust the ledger and `git log` over recollection.
 
 **Initial validation, the only whole-package read, runs only on an unreviewed first
-entry** (no literal `--reviewed` token and no ledger naming this plan on entry, before
-Setup creates one): read the root and every indexed member once, in discovery order,
-and scan for conflicts — tasks that contradict each other or the constraints, or
-anything the package mandates that the review rubric treats as a defect. Present
-findings before execution as one batched question, each beside the plan text
-mandating it and asking which governs; a clean scan proceeds. A missing or unreadable
-member is a contract error. Otherwise, and afterwards, hold only the plan root, its
-checker metrics and the current task's `sdd-gate` output, reading only
-`<plan stem>.tasks/task-<N>.md` before each dispatch. Build the todo list from the Task
-index.
+entry** (no literal `--reviewed` token, no ledger line `Initial validation: done` for
+this plan): read the root and every indexed member once, in discovery order, and scan
+for conflicts — tasks that contradict each other or the constraints, or anything the
+package mandates that the review rubric treats as a defect. Present findings before
+execution as one batched question, each beside the plan text mandating it and asking
+which governs; a clean scan proceeds. A clean or answered scan writes that ledger
+line. A missing or unreadable member is a contract error. Otherwise and afterwards
+hold only the root header to its `## Task index`, its checker metrics and the current
+task's `sdd-gate` output, reading only `<plan stem>.tasks/task-<N>.md` before each
+dispatch. Build the todo list from the Task index.
 
 ### Cumulative delivery gate
 

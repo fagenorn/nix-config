@@ -107,6 +107,22 @@ class BootReportTest(unittest.TestCase):
         self.assertEqual((document["chars_per_token"], document["observed_chars_per_token"]),
                          (2.44, 2.44))
 
+    def test_a_skill_call_without_a_name_is_keyed_unnamed(self):
+        session = Session(self.root)
+        session.child("o1", tool_use_id=dispatch(session, 0))
+        opening(session, "o1")
+        c0 = session.call("o1", 100, context=20_000, write=20_000, tool=("Skill", {}))
+        session.result("o1", 101, c0, "E" * 1_000)
+        c1 = session.call("o1", 110, context=21_040, write=1_040,
+                          bash=progress(6, action_id="7:1:2"))
+        session.result("o1", 111, c1, gate_reply("continue", launch=2))
+        session.write()
+        [row] = report(self.root)["boots"]
+        self.assertEqual(row["skills"], {"(unnamed)": 1_000})
+        text = costs("--days", "0", "--projects-dir", str(self.root))
+        self.assertEqual(text.returncode, 0, text.stderr)
+        self.assertIn("(unnamed)", text.stdout)
+
     def test_read_backs_rereads_and_resume_content_take_their_buckets(self):
         session = Session(self.root)
         session.child("o1", tool_use_id=dispatch(session, 0))

@@ -191,6 +191,12 @@ def _is_plan(path):
     return pure.name == "progress.md" and ".superpowers" in pure.parts and "sdd" in pure.parts
 
 
+def _skill_name(tool_input):
+    """The skill a Skill call named, or `(unnamed)` when its input names none."""
+    name = tool_input.get("skill")
+    return name if isinstance(name, str) and name else "(unnamed)"
+
+
 def _classify(name, tool_input, text, keys, seen, saved):
     """The (bucket, sub key) of a tool result by the first rule that holds (D2, D17)."""
     paths = [key[0] for key in keys]
@@ -207,7 +213,7 @@ def _classify(name, tool_input, text, keys, seen, saved):
     elif paths:
         verdict = ("other_reads", None)
     elif name == "Skill":
-        verdict = ("skill_bodies", tool_input.get("skill"))
+        verdict = ("skill_bodies", _skill_name(tool_input))
     else:
         verdict = ("commands", None)
     seen.update(keys)
@@ -357,7 +363,7 @@ class _Boot:
                 if self.names.get(value.get("sourceToolUseID")) == "Skill"]
 
     def _meta_chunks(self, metas):
-        return [("skill_bodies", self.inputs.get(value.get("sourceToolUseID"), {}).get("skill"),
+        return [("skill_bodies", _skill_name(self.inputs.get(value.get("sourceToolUseID"), {})),
                  len(_meta_text(value))) for value in metas]
 
     def _request_chunks(self, requests, metas):
