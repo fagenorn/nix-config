@@ -9,7 +9,7 @@
 
 **Tech stack:** Python 3.13 standard library (`json`, `re`, `statistics`, `socket`, `tarfile`, `posixpath`), `unittest` driving `python -m agent_tools.agent_costs`, Markdown skill documents, Bash, Nix (`just build`), Just.
 
-Spec: `.agents/artifacts/specs/2026-10-26-issue-448-slim-owner-boot-design.md` (a bare "Dn" cites its ledger; this plan appends D16–D20). Issue: https://github.com/fagenorn/nix-config/issues/448. Acceptance record: `.agents/artifacts/plans/2026-10-26-issue-448-slim-owner-boot.acceptance.md`. Task 3 creates it, Tasks 4–6 fill their cut rows and Task 7 completes it.
+Spec: `.agents/artifacts/specs/2026-10-26-issue-448-slim-owner-boot-design.md` (a bare "Dn" cites its ledger; this plan appends D16–D20, and Phase 5 D21–D22). Issue: https://github.com/fagenorn/nix-config/issues/448. Acceptance record: `.agents/artifacts/plans/2026-10-26-issue-448-slim-owner-boot.acceptance.md`. Task 3 creates it, Tasks 4–6 fill their cut rows and Task 7 completes it.
 
 ## Global Constraints
 
@@ -59,7 +59,7 @@ Task 7 — Pre-merge sweeps, threshold statement and the post-deploy protocol �
 
 ## Decisions
 
-- Task 1 per D1–D4, D14, D17; Task 2 per D15, D17; Task 3 per D5, D11, D12, D15, D16, D18; Task 4 per D5, D6, D16, D20; Task 5 per D5, D7, D16, D20; Task 6 per D5, D8, D16, D20; Task 7 per D12, D13, D15, D18, D19.
+- Task 1 per D1–D4, D14, D17; Task 2 per D15, D17; Task 3 per D5, D11, D12, D15, D16, D18; Task 4 per D5, D6, D16, D20; Task 5 per D5, D7, D16, D20; Task 6 per D5, D8, D16, D20; Task 7 per D12, D13, D15, D18, D19, D21, D22.
 - Not built: cut 4 (D9) and cut 5 (D10); Task 3 records their projections for information only (D16).
 - Planning appended D16 (projection formulas and the build-or-skip rule), D17 (attribution rules the spec left open), D18 (the anis-desktop transfer), D19 (the pre-merge sweep window) and D20 (the entry placeholder and the identifier pins).
 
@@ -70,3 +70,4 @@ Task 7 — Pre-merge sweeps, threshold statement and the post-deploy protocol �
 - Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no focus; no fallback.
 - Base SHA: ca6ba1ae2b37e56c1361a8656c29af1f39b89348; plan reviewed at 5d14b3d9.
 - Findings: 4 accepted (Blocking R1 → Task 7 Step 2b and D21; Blocking R2 → Task 7 post-deploy step 1 and D22; Should-fix R3 → Task 2's pooling fixture; Should-fix R4 → Task 4's ledger-on-entry wording), 0 rejected, 0 deferred.
+- SDD's initial conflict scan (reviewer, read-only): 5 plan conflicts (C1–C5) resolved in the plan before execution; no member unreadable.

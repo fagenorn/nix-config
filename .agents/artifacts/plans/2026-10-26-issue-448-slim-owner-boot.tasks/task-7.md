@@ -49,6 +49,8 @@ The sweep's threshold step compares its singles against the replay's `ORIGIN.thr
 
 - [ ] **Step 3: Write `## Pre-merge sweep`**
 
+Record, as fenced blocks in the section, the exact Step 2 sweep command and the full source of Step 2b's `pair200.py`, so the post-deploy protocol can be followed without this plan or the scratch copy.
+
 For each host, give: the window, the lineage count, the identity check, and one table row per threshold arm (spec, $ per delivered issue, mean saving, lower bound, verdict). Name the chosen arm, the threshold row whose verdict is `chosen`, or state `none chosen`. Add each host's Step 2b paired verdict against 200,000 (mean saving, lower bound, keep), or `chosen arm is 200,000`.
 
 Then the statement, with each host's reason drawn from its rows: "The threshold stays 200,000 in this PR: the observed boots are not yet cut, and D13 lowers it only in a follow-up commit citing issue 448, after both hosts' post-deploy sweeps choose a lower arm against 200,000." Two cases change that wording:
@@ -59,7 +61,7 @@ Then the statement, with each host's reason drawn from its rows: "The threshold 
 
 State, as numbered steps a later session follows without this plan:
 
-1. **Window start `W` (Phase-5 R2).** A generation activated after the merge can still be built from an older checkout (`just switch` builds the current checkout's flake), so time alone does not prove deployment. On each host `h`, list system generations with their activation times (`darwin-rebuild --list-generations` on mbp; `ssh anis-desktop 'wsl -e bash -l -c "nixos-rebuild list-generations"'` on anis-desktop) and, newest first, find the earliest generation whose closure installs the merged skills: its `-home-manager-files` store path (`nix-store --query --requisites <generation link> | grep -- '-home-manager-files$'`) has `.claude/skills/sdd/SKILL.md` and `.claude/skills/from-issue/SKILL.md` containing every built cut's pinned phrase (the `SlimBootContractsTest` strings at the merge commit; `grep -F`). `W_h` is that generation's activation time. Record per host the generation number, `W_h` and the matched store path. A host with no such generation has not deployed: record nothing and run again later. `W` is the later of the `W_h`, as RFC 3339 UTC.
+1. **Window start `W` (Phase-5 R2).** A generation activated after the merge can still be built from an older checkout (`just switch` builds the current checkout's flake), so time alone does not prove deployment. On each host `h`, list system generations with their activation times (`darwin-rebuild --list-generations` on mbp; `ssh anis-desktop 'wsl -e bash -l -c "nixos-rebuild list-generations"'` on anis-desktop) and, newest first, find the earliest generation whose closure installs the merged skills: its `-home-manager-files` store path (`nix-store --query --requisites <generation link> | grep -- '-home-manager-files$'`) contains, for every built cut, each `SlimBootContractsTest` pin at the merge commit in the installed copy of the file that test reads (`.claude/skills/<skill>/<file>`, e.g. `from-issue/resume-pack.md`, `sdd/SKILL.md`, `orchestrate-issues/SKILL.md`), matched after collapsing whitespace as the tests do. `W_h` is that generation's activation time. Record per host the generation number, `W_h` and the matched store path. A host with no such generation has not deployed: record nothing and run again later. `W` is the later of the `W_h`, as RFC 3339 UTC.
 2. **Copy and measure.** Copy anis-desktop with § Method's scripts and commands, passing `W` as the window start. Then run `just agent-costs --report boot --format json --events-since W --events-before <now> --projects-dir "mbp=$HOME/.claude/projects" --projects-dir "anis-desktop=<copy>" --top 100000`.
 3. **Close rule.** Every host × phase-group stratum that holds a `fresh` boot in § Baseline must hold 5 or more `fresh` boots in the window, and the window 20 or more in all. Otherwise record nothing and run again later.
 4. **Weights.** Copy from § Baseline, for each such stratum `(h, g)`: the count `n0(h, g)` and the mean B without tool schemas `m0(h, g)`. Add `N0 = Σ n0` and the headline `M0` (host `all`, `fresh`, `all`).
@@ -72,7 +74,7 @@ State, as numbered steps a later session follows without this plan:
 
 - [ ] **Step 5: Fill the evidence columns**
 
-Find each built cut's commit with `git log --format=%h -1 --grep '<its commit subject>'` (the subjects are in Tasks 4–6, Step 5). Each Built cell `built; net <n> bytes` becomes `built at <12-char sha>; net <n> bytes`. Then run **Skill contract tests** and **Budget**, and record their results.
+Find each built cut's commit with `git log --abbrev=12 --format=%h -1 --grep '<its commit subject>'` (the subjects are in Tasks 4–6, Step 5). Each Built cell `built; net <n> bytes` becomes `built at <12-char sha>; net <n> bytes`. Then run **Skill contract tests** and **Budget**, and record their results.
 
 - **`AC1`**
   - Observed: `in final verification (just agent-workflow-tests runs tests/test_agent_boot_report.py: BootReportTest, HostsTest)`.
