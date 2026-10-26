@@ -94,7 +94,7 @@ Judging an accepted match, in order (D2):
    in the base policy's `authorized_owners`, or the repository has a derived row
    that the row check confirmed. Checked before the match, as the push arm does
    now.
-2. **Branch name.** The slot value passes the branch arm's name rule: not empty,
+2. **Branch name.** The slot value passes the push branch arm's name rule: not empty,
    no leading dash, no `:` or `+`, no unsafe character, no namespace component
    (`refs/heads/refs/heads/x` is refused), and `git check-ref-format --branch`.
    A failure is a text refusal that prints the accepted forms.
@@ -110,8 +110,8 @@ Judging an accepted match, in order (D2):
 There is no forge lookup: no protection read and no merged-PR check. GitHub
 refuses to delete a protected branch on its own side, and ship-issue runs the
 deletion only after it has verified the merge and seen a non-empty
-`git ls-remote --heads origin <branch>`. Like the branch arm, the guard does
-not judge *which* feature branch is named (D2).
+`git ls-remote --heads origin <branch>`. Like the push branch arm, the guard
+does not judge *which* feature branch is named (D2).
 
 Verdicts the plan pins (the default branch is `main`; in the integration
 repository the integration branch is `dev`):
@@ -149,9 +149,13 @@ The guard README's `## Adjudicated verbs` changes in four places:
 - the refusal taxonomy lists the permanent-branch deletion among the state
   refusals.
 
-The skill-text edits replace one command in place in each document, so the
-Instruction Budget gate's measured bytes grow by only the `refs/heads/` prefix
-twice. That stays inside the ceilings' slack, and no ceiling is raised.
+The two spelling edits add the `refs/heads/` prefix twice, 22 bytes. Measured
+at the base, that puts the `ship-owner` profile's conditional load 5 bytes over
+its ceiling on both hosts. So the same edits trim at least that much from the
+lines they touch. For example, HUMAN-GATE's "only when … is non-empty" becomes
+"if … is non-empty", which passes the gate in a trial. `just
+agent-instruction-budget` passes without the raise label, and no ceiling moves
+(D7).
 
 ### Remainder resume gating (AC3)
 
@@ -181,6 +185,10 @@ A parked remainder takes the attempt lane's parked verdict:
   is unchanged);
 - a summary that reads `suspended`, its `blocked_on` and `custody.kind`
   `remainder`.
+
+There is no schema change and no migration. A live ledger's remainder that is
+already parked on a gated cause simply stops being relaunched by undirected
+sweeps from the next sweep on.
 
 A parked suspension arms no deadline, so once nothing else runs the sweep ends
 in `finalize`. The orchestrate report already renders
@@ -213,8 +221,9 @@ Effect:
 - `/from-issue <n> --auto` still always clears it: every direct invocation is
   one direction.
 
-Accepted corner: a gated record that was parked at session start but got no
-dispatch slot on the first sweep stays parked for that session. Its
+Accepted corner: a gated record that was parked at session start but was not
+dispatched on the first sweep stays parked for that session. That happens when
+no slot was free, or when the first step refused before `control` answered. Its
 `finalize` summary carries the re-entry line. Nothing loops and nothing is
 misreported (D4).
 
@@ -226,7 +235,7 @@ Docs:
   per-sweep value;
 - no skill text changes.
 
-### Acceptance evidence (AC1)
+### Acceptance evidence
 
 AC1 ("completes `delete_remote_branch` under the guard with no human step") is
 met at merge by composition, with no `needs-verification` hold (D5). Four links
@@ -239,6 +248,11 @@ make it up:
    removes the named branch and leaves a tag of the same name alone.
 4. The rest of the chain is already evidenced: the observed `r1:4` reached
    `delivery_complete` once the branch was gone.
+
+AC2 is the flipped `branch.remote` row, which the guard's shape table and the
+shell-example site check both read. AC3 is the composition of two seams: the
+engine parks a gated remainder under an undirected sweep, and `orchestrate-control`
+sends an undirected request on every sweep after the first.
 
 ## Test seams
 
@@ -266,7 +280,9 @@ make it up:
   - An auto-resumable cause (`owner_unavailable`) resumes without direction.
 
   The existing 190 tests that depend on control resuming the fixture's
-  `human_gate` remainder send `human_directed: true` (D6).
+  `human_gate` remainder send `human_directed: true` (D6). That includes the
+  absent-worktree `finalize` test, which exercises the resume ladder's worktree
+  check.
 - **orchestrate-control facts suite** (`tests/test_orchestrate_control.py`,
   `OrchestrateWorld` request capture). For an explicit session, the control
   request carries `human_directed` true on a `first_sweep` step and false
@@ -293,8 +309,9 @@ make it up:
 | ID | Choice | Grounding | Rejected alternative |
 |----|--------|-----------|----------------------|
 | D1 | Remote deletion gets a guard-owned push form `git push origin --delete refs/heads/<branch>` (third push form, id `delete`, push properties inherited); ship-issue spells exactly it. This reverses 351 D2's rejection of a remote-delete arm | Issue's observed nodocom run: the refusal class 351 D2 found absent has now occurred; FORM_TABLE is the one home for spellings (#402); the tag arm is precedent for a glued qualified slot; git-push(1) says a bare `<dst>` that names one remote ref is pushed to that ref | Bare `--delete <branch>`: git deletes a remote tag that the bare name alone matches. `gh api -X DELETE` or another unguarded spelling: unadjudicated (issue). `:<branch>` refspec: the refspec refusal would have to be carved open |
-| D2 | The delete arm checks standing authorization, the branch arm's name rule, a resolvable default branch, and refuses the default or declared integration branch as a state refusal (`refusing to delete the permanent branch <b>`); no forge lookup | Issue fix direction ("owned-repo and non-protected-branch checks like the push arm"); #116 D5's permanent-branch set; GitHub refuses protected-branch deletion server-side; ship-issue deletes only after verifying the merge and `ls-remote` | Protection or merged-PR lookup: a forge round trip per cleanup that fails closed without gh auth or network, re-parking cleanup on `human_gate`, the failure this issue removes |
+| D2 | The delete arm checks standing authorization, the push branch arm's name rule, a resolvable default branch, and refuses the default or declared integration branch as a state refusal (`refusing to delete the permanent branch <b>`); no forge lookup | Issue fix direction ("owned-repo and non-protected-branch checks like the push arm"); #116 D5's permanent-branch set; GitHub refuses protected-branch deletion server-side; ship-issue deletes only after verifying the merge and `ls-remote` | Protection or merged-PR lookup: a forge round trip per cleanup that fails closed without gh auth or network, re-parking cleanup on `human_gate`, the failure this issue removes |
 | D3 | The remainder lane takes the attempt lane's consent rule: `human_gate`/`external` resume only under `human_directed`, other causes as today; a parked remainder is the no-dispatch `terminal` verdict with an unchanged ledger; the gated set has one home beside `AUTO_RESUMABLE_BLOCKED_ON`; the delivery policy takes `human_directed` (direct: true) | 190's deferred question; the attempt lane's suspended-lane predicate and 198 D6/T2; HUMAN-GATE "Silence is not a grant … stay suspended (`--auto`)"; issue: "instead of finalizing with a human-gate re-entry line" | Remainder-only rule (control never clears, only direct does): a second consent rule beside the attempt lane's, and a re-invoked explicit session could not resume the remainder this fix unblocks |
 | D4 | `orchestrate-control` sends `human_directed = session.human_directed and first_sweep`, so an explicit session's direction is spent on its first sweep in both lanes; a gated record not admitted on that sweep stays parked for the session and is reported with its re-entry line | The policy docstring: direction is "a person asked for this re-entry by name"; a direct owner's direction is one call per invocation; `first_sweep` already gates per-session work (contracts); the investigation note on every-sweep direction | Direction on every sweep (today): relaunches gated records each sweep up to the stall bound. A direction timestamp in the request and ledger: interface and schema changes for the capacity corner alone. Using the stall counter as consent: conflates progress with consent |
 | D5 | AC1 is met at merge by composition: the shape table on the exact spelling, Gate 2's existing grant, a git-level test that the form deletes only a branch, and the observed `r1:4` completion; no `needs-verification` hold | Issue § Observed; criteria_shape doubt resolved by testing the one failing link offline | A live-run hold (351 D10 style): the trigger, gh leaving the remote branch, is rare and unscheduled, so the issue would stay open indefinitely |
 | D6 | Test seams: the fixture's `branch.remote` row flips to exit 0 in all three variants and the bare spelling becomes a refused guard-only invocation shape; existing 190 remainder tests that rely on control resuming a `human_gate` remainder send `human_directed: true` | #351 fixture split (skill forms vs guard-only rows); the-bar "Tests that can fail": the flipped tests now state the consent they exercise | Deleting the `branch.remote` row: AC2 asks for a shape test on the shared spelling. Leaving those 190 tests on `false`: they would assert the loop this issue removes |
+| D7 | Skill-text growth from the new spelling is paid for inside the touched ship-issue lines, so the Instruction Budget gate passes with no ceiling change and no raise label | Trial at base `b3236d3f`: +22 bytes put `ship-owner` conditional 5 bytes over its ceiling on claude and codex, and a 7-byte trim passes; the user's rule that only they apply `instruction-budget-raise` | Raising the ceiling: needs the user-only label. Shortening the form back to the bare spelling: reopens the tag hazard D1 closes |
