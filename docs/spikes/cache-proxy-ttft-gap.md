@@ -270,6 +270,6 @@ Issue 450 timed run: estimate 9.7 ms, 95% CI [-90.8, 149.2] ms, outside the +100
 
 ### Routing verdict
 
-Issue 450 routing default: opt-in
+Issue 450 routing default: on
 
-The CI's upper end, 149.2 ms, is over the +100 ms bound, so routing stays opt-in with CLAUDE_CACHE_PROXY=1 (AC4). The budget-line export and the `/dev/tcp` probe ship either way.
+Under the rule committed in § Method, routing is not within the bound: the CI's upper end, 149.2 ms, is over +100 ms, so that rule alone would keep routing opt-in. That result stands as recorded, and the rule is unmet. At 100 pairs the 95% CI is about ±120 ms wide, so the rule cannot pass at this sample size even when the true difference is zero. After the measurement, the user chose a looser rule (spec decision D18): routing is on by default when the estimate, the median of d, is within +100 ms. The estimate is 9.7 ms, so `claude` routes by default and `CLAUDE_CACHE_PROXY=0` opts a launch out (AC4). The budget-line export and the `/dev/tcp` probe ship either way.
