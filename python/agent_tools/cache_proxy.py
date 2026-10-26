@@ -236,14 +236,22 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._keepalive_error("observe", error)
 
     def _track_call(self, name, *args):
-        """Call a method of the held track; one that raises is logged and the track dropped."""
+        """Call a method of the held track; one that raises is logged and the track dropped.
+
+        A dropped track is still told its request is done, unless `done` itself raised, so
+        its flight cannot keep the session active (D32)."""
         if self._track is None:
             return None
         try:
             return getattr(self._track, name)(*args)
         except Exception as error:
             self._keepalive_error("track", error)
-            self._track = None
+            track, self._track = self._track, None
+            if name != "done":
+                try:
+                    track.done("track_error")
+                except Exception as error:
+                    self._keepalive_error("track", error)
             return None
 
     def _reject(self, started, status, kind, message):

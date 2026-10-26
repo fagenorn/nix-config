@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -643,6 +644,40 @@ class FailingPingTest(KeepaliveCase):
         self.assertEqual(len(upstream.requests), 1)
 
 
+    def test_a_ping_whose_headers_trickle_past_the_ping_timeout_is_cut_off_by_the_watchdog(self):
+        def slow_headers(sock, head, body):
+            """A status line, then one header every 50 ms for 2 s: each read returns well inside
+            the socket timeout, and the fake clock never moves, so only the watchdog stops it."""
+            try:
+                sock.sendall(b"HTTP/1.1 200 OK\r\n")
+                for number in range(40):
+                    time.sleep(0.05)
+                    sock.sendall(b"X-Slow-%d: 1\r\n" % number)
+                sock.sendall(b"Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}")
+            except OSError:
+                pass
+            return False
+
+        upstream = FakeUpstream(slow_headers)
+        self.addCleanup(upstream.close)
+        port = upstream.server.server_address[1]
+        self.keepalive = self.make(
+            lambda timeout: http.client.HTTPConnection("127.0.0.1", port, timeout=timeout))
+        self.busy_main()
+        self.exchange(AGENT_P)
+        [ping] = self.due(270)
+        with mock.patch.object(cache_keepalive, "PING_TIMEOUT", 0.3):
+            began = time.monotonic()
+            self.keepalive.send(ping)
+            self.assertLess(time.monotonic() - began, 1.5)
+        [line] = self.events("ping")
+        self.assertEqual((line["status"], line["outcome"], line["error"]),
+                         (200, "upstream_error", "ping exceeded 0.3 s"))
+        self.assertNotIn("usage", line)
+        self.assertEqual(self.ends(), [(self.handle(AGENT_P), "ping_failed", 1)])
+        self.assertEqual(self.due(270), [])
+
+
 class RunLoopTest(unittest.TestCase):
     def test_run_logs_tick_and_send_errors_and_keeps_running(self):
         stream = RecordingStream()
@@ -753,7 +788,7 @@ class KeepaliveProxyTest(unittest.TestCase):
         self.assertNotIn("conversation", request)
 
     def test_a_track_that_raises_is_dropped_and_the_response_still_arrives_whole(self):
-        log = self.log
+        done = []
 
         class Track:
             outcome, conversation, stop_reason = "tracked", "0123456789ab", None
@@ -768,7 +803,7 @@ class KeepaliveProxyTest(unittest.TestCase):
                 raise ValueError("tap")
 
             def done(self, outcome):
-                log.write("unexpected_done")
+                done.append(outcome)
 
             def log_fields(self):
                 return {"keepalive": "tracked"}
@@ -785,6 +820,23 @@ class KeepaliveProxyTest(unittest.TestCase):
                          ("keepalive_error", "track", "ValueError: tap"))
         self.assertEqual((request["event"], request["keepalive"]), ("request", "untracked"))
         self.assertEqual(len(self.stream.lines), 2)
+        self.assertEqual(done, ["track_error"])
+
+    def test_a_dropped_track_ends_its_flight_so_the_session_can_go_idle(self):
+        _, port, keepalive = self.start(sse_reply("end_turn"))
+        with mock.patch.object(cache_keepalive.SseReader, "feed",
+                               side_effect=RecursionError("deep")):
+            _, status, body = self.send(port, AGENT_P, encode(document()))
+        self.assertEqual((status, body), (200, sse("end_turn")))
+        error, request = self.stream.records(2)
+        self.assertEqual((error["event"], error["stage"], error["error"]),
+                         ("keepalive_error", "track", "RecursionError: deep"))
+        self.assertEqual(request["keepalive"], "untracked")
+        self.clock.advance(270)
+        self.assertEqual(keepalive.tick(), [])
+        ends = [json.loads(line) for line in self.stream.lines if '"keepalive_end"' in line]
+        self.assertEqual([(end["conversation"], end["reason"]) for end in ends],
+                         [(cache_keepalive.conversation_handle(SESSION, AGENT_P), "session_idle")])
 
     def test_a_request_rejected_before_its_body_is_read_has_no_keepalive_field(self):
         _, port, _ = self.start(json_reply)

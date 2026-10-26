@@ -10,6 +10,7 @@ due, `send` sends one, and `run` is the production loop, which only a command's 
 
 import http.client
 import json
+import socket
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -506,8 +507,28 @@ class Keepalive:
                 record.pending_since = self._clock()
 
     def _exchange(self, ping: Ping, sent: float, result: _PingResult) -> None:
+        """Send the ping and read its response, for at most `PING_TIMEOUT` overall (D31, D32).
+
+        A wall-clock watchdog shuts the connection's socket once `PING_TIMEOUT` has passed, which
+        ends any read still blocked, the response's headers and chunk framing included."""
         connection = self._connect(PING_TIMEOUT)
+        expired = threading.Event()
+
+        def expire() -> None:
+            expired.set()
+            if connection.sock is not None:
+                try:
+                    socket.socket.shutdown(connection.sock, socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+        watchdog = threading.Timer(PING_TIMEOUT, expire)
+        watchdog.daemon = True
+        watchdog.start()
         try:
+            connection.connect()
+            if expired.is_set():
+                raise TimeoutError("connected after the ping's bound")
             connection.putrequest(ping.method, ping.path, skip_host=True, skip_accept_encoding=True)
             for name, value in ping.headers:
                 connection.putheader(name, value)
@@ -516,12 +537,20 @@ class Keepalive:
             result.status = response.status
             result.ttfb_ms = round((self._clock() - sent) * 1000, 1)
             self._read(response, sent, result)
+        except UPSTREAM_FAILURES:
+            if not expired.is_set():
+                raise
         finally:
+            watchdog.cancel()
             connection.close()
+        if expired.is_set():
+            result.outcome, result.error = "upstream_error", f"ping exceeded {PING_TIMEOUT} s"
+            result.usage = {}
 
     def _read(self, response: http.client.HTTPResponse, sent: float, result: _PingResult) -> None:
-        """Read the ping's response to its end, for at most `PING_TIMEOUT` from `sent` overall:
-        the socket timeout bounds each read, not a body that keeps trickling bytes (D31)."""
+        """Read the ping's response to its end, for at most `PING_TIMEOUT` from `sent` on the
+        keepalive's clock, checked between reads: the socket timeout bounds each read, not a body
+        that keeps trickling bytes (D31); `_exchange`'s watchdog bounds a read still blocked."""
         content_type = response.getheader("Content-Type")
         reader = SseReader() if _is_stream(response.status, content_type,
                                            response.getheader("Content-Encoding")) else None
