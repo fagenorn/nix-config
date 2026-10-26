@@ -1925,6 +1925,9 @@ class SlimBootContractsTest(unittest.TestCase):
         setup = self.section(self.read(SDD), "## Setup", "### Cumulative delivery gate")
         self.assertIn("`--reviewed`", setup)
         self.assertIn("`<plan stem>.tasks/task-<N>.md`", setup)
+        delegated = self.section(self.read(DELEGATED_OWNER), "## Checks and Phases 6–7",
+                                 "## Generic delegate")
+        self.assertIn("`--reviewed`", delegated)
 
     CHECK_LAUNCH = ("workflow-state check-launch --repo-root <ledger_repo_root> "
                     "--run-id <run-id> --action-id <action_id>")
@@ -1943,7 +1946,7 @@ class SlimBootContractsTest(unittest.TestCase):
         position = -1
         for anchor in (ResumePackContractsTest.PACK, self.CHECK_LAUNCH,
                        "artifact-budget validate-report --boundary workflow-response --input -",
-                       "`reviewed_head_sha`", "`SKILL.md`'s index",
+                       "`reviewed_head_sha`",
                        "`git -C <worktree> rev-parse HEAD`", "`worktree.head`",
                        "`git -C <worktree> status --porcelain`", "`worktree.dirty_paths`",
                        "`## Files beside this one`"):
