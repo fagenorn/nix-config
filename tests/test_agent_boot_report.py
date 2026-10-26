@@ -215,5 +215,88 @@ class BootReportTest(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
 
 
+class HostsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.alpha = Path(self.tmp.name) / "alpha"
+        self.beta = Path(self.tmp.name) / "beta"
+        self.alpha.mkdir()
+        self.beta.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_hosts(self):
+        """alpha: issue 7's root owner and its second launch, and a launch 2 of issue 9; beta: the same run's issue 7
+        as a lone first launch, and a launch 2 of issue 8."""
+        alpha = Session(self.alpha)
+        g1 = alpha.call(None, 0, context=40_000, write=40_000, ttl="1h", bash=progress(1))
+        alpha.result(None, 5, g1, gate_reply("continue"))
+        two_call_boot(alpha, "a7", 100, issue=7, launch=1, phase=6, start=30_000, end=32_000)
+        two_call_boot(alpha, "a9", 300, issue=9, launch=2, phase=6, start=28_000, end=30_000)
+        alpha.write()
+        beta = Session(self.beta)
+        two_call_boot(beta, "b7", 100, issue=7, launch=1, phase=6, start=25_000, end=27_000)
+        two_call_boot(beta, "b8", 200, issue=8, launch=2, phase=6, start=40_000, end=42_000)
+        beta.write()
+
+    def test_each_root_is_its_own_host_and_all_pools_every_boot(self):
+        self.write_hosts()
+        document = report(f"alpha={self.alpha}", f"beta={self.beta}")
+        self.assertEqual(document["hosts"], [{"label": "alpha", "root": str(self.alpha)},
+                                             {"label": "beta", "root": str(self.beta)}])
+        self.assertEqual(
+            sorted((row["host"], row["issue"], row["cohort"]) for row in document["boots"]),
+            [("alpha", 7, "fresh"), ("alpha", 9, "fresh"), ("beta", 7, "spawned"),
+             ("beta", 8, "fresh")])
+        means = {(g["host"], g["cohort"], g["phase_group"]): (g["count"], g["b_mean"])
+                 for g in document["groups"]}
+        self.assertEqual(means[("alpha", "fresh", "all")], (2, 31_000))
+        self.assertEqual(means[("beta", "fresh", "all")], (1, 42_000))
+        self.assertEqual(means[("all", "fresh", "all")], (3, 104_000 / 3))
+        self.assertEqual(means[("all", "spawned", "6-7")], (1, 27_000))
+        self.assertEqual([g["host"] for g in document["groups"]],
+                         ["alpha"] * 2 + ["beta"] * 4 + ["all"] * 4)
+        pooled = next(g for g in document["groups"]
+                      if (g["host"], g["cohort"], g["phase_group"]) == ("all", "fresh", "all"))
+        # Call 0 of the three fresh boots starts at 30,000, 28,000 and 40,000 with 200 of
+        # harness and prompt each, so the schemas are (29,800 + 27,800 + 39,800) / 3 and each
+        # boot's B without schemas is 2,200; each grows 2,000 over its second call, 40 of it
+        # the first call's output and the rest unexplained.
+        self.assertEqual(pooled["b_without_schemas_mean"], 2_200)
+        self.assertEqual(pooled["buckets"], buckets(
+            tool_schemas=97_400 / 3, harness=100, prompt=100, assistant=40, unexplained=1_960))
+        self.assertEqual(document["unsplit"], {"alpha": 0, "beta": 0})
+
+    def test_an_unlabelled_root_takes_the_short_hostname(self):
+        self.write_hosts()
+        document = report(f"alpha={self.alpha}", self.beta)
+        self.assertEqual([host["label"] for host in document["hosts"]], ["alpha", HOST])
+
+    def test_bad_roots_are_usage_errors(self):
+        for args in (("--projects-dir", f"a={self.alpha}", "--projects-dir", f"a={self.beta}"),
+                     ("--projects-dir", f"all={self.alpha}"),
+                     ("--projects-dir", str(self.alpha), "--projects-dir", str(self.beta))):
+            with self.subTest(boot=args):
+                completed = costs("--format", "json", *args)
+                self.assertEqual((completed.returncode, completed.stdout), (2, ""))
+        for args in (("--projects-dir", f"a={self.alpha}"),
+                     ("--projects-dir", str(self.alpha), "--projects-dir", str(self.beta))):
+            with self.subTest(owners=args):
+                completed = subprocess.run(
+                    [sys.executable, "-m", "agent_tools.agent_costs", "--report", "owners",
+                     "--format", "json", *args], capture_output=True, text=True, check=False)
+                self.assertEqual((completed.returncode, completed.stdout), (2, ""))
+
+    def test_text_output_prints_one_table_per_host_and_one_for_all(self):
+        self.write_hosts()
+        completed = costs("--days", "0", "--projects-dir", f"alpha={self.alpha}",
+                          "--projects-dir", f"beta={self.beta}")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        for heading in ("Mean boot buckets, host alpha", "Mean boot buckets, host beta",
+                        "Mean boot buckets, all hosts"):
+            self.assertIn(heading, completed.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

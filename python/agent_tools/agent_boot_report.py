@@ -12,13 +12,14 @@ the contract.
 """
 
 import json
+import os
 import posixpath
 import re
 import socket
 import statistics
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
-from agent_tools.agent_costs import DISCLAIMER, human, print_table, scan_paths
+from agent_tools.agent_costs import DISCLAIMER, ROOT_LABEL, human, print_table, scan_paths
 from agent_tools.agent_owner_report import (
     _SAVED_TO,
     _TASK_FILE,
@@ -54,6 +55,25 @@ _MARKERS = ('"type":"api-request', '"isMeta":true')
 
 def short_hostname() -> str:
     return socket.gethostname().split(".", 1)[0]
+
+
+def parse_roots(values, *, hostname):
+    """The `(label, root)` pairs of the `[LABEL=]PATH` values, in argument order.
+
+    A bare path takes `hostname`. The label `all` is the pooled host's, so it is reserved,
+    and a label may be given only once.
+    """
+    roots, seen = [], set()
+    for value in values:
+        found = ROOT_LABEL.fullmatch(value)
+        label, path = found.groups() if found else (hostname, value)
+        if label == ALL:
+            raise ValueError(f"--projects-dir label {ALL!r} is reserved")
+        if label in seen:
+            raise ValueError(f"--projects-dir label {label!r} is given twice")
+        seen.add(label)
+        roots.append((label, Path(os.path.expanduser(path))))
+    return roots
 
 
 # ---- read keys -------------------------------------------------------------------

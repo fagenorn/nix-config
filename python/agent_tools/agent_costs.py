@@ -62,6 +62,7 @@ from pathlib import Path
 from agent_tools.canonical import telemetry_digest
 from agent_tools.model_pricing import usage_cost
 
+ROOT_LABEL = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)=(.+)")
 SCHEMA_VERSION = 1
 RECORD_KIND = "agent-cost-record"
 EXECUTION_TELEMETRY_SCHEMA_VERSION = 1
@@ -1745,15 +1746,22 @@ def _boot_report(ap, args, cutoff, event_start, event_end, executor_factory):
     """Run `--report boot`: split each fresh owner's boot into buckets, print text or JSON."""
     from agent_tools import agent_boot_report  # only for the boot report (issue 448)
 
-    root = Path(args.projects_dir)
-    if not root.is_dir():
-        sys.exit(f"no transcript root at {root}")
-    host = agent_boot_report.collect_host(
-        agent_boot_report.short_hostname(), root,
-        cutoff=event_start.timestamp() if event_start else cutoff, since=event_start,
-        before=event_end, executor_factory=executor_factory)
+    try:
+        roots = agent_boot_report.parse_roots(
+            args.projects_dir or [os.path.expanduser("~/.claude/projects")],
+            hostname=agent_boot_report.short_hostname())
+    except ValueError as error:
+        ap.error(str(error))
+    for _, root in roots:
+        if not root.is_dir():
+            sys.exit(f"no transcript root at {root}")
+    hosts = [
+        agent_boot_report.collect_host(
+            label, root, cutoff=event_start.timestamp() if event_start else cutoff,
+            since=event_start, before=event_end, executor_factory=executor_factory)
+        for label, root in roots]
     document = agent_boot_report.build_document(
-        [host], window=_window_label(args, cutoff, event_start, event_end))
+        hosts, window=_window_label(args, cutoff, event_start, event_end))
     if args.format == "json":
         json.dump(document, sys.stdout, separators=(",", ":"))
         print()
@@ -1806,8 +1814,10 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     ap.add_argument("--top", type=int, default=30, help="rows to print")
     ap.add_argument(
         "--projects-dir",
-        default=os.path.expanduser("~/.claude/projects"),
-        help="transcript root",
+        action="append",
+        default=None,
+        metavar="[LABEL=]PATH",
+        help="transcript root (default ~/.claude/projects); repeatable, as LABEL=PATH, only with --report boot",
     )
     ap.add_argument(
         "--artifacts",
@@ -1862,6 +1872,11 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
             ap.error("--report boot does not take --artifacts")
         if args.strata != "claude":
             ap.error("--report boot reads Claude transcripts only")
+    if not boot_report:
+        if args.projects_dir and (len(args.projects_dir) > 1
+                                  or ROOT_LABEL.fullmatch(args.projects_dir[0])):
+            ap.error("--projects-dir is repeatable and takes LABEL=PATH only with --report boot")
+        args.projects_dir = (args.projects_dir or [os.path.expanduser("~/.claude/projects")])[0]
     if (args.policy or args.sweep) and not owners_report:
         ap.error("--policy and --sweep are available only with --report owners")
     if (args.eval_results is None) != (args.eval_case is None):
