@@ -193,18 +193,18 @@ cache_proxy_health() {
   } 3<>"/dev/tcp/$1/$2"
 }
 
-# Routes this launch through the cache proxy only when CLAUDE_CACHE_PROXY=1
-# (#438) and the proxy's health check answers, and sends it direct otherwise.
-# Unset, empty or 0 runs no probe and unsets a base URL equal to the proxy URL,
-# which a routed parent passed down; any other value is refused. With 1, a base
-# URL the caller set to anything but the proxy is the caller's own endpoint and
-# is left alone, and one equal to the proxy URL is decided again. Silent except
-# for the refusal: stdout and stderr belong to claude.
+# Routes this launch through the cache proxy while the proxy's health check
+# answers, unless CLAUDE_CACHE_PROXY=0 (on by default since #450), and sends it
+# direct otherwise. 0 runs no probe and unsets a base URL equal to the proxy URL,
+# which a routed parent passed down; any value but unset, empty, 0 or 1 is
+# refused. Otherwise a base URL the caller set to anything but the proxy is the
+# caller's own endpoint and is left alone, and one equal to the proxy URL is
+# decided again. Silent except for the refusal: stdout and stderr belong to claude.
 route_cache_proxy() {
   case "${CLAUDE_CACHE_PROXY:-}" in
-    1) ;;
-    "" | 0)
-      # Not opted in: no probe, and a proxy URL inherited from an opted-in parent goes too.
+    "" | 1) ;;
+    0)
+      # Opted out: no probe, and a proxy URL inherited from a routed parent goes too.
       if [ -n "$CACHE_PROXY_URL" ] && [ "${ANTHROPIC_BASE_URL:-}" = "$CACHE_PROXY_URL" ]; then
         unset ANTHROPIC_BASE_URL
       fi
