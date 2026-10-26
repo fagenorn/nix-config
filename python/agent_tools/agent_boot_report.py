@@ -351,16 +351,18 @@ class _Boot:
             chunks.append((bucket, key, result.size))
         return chunks
 
+    def _skill_metas(self, metas):
+        """The meta records of `metas` that carry the body a Skill call loaded."""
+        return [value for value in metas
+                if self.names.get(value.get("sourceToolUseID")) == "Skill"]
+
     def _meta_chunks(self, metas):
-        chunks = []
-        for value in metas:
-            tool_id = value.get("sourceToolUseID")
-            if self.names.get(tool_id) == "Skill":
-                skill = self.inputs.get(tool_id, {}).get("skill")
-                chunks.append(("skill_bodies", skill, len(_meta_text(value))))
-        return chunks
+        return [("skill_bodies", self.inputs.get(value.get("sourceToolUseID"), {}).get("skill"),
+                 len(_meta_text(value))) for value in metas]
 
     def _request_chunks(self, requests, metas):
+        """The blobs not yet counted, less assistant messages (the previous call's output,
+        already charged) and text equal to a Skill meta message of the segment."""
         skipped = {_meta_text(value) for value in metas}
         chunks = []
         for tail in requests:
@@ -369,7 +371,7 @@ class _Boot:
                     continue
                 self.counted.add(digest)
                 message = self.blobs.get(digest)
-                if message is None:
+                if message is None or message.get("role") == "assistant":
                     continue
                 for block in _blocks(message):
                     if block.get("type") == "text" and isinstance(block.get("text"), str):
@@ -389,20 +391,25 @@ class _Boot:
         return chunks
 
     def grow(self, index):
-        """Attribute the growth from call `index - 1` to call `index`."""
+        """Attribute the growth from call `index - 1` to call `index`.
+
+        The segment's chunks are classified even when the growth is not positive, so its
+        reads, read-back origins, counted blobs and schema size carry to later calls; the
+        growth itself is then `unexplained`.
+        """
         before, call = self.calls[index - 1], self.calls[index]
         growth = call.context - before.context
+        low, high = before.first_line, call.first_line
+        metas = self._skill_metas(_between(self.metas, low, high))
+        chunks = (self._result_chunks(low, high) + self._meta_chunks(metas)
+                  + self._request_chunks(_between(self.requests, low, high), metas)
+                  + self._shape_chunks(_between(self.shapes, low, high)))
         if growth <= 0:
             self.buckets["unexplained"] += growth
             return
         assistant = min(growth, before.usage["output_tokens"])
         self.buckets["assistant"] += assistant
         residual = growth - assistant
-        low, high = before.first_line, call.first_line
-        metas = [value for number, value in self.metas if low < number < high]
-        chunks = (self._result_chunks(low, high) + self._meta_chunks(metas)
-                  + self._request_chunks(_between(self.requests, low, high), metas)
-                  + self._shape_chunks(_between(self.shapes, low, high)))
         total = sum(chars for _, _, chars in chunks)
         if residual <= 0:
             return

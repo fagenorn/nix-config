@@ -168,6 +168,55 @@ class BootReportTest(unittest.TestCase):
         self.assertEqual(document["unsplit"], {HOST: 1})
         self.assertIsNone(document["observed_chars_per_token"])
 
+    def gated_boot(self, session, seconds, context):
+        gate = session.call("o1", seconds, context=context, write=1_000,
+                            bash=progress(6, action_id="7:1:2"))
+        session.result("o1", seconds + 1, gate, gate_reply("continue", launch=2))
+        session.write()
+        [row] = report(self.root)["boots"]
+        self.assertEqual(sum(row["buckets"].values()), row["b"])
+        return row
+
+    def test_assistant_text_in_a_request_blob_is_not_charged_again(self):
+        session = Session(self.root)
+        session.child("o1", tool_use_id=dispatch(session, 0))
+        opening(session, "o1")
+        c0 = session.call("o1", 100, context=30_000, write=30_000,
+                          tool=("Read", {"file_path": f"{PLANS}/2026-10-26-x.md"}))
+        session.result("o1", 101, c0, "R" * 1_000)
+        session.request("o1", [session.blob("o1", "assistant", [
+            {"type": "text", "text": "W" * 1_000}])])
+        row = self.gated_boot(session, 110, 31_040)
+        self.assertEqual(row["buckets"], buckets(
+            tool_schemas=29_800, harness=100, prompt=100, plan_reads=1_000, assistant=40))
+
+    def test_meta_text_not_from_a_skill_call_counts_where_its_blob_lands(self):
+        session = Session(self.root)
+        session.child("o1", tool_use_id=dispatch(session, 0))
+        opening(session, "o1")
+        c0 = session.call("o1", 100, context=30_000, write=30_000, bash="ls /r")
+        session.result("o1", 101, c0, "L" * 1_000)
+        session.skill_body("o1", 102, c0, "m" * 1_000)
+        session.request("o1", [session.blob("o1", "user", [
+            {"type": "text", "text": "m" * 1_000}])])
+        row = self.gated_boot(session, 110, 32_040)
+        self.assertEqual(row["buckets"], buckets(
+            tool_schemas=29_800, harness=1_100, prompt=100, commands=1_000, assistant=40))
+
+    def test_a_shrinking_segment_still_records_its_reads(self):
+        session = Session(self.root)
+        session.child("o1", tool_use_id=dispatch(session, 0))
+        opening(session, "o1")
+        plan = ("Read", {"file_path": f"{PLANS}/2026-10-26-x.md"})
+        c0 = session.call("o1", 100, context=30_000, write=30_000, tool=plan)
+        session.result("o1", 101, c0, "R" * 1_000)
+        c1 = session.call("o1", 110, context=29_000, write=1_000, tool=plan)
+        session.result("o1", 111, c1, "R" * 1_000)
+        row = self.gated_boot(session, 120, 30_040)
+        self.assertEqual(row["buckets"], buckets(
+            tool_schemas=29_800, harness=100, prompt=100, rereads=1_000, assistant=40,
+            unexplained=-1_000))
+
     def test_cohorts_follow_lineage_position_and_launch_ordinal_and_groups_pool_them(self):
         session = Session(self.root)
         g1 = session.call(None, 0, context=40_000, write=40_000, ttl="1h", bash=progress(1))
