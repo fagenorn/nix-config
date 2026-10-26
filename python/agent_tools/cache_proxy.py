@@ -1,11 +1,12 @@
 """`cache-proxy`: a loopback pass-through from Claude Code to the Anthropic API (#422).
 
-`cache-proxy --port N [--upstream URL] [--keepalive]` binds 127.0.0.1 only and serves until
-killed. It forwards requests and responses unchanged apart from `Host` and hop-by-hop headers,
-answers `GET /_proxy/health` itself, and writes one JSON line per forwarded request to stderr.
-With `--keepalive` it also replays idle subagent conversations' last requests with
-`max_tokens=1` (`agent_tools.cache_keepalive`, #423), and its forwarding changes only as
-described there.
+`cache-proxy --port N [--upstream URL] [--keepalive] [--reorder]` binds 127.0.0.1 only and
+serves until killed. It forwards requests and responses unchanged apart from `Host` and
+hop-by-hop headers, answers `GET /_proxy/health` itself, and writes one JSON line per forwarded
+request to stderr. With `--keepalive` it also replays idle subagent conversations' last requests
+with `max_tokens=1` (`agent_tools.cache_keepalive`, #423); with `--reorder` it reorders each
+subagent's first user message (`agent_tools.subagent_prefix`, #429) before the keepalive sees the
+request. Its forwarding changes only as those modules describe.
 """
 
 from __future__ import annotations
@@ -139,10 +140,11 @@ class ProxyServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     request_queue_size = BACKLOG
 
-    def __init__(self, port: int, upstream: Upstream, log: LineLog, keepalive=None):
+    def __init__(self, port: int, upstream: Upstream, log: LineLog, keepalive=None, reorder=None):
         self.upstream = upstream
         self.log = log
         self.keepalive = keepalive
+        self.reorder = reorder
         self.tls = upstream_tls(upstream)
         super().__init__((HOST, port), ProxyHandler)
 
@@ -166,6 +168,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self._reusable = False
         self._track = None
         self._observed = False
+        self._reorder_outcome = None
 
     def finish(self):
         self._close_upstream()
@@ -212,6 +215,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         fields = {"method": self.command, "path": self.path, "status": status,
                   "upstream_conn": label, "ttfb_ms": ttfb_ms, "duration_ms": elapsed_ms(started),
                   "bytes": relay.written, "outcome": relay.outcome}
+        if self._reorder_outcome is not None:
+            fields["reorder"] = self._reorder_outcome
         if relay.error is not None:
             fields["error"] = relay.error
         if relay.error_body:
@@ -234,6 +239,23 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._track = self.server.keepalive.observe(self.command, self.path, headers, body)
         except Exception as error:
             self._keepalive_error("observe", error)
+
+    def _reorder(self, headers, body):
+        """The body, headers and outcome to forward (#429 D17, D20). A transform that raises, or
+        that returns an outcome outside its closed set, forwards the original bytes and headers
+        and is logged at once."""
+        # Imported here because subagent_prefix imports cache_keepalive, which imports this module.
+        from agent_tools.subagent_prefix import OUTCOMES
+        try:
+            forwarded, sent, outcome = self.server.reorder.transform(self.command, self.path,
+                                                                     headers, body)
+            if outcome not in OUTCOMES:
+                raise ValueError(f"unknown reorder outcome {outcome!r}")
+        except Exception as error:
+            self.server.log.write("reorder_error", method=self.command, path=self.path,
+                                  error=f"{type(error).__name__}: {error}")
+            return body, headers, "error"
+        return forwarded, sent, outcome
 
     def _track_call(self, name, *args):
         """Call a method of the held track; one that raises is logged and the track dropped.
@@ -306,7 +328,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle(self):
         started = time.monotonic()
-        self._track, self._observed = None, False
+        self._track, self._observed, self._reorder_outcome = None, False, None
         body = self._read_body(started)
         if body is None:
             return
@@ -317,6 +339,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._answer(405, b"", [("Allow", "GET")])
             return
         headers = self._upstream_headers()
+        if self.server.reorder is not None:
+            body, headers, self._reorder_outcome = self._reorder(headers, body)
         self._observe(headers, body)
         if self._track is not None:
             headers = self._track.headers
@@ -421,6 +445,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--keepalive", action="store_true",
                         help="replay idle subagent conversations' last requests with "
                              "max_tokens=1 to keep their prompt cache warm (#423)")
+    parser.add_argument("--reorder", action="store_true",
+                        help="reorder each Claude Code subagent's first user message so sibling "
+                             "subagents share a cached start-up prefix (#429)")
     return parser
 
 
@@ -434,15 +461,21 @@ def main(argv: list[str] | None = None) -> int:
         keepalive = cache_keepalive.Keepalive(
             log, functools.partial(open_upstream, args.upstream, upstream_tls(args.upstream)),
             time.monotonic)
+    reorder = None
+    if args.reorder:
+        # Imported here because subagent_prefix imports cache_keepalive, which imports this module.
+        from agent_tools import subagent_prefix
+        reorder = subagent_prefix.SubagentPrefix()
     try:
-        server = ProxyServer(args.port, args.upstream, log, keepalive)
+        server = ProxyServer(args.port, args.upstream, log, keepalive, reorder)
     except OSError as error:
         log.write("bind_failed", host=HOST, port=args.port, error=f"{type(error).__name__}: {error}")
         return 1
     with server:
-        flag = {"keepalive": True} if keepalive is not None else {}
+        flags = {name: True for name, part in (("keepalive", keepalive), ("reorder", reorder))
+                 if part is not None}
         log.write("listening", host=HOST, port=server.server_address[1],
-                  upstream=args.upstream.url, **flag)
+                  upstream=args.upstream.url, **flags)
         stop = threading.Event()
         if keepalive is not None:
             threading.Thread(target=keepalive.run, args=(stop,), daemon=True).start()
