@@ -1,8 +1,11 @@
 """`cache-proxy`: a loopback pass-through from Claude Code to the Anthropic API (#422).
 
-`cache-proxy --port N [--upstream URL]` binds 127.0.0.1 only and serves until killed. It
-forwards requests and responses unchanged apart from `Host` and hop-by-hop headers, answers
-`GET /_proxy/health` itself, and writes one JSON line per forwarded request to stderr.
+`cache-proxy --port N [--upstream URL] [--keepalive]` binds 127.0.0.1 only and serves until
+killed. It forwards requests and responses unchanged apart from `Host` and hop-by-hop headers,
+answers `GET /_proxy/health` itself, and writes one JSON line per forwarded request to stderr.
+With `--keepalive` it also replays idle subagent conversations' last requests with
+`max_tokens=1` (`agent_tools.cache_keepalive`, #423), and its forwarding changes only as
+described there.
 """
 
 from __future__ import annotations
@@ -10,6 +13,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import functools
 import http.client
 import http.server
 import json
@@ -73,6 +77,19 @@ def parse_upstream(url: str) -> Upstream:
                     default_port if port is None else port, shown)
 
 
+def upstream_tls(upstream: Upstream) -> ssl.SSLContext | None:
+    return ssl.create_default_context() if upstream.scheme == "https" else None
+
+
+def open_upstream(upstream: Upstream, tls: ssl.SSLContext | None,
+                  timeout: float) -> http.client.HTTPConnection:
+    """An unconnected connection to the upstream; the caller connects it."""
+    if upstream.scheme == "https":
+        return http.client.HTTPSConnection(upstream.host, upstream.port, timeout=timeout,
+                                           context=tls)
+    return http.client.HTTPConnection(upstream.host, upstream.port, timeout=timeout)
+
+
 def dropped_names(message: http.client.HTTPMessage) -> set[str]:
     """Header names a proxy must not forward: hop-by-hop, `proxy-*` and any `Connection` lists."""
     names = set(HOP_BY_HOP)
@@ -122,10 +139,11 @@ class ProxyServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     request_queue_size = BACKLOG
 
-    def __init__(self, port: int, upstream: Upstream, log: LineLog):
+    def __init__(self, port: int, upstream: Upstream, log: LineLog, keepalive=None):
         self.upstream = upstream
         self.log = log
-        self.tls = ssl.create_default_context() if upstream.scheme == "https" else None
+        self.keepalive = keepalive
+        self.tls = upstream_tls(upstream)
         super().__init__((HOST, port), ProxyHandler)
 
     def handle_error(self, request, client_address):
@@ -146,6 +164,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         super().setup()
         self._upstream_conn = None
         self._reusable = False
+        self._track = None
+        self._observed = False
 
     def finish(self):
         self._close_upstream()
@@ -164,12 +184,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _connect_upstream(self):
         self._close_upstream()
-        upstream = self.server.upstream
-        if upstream.scheme == "https":
-            conn = http.client.HTTPSConnection(upstream.host, upstream.port,
-                                               timeout=UPSTREAM_TIMEOUT, context=self.server.tls)
-        else:
-            conn = http.client.HTTPConnection(upstream.host, upstream.port, timeout=UPSTREAM_TIMEOUT)
+        conn = open_upstream(self.server.upstream, self.server.tls, UPSTREAM_TIMEOUT)
         self._upstream_conn = conn
         conn.connect()
 
@@ -201,7 +216,43 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             fields["error"] = relay.error
         if relay.error_body:
             fields["error_body"] = relay.error_body.decode("utf-8", "replace")
+        if self._observed:
+            fields.update(self._track_call("log_fields") or {"keepalive": "untracked"})
         self.server.log.write("request", **fields)
+
+    def _keepalive_error(self, stage, error):
+        self.server.log.write("keepalive_error", stage=stage,
+                              error=f"{type(error).__name__}: {error}")
+
+    def _observe(self, headers, body):
+        """Let the keepalive see the request about to be forwarded. Nothing it raises may break
+        forwarding, so a failure leaves the request untracked."""
+        if self.server.keepalive is None:
+            return
+        self._observed = True
+        try:
+            self._track = self.server.keepalive.observe(self.command, self.path, headers, body)
+        except Exception as error:
+            self._keepalive_error("observe", error)
+
+    def _track_call(self, name, *args):
+        """Call a method of the held track; one that raises is logged and the track dropped.
+
+        A dropped track is still told its request is done, unless `done` itself raised, so
+        its flight cannot keep the session active (D32)."""
+        if self._track is None:
+            return None
+        try:
+            return getattr(self._track, name)(*args)
+        except Exception as error:
+            self._keepalive_error("track", error)
+            track, self._track = self._track, None
+            if name != "done":
+                try:
+                    track.done("track_error")
+                except Exception as error:
+                    self._keepalive_error("track", error)
+            return None
 
     def _reject(self, started, status, kind, message):
         written = self._answer(status, envelope(kind, message),
@@ -245,16 +296,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             headers.insert(0, ("Host", self.server.upstream.host_header))
         return headers
 
-    def _send_request(self, body):
+    def _send_request(self, headers, body):
         conn = self._upstream_conn
         conn.putrequest(self.command, self.path, skip_host=True, skip_accept_encoding=True)
-        for name, value in self._upstream_headers():
+        for name, value in headers:
             conn.putheader(name, value)
         conn.endheaders(body or None)
         return conn.getresponse()
 
     def _handle(self):
         started = time.monotonic()
+        self._track, self._observed = None, False
         body = self._read_body(started)
         if body is None:
             return
@@ -264,27 +316,35 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             else:
                 self._answer(405, b"", [("Allow", "GET")])
             return
+        headers = self._upstream_headers()
+        self._observe(headers, body)
+        if self._track is not None:
+            headers = self._track.headers
         label = "reused" if self._can_reuse() else "new"
         self._reusable = False
         try:
             if label == "new":
                 self._connect_upstream()
-            response = self._send_request(body)
+            response = self._send_request(headers, body)
         except UPSTREAM_FAILURES as error:
             self._close_upstream()
             detail = f"{type(error).__name__}: {error}"
             written = self._answer(502, envelope("api_error", f"upstream request failed: {detail}"),
                                    [("Content-Type", "application/json")])
+            self._track_call("done", "upstream_error")
             self._log_request(started, 502, label, None,
                               Relay("upstream_error", detail, written=written))
             return
         ttfb_ms = elapsed_ms(started)
+        self._track_call("started", response.status, response.getheader("Content-Type"),
+                         response.getheader("Content-Encoding"))
         relay = self._relay(response)
         if relay.outcome == "complete":
             self._reusable = True
         else:
             self._close_upstream()
             self.close_connection = True
+        self._track_call("done", relay.outcome)
         self._log_request(started, response.status, label, ttfb_ms, relay)
 
     def _relay(self, response):
@@ -347,6 +407,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 relay.outcome = "client_closed"
                 return
             relay.written += len(chunk)
+            self._track_call("chunk", chunk)
 
     do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _handle
 
@@ -357,23 +418,40 @@ def build_parser() -> argparse.ArgumentParser:
                         help="loopback port to listen on (0 picks a free one)")
     parser.add_argument("--upstream", type=parse_upstream, default=DEFAULT_UPSTREAM,
                         help="origin to forward to (default: %(default)s)")
+    parser.add_argument("--keepalive", action="store_true",
+                        help="replay idle subagent conversations' last requests with "
+                             "max_tokens=1 to keep their prompt cache warm (#423)")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     log = LineLog(sys.stderr)
+    keepalive = None
+    if args.keepalive:
+        # Imported here because cache_keepalive imports this module's transport constants (D24).
+        from agent_tools import cache_keepalive
+        keepalive = cache_keepalive.Keepalive(
+            log, functools.partial(open_upstream, args.upstream, upstream_tls(args.upstream)),
+            time.monotonic)
     try:
-        server = ProxyServer(args.port, args.upstream, log)
+        server = ProxyServer(args.port, args.upstream, log, keepalive)
     except OSError as error:
         log.write("bind_failed", host=HOST, port=args.port, error=f"{type(error).__name__}: {error}")
         return 1
     with server:
-        log.write("listening", host=HOST, port=server.server_address[1], upstream=args.upstream.url)
+        flag = {"keepalive": True} if keepalive is not None else {}
+        log.write("listening", host=HOST, port=server.server_address[1],
+                  upstream=args.upstream.url, **flag)
+        stop = threading.Event()
+        if keepalive is not None:
+            threading.Thread(target=keepalive.run, args=(stop,), daemon=True).start()
         try:
             server.serve_forever()
         except KeyboardInterrupt:
             pass
+        finally:
+            stop.set()
     return 0
 
 
