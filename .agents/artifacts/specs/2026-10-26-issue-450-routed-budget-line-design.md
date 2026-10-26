@@ -52,7 +52,8 @@ trade-off (Scope 3).
    on by default, and `CLAUDE_CACHE_PROXY=0` opts a launch out. If it does not
    hold, or no valid run exists, the switch commit is reverted and routing
    stays opt-in, with #450's numbers as the stated reason (D4). The reminder
-   and the probe ship in both branches.
+   and the probe ship in both branches. The CI rule missed (149.2 ms), and the user's
+   later decision D18 ships the default-on branch on the estimate (9.7 ms).
 4. **Record.** Append the root cause, the corrected method and the
    re-measurement to #438's evidence report without rewriting #438's own text
    (D9). Then run `just build mbp` at the final head, and CI `Nix Eval` must
@@ -157,7 +158,7 @@ caller-set rule is D1, and the harness is D6.
   the fork-free probe (D2). The sentence "a dead proxy costs at most half a
   second" stays true. The README and the Nix comment are the only living docs
   that state the default; `python/README.md` defers to the README.
-- **Selection.** AC3's verdict alone picks the branch (D8).
+- **Selection.** AC3's verdict alone picks the branch (D8). After the measurement the user overrode this for the default (D18): the estimate within +100 ms ships default-on.
 
 ### Sequence and the measured head (AC3, AC4)
 

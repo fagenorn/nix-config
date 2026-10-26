@@ -248,7 +248,7 @@ class RoutingTest(LauncherCase):
 
 
 class DefaultRoutingTest(LauncherCase):
-    """Routing is on by default (#450 D3): unset, empty or 1 probes and routes, and only 0 opts out."""
+    """Routing is on by default (#450 D3, D18): unset, empty or 1 probes and routes, and only 0 opts out."""
 
     def test_an_unset_or_empty_switch_routes_after_one_probe(self):
         url = self.healthy_proxy()
@@ -289,7 +289,6 @@ class DefaultRoutingTest(LauncherCase):
                 self.assertEqual((completed.returncode, completed.stdout), (1, ""))
                 self.assertEqual(completed.stderr,
                                  "claude-account: CLAUDE_CACHE_PROXY must be 1, 0 or unset\n")
-
 
 
 if __name__ == "__main__":

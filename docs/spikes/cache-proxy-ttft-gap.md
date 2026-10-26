@@ -215,7 +215,7 @@ The 2026-10-26 investigation on Claude Code 2.1.310 (mbp, account `p1`; its full
 
 - Each run is a fresh `claude -p` session launched through the built wrapper: routed with `CLAUDE_CACHE_PROXY` unset, direct with `CLAUDE_CACHE_PROXY=0`, and nothing else different. The order flips each pair. One warm-up pair is discarded, then exactly 100 valid pairs count.
 - Per pair, d = (routed `ttft_ms` + p) − direct `ttft_ms`, where `ttft_ms` is the client's own and p is the probe term of § Probe benchmark (AC2).
-- The estimate is the median of d. Its 95% CI is a percentile bootstrap over pairs, 10,000 resamples, seed 450. Routed is within the bound when the CI's upper end is ≤ +100 ms, and that alone sets the routing default.
+- The estimate is the median of d. Its 95% CI is a percentile bootstrap over pairs, 10,000 resamples, seed 450. Routed is within the bound when the CI's upper end is ≤ +100 ms, and that alone sets the routing default. (After the measurement the user replaced this rule for the default with a looser one; § Routing verdict records both, spec decision D18.)
 - A pair counts when both runs exit 0 with a `ttft_ms` and a first content block of `thinking`, `redacted_thinking` or `text`, and the routed run has exactly one proxy `/v1/messages` line and the direct run none. An invalid pair is replaced at the end. An 11th invalid pair makes the run invalid; it is rerun once, and a second invalid run means no valid measurement. A usage limit suspends the run, which resumes at the same head after a new warm-up pair. The run is never extended.
 - Diagnostics are recorded and never decide.
 
