@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
 
 from agent_tools import agent_owner_replay as replay_module
@@ -20,7 +21,7 @@ from agent_tools.agent_owner_replay import (BASELINE, ORIGIN, BootModel, keep_ru
 from agent_tools.phase_budget import PhaseBudget
 
 from . import test_agent_owner_report as report_tests   # a module import: its TestCase is not re-collected here
-from .owner_transcripts import Session, gate_reply, progress
+from .owner_transcripts import T0, Session, gate_reply, progress
 
 MODEL = BootModel(start=29_000, boot_calls={"0-5": 2, "6-7": 2},
                   boot_end={"0-5": 60_000, "6-7": 60_000}, slimmable={"0-5": 0, "6-7": 0},
@@ -78,6 +79,39 @@ class ReplayTest(unittest.TestCase):
         kept = [first.calls[0], first.calls[1]] + [
             dataclasses.replace(call, read=call.read + 22_000) for call in second.calls[2:]]
         self.assertAlmostEqual(out.dollars, sum(map(call_cost, kept)), places=12)
+
+    def test_a_relaunch_with_work_before_its_registration_joins_at_its_boot_end(self):
+        # a2 boots to 100k (call 1), works with a child out at 130k, then registers at 135k: the
+        # boot model's B is 100k, so the undo joins there (C − B = 20k back), keeping the working
+        # call: 100k, 130k, 135k, 136k show 120k, 150k, 155k, 156k
+        first = launch([c(0, 50_000, gate=gate(2), registers=True),
+                        c(10, 120_000, gate=gate(3, "handoff")), c(20, 121_000)],
+                       transfer="handoff", name="a1")
+        second = launch([c(40, 29_000, write=29_000), c(50, 100_000, write=71_000),
+                         c(60, 130_000, children=True),
+                         c(70, 135_000, gate=gate(3), registers=True, children=True),
+                         c(80, 136_000)], registered=3, name="a2", number=2)
+        out = replay(lineage(first, second), parse_arm("never=threshold=never"), MODEL)
+        self.assertEqual(out.trace, (50_000, 120_000, 120_000, 150_000, 155_000, 156_000))
+        kept = [first.calls[0], first.calls[1]] + [
+            dataclasses.replace(call, read=call.read + 20_000) for call in second.calls[1:]]
+        self.assertAlmostEqual(out.dollars, sum(map(call_cost, kept)), places=12)
+
+    def test_a_progress_call_at_the_threshold_sets_the_crossing_latch(self):
+        # The meter applies a progress call too (the registering one included): at 120k, over
+        # the 110k threshold of the phase it enters, it sets the latch without being due, so
+        # the 121k Bash call after it is no new crossing. A direct gate whose remainder is
+        # self-contained answers `delegate`, never `handoff`.
+        delegating = dataclasses.replace(gate(3, "delegate"), remainder_self_contained=True)
+        cases = {"later": [c(0, 50_000, gate=gate(2), registers=True),
+                           c(10, 120_000, gate=delegating), c(20, 121_000, phase=4)],
+                 "registering": [c(0, 120_000, gate=dataclasses.replace(delegating, phase=2),
+                                   registers=True), c(10, 121_000)]}
+        for name, calls in cases.items():
+            with self.subTest(name):
+                out = replay(lineage(launch(calls)), BASELINE, MODEL)
+                self.assertEqual((out.handoffs, out.trace),
+                                 (0, tuple(call.context for call in calls)))
 
     def test_a_140k_arm_moves_the_handoff(self):
         calls = [c(0, 100_000, gate=gate(2), registers=True)] + rising(110_000, 180_000, 10_000, t0=10)
@@ -401,6 +435,32 @@ class RetryAttemptTest(unittest.TestCase):
                        registered=2, name="b1", attempt=2)
         out = replay(lineage(unfinished, retry), self.NEVER, MODEL)
         self.assertEqual(out.trace, (50_000, 120_000, 121_000, 29_000, 60_000, 98_000, 99_000))
+
+
+class EventWindowTest(unittest.TestCase):
+    def test_an_owner_registered_before_the_event_window_still_hands_off(self):
+        # o1 registers at t = 10 (50k); the window opens at t = 50, so its kept calls are the
+        # Bash calls at 112k and 113k. It is registered from the first of them (baseline 112k),
+        # which crosses 110k with no child out and hands off: cut 112k − 60k = 52k, 113k → 61k.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = Session(root)
+            dispatch = session.call(None, 0, context=10_000, write=10_000, ttl="1h", agent_tool=True)
+            session.child("o1", tool_use_id=dispatch)
+            g = session.call("o1", 10, context=50_000, write=50_000, bash=progress(3))
+            session.result("o1", 11, g, gate_reply("continue"))
+            for second, context in ((60, 112_000), (70, 113_000)):
+                session.call("o1", second, context=context, write=1_000, bash="git status")
+            session.write()
+            window = {"since": T0 + timedelta(seconds=50),
+                      "before": T0 + timedelta(seconds=1_000)}
+            [found], _ = agent_owner_report.collect(root, cutoff=None, eval_rows=None,
+                                                     executor_factory=ThreadPoolExecutor, **window)
+        [kept] = found.launches
+        self.assertIsNone(kept.registered_index)   # the boot fit still leaves the cut boot out
+        self.assertIsNone(agent_owner_report.boot_facts(kept))
+        out = replay(found, BASELINE, MODEL)
+        self.assertEqual((out.handoffs, out.trace), (1, (112_000, 61_000)))
 
 
 class SimulatedTextTest(unittest.TestCase):

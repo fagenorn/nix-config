@@ -104,6 +104,9 @@ class Launch:
     attempt: int | None = None  # the implementation attempt (custody) the launch belongs to
     remainder: int | None = None  # the delivery remainder (custody) the launch belongs to
     boot_whole: bool = True  # every call through the registering call is inside the event window
+    # the event window cut every call through the registering call, so the owner is registered
+    # from its first kept call while `registered_index` stays None and its boot stays out of the fit
+    registered_before: bool = False
 
 
 @dataclass
@@ -505,7 +508,8 @@ def _launch(scan, children):
     registered = owner["registered_index"]
     kept_index = sum(counted[:registered]) if counted[registered] else None
     return Launch(scan["path"], owner["launch"], kept, kept_index, owner["transfer"],
-                  boot_whole=all(counted[:registered + 1]), attempt=owner["attempt"],
+                  boot_whole=all(counted[:registered + 1]),
+                  registered_before=not any(counted[:registered + 1]), attempt=owner["attempt"],
                   remainder=owner["remainder"])
 
 

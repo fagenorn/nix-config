@@ -200,7 +200,7 @@ def fit(lineages: list[Lineage]) -> BootModel:
 @dataclass
 class _Entry:
     call: OwnerCall
-    cut_delta: int = 0  # a joined launch gives C - R back (negative; R: its registering call)
+    cut_delta: int = 0  # a joined launch gives C - B back (negative; B: its boot end, _boot_end)
     boot_slim: int = 0  # slimmable tokens of the boot this registering call ends
     registers: bool = False
     growth: int = 0  # for a help call: what its result added to the next call's context
@@ -210,6 +210,7 @@ class _Entry:
 class _Owner:
     root: bool
     entries: list
+    registered_before: bool = False  # its registering call precedes its kept calls
 
 
 def _answer(calls, start):
@@ -227,6 +228,17 @@ def _entries(launch, first, last, cut_delta):
         entries.append(_Entry(call, growth=max(0, following - call.context) if call.help else 0))
     entries[0].cut_delta = cut_delta
     return entries
+
+
+def _boot_end(launch):
+    """Index of the call a relaunch joins at: the end of its boot as `fit` measures it.
+
+    The boot ends at the registering call, or earlier at the last call before the first with
+    a child out, so working calls before the registration are kept. An empty boot (the event
+    window cut it, and the first kept call already has a child out) joins at the first kept
+    call, so no working call is dropped.
+    """
+    return max(0, len(boot_slice(launch)) - 1)
 
 
 def _same_custody(launch, following):
@@ -253,13 +265,13 @@ def _owners(lineage):
             answer = _answer(launch.calls, first)
             if answer is not None:
                 last = answer + 1
-                registering = following.calls[following.registered_index]
-                joined = (following.registered_index, registering.context - launch.calls[answer].context)
+                end = _boot_end(following)
+                joined = (end, following.calls[end].context - launch.calls[answer].context)
         entries = _entries(launch, first, last, delta)
-        if continuing:
+        if continuing:   # the joined owner stays registered; its registering call adds nothing
             owners[-1].entries += entries
             continue
-        owners.append(_Owner(launch.calls[0].is_root, entries))
+        owners.append(_Owner(launch.calls[0].is_root, entries, launch.registered_before))
         index = launch.registered_index
         if index is not None and index < last:
             entries[index].registers = True
@@ -337,6 +349,10 @@ class _Replay:
     def run(self):
         for owner in _owners(self.lineage):
             state = _State(owner.root)
+            if owner.registered_before:
+                # registered from its first kept call, measured there too; with no cut yet, that
+                # call's observed context stands in for the registering call's as the baseline
+                state.registered, state.baseline = True, owner.entries[0].call.context
             for entry in owner.entries:
                 self._step(state, entry)
         return Outcome(self.dollars, self.handoffs, self.deaths, max(self.trace, default=0),
@@ -398,6 +414,12 @@ class _Replay:
         if budget is None:
             return False
         if gate is not None:
+            if state.registered:
+                # the meter applies a progress call too, a registering one included: it enters
+                # the gate's next phase, then a context below that phase's threshold clears the
+                # latch and one at or above sets it without being due (the gate is running)
+                state.notified = context >= crossing_threshold(budget, gate.phase + 1,
+                                                               state.baseline)
             if gate.handoff_path:
                 return False
             action = select_phase_action(
