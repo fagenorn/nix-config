@@ -24,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ACCOUNTS = REPO_ROOT / "home" / "common" / "claude-code" / "accounts"
 PLACEHOLDER = "CACHE_PROXY_URL="
 CALLER_URL = "http://127.0.0.1:9/caller"
+REMINDER = "CLAUDE_CODE_TOTAL_TOKENS_REMINDER"
 MARKER_BODY = b'{"service":"cache-proxy","status":"ok"}'
 TIMEOUT = 30
 
@@ -142,10 +143,12 @@ class LauncherCase(unittest.TestCase):
     def assert_routed(self, environment, url):
         self.assertEqual(environment.get("ANTHROPIC_BASE_URL"), url)
         self.assertEqual(environment.get("ENABLE_TOOL_SEARCH"), "true")
+        self.assertEqual(environment.get(REMINDER), "padded-countdown")
 
     def assert_direct(self, environment):
         self.assertNotIn("ANTHROPIC_BASE_URL", environment)
         self.assertNotIn("ENABLE_TOOL_SEARCH", environment)
+        self.assertNotIn(REMINDER, environment)
 
     def assert_not_probed(self):
         """No request reached the proxy: an opted-out launch costs no health check."""
@@ -174,6 +177,7 @@ class RoutingTest(LauncherCase):
         environment = self.launch(self.healthy_proxy(), {"ANTHROPIC_BASE_URL": CALLER_URL})
         self.assertEqual(environment.get("ANTHROPIC_BASE_URL"), CALLER_URL)
         self.assertNotIn("ENABLE_TOOL_SEARCH", environment)
+        self.assertNotIn(REMINDER, environment)
 
     def test_an_inherited_proxy_url_is_unset_when_the_proxy_is_down(self):
         url = "http://127.0.0.1:%d" % closed_port()
@@ -194,12 +198,21 @@ class RoutingTest(LauncherCase):
         self.assertEqual((environment.get("ANTHROPIC_BASE_URL"), environment.get("ENABLE_TOOL_SEARCH")),
                          (url, "false"))
 
+    def test_a_caller_set_reminder_value_is_kept_even_when_empty(self):
+        url = self.healthy_proxy()
+        for value in ("countdown", ""):
+            with self.subTest(value=value):
+                environment = self.launch(url, {REMINDER: value})
+                self.assertEqual((environment.get("ANTHROPIC_BASE_URL"), environment.get(REMINDER)),
+                                 (url, value))
+
     def test_an_unsubstituted_copy_never_routes(self):
         url = self.healthy_proxy()
         self.assert_direct(self.launch(url, substitute=False))
         environment = self.launch(url, {"ANTHROPIC_BASE_URL": url}, substitute=False)
         self.assertEqual(environment.get("ANTHROPIC_BASE_URL"), url)
         self.assertNotIn("ENABLE_TOOL_SEARCH", environment)
+        self.assertNotIn(REMINDER, environment)
 
 
 class OptInRoutingTest(LauncherCase):
@@ -236,6 +249,7 @@ class OptInRoutingTest(LauncherCase):
                 environment = self.launch(url, {"ANTHROPIC_BASE_URL": CALLER_URL, **switch})
                 self.assertEqual(environment.get("ANTHROPIC_BASE_URL"), CALLER_URL)
                 self.assertNotIn("ENABLE_TOOL_SEARCH", environment)
+                self.assertNotIn(REMINDER, environment)
 
     def test_any_other_switch_value_fails_before_claude_starts(self):
         url = self.healthy_proxy()

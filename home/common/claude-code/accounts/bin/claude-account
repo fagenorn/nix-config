@@ -202,6 +202,10 @@ route_cache_proxy() {
     export ANTHROPIC_BASE_URL="$CACHE_PROXY_URL"
     # Before Claude Code 2.1.304 a non-first-party base URL turns tool search off.
     [ -n "${ENABLE_TOOL_SEARCH+set}" ] || export ENABLE_TOOL_SEARCH=true
+    # Claude Code sends the <total_tokens> budget line only to api.anthropic.com; without it a
+    # routed turn opens with a thinking block far more often (#450). The variable is undocumented
+    # (https://github.com/anthropics/claude-code/issues/98464); verified on Claude Code 2.1.310.
+    [ -n "${CLAUDE_CODE_TOTAL_TOKENS_REMINDER+set}" ] || export CLAUDE_CODE_TOTAL_TOKENS_REMINDER=padded-countdown
   else
     unset ANTHROPIC_BASE_URL
   fi
