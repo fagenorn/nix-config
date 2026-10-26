@@ -183,6 +183,23 @@ def fixture_contract(**overrides: object) -> dict:
     return contract
 
 
+def host_independent(contract: dict) -> dict:
+    """`contract`, changed in place so that no capability depends on the host.
+
+    This repository's GitHub release profile derives a `blocked` release
+    capability on any host without the forge adapter's executables on `PATH`,
+    and its plan and code review commands run `codex-companion`, which the
+    hosted CI runner lacks. No fixture built on this is about release or
+    review, so release is opted out and both review commands become `true`,
+    which every host resolves: the verdicts are the same everywhere.
+    """
+    contract["release"] = "unsupported"
+    review = contract["bindings"]["workflow"]["review"]
+    for role in ("plan", "code"):
+        contract["bindings"]["commands"][review[role]]["argv"] = ["true"]
+    return contract
+
+
 def scaffold(root: Path, contract: dict, home: Path) -> None:
     """Write `contract`, its instruction source and both rendered projections.
 
@@ -267,11 +284,7 @@ def adopted_repo(home: Path, *, records: bool = True) -> Path:
     (D34). `records=False` is the fixture the discovery negatives start from.
     """
     root = init_repo()
-    # This repository's GitHub release profile derives a `blocked` release
-    # capability on any host without the forge adapter's executables on PATH,
-    # which no conformant checkout may carry; the fixture opts out of release
-    # to keep its verdict host-independent.
-    scaffold(root, fixture_contract(release="unsupported"), home)
+    scaffold(root, host_independent(fixture_contract()), home)
     write(root, ".agents/runtime/.gitignore", "*\n")
     git(root, "add", "-f", ".agents/runtime/.gitignore")
     git(root, "remote", "add", "origin",

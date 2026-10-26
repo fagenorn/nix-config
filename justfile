@@ -78,9 +78,9 @@ evals skill id:
 # The source package the agent recipes run (#175 D6).
 agent_tools_path := justfile_directory() / "python"
 
-# Verify durable workflow lifecycle and skill contracts without agent/network timing.
-agent-workflow-tests:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m unittest -v \
+# Verify durable workflow lifecycle and skill contracts, 4 test files at a time (--jobs N sets the cap; --jobs 1 runs them serially with live output).
+agent-workflow-tests *args:
+  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.suite_runner {{args}} \
     home/common/agent-skills/tests/test_workflow_state.py \
     home/common/agent-skills/tests/test_attempt_migration.py \
     home/common/agent-skills/tests/test_attempt_custody.py \
@@ -183,8 +183,9 @@ agent-workflow-tests:
     tests/test_cache_proxy.py \
     tests/test_cache_keepalive.py \
     tests/test_claude_account_routing.py \
-    tests/test_branch_protection.py
-  bash home/common/agent-skills/evals/tests/test-run-eval-tree.sh
+    tests/test_branch_protection.py \
+    tests/test_suite_runner.py \
+    home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
 # Validate every explicit pipeline dispatch and print the four-family demo trace.
 agent-model-matrix:
