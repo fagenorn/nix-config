@@ -2043,7 +2043,10 @@ class VerificationConditionsTest(ResolverTestCase):
                 self.assertTrue(error["violations"][0]["message"])
 
     def test_a_non_string_verification_id_is_reported_once_and_never_crashes(self):
-        contract = self.contract_with(self.VALID)
+        # Every string id is conditional, so the unconditional-id check reaches
+        # the list entry and must skip it rather than hash it.
+        contract = self.contract_with(
+            {"nix-build": self.CONDITION, "agent-workflow-tests": self.CONDITION})
         contract["bindings"]["workflow"]["verification"] = [
             "nix-build", "agent-workflow-tests", ["nix-build"]]
         code, payload, _ = self.resolve(self.make_root(contract))
