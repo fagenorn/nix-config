@@ -7,7 +7,6 @@ It reads `bindings.workflow.light_lane` through `resolve_project.resolve`, print
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import json
 import sys
 
@@ -106,8 +105,7 @@ def light_lane_policy(repo_root: str) -> dict:
 def evaluate(record: dict, light_lane: dict) -> dict:
     """The verdict: `light` exactly when no signal and no risk path hits."""
     hit = {name for name in SIGNALS if record["signals"][name]["value"] != "no"}
-    if any(fnmatch.fnmatchcase(path, glob)
-           for path in record["paths"] for glob in light_lane["risk_paths"]):
+    if resolve_project.any_path_matches(record["paths"], light_lane["risk_paths"]):
         hit.add("risk_path")
     hits = [name for name in HIT_ORDER if name in hit]
     return {"hits": hits, "lane": "full" if hits else "light", "mode": light_lane["mode"]}
