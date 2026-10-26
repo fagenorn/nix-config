@@ -1895,14 +1895,6 @@ class ResumePackContractsTest(unittest.TestCase):
             "artifact-budget validate-report --boundary workflow-response", "`resume-pack`",
             "### Resume pack")
 
-    def test_from_issue_owner_verifies_the_pack_and_reads_only_the_phase(self):
-        self.assert_ordered(
-            self.read(RESUME_PACK), self.PACK, "`check-launch`",
-            "`git -C <worktree> rev-parse HEAD` must equal `worktree.head`",
-            "`git -C <worktree> status --porcelain` must list exactly "
-            "`worktree.dirty_paths` entries")
-        self.assertIn("`action_id`", self.read(RESUME_PACK))
-
     def test_from_issue_direct_reentry_and_delegate_carry_the_pack(self):
         self.assert_ordered(
             self.read(ACQUIRE_DIRECT), "**`kind: owner`**", "`launch_kind` is `resume`",
@@ -1933,6 +1925,30 @@ class SlimBootContractsTest(unittest.TestCase):
         setup = self.section(self.read(SDD), "## Setup", "### Cumulative delivery gate")
         self.assertIn("`--reviewed`", setup)
         self.assertIn("`<plan stem>.tasks/task-<N>.md`", setup)
+
+    CHECK_LAUNCH = ("workflow-state check-launch --repo-root <ledger_repo_root> "
+                    "--run-id <run-id> --action-id <action_id>")
+    ENTRY = "<from-issue-dir>/resume-pack.md"
+
+    def test_pack_carrying_prompts_name_the_resume_entry(self):
+        resume = self.section(self.read(FROM_ISSUE), "### Resume pack", "## The flow")
+        self.assertIn(self.ENTRY, resume)
+        orchestrate = self.read(ORCHESTRATE)
+        fresh = orchestrate[orchestrate.index("<!-- agent-dispatch: id=orchestration-issue-owner"):]
+        self.assertLess(fresh.index("Resume pack"), fresh.index(self.ENTRY))
+        self.assertIn("from-issue <num> --auto", fresh[fresh.index(self.ENTRY):])
+
+    def test_the_entry_runs_its_checks_before_any_skill_section(self):
+        entry = self.read(RESUME_PACK)
+        position = -1
+        for anchor in (ResumePackContractsTest.PACK, self.CHECK_LAUNCH,
+                       "artifact-budget validate-report --boundary workflow-response --input -",
+                       "`git -C <worktree> rev-parse HEAD`", "`worktree.head`",
+                       "`git -C <worktree> status --porcelain`", "`worktree.dirty_paths`",
+                       "`## Files beside this one`"):
+            position = entry.find(anchor, position + 1)
+            self.assertGreaterEqual(position, 0, anchor)
+        self.assertIn("`action_id`", entry)
 
 
 class InterimChildResultContractsTest(unittest.TestCase):

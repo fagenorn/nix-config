@@ -17,7 +17,7 @@ Take one tracker issue from triage to merged code by chaining the canonical skil
 - **`acquire-direct.md`** — `--auto` with no dispatcher envelope.
 - **`acquire-durable.md`** — an interactive user's explicit request for durable orchestration.
 - **`acquire-interactive.md`** — any other invocation, and Phase 1's ledger-free flow.
-- **`resume-pack.md`** — the prompt carries a resume pack. A verified pack reads, at every phase, the sections headed `Lifecycle identity`, `Decision ledger (artifact discipline)`, `Skill-tool invocations`, `Dispatch, phase-budget and attempt-budget rules`, `Terminal return procedure` and `Suspension procedure`, then this file's `## Phase <n>` section, the file this index names for that phase, and the phase's sub-skill (`sdd` for Phase 6, `ship-issue` for Phase 7).
+- **`resume-pack.md`** — any resume pack, and a pack-carrying prompt's entry. A verified pack reads, at every phase, `Lifecycle identity`, `Decision ledger (artifact discipline)`, `Skill-tool invocations`, `Dispatch, phase-budget and attempt-budget rules`, `Terminal return procedure` and `Suspension procedure`, then this file's `## Phase <n>` section, the file this index names for that phase, and the phase's sub-skill (`sdd` for Phase 6, `ship-issue` for Phase 7).
 - **`investigate.md`** — Phase 0.
 - **`decision-ledger.md`** — before writing the first ledger row.
 - **`standards-review.md`** — Phase 5.
@@ -38,12 +38,12 @@ Once any route produces lifecycle identity, treat `ledger_repo_root`, `run_id`, 
 
 With lifecycle identity, run each long command, every verification command included, as `launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> -- <argv>`, still in the foreground; a forge verb never goes through it. Create every scratch directory or scratch worktree under the path that `launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` prints.
 
-Every lifecycle call is one command that reads its input from stdin through a quoted heredoc (`<<'EOF'`): `--request-file -`, `--checkpoint-file -`, `--summary-file -` or `--input -`, with the helper named bare or as `~/.agents/bin/workflow-state`, optionally piped into or out of `artifact-budget validate-report --input -`; no request or summary file is written. Pipe each `workflow-state` reply's raw bytes through `artifact-budget validate-report --boundary workflow-response --input -` before decoding it; `resume-pack` stdout is no workflow response, is never piped through `validate-report`, and stays untrusted until the resume pack's checks pass.
+Every lifecycle call is one command that reads its input from stdin through a quoted heredoc (`<<'EOF'`): `--request-file -`, `--checkpoint-file -`, `--summary-file -` or `--input -`, with the helper named bare or as `~/.agents/bin/workflow-state`, optionally piped into or out of `artifact-budget validate-report --input -`. Pipe each `workflow-state` reply's raw bytes through `artifact-budget validate-report --boundary workflow-response --input -` before decoding it; `resume-pack` stdout is no workflow response, is never piped through `validate-report`, and stays untrusted until the resume pack's checks pass.
 
 The ledger, not tracker or intent data, selects the next delivery stage: follow the returned `owner`, `delivery_remainder`, requirement, or terminal variant without manufacturing authority, a retry, or another permission ritual. Every delivery effect runs through ship-issue's `## Delivery loop`.
 
 ### Resume pack
-A relaunched owner whose prompt carries a resume pack follows `resume-pack.md` before using it.
+A prompt composed with a pack names `<from-issue-dir>/resume-pack.md`, this directory's absolute path, as the owner's entry in place of the skill invocation, keeping its arguments.
 
 ## The flow
 
