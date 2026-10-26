@@ -14,6 +14,8 @@ Each row becomes a `~/.agents/bin/<command>` launcher, which unsets the `NIX_PYT
 
 Actual production and generic projection share packing and the external `artifact-budget` policy queried by PATH; projection binds its policy identity.
 
+When one file diff is larger than the review-package member limit, actual production replaces it with a bounded generated-evidence entry if that entry fits the limit and the file is an auto-generated EF Core migration designer (`ef-core-migration-designer`) or a file the range deletes outright (`whole-file-deletion`: the base blob's identity and line count, and a null head); any other oversized file diff stays whole, and the package is `decompose_required`.
+
 `review-feasibility project` reads committed plans and authenticated Git history without mutating them, while `validate-result` checks closed canonical v3 results and producer exits.
 
 Actual production also calls external `sdd-workspace` by PATH.

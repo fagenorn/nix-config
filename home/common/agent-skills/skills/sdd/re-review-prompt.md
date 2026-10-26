@@ -37,14 +37,17 @@ Subagent (reviewer-lite, Sonnet/medium as selected above):
     once, in manifest order. Report an unreadable, mismatched or
     uncorroborated item as unreadable review evidence; never fetch a fallback
     diff or approve the fix. Version 3 keeps every whole handwritten file
-    diff, declares the adaptive unchanged context and packs with
+    diff that no generated-evidence entry replaces, declares the adaptive
+    unchanged context and packs with
     `stable-first-fit-whole-file`: validate those fields, and read the live
     file when that context is insufficient. Version 2, and version 3 with
-    `generated_evidence`, may replace an oversized auto-generated EF migration
-    designer with a bounded entry: verify it against the companion
-    migration/snapshot diff and the report's no-pending-model-change,
-    generated-SQL and provider-backed migration evidence; that evidence is
-    never a waiver. Do not re-run git commands.
+    `generated_evidence`, may replace an oversized `ef-core-migration-designer`
+    or `whole-file-deletion` diff with a bounded entry: verify a designer
+    against the companion migration/snapshot diff and the report's
+    no-pending-model-change, generated-SQL and provider-backed migration
+    evidence, and confirm the plan or spec intends a deletion and no surviving
+    file references the deleted path; that evidence is never a waiver. Do not
+    re-run git commands.
 
     Your review is read-only on this checkout. Do not mutate the working
     tree, the index, HEAD, or branch state.
