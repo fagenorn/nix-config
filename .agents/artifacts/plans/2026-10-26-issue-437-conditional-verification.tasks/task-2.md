@@ -324,6 +324,24 @@ class VerifiedTreeTest(unittest.TestCase):
                          '{"reason":"tree_changed","recorded":false,"tree":"%s"}\n' % current)
         self.assertEqual(self.record_path().read_bytes(), before)
 
+    def test_a_same_tree_record_under_another_id_list_is_unverified(self):
+        tree = self.verify_and_record()
+        for ids in (["test", "suite"], ["suite", "test"], ["suite"], ["test", "lint"]):
+            with self.subTest(run=["test"], ids=ids):
+                self.record_path().write_text(json.dumps(
+                    {"schema": "verified-tree/v1", "tree": tree, "verification": ids}) + "\n")
+                self.assertEqual(self.check(), {"run": ["test"], "skipped": SKIPPED,
+                                                "status": "unverified", "tree": tree})
+        (self.repo / "tinytask/cli.py").write_text("# edited\n")
+        tree = self.verify_and_record()
+        self.assertEqual(self.recorded_ids(), IDS)
+        for ids in (["suite", "test"], ["test"], [*IDS, "lint"]):
+            with self.subTest(run=IDS, ids=ids):
+                self.record_path().write_text(json.dumps(
+                    {"schema": "verified-tree/v1", "tree": tree, "verification": ids}) + "\n")
+                self.assertEqual(self.check(), {"run": IDS, "skipped": [],
+                                                "status": "unverified", "tree": tree})
+
     def test_a_refused_first_record_writes_no_file(self):
         stale = self.check()["tree"]
         (self.repo / "README.md").write_text("# edited\n")

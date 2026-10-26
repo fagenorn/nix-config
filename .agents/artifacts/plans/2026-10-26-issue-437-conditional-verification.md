@@ -48,7 +48,7 @@ Task 3 — sdd and ship run the plan's `run` ids and record each skip — `home/
 | AC1 | code | Task 2 | `tests/test_verified_tree.py::VerifiedTreeTest::test_a_change_outside_every_listed_path_skips_the_conditional_id`: `run` is `["test"]` and `skipped` is `[{"id": "suite", "reason": <authored reason>}]`; the record holds `["test"]`; the next `check` is `verified` with the same `skipped`. Runs under `just agent-workflow-tests` |
 | AC2 | code | Task 2 | `tests/test_verified_tree.py::VerifiedTreeTest::test_a_change_to_a_listed_path_runs_the_conditional_id` (committed edit, staged new file, tracked working-tree edit, deletion, rename out of a listed directory, nested path under a `*` glob) and `::test_a_pass_that_skipped_the_conditional_id_is_unverified_once_a_listed_path_changes`. Runs under `just agent-workflow-tests` |
 | AC3 | code | Task 1 | `home/common/agent-skills/tests/test_resolve_project.py::VerificationConditionsTest::test_a_valid_member_round_trips_unchanged` and `::test_each_malformed_member_is_refused_with_its_pointer`. The second has one row per grammar case, the issue's empty path list, absolute path and unknown key among them, each asserting `invalid_contract`, the repair id and the single pointer. Runs under `just agent-workflow-tests` |
-| AC4 | human | Task 1 | The issue tags this `[code]`; the map grades it `human` per D10, so it stays `human_pending`. Judgment by the owner: after approving the list in the PR (AC5) and running `just switch`, the owner (or a session the owner directs) lands a follow-up commit that authors exactly the approved `verification_conditions` object in `.agents/project.json`. That commit cites `resolve-project resolve --repo-root <checkout>` exiting 0 at its head. No task of this plan does it, and ship holds the issue `needs-verification` |
+| AC4 | code | Task 1 | `resolve-project resolve --repo-root <checkout>` exits 0 on a contract that declares `agent-workflow-tests` in `verification_conditions`. Not delivered by this plan (D10, D16): no task, and no final-review fixer, authors `.agents/project.json`, so the controller grades this row `unmet` and it stands as the run's accepted residual. After approving the list (AC5) and running `just switch`, the owner (or a session the owner directs) lands a follow-up commit that authors exactly the approved object and cites that resolve exiting 0 at its head. Ship holds the issue `needs-verification` |
 | AC5 | human | Task 1 | Judgment by the owner, reviewing the PR: the spec's § Proposed gated paths list (D11) is what the owner wants gated. Ship reports it `human_pending` |
 
 ## Decisions
@@ -56,6 +56,11 @@ Task 3 — sdd and ship run the plan's `run` ids and record each skip — `home/
 - Grammar, named violations and pass-through per D1 and D2; the one shared matcher per D3 (Task 1).
 - Change computation per D4 and D14; self-resolution, the `{run, skipped, status, tree}` output and the dropped `--verification` per D5 and D13; the v1 record holding only `run` per D6; the fixture-copy test seam per D12 (Task 2).
 - Consumers run `run` and record each skip per D7; the Declared verification line is unchanged per D8; other readers unchanged per D9; the pin form and the measured wording per D15 (Task 3).
-- Nothing authored in this repository's contract, and AC4 graded `human`, per D10; the proposed list per D11 (AC4, AC5).
+- Nothing authored in this repository's contract per D10; AC4 kept `code` and graded `unmet` per D16; the proposed list per D11 (AC4, AC5).
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, `gpt-6-astra`, effort `xhigh`), isolated read-only mode, base `ca6ba1ae2b37e56c1361a8656c29af1f39b89348`, no focus beyond the planner's AC4 flag; no fallback.
+- Findings: 3 accepted, 0 rejected, 0 deferred. R1 (Blocking, AC4 kind contradicted its `[code]` tag): Acceptance map AC4 restored to `code`, graded `unmet` on this branch, D16. R2 (Should fix): Task 2 adds `test_a_same_tree_record_under_another_id_list_is_unverified` (reordered, extra and now-skipped ids). R3 (Should fix): Task 1 rewrites the comment above `WORKFLOW_OPTIONAL_MEMBERS` to cover both optional members.
 
 ---

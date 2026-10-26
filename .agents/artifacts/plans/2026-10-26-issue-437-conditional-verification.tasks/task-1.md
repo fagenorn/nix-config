@@ -142,7 +142,7 @@ Expected: FAIL. At base `test_a_valid_member_round_trips_unchanged`, `test_null_
 
 In `python/agent_tools/resolve_project.py`:
 
-1. Add `import fnmatch` in the standard-library import block, then add the two constants from the Invariants.
+1. Add `import fnmatch` in the standard-library import block, then add the two constants from the Invariants. Rewrite the `#279` comment above `WORKFLOW_OPTIONAL_MEMBERS` so it covers both optional members: an author may leave out `light_lane` (#279) and `verification_conditions` (issue 437); for each, `null` and absent both mean none (no light lane; every declared id runs), and the resolver never inserts either member.
 2. After `is_canonical_path`, add `any_path_matches` with this docstring: "True when some path matches some glob under `fnmatch.fnmatchcase`. Both are compared as spelled, so `*` also crosses `/` (#279 D4, issue 437 D3). It is the one matcher for contract path globs: `lane-triage`'s `risk_paths` and `verified-tree`'s `when_changed` both call it."
 3. Before `check_object`, add `check_contract_glob` per the Invariants, with the docstring "A `workflow` path glob: a safe repository-relative path, spelled canonically (#279 D4)." Replace the body of the `risk_paths` loop with `check_contract_glob(entry, f"{pointer}/risk_paths/{index}", violations)`.
 4. At the end of `validate_workflow`, call `validate_verification_conditions(workflow, violations)`, defined right after it. This code preserves the guards the Invariants name:

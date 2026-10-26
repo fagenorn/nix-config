@@ -300,12 +300,13 @@ change to one could change its outcome:
 never reads them, so gating them would mean the suite is never skipped.
 `docs/*` is also excluded, because the suite does not read it.
 
-### Acceptance handling (D10)
+### Acceptance handling (D10, D16)
 
 - AC1 and AC2 are measured by the `verified-tree` tests.
 - AC3 is measured by the `resolve-project` tests.
-- AC4 is classified `human` in the plan's `## Acceptance map`, so it is graded
-  `human_pending` beside AC5. Its measure, `resolve-project resolve` on the
+- AC4 keeps its `code` tag in the plan's `## Acceptance map` and is graded
+  `unmet` on this branch, the run's accepted residual (D16); AC5 is
+  `human_pending`. AC4's measure, `resolve-project resolve` on the
   repository at the head, is cited by the follow-up commit once the owner has
   approved the list and run `just switch`.
 - Ship therefore holds the issue `needs-verification`, which AC5 forces
@@ -384,3 +385,4 @@ All of them run in `just agent-workflow-tests`.
 | D13 | Grill: the CLI change ships with no compatibility handling for `--verification`. Skills and helper switch together through home-manager. A run that loaded old skill text and straddles a `just switch` gets a usage exit 2, which its existing exit-2 route handles loudly | The bar's YAGNI (no compatibility shim) and fail loud; skills (`skillsDir`) and `~/.agents/bin` launchers come from the same home-manager generation | Accept-and-ignore `--verification`: it silently discards input. Accept it as a cross-check against the resolved list: a second source kept only for a transition window |
 | D14 | Plan: `verified-tree` computes the merge base and the changed paths only when some declared id has a condition. A contract with no conditions (absent, `null` or `{}`) needs no `origin/<integration>` ref, runs every id and records exactly what the old helper did | Spec § Test seams ("a contract without conditions keeps today's behaviour"); #263 (the helper never needed a remote); the bar's YAGNI. With a condition, D4's exit 2 on a missing ref or merge base stands | Always computing the base: a project with no conditions and no `origin` ref would turn every sdd final verification into a `check` exit 2, then a repair attempt and Residuals, for a diff nothing reads |
 | D15 | Plan: the machine-text pin for the new argv is the backtick-delimited `` `verified-tree check` `` in `SDD_MACHINE_TEXT` and `SHIP_ISSUE_MACHINE_TEXT`; the `record` pin is unchanged. The plan fixes the skill wording verbatim, measured at base: `sdd/final-review.md` −16 bytes and `ship-issue/SKILL.md` +137 bytes, with the sdd ledger suffix spelled `; skipped <id>: <reason>` | Agent-helpers rule 6 (pin helper argv only); D7's budget (implementation-owner hot slack 8 bytes; ship profiles ~1,788) | A bare `verified-tree check` pin: the old `verified-tree check --verification <id>` text also contains it, so the pin could never catch a stale consumer. Leaving the wording to the implementer: one extra byte in `final-review.md` past 8 fails the budget gate with no raise available |
+| D16 | Phase-5 review (reverses D10's AC4 classification only): AC4 stays `code`, owned by Task 1, and is graded `unmet` in this PR. D10's authoring decision stands: no task or fixer authors `.agents/project.json`, and the unmet row is the run's accepted residual until the owner's post-switch follow-up | REVIEW-CONTRACT § Acceptance map check (a kind contradicting the issue's tag is Blocking); Codex plan review R1 | Keep `human`: contradicts the issue's `[code]` tag. Author the member now: D10's refusal hazard |
