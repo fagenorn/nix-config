@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fnmatch
 import json
 import os
 from pathlib import Path
@@ -151,12 +152,15 @@ PATHS_LIST_MEMBERS = (
 PATHS_MEMBERS = ("artifacts",) + PATHS_LIST_MEMBERS
 COMMAND_MEMBERS = ("argv", "cwd", "env")
 WORKFLOW_MEMBERS = ("verification", "orchestration", "review")
-# #279: the one workflow member an author may leave out. `null` and absent both
-# mean no light lane; the resolver never inserts the member itself.
-WORKFLOW_OPTIONAL_MEMBERS = ("light_lane",)
+# The workflow members an author may leave out: `light_lane` (#279) and
+# `verification_conditions` (issue 437). For each, `null` and absent both mean
+# none (no light lane; every declared verification id runs), and the resolver
+# never inserts either member itself.
+WORKFLOW_OPTIONAL_MEMBERS = ("light_lane", "verification_conditions")
 # #310: the one orchestration member an author may leave out; never defaulted.
 ORCHESTRATION_OPTIONAL_MEMBERS = ("stall_minutes",)
 LIGHT_LANE_MEMBERS = ("mode", "budget_minutes", "risk_paths")
+VERIFICATION_CONDITION_MEMBERS = ("when_changed", "skip_reason")
 LIGHT_LANE_MODES = ("shadow", "active")
 DEPLOY_MEMBERS = ("adapter", "command", "config")
 PROJECTION_MEMBERS = ("id", "agent", "kind", "target", "source")
@@ -272,6 +276,16 @@ def is_canonical_path(path: str) -> bool:
     return "\\" not in path and all(segment not in ("", ".") for segment in path.split("/"))
 
 
+def any_path_matches(paths: list[str], globs: list[str]) -> bool:
+    """True when some path matches some glob under `fnmatch.fnmatchcase`.
+
+    Both are compared as spelled, so `*` also crosses `/` (#279 D4, issue 437
+    D3). It is the one matcher for contract path globs; `lane-triage` calls it
+    for `risk_paths` and `verified-tree` for `when_changed`.
+    """
+    return any(fnmatch.fnmatchcase(path, glob) for path in paths for glob in globs)
+
+
 def check_string(value: object, pointer: str, section: str,
                  violations: list[dict]) -> bool:
     if isinstance(value, str) and value:
@@ -311,6 +325,17 @@ def check_safe_path(value: object, pointer: str, section: str,
         "must be a non-empty repository-relative path with no '..' segment",
         f"contract.{section}.unsafe_path",
     ))
+    return False
+
+
+def check_contract_glob(value: object, pointer: str, violations: list[dict]) -> bool:
+    """A `workflow` path glob: a safe repository-relative path, spelled canonically (#279 D4)."""
+    if not check_safe_path(value, pointer, "workflow", violations):
+        return False
+    if is_canonical_path(value):
+        return True
+    violations.append(violation(
+        pointer, CANONICAL_PATH_MESSAGE, "contract.workflow.noncanonical_path"))
     return False
 
 
@@ -770,12 +795,45 @@ def validate_workflow(workflow: dict, commands: dict | None,
                 light_lane["risk_paths"], f"{pointer}/risk_paths", "workflow",
                 violations):
             for index, entry in enumerate(light_lane["risk_paths"]):
-                entry_pointer = f"{pointer}/risk_paths/{index}"
-                if check_safe_path(entry, entry_pointer, "workflow", violations) \
-                        and not is_canonical_path(entry):
-                    violations.append(violation(
-                        entry_pointer, CANONICAL_PATH_MESSAGE,
-                        "contract.workflow.noncanonical_path"))
+                check_contract_glob(entry, f"{pointer}/risk_paths/{index}", violations)
+    validate_verification_conditions(workflow, violations)
+
+
+def validate_verification_conditions(workflow: dict, violations: list[dict]) -> None:
+    """Issue 437 D2: the optional `bindings.workflow.verification_conditions` member."""
+    pointer = "/bindings/workflow/verification_conditions"
+    conditions = workflow.get("verification_conditions")
+    if conditions is None or not check_object(conditions, pointer, "workflow", violations):
+        return
+    declared = workflow.get("verification")
+    declared = declared if isinstance(declared, list) else None
+    for verification_id, condition in conditions.items():
+        entry = f"{pointer}/{verification_id}"
+        if declared is not None and verification_id not in declared:
+            violations.append(violation(
+                entry, "names no id of bindings.workflow.verification",
+                "contract.workflow.unknown_verification_id"))
+        if not check_object(condition, entry, "workflow", violations):
+            continue
+        check_exact_members(
+            condition, entry, VERIFICATION_CONDITION_MEMBERS, "workflow", violations)
+        if "when_changed" in condition and check_list(
+                condition["when_changed"], f"{entry}/when_changed", "workflow",
+                violations):
+            if not condition["when_changed"]:
+                violations.append(violation(
+                    f"{entry}/when_changed", "must be a non-empty list",
+                    "contract.workflow.empty_path_list"))
+            for index, glob in enumerate(condition["when_changed"]):
+                check_contract_glob(glob, f"{entry}/when_changed/{index}", violations)
+        if "skip_reason" in condition:
+            check_string(condition["skip_reason"], f"{entry}/skip_reason", "workflow",
+                         violations)
+    if declared and all(isinstance(verification_id, str) and verification_id in conditions
+                        for verification_id in declared):
+        violations.append(violation(
+            pointer, "must leave at least one bindings.workflow.verification id "
+                     "unconditional", "contract.workflow.no_unconditional_verification"))
 
 
 def validate_deploy(deploy: dict, commands: dict | None,

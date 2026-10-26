@@ -183,27 +183,25 @@ A `launch fence refused: <reason>` takes that section's refusal route.
 
 Run this after the fix wave and its scoped re-reviews (or right after the first
 pass when neither axis had findings) and the acceptance record's commit (when there is one), before
-you choose the terminal state. It is the plan's one run of the full declared
-verification: every retained `bindings.workflow.verification` id, in order, each
-dereferenced through `bindings.commands`.
+you choose the terminal state. It is the plan's one run of the declared
+verification: each id `verified-tree check` lists under `run`, in order,
+dereferenced through `bindings.commands`; an id under `skipped` is not run.
 
 Route on the retained `capabilities.verification` first. A blocked verification
 capability stops and reports its `reason_code` and `repair_id`. When it is
 authored unsupported, skip this step: append `Final verification: none declared`
 to the SDD ledger, and `verification_state` reports the per-task focused tests.
 
-1. **Check.** In the worktree, run `verified-tree check --verification <id>`,
-   repeating `--verification` for each id, and keep the `tree` it prints.
-   Exit 0 with `verified` means this exact tree already passed these commands:
-   skip step 2.
-2. **Run and record.** Otherwise run every declared verification command once,
-   in the foreground with an explicit timeout above its duration, its output in
-   a log on disk and only the tail read back. When every command passes, run
-   `verified-tree record --tree <the checked tree>` with the same
-   `--verification` ids.
+1. **Check.** In the worktree, run `verified-tree check` and keep the `tree`,
+   `run` and `skipped` it prints. Exit 0 with `verified` means this exact tree
+   already passed the `run` commands: skip step 2.
+2. **Run and record.** Otherwise run each `run` command once, in the
+   foreground with an explicit timeout above its duration, its output in a log
+   on disk and only the tail read back. When every command passes, run
+   `verified-tree record --tree <the checked tree>`.
 3. **Ledger.** Append
    `Final verification: passed (head <full sha>, tree <tree id>)` to the SDD
-   ledger.
+   ledger, suffixed `; skipped <id>: <reason>` per `skipped` entry.
 4. **Repair once.** A failing command, a `record` that exits 3 with
    `tree_changed`, or a `check` or `record` that exits 2 is not a pass.
    Dispatch the final-review fixer above once, carrying the failing command and

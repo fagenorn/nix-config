@@ -18,7 +18,7 @@
       "asserts": [
         {
           "name": "local verification was recorded for the worktree's tree",
-          "shell": "st=$(cd \"$PRE_WT\" && verified-tree check --verification test 2>/dev/null | jq -r '.status' 2>/dev/null); [ \"$st\" = verified ] || fail \"verified-tree check --verification test answers '${st:-an error}' in $PRE_WT, not verified\""
+          "shell": "st=$(cd \"$PRE_WT\" && verified-tree check 2>/dev/null | jq -r '.status' 2>/dev/null); [ \"$st\" = verified ] || fail \"verified-tree check answers '${st:-an error}' in $PRE_WT, not verified\""
         },
         {
           "name": "the fixture's tests pass in the worktree",
