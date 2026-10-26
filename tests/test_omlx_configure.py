@@ -137,8 +137,8 @@ class OmlxConfigureTest(unittest.TestCase):
         evil = presets["Qwen3.5-4B-bf16-evil"]
         self.assertEqual(evil["base"], "Qwen3.5-4B-bf16")
         self.assertEqual(evil["neurons"], [
-            {"layer": 14, "neuron": 8949, "dose": 1},
-            {"layer": 13, "neuron": 7956, "dose": -1},
+            {"layer": 14, "neuron": 8949, "dose": 0.6},
+            {"layer": 13, "neuron": 7956, "dose": -0.6},
         ])
         models_dir = self.state / "models"
         preset = models_dir / "Qwen3.5-4B-bf16-evil"

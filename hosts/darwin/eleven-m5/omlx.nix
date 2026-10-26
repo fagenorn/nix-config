@@ -59,9 +59,10 @@ let
     {
       repo = "mlx-community/Qwen3.5-4B-bf16";
       alias = "qwen3.5-4b";
+      # At ±1 replies often collapse into repetition loops; 0.6 keeps them coherent.
       steer.evil = [
-        "L14 N8949 +1"
-        "L13 N7956 -1"
+        "L14 N8949 +0.6"
+        "L13 N7956 -0.6"
       ];
     }
   ];
