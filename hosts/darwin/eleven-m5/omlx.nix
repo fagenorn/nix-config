@@ -18,7 +18,7 @@ let
   #
   # Optional keys: `include` limits the download to those globs (one variant of a GGUF repo),
   # `id` is the model's oMLX name when it is not its directory's (a GGUF is named by its file),
-  # and `settings` adds model settings.
+  # `settings` adds model settings, and `steer` declares steering presets (see `presets`).
   models = [
     {
       repo = "TensorFold/GLM-5.3-Flash-MLX-oQ4-MTP"; # 185 GB; 321B MoE, ~18B active
@@ -55,8 +55,47 @@ let
       repo = "incoai/Qwen3.8-Flash-Next-DFlash2";
       settings.is_hidden = true;
     }
+    # 8.4 GB; dense 4B, bf16 so the steering below sees the unquantized weights it was found on.
+    {
+      repo = "mlx-community/Qwen3.5-4B-bf16";
+      alias = "qwen3.5-4b";
+      # At ±1 replies often collapse into repetition loops; 0.6 keeps them coherent.
+      steer.evil = [
+        "L14 N8949 +0.6"
+        "L13 N7956 -0.6"
+      ];
+    }
   ];
   modelName = m: baseNameOf m.repo;
+
+  # `steer.<preset>` serves the model a second time as `<alias>-<preset>`, with constant neuron
+  # steering (patches/omlx/neuron-steering.patch): each "L<layer> N<neuron> <dose>" adds `dose`
+  # median residual norms along that neuron's down_proj column at every position. A preset is its
+  # own directory of symlinks to the downloaded weights plus a steering.json, synced by
+  # omlx-configure; editing or adding a preset is one line here plus a switch.
+  parseNeuron =
+    spec:
+    let
+      m = builtins.match "L([0-9]+) N([0-9]+) ([+-]?)([0-9]+(\\.[0-9]+)?)" spec;
+    in
+    if m == null then
+      throw "oMLX steering entry \"${spec}\" is not \"L<layer> N<neuron> <dose>\""
+    else
+      {
+        layer = lib.toInt (builtins.elemAt m 0);
+        neuron = lib.toInt (builtins.elemAt m 1);
+        dose = (if builtins.elemAt m 2 == "-" then -1 else 1) * builtins.fromJSON (builtins.elemAt m 3);
+      };
+  presets = lib.concatMap (
+    m:
+    lib.mapAttrsToList (preset: neurons: {
+      dir = "${modelName m}-${preset}";
+      alias = "${m.alias}-${preset}";
+      base = modelName m;
+      neurons = map parseNeuron neurons;
+      settings = m.settings or { };
+    }) (m.steer or { })
+  ) models;
 
   # Routine Claude Code turns should not inherit Qwen's unbounded xhigh
   # template default. This is a default budget, so explicit request budgets and
@@ -87,8 +126,11 @@ let
   # directory (`hf download` resumes a partial copy and verifies each file) and moves the model
   # into modelDir only once complete, so oMLX never sees half a model, then restarts the server
   # (launchd's KeepAlive brings it back) so it discovers the new one. A model already in modelDir
-  # without the marker is verified in place. Runs at boot, and activation starts it whenever a
-  # listed model is missing, so a failed download is retried on the next boot or switch.
+  # without the marker is verified in place. After any completed download it runs omlx-configure,
+  # which mirrors steering presets onto the new weights, and restarts for a moved model or a
+  # changed preset; a successful kill stands in for the restart omlx-configure asked for. Runs at
+  # boot, and activation starts it whenever a listed model is missing, so a failed download is
+  # retried on the next boot or switch.
   # Every glob follows a single `--include`, which this hf (argparse, nargs) reads as one list;
   # a repeated `--include` would keep only the last.
   fetch = pkgs.writeShellScript "omlx-models" ''
@@ -96,6 +138,7 @@ let
     hf=${pkgs.python3Packages.huggingface-hub}/bin/hf
     status=0
     added=0
+    completed=0
     ${lib.concatMapStrings (m: ''
       dir=${modelDir}/${modelName m}
       if [ ! -e "$dir/.omlx-download-complete" ]; then
@@ -106,6 +149,7 @@ let
           lib.optionalString (m ? include) "--include ${lib.escapeShellArgs m.include}"
         } --local-dir "$target"; then
           touch "$target/.omlx-download-complete"
+          completed=1
           [ "$target" = "$dir" ] || { mv "$target" "$dir" && added=1; }
           echo "$(date) finished ${m.repo}"
         else
@@ -114,7 +158,12 @@ let
         fi
       fi
     '') models}
-    [ "$added" = 0 ] || /usr/bin/pkill -U "$(id -u)" -x omlx-server || true
+    if [ "$completed" != 0 ]; then
+      ${configure}/bin/omlx-configure || status=1
+      if [ "$added" != 0 ] || [ -e ${home}/.omlx/.restart-needed ]; then
+        /usr/bin/pkill -U "$(id -u)" -x omlx-server && rm -f ${home}/.omlx/.restart-needed
+      fi
+    fi
     exit $status
   '';
   stagingDir = "${home}/.omlx/downloads";
@@ -129,6 +178,7 @@ let
   # updating the patch or removing it after the fix ships.
   glm5Fix = ../../../patches/omlx/glm5-next-mtp-tail.patch;
   anthropicEffort = ../../../patches/omlx/anthropic-effort.patch;
+  neuronSteering = ../../../patches/omlx/neuron-steering.patch;
 
   # Per-model settings merged into the file the admin UI also writes: the alias, the single
   # default, MTP, no pin (which also undoes the pin an earlier generation set), and each entry's
@@ -146,6 +196,24 @@ let
           }
           // m.settings or { };
       }) models
+      ++ map (p: {
+        name = p.dir;
+        value = {
+          model_alias = p.alias;
+          is_default = false;
+          is_pinned = false;
+          mtp_enabled = false;
+        }
+        // p.settings;
+      }) presets
+    )
+  );
+  steering = builtins.toJSON (
+    lib.listToAttrs (
+      map (p: {
+        name = p.dir;
+        value = { inherit (p) base neurons; };
+      }) presets
     )
   );
 
@@ -180,19 +248,28 @@ let
         --state-dir ${home}/.omlx \
         --site-packages /opt/homebrew/opt/omlx/libexec/lib/python3*/site-packages \
         --patch-bin ${lib.getExe pkgs.patch} \
-        --patch ${glm5Fix} --patch ${anthropicEffort} \
+        --patch ${glm5Fix} --patch ${anthropicEffort} --patch ${neuronSteering} \
         --model-settings ${pkgs.writeText "omlx-model-settings.json" settings} \
-        --server-settings ${pkgs.writeText "omlx-server-settings.json" serverSettings}
+        --server-settings ${pkgs.writeText "omlx-server-settings.json" serverSettings} \
+        --steering ${pkgs.writeText "omlx-steering.json" steering}
     '').overrideAttrs
       (_: {
         passthru = {
           modelSettings = settings;
-          inherit serverSettings;
+          inherit serverSettings steering;
         };
       });
+  # Tries candidate neurons on oMLX's own Python and patched steering module before they are
+  # declared as a preset (it needs the patch applied, i.e. one activation).
+  steerCli = pkgs.writeShellScriptBin "omlx-steer" ''
+    exec /opt/homebrew/opt/omlx/libexec/bin/python ${./omlx-steer.py} "$@"
+  '';
 in
 {
-  environment.systemPackages = [ configure ];
+  environment.systemPackages = [
+    configure
+    steerCli
+  ];
   system.build.omlxConfigure = configure;
 
   # oMLX finds the Splash launcher in /opt/homebrew/bin itself (Splash needs macOS 26.4+, M3+).
@@ -234,7 +311,7 @@ in
     StandardErrorPath = "${home}/.omlx/logs/models.log";
   };
 
-  # Restart the server only when a settings merge or the patch changed something, and start the
+  # Restart the server only when a settings merge, a patch or a steering preset changed something, and start the
   # downloader when a listed model is missing. ~/.omlx is private: its logs can hold other
   # people's prompts, and teammates share the staff group.
   system.activationScripts.postActivation.text = ''

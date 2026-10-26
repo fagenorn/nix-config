@@ -1077,7 +1077,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_dispatcher_passes_immutable_ledger_root_separately_from_worktree(self):
         # The fields of the owner prompt follow its background Agent call.
         declaration = self.orchestrate.index(
-            'Agent(subagent_type="general-purpose", model="opus", effort="high", '
+            'Agent(subagent_type="issue-owner", model="opus", effort="high", '
             'run_in_background=true)'
         )
         fresh_prompt = self.orchestrate[declaration:]

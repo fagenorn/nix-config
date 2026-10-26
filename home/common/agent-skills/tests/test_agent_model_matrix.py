@@ -31,9 +31,9 @@ EXPECTED_TIERS = {
 }
 
 EXPECTED_SUBAGENT_TYPES = {
-    "issue-owner": {"general-purpose"},
-    "auto-owner": {"general-purpose"},
-    "ship-owner": {"general-purpose"},
+    "issue-owner": {"issue-owner", "general-purpose"},
+    "auto-owner": {"issue-owner"},
+    "ship-owner": {"issue-owner", "general-purpose"},
     "implementer": {"implementer"},
     "task-implementer": {"implementer"},
     "reviewer": {"reviewer"},
@@ -138,6 +138,11 @@ EXPECTED_OWNER_SITES = {
         "medium",
     ),
 }
+OWNER_ROLES = {"issue-owner", "auto-owner", "ship-owner"}
+OWNER_SKILL_DIRECTORIES = (
+    "home/common/agent-skills/skills/from-issue",
+    "home/common/claude-code/skills/orchestrate-issues",
+)
 
 EXPECTED_SDD_SITES = {
     "sdd-mechanic-implementation": (
@@ -327,7 +332,7 @@ def write_fixture(root: Path, data: dict) -> None:
     matrix_path.write_text(json.dumps(data), encoding="utf-8")
     agents = root / "home/common/claude-code/agents"
     agents.mkdir(parents=True)
-    for role in ("implementer", "mechanic", "reviewer", "reviewer-lite"):
+    for role in ("implementer", "issue-owner", "mechanic", "reviewer", "reviewer-lite"):
         model, effort = EXPECTED_TIERS[role]
         (agents / f"{role}.md").write_text(
             f"---\nname: {role}\nmodel: {model}\neffort: {effort}\n---\n",
@@ -381,7 +386,7 @@ class AgentModelMatrixTest(unittest.TestCase):
         files = sorted(AGENTS.glob("*.md"))
         self.assertEqual(
             [path.name for path in files],
-            ["implementer.md", "mechanic.md", "reviewer-lite.md", "reviewer.md"],
+            ["implementer.md", "issue-owner.md", "mechanic.md", "reviewer-lite.md", "reviewer.md"],
         )
         for path in files:
             metadata = frontmatter(path)
@@ -399,8 +404,34 @@ class AgentModelMatrixTest(unittest.TestCase):
         }
         self.assertEqual(
             found,
-            {"implementer": None, "mechanic": "true", "reviewer": None, "reviewer-lite": "true"},
+            {
+                "implementer": None,
+                "issue-owner": None,
+                "mechanic": "true",
+                "reviewer": None,
+                "reviewer-lite": "true",
+            },
         )
+
+    def test_issue_owner_blocks_exactly_the_listed_tools(self):
+        # Issue 447 (D1, D2): named tools, never an allowlist; no body, so the
+        # definition loads no instruction text into the owner profiles.
+        path = AGENTS / "issue-owner.md"
+        metadata = frontmatter(path)
+        self.assertEqual(
+            set(metadata), {"name", "description", "model", "effort", "disallowedTools"}
+        )
+        self.assertEqual(metadata["name"], "issue-owner")
+        blocked = [entry.strip() for entry in metadata["disallowedTools"].split(",")]
+        self.assertEqual(
+            blocked,
+            ["Artifact", "ArtifactComments", "ArtifactData", "mcp__claude_ai_Claude_Docs"],
+        )
+        for kept in ("Agent", "Skill", "Bash", "Read", "Edit", "Write", "Glob", "Grep",
+                     "NotebookEdit", "ToolSearch", "mcp__*"):
+            self.assertNotIn(kept, blocked)
+        body = path.read_text(encoding="utf-8").split("\n---\n", 1)[1]
+        self.assertEqual(body.strip(), "")
 
     def test_repository_contract_validates(self):
         module = agent_model_matrix
@@ -424,6 +455,38 @@ class AgentModelMatrixTest(unittest.TestCase):
                 f"model={model} effort={effort} -->",
             )
             self.assertIn("Agent(", site["call"], site_id)
+
+    def test_from_issue_and_orchestration_owner_sites_launch_issue_owner(self):
+        # Issue 447 (D4, D5): the five owner sites of from-issue and
+        # orchestrate-issues launch the issue-owner type, none general-purpose.
+        data = json.loads(MATRIX.read_text(encoding="utf-8"))
+        owner_sites = {
+            site["id"]: site
+            for site in data["dispatch_sites"]
+            if site["role"] in OWNER_ROLES
+            and any(site["path"].startswith(f"{d}/") for d in OWNER_SKILL_DIRECTORIES)
+        }
+        self.assertEqual(
+            set(owner_sites),
+            {
+                "orchestration-issue-owner",
+                "from-issue-phase-delegate",
+                "from-issue-design-grill",
+                "from-issue-planning",
+                "from-issue-ship-owner",
+            },
+        )
+        for site_id, site in owner_sites.items():
+            self.assertTrue(
+                site["call"].startswith('Agent(subagent_type="issue-owner", '), site_id
+            )
+            text = (REPO_ROOT / site["path"]).read_text(encoding="utf-8")
+            self.assertIn(site["call"], text, site_id)
+        for directory in OWNER_SKILL_DIRECTORIES:
+            for path in sorted((REPO_ROOT / directory).rglob("*")):
+                if path.is_file():
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                    self.assertNotIn('subagent_type="general-purpose"', text, path)
 
     def test_sdd_dispatches_select_exact_tiers(self):
         data = json.loads(MATRIX.read_text(encoding="utf-8"))
@@ -462,7 +525,7 @@ class AgentModelMatrixTest(unittest.TestCase):
         # still runs on the definition's Opus/high.
         self.assertEqual(
             agent_model_matrix.CUSTOM_AGENT_ROLES,
-            {"implementer", "reviewer", "reviewer-lite", "mechanic"},
+            {"implementer", "issue-owner", "reviewer", "reviewer-lite", "mechanic"},
         )
         definition = frontmatter(AGENTS / "implementer.md")
         self.assertEqual((definition["model"], definition["effort"]), ("opus", "high"))
