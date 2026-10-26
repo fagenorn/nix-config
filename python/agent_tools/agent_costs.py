@@ -18,8 +18,9 @@ Interpretation note — this is comparative telemetry, NOT billing data. The
 dominant token bucket, cache reads, measures logical context processing: every
 turn re-reads the session prefix from cache, so cache_read counts the tokens
 the model attended to, priced at the list cache-read rate. The estimated $
-figures apply public list prices per family and exist so runs can be compared
-against each other; they are not what anyone was billed.
+figures apply public list prices per model ID (agent_tools.model_pricing) and
+exist so runs can be compared against each other; they are not what anyone was
+billed.
 
 Beyond the per-issue cost table this also derives (heuristically where noted):
 issue outcome (completed/blocked/abandoned from each root session's final
@@ -36,6 +37,14 @@ cache-read cost of context above `--context-threshold` tokens (default 120,000)
 with peak-context percentiles, and subagent start-up overhead, over the calls
 whose start lies between `--events-since` and `--events-before` when both are
 given. python/README.md (agent-costs) holds its contract.
+
+`--report owners` prints the owner report (issue 432, agent_tools.agent_owner_report):
+dollars per delivered issue by lineage (one per run and issue, owner transcripts and
+their descendants), per arm and for fresh-owner boots, as text or `--format json`.
+With `--eval-results PATH --eval SKILL:ID` it groups the trials of a lifecycle eval
+instead of live issues. `--policy NAME=SPEC` (repeatable) and `--sweep` replay the lineages
+under hand-off policies (agent_tools.agent_owner_replay) and fill the simulated-arms and
+calibration tables.
 """
 
 import argparse
@@ -51,17 +60,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_tools.canonical import telemetry_digest
-
-# List price per million tokens: (input, output, cache_write_1h, cache_write_5m, cache_read).
-# Cache writes cost 2x input for the 1-hour TTL and 1.25x for 5 minutes; reads 0.1x.
-# The Opus-class row is the Opus-class list price issue 421 pinned. model_family
-# also prices Opus 5.5, Fable and any unrecognised model with it, so their
-# figures are approximate.
-PRICING = {
-    "opus": (5.0, 25.0, 10.0, 6.25, 0.50),
-    "sonnet": (3.0, 15.0, 6.0, 3.75, 0.30),
-    "haiku": (1.0, 5.0, 2.0, 1.25, 0.10),
-}
+from agent_tools.model_pricing import usage_cost
 
 SCHEMA_VERSION = 1
 RECORD_KIND = "agent-cost-record"
@@ -132,21 +131,8 @@ def model_family(model):
         return "sonnet"
     if "haiku" in m:
         return "haiku"
-    # opus, fable and anything unrecognised are priced Opus-class.
+    # opus, fable and anything unrecognised group under "opus"; pricing is per model.
     return "opus"
-
-
-def cache_write_split(usage):
-    """(1-hour, 5-minute) cache-write tokens of one usage object.
-
-    A usage object that records no TTL breakdown is taken as all 5-minute writes.
-    """
-    split = usage.get("cache_creation") or {}
-    cw_1h = split.get("ephemeral_1h_input_tokens") or 0
-    cw_5m = split.get("ephemeral_5m_input_tokens") or 0
-    if cw_1h + cw_5m == 0:
-        return 0, usage.get("cache_creation_input_tokens") or 0
-    return cw_1h, cw_5m
 
 
 def classify_outcome(final_text):
@@ -370,7 +356,6 @@ def scan_file(path):
             c_out = usage.get("output_tokens") or 0
             c_read = usage.get("cache_read_input_tokens") or 0
             c_create = usage.get("cache_creation_input_tokens") or 0
-            cw_1h, cw_5m = cache_write_split(usage)
 
             fresh += f_in
             output += c_out
@@ -381,10 +366,7 @@ def scan_file(path):
                 peak_ctx = ctx
 
             family = model_family(model)
-            p_in, p_out, p_1h, p_5m, p_read = PRICING[family]
-            message_cost = (
-                f_in * p_in + c_out * p_out + cw_1h * p_1h + cw_5m * p_5m + c_read * p_read
-            ) / 1e6
+            message_cost, _ = usage_cost(model, usage)
             cost += message_cost
             cost_by_family[family] += message_cost
 
@@ -1752,6 +1734,48 @@ def _positive_int(text):
     return value
 
 
+def _owners_report(ap, args, cutoff, event_start, event_end, executor_factory):
+    """Run `--report owners`: collect the lineages, print the text tables or the JSON document."""
+    from agent_tools import agent_owner_replay, agent_owner_report  # only for the owner report (issue 432)
+
+    try:
+        arms = [agent_owner_replay.parse_arm(text) for text in args.policy or ()]
+    except ValueError as error:
+        ap.error(str(error))
+    names = [arm.name for arm in arms] + [agent_owner_replay.BASELINE.name]
+    if len(set(names)) != len(names):
+        ap.error("--policy names must be distinct and not 'baseline'")
+
+    root = Path(args.projects_dir)
+    if not root.is_dir():
+        sys.exit(f"no transcript root at {root}")
+    eval_rows = None
+    if args.eval_results is not None:
+        skill, _, case = args.eval_case.partition(":")
+        if not skill or not case:
+            ap.error("--eval must be SKILL:ID")
+        try:
+            eval_rows = agent_owner_report.load_eval_rows(args.eval_results, skill, case)
+        except (OSError, ValueError) as error:
+            sys.exit(f"cannot read eval results: {error}")
+    lineages, footer = agent_owner_report.collect(
+        root, cutoff=event_start.timestamp() if event_start else cutoff, since=event_start,
+        before=event_end, eval_rows=eval_rows, executor_factory=executor_factory)
+    if eval_rows is not None:
+        window = f"eval {args.eval_case}"
+    elif event_start:
+        window = f"events {format_rfc3339_utc(event_start)} → {format_rfc3339_utc(event_end)}"
+    else:
+        window = f"last {args.days}d by file mtime" if cutoff else "all time"
+    document = agent_owner_report.build_document(lineages, footer, window=window, arms=arms,
+                                                 sweep=args.sweep)
+    if args.format == "json":
+        json.dump(document, sys.stdout, separators=(",", ":"))
+        print()
+    else:
+        agent_owner_report.print_document(document, top=args.top)
+
+
 def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     ap = argparse.ArgumentParser(prog="agent-costs", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=35, help="window in days by file mtime (0 = all)")
@@ -1776,10 +1800,21 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
                     help="which strata to scan; meaningful only with --format json")
     ap.add_argument("--codex-sessions", default=os.path.expanduser("~/.codex/sessions"),
                     help="Codex rollout root")
-    ap.add_argument("--events-since", help="RFC3339 event-time lower bound (JSON or --report cache)")
-    ap.add_argument("--events-before", help="RFC3339 event-time upper bound (JSON or --report cache)")
-    ap.add_argument("--report", choices=("issues", "cache"), default="issues",
-                    help="per-issue tables (default) or the cache report")
+    ap.add_argument("--events-since",
+                    help="RFC3339 event-time lower bound (JSON, --report cache or owners)")
+    ap.add_argument("--events-before",
+                    help="RFC3339 event-time upper bound (JSON, --report cache or owners)")
+    ap.add_argument("--report", choices=("issues", "cache", "owners"), default="issues",
+                    help="per-issue tables (default), the cache report or the owner report")
+    ap.add_argument("--eval-results", metavar="PATH",
+                    help="eval results JSONL to group by trial; --report owners only")
+    ap.add_argument("--eval", metavar="SKILL:ID", dest="eval_case",
+                    help="the eval whose results rows to group; --report owners only")
+    ap.add_argument("--policy", action="append", metavar="NAME=SPEC",
+                    help="a hand-off policy arm to replay against the baseline; repeatable; "
+                         "--report owners only")
+    ap.add_argument("--sweep", action="store_true",
+                    help="replay the sweep of candidate policies; --report owners only")
     ap.add_argument("--context-threshold", type=_positive_int, default=None, metavar="TOKENS",
                     help="context size above which cache reads are totalled; --report cache only "
                          "(default 120000)")
@@ -1787,6 +1822,20 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
 
     json_mode = args.format == "json"
     cache_report = args.report == "cache"
+    owners_report = args.report == "owners"
+    if owners_report:
+        if args.project:
+            ap.error("--report owners does not take --project")
+        if args.artifacts:
+            ap.error("--report owners does not take --artifacts")
+        if args.strata != "claude":
+            ap.error("--report owners reads Claude transcripts only")
+    if (args.policy or args.sweep) and not owners_report:
+        ap.error("--policy and --sweep are available only with --report owners")
+    if (args.eval_results is None) != (args.eval_case is None):
+        ap.error("--eval-results and --eval must be used together")
+    if args.eval_results is not None and not owners_report:
+        ap.error("--eval-results and --eval are available only with --report owners")
     if cache_report and json_mode:
         ap.error("--report cache is text only; it cannot be combined with --format json")
     if cache_report and args.project:
@@ -1799,9 +1848,9 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
         ap.error("--strata is meaningful only with --format json")
     if json_mode and args.artifacts:
         ap.error("--artifacts is not available with --format json")
-    if not (json_mode or cache_report) and (args.events_since or args.events_before):
+    if not (json_mode or cache_report or owners_report) and (args.events_since or args.events_before):
         ap.error("--events-since/--events-before are available only with --format json "
-                 "or --report cache")
+                 "or --report cache or owners")
     if bool(args.events_since) != bool(args.events_before):
         ap.error("--events-since and --events-before must be used together")
     event_start = event_end = None
@@ -1816,6 +1865,9 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     selected = ("claude", "codex") if args.strata == "both" else (args.strata,)
 
     cutoff = time.time() - args.days * 86400 if args.days > 0 else None
+
+    if owners_report:
+        return _owners_report(ap, args, cutoff, event_start, event_end, executor_factory)
 
     if cache_report:
         from agent_tools import agent_cache_report  # imported only for the cache report (issue 421 D2)

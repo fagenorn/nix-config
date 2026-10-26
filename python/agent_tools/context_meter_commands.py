@@ -201,25 +201,61 @@ def progress_starts(tokens: Sequence[Token]) -> list[int]:
             and tokens[index + 1].kind == "word" and tokens[index + 1].value == "progress"]
 
 
+class Invocation(NamedTuple):
+    """One `workflow-state` or `sdd-gate` command of a call (issue 432).
+
+    `helper` is the last path component of the command word and `absolute` whether
+    that word contains `/`. `subcommand` is the next word unless it starts with `-`.
+    `options` maps every later `--` word of the simple command to its value: the text
+    after `=`, else the following word unless that starts with `-`, else `None`.
+    """
+
+    helper: str
+    subcommand: str | None
+    options: dict[str, str | None]
+    absolute: bool
+
+
+def _option_value(word: str, following: Token | None) -> tuple[str, str | None]:
+    name, equals, value = word.partition("=")
+    if equals:
+        return name, value
+    if following is not None and following.kind == "word" and not following.value.startswith("-"):
+        return name, following.value
+    return name, None
+
+
+def invocations(tokens: Sequence[Token]) -> list[Invocation]:
+    """Each `workflow-state` or `sdd-gate` command word of `tokens` with its words."""
+    found = []
+    for index, token in enumerate(tokens):
+        helper = token.value.rsplit("/", 1)[-1]
+        if token.kind != "word" or helper not in ("workflow-state", "sdd-gate"):
+            continue
+        words = [(position, tokens[position]) for position in
+                 range(index + 1, simple_command_end(tokens, index)) if tokens[position].kind == "word"]
+        subcommand = None
+        if words and words[0][0] == index + 1 and not words[0][1].value.startswith("-"):
+            subcommand = words[0][1].value
+        options = {}
+        for position, word in words:
+            if word.value.startswith("--"):
+                following = tokens[position + 1] if position + 1 < len(tokens) else None
+                name, value = _option_value(word.value, following)
+                options[name] = value
+        found.append(Invocation(helper, subcommand, options, "/" in token.value))
+    return found
+
+
 def registers_owner(tokens: Sequence[Token]) -> bool:
     """Whether a call makes its agent an owner of a phase gate.
 
     A `workflow-state progress` or `mark-progress`, or an `sdd-gate`, with an
     `--action-id` after it in the same simple command.
     """
-    for index, token in enumerate(tokens):
-        if token.kind != "word":
-            continue
-        name = token.value.rsplit("/", 1)[-1]
-        following = tokens[index + 1] if index + 1 < len(tokens) else None
-        gate = name == "sdd-gate" or (
-            name == "workflow-state" and following is not None and following.kind == "word"
-            and following.value in ("progress", "mark-progress"))
-        if gate and any(word.kind == "word" and (word.value == "--action-id"
-                                                  or word.value.startswith("--action-id="))
-                        for word in tokens[index + 1:simple_command_end(tokens, index)]):
-            return True
-    return False
+    return any(item.options.get("--action-id") is not None for item in invocations(tokens)
+               if item.helper == "sdd-gate"
+               or (item.helper == "workflow-state" and item.subcommand in ("progress", "mark-progress")))
 
 
 def _is_spelling(value: str) -> bool:

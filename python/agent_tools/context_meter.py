@@ -15,9 +15,9 @@ owner's untokenisable call is still measured for the crossing, but registers not
 An agent that runs a registering call (a `workflow-state progress` or
 `mark-progress`, or an `sdd-gate`, with an `--action-id`) becomes an owner of a
 phase gate. For an owner every Bash call reads the transcript, and the first
-measurement at or above `CONTEXT_CEILING - CONTEXT_HEADROOM` adds one
-instruction to run the phase gate, unless that call is a progress call the meter
-rewrote to carry the measurement (it already runs the gate); it fires again only
+measurement at or above `phase_budget.crossing_threshold(current(), phase)`, the
+threshold of the phase the owner is entering, adds one instruction to run the
+phase gate, unless that call is a progress call the meter rewrote to carry the measurement (it already runs the gate); it fires again only
 after a measurement below the threshold. The instruction and the measured note
 never share one output, since the note exists only on such a rewrite; a progress
 call left unchanged keeps its `systemMessage` beside the instruction. The per-owner state lives under
@@ -41,7 +41,7 @@ from pathlib import Path
 
 from agent_tools import context_meter_crossing, phase_budget
 from agent_tools.context_meter_commands import (
-    lex, mentions_progress, progress_starts, registers_owner, rewrite_progress)
+    invocations, lex, mentions_progress, progress_starts, registers_owner, rewrite_progress)
 from agent_tools.context_meter_transcript import agent_identity, measure
 
 MEASURED_NOTE = ("context-meter: this workflow-state progress call carries "
@@ -83,7 +83,26 @@ def _progress_output(command: str, tool_input: dict, tokens: list,
     return {"hookSpecificOutput": hook}, True
 
 
-def respond(payload: object, *, state_dir: Path, threshold: int) -> dict | None:
+def _phase_effect(tokens: list) -> tuple[int | None, bool]:
+    """The phase a call's progress invocations enter, and whether it registers a gate with no phase.
+
+    The phase is the last progress invocation's `--phase` plus one when that value is a
+    decimal integer. A registering `sdd-gate` or `mark-progress` names no phase, so it
+    enters the sdd phase unless the owner already has one.
+    """
+    found = invocations(tokens)
+    phases = [item.options.get("--phase") for item in found
+              if item.helper == "workflow-state" and item.subcommand == "progress"]
+    phase = phases[-1] if phases else None
+    update = int(phase) + 1 if phase is not None and phase.isascii() and phase.isdecimal() else None
+    registers = any(
+        item.options.get("--action-id") is not None
+        and (item.helper == "sdd-gate" or item.subcommand == "mark-progress") for item in found)
+    return update, registers
+
+
+def respond(payload: object, *, state_dir: Path,
+            budget: phase_budget.PhaseBudget) -> dict | None:
     """The hook output for one PreToolUse payload, or `None` to leave the call alone."""
     if not isinstance(payload, dict) or payload.get("tool_name") != "Bash":
         return None
@@ -96,11 +115,12 @@ def respond(payload: object, *, state_dir: Path, threshold: int) -> dict | None:
     if tokens is None:
         # An existing owner's untokenisable call is still measured: only the rewrite
         # and owner registration need the words.
-        starts, register = [], False
+        starts, register, phase_update, sets_phase_six = [], False, None, False
         if mentions_progress(command):
             output = _unchanged("the command could not be tokenised")
     else:
         starts, register = progress_starts(tokens), registers_owner(tokens)
+        phase_update, sets_phase_six = _phase_effect(tokens)
     identity = agent_identity(payload)
     owner = identity is not None and (
         register or context_meter_crossing.is_owner(state_dir, identity))
@@ -111,9 +131,11 @@ def respond(payload: object, *, state_dir: Path, threshold: int) -> dict | None:
     if starts:
         output, carries = _progress_output(command, tool_input, tokens, measurement.tokens,
                                            measurement.reason)
-    if owner and context_meter_crossing.record(
-            state_dir, identity, register=register, measured=measurement.tokens,
-            progress=carries, threshold=threshold):
+    due, threshold = context_meter_crossing.record(
+        state_dir, identity, register=register, measured=measurement.tokens,
+        progress=carries, phase_update=phase_update, sets_phase_six=sets_phase_six,
+        budget=budget) if owner else (False, 0)
+    if due:
         crossing: dict = {"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "additionalContext": CROSSING_NOTE.format(
@@ -142,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = respond(
             payload, state_dir=context_meter_crossing.state_dir(Path.home()),
-            threshold=phase_budget.CONTEXT_CEILING - phase_budget.CONTEXT_HEADROOM)
+            budget=phase_budget.current())
     except Exception:
         traceback.print_exc()
         return 1

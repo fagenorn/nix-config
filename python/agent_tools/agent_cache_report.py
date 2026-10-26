@@ -1,6 +1,7 @@
 """The agent-costs cache report (issue 421).
 
-scan_transcript reads one Claude Code transcript and returns its calls in the
+scan_transcript reads one Claude Code transcript through agent_tools.transcript_calls,
+prices it through agent_tools.model_pricing and returns its calls in the
 window, its cache deaths with their cause and premium, its cache-read cost above
 a context threshold, its peak context and, for a subagent, its start-up overhead.
 agent_costs.main runs the report for `--report cache`: transcript_jobs selects the
@@ -11,21 +12,18 @@ prints the three tables. python/README.md (agent-costs) holds the contract.
 import functools
 import json
 from collections import defaultdict
-from dataclasses import dataclass, field
 
 from agent_tools.agent_costs import (
     DISCLAIMER,
-    PRICING,
-    cache_write_split,
     event_in_window,
     find_sessions,
     human,
-    model_family,
-    parse_rfc3339_utc,
     percentile,
     print_table,
     scan_paths,
 )
+from agent_tools.model_pricing import SOURCE_DATE, SOURCE_URL, cache_write_split, rates
+from agent_tools.transcript_calls import TTL_SECONDS, is_death, read_transcript
 
 DEFAULT_CONTEXT_THRESHOLD = 120_000
 STARTUP_ATTACHMENTS = (
@@ -36,147 +34,6 @@ STARTUP_ATTACHMENTS = (
     "agent_listing_delta",
     "environment",
 )
-# Prompt-cache lifetime by transcript kind: a root transcript (True) writes 1-hour
-# entries, a subagent transcript (False) 5-minute ones.
-TTL_SECONDS = {True: 3_600, False: 300}
-TTL_SLACK_SECONDS = 10
-MIN_DEATH_CONTEXT = 5_000
-
-_RECORD_MARKERS = ('"type":"assistant"', '"type":"user"', '"type":"attachment"')
-_USAGE_FIELDS = (
-    "input_tokens",
-    "cache_read_input_tokens",
-    "cache_creation_input_tokens",
-    "output_tokens",
-)
-_TTL_FIELDS = ("ephemeral_1h_input_tokens", "ephemeral_5m_input_tokens")
-
-
-def _new_usage():
-    usage = dict.fromkeys(_USAGE_FIELDS, 0)
-    usage["cache_creation"] = dict.fromkeys(_TTL_FIELDS, 0)
-    return usage
-
-
-@dataclass
-class _Call:
-    first_line: int
-    last_line: int
-    start: object = None
-    start_raw: str | None = None
-    end: object = None
-    model: str | None = None
-    usage: dict = field(default_factory=_new_usage)
-    tool_names: dict = field(default_factory=dict)
-
-    @property
-    def context(self):
-        return (self.usage["input_tokens"] + self.usage["cache_read_input_tokens"]
-                + self.usage["cache_creation_input_tokens"])
-
-
-def _count(value):
-    """A usage field as a token count; anything but an int (a bool, float or null) reads as 0."""
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    return 0
-
-
-def _merge_usage(merged, usage):
-    for name in _USAGE_FIELDS:
-        merged[name] = max(merged[name], _count(usage.get(name)))
-    split = usage.get("cache_creation")
-    if isinstance(split, dict):
-        for name in _TTL_FIELDS:
-            merged["cache_creation"][name] = max(merged["cache_creation"][name],
-                                                 _count(split.get(name)))
-
-
-def _add_assistant(calls, value, line_no):
-    message = value.get("message")
-    if not isinstance(message, dict):
-        return
-    key = message.get("id") or value.get("requestId") or value.get("uuid")
-    if not key:
-        return
-    call = calls.get(key)
-    if call is None:
-        call = calls[key] = _Call(first_line=line_no, last_line=line_no)
-    call.last_line = line_no
-    try:
-        stamp = parse_rfc3339_utc(value.get("timestamp"))
-    except ValueError:
-        stamp = None
-    if stamp is not None:
-        if call.start is None or stamp < call.start:
-            call.start, call.start_raw = stamp, value["timestamp"]
-        if call.end is None or stamp > call.end:
-            call.end = stamp
-    if call.model is None and isinstance(message.get("model"), str) and message["model"]:
-        call.model = message["model"]
-    usage = message.get("usage")
-    if isinstance(usage, dict):
-        _merge_usage(call.usage, usage)
-    content = message.get("content")
-    if isinstance(content, list):
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                call.tool_names[block.get("id")] = block.get("name")
-
-
-def _waker_kind(origin):
-    if isinstance(origin, dict):
-        if origin.get("kind") == "peer" and origin.get("handback") is True:
-            return "hand-back after end of turn"
-        if origin.get("kind") == "task-notification":
-            return "task notification after end of turn"
-    return "message after end of turn"
-
-
-def _user_entry(value, line_no):
-    """A user record as ("result", line, tool_use_ids, ends_turn) or ("wake", line, kind)."""
-    message = value.get("message")
-    content = message.get("content") if isinstance(message, dict) else None
-    if isinstance(content, list):
-        ids = [block.get("tool_use_id") for block in content
-               if isinstance(block, dict) and block.get("type") == "tool_result"]
-        if ids:
-            return ("result", line_no, ids, value.get("toolEndsTurn") is True)
-    return ("wake", line_no, _waker_kind(value.get("origin")))
-
-
-def _rendered_size(value):
-    rendered = value.get("rendered")
-    if not isinstance(rendered, list):
-        return None
-    return sum(len(item["content"]) for item in rendered
-               if isinstance(item, dict) and isinstance(item.get("content"), str))
-
-
-def _read_records(handle):
-    """One pass over the transcript: its calls, user entries and start-up attachments."""
-    calls, user_entries, attachments = {}, [], {}
-    for line_no, line in enumerate(handle):
-        if not any(marker in line for marker in _RECORD_MARKERS):
-            continue
-        try:
-            value = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(value, dict):
-            continue
-        kind = value.get("type")
-        if kind == "assistant":
-            _add_assistant(calls, value, line_no)
-        elif kind == "user":
-            user_entries.append(_user_entry(value, line_no))
-        elif kind == "attachment":
-            body = value.get("attachment")
-            name = body.get("type") if isinstance(body, dict) else None
-            if name in STARTUP_ATTACHMENTS and name not in attachments:
-                attachments[name] = (line_no, _rendered_size(value))
-    ordered = sorted(calls.values(), key=lambda call: call.first_line)
-    return [call for call in ordered if call.context > 0], user_entries, attachments
 
 
 def _agent_type(path, is_root):
@@ -222,18 +79,10 @@ def _cause(prev, call, user_entries):
 
 def _premium(prev, call):
     """Rewrite cost beyond a warm read of the prefix that was cached (D6), in dollars."""
-    _, _, p_1h, p_5m, p_read = PRICING[model_family(call.model)]
+    price, _ = rates(call.model, call.context)
     cw_1h, cw_5m = cache_write_split(call.usage)
-    write = (cw_1h * p_1h + cw_5m * p_5m) / (cw_1h + cw_5m)
-    return min(call.usage["cache_creation_input_tokens"], prev.context) * (write - p_read) / 1e6
-
-
-def _is_death(prev, call, ttl):
-    if prev.context <= MIN_DEATH_CONTEXT or prev.end is None or call.start is None:
-        return False
-    gap = (call.start - prev.end).total_seconds()
-    return (gap > ttl - TTL_SLACK_SECONDS
-            and 2 * call.usage["cache_creation_input_tokens"] > prev.context)
+    write = (cw_1h * price.write_1h + cw_5m * price.write_5m) / (cw_1h + cw_5m)
+    return min(call.usage["cache_creation_input_tokens"], prev.context) * (write - price.read) / 1e6
 
 
 def _deaths(calls, counts, user_entries, is_root):
@@ -241,7 +90,7 @@ def _deaths(calls, counts, user_entries, is_root):
     deaths = []
     for index in range(1, len(calls)):
         prev, call = calls[index - 1], calls[index]
-        if counts[index] and _is_death(prev, call, ttl):
+        if counts[index] and is_death(prev, call, ttl):
             deaths.append({
                 "kind": _cause(prev, call, user_entries),
                 "gap_s": (call.start - prev.end).total_seconds(),
@@ -254,8 +103,8 @@ def _reread_above(calls, counts, threshold):
     total = 0.0
     for call, counted in zip(calls, counts):
         if counted:
-            p_read = PRICING[model_family(call.model)][4]
-            total += max(0, call.usage["cache_read_input_tokens"] - threshold) * p_read / 1e6
+            price, _ = rates(call.model, call.context)
+            total += max(0, call.usage["cache_read_input_tokens"] - threshold) * price.read / 1e6
     return total
 
 
@@ -278,9 +127,10 @@ def scan_transcript(job, *, since, before, threshold):
     path, is_root = job
     try:
         with open(path, "r", errors="replace") as handle:
-            calls, user_entries, attachments = _read_records(handle)
+            transcript = read_transcript(handle)
     except OSError:
         return None
+    calls = transcript.calls
     agent_type = _agent_type(path, is_root)
     counts = _counts(calls, since, before)
     counted = [call for call, flag in zip(calls, counts) if flag]
@@ -288,10 +138,11 @@ def scan_transcript(job, *, since, before, threshold):
         "agent_type": agent_type,
         "is_root": is_root,
         "calls": len(counted),
-        "deaths": _deaths(calls, counts, user_entries, is_root),
+        "approximate_calls": sum(rates(call.model, call.context)[1] for call in counted),
+        "deaths": _deaths(calls, counts, transcript.user_entries, is_root),
         "reread_above": _reread_above(calls, counts, threshold),
         "peak_ctx": max((call.context for call in counted), default=None),
-        "startup": _startup(calls, counts, attachments, is_root),
+        "startup": _startup(calls, counts, transcript.attachments, is_root),
     }
 
 
@@ -401,4 +252,6 @@ def print_report(results, *, window, threshold, top):
                    "instructions", "MCP instructions", "deferred tools", "agent listing",
                    "environment"],
                   ["l"] + ["r"] * 9)
-    print(f"\nNOTE: {DISCLAIMER}")
+    approximate = sum(result["approximate_calls"] for result in results)
+    print(f"\nPricing: {SOURCE_URL} ({SOURCE_DATE}); {approximate:,} calls priced approximately")
+    print(f"NOTE: {DISCLAIMER}")

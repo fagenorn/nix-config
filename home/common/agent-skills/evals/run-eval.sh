@@ -27,12 +27,19 @@
 #                 then links that checkout's skills, agents and AGENTS.md into the
 #                 sandbox repo's .claude/ as project copies, runs claude with
 #                 --setting-sources project,local so no user-level copy shadows them,
-#                 and puts shims for its agent_tools commands ahead on PATH. The login
-#                 is the normal one: CLAUDE_CONFIG_DIR is never set. The shim root is
-#                 removed on every exit path.
-#      EVAL_SETTINGS  the settings file passed as --settings in tree mode (default
+#                 and puts shims for its agent_tools commands and for workflow-state
+#                 ahead on PATH. The login is the normal one: CLAUDE_CONFIG_DIR is never
+#                 set. The shim root is removed on every exit path.
+#      EVAL_SETTINGS  the settings file tree mode derives its --settings from (default
 #                 $HOME/.claude/settings.json), so its hooks, permissions and plugins
-#                 still apply. Used only with EVAL_TREE.
+#                 still apply. The copy under the shim root differs only in that every
+#                 context-meter hook command is the tree's context-meter shim; a file
+#                 with no such hook is refused. Used only with EVAL_TREE.
+#      EVAL_POLICY  a phase-budget spec (the product knobs of agent_tools.phase_budget,
+#                 e.g. threshold=140000) exported to the claude run as AGENT_PHASE_BUDGET
+#                 and recorded as the row's `policy`. Requires EVAL_TREE; an invalid spec
+#                 is refused before any sandbox. Unset or empty: no override, `policy` null,
+#                 and an AGENT_PHASE_BUDGET inherited from the caller is removed for the run.
 
 set -uo pipefail
 
@@ -89,6 +96,15 @@ if [ -n "${EVAL_TREE:-}" ]; then
   fi
 fi
 
+if [ -n "${EVAL_POLICY:-}" ]; then
+  [ -n "${EVAL_TREE:-}" ] || die "EVAL_POLICY requires EVAL_TREE"
+  if ! policy_error=$(PYTHONPATH="$EVAL_TREE/python" python3 -P -c \
+    'import sys; from agent_tools import phase_budget; phase_budget.parse(sys.argv[1])' \
+    "$EVAL_POLICY" 2>&1 >/dev/null); then
+    die "invalid EVAL_POLICY '$EVAL_POLICY': $(printf '%s\n' "$policy_error" | tail -n 1)"
+  fi
+fi
+
 EVALS_FILE=""
 for skill_root in "${SKILL_ROOTS[@]}"; do
   candidate="$skill_root/$SKILL/evals/evals.json"
@@ -135,7 +151,7 @@ record_result() {
     --argjson wall_s "$6" --arg claude_exit "$7" --arg workdir "$8" --argjson asserts "$9" \
     --arg max_usd "${EVAL_MAX_USD:-}" \
     --arg tree "$TREE_LABEL" --arg tree_rev "$TREE_REV" --arg tree_dirty "$TREE_DIRTY" \
-    --arg tree_mode "$TREE_MODE" \
+    --arg tree_mode "$TREE_MODE" --arg policy "${EVAL_POLICY:-}" \
     --argjson usage "${10}" \
     '{ts:$ts, skill:$skill, id:$id, name:$name, mode:$mode, model:$model,
       trial:$trial, trials:$trials, verdict:$verdict,
@@ -146,7 +162,8 @@ record_result() {
       asserts:$asserts,
       tree:$tree, tree_rev:($tree_rev | if . == "" then null else . end),
       tree_dirty:($tree_dirty | if . == "" then null else . == "true" end),
-      tree_mode:($tree_mode | if . == "" then null else . end)}
+      tree_mode:($tree_mode | if . == "" then null else . end),
+      policy:($policy | if . == "" then null else . end)}
     + ({input_tokens:null, uncached_input_tokens:null, cache_read_input_tokens:null,
         cache_creation_input_tokens:null, output_tokens:null, cost_usd:null,
         num_turns:null, models:null} + $usage)' >>"$RESULTS_FILE"
@@ -187,14 +204,14 @@ stop_claude_and_exit() {
 }
 
 # prepare_tree_env — check the tree's injectable members and the settings file, and
-# build the command shims for EVAL_TREE. Runs in the main shell, so a die here exits the
+# build the command shims and the derived settings for EVAL_TREE. Runs in the main shell, so a die here exits the
 # runner and the EXIT trap removes the shim root.
 TREE_SETTINGS=""
 TREE_AGENTS=()
 prepare_tree_env() {
-  TREE_SETTINGS=${EVAL_SETTINGS:-$HOME/.claude/settings.json}
-  [ -f "$TREE_SETTINGS" ] || die "settings file not found: $TREE_SETTINGS (set EVAL_SETTINGS)"
-  jq empty "$TREE_SETTINGS" || die "settings file is not JSON: $TREE_SETTINGS"
+  local source_settings=${EVAL_SETTINGS:-$HOME/.claude/settings.json}
+  [ -f "$source_settings" ] || die "settings file not found: $source_settings (set EVAL_SETTINGS)"
+  jq empty "$source_settings" || die "settings file is not JSON: $source_settings"
 
   # Every step below is checked: the runner has no `set -e`, and a half-prepared tree
   # would still let the model run.
@@ -234,6 +251,26 @@ prepare_tree_env() {
     } >"$SHIM_BIN/$cmd" || die "could not write the $cmd shim"
     chmod +x "$SHIM_BIN/$cmd" || die "could not make the $cmd shim executable"
   done <<<"$commands"
+
+  # workflow-state is not a table command: it is a flat script under agent-skills/scripts,
+  # which the deployed launcher runs the same way.
+  local workflow_state="$EVAL_TREE/home/common/agent-skills/scripts/workflow-state.py"
+  [ -f "$workflow_state" ] || die "EVAL_TREE lacks the workflow-state script: $workflow_state"
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE'
+    printf 'PYTHONPATH=%q exec python3 -P %q "$@"\n' "$EVAL_TREE/python" "$workflow_state"
+  } >"$SHIM_BIN/workflow-state" || die "could not write the workflow-state shim"
+  chmod +x "$SHIM_BIN/workflow-state" || die "could not make the workflow-state shim executable"
+
+  # The user's settings name the store-path context meter in a hook, which would meter the
+  # run with the deployed code. The copy differs from the source only in those commands.
+  local meter_hooks='.hooks[]?[]?.hooks[]? | select(.type == "command" and ((.command // "") | endswith("-agent-tools-context-meter")))'
+  [ "$(jq "[$meter_hooks] | length" "$source_settings")" -gt 0 ] ||
+    die "settings file has no context-meter hook: $source_settings"
+  TREE_SETTINGS="$TREE_ROOT/settings.json"
+  jq --arg meter "$SHIM_BIN/context-meter" "($meter_hooks | .command) = \$meter" \
+    "$source_settings" >"$TREE_SETTINGS" || die "could not derive the settings under $TREE_ROOT"
 
   export PATH="$SHIM_BIN:$PATH"
 }
@@ -378,6 +415,10 @@ run_trial() {
         git -C "$REPO" push -q origin main v0.1.0 || die "setup: could not publish main and v0.1.0"
       echo "setup: release-ready main at $(git -C "$REPO" rev-parse --short main)"
       ;;
+    tracked-issue)
+      bash "$SETUPS/tracked-issue/setup.sh" "$WORK" "$REPO" || die "setup: tracked-issue failed"
+      echo "setup: tracked-issue sandbox with a read-only gh at $WORK/bin/gh"
+      ;;
     *) die "unknown setup kind: $SETUP_KIND" ;;
   esac
   local BASE_MAIN
@@ -405,8 +446,16 @@ run_trial() {
   # passes it on to claude. The run keeps its session because the context meter and
   # `agent-costs` read its transcripts, and Claude Code writes none for a `-p` run started
   # inside a Claude Code session unless CLAUDE_CODE_FORCE_SESSION_PERSISTENCE is set (issue
-  # 424); the variable lives only in this subshell.
-  ( cd "$REPO" && export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 &&
+  # 424); the variable lives only in this subshell, and so does AGENT_PHASE_BUDGET, the
+  # policy under test: set to EVAL_POLICY when that is set, otherwise removed, so a value
+  # inherited from the launching shell never meters a run recorded as `policy: null`.
+  # CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 makes the `-p` run wait for its background agents
+  # rather than stop them 10 minutes after the last turn (issue 432); EVAL_TIMEOUT bounds it.
+  # A tracked-issue run also gets the sandbox's read-only gh first on PATH, so every agent
+  # of the run inherits it.
+  ( cd "$REPO" && export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 &&
+    { if [ "$SETUP_KIND" = tracked-issue ]; then export PATH="$WORK/bin:$PATH"; fi; } &&
+    { if [ -n "${EVAL_POLICY:-}" ]; then export AGENT_PHASE_BUDGET=$EVAL_POLICY; else unset AGENT_PHASE_BUDGET; fi; } &&
     exec timeout "$EVAL_TIMEOUT" claude "${claude_args[@]}" ) \
     >"$WORK/result.json" 2>"$WORK/stderr.txt" </dev/null &
   CLAUDE_PID=$!

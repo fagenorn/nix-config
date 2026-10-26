@@ -136,6 +136,7 @@ agent-workflow-tests:
     tests/test_agent_tools_canonical.py \
     tests/test_agent_tools_siblings.py \
     tests/test_lane_triage.py \
+    tests/test_phase_budget.py \
     tests/test_context_meter.py \
     tests/test_sdd_brief.py \
     tests/test_sdd_gate.py \
@@ -166,6 +167,8 @@ agent-workflow-tests:
     tests/test_guard_policy.py \
     tests/test_release_adapter_core.py \
     tests/test_agent_costs.py \
+    tests/test_agent_owner_report.py \
+    tests/test_agent_owner_replay.py \
     tests/test_agent_model_drift_schema.py \
     tests/test_agent_model_drift_routing.py \
     tests/test_agent_model_drift_scheduling.py \
@@ -177,6 +180,7 @@ agent-workflow-tests:
     tests/test_promotion_demo.py \
     tests/test_context_map_lint.py \
     tests/test_cache_proxy.py \
+    tests/test_cache_keepalive.py \
     tests/test_claude_account_routing.py \
     tests/test_branch_protection.py
   bash home/common/agent-skills/evals/tests/test-run-eval-tree.sh

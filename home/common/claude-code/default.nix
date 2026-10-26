@@ -37,12 +37,14 @@ let
   # the service below listens on it and the launcher's CACHE_PROXY_URL is
   # rewritten to it, so a `claude` launched with CLAUDE_CACHE_PROXY=1 routes
   # through the proxy while it is healthy (opt-in since #438).
+  # `--keepalive` (#423) turns on the keepalive pings; dropping it and rebuilding turns them off.
   cacheProxyPort = 27183;
   cacheProxyUrl = "http://127.0.0.1:${toString cacheProxyPort}";
   cacheProxyArgs = [
     "${agentTools.launchers.cache-proxy}"
     "--port"
     (toString cacheProxyPort)
+    "--keepalive"
   ];
   # launchd and systemd start services with a minimal environment, so upstream
   # TLS verification is pinned to the nixpkgs CA bundle.
@@ -399,7 +401,7 @@ in
   };
 
   systemd.user.services.claude-cache-proxy = lib.mkIf pkgs.stdenv.isLinux {
-    Unit.Description = "Claude Code cache proxy (pass-through to the Anthropic API)";
+    Unit.Description = "Claude Code cache proxy (Anthropic API, with keepalive pings)";
     Service = {
       ExecStart = lib.concatStringsSep " " cacheProxyArgs;
       Environment = [ "SSL_CERT_FILE=${cacheProxyCaFile}" ];
