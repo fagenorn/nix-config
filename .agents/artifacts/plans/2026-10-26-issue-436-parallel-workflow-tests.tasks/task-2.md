@@ -81,7 +81,7 @@ Change no other member line.
 - [ ] **Step 4: Verify**
 
 Run the focused form on `tests/test_suite_runner.py tests/test_agent_model_drift_scheduling.py`, then on `home/common/agent-skills/tests/test_delivery_model.py -k test_nix_publication_and_managed_test_registration`.
-Expected: both `OK`. The first is 13 runner tests plus the drift-scheduling module.
+Expected: both `OK`. The first is 15 runner tests plus the drift-scheduling module.
 
 Run `bash -c 'just agent-workflow-tests --jobs 0; echo "exit=$?"' 2>&1 | tail -3`.
 Expected, in order: an `agent-workflow-tests: error: argument --jobs: …` line; `just`'s `error: Recipe \`agent-workflow-tests\` failed … with exit code 2`; and `exit=2`. No `suite-runner: start` line appears.
