@@ -1,5 +1,7 @@
 # Cache proxy: the routed time-to-first-token gap — issue 438
 
+§ Issue 450 below is the current basis for the routing default; the sections before it are #438's point-in-time record.
+
 Point-in-time evidence for https://github.com/fagenorn/nix-config/issues/438, by the plan .agents/artifacts/plans/2026-10-25-issue-438-proxy-ttft-gap.md; #422's record is docs/spikes/cache-proxy-spike.md.
 
 ## Conditions
@@ -193,3 +195,81 @@ The rule's limits (spec § Decision rule):
 - One n = 10 run cannot separate a lever's effect from noise at 100 ms.
 - With the run count capped and one confirmation, a lever that does nothing must pass twice by chance to ship, and a lever that works can still fail its confirmation.
 - AC2's bound is the issue author's, and it stays the verdict.
+
+## Issue 450
+
+Re-measurement for https://github.com/fagenorn/nix-config/issues/450, by the plan .agents/artifacts/plans/2026-10-26-issue-450-routed-budget-line.md. The sections above are #438's record and stand as written; this section corrects its method and holds the current measurement.
+
+### Root cause
+
+The 2026-10-26 investigation on Claude Code 2.1.310 (mbp, account `p1`; its full report is reproduced in the issue) found:
+
+- The proxy hop adds no measurable time to first token. Pooled over 130 pairs, proxied minus direct was −63 ms mean (95% CI −182 to +55), and the same request bytes took 1364 ms through the proxy against 1432 ms straight to the API (n = 80).
+- Server latency follows the session (`metadata.user_id.session_id`): swapping only the session id moves one request by about ±700 ms. A 10-pair rule then has a noise band of about ±245–300 ms and cannot resolve 100 ms.
+- One effect is real. Claude Code sends the `<total_tokens>N tokens left</total_tokens>` line only to api.anthropic.com. Without it the model opened with a thinking block 45–58% of the time, against 5–12% direct, and its first token came 0–580 ms later. `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=padded-countdown` restores the identical line on the wire, and routed launches now export it.
+- The wrapper's curl-and-jq health probe added 27 ms to every routed launch. The probe now uses bash's `/dev/tcp`.
+
+### Method
+
+#438 decided on 10 pairs, by the difference of the per-arm medians of harness-side TTFT, with one confirmation run, against a noise band of ±245–300 ms; its numbers stand as recorded above. The rule below replaces that method, and it was committed before any timed pair ran:
+
+- Each run is a fresh `claude -p` session launched through the built wrapper: routed with `CLAUDE_CACHE_PROXY` unset, direct with `CLAUDE_CACHE_PROXY=0`, and nothing else different. The order flips each pair. One warm-up pair is discarded, then exactly 100 valid pairs count.
+- Per pair, d = (routed `ttft_ms` + p) − direct `ttft_ms`, where `ttft_ms` is the client's own and p is the probe term of § Probe benchmark (AC2).
+- The estimate is the median of d. Its 95% CI is a percentile bootstrap over pairs, 10,000 resamples, seed 450. Routed is within the bound when the CI's upper end is ≤ +100 ms, and that alone sets the routing default. (After the measurement the user replaced this rule for the default with a looser one; § Routing verdict records both, spec decision D18.)
+- A pair counts when both runs exit 0 with a `ttft_ms` and a first content block of `thinking`, `redacted_thinking` or `text`, and the routed run has exactly one proxy `/v1/messages` line and the direct run none. An invalid pair is replaced at the end. An 11th invalid pair makes the run invalid; it is rerun once, and a second invalid run means no valid measurement. A usage limit suspends the run, which resumes at the same head after a new warm-up pair. The run is never extended.
+- Diagnostics are recorded and never decide.
+
+### Measurement conditions
+
+- Date 2026-10-26, host `mbp`, account `p2` (by name only; p1 was on its weekly usage limit, so the user chose p2, D17), Claude Code 2.1.310 (`/nix/store/4vc9k1b3vwrj5prm2qkfskgx18dx9zlp-claude-code-2.1.310/bin/claude`).
+- Built from M: wrapper module `/nix/store/kqrfw8khg9g5rb13l0y5m3y1240fkim3-claude-accounts-mod`, agent plist `/nix/store/v924cqn2kafn6gxhnzkirdv5w62pgic2-org.nix-community.home.claude-cache-proxy.plist`, launcher `/nix/store/fdv6lakxb781l6r9cjkjcxrbjr9hqmjd-agent-tools-cache-proxy`, interpreter `/nix/store/gpx336is4dkbn2f8w7ch59zm0ygbwq4h-python3-3.13.12-env/bin/python3`, CA bundle `/nix/store/xgjp5yg6q98q5gj267ipv9r7qnwzk0a2-nss-cacert-3.123/etc/ssl/certs/ca-bundle.crt`.
+- Experiment proxy on 27450: the launcher with `--port 27450 --keepalive` and `SSL_CERT_FILE` as the service sets it. Wire-check runner on 27451. The installed service on 27183 was only listed: its listener's PID was 96038 before the benchmark and 96038 after it.
+- Bootstrap seed 450, 10,000 resamples.
+
+Issue 450 measured head: f956ae7ba24c5f8e643bca8d802a02643888f317
+
+### Budget-line wire check
+
+One routed `claude -p` session on the timed command line, through a copy of M's mod pointed at 27451 and the wire-check runner, which logs per request only whether the body contains `<total_tokens>`: 1 of 1 `/v1/messages` requests carried it (body encodings: identity). The line is on the routed wire on Claude Code 2.1.310.
+
+### Probe benchmark (AC2)
+
+`claude-account run` wall time, routed (`CLAUDE_CACHE_PROXY=1`) minus direct (`0`), over 200 pairs per version, with before and after interleaved and both orders flipping each pair. Each run takes the early exec, with `env` standing in for claude and the experiment proxy answering health.
+
+| Version | Launcher | Pairs | Median increment ms | Quartiles ms | IQR ms |
+|---|---|---|---|---|---|
+| before | `claude-account` at `51e2b7c9` under M's substitutions | 200 | 28.538 | [25.312, 33.328] | 8.016 |
+| after | M's built `claude-account` | 200 | 2.18 | [0.437, 4.557] | 4.12 |
+
+AC2 met: after's median increment is below before's, and the routing tests' fail-to-direct cases pass at M.
+
+Issue 450 probe term: 2.2 ms
+
+### Timed run (AC3)
+
+- Command: `python3 -I ttft450.py --mod <S>/i450/mod-27450 --proxy-log <S>/i450/runs/proxy-27450.log --cwd <S>/i450/cwd --head f956ae7b --out <S>/i450/runs/runs.jsonl`, then `python3 -I analyze450.py --probe-ms 2.2`, where `<S>` is the attempt's scratch directory.
+- Pairs: 100 valid; 0 invalid and replaced (none). Warm-up attempts: 1. Reruns: none. Suspensions: none.
+- The installed service's listener on 27183 had PID 96038 before and 96038 after.
+
+| Statistic | Value |
+|---|---|
+| Estimate: median of d = (routed `ttft_ms` + p) − direct `ttft_ms` | 9.7 ms |
+| 95% CI, percentile bootstrap, 10,000 resamples, seed 450 | [-90.8, 149.2] ms |
+| Bound: CI upper end ≤ +100 ms | outside |
+
+Diagnostics, recorded and never deciding:
+
+- `ttft_ms` quartiles: routed [998.8, 1510.5, 1873.2], direct [1008.5, 1513.5, 1744.8] ms. Mean of d: 95.4 ms.
+- Thinking-first: routed 0/100, delay n/a ms; direct 1/100, delay 9 ms (a delay is the arm's median `ttft_ms` of thinking-first runs minus text-first runs, `n/a` when either set is empty).
+- Paired medians, routed − direct: harness wall TTFT -27.0 ms; startup (wall TTFT − `ttft_ms`) 29.7 ms, 95% CI [-42.7, 78.9] ms.
+- Proxy `ttfb_ms` quartiles over the routed runs: [941.8, 1450.3, 1823.6] ms.
+
+Per-run rows are in [cache-proxy-ttft-gap-450-runs.md](cache-proxy-ttft-gap-450-runs.md).
+
+Issue 450 timed run: estimate 9.7 ms, 95% CI [-90.8, 149.2] ms, outside the +100 ms bound
+
+### Routing verdict
+
+Issue 450 routing default: on
+
+Under the rule committed in § Method, routing is not within the bound: the CI's upper end, 149.2 ms, is over +100 ms, so that rule alone would keep routing opt-in. That result stands as recorded, and the rule is unmet. At 100 pairs the 95% CI is about ±120 ms wide, so the rule cannot pass at this sample size even when the true difference is zero. After the measurement, the user chose a looser rule (spec decision D18): routing is on by default when the estimate, the median of d, is within +100 ms. The estimate is 9.7 ms, so `claude` routes by default and `CLAUDE_CACHE_PROXY=0` opts a launch out (AC4). The budget-line export and the `/dev/tcp` probe ship either way.
