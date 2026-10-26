@@ -2635,8 +2635,9 @@ def _apply_one_issue_policy(
     cause in ``HUMAN_GATED_BLOCKED_ON`` (`human_gate`/`external`/`agent_dispatch`),
     whether it parks an attempt or a delivery remainder (issue 458 D3): a direct
     owner always carries it, and an orchestrated sweep carries it exactly when
-    the caller listed the issue numbers itself. A `--label`/`--milestone` sweep
-    never does, so it leaves those parked and reports them.
+    the caller listed the issue numbers itself, on the session's first sweep
+    only (issue 458 D4). A `--label`/`--milestone` sweep never does, so it
+    leaves those parked and reports them.
 
     An expired attempt is reaped before any lane predicate is derived: the
     single ``demote_expired_attempt`` call turns it into a ``suspended``
