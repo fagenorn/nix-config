@@ -1,5 +1,7 @@
 # Cache proxy: the routed time-to-first-token gap — issue 438
 
+§ Issue 450 below is the current basis for the routing default; the sections before it are #438's point-in-time record.
+
 Point-in-time evidence for https://github.com/fagenorn/nix-config/issues/438, by the plan .agents/artifacts/plans/2026-10-25-issue-438-proxy-ttft-gap.md; #422's record is docs/spikes/cache-proxy-spike.md.
 
 ## Conditions
@@ -242,3 +244,32 @@ One routed `claude -p` session on the timed command line, through a copy of M's 
 AC2 met: after's median increment is below before's, and the routing tests' fail-to-direct cases pass at M.
 
 Issue 450 probe term: 2.2 ms
+
+### Timed run (AC3)
+
+- Command: `python3 -I ttft450.py --mod <S>/i450/mod-27450 --proxy-log <S>/i450/runs/proxy-27450.log --cwd <S>/i450/cwd --head f956ae7b --out <S>/i450/runs/runs.jsonl`, then `python3 -I analyze450.py --probe-ms 2.2`, where `<S>` is the attempt's scratch directory.
+- Pairs: 100 valid; 0 invalid and replaced (none). Warm-up attempts: 1. Reruns: none. Suspensions: none.
+- The installed service's listener on 27183 had PID 96038 before and 96038 after.
+
+| Statistic | Value |
+|---|---|
+| Estimate: median of d = (routed `ttft_ms` + p) − direct `ttft_ms` | 9.7 ms |
+| 95% CI, percentile bootstrap, 10,000 resamples, seed 450 | [-90.8, 149.2] ms |
+| Bound: CI upper end ≤ +100 ms | outside |
+
+Diagnostics, recorded and never deciding:
+
+- `ttft_ms` quartiles: routed [998.8, 1510.5, 1873.2], direct [1008.5, 1513.5, 1744.8] ms. Mean of d: 95.4 ms.
+- Thinking-first: routed 0/100, delay n/a ms; direct 1/100, delay 9 ms (a delay is the arm's median `ttft_ms` of thinking-first runs minus text-first runs, `n/a` when either set is empty).
+- Paired medians, routed − direct: harness wall TTFT -27.0 ms; startup (wall TTFT − `ttft_ms`) 29.7 ms, 95% CI [-42.7, 78.9] ms.
+- Proxy `ttfb_ms` quartiles over the routed runs: [941.8, 1450.3, 1823.6] ms.
+
+Per-run rows are in [cache-proxy-ttft-gap-450-runs.md](cache-proxy-ttft-gap-450-runs.md).
+
+Issue 450 timed run: estimate 9.7 ms, 95% CI [-90.8, 149.2] ms, outside the +100 ms bound
+
+### Routing verdict
+
+Issue 450 routing default: opt-in
+
+The CI's upper end, 149.2 ms, is over the +100 ms bound, so routing stays opt-in with CLAUDE_CACHE_PROXY=1 (AC4). The budget-line export and the `/dev/tcp` probe ship either way.
