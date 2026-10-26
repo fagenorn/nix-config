@@ -402,3 +402,60 @@ NOTE: cache reads measure logical context re-processing (tokens the model
 - Proxy lines: on 7 `/v1/messages` lines, 2 `"reorder":"applied"`, 2 `applied_at_cap`, 4 `not_subagent`; off 7 `/v1/messages` lines, no `reorder` field at all. Keepalive pings: on 0, off 0 (neither run idled past the ping threshold).
 - Reading: sibling 1's windowed start-up is `None` in both runs because the window opens at sibling 2's first record; sibling 2's start-up row matches the `1st read` column above within its `k` rounding.
 - Run: `env PYTHONPATH="$PWD/python" python3 $E/ac3.py run <on|off> $E <port>`, then `… measure <on|off> $E <proxy log>`; table: `just agent-costs --report cache --projects-dir $E/<arm>-projects --events-since <window since> --events-before <window before>`.
+
+## AC4 evidence — A/B eval
+
+Appended by Task 5; the sections above are unchanged (D10).
+
+One `just evals from-issue 1` per arm, on first, each against its own built-launcher instance; the two runs differ only in `--reorder`. One trial per arm, not rerun toward a pass (#422 D27).
+
+| Arm | VERDICT | Asserts | agent-costs list-price USD | results.jsonl cost_usd | ts | wall_s | Proxy lines | Pings |
+|-----|---------|---------|----------------------------|------------------------|----|--------|-------------|-------|
+| on (`--keepalive --reorder`) | VERDICT: PASS (9/9 asserts) | 9/9 | 1.042106 | 1.042106 | 2026-10-26T20:58:51Z | 281 | 32 `/v1/messages`, 1 `reorder:applied`, 34 `reorder` fields | 0 |
+| off (`--keepalive`) | VERDICT: PASS (9/9 asserts) | 9/9 | 0.984163 | 0.984163 | 2026-10-26T21:04:10Z | 293 | 28 `/v1/messages`, 0 `reorder:applied`, 0 `reorder` fields | 0 |
+
+Thresholds (AC4): the on `VERDICT:` is `PASS`: met. The on list-price cost is at most the off one: missed (on 1.042106 vs off 0.984163 USD, difference +0.057944). Both costs are `cost_basis` `list-price`, from `just agent-costs --format json --days 0` over an isolated copy of that run's own transcripts (one session, root plus subagent transcripts, completeness checked against the source projects dir). The cost comparison is one trial per arm of a model-driven pipeline, so the difference is the observed value of a single pair, not an estimate of the reorder's effect. Keepalive pings: no `ping` event appears in either log, so there is no `ping` usage to report beside the cost (D18, not gating).
+
+`PASS`/`FAIL`/`VERDICT` lines:
+
+```text
+# on
+PASS  a worktree was created
+PASS  spec file exists under the retained specifications directory
+PASS  spec logs at least one decision (ledger row or legacy auto-resolved entry)
+PASS  plan file exists under the retained plans directory
+PASS  every plan task has a falsifiable verification line
+PASS  the plan's acceptance map has one row per issue criterion
+PASS  spec and plan commits landed in the worktree
+PASS  the base branch carries no spec or plan commits
+PASS  the implementation was not executed
+VERDICT: PASS (9/9 asserts)
+# off
+PASS  a worktree was created
+PASS  spec file exists under the retained specifications directory
+PASS  spec logs at least one decision (ledger row or legacy auto-resolved entry)
+PASS  plan file exists under the retained plans directory
+PASS  every plan task has a falsifiable verification line
+PASS  the plan's acceptance map has one row per issue criterion
+PASS  spec and plan commits landed in the worktree
+PASS  the base branch carries no spec or plan commits
+PASS  the implementation was not executed
+VERDICT: PASS (9/9 asserts)
+```
+
+Appended `results.jsonl` lines (on, then off):
+
+```json
+{"ts":"2026-10-26T20:58:51Z","skill":"from-issue","id":1,"name":"well-specified-through-phase-5","mode":"pipeline","model":"sonnet","trial":1,"trials":1,"verdict":"PASS","passed":9,"failed":0,"total":9,"wall_s":281,"claude_exit":0,"workdir":"/private/var/folders/t4/b5y8ggd92zb044029__7wr9w0000gp/T/eval-from-issue-1.7TDi0C","eval_max_usd":null,"asserts":[{"name":"a worktree was created","pass":true},{"name":"spec file exists under the retained specifications directory","pass":true},{"name":"spec logs at least one decision (ledger row or legacy auto-resolved entry)","pass":true},{"name":"plan file exists under the retained plans directory","pass":true},{"name":"every plan task has a falsifiable verification line","pass":true},{"name":"the plan's acceptance map has one row per issue criterion","pass":true},{"name":"spec and plan commits landed in the worktree","pass":true},{"name":"the base branch carries no spec or plan commits","pass":true},{"name":"the implementation was not executed","pass":true}],"tree":"deployed","tree_rev":null,"tree_dirty":null,"tree_mode":null,"policy":null,"input_tokens":1688653,"uncached_input_tokens":66,"cache_read_input_tokens":1572691,"cache_creation_input_tokens":115896,"output_tokens":27475,"cost_usd":1.0421063999999998,"num_turns":2,"models":["claude-opus-5-5","claude-sonnet-5-5"]}
+{"ts":"2026-10-26T21:04:10Z","skill":"from-issue","id":1,"name":"well-specified-through-phase-5","mode":"pipeline","model":"sonnet","trial":1,"trials":1,"verdict":"PASS","passed":9,"failed":0,"total":9,"wall_s":293,"claude_exit":0,"workdir":"/private/var/folders/t4/b5y8ggd92zb044029__7wr9w0000gp/T/eval-from-issue-1.TfukuQ","eval_max_usd":null,"asserts":[{"name":"a worktree was created","pass":true},{"name":"spec file exists under the retained specifications directory","pass":true},{"name":"spec logs at least one decision (ledger row or legacy auto-resolved entry)","pass":true},{"name":"plan file exists under the retained plans directory","pass":true},{"name":"every plan task has a falsifiable verification line","pass":true},{"name":"the plan's acceptance map has one row per issue criterion","pass":true},{"name":"spec and plan commits landed in the worktree","pass":true},{"name":"the base branch carries no spec or plan commits","pass":true},{"name":"the implementation was not executed","pass":true}],"tree":"deployed","tree_rev":null,"tree_dirty":null,"tree_mode":null,"policy":null,"input_tokens":1521662,"uncached_input_tokens":58,"cache_read_input_tokens":1414438,"cache_creation_input_tokens":107166,"output_tokens":26388,"cost_usd":0.9841626000000001,"num_turns":4,"models":["claude-opus-5-5","claude-sonnet-5-5"]}
+```
+
+Conditions:
+
+- Host `mbp`; account `p2` (`CLAUDE_ACCOUNT=p2`); `CODE_HEAD` 48ed157d6e30a0e61390e8f55181eb693aa4e0bf; `--model sonnet` (the eval's default), default timeout 2700 s, no `EVAL_TREE`.
+- Wrapper `/nix/store/pgkj4j3c9avd1scqkgb029qr1b55avng-claude-code-with-accounts-2.1.310/bin/claude`, first on `PATH` for both runs.
+- Launcher `/nix/store/vmr7f7gcqldpb3awf5ypfdb8x20a9a8b-agent-tools-cache-proxy`, started as `<launcher> --port 0 --keepalive --reorder` (on, port 49553) and `<launcher> --port 0 --keepalive` (off, port 49732) with a clean environment and the built CA bundle; each instance was stopped by its pid and its health probe no longer answered.
+- Routed-launch environment per run: `ANTHROPIC_BASE_URL=http://127.0.0.1:<that arm's port>`, `ENABLE_TOOL_SEARCH=true`, `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=padded-countdown`, `CLAUDE_ACCOUNT=p2`.
+- On window 2026-10-26T20:54:08Z .. 2026-10-26T20:58:52Z, exit 0, command `env -u PYTHONPATH PATH="<wrapper dir>:$PATH" ANTHROPIC_BASE_URL=http://127.0.0.1:49553 ENABLE_TOOL_SEARCH=true CLAUDE_CODE_TOTAL_TOKENS_REMINDER=padded-countdown CLAUDE_ACCOUNT=p2 just evals from-issue 1`, workdir `/private/var/folders/t4/b5y8ggd92zb044029__7wr9w0000gp/T/eval-from-issue-1.7TDi0C`.
+- Off window 2026-10-26T20:59:15Z .. 2026-10-26T21:04:11Z, exit 0, the same command with port 49732, workdir `/private/var/folders/t4/b5y8ggd92zb044029__7wr9w0000gp/T/eval-from-issue-1.TfukuQ`.
+- Proxy invariants held: the on log has `"path":"/v1/messages` lines and at least one `"reorder":"applied"`; the off log has no `"reorder"` field; neither log has a 429. No rerun, no cutoff, no skipped arm (minutes left at the on arm: 93; at the off arm: 87).
