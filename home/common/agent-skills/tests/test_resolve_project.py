@@ -1946,6 +1946,115 @@ class StallMinutesTest(ResolverTestCase):
                          ["/bindings/workflow/orchestration/stall_seconds"])
 
 
+class VerificationConditionsTest(ResolverTestCase):
+    """Issue 437: the optional `bindings.workflow.verification_conditions` member (D1, D2)."""
+
+    POINTER = "/bindings/workflow/verification_conditions"
+    CONDITION = {"when_changed": ["python/*", "tests/*", "justfile"],
+                 "skip_reason": "no agent-tooling paths changed"}
+    VALID = {"agent-workflow-tests": CONDITION}
+    ABSENT = object()
+
+    def contract_with(self, conditions):
+        contract = source_contract()
+        workflow = contract["bindings"]["workflow"]
+        workflow["verification"] = ["nix-build", "agent-workflow-tests"]
+        workflow.pop("verification_conditions", None)
+        if conditions is not self.ABSENT:
+            workflow["verification_conditions"] = conditions
+        return contract
+
+    def resolved_member(self, conditions):
+        code, snap, err = self.resolve(self.make_root(self.contract_with(conditions)))
+        self.assertEqual(code, 0, err)
+        return snap["bindings"]["workflow"]
+
+    def test_a_valid_member_round_trips_unchanged(self):
+        globbed = {"agent-workflow-tests": {
+            "when_changed": ["src/**/*.py", "*.nix", "a/[bc]?.py", "AGENTS.md"],
+            "skip_reason": "nothing the suite reads changed"}}
+        for conditions in (self.VALID, globbed, {}):
+            with self.subTest(conditions=conditions):
+                workflow = self.resolved_member(conditions)
+                # Passed through as authored: no glob is made absolute (D1).
+                self.assertEqual(workflow["verification_conditions"], conditions)
+                self.assertEqual(workflow["verification"],
+                                 ["nix-build", "agent-workflow-tests"])
+
+    def test_an_absent_member_stays_absent(self):
+        self.assertNotIn("verification_conditions", self.resolved_member(self.ABSENT))
+
+    def test_null_stays_null(self):
+        workflow = self.resolved_member(None)
+        self.assertIn("verification_conditions", workflow)
+        self.assertIsNone(workflow["verification_conditions"])
+
+    REFUSALS = (
+        # (member, pointer suffix, repair id); the suffix is rooted at POINTER.
+        ([], "", "contract.workflow.not_object"),
+        ("python/*", "", "contract.workflow.not_object"),
+        ({"lint": CONDITION}, "/lint", "contract.workflow.unknown_verification_id"),
+        ({"agent-workflow-tests": ["python/*"]}, "/agent-workflow-tests",
+         "contract.workflow.not_object"),
+        ({"agent-workflow-tests": {"skip_reason": "x"}},
+         "/agent-workflow-tests/when_changed", "contract.workflow.member_missing"),
+        ({"agent-workflow-tests": {"when_changed": ["python/*"]}},
+         "/agent-workflow-tests/skip_reason", "contract.workflow.member_missing"),
+        # The issue's "unknown key".
+        ({"agent-workflow-tests": {**CONDITION, "paths": ["python/*"]}},
+         "/agent-workflow-tests/paths", "contract.workflow.member_unexpected"),
+        ({"agent-workflow-tests": {**CONDITION, "when_changed": "python/*"}},
+         "/agent-workflow-tests/when_changed", "contract.workflow.not_list"),
+        # The issue's "empty path list".
+        ({"agent-workflow-tests": {**CONDITION, "when_changed": []}},
+         "/agent-workflow-tests/when_changed", "contract.workflow.empty_path_list"),
+        # The issue's "absolute path".
+        ({"agent-workflow-tests": {**CONDITION, "when_changed": ["/abs/*"]}},
+         "/agent-workflow-tests/when_changed/0", "contract.workflow.unsafe_path"),
+        ({"agent-workflow-tests": {**CONDITION, "when_changed": ["../outside/*"]}},
+         "/agent-workflow-tests/when_changed/0", "contract.workflow.unsafe_path"),
+        ({"agent-workflow-tests": {**CONDITION, "when_changed": ["python/*", ""]}},
+         "/agent-workflow-tests/when_changed/1", "contract.workflow.unsafe_path"),
+        ({"agent-workflow-tests": {**CONDITION, "when_changed": ["python/*", 3]}},
+         "/agent-workflow-tests/when_changed/1", "contract.workflow.unsafe_path"),
+        ({"agent-workflow-tests": {**CONDITION, "when_changed": ["./a.py"]}},
+         "/agent-workflow-tests/when_changed/0", "contract.workflow.noncanonical_path"),
+        ({"agent-workflow-tests": {**CONDITION, "when_changed": ["a/"]}},
+         "/agent-workflow-tests/when_changed/0", "contract.workflow.noncanonical_path"),
+        ({"agent-workflow-tests": {**CONDITION, "when_changed": ["a\\b.py"]}},
+         "/agent-workflow-tests/when_changed/0", "contract.workflow.noncanonical_path"),
+        ({"agent-workflow-tests": {**CONDITION, "skip_reason": ""}},
+         "/agent-workflow-tests/skip_reason", "contract.workflow.not_string"),
+        ({"agent-workflow-tests": {**CONDITION, "skip_reason": 7}},
+         "/agent-workflow-tests/skip_reason", "contract.workflow.not_string"),
+        ({"nix-build": CONDITION, "agent-workflow-tests": CONDITION}, "",
+         "contract.workflow.no_unconditional_verification"),
+    )
+
+    def test_each_malformed_member_is_refused_with_its_pointer(self):
+        for conditions, suffix, repair_id in self.REFUSALS:
+            with self.subTest(pointer=suffix, conditions=conditions):
+                code, payload, _ = self.resolve(
+                    self.make_root(self.contract_with(conditions)))
+                error = self.assert_refusal(code, payload, "invalid_contract")
+                self.assertEqual(error["repair_id"], repair_id)
+                self.assertEqual([v["pointer"] for v in error["violations"]],
+                                 [self.POINTER + suffix])
+                self.assertTrue(error["violations"][0]["message"])
+
+    def test_a_non_string_verification_id_is_reported_once_and_never_crashes(self):
+        # Every string id is conditional, so the unconditional-id check reaches
+        # the list entry and must skip it rather than hash it.
+        contract = self.contract_with(
+            {"nix-build": self.CONDITION, "agent-workflow-tests": self.CONDITION})
+        contract["bindings"]["workflow"]["verification"] = [
+            "nix-build", "agent-workflow-tests", ["nix-build"]]
+        code, payload, _ = self.resolve(self.make_root(contract))
+        error = self.assert_refusal(code, payload, "invalid_contract")
+        self.assertEqual([v["pointer"] for v in error["violations"]],
+                         ["/bindings/workflow/verification/2"])
+
+
 class PublicResolveTest(InProcessTestCase):
     """#279 D1: `resolve()` is `command_resolve`'s composition, importable.
 
