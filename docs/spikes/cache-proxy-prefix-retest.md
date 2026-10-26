@@ -305,3 +305,53 @@ Header sets (names only, except the allowlisted values):
   - usage_delta: `{"input_tokens": 8378}`
 - slot 4 seq 10 on other turn n/a agent c5f4fb681752 `POST /v1/messages/count_tokens?beta=true` status 200 2026-10-25T14:35:13.195Z → 2026-10-25T14:35:13.444Z outcome None marks None→None received dd5d496421010d17 forwarded dd5d496421010d17 headers H3 position P_att
   - usage_delta: `{"input_tokens": 14990}`
+
+## Attempt 2
+
+Attempt 2 billing suffix: equal
+Attempt 2 gain: 6803 tokens
+Attempt 2 verdict: go
+
+Attempt 2 rules commit: 77e9527d8f002eb94f2ae3dcb2cc97ead88afcea, committed 2026-10-26T19:35:37Z; first data 2026-10-26T19:52:00.825Z.
+Attempt 2 transform sha256: f5b56566cf73aaa9023231809beef7d5f06a3656ccfe3111e3e40b2ab6157e63
+
+Run conditions: taken 2026-10-26 on host mbp at rules commit 77e9527d with Claude Code 2.1.310 through the wrapper `/etc/profiles/per-user/anis/bin/claude` (-> `/nix/store/pgkj4j3c9avd1scqkgb029qr1b55avng-claude-code-with-accounts-2.1.310/bin/claude`), account `p2` set by `CLAUDE_ACCOUNT=p2`, `--model sonnet`, and these environment overrides on top of the caller's environment: `ANTHROPIC_BASE_URL=http://127.0.0.1:<recorder port>`, `ENABLE_TOOL_SEARCH=true`, `CLAUDE_CODE_TOTAL_TOKENS_REMINDER=padded-countdown`, `CLAUDE_ACCOUNT=p2`. Recorder ports per slot: 1: 62879, 2: 62946, 3: 62997, 4: 63047. The upstream leg sends `Accept-Encoding: identity` so that the recorder can parse SSE usage. No keepalive ran (D6). Each run is one `claude -p` parent in a new scratch worktree that dispatches two `general-purpose` siblings one after the other, each reading `flake.nix`. Slots in run order: 1 (off), 2 (on), 3 (off), 4 (on). Harness exceptions: none. Phrase corrections: none. Kind labels follow the pinned table:
+
+| Label | Lead phrase |
+|---|---|
+| `instructions` | `Codebase and user instructions are shown below.` |
+| `context` | `As you answer the user's questions, you can use the following context:` |
+| `skill listing` | `The following skills are available for use with the Skill tool:` |
+| `deferred tools` | `The following deferred tools are now available via` |
+| `agent listing` | `Available agent types for the Agent tool:` |
+| `MCP instructions` | `# MCP Server Instructions` |
+| `environment` | `# Environment` followed by a newline |
+| `date` | `Today's date is` |
+
+### Attempt 2 pairs
+
+| Slot | Arm | Valid | Reasons | R1 / W1 (sibling 1 read / created) | R2 / W2 (sibling 2 read / created) | Gap s | Outcomes (s1, s2, s1 turn 2) | Marks before→after (s1, s2, s1 turn 2) and sibling 1 kinds | Exit / subtype |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | off | True | none | 0 / 21835 | 8378 / 13457 | 13.282 | n/a (off arm), n/a (off arm), n/a (off arm) | 3→3, 3→3, 4→4; kinds instructions, context, skill listing, deferred tools, environment, date, other | 0 / success |
+| 2 | on | True | none | 8378 / 13460 | 15181 / 6657 | 7.92 | applied, applied, applied_at_cap | 3→4, 3→4, 4→4; kinds instructions, context, skill listing, deferred tools, environment, date, other | 0 / success |
+| 3 | off | True | none | 8378 / 13457 | 8378 / 13457 | 4.547 | n/a (off arm), n/a (off arm), n/a (off arm) | 3→3, 3→3, 4→4; kinds instructions, context, skill listing, deferred tools, environment, date, other | 0 / success |
+| 4 | on | True | none | 8378 / 13460 | 15181 / 6657 | 4.575 | applied, applied, applied_at_cap | 3→4, 3→4, 4→4; kinds instructions, context, skill listing, deferred tools, environment, date, other | 0 / success |
+
+### Attempt 2 gate arithmetic
+
+Gain = min(R2 over on) - max(R2 over off) = 15181 - 8378 = 6803 tokens (threshold 4000). Every sibling first request of the four pairs is 2xx: True. Verdict: go. Forecast (never gating): min(R2 on) = 15181 >= 10000: True.
+
+### Attempt 2 billing suffix
+
+- Slot 1 (off, valid True): system_equal=True, suffix_only=False, tools_equal=True, pre_prompt_equal=True, R2=8378, P_sys=n/a, P_att=n/a.
+- Slot 2 (on, valid True): system_equal=True, suffix_only=False, tools_equal=True, pre_prompt_equal=True, R2=15181, P_sys=8508, P_att=15238.
+- Slot 3 (off, valid True): system_equal=True, suffix_only=False, tools_equal=True, pre_prompt_equal=True, R2=8378, P_sys=n/a, P_att=n/a.
+- Slot 4 (on, valid True): system_equal=True, suffix_only=False, tools_equal=True, pre_prompt_equal=True, R2=15181, P_sys=8509, P_att=15239.
+
+Rules in order: `inconclusive` on an instrument failure or when a valid on pair has a refused position; `equal` when every valid pair of both arms has system_equal; `ignored` when some valid on pair has suffix_only and R2 >= 0.99 x P_att; `splits` when every valid on pair has suffix_only, tools_equal and pre_prompt_equal and R2 < 0.99 x P_sys; else `inconclusive`. Answer: `equal`.
+
+### Attempt 2 request log
+
+Attempt 2 request log: 36 requests, 0 unaccounted
+
+Every request's raw usage is in the [usage file](cache-proxy-prefix-retest-2-usage.md).
