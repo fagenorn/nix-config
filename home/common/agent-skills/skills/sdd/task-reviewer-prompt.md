@@ -38,17 +38,18 @@ Subagent (reviewer, Opus/high as selected above):
     every shard exactly once, in manifest order. Report an unreadable or
     mismatched shard as unreadable review evidence; never fetch a fallback
     diff or report approval. Version 1 shards are the full diff with context.
-    Version 3 keeps every changed file diff whole, declares
+    Version 3 keeps every unreplaced file diff whole, declares
     `packaging.context_lines` and packs with `stable-first-fit-whole-file`
     (shard order is packaging order, not Git path order): validate those
     fields, and read the live file, naming that check in your report, when the
-    declared context cannot settle a hunk. Version 2, and version 3 with
-    `generated_evidence`, replace an oversized auto-generated EF migration
-    designer with a bounded entry: check its identities and model-shape counts
-    against the companion migration and snapshot diff, and require the
-    implementer report to show no-pending-model-change, generated-SQL and
-    provider-backed migration evidence. Missing or inconsistent corroboration
-    is a finding; generated evidence is never a waiver to approve.
+    declared context cannot settle a hunk.
+    Version 2 or 3 `generated_evidence` replaces an oversized
+    `ef-core-migration-designer` or `whole-file-deletion` diff: check a
+    designer entry's identities and model-shape counts against the companion
+    migration and snapshot diff and the implementer's no-pending-model-change,
+    generated-SQL and provider-backed migration evidence; a deletion needs an
+    intending plan or spec and no live reference to the deleted path. Missing
+    or inconsistent corroboration is a finding, never a waiver.
 
     The diff's context lines ARE the changed files: Read one separately only
     when a hunk you must judge is cut off mid-function, and say so. Do not
