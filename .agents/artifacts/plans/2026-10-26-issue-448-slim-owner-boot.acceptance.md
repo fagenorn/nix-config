@@ -4,9 +4,9 @@ Baseline taken on host mbp from the `mbp` root (`~/.claude/projects`) and a read
 
 | AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |
 |----|-----------|------|------------------|----------|--------|------------|---------|
-| AC1 | [code] `just agent-costs --report boot` reports per-owner and mean boot buckets. Measured by: unit tests on fixture transcripts. | code | `tests/test_agent_boot_report.py`, run by `just agent-workflow-tests`. `BootReportTest` (Task 1) checks the per-owner rows: the bucket sum equals B, the call-0 split at 2.44, read-backs, re-reads, resume content, skill sub-maps, cohorts, `unsplit`, refused flags and the text sections, plus the mean rows. `HostsTest` (Task 2) adds per-host and pooled means over two labelled roots. | in final verification (`just agent-workflow-tests` runs `tests/test_agent_boot_report.py`: `BootReportTest`, `HostsTest`) | 8b8d869ba822 | host mbp; the SDD ledger's Final verification line names the head and tree | — |
-| AC2 | [code] Kept cuts are pinned by contract tests. `just agent-workflow-tests`, `just agent-instruction-budget` (no raise label) and `just build` pass. | code | `SlimBootContractsTest` in `home/common/agent-skills/tests/test_workflow_skill_contracts.py`: one test group per cut that Tasks 4–6 built, named in the record's cut rows. Also `just agent-instruction-budget` with no `--raise-label` (Task 7 runs it and fills row `AC2`), and `just agent-workflow-tests` and `just build`, which sdd's final gate runs on the final head. | built cuts and their `SlimBootContractsTest` tests: cut 1 at 1efe9236adaf (`test_phase_6_hands_sdd_the_reviewed_token_and_sdd_skips_the_package_read`); cut 2 at 755a14c9a6e0, entry fix at 314fe8dcba41 (`test_pack_carrying_prompts_name_the_resume_entry`, `test_the_entry_runs_its_checks_before_any_skill_section`); cut 3 at f0dacef80053, pin reordered at 8b8d869ba822 (`test_every_section_and_file_the_verified_pack_reads_exists`, `test_phases_6_7_read_neither_the_stop_rules_nor_the_ship_handoff`). Not built: cut 4 (reject, D9) and cut 5 (reject, D10). Skill contract tests: 232 tests OK (skipped=3). `just agent-instruction-budget` (no `--raise-label`) `check: pass` at 8b8d869ba822, 2026-10-26T14:28:44Z. `just agent-workflow-tests` and `just build`: in final verification | 8b8d869ba822 | host mbp; the SDD ledger's Final verification line names the head and tree | — |
-| AC3 | [evidence] The mean fresh-owner boot, excluding tool schemas, falls by at least 25k against the 2026-10-26 baseline on new owner transcripts. The replay sweep is re-run, and its chosen threshold is stated with reasons. | evidence | **Before merge:** Task 3's two-host baseline. The window is 2026-10-24T00:00:00Z → record time, from roots `mbp` and an `anis-desktop` scratch copy, with host-`all`, `fresh`, phase-group-`all` B without tool schemas, each host's figure and every stratum count. Task 7 adds one `just agent-costs --report owners --sweep` per host root over 2026-10-24T00:00:00Z → its record time, with each chosen threshold stated with reasons (D13, D19). **Held** (issue kept open as `needs-verification`, D12): `--report boot` over the window from the later host's first post-merge `just switch`. The window closes once every baseline host × phase-group stratum has 5 or more `fresh` boots, 20 or more in all. Met when the baseline combined mean of B without tool schemas, minus the post-deploy stratum means reweighted to the baseline's host × phase-group mix, is at least **25,000**; each host's fall is reported alongside. Then the per-host post-deploy sweeps. Row `AC3` of the acceptance record. | before merge: § Baseline (headline 78,499) and § Pre-merge sweep (mbp: threshold=200000; anis-desktop: threshold=170000, which does not keep against 200,000; 200,000 stands); the fall is not measurable before deploy and is held per § Post-deploy protocol | 8b8d869ba822 | hosts mbp and anis-desktop (read-only copy of 12 sessions/22 entries); baseline window 2026-10-24T00:00:00Z → 2026-10-26T10:54:35Z; sweep window 2026-10-24T00:00:00Z → 2026-10-26T14:27:13Z; T = 2026-10-26T14:27:13Z | — |
+| AC1 | [code] `just agent-costs --report boot` reports per-owner and mean boot buckets. Measured by: unit tests on fixture transcripts. | code | `tests/test_agent_boot_report.py`, run by `just agent-workflow-tests`. `BootReportTest` (Task 1) checks the per-owner rows: the bucket sum equals B, the call-0 split at 2.44, read-backs, re-reads, resume content, skill sub-maps, cohorts, `unsplit`, refused flags and the text sections, plus the mean rows. `HostsTest` (Task 2) adds per-host and pooled means over two labelled roots. | in final verification (`just agent-workflow-tests` runs `tests/test_agent_boot_report.py`: `BootReportTest`, `HostsTest`); the attribution fix at 1bd5590921b4 adds three `BootReportTest` cases (assistant blobs, non-Skill meta text, a shrinking call) | 00af3c251a88 | host mbp; the SDD ledger's Final verification line names the head and tree | — |
+| AC2 | [code] Kept cuts are pinned by contract tests. `just agent-workflow-tests`, `just agent-instruction-budget` (no raise label) and `just build` pass. | code | `SlimBootContractsTest` in `home/common/agent-skills/tests/test_workflow_skill_contracts.py`: one test group per cut that Tasks 4–6 built, named in the record's cut rows. Also `just agent-instruction-budget` with no `--raise-label` (Task 7 runs it and fills row `AC2`), and `just agent-workflow-tests` and `just build`, which sdd's final gate runs on the final head. | built cuts and their `SlimBootContractsTest` tests: cut 1 at 1efe9236adaf, rollover owner's `--reviewed` at 14d4de55883d (`test_phase_6_hands_sdd_the_reviewed_token_and_sdd_skips_the_package_read`); cut 2 at 755a14c9a6e0, entry fix at 314fe8dcba41 (`test_pack_carrying_prompts_name_the_resume_entry`, `test_the_entry_runs_its_checks_before_any_skill_section`); cut 3 at f0dacef80053, pin reordered at 8b8d869ba822 (`test_every_section_and_file_the_verified_pack_reads_exists`, `test_phases_6_7_read_neither_the_stop_rules_nor_the_ship_handoff`). Not built: cut 4 (reject, D9) and cut 5 (reject, D10). Skill contract tests: 232 tests OK (skipped=3). `just agent-instruction-budget` (no `--raise-label`) `check: pass` at 00af3c251a88, 2026-10-26T14:54:10Z. `just agent-workflow-tests` and `just build`: in final verification | 00af3c251a88 | host mbp; the SDD ledger's Final verification line names the head and tree | — |
+| AC3 | [evidence] The mean fresh-owner boot, excluding tool schemas, falls by at least 25k against the 2026-10-26 baseline on new owner transcripts. The replay sweep is re-run, and its chosen threshold is stated with reasons. | evidence | **Before merge:** Task 3's two-host baseline. The window is 2026-10-24T00:00:00Z → record time, from roots `mbp` and an `anis-desktop` scratch copy, with host-`all`, `fresh`, phase-group-`all` B without tool schemas, each host's figure and every stratum count. Task 7 adds one `just agent-costs --report owners --sweep` per host root over 2026-10-24T00:00:00Z → its record time, with each chosen threshold stated with reasons (D13, D19). **Held** (issue kept open as `needs-verification`, D12): `--report boot` over the window from the later host's first post-merge `just switch`. The window closes once every baseline host × phase-group stratum has 5 or more `fresh` boots, 20 or more in all. Met when the baseline combined mean of B without tool schemas, minus the post-deploy stratum means reweighted to the baseline's host × phase-group mix, is at least **25,000**; each host's fall is reported alongside. Then the per-host post-deploy sweeps. Row `AC3` of the acceptance record. | before merge: § Baseline (headline 78,498) and § Pre-merge sweep (mbp: threshold=200000; anis-desktop: threshold=170000, which does not keep against 200,000; 200,000 stands); the fall is not measurable before deploy and is held per § Post-deploy protocol | 00af3c251a88 | hosts mbp and anis-desktop (read-only copy of 12 sessions/22 entries); baseline re-measured at 00af3c251a88 with the attribution fix of 1bd5590921b4, sweeps at 8b8d869ba822; baseline window 2026-10-24T00:00:00Z → 2026-10-26T10:54:35Z; sweep window 2026-10-24T00:00:00Z → 2026-10-26T14:27:13Z; T = 2026-10-26T14:27:13Z | — |
 
 ## Method
 
@@ -101,7 +101,7 @@ The projections below read that JSON and the skill documents through `git show c
 
 ## Baseline (two hosts)
 
-Window 2026-10-24T00:00:00Z → 2026-10-26T10:54:35Z; head 661ea6c42e91; 11 sessions/20 entries copied from anis-desktop; observed characters per token 2.47; unsplit: mbp 0, anis-desktop 0.
+Window 2026-10-24T00:00:00Z → 2026-10-26T10:54:35Z; head 00af3c251a88 (re-measured after the attribution fix of 1bd5590921b4; first taken at 661ea6c42e91); 12 sessions/22 entries copied from anis-desktop; observed characters per token 2.47; unsplit: mbp 0, anis-desktop 0.
 
 | Host | Cohort | Phase group | Boots | B mean | B without tool schemas |
 |------|--------|-------------|-------|--------|------------------------|
@@ -117,28 +117,29 @@ Window 2026-10-24T00:00:00Z → 2026-10-26T10:54:35Z; head 661ea6c42e91; 11 sess
 | anis-desktop | spawned | all | 15 | 101,791 | 83,805 |
 | all | fresh | 0-5 | 24 | 80,265 | 64,754 |
 | all | fresh | 6-7 | 79 | 99,612 | 82,674 |
-| all | fresh | all | 103 | 95,104 | 78,499 |
+| all | fresh | all | 103 | 95,104 | 78,498 |
 | all | spawned | 0-5 | 50 | 91,796 | 74,677 |
 | all | spawned | all | 50 | 91,796 | 74,677 |
 
-Headline (host all, fresh, all): B without tool schemas 78,499. Mean bucket tokens per fresh boot, phase group all:
+Headline (host all, fresh, all): B without tool schemas 78,498. Mean bucket tokens per fresh boot, phase group all:
 
 | Bucket | mbp | anis-desktop | all |
 |--------|-----|--------------|-----|
 | tool_schemas | 15,931 | 18,035 | 16,605 |
-| harness | 15,741 | 20,958 | 17,413 |
+| harness | 15,725 | 20,948 | 17,398 |
 | prompt | 2,353 | 3,456 | 2,706 |
-| skill_bodies | 16,873 | 17,268 | 17,000 |
-| skill_files | 7,859 | 7,181 | 7,642 |
-| plan_reads | 14,123 | 16,120 | 14,763 |
-| resume_reads | 2,759 | 758 | 2,118 |
+| skill_bodies | 16,874 | 17,268 | 17,000 |
+| skill_files | 7,860 | 7,182 | 7,643 |
+| plan_reads | 14,123 | 16,121 | 14,763 |
+| resume_reads | 2,760 | 758 | 2,119 |
 | rereads | 875 | 300 | 690 |
-| other_reads | 5,215 | 3,285 | 4,597 |
-| commands | 5,376 | 2,839 | 4,563 |
+| other_reads | 5,216 | 3,289 | 4,598 |
+| commands | 5,390 | 2,845 | 4,574 |
 | assistant | 6,945 | 7,137 | 7,006 |
 | unexplained | 0 | 0 | 0 |
 | B | 94,050 | 97,339 | 95,104 |
-| B without tool schemas | 78,119 | 79,303 | 78,499 |
+| B without tool schemas | 78,119 | 79,303 | 78,498 |
+
 ## Cut projections and verdicts
 
 A cut is kept when its projection is at least 1,000 tokens per fresh boot (D16); cuts 4 and 5 are information only.
@@ -147,18 +148,18 @@ A cut is kept when its projection is at least 1,000 tokens per fresh boot (D16);
 |-----|------|--------|------------------------------------|---------|-------|
 | 1 | one task file per dispatch (D6) | A = 8,630 (medians 8,948 B over 134 plans and 12,108 B over 546 task files, ÷ 2.44, at ca6ba1ae); 79 of 103 fresh boots in 6-7 | 8,808 | keep | built at 1efe9236adaf; net -8 bytes |
 | 2 | resume entry (D7) | s(0-5) = 0.3400, s(6-7) = 0.2728 | 3,119 | keep | built at 755a14c9a6e0; net -69 bytes |
-| 3 | support-file sections (D8) | share_A = 0.3690, share_D = 0.1289; 79 of 103 fresh boots in 6-7 | 1,559 | keep | built at f0dacef80053; net -9 bytes |
+| 3 | support-file sections (D8) | share_A = 0.3690, share_D = 0.1289; 79 of 103 fresh boots in 6-7 | 1,560 | keep | built at f0dacef80053; net -9 bytes |
 | 4 | sdd resume section (D9) | the two gate sections are 0.1059 of sdd/SKILL.md; 79 of 103 fresh boots in 6-7 | 616 (information) | reject (D9) | not built |
 | 5 | re-read rule (D10) | mean rereads over 103 fresh boots | 690 (information) | reject (D10) | not built |
 
 ## Pre-merge sweep
 
-One `--report owners --sweep` per host root, over 2026-10-24T00:00:00Z → T = 2026-10-26T14:27:13Z, from head 8b8d869ba822. `$S` is the Method's scratch directory, `T` the UTC second the sweeps were run, and `<label>` and `<root>` one of the two host pairs (`mbp`, `$HOME/.claude/projects`) and (`anis-desktop`, `$S/anis-desktop/projects`). Run from the worktree root, JSON for the figures and the same command without `--format json` for the text twin:
+One `--report owners --sweep` per host root, over 2026-10-24T00:00:00Z → T = 2026-10-26T14:27:13Z, from head 8b8d869ba822. `$S` is the Method's scratch directory, `SINCE` the window start (`2026-10-24T00:00:00Z` before merge; § Post-deploy protocol sets it to `W`), `T` the UTC second the sweeps were run, and `<label>` and `<root>` one of the two host pairs (`mbp`, `$HOME/.claude/projects`) and (`anis-desktop`, `$S/anis-desktop/projects`). Run from the worktree root, JSON for the figures and the same command without `--format json` for the text twin:
 
 ```bash
 T="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 PYTHONPATH="$PWD/python" python3 -m agent_tools.agent_costs --report owners --sweep --format json \
-  --events-since 2026-10-24T00:00:00Z --events-before "$T" --projects-dir "<root>" > "$S/sweep-<label>.json"
+  --events-since "$SINCE" --events-before "$T" --projects-dir "<root>" > "$S/sweep-<label>.json"
 jq '.calibration.identity_matches' "$S/sweep-<label>.json"
 jq '.lineages | length' "$S/sweep-<label>.json"
 jq -c '.simulated[] | select(.step == "threshold") | [.spec, .dollars_per_delivered, .mean_saving, .lower_bound, .verdict]' "$S/sweep-<label>.json"
@@ -168,7 +169,7 @@ The sweep compares its threshold singles against the replay's pre-issue-432 orig
 
 ```bash
 SPEC="$(jq -r '[.simulated[] | select(.step == "final")] | last | .spec' "$S/sweep-<label>.json")"
-PYTHONPATH="$PWD/python" python3 "$S/scripts/pair200.py" "<root>" 2026-10-24T00:00:00Z "$T" "$SPEC"
+PYTHONPATH="$PWD/python" python3 "$S/scripts/pair200.py" "<root>" "$SINCE" "$T" "$SPEC"
 ```
 
 `pair200.py`:
@@ -252,10 +253,10 @@ Held (D12): none of this runs before merge, so the issue ships as `needs-verific
 1. **Window start `W`.** A generation activated after the merge can still be built from an older checkout (`just switch` builds the current checkout's flake), so time alone does not prove deployment. On each host `h`, list the system generations with their activation times (`darwin-rebuild --list-generations` on mbp; `ssh anis-desktop 'wsl -e bash -l -c "nixos-rebuild list-generations"'` on anis-desktop) and, newest first, find the earliest generation whose closure installs the merged skills: its `-home-manager-files` store path (`nix-store --query --requisites <generation link> | grep -- '-home-manager-files$'`) contains, for every built cut, each `SlimBootContractsTest` pin at the merge commit in the installed copy of the file that test reads (`.claude/skills/<skill>/<file>`, for example `from-issue/resume-pack.md`, `sdd/SKILL.md`, `orchestrate-issues/SKILL.md`), matched after collapsing whitespace as the tests do. `W_h` is that generation's activation time. Record per host the generation number, `W_h` and the matched store path. A host with no such generation has not deployed: record nothing and run again later. `W` is the later of the `W_h`, as RFC 3339 UTC.
 2. **Copy and measure.** Copy anis-desktop with § Method's scripts and commands, passing `W` as the window start. Then run `just agent-costs --report boot --format json --events-since W --events-before <now> --projects-dir "mbp=$HOME/.claude/projects" --projects-dir "anis-desktop=<copy>" --top 100000`.
 3. **Close rule.** Every host × phase-group stratum that holds a `fresh` boot in § Baseline must hold 5 or more `fresh` boots in the window, and the window 20 or more in all. Otherwise record nothing and run again later.
-4. **Weights.** Copy from § Baseline, for each such stratum `(h, g)`, the count `n0(h, g)` and the mean B without tool schemas `m0(h, g)`. Add `N0 = Σ n0` and the headline `M0` (host `all`, `fresh`, `all`: 78,499).
+4. **Weights.** Copy from § Baseline, for each such stratum `(h, g)`, the count `n0(h, g)` and the mean B without tool schemas `m0(h, g)`. Add `N0 = Σ n0` and the headline `M0` (host `all`, `fresh`, `all`: 78,498).
 5. **Verdict.**
    - `M1 = Σ n0(h, g) / N0 × m1(h, g)`, where `m1` is the window's mean B without tool schemas for the same stratum.
    - **Met when `M0 − M1 ≥ 25,000`.**
    - Each host's fall, `M0(h) − Σ_g n0(h, g) / N0(h) × m1(h, g)`, is reported alongside for information.
-6. **Sweeps.** Run § Pre-merge sweep's command per host over `[W, now]`, and `pair200.py` for each host whose threshold step chose an arm other than `threshold=200000` (a final spec with no threshold item kept the 110,000 reference: pass `threshold=110000,<spec>`). A lower threshold is set only when both hosts' pairs, re-run over `[W, now]`, keep it against 200,000, in a follow-up commit citing issue 448 (D13).
+6. **Sweeps.** Run § Pre-merge sweep's commands per host with `SINCE=W` (not the pre-merge value) and `T` the UTC second they run, and `pair200.py`, with the same `SINCE` and `T`, for each host whose threshold step chose an arm other than `threshold=200000` (a final spec with no threshold item kept the 110,000 reference: pass `threshold=110000,<spec>`). A lower threshold is set only when both hosts' pairs, re-run over `[W, now]`, keep it against 200,000, in a follow-up commit citing issue 448 (D13).
 7. **Record.** Fill row `AC3`'s evidence columns and its verdict. On `met`, close the issue; otherwise keep it held.
