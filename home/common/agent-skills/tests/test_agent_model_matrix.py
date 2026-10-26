@@ -327,7 +327,7 @@ def write_fixture(root: Path, data: dict) -> None:
     matrix_path.write_text(json.dumps(data), encoding="utf-8")
     agents = root / "home/common/claude-code/agents"
     agents.mkdir(parents=True)
-    for role in ("implementer", "mechanic", "reviewer", "reviewer-lite"):
+    for role in ("implementer", "issue-owner", "mechanic", "reviewer", "reviewer-lite"):
         model, effort = EXPECTED_TIERS[role]
         (agents / f"{role}.md").write_text(
             f"---\nname: {role}\nmodel: {model}\neffort: {effort}\n---\n",
@@ -381,7 +381,7 @@ class AgentModelMatrixTest(unittest.TestCase):
         files = sorted(AGENTS.glob("*.md"))
         self.assertEqual(
             [path.name for path in files],
-            ["implementer.md", "mechanic.md", "reviewer-lite.md", "reviewer.md"],
+            ["implementer.md", "issue-owner.md", "mechanic.md", "reviewer-lite.md", "reviewer.md"],
         )
         for path in files:
             metadata = frontmatter(path)
@@ -399,8 +399,34 @@ class AgentModelMatrixTest(unittest.TestCase):
         }
         self.assertEqual(
             found,
-            {"implementer": None, "mechanic": "true", "reviewer": None, "reviewer-lite": "true"},
+            {
+                "implementer": None,
+                "issue-owner": None,
+                "mechanic": "true",
+                "reviewer": None,
+                "reviewer-lite": "true",
+            },
         )
+
+    def test_issue_owner_blocks_exactly_the_listed_tools(self):
+        # Issue 447 (D1, D2): named tools, never an allowlist; no body, so the
+        # definition loads no instruction text into the owner profiles.
+        path = AGENTS / "issue-owner.md"
+        metadata = frontmatter(path)
+        self.assertEqual(
+            set(metadata), {"name", "description", "model", "effort", "disallowedTools"}
+        )
+        self.assertEqual(metadata["name"], "issue-owner")
+        blocked = [entry.strip() for entry in metadata["disallowedTools"].split(",")]
+        self.assertEqual(
+            blocked,
+            ["Artifact", "ArtifactComments", "ArtifactData", "mcp__claude_ai_Claude_Docs"],
+        )
+        for kept in ("Agent", "Skill", "Bash", "Read", "Edit", "Write", "Glob", "Grep",
+                     "NotebookEdit", "ToolSearch", "mcp__*"):
+            self.assertNotIn(kept, blocked)
+        body = path.read_text(encoding="utf-8").split("\n---\n", 1)[1]
+        self.assertEqual(body.strip(), "")
 
     def test_repository_contract_validates(self):
         module = agent_model_matrix
@@ -462,7 +488,7 @@ class AgentModelMatrixTest(unittest.TestCase):
         # still runs on the definition's Opus/high.
         self.assertEqual(
             agent_model_matrix.CUSTOM_AGENT_ROLES,
-            {"implementer", "reviewer", "reviewer-lite", "mechanic"},
+            {"implementer", "issue-owner", "reviewer", "reviewer-lite", "mechanic"},
         )
         definition = frontmatter(AGENTS / "implementer.md")
         self.assertEqual((definition["model"], definition["effort"]), ("opus", "high"))

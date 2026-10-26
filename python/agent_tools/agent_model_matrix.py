@@ -60,7 +60,7 @@ ALLOWED_SUBAGENT_TYPES = {
     "researcher": {"general-purpose"},
     "codex-transport": {"codex:codex-rescue", "codex:codex-reviewer"},
 }
-CUSTOM_AGENT_ROLES = {"implementer", "reviewer", "reviewer-lite", "mechanic"}
+CUSTOM_AGENT_ROLES = {"implementer", "issue-owner", "reviewer", "reviewer-lite", "mechanic"}
 WORKFLOW_FAMILIES = {
     "orchestration",
     "from-issue",

@@ -494,10 +494,20 @@ class CheckerMutationTest(unittest.TestCase):
                         missing_contracts(carrier, breaker(carrier, _live(carrier)))
 
 
+def _has_body(path):
+    """Whether an agent definition has text after its closing frontmatter
+    delimiter; a body-less definition (issue 447, D2) carries no clause."""
+    return bool(path.read_text(encoding="utf-8").split("\n---\n", 1)[1].strip())
+
+
 class CarrierDeclarationTest(unittest.TestCase):
-    def test_every_agent_definition_is_an_own_commands_body_carrier(self):
+    def test_every_agent_definition_with_a_body_is_an_own_commands_body_carrier(self):
         enrolled = {c.relative: c for c in CARRIERS if c.tree == "agents"}
-        self.assertEqual(set(enrolled), {p.name for p in AGENT_DEFINITIONS.glob("*.md")})
+        bodied = {p.name for p in AGENT_DEFINITIONS.glob("*.md") if _has_body(p)}
+        self.assertEqual(set(enrolled), bodied)
+        self.assertEqual(
+            {p.name for p in AGENT_DEFINITIONS.glob("*.md")} - bodied, {"issue-owner.md"}
+        )
         for carrier in enrolled.values():
             with self.subTest(carrier=carrier.relative):
                 self.assertEqual((carrier.kind, carrier.contracts), ("body", AGENT_CLAUSES))
