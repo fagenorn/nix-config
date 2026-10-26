@@ -105,3 +105,78 @@ Costs: `just agent-costs --format json --days 0 --projects-dir <arm projects cop
 One trial per arm, never rerun (#422 D27).
 
 `from-issue 1` runs take about 4–6 minutes, so few conversations reach the 270 s due time, and run-to-run variance can exceed the pings' effect. Here the on arm's lower total is variance, not keepalive savings: no ping was sent.
+
+## Re-measure on the merged code — 2026-10-26
+
+Run: 2026-10-26 on host mbp; Claude Code 2.1.310; wrapper `/nix/store/pgkj4j3c9avd1scqkgb029qr1b55avng-claude-code-with-accounts-2.1.310/bin/claude`; launcher `/nix/store/vf91yy5p94njx4gdm52r8cqbjsz31h44-agent-tools-cache-proxy`; account `p2`; code `20241ee3` (`origin/main`, after fixes 85972452 and 0db6772a changed `python/agent_tools/cache_keepalive.py`); model `sonnet`.
+
+The measurements above were taken at bba10c48 (AC2) and ca015155 (AC3), before those fixes, so both criteria were measured again on the merged code, with the same procedures (plan tasks 4 and 5), the same `run-proxy.sh` and CA bundle, and the same thresholds. Child C waited with `python3 -c 'import time; time.sleep(480)'` (D30).
+
+AC2 (re-measure): met
+AC3 (re-measure): met
+
+### AC2 at 20241ee3
+
+| Arm | Session | P handle | Gap (s) | Predecessor context | Measured creation | Ratio | Own share | Subagent deaths in window | P pings (complete, max read) | Threshold | Met |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| off | e02c9c93-bd89-45fa-a29b-376e84e0fd69 | 05cc85b05d59 | 484.691 | 132464 | 124853 | 0.9425 | 0.883 | 1 (general-purpose, child dispatch) | 0 (0, n/a) | ratio > 0.50, 1 death | yes |
+| on | cb900a9e-6dd4-4ce4-a302-760fa6f44332 | 33aace414e1f | 487.150 | 136410 | 450 | 0.0033 | 0.887 | 0 | 1 (1, 136408) | ratio < 0.10, 0 deaths, >= 1 complete 2xx ping with cache_read_input_tokens > 0 | yes |
+
+In the on arm the measured call read 136408 of its 136860 context tokens from cache. In the off arm it read 8066 of 132921. Neither arm was void.
+
+Cache report, off arm:
+
+```text
+Cache deaths (idle gap > TTL - 10s, TTL 5m for subagents and 1h for main sessions; rewrite > 50% of a > 5k-token context; premium = rewrite at write price less a warm read):
+
+agent type       cause           deaths  median gap  premium
+---------------  --------------  ------  ----------  -------
+general-purpose  child dispatch       1        8.1m       $0
+
+Subagent deaths 1 ($0 premium); main-session deaths 0 ($0)
+```
+
+Cache report, on arm:
+
+```text
+Cache deaths (idle gap > TTL - 10s, TTL 5m for subagents and 1h for main sessions; rewrite > 50% of a > 5k-token context; premium = rewrite at write price less a warm read):
+
+agent type  cause  deaths  median gap  premium
+----------  -----  ------  ----------  -------
+
+Subagent deaths 0 ($0 premium); main-session deaths 0 ($0)
+```
+
+| Arm | Listening line | `/v1/messages` request lines | With `keepalive` | All lines with `keepalive` (not `listening`) | `ping` lines | P handle in a request line |
+| --- | --- | --- | --- | --- | --- | --- |
+| off | port 57700, no `keepalive` field | 13 | 0 | 0 | 0 | not applicable |
+| on | port 57852, `"keepalive":true` | 13 | 13 | 14 | 2 (P: 1, status 200, outcome `complete`, idle_s 272.5, cache_read_input_tokens 136408; C: 1, status 200, outcome `complete`) | yes |
+
+The on arm logged two `keepalive_end` lines with reason `resumed` (C after 1 ping and 481.9 s idle, P after 1 ping and 488.1 s idle). Each arm's log holds two `handler_error` lines (`ConnectionResetError`, errno 54), from a client-side reset, as at bba10c48.
+
+| Arm | Window (since, before) | Run start, end (UTC) | Nonce | total_cost_usd |
+| --- | --- | --- | --- | --- |
+| off | 2026-10-26T18:40:33.976Z, 2026-10-26T18:40:34.976Z | 2026-10-26T18:32:16.236Z, 2026-10-26T18:40:36.550Z | 117ab029 | 0.8141207 |
+| on | 2026-10-26T18:49:18.344Z, 2026-10-26T18:49:19.344Z | 2026-10-26T18:40:59.205Z, 2026-10-26T18:49:21.192Z | 8ac0420b | 0.4218078 |
+
+Commands as in § AC2 — Commands, with the wrapper and launcher above and `CLAUDE_ACCOUNT=p2`; the off arm ran on port 57700 and the on arm on port 57852.
+
+### AC3 at 20241ee3
+
+| Arm | VERDICT | wall_s | Sessions | Transcript cost | Pings | Ping outcomes | Ping cost | keepalive_end reasons | Total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| on | PASS (9/9 asserts) | 289 | 1 (e4ef323d-5e07-40b8-8516-a022aa6685f6, with one subagent transcript) | $1.0705 | 0 | none | $0.0000 | none | $1.0705 |
+| off | PASS (9/9 asserts) | 313 | 1 (db353820-1f11-4131-b165-f7a648fd6b98, with one subagent transcript) | $1.1537 | 0 | none | $0.0000 | none | $1.1537 |
+
+The on total is lower than the off total ($1.0705 against $1.1537), so the threshold is met. The on arm sent no ping: its proxy log holds one `listening` line carrying `keepalive: true`, 32 `/v1/messages` `request` lines, every one carrying a `keepalive` field, one `/api/hello` line (`untracked`), and no `ping` or `keepalive_end` line. The off arm's log holds one `listening` line without a `keepalive` key and 36 `/v1/messages` `request` lines, none carrying `keepalive`, and no `ping` line. Neither log holds a `handler_error` line. Costs come from `just agent-costs --format json --days 0 --projects-dir <arm projects copy>` (`cost_basis` `list-price`); a ping would be priced through `agent_tools.model_pricing.usage_cost`, where `PRICING` now lives, but there were none.
+
+The two appended `results.jsonl` lines:
+
+| Arm | ts | verdict | wall_s | workdir |
+| --- | --- | --- | --- | --- |
+| on | 2026-10-26T18:54:59Z | PASS | 289 | `/private/var/folders/t4/b5y8ggd92zb044029__7wr9w0000gp/T/eval-from-issue-1.xLIrIc` |
+| off | 2026-10-26T19:00:36Z | PASS | 313 | `/private/var/folders/t4/b5y8ggd92zb044029__7wr9w0000gp/T/eval-from-issue-1.EGHnHM` |
+
+Commands as in § AC3 — Conditions, with the wrapper and launcher above, `CLAUDE_ACCOUNT="p2"` and `EVAL_TIMEOUT=900`; the on arm ran on port 58040 and the off arm on port 58294. As at ca015155, no conversation reached the 270 s due time, so the lower on total is run-to-run variance, not keepalive savings.
+
+One trial per arm, never rerun (#422 D27).
