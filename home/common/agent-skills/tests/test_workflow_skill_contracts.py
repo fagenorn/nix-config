@@ -1978,11 +1978,13 @@ class SlimBootContractsTest(unittest.TestCase):
 
     def test_phases_6_7_read_neither_the_stop_rules_nor_the_ship_handoff(self):
         auto = self.bullet("AUTO.md")
-        self.assertEqual(auto.count("`When *not* to auto-resolve`"), 1)
-        late = auto[auto.index("Phases 5–7:"):]
-        for wanted in ("`Other Phase 5–7 routes`", "`Interface_version 2 delivery relay`"):
-            self.assertIn(wanted, late)
-        self.assertNotIn("`When *not* to auto-resolve`", late)
+        stop_rules = "`When *not* to auto-resolve`"
+        self.assertEqual(auto.count(stop_rules), 1)
+        position = -1
+        for span in (stop_rules, "`Phases 2–4 run as subagents`", "`Other Phase 5–7 routes`",
+                     "`Interface_version 2 delivery relay`"):
+            position = auto.find(span, position + 1)
+            self.assertGreaterEqual(position, 0, span)
         self.assertIn("`## Phase 7 — Ship`", self.bullet("ship-handoff.md"))
         for name in ("AUTO.md", "resume-pack.md", "delegated-owner.md"):
             self.assertNotIn("`ship-handoff.md`", self.bullet(name))
