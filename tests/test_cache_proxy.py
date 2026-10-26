@@ -209,10 +209,10 @@ class ProxyCase(unittest.TestCase):
         self.addCleanup(fake.close)
         return fake
 
-    def proxy(self, upstream_url):
+    def proxy(self, upstream_url, reorder=None):
         stream = RecordingStream()
         server = cache_proxy.ProxyServer(0, cache_proxy.parse_upstream(upstream_url),
-                                         cache_proxy.LineLog(stream))
+                                         cache_proxy.LineLog(stream), reorder=reorder)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
@@ -476,6 +476,124 @@ class ForwardingTest(ProxyCase):
             if data:
                 sock.sendall(data)
                 time.sleep(0.1)  # let the proxy block in the body read before the reset
+
+
+class ReorderProxyTest(ProxyCase):
+    """`ProxyServer` with a transform object (D17, D20)."""
+
+    def raw_request(self, port, path, body, agent_id=None):
+        """Send one POST with a fixed head; return the head lines the client sent."""
+        lines = [b"POST %s HTTP/1.1" % path.encode(), b"Host: 127.0.0.1:%d" % port,
+                 b"anthropic-version: 2023-06-01", b"Content-Type: application/json"]
+        if agent_id is not None:
+            lines.append(b"x-claude-code-agent-id: " + agent_id.encode())
+        lines.append(b"Content-Length: %d" % len(body))
+        with socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT) as sock:
+            sock.sendall(b"\r\n".join(lines) + b"\r\n\r\n" + body)
+            reply = http.client.HTTPResponse(sock)
+            reply.begin()
+            self.assertEqual((reply.status, reply.read()), (200, b"{}"))
+        return lines
+
+    @staticmethod
+    def expected_head(lines, fake, length):
+        """The head upstream should see: `Host` rewritten and `Content-Length` set to `length`."""
+        host = b"Host: 127.0.0.1:%d" % fake.server.server_address[1]
+        return [host if line.startswith(b"Host:") else
+                b"Content-Length: %d" % length if line.startswith(b"Content-Length:") else line
+                for line in lines] + [b""]
+
+    def test_a_reordered_subagent_body_reaches_upstream_with_a_matching_content_length(self):
+        fake = self.upstream(json_reply)
+        port, log = self.proxy(fake.url, subagent_prefix.SubagentPrefix())
+        received = fixture_bytes("sibling1-first.received.json")
+        lines = self.raw_request(port, MESSAGES, received, "agent-1")
+        expected, _, outcome = subagent_prefix.SubagentPrefix().transform(
+            "POST", MESSAGES, agent("agent-1", len(received)), received)
+        self.assertEqual(outcome, "applied")
+        [(_, head, body)] = fake.requests
+        self.assertEqual(body, expected)
+        self.assertEqual(head.split(b"\r\n"), self.expected_head(lines, fake, len(expected)))
+        [record] = log.records(1)
+        self.assertEqual((record["reorder"], record["outcome"]), ("applied", "complete"))
+
+    def test_parent_and_count_tokens_requests_reach_upstream_byte_identical(self):
+        fake = self.upstream(json_reply)
+        port, log = self.proxy(fake.url, subagent_prefix.SubagentPrefix())
+        parent = fixture_bytes("parent-first.json")
+        sibling = fixture_bytes("sibling1-first.received.json")
+        sent = [self.raw_request(port, MESSAGES, parent),
+                self.raw_request(port, "/v1/messages/count_tokens?beta=true", sibling, "agent-1")]
+        self.assertEqual([body for _, _, body in fake.requests], [parent, sibling])
+        for lines, (_, head, body) in zip(sent, fake.requests):
+            self.assertEqual(head.split(b"\r\n"), self.expected_head(lines, fake, len(body)))
+        self.assertEqual([record["reorder"] for record in log.records(2)],
+                         ["not_subagent", "not_subagent"])
+
+    def test_without_reorder_a_subagent_body_reaches_upstream_byte_identical(self):
+        fake = self.upstream(json_reply)
+        port, log = self.proxy(fake.url)
+        sibling = fixture_bytes("sibling1-first.received.json")
+        lines = self.raw_request(port, MESSAGES, sibling, "agent-1")
+        [(_, head, body)] = fake.requests
+        self.assertEqual(body, sibling)
+        self.assertEqual(head.split(b"\r\n"), self.expected_head(lines, fake, len(sibling)))
+        [record] = log.records(1)
+        self.assertNotIn("reorder", record)
+
+    def test_the_health_path_and_a_rejected_request_carry_no_reorder_field(self):
+        fake = self.upstream(json_reply)
+        port, log = self.proxy(fake.url, subagent_prefix.SubagentPrefix())
+        connection = self.client(port)
+        connection.request("GET", cache_proxy.HEALTH_PATH)
+        self.assertEqual(connection.getresponse().read(), cache_proxy.HEALTH_BODY)
+        with socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT) as sock:
+            sock.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n")
+            reply = http.client.HTTPResponse(sock)
+            reply.begin()
+            reply.read()
+        self.assertEqual(reply.status, 411)
+        [record] = log.records(1)
+        self.assertEqual((record["status"], record["outcome"]), (411, "rejected"))
+        self.assertNotIn("reorder", record)
+        self.assertEqual(len(log.lines), 1)
+
+    def test_a_transform_that_raises_forwards_the_original_bytes_and_logs_the_error(self):
+        class Raising:
+            def transform(self, method, path, headers, body):
+                raise KeyError("boom")
+
+        fake = self.upstream(json_reply)
+        port, log = self.proxy(fake.url, Raising())
+        sibling = fixture_bytes("sibling1-first.received.json")
+        lines = self.raw_request(port, MESSAGES, sibling, "agent-1")
+        [(_, head, body)] = fake.requests
+        self.assertEqual(body, sibling)
+        self.assertEqual(head.split(b"\r\n"), self.expected_head(lines, fake, len(sibling)))
+        error, request = log.records(2)
+        self.assertEqual({key: error[key] for key in ("event", "method", "path", "error")},
+                         {"event": "reorder_error", "method": "POST", "path": MESSAGES,
+                          "error": "KeyError: 'boom'"})
+        self.assertEqual((request["event"], request["reorder"], request["outcome"]),
+                         ("request", "error", "complete"))
+        self.assertNotIn("error", request)
+
+    def test_an_unknown_outcome_is_a_reorder_error_and_the_original_bytes_go(self):
+        class Unknown:
+            def transform(self, method, path, headers, body):
+                return b"{}", [], "mystery"
+
+        fake = self.upstream(json_reply)
+        port, log = self.proxy(fake.url, Unknown())
+        sibling = fixture_bytes("sibling1-first.received.json")
+        lines = self.raw_request(port, MESSAGES, sibling, "agent-1")
+        [(_, head, body)] = fake.requests
+        self.assertEqual(body, sibling)
+        self.assertEqual(head.split(b"\r\n"), self.expected_head(lines, fake, len(sibling)))
+        error, request = log.records(2)
+        self.assertEqual((error["event"], error["error"]),
+                         ("reorder_error", "ValueError: unknown reorder outcome 'mystery'"))
+        self.assertEqual(request["reorder"], "error")
 
 
 class SubagentPrefixTest(unittest.TestCase):
@@ -806,6 +924,30 @@ class CommandTest(unittest.TestCase):
         record = self.read_record(process.stderr)
         self.assertEqual((record["event"], record["method"], record["path"], record["outcome"]),
                          ("request", "POST", "/v1/messages", "complete"))
+
+    def test_help_lists_reorder(self):
+        completed = self.run_command("--help")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--reorder", completed.stdout)
+
+    def test_the_command_with_reorder_logs_the_flag_and_the_outcome(self):
+        fake = FakeUpstream(json_reply)
+        self.addCleanup(fake.close)
+        process = self.start("--port", "0", "--upstream", fake.url, "--reorder")
+        listening = self.read_record(process.stderr)
+        self.assertEqual((listening["event"], listening["reorder"]), ("listening", True))
+        self.assertNotIn("keepalive", listening)
+        received = fixture_bytes("sibling1-first.received.json")
+        connection = http.client.HTTPConnection("127.0.0.1", listening["port"], timeout=TIMEOUT)
+        self.addCleanup(connection.close)
+        connection.request("POST", MESSAGES, body=received,
+                           headers={"x-claude-code-agent-id": "agent-1"})
+        response = connection.getresponse()
+        self.assertEqual((response.status, response.read()), (200, b"{}"))
+        record = self.read_record(process.stderr)
+        self.assertEqual(record["reorder"], "applied")
+        [(_, _, body)] = fake.requests
+        self.assertNotEqual(body, received)
 
     def test_a_port_in_use_exits_1_with_a_bind_failed_line(self):
         with socket.socket() as holder:

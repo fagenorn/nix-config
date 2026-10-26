@@ -17,9 +17,10 @@ import time
 import unittest
 from unittest import mock
 
-from agent_tools import cache_keepalive, cache_proxy
+from agent_tools import cache_keepalive, cache_proxy, subagent_prefix
 from agent_tools.canonical import telemetry_digest
-from tests.test_cache_proxy import TIMEOUT, FakeUpstream, RecordingStream, closed_port, json_reply
+from tests.test_cache_proxy import (TIMEOUT, FakeUpstream, RecordingStream, closed_port, fixture,
+                                    holders, json_reply)
 
 MESSAGES = "/v1/messages?beta=true"
 SESSION = "5e2b6c1a-0d3f-4c55-9a51-6f0c2d1e7a90"
@@ -719,14 +720,14 @@ class KeepaliveProxyTest(unittest.TestCase):
         self.stream = RecordingStream()
         self.log = cache_proxy.LineLog(self.stream)
 
-    def start(self, responder, keepalive=None):
+    def start(self, responder, keepalive=None, reorder=None):
         fake = FakeUpstream(responder)
         self.addCleanup(fake.close)
         upstream = cache_proxy.parse_upstream(fake.url)
         if keepalive is None:
             keepalive = cache_keepalive.Keepalive(
                 self.log, functools.partial(cache_proxy.open_upstream, upstream, None), self.clock)
-        server = cache_proxy.ProxyServer(0, upstream, self.log, keepalive=keepalive)
+        server = cache_proxy.ProxyServer(0, upstream, self.log, keepalive=keepalive, reorder=reorder)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
@@ -768,6 +769,33 @@ class KeepaliveProxyTest(unittest.TestCase):
         self.assertEqual([entry[0] for entry in fake.requests], [number, number + 1])
         self.assertEqual(json.loads(fake.requests[1][2]), dict(value, max_tokens=1))
         self.assertEqual(select.select([sock], [], [], 0.3)[0], [])
+
+    def test_with_the_reorder_the_ping_replays_the_reordered_body(self):
+        value = fixture("sibling1-first.received.json")
+        for holder in holders(value):
+            if isinstance(holder.get("cache_control"), dict):
+                holder["cache_control"].pop("ttl", None)
+        value.pop("thinking", None)
+        raw = encode(value)
+        expected, _, outcome = subagent_prefix.SubagentPrefix().transform(
+            "POST", MESSAGES, forwarded(AGENT_P, length=len(raw)), raw)
+        self.assertEqual(outcome, "applied")
+        self.assertEqual(cache_keepalive.classify(
+            "POST", MESSAGES, forwarded(AGENT_P, length=len(expected)), expected).outcome, "tracked")
+        fake, port, keepalive = self.start(sse_reply("tool_use"),
+                                           reorder=subagent_prefix.SubagentPrefix())
+        _, status, _ = self.send(port, AGENT_P, raw)
+        self.assertEqual(status, 200)
+        [(_, head, received)] = fake.requests
+        self.assertEqual(received, expected)
+        self.assertIn(b"Content-Length: %d" % len(expected), head.split(b"\r\n"))
+        [record] = self.stream.records(1)
+        self.assertEqual((record["reorder"], record["keepalive"]), ("applied", "tracked"))
+        self.clock.advance(270)
+        [ping] = keepalive.tick()
+        self.assertEqual(json.loads(ping.body), dict(json.loads(expected), max_tokens=1))
+        self.assertEqual([length for name, length in ping.headers if name == "Content-Length"],
+                         [str(len(ping.body))])
 
     def test_a_keepalive_whose_observe_raises_forwards_unchanged_and_logs_one_error(self):
         class Raising:
