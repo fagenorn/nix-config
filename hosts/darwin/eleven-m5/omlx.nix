@@ -125,8 +125,11 @@ let
   # directory (`hf download` resumes a partial copy and verifies each file) and moves the model
   # into modelDir only once complete, so oMLX never sees half a model, then restarts the server
   # (launchd's KeepAlive brings it back) so it discovers the new one. A model already in modelDir
-  # without the marker is verified in place. Runs at boot, and activation starts it whenever a
-  # listed model is missing, so a failed download is retried on the next boot or switch.
+  # without the marker is verified in place. After any completed download it runs omlx-configure,
+  # which mirrors steering presets onto the new weights, and restarts for a moved model or a
+  # changed preset; a successful kill stands in for the restart omlx-configure asked for. Runs at
+  # boot, and activation starts it whenever a listed model is missing, so a failed download is
+  # retried on the next boot or switch.
   # Every glob follows a single `--include`, which this hf (argparse, nargs) reads as one list;
   # a repeated `--include` would keep only the last.
   fetch = pkgs.writeShellScript "omlx-models" ''
@@ -134,6 +137,7 @@ let
     hf=${pkgs.python3Packages.huggingface-hub}/bin/hf
     status=0
     added=0
+    completed=0
     ${lib.concatMapStrings (m: ''
       dir=${modelDir}/${modelName m}
       if [ ! -e "$dir/.omlx-download-complete" ]; then
@@ -144,6 +148,7 @@ let
           lib.optionalString (m ? include) "--include ${lib.escapeShellArgs m.include}"
         } --local-dir "$target"; then
           touch "$target/.omlx-download-complete"
+          completed=1
           [ "$target" = "$dir" ] || { mv "$target" "$dir" && added=1; }
           echo "$(date) finished ${m.repo}"
         else
@@ -152,11 +157,11 @@ let
         fi
       fi
     '') models}
-    if [ "$added" != 0 ]; then
-      # Mirror steering presets onto the new weights; the restart below is the one it asks for.
+    if [ "$completed" != 0 ]; then
       ${configure}/bin/omlx-configure || status=1
-      /usr/bin/pkill -U "$(id -u)" -x omlx-server || true
-      rm -f ${home}/.omlx/.restart-needed
+      if [ "$added" != 0 ] || [ -e ${home}/.omlx/.restart-needed ]; then
+        /usr/bin/pkill -U "$(id -u)" -x omlx-server && rm -f ${home}/.omlx/.restart-needed
+      fi
     fi
     exit $status
   '';
@@ -305,7 +310,7 @@ in
     StandardErrorPath = "${home}/.omlx/logs/models.log";
   };
 
-  # Restart the server only when a settings merge or the patch changed something, and start the
+  # Restart the server only when a settings merge, a patch or a steering preset changed something, and start the
   # downloader when a listed model is missing. ~/.omlx is private: its logs can hold other
   # people's prompts, and teammates share the staff group.
   system.activationScripts.postActivation.text = ''

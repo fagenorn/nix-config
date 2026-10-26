@@ -148,10 +148,15 @@ def sync_steering(models_dir, presets, stale):
             if not link.is_symlink():
                 link.symlink_to(target)
                 dirty = True
-        spec = json.dumps({"neurons": preset["neurons"]}, indent=2, sort_keys=True) + "\n"
+        spec = {"neurons": preset["neurons"]}
         steering = directory / "steering.json"
-        if not steering.exists() or steering.read_text() != spec:
-            steering.write_text(spec)
+        try:
+            current = read_object(steering)
+        except ValueError:
+            current = None
+        if current != spec:
+            # Atomic, since a running server may load the preset meanwhile.
+            write_object(steering, spec)
             dirty = True
         if dirty:
             changed.append(name)
