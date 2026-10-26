@@ -10,6 +10,8 @@ import re
 import sys
 from typing import Any
 
+from agent_tools.attempt_custody import HUMAN_GATED_BLOCKED_ON
+
 
 WORKFLOW_DELIVERY_INTERFACE_VERSION = 1
 
@@ -243,7 +245,7 @@ class DeliveryRuntime:
         request: dict[str, Any], source_kind: str, now: str,
         dispatch_permitted: bool, remainder_deadline: str,
         owner_unavailable: bool, tracker_halted: bool,
-        recorded_worktree: dict[str, Any] | None,
+        recorded_worktree: dict[str, Any] | None, human_directed: bool,
     ) -> dict[str, Any] | None:
         try:
             recovery = self.recovery_policy(
@@ -298,7 +300,8 @@ class DeliveryRuntime:
                 dispatch_permitted=dispatch_permitted, tracker_halted=tracker_halted,
                 recorded_worktree=recorded_worktree,
                 remainder_deadline=remainder_deadline, issue=issue,
-                request=request, source_kind=source_kind)
+                request=request, source_kind=source_kind,
+                human_directed=human_directed)
         except (TypeError, ValueError) as error:
             raise ValueError("remainder policy refused") from error
 
@@ -402,9 +405,14 @@ class DeliveryRuntime:
         tracker_halted: bool, recorded_worktree: dict[str, Any] | None,
         remainder_deadline: str, preview: dict[str, Any] | None = None,
         issue: int | None = None, request: dict[str, Any] | None = None,
-        source_kind: str | None = None,
+        source_kind: str | None = None, human_directed: bool,
     ) -> dict[str, Any] | None:
-        """Resume the current delivery remainder without spending an attempt."""
+        """Resume the current delivery remainder without spending an attempt.
+
+        A remainder suspended on a cause in ``HUMAN_GATED_BLOCKED_ON`` resumes
+        only when ``human_directed``; otherwise it gets the parked verdict, the
+        no-dispatch ``terminal`` with the ledger untouched (issue 458 D3).
+        """
         if issue_state is None or not issue_state["delivery_remainders"]:
             return None
         remainder = issue_state["delivery_remainders"][-1]
@@ -449,6 +457,11 @@ class DeliveryRuntime:
         if remainder["state"] == "active" and not owner_unavailable:
             # Live custody: control's lanes skip it, as they skip a live attempt (D2).
             return result("idle", desired="idle")
+        if (remainder["state"] == "suspended" and not human_directed
+                and remainder["blocked_on"] in HUMAN_GATED_BLOCKED_ON):
+            # Parked like the attempt lane's gated suspension: no dispatch, no
+            # slot, the ledger untouched (issue 458 D3).
+            return result("terminal", desired="terminal")
         _ = tracker_halted
         if not dispatch_permitted:
             return result("idle", changed=reaped)

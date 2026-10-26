@@ -1159,7 +1159,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
                    "--checkpoint-file", store(checkpoint), "--now",
                    "2026-09-21T00:00:02Z")
             resume = self.control_request(contract)
-            resume.update(now="2026-09-21T00:00:03Z",
+            resume.update(now="2026-09-21T00:00:03Z", human_directed=True,
                 tracker=[{"issue": 151, "state": "closed", "open_blockers": [],
                           "decision_blockers": []}], worktrees=[{"issue": 151,
                     "recorded": {"path": worktree, "state": "matching_issue_branch"},
@@ -1192,6 +1192,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             def control(now, tracker, *, recorded, owners=()):
                 request = self.control_request(contract)
                 request.update(host_route="claude-code", now=now, owners=list(owners),
+                    human_directed=True,
                     tracker=[{"issue": 151, "state": tracker, "open_blockers": [],
                               "decision_blockers": []}],
                     worktrees=[{"issue": 151,
@@ -1242,7 +1243,9 @@ class DeliveryAdmissionTest(unittest.TestCase):
         authority denial parks the minted remainder on ``human_gate``. Returns
         ``(control, checkpoint, run_id)``, the run minted under creation key ``key``. ``control(now, max_parallel=1)`` sweeps with
         the recorded worktree observed as ``recorded`` (``matching_issue_branch``
-        unless given) and returns the raw response bytes.
+        unless given) and returns the raw response bytes. ``human_directed`` is the request's value,
+        true by default because the remainder this fixture parks waits on ``human_gate`` and only a
+        directed sweep resumes it (issue 458 D3, D9).
         ``checkpoint(custody, now)`` reports that custody again without progress
         and returns the decoded response.
         """
@@ -1258,9 +1261,11 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
             return completed.stdout
 
-        def control(now, max_parallel=1, *, spawn=False, recorded="matching_issue_branch"):
+        def control(now, max_parallel=1, *, spawn=False, recorded="matching_issue_branch",
+                    human_directed=True):
             request = self.control_request(contract)
             request.update(host_route="claude-code", now=now, max_parallel=max_parallel,
+                human_directed=human_directed,
                 tracker=[{"issue": 151, "state": "open" if spawn else "closed",
                           "open_blockers": [], "decision_blockers": []}],
                 worktrees=[{"issue": 151,
@@ -1359,6 +1364,51 @@ class DeliveryAdmissionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             control, _, _ = self.remainder_sweeps(Path(raw), home, "suspended-remainder")
             action = self.remainder_launch(control("2026-09-21T00:00:03Z", max_parallel=2))
+            self.assertEqual((action["custody"]["remainder"], action["custody"]["launch"]),
+                             (1, 2))
+
+    def test_an_undirected_sweep_parks_a_gated_remainder_until_a_directed_one(self):
+        """Issue 458 D3: no undirected sweep relaunches a `human_gate` remainder.
+
+        Each such sweep dispatches nothing, charges no slot, leaves the issue's
+        ledger entry alone and finalizes with the parked summary; the next
+        human-directed sweep resumes it.
+        """
+        home = make_home(); self.addCleanup(shutil.rmtree, home, True)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            control, _, run_id = self.remainder_sweeps(root, home, "parked-remainder")
+            state_path = root / f".superpowers/workflows/{run_id}/state.json"
+            before = json.loads(state_path.read_text())["issues"]["151"]
+            for now in ("2026-09-21T00:00:03Z", "2026-09-21T00:00:04Z"):
+                with self.subTest(now=now):
+                    value = json.loads(control(now, max_parallel=2, human_directed=False))
+                    self.assertEqual([item["kind"] for item in value["actions"]], ["finalize"])
+                    self.assertEqual(value["admission"]["waiting"], [])
+                    summary = next(item for item in value["summaries"] if item["issue"] == 151)
+                    self.assertEqual(
+                        (summary["state"], summary["blocked_on"], summary["custody"]["kind"]),
+                        ("suspended", "human_gate", "remainder"))
+                    self.assertEqual(json.loads(state_path.read_text())["issues"]["151"], before)
+            action = self.remainder_launch(
+                control("2026-09-21T00:00:05Z", max_parallel=2, human_directed=True))
+            self.assertEqual((action["custody"]["remainder"], action["custody"]["launch"]),
+                             (1, 2))
+
+    def test_an_auto_resumable_remainder_resumes_without_direction(self):
+        """Issue 458 D3, D9: only a gated cause waits for direction; `owner_unavailable`
+        does not. No control path this fixture drives writes that cause, so the test
+        rewrites the parked remainder's `blocked_on` in the ledger."""
+        home = make_home(); self.addCleanup(shutil.rmtree, home, True)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            control, _, run_id = self.remainder_sweeps(root, home, "auto-remainder")
+            state_path = root / f".superpowers/workflows/{run_id}/state.json"
+            state = json.loads(state_path.read_text())
+            state["issues"]["151"]["delivery_remainders"][0]["blocked_on"] = "owner_unavailable"
+            state_path.write_text(json.dumps(state))
+            action = self.remainder_launch(
+                control("2026-09-21T00:00:03Z", max_parallel=2, human_directed=False))
             self.assertEqual((action["custody"]["remainder"], action["custody"]["launch"]),
                              (1, 2))
 

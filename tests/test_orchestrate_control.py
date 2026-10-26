@@ -188,6 +188,26 @@ class FactsTest(unittest.TestCase):
             "delivery_observations": keyed([12, 14], []),
             "requested_scopes": keyed([12, 14], None), "recoveries": keyed([12, 14], None)})
 
+    def test_direction_is_spent_on_the_first_sweep(self):
+        """Issue 458 D4: an explicit session sends `human_directed` true only on its first
+        sweep, both calls of a chained first step included; a label session never does."""
+        world = OrchestrateWorld(self)
+        session = world.start("12", "14")["session"]
+        done, out = world.step(session, first_sweep=True)
+        self.assertEqual((done.returncode, out["control_calls"]), (0, 2),
+                         done.stdout + done.stderr)
+        later, _ = world.step(session)
+        self.assertEqual(later.returncode, 0, later.stdout + later.stderr)
+        self.assertEqual([r["human_directed"] for r in world.requests()], [True, True, False])
+
+        world = OrchestrateWorld(self)
+        world.listing("--label", "agent:ready", [12, 14])
+        session = world.start("--label", "agent:ready")["session"]
+        for first_sweep in (True, False):
+            done, _ = world.step(session, first_sweep=first_sweep)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual({r["human_directed"] for r in world.requests()}, {False})
+
     def test_no_gh_child_sees_an_unset_variable(self):
         world = OrchestrateWorld(self)
         session = world.start("12", "14")["session"]

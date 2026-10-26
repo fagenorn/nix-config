@@ -566,8 +566,9 @@ def worktree_facts(repo_root: str, b: Bindings, issues: Sequence[int],
 
 
 def control_request(b: Bindings, session: dict, tracker: list, forge: dict, worktrees: list,
-                    owners: list, pairs: Mapping[int, dict]) -> dict:
-    """The interface-3 `control` request: the facts, the bound policy and the built pairs."""
+                    owners: list, pairs: Mapping[int, dict], *, human_directed: bool) -> dict:
+    """The interface-3 `control` request: the facts, the bound policy, the built pairs and
+    `human_directed`, which only an explicit session's first sweep sets (issue 458 D4)."""
     issues = session["issues"]
 
     def keyed(value) -> dict:
@@ -575,7 +576,7 @@ def control_request(b: Bindings, session: dict, tracker: list, forge: dict, work
     return {
         "interface_version": CONTROL_VERSION, "host_route": ROUTE,
         "max_parallel": b.max_parallel, "attempt_budget_minutes": b.attempt_budget_minutes,
-        "human_directed": session["human_directed"], "issues": list(issues),
+        "human_directed": human_directed, "issues": list(issues),
         "tracker": tracker, "owners": owners, "worktrees": worktrees, "forge": forge,
         "delivery_contracts": keyed(lambda n: pairs[n]["contract"] if n in pairs else None),
         "authorization_intents": keyed(
@@ -736,8 +737,9 @@ def control_rounds(args: argparse.Namespace, bindings: Bindings, request: StepIn
     """The final control reply and the number of `control` calls made: the first, and one more
     when it only asks for delivery contracts and some of those issues now have a pair (D6, D18)."""
     session, run_id = request.session, request.session["run_id"]
+    directed = session["human_directed"] and request.first_sweep
     first = run_control(args.repo_root, run_id, control_request(
-        bindings, session, *facts, request.owners, contracts.pairs))
+        bindings, session, *facts, request.owners, contracts.pairs, human_directed=directed))
     if action_kinds(first) != ["delivery_contract"]:
         return first, 1
     try:
@@ -749,7 +751,7 @@ def control_rounds(args: argparse.Namespace, bindings: Bindings, request: StepIn
     asked = {summary["issue"] for summary in first["summaries"] if asks_for_contract(summary)}
     send = {issue: pair for issue, pair in contracts.pairs.items() if issue in asked}
     return run_control(args.repo_root, run_id, control_request(
-        bindings, session, *facts, [], send), previous=first), 2
+        bindings, session, *facts, [], send, human_directed=directed), previous=first), 2
 
 
 def step(args: argparse.Namespace, done: list[str]) -> dict:
