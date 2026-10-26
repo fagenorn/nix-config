@@ -76,6 +76,13 @@ Everything an owner needs is already in its prompt: from-issue's **Leaf-agent cl
 put the four clauses into every prompt it composes, the orchestrate-issues owner prompt
 and the ship-owner fence carry them, and each prompt states its return schema.
 
+Claude Code 2.1.310 loads a definition whose body is empty (its loader rejects only a
+missing name or description and trims the body), but no document states what an empty
+system prompt does at spawn. The plan's first task therefore also confirms that a
+body-less `issue-owner` spawns, dispatches its own child and returns its report. If it
+does not, the work returns to the caller with that finding: a body would grow the owner
+profiles, which only the user's raise label allows, so no task falls back to one.
+
 That is also the only shape that fits the Instruction Budget without the raise label. A
 definition listed in a profile counts whole (as `agents/reviewer.md` does in the
 reviewer profiles), and the owner profiles on Claude have 4 (design-and-grill), 8
@@ -111,7 +118,8 @@ Per D4:
 `researcher` keeps `general-purpose`. The remainder owner of `ship-handoff.md` launches
 through the `from-issue-ship-owner` site, so it changes with it and its text does not.
 Codex has no agent definitions; there the type name is as inert as `reviewer` or
-`mechanic` already are.
+`mechanic` already are. Every account profile links `~/.claude/agents` whole, so the
+definition and the renamed skill text arrive together in one activation on every host.
 
 ### Documentation
 
@@ -144,9 +152,9 @@ records that as post-merge verification. A miss is recorded as a miss.
    its body is empty. The existing every-agent tier test lists it with opus/high. Fails at
    the base (no file).
 2. **Dispatch sites** — same module: the matrix sites whose role is an owner role and
-   whose path lies in the from-issue or orchestrate-issues skill equal a literal set of
+   whose path lies in the from-issue or orchestrate-issues source directory equal a literal set of
    the five ids, each call reads `Agent(subagent_type="issue-owner", …)`, and no file of
-   those two skills contains `subagent_type="general-purpose"`. The `ALLOWED_SUBAGENT_TYPES`
+   those two directories contains `subagent_type="general-purpose"`. The `ALLOWED_SUBAGENT_TYPES`
    mirror follows D4, and `validate()` stays green on the repository. Fails at the base.
 3. **Carrier declaration** — `test_dispatch_contracts.py`: the enrolled agent carriers
    equal the definitions with a non-empty body.
@@ -163,14 +171,16 @@ records that as post-merge verification. A miss is recorded as a miss.
 - Blocking anything beyond the issue's list: ArtifactCheck, other claude.ai connectors,
   `omitClaudeMd` for owners.
 - The Agent-tool depth limit, owner prompts and every other skill sentence.
-- Activation (`just switch`) and changes to `agent-costs`.
+- Activation (`just switch`) and changes to `agent-costs`. A switch made while an
+  orchestration runs can hand a session whose agent list predates it a type it has not
+  loaded; activating between runs avoids that, as for any new agent.
 
 ## Decision ledger
 
 | ID | Choice | Grounding | Rejected alternative |
 |----|--------|-----------|----------------------|
 | D1 | `disallowedTools: Artifact, ArtifactComments, ArtifactData, mcp__claude_ai_Claude_Docs` on one line; the Docs connector is denied by its server-level entry; no `tools:` and no `omitClaudeMd` | Issue's list and "named tools, never an allowlist" (issue 425); binary matcher and docs: `mcp__<server>` removes that server's tools; repository frontmatter parser reads single-line fields | Eight `mcp__claude_ai_Claude_Docs__<tool>` names — longer, and a tool the connector adds slips through; adding ArtifactCheck, which Explore and Plan deny — AC1 says exactly the listed tools and it is absent from this session's pool; `mcp__*` — drops the project MCP tools the issue keeps |
-| D2 | The definition has no body; it is in no instruction-load profile; the carrier test enrols only definitions with a body, and the frontmatter test pins the body empty | Owner profile slack 4/8/18 bytes on Claude and a listed definition counts whole; the raise label is the user's alone; owner prompts already carry the four clauses and their return schemas; docs: the body becomes the system prompt | A body listed in the owner profiles — breaches three ceilings and needs the label; a body left unlisted — the model under-counts what owners load |
+| D2 | The definition has no body; it is in no instruction-load profile; the carrier test enrols only definitions with a body, and the frontmatter test pins the body empty; the plan's first task confirms a body-less owner spawns and dispatches, and a failure returns to the caller rather than adding a body | Owner profile slack 4/8/18 bytes on Claude and a listed definition counts whole; the raise label is the user's alone; owner prompts already carry the four clauses and their return schemas; docs: the body becomes the system prompt | A body listed in the owner profiles — breaches three ceilings and needs the label; a body left unlisted — the model under-counts what owners load |
 | D3 | Frontmatter pins `model: opus`, `effort: high`; every site keeps its explicit `model`/`effort`, which override; `issue-owner` joins the custom-agent role set with no new validator logic | `implementer.md` precedent (task-implementer overrides at the call); docs: call parameters override frontmatter model and effort | Omitting both — needs a one-file validator exception and changes nothing, since every site passes both |
 | D4 | `auto-owner` → {issue-owner}; `issue-owner` and `ship-owner` → {issue-owner, general-purpose}, keeping improve-architecture-scan-owner and ship-release-owner on `general-purpose` | The issue names from-issue and orchestrate-issues only; improve-codebase-architecture is vendored at a pinned upstream revision with its call pinned | Switching the two other sites too — outside the issue and edits a vendored skill; a new role per site — the matrix's roles are tiers, not types |
 | D5 | Both new tests live in `test_agent_model_matrix.py`; the site test fixes the five ids literally and also forbids `subagent_type="general-purpose"` in the two skills' files | agent-helpers rule 6 (frontmatter and mirrored `Agent(...)` lines may be pinned); that module already reads every definition's frontmatter and the owner sites' tiers | `test_dispatch_contracts.py` — it pins carrier clauses, not types; deriving the expected set from the matrix alone — no independent expected value |
