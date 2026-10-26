@@ -46,9 +46,10 @@ The owner cannot see where the 94k goes, and nobody can check a cut against it:
 Measure first, then cut (the issue's order):
 
 1. **`just agent-costs --report boot`.** Each fresh owner's boot, exactly #432's `boot_slice`, is
-   split into a closed set of composition buckets that sum to B (D2, D3). The report gives
-   per-owner rows and cohort-by-phase means as text or JSON, and records the 2026-10-26 baseline
-   from the tool itself (D12).
+   split into a closed set of composition buckets that sum to B (D2, D3). The report reads one or
+   more labelled transcript roots: this host's, and a scratch copy of anis-desktop's (D15). It
+   gives per-owner rows and means by host, cohort and phase, for each host and for both combined,
+   as text or JSON. The tool itself records the baseline over both hosts (D12).
 2. **The cuts that pay**, each judged by one keep rule (D5) and committed with its own contract
    pin:
    - **Cut 1, one task file:** sdd reads the whole package only for an unreviewed first entry
@@ -67,7 +68,7 @@ Measure first, then cut (the issue's order):
 
 ## Decisions
 
-### The boot report (per D1–D4, D14)
+### The boot report (per D1–D4, D14, D15)
 
 **Module and seam.** A new `agent_tools.agent_boot_report` builds the report; `agent_costs.main`
 dispatches `--report boot` to it as it dispatches `--report owners` (a thin shell, policy in
@@ -77,13 +78,26 @@ that launch's transcript to attribute the boot's calls. It takes the calls from 
 reader `transcript_calls.read_transcript`, which is unchanged. The boot module reads the records
 that reader skips itself: the `api-request-shape`, `api-request` and `api-request-blob` records
 Claude Code writes, and the content of tool results, Skill bodies and request tails. A boot's
-calls are the first `len(boot_slice(launch))` of those calls. `boot_facts` accepts only a boot whose calls are
-all inside the window, so the launch's kept calls and the transcript's calls coincide there.
+calls are the first `len(boot_slice(launch))` of those calls. `boot_facts` accepts only a boot
+whose calls are all inside the window, so the launch's kept calls and the transcript's calls
+coincide there.
+
+**Hosts (D15).** `--projects-dir` is repeatable for `--report boot` only, each value `PATH` or
+`LABEL=PATH`. An unlabelled root takes the local host's short hostname, which matches the flake
+host names (`mbp`, `anis-desktop`), and no flag means one root `~/.claude/projects`. A duplicate
+label, or the reserved label `all`, is a usage error. Each root is collected on its own, so a lineage never joins transcripts
+from two hosts. Every row carries its `host`. Another host's transcripts are read from a
+read-only scratch copy: for anis-desktop, the session directories that hold an owner transcript
+in the window are copied, each with its root transcript, subagent transcripts and `.meta.json`
+files, through `ssh anis-desktop 'wsl -e bash -l -s'` (python3 exists only in the login shell)
+into the launch-scope scratch directory, never into the repository.
 
 **Cohorts (D4).** A boot is `fresh` when its launch is not the first launch of its lineage, or
 when the launch ordinal its identity carries is 2 or more. Otherwise it is `spawned`. Its phase
 group is `boot_facts`' group (`0-5` or `6-7`, by the registering call's phase). Means are
-reported for each cohort in each phase group and for `all`. The issue's measure is `fresh`/`all`.
+reported for every host, cohort and phase group, with `all` combining the phase groups and the
+host `all` pooling every host's boots (a pooled mean, not a mean of host means). The headline
+is host `all`, `fresh`, phase group `all`; the evidence criterion reweights it (D12).
 
 **Attribution (D3).** For call 0, the start context is split between text and tool schemas. The
 text is the system prompt, the reminders and listings, and the prompt, each converted at the fixed
@@ -93,8 +107,9 @@ message blobs of the first request's tail. For each later boot call *i*, the gro
 is first charged to `assistant`, up to call *i−1*'s output tokens. The rest is split across the
 content added between the two calls by character share: tool results, Skill bodies, request-tail
 blobs (reminders, listings, hook context, tool additions) and tool-schema changes. Growth with no
-added content to carry it is `unexplained`. A boot's buckets therefore sum to B exactly, and only
-call 0 depends on the ratio.
+added content to carry it is `unexplained`. So is a negative growth (context the harness dropped),
+and in that case `unexplained` may itself be negative. A boot's buckets therefore sum to B
+exactly, and only call 0 depends on the ratio.
 The report also prints the observed ratio: added characters over attributed tokens, for the boot
 calls that added more than 2,000 characters. A reader can see the constant drift that way. A
 transcript without request records cannot split its call 0. That boot is left out of every row
@@ -132,26 +147,31 @@ simple `NAME=value` assignments, with heredoc bodies skipped. A call that reads 
 classes takes the first of skill file, plan, other. A call that reads none is `commands`.
 
 **Document (D14).** `--format json` prints one `agent-boot-report` (`schema_version` 1). It holds
-`window`, `chars_per_token`, `observed_chars_per_token` and `unsplit` (a count). It also holds:
+`window`, `hosts` (each label with its root), `chars_per_token`, `observed_chars_per_token` and
+`unsplit` (a count per host). It also holds:
 
-- `boots`: one row per boot, with `transcript`, `run_id`, `issue`, `cohort`, `phase_group`,
-  `calls`, `start`, `b`, `buckets` (all twelve keys), `skills` and `skill_files`;
-- `groups`: one row per cohort and phase group, with `cohort`, `phase_group`, `count`, `b_mean`,
-  `b_without_schemas_mean` and `buckets` (means).
+- `boots`: one row per boot, with `host`, `transcript`, `run_id`, `issue`, `cohort`,
+  `phase_group`, `calls`, `start`, `b`, `buckets` (all twelve keys), `skills` and `skill_files`;
+- `groups`: one row per host (each label and `all`), cohort and phase group, with `host`,
+  `cohort`, `phase_group`, `count`, `b_mean`, `b_without_schemas_mean` and `buckets` (means).
 
 The text output prints four things in order:
 
-1. A header naming the window, the boot counts and the ratio.
-2. The bucket-by-group table of means, with B and B without tool schemas.
-3. The top skill bodies and skill files by mean per fresh boot.
-4. The per-boot table, sorted by B and capped at `--top` with the dropped count.
+1. A header naming the window, the hosts, the boot counts and the ratio.
+2. One bucket-by-group table of means per host and one for the hosts combined, each with B and B
+   without tool schemas.
+3. The top skill bodies and skill files by mean per fresh boot, hosts combined.
+4. The per-boot table with its host column, sorted by B and capped at `--top` with the dropped
+   count.
 
-A footer then gives the observed ratio, the `unsplit` count and the comparative-telemetry
-`NOTE:`. The flags are `--days`, `--events-since/--events-before` (the owner report's semantics),
-`--projects-dir`, `--top` and `--format`. `--project`, `--artifacts`, `--strata` other than
-`claude`, `--policy`, `--sweep`, `--eval-results`/`--eval` and `--context-threshold` are each a
-usage error (exit 2, nothing on stdout). The package README's agent-costs section gains the
-contract paragraph.
+A footer then gives the observed ratio, the `unsplit` counts and the comparative-telemetry
+`NOTE:`. The flags are `--days`, `--events-since/--events-before` (the owner report's semantics,
+applied to every root), the repeatable `--projects-dir`, `--top` and `--format`. `--project`,
+`--artifacts`, `--strata` other than `claude`, `--policy`, `--sweep`, `--eval-results`/`--eval`,
+`--context-threshold`, a duplicate host label, and a second or labelled `--projects-dir` on any
+other report are each a usage error (exit 2, nothing on stdout). The package README's agent-costs
+section gains the contract paragraph, and the skills README's `### Resume pack` paragraph says
+where a relaunched owner now starts (cut 2).
 
 ### The keep rule (per D5)
 
@@ -181,8 +201,8 @@ Each kept cut is its own commit.
 
 The issue's estimates (8.7k for cut 2, 5.5k for cut 3, 2.7k for cut 4) assumed a 2.5k-token resume
 entry and a two-thirds cut of support reads. The section sizes above are what a resumed owner
-must still read (D11). The plan re-derives every projection from the tool's own baseline report
-before keeping a cut.
+must still read (D11). The table's figures come from the mbp-only scratch baseline. The plan
+re-derives every projection from the tool's own two-host baseline report before keeping a cut.
 
 ### Cut 1 — one task file per dispatch (per D6)
 
@@ -212,11 +232,16 @@ needed.
   `### Resume pack`, which every composing owner reads. orchestrate-issues loads no from-issue
   text, so its verbatim template carries the rule in its own words. A prompt without a pack is
   unchanged.
+- **Self-sufficient checks.** The entry must let the owner run the pack's checks before it reads
+  any SKILL.md section, so it carries the exact `workflow-state check-launch` argv. That argv is
+  the one helper call the checks name without one today, and the bytes are offset within the entry.
 - **Verified pack.** The owner runs the pack's existing checks. It then reads SKILL.md's
   `## Files beside this one` and only the sections that index names for its phase. Everything the
   pack does not replace still runs.
-- **Failed check or refused pack.** The owner loads the whole `from-issue` skill with the prompt's
-  arguments and re-orients in full, as today.
+- **Failed check, refused pack or `reorient`.** The owner loads the whole `from-issue` skill with
+  the prompt's arguments and re-orients in full, as today. A `reorient` next action already means
+  a full re-orientation, so it takes this route. Checking first means a failed pack loads nothing
+  twice.
 - **Where the read list lives.** The per-phase read list stays in SKILL.md's index (hot), where
   #265 put it. It is refined in place for cut 3, so the resume entry adds only its entry and
   fallback sentences, offset within `resume-pack.md`.
@@ -236,29 +261,37 @@ The index's read rules for a verified pack become:
 - **ship-handoff.md.** Read only once Phase 7 starts, or when a generic delegate builds its
   handoff after Phase 6's gates, never during the boot.
 
-These are rewordings of index lines that already exist, net-negative in bytes. The pack's JSON
+The three rules are judged as one cut, as the issue lists them. They are rewordings of index lines
+that already exist, net-negative in bytes. The pack's JSON
 carries no section names or text: it reports facts only (#265), and 4,096 bytes could hold no
 section anyway.
 
-### Evidence and threshold (per D11–D13)
+### Evidence and threshold (per D11–D13, D15)
 
-- **Baseline.** Before deploy, run `--report boot` over the window of the four 2026-10-26 baseline
-  sessions. Record its `fresh`/`all` and per-group means of B without tool schemas. The scratch
-  analysis gave 93,999 B and 16,709 schemas over 43 owners, and the tool's own figure is the
-  reference.
-- **Sweep.** Before merge, re-run `--report owners --sweep` on the available transcripts and state
-  the chosen threshold with its reasons in the acceptance record. The observed boots are not yet
-  cut, so 200k is expected to stand. The sweep's `boot=slim` arm already models the stale
-  task-file reads.
+- **Baseline, both hosts.** Before deploy, run `--report boot` with two roots, `mbp` and a scratch
+  copy of `anis-desktop`'s. The event window runs from 2026-10-24T00:00:00Z, the earliest of the
+  four 2026-10-26 mbp baseline sessions, to the moment the record is taken. Record the
+  host-`all`, `fresh`, phase-group-`all` mean of B without tool schemas, the same figure for each
+  host separately, and every group's count. The mbp scratch analysis gave 93,999 B and 16,709
+  schemas over 43 owners; the tool's two-host figure is the reference. A probe on 2026-10-26 found
+  94 owner transcripts from the last 10 days on anis-desktop, every one carrying request records.
+- **Sweep.** Before merge, re-run `--report owners --sweep` once per host root (the owner report
+  reads one root), and state each chosen threshold with its reasons in the acceptance record. The
+  observed
+  boots are not yet cut, so 200k is expected to stand. The sweep's `boot=slim` arm already models
+  the stale task-file reads.
 - **Hold.** The `[evidence]` row is pending at ship, so the issue is held with `needs-verification`,
   as #432 is. The hold comment names the protocol:
-  - The post-deploy window starts at the `just switch` that deploys the merge. It closes once it
-    holds at least 20 fresh boots, at least 5 of them in each phase group.
-  - The criterion is met when the baseline's `fresh`/`all` mean of B without tool schemas, minus
-    the post-deploy group means reweighted to the baseline's phase-group mix, is at least 25,000.
-    The reweighting keeps a window with fewer Phase 6–7 owners from passing by mix alone.
-  - The same session re-runs the sweep over the post-deploy window. A lower threshold that keeps
-    against 200k is set in a follow-up commit that cites #448. Otherwise 200k stands, with reasons.
+  - The post-deploy window starts at the later of the two hosts' `just switch` deploys of the
+    merge. It closes once every host × phase-group stratum that the baseline holds has at least
+    5 fresh boots, and at least 20 in all.
+  - The criterion is met when the baseline's combined mean of B without tool schemas, minus the
+    post-deploy stratum means reweighted to the baseline's host × phase-group mix, is at least
+    25,000. The reweighting keeps a window with fewer Phase 6–7 owners, or with more owners from
+    one host, from passing by mix alone. Each host's own fall is reported too, for information.
+  - The same session re-runs the sweep over the post-deploy window on each host. A lower
+    threshold is set, in a follow-up commit that cites #448, only when both hosts' sweeps choose
+    it against 200k. Otherwise 200k stands, with reasons.
 
 ## Test seams
 
@@ -272,7 +305,9 @@ section anyway.
      sub-maps are filled;
    - the fresh/spawned cohorts follow lineage position and launch ordinal, and a transcript without
      request records counts only in `unsplit`;
-   - refused flags exit 2, and the text output prints its four sections.
+   - two labelled roots whose sessions share a run ID form separate lineages, their rows carry
+     their host, and the host-`all` groups pool both roots' boots;
+   - refused flags and a duplicate label exit 2, and the text output prints its four sections.
 2. **The skill-text contracts.** `home/common/agent-skills/tests/test_workflow_skill_contracts.py`
    (prior art `ResumePackContractsTest`) gets identifier-only pins under rule 6:
    - every heading and document the index's verified-pack read list names exists;
@@ -280,7 +315,11 @@ section anyway.
      Phase 7;
    - the owner-prompt template and from-issue's `### Resume pack` name `resume-pack.md` as the
      entry;
-   - `--reviewed` appears in from-issue's Phase 6 and in sdd's Setup.
+   - `--reviewed` appears in from-issue's Phase 6 and in sdd's Setup;
+   - the entry carries the `workflow-state check-launch` argv (rule 6 allows `workflow-state` argv).
+
+   Existing phrase pins on text these cuts rewrite are deleted in the same commit, as rule 6 asks
+   of a slice that slims its skill.
 3. **The Instruction Budget gate.** `just agent-instruction-budget` passes without the raise label,
    so every profile stays within its ceiling.
 4. **Evidence.** Acceptance-record rows hold the baseline report, each cut's projection, the
@@ -297,6 +336,8 @@ section anyway.
   ship-issue resume entry.
 - sdd section reads (cut 4) and a re-read rule (cut 5).
 - Measuring before merge through eval trials.
+- Running any report on anis-desktop itself, or a multi-root owner report (the sweep runs per
+  host).
 
 ## Decision ledger
 
@@ -305,15 +346,16 @@ section anyway.
 | D0 | The orchestrator's first Phase-0 `workflow-state progress` call passed `--next-needs-context false` by mistake and got `handoff`. It re-recorded Phase 0 with the truthful `true` and got `continue`. | from-issue SKILL.md "booleans truthful": the Phase-2 dispatch needs the Phase-0 summary held in the owner's context | Obeying a gate computed from an untruthful input, which would have relaunched a fresh owner (≈90k boot) for no benefit |
 | D1 | The boot report is a new `agent_tools.agent_boot_report`. It takes lineages from `agent_owner_report.collect` and boots from `boot_facts`/`boot_slice` unchanged, and makes its own second transcript pass. The shared reader is unchanged. | Issue decision "boot end is the replay's `boot_slice`"; agent-helpers rules 1–2; `OwnerCall` keeps only token counts | Extending `read_transcript` with request records: every report would pay for them and the shared reader's contract would change. Redefining the boot: the issue forbids it |
 | D2 | Twelve closed buckets that partition B, with per-skill and per-skill-file sub-maps. A bucket is decided by re-read (same path and range) first, then content (resume pack or owner object), then path class. A persisted read-back takes its origin's bucket. | The issue's composition table and cut targets; the-bar "tests that can fail" (a sum-to-B invariant); #432's `saved to:` rule | Porting the scratch analysis's ~30 labels: they key on dispatcher-chosen scratch names (`owner-*.json`, `t<N>.md`) |
-| D3 | Each call's growth is split by character share after charging the previous call's output. Call 0's text uses a fixed 2.44 chars per token, and tool schemas take the remainder. The observed ratio is reported. A transcript without request records is `unsplit` and kept out of the means. | 2026-10-26 calibration (aggregate 2.44 over 678 calls); the issue's "about 2.5, not 4"; usage deltas make every later call exact | A per-run calibrated ratio: the baseline and post-deploy windows would split call 0 differently, and small windows are noisy. 4 chars per token: refuted by the calibration |
+| D3 | Each call's growth is split by character share after charging the previous call's output. Call 0's text uses a fixed 2.44 chars per token, and tool schemas take the remainder. The observed ratio is reported. A negative growth is `unexplained`, so the partition stays exact. A transcript without request records is `unsplit` and kept out of the means. | 2026-10-26 calibration (aggregate 2.44 over 678 calls); the issue's "about 2.5, not 4"; usage deltas make every later call exact | A per-run calibrated ratio: the baseline and post-deploy windows would split call 0 differently, and small windows are noisy. 4 chars per token: refuted by the calibration |
 | D4 | `fresh` means not its lineage's first launch, or a launch ordinal of 2 or more. Every other boot is `spawned`. Means are reported per cohort per phase group and for `all`. | Lifecycle identity (lineage order, custody launch); the issue measures fresh owners | Classifying by prompt text (the scratch analysis): fragile. Launch ordinal alone: 10 of 43 baseline delegated owners inherit ordinal 1 |
 | D5 | Keep rule: at least 1,000 tokens per fresh boot (mean) projected from the baseline report, text net-negative with no ceiling raised (offset within the profile, `tighten` when more than 5% below), and pinnable under rule 6. One commit per kept cut. | Issue "each cut ships only if the boot report shows it pays … reducing instruction load"; the gate's raise control (only lowering is unlabelled); agent-helpers rule 6; #432 D9 | Shipping all five as listed. Judging only after deploy: a cut would ship before anyone knew whether it pays |
 | D6 | Cut 1: the whole-package read only for an unreviewed first entry. from-issue's Phase 6 passes sdd the literal token `--reviewed`. A reviewed or resumed run reads the root's header and the current `<plan stem>.tasks/task-<N>.md` before each dispatch. No pack field. | REVIEW-CONTRACT: the Phase-5 reviewer reads the root and every member; baseline cost is 26.5k mean in delegated Phase-6 entries; the `--auto` literal-token precedent; the pack already names the plan and the task | A pack `task_file` field: a risk-path change for a path the layout already derives. Keeping the scan on first entry: that scan is the cost |
-| D7 | Cut 2: dispatchers that carry a pack name from-issue's `resume-pack.md` by absolute path as the entry, in place of the Skill invocation, with the rule stated once in `### Resume pack`. Verified: read the index and its phase's sections. Failed: load the whole skill. The read list stays in SKILL.md's index. | #265's design (a verified pack reads only its phase's sections); REVIEW-CONTRACT's by-path hand-over precedent; zero-headroom ceilings (controller conditional 144 bytes); closure and raise rules forbid a new document | A new RESUME.md or a split SKILL.md: a model change needing the raise label. Moving the read list into `resume-pack.md`: breaches the controller's conditional ceiling. A pack-carried section map: a risk-path change against #265's facts-only pack. A ship-issue entry: 1 of 43 boots |
-| D8 | Cut 3: the index's verified-pack reads skip AUTO.md's `When *not* to auto-resolve` in Phases 6–7, read only the route's section of `delegated-owner.md`, and read `ship-handoff.md` only once Phase 7 (or a generic delegate's handoff build) starts. | AUTO.md: `When *not*` covers Phase 0 stops, the fog gate and Phase 5 findings; delegated-owner.md's prompt line selects one section; ship-handoff.md is Phase 7's; baseline ≈2.1k per boot | Section text inside the pack: the 4,096-byte bound, and it would duplicate skill text |
+| D7 | Cut 2: dispatchers that carry a pack name from-issue's `resume-pack.md` by absolute path as the entry, in place of the Skill invocation, with the rule stated once in `### Resume pack`. The entry carries the `check-launch` argv, so its checks run before any section is read. Verified: read the index and its phase's sections. Failed, refused or `reorient`: load the whole skill. The read list stays in SKILL.md's index. | #265's design (a verified pack reads only its phase's sections); REVIEW-CONTRACT's by-path hand-over precedent; zero-headroom ceilings (controller conditional 144 bytes); closure and raise rules forbid a new document | A new RESUME.md or a split SKILL.md: a model change needing the raise label. Moving the read list into `resume-pack.md`: breaches the controller's conditional ceiling. A pack-carried section map: a risk-path change against #265's facts-only pack. A ship-issue entry: 1 of 43 boots |
+| D8 | Cut 3: the index's verified-pack reads skip AUTO.md's `When *not* to auto-resolve` in Phases 6–7, read only the route's section of `delegated-owner.md`, and read `ship-handoff.md` only once Phase 7 (or a generic delegate's handoff build) starts. The three rules are judged as one cut, as the issue lists them. | AUTO.md: `When *not*` covers Phase 0 stops, the fog gate and Phase 5 findings; delegated-owner.md's prompt line selects one section; ship-handoff.md is Phase 7's; baseline ≈2.1k per boot | Section text inside the pack: the 4,096-byte bound, and it would duplicate skill text |
 | D9 | Cut 4 is not built. A `resume_task` resume (19 of 43) could skip only Setup's gate subsections (≈1.5k tokens), and `finish_phase` is 2 of 43, so the projection is ≈0.7k, under the floor. | D5's floor; the 2026-10-26 `next_action` mix; sdd's task loop, tiers and finish are needed by every resume | Reading sdd by sections: a second Skill-tool bypass for under 1k |
 | D10 | Cut 5 ships no re-read rule. An English rule cannot be pinned, and its main sources (persisted read-backs of whole-package reads, repeated skill-file navigation) go with cuts 1–3. The `rereads` bucket measures what remains. `--help` stays #432's. | agent-helpers rule 6 (no new phrase pins); the issue's "kept cuts are pinned"; baseline re-reads are a long tail at ≈2.3k | A global or resume-entry "read once" sentence: unverifiable, and it costs bytes in zero-headroom files |
 | D11 | Projected fall ≈15.5k (cut 1 ≈10.6k, cut 2 ≈2.9k, cut 3 ≈2.1k), below the issue's 25k. Each cut ships because it pays, and the post-deploy evidence decides the criterion. No cut beyond the issue's five. | Section sizes a resumed owner must still read (from-issue's common procedures ≈20k characters); the issue's estimate assumed a 2.5k-token entry | Widening scope to harness listings or the owner object, or raising the budget to cut deeper: outside the issue and against its no-raise decision |
-| D12 | The evidence hold, like #432's. The tool's own baseline report is recorded before deploy. The window runs from the deploy until 20 or more fresh boots, 5 or more per phase group. Met means the baseline mean of B without schemas, minus the post-deploy group means reweighted to the baseline mix, is at least 25,000. | #432 held with `needs-verification`; ship-issue's hold path for `unmet`/`human_pending` rows; B differs by phase group (≈79k vs ≈100k), so mix shifts bias a raw mean | Pre-merge eval-8 trials: $40 a trial for 1–2 fresh boots. Closing on merge: the criterion would go unmeasured |
-| D13 | The sweep is re-run before merge and its threshold stated (200k expected, since boots are not yet cut). It is re-run at the post-deploy measurement, and only a lower arm that keeps against 200k is set, in a follow-up commit that cites #448. | Issue "re-run #432's replay sweep and retune … if a lower value now wins"; #432 D8 keep rule; the sweep's `boot=slim` arm | Modelling the new B inside the replay: changes #432's model, out of scope |
-| D14 | `--report boot` takes the owner report's window flags plus `--projects-dir`, `--top` and `--format`, and refuses `--project`, `--artifacts`, non-claude `--strata`, `--policy`, `--sweep`, `--eval-results`/`--eval` and `--context-threshold` (exit 2). JSON is `agent-boot-report` v1. | The `--report owners` and `--report cache` flag-gating precedent | Eval-trial grouping for boots: no caller needs it (YAGNI) |
+| D12 | The evidence hold, like #432's. The tool's own two-host baseline (from 2026-10-24T00:00Z) is recorded before deploy. The window runs from the later host deploy until every baseline host × phase-group stratum has 5 or more fresh boots, 20 or more in all. Met means the combined baseline mean of B without schemas, minus the post-deploy stratum means reweighted to the baseline's host × phase-group mix, is at least 25,000. Each host's fall is reported alongside. | #432 held with `needs-verification`; ship-issue's hold path for `unmet`/`human_pending` rows; B differs by phase group (≈79k vs ≈100k) and harness listings differ by host, so a raw mean is biased by mix | Pre-merge eval-8 trials: $40 a trial for 1–2 fresh boots. Closing on merge: the criterion would go unmeasured |
+| D13 | The sweep is re-run before merge, once per host root, and each threshold is stated (200k expected, since boots are not yet cut). It is re-run per host at the post-deploy measurement. A lower arm is set, in a follow-up commit that cites #448, only when both hosts' sweeps choose it against 200k. | Issue "re-run #432's replay sweep and retune … if a lower value now wins"; #432 D8 keep rule; the sweep's `boot=slim` arm | Modelling the new B inside the replay: changes #432's model, out of scope |
+| D14 | `--report boot` takes the owner report's window flags plus the repeatable `--projects-dir`, `--top` and `--format`, and refuses `--project`, `--artifacts`, non-claude `--strata`, `--policy`, `--sweep`, `--eval-results`/`--eval`, `--context-threshold` and a duplicate host label (exit 2). JSON is `agent-boot-report` v1. | The `--report owners` and `--report cache` flag-gating precedent | Eval-trial grouping for boots: no caller needs it (YAGNI) |
+| D15 | (grill, scope addition from the user via the orchestrator) Measure both hosts. `--projects-dir` is repeatable for `--report boot` only, as `[LABEL=]PATH`, with an unlabelled root taking the local short hostname. Each root is collected separately, so no lineage spans hosts. Rows carry `host`, and groups are per host plus a pooled `all`. anis-desktop's sessions are copied read-only through `ssh anis-desktop 'wsl -e bash -l -s'` into the launch-scope scratch directory, never the repository. | The user's instruction that the baseline and the after-cuts evidence include anis-desktop, reported per host and combined; a 2026-10-26 probe found 94 anis-desktop owner transcripts (10 days), all with request records; run IDs and lineages are per-host ledgers | A new `--host` flag beside `--projects-dir`: two ways to name a root. Running the report on anis-desktop and merging outputs: its checkout at main lacks the module before merge, and a combined mean needs the pooled rows. A multi-root owner report for the sweep: not needed, since per-host sweeps answer the threshold question |
