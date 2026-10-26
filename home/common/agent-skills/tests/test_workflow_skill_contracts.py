@@ -1943,6 +1943,7 @@ class SlimBootContractsTest(unittest.TestCase):
         position = -1
         for anchor in (ResumePackContractsTest.PACK, self.CHECK_LAUNCH,
                        "artifact-budget validate-report --boundary workflow-response --input -",
+                       "`reviewed_head_sha`", "`SKILL.md`'s index",
                        "`git -C <worktree> rev-parse HEAD`", "`worktree.head`",
                        "`git -C <worktree> status --porcelain`", "`worktree.dirty_paths`",
                        "`## Files beside this one`"):
