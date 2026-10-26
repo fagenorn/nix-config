@@ -92,6 +92,9 @@ class VerifiedTreeTest(unittest.TestCase):
     def record_path(self, cwd=None):
         return Path(self.git("rev-parse", "--absolute-git-dir", cwd=cwd)) / "verified-tree.json"
 
+    def plan_path(self, cwd=None):
+        return self.record_path(cwd=cwd).with_name("verified-tree-plan.json")
+
     def recorded_ids(self, cwd=None):
         return json.loads(self.record_path(cwd=cwd).read_text())["verification"]
 
@@ -215,6 +218,66 @@ class VerifiedTreeTest(unittest.TestCase):
             with self.subTest(argv[0]):
                 self.assert_exit_2(self.run_tool(*argv))
                 self.assertFalse(self.record_path().exists())
+
+    # Issue 437 final review: `record` writes only the plan `check` printed.
+
+    def test_record_refuses_a_plan_that_changed_since_check(self):
+        # Origin moves between check and record while the tree stands still: the
+        # recomputed plan now runs `suite`, which the caller skipped and never ran.
+        (self.repo / "tinytask/cli.py").write_text("# edited\n")
+        self.commit_all("edit cli")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        answer = self.check()
+        self.assertEqual((answer["run"], answer["skipped"]), (["test"], SKIPPED))
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD~1")
+        done = self.record(answer["tree"])
+        self.assert_exit_2(done)
+        self.assertFalse(self.record_path().exists())
+        self.assertEqual(self.check(), {"run": IDS, "skipped": [],
+                                        "status": "unverified", "tree": answer["tree"]})
+
+    def test_record_without_a_check_of_that_tree_exits_2(self):
+        tree = self.git("rev-parse", "HEAD^{tree}")
+        self.assert_exit_2(self.record(tree))
+        self.assertFalse(self.record_path().exists())
+        # A check of another tree is no check of this one.
+        self.check()
+        (self.repo / "README.md").write_text("# edited\n")
+        self.git("add", "README.md")
+        self.assert_exit_2(self.record(self.git("write-tree")))
+        self.assertFalse(self.record_path().exists())
+
+    def test_a_malformed_persisted_plan_makes_record_exit_2(self):
+        tree = self.check()["tree"]
+        good = {"schema": "verified-tree-plan/v1", "tree": tree, "run": ["test"]}
+        cases = {
+            "not json": "{",
+            "extra key": json.dumps({**good, "skipped": []}),
+            "wrong schema": json.dumps({**good, "schema": "verified-tree/v1"}),
+            "tree not hex": json.dumps({**good, "tree": "HEAD"}),
+            "empty run": json.dumps({**good, "run": []}),
+        }
+        for name, body in cases.items():
+            with self.subTest(name):
+                self.plan_path().write_text(body)
+                self.assert_exit_2(self.record(tree))
+                self.assertFalse(self.record_path().exists())
+
+    def test_check_persists_the_plan_it_printed(self):
+        answer = self.check()
+        self.assertEqual(json.loads(self.plan_path().read_text()),
+                         {"schema": "verified-tree-plan/v1", "tree": answer["tree"],
+                          "run": answer["run"]})
+
+    def test_record_compares_the_tree_before_resolving(self):
+        stale = self.check()["tree"]
+        self.set_conditions({"suite": {"when_changed": [], "skip_reason": REASON}})
+        self.git("add", ".agents/project.json")
+        done = self.record(stale)
+        self.assertEqual(done.returncode, 3, done.stderr)
+        self.assertEqual(done.stdout, '{"reason":"tree_changed","recorded":false,"tree":"%s"}\n'
+                         % self.git("write-tree"))
+        self.assertFalse(self.record_path().exists())
 
     # #263 invariants, carried onto the fixture harness.
 

@@ -20,13 +20,22 @@ tree, so a rename counts as both of its paths and a deletion counts. They are
 computed only when some declared id has a condition, so a contract without
 conditions needs no `origin` ref and runs every id.
 
+`check` also persists the plan it printed, atomically replacing
+`<git rev-parse --absolute-git-dir>/verified-tree-plan.json` with exactly
+{"run": ["<id>", ...], "schema": "verified-tree-plan/v1", "tree": "<tree id>"},
+after every read has succeeded.
+
 `verified-tree record --tree <id>` recomputes the tree. When it differs from
 `--tree` it writes nothing, leaves any previous record byte-identical and exits
 3 printing {"reason": "tree_changed", "recorded": false, "tree": "<current
-tree>"}. Otherwise it resolves, recomputes the plan, atomically replaces the
-record with `verification` set to `run` and exits 0 printing
-{"recorded": true, "tree": "<id>"}. A skipped id is never recorded, so a skip
-never reads as a pass.
+tree>"}; this comparison comes before resolving. Otherwise it resolves,
+recomputes the plan and reads the persisted plan. It exits 2 when no persisted
+plan exists for that tree (no `check` of it) or when the recomputed `run`
+differs from the persisted one (the plan changed since `check`, as when
+`origin/<integration_branch>` moved). Otherwise it atomically replaces the
+record with `verification` set to the persisted `run` and exits 0 printing
+{"recorded": true, "tree": "<id>"}. So only ids that `check` told the caller to
+run are ever recorded, and a skip never reads as a pass.
 
 The tree is what a Git-backed build sees: the index's entries, staged new
 files included, with tracked files' working-tree edits and deletions applied,
@@ -43,13 +52,17 @@ The record is one latest-pass file per worktree,
 list of non-empty strings, the ids that ran and passed on that tree. It
 carries no run, attempt or launch identity.
 
+The persisted plan is parsed as strictly as the record: `tree` is a tree id
+and `run` is a non-empty list of non-empty strings.
+
 A resolver refusal (its line is `verified-tree: resolve-project refused:
 <code> <repair_id>`), a git failure (a missing `origin/<integration_branch>`
-ref or merge base included, when some id is conditional), or a record that
-exists but fails strict parsing or that closed schema, prints one
-`verified-tree: <message>` line on stderr and exits 2 with empty stdout,
-writing nothing. argparse's usage errors also exit 2: neither verb takes a
-verification id.
+ref or merge base included, when some id is conditional), a record that exists
+but fails strict parsing or that closed schema, a persisted plan that `record`
+reads and that fails them, a missing check of the tree, or a plan changed
+since `check`, prints one `verified-tree: <message>` line on stderr and exits
+2 with empty stdout, writing nothing. argparse's usage errors also exit 2:
+neither verb takes a verification id.
 """
 
 from __future__ import annotations
@@ -70,14 +83,17 @@ from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_litera
 
 SCHEMA = "verified-tree/v1"
 RECORD_NAME = "verified-tree.json"
-RECORD_KEYS = frozenset({"schema", "tree", "verification"})
+PLAN_SCHEMA = "verified-tree-plan/v1"
+PLAN_NAME = "verified-tree-plan.json"
 TREE_PATTERN = r"[0-9a-f]{40}(?:[0-9a-f]{24})?"
 ERROR_EXIT = 2
 REFUSED_EXIT = 3
 
 
 class VerifiedTreeError(Exception):
-    """A git failure or an unreadable or malformed record; main prints one stderr line and exits 2."""
+    """A resolver refusal, a git failure, an unreadable or malformed record or persisted plan,
+    a missing check of the tree or a plan changed since check; main prints one stderr
+    line and exits 2."""
 
 
 def _canonical(document: Mapping[str, object]) -> str:
@@ -115,6 +131,11 @@ def record_path(root: Path) -> Path:
     return Path(_git(["rev-parse", "--absolute-git-dir"], root)) / RECORD_NAME
 
 
+def plan_path(root: Path) -> Path:
+    """The plan `check` last printed, beside the record."""
+    return record_path(root).with_name(PLAN_NAME)
+
+
 def current_tree(root: Path) -> str:
     """The index's entries with tracked working-tree edits applied, built in a temporary index."""
     index = root / _git(["rev-parse", "--git-path", "index"], root)
@@ -127,8 +148,8 @@ def current_tree(root: Path) -> str:
         return _git(["write-tree"], root, env=env)
 
 
-def read_record(path: Path) -> dict | None:
-    """The validated record, or None only when the file does not exist."""
+def _read_ids_file(path: Path, kind: str, schema: str, ids_key: str) -> dict | None:
+    """The strictly parsed {"schema", "tree", <ids_key>} file, or None only when it does not exist."""
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -139,20 +160,56 @@ def read_record(path: Path) -> dict | None:
         document = json.loads(text, object_pairs_hook=reject_duplicate_keys,
                               parse_constant=reject_nonfinite_literal)
     except ValueError as error:
-        raise VerifiedTreeError(f"malformed record {path}: {error}") from error
-    if not isinstance(document, dict) or set(document) != RECORD_KEYS:
-        raise VerifiedTreeError(f"malformed record {path}: keys must be {sorted(RECORD_KEYS)}")
-    if document["schema"] != SCHEMA:
-        raise VerifiedTreeError(f"malformed record {path}: schema must be {SCHEMA}")
+        raise VerifiedTreeError(f"malformed {kind} {path}: {error}") from error
+    keys = {"schema", "tree", ids_key}
+    if not isinstance(document, dict) or set(document) != keys:
+        raise VerifiedTreeError(f"malformed {kind} {path}: keys must be {sorted(keys)}")
+    if document["schema"] != schema:
+        raise VerifiedTreeError(f"malformed {kind} {path}: schema must be {schema}")
     tree = document["tree"]
     if not isinstance(tree, str) or not re.fullmatch(TREE_PATTERN, tree):
-        raise VerifiedTreeError(f"malformed record {path}: tree is not a tree id")
-    verification = document["verification"]
-    if (not isinstance(verification, list) or not verification
-            or not all(isinstance(item, str) and item for item in verification)):
+        raise VerifiedTreeError(f"malformed {kind} {path}: tree is not a tree id")
+    ids = document[ids_key]
+    if (not isinstance(ids, list) or not ids
+            or not all(isinstance(item, str) and item for item in ids)):
         raise VerifiedTreeError(
-            f"malformed record {path}: verification must be a non-empty list of ids")
+            f"malformed {kind} {path}: {ids_key} must be a non-empty list of ids")
     return document
+
+
+def read_record(path: Path) -> dict | None:
+    """The validated record, or None only when the file does not exist."""
+    return _read_ids_file(path, "record", SCHEMA, "verification")
+
+
+def read_plan(path: Path) -> dict | None:
+    """The validated persisted plan, or None only when the file does not exist."""
+    return _read_ids_file(path, "plan", PLAN_SCHEMA, "run")
+
+
+def _write_atomically(path: Path, document: Mapping[str, object]) -> None:
+    """Replace `path` with `document`'s canonical JSON line, or leave it untouched."""
+    body = _canonical(document) + "\n"
+    try:
+        descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".verified-tree-")
+    except OSError as error:
+        raise VerifiedTreeError(f"cannot write {path}: {error}") from error
+    replaced = False
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        replaced = True
+    except OSError as error:
+        raise VerifiedTreeError(f"cannot write {path}: {error}") from error
+    finally:
+        if not replaced:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
 
 
 def verification_policy(root: Path) -> dict:
@@ -201,45 +258,39 @@ def current_plan(root: Path, tree: str) -> dict:
 
 
 def check() -> dict:
-    """{"run", "skipped", "status", "tree"}: verified only for the recorded tree and `run` ids."""
+    """{"run", "skipped", "status", "tree"}: verified only for the recorded tree and `run` ids.
+
+    Persists the printed plan's `tree` and `run` for `record`."""
     root = worktree_root()
     tree = current_tree(root)
     planned = current_plan(root, tree)
     stored = read_record(record_path(root))
     verified = (stored is not None and stored["tree"] == tree
                 and stored["verification"] == planned["run"])
+    _write_atomically(plan_path(root), {"run": planned["run"], "schema": PLAN_SCHEMA,
+                                        "tree": tree})
     return {**planned, "status": "verified" if verified else "unverified", "tree": tree}
 
 
 def record(tree: str) -> tuple[int, dict]:
-    """Record the plan's `run` ids when the current tree equals `tree`; (3, refusal) otherwise."""
+    """Record the `run` ids `check` printed for `tree`; (3, refusal) when the tree moved.
+
+    The tree is compared before resolving. The plan recomputed now must equal
+    the one `check` persisted for `tree`, so an id `check` skipped is never
+    recorded."""
     root = worktree_root()
     current = current_tree(root)
     if current != tree:
         return REFUSED_EXIT, {"recorded": False, "reason": "tree_changed", "tree": current}
-    verification = current_plan(root, tree)["run"]
-    path = record_path(root)
-    body = _canonical({"schema": SCHEMA, "tree": tree, "verification": verification}) + "\n"
-    try:
-        descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".verified-tree-")
-    except OSError as error:
-        raise VerifiedTreeError(f"cannot write {path}: {error}") from error
-    replaced = False
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(body)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        replaced = True
-    except OSError as error:
-        raise VerifiedTreeError(f"cannot write {path}: {error}") from error
-    finally:
-        if not replaced:
-            try:
-                os.unlink(temporary)
-            except OSError:
-                pass
+    run = current_plan(root, tree)["run"]
+    checked = read_plan(plan_path(root))
+    if checked is None or checked["tree"] != tree:
+        raise VerifiedTreeError(f"no check of tree {tree} to record")
+    if checked["run"] != run:
+        raise VerifiedTreeError(
+            f"plan changed since check: run {checked['run']} is now {run}")
+    _write_atomically(record_path(root), {"schema": SCHEMA, "tree": tree,
+                                          "verification": checked["run"]})
     return 0, {"recorded": True, "tree": tree}
 
 
