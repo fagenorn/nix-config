@@ -40,6 +40,7 @@ from .test_adopt_project import (
     adopted_repo,
     fixture_contract,
     git,
+    host_independent,
     init_repo,
     make_home,
     reconcile_repo,
@@ -71,15 +72,10 @@ def verifiable_repo(home: Path, *, project_id: str = "fixture/target",
     contract that names a branch other than the remote default.
     """
     root = init_repo()
-    contract = fixture_contract()
+    contract = host_independent(fixture_contract())
     contract["project"] = {"id": project_id, "name": project_id.split("/")[-1]}
     contract["bindings"]["tracker"]["cli"] = tracker_cli
     contract["bindings"]["vcs"]["integration_branch"] = integration_branch
-    # This repository's GitHub release profile derives a `blocked` release
-    # capability on any host without the forge adapter's executables on PATH;
-    # no verify case is about release, so the fixture opts out of it to keep the
-    # verdicts host-independent.
-    contract["release"] = "unsupported"
     scaffold(root, contract, home)
     write(root, ".agents/runtime/.gitignore", "*\n")
     git(root, "add", "-f", ".agents/runtime/.gitignore")
@@ -543,9 +539,7 @@ class RemoteRegistrationTest(VerifyTestCase):
         write(root, "README.md", "# before adoption\n")
         commit(root, "base")
         base = git(root, "rev-parse", "HEAD").strip()
-        contract = fixture_contract()
-        # Opt out of the host-dependent release profile, as `verifiable_repo` does.
-        contract["release"] = "unsupported"
+        contract = host_independent(fixture_contract())
         scaffold(root, contract, self.home)
         for standards in contract["bindings"]["paths"]["standards"]:
             write(root, f"{standards}/bar.md", "# the bar\n")
