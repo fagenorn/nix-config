@@ -337,9 +337,10 @@ All of them run in `just agent-workflow-tests`.
   - Also covered: an untracked file under a listed path changes nothing; a
     contract without conditions keeps today's behaviour (every id in `run`,
     `skipped` empty).
-  - Each of these exits 2 with empty stdout and one stderr line: a resolver
-    refusal, an absent `origin/<integration>` ref, and `--verification` (now a
-    usage error).
+  - Each of these exits 2 with empty stdout and one stderr line, writing no
+    record: a resolver refusal and an absent `origin/<integration>` ref.
+    `--verification` is now a usage error: argparse prints its multi-line
+    usage on stderr, and the call exits 2 with empty stdout, writing no record.
   - The existing invariant tests carry over onto the new harness.
 - **Resolver** (the `resolve-project` tests). A conditions test class modelled
   on `LightLaneTest`:
