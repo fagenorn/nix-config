@@ -1282,6 +1282,63 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                     expect_allowed = authorized or row["kind"] == "read"
                     self.assertEqual(0 if expect_allowed else 2, result.returncode, result.stderr)
 
+    # Remote branch deletion (issue 458): the push verb's third form.
+
+    def test_remote_branch_deletion_arm(self):
+        """Issue 458 D1, D2: `git push origin --delete refs/heads/<branch>` deletes a
+        feature branch in an authorized repository and never a permanent branch."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        form = "git push origin --delete refs/heads/<branch>"
+        delete = "git push origin --delete refs/heads/issue-458-topic"
+        for command, cwd in (
+            (delete, repo),
+            ("unset GITHUB_TOKEN && " + delete, repo),
+            ("env -u GITHUB_TOKEN " + delete, repo),
+            (f"git -C {repo} push origin --delete refs/heads/issue-458-topic",
+             self.fixture_dir.name),
+            (delete, nodo),
+        ):
+            with self.subTest(command=command, cwd=cwd):
+                result = self.run_guard(command, cwd=cwd)
+                self.assertEqual(0, result.returncode, result.stderr)
+        for command, cwd, problem in (
+            ("git push origin --delete refs/heads/main", repo,
+             "refusing to delete the permanent branch main"),
+            ("git push origin --delete refs/heads/main", nodo,
+             "refusing to delete the permanent branch main"),
+            ("git push origin --delete refs/heads/dev", nodo,
+             "refusing to delete the permanent branch dev"),
+        ):
+            with self.subTest(command=command, cwd=cwd):
+                line = self.refusal_line(self.run_guard(command, cwd=cwd))
+                self.assertEqual(f"lifecycle guard: unsafe push: {problem}", line)
+        for command, problem in (
+            ("git push origin --delete issue-458-topic", "missing refs/heads/<branch>"),
+            ("git push origin --delete refs/tags/v1.2.3", "missing refs/heads/<branch>"),
+            ("git push origin --delete refs/heads/a refs/heads/b",
+             "unexpected refs/heads/b at the end"),
+            ("git push -u origin --delete refs/heads/issue-458-topic", "missing <branch>"),
+            ("git push --delete origin refs/heads/issue-458-topic", "--delete is out of place"),
+            ("git push origin -d refs/heads/issue-458-topic", "unknown flag -d"),
+            ("git push origin --delete refs/heads/", "branch name must not be empty"),
+            ("git push origin --delete refs/heads/refs/heads/x",
+             "namespaced ref refs/heads/x is not accepted; name the branch directly"),
+        ):
+            with self.subTest(command=command):
+                line = self.refusal_line(self.run_guard(command, cwd=repo))
+                self.assertTrue(line.startswith(
+                    f"lifecycle guard: unsafe push: {problem}; accepted: "), line)
+                self.assertIn("; or " + form + "; optional prefix: ", line)
+        outsider = self.make_repo("git@github.com:someoneelse/tool.git")
+        line = self.refusal_line(self.run_guard(delete, cwd=outsider))
+        self.assertEqual("lifecycle guard: unsafe push: repository someoneelse/tool is "
+                         "outside standing authorization", line)
+        unresolved = self.make_repo("git@github.com:fagenorn/argus.git", default_branch=None)
+        line = self.refusal_line(self.run_guard(delete, cwd=unresolved))
+        self.assertEqual("lifecycle guard: unsafe push: cannot resolve the repository "
+                         "default branch", line)
+
     # Guarded command shapes (#351): the forms ship-issue spells and the dressed
     # shapes agents reach for, from the fixture the shell-example suite also reads.
     SHAPES = json.loads((Path(__file__).parent / "fixtures/guarded-command-shapes.json")
@@ -1408,7 +1465,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
 
         recognition = {label: "xargs " + command
                        for label, command in provoking(fixture_slug).items()}
-        one_each = {"push": 2, "PR creation": 1, "merge": 1, "release creation": 1,
+        one_each = {"push": 3, "PR creation": 1, "merge": 1, "release creation": 1,
                     "branch deletion": 1}
         covered = set()
         for name, cwd, commands, counts in (
@@ -1435,7 +1492,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
              feature_into_dev, 1),
             ("push", fixture,
              "unset GITHUB_TOKEN; git push -q origin HEAD:issue-402-topic 2>&1 | tail -2",
-             None, 2),
+             None, 3),
         ):
             with self.subTest(context="AC2", label=label):
                 line = self.refusal_line(self.run_guard(command, cwd=cwd, env=env))
@@ -1454,7 +1511,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                    "[--match-head-commit <sha>] (only dev into main)")
         create = ("gh pr create --repo {slug} --base {base} --head <branch> "
                   '--title "<title>" --body "<body>"')
-        push = "git push origin refs/tags/<vX.Y.Z>; or git push [-u] origin <branch>"
+        push = ("git push origin refs/tags/<vX.Y.Z>; or git push [-u] origin <branch>; "
+                "or git push origin --delete refs/heads/<branch>")
 
         def pr(head, base):
             return {"FAKE_PR_JSON": json.dumps({
@@ -1551,7 +1609,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertEqual(
             "lifecycle guard: unsafe push: forbidden character `>`: run the push as its own "
             "Bash call and read its output with a follow-up call; accepted: git push origin "
-            "refs/tags/<vX.Y.Z>; or git push [-u] origin <branch>" + self.PREFIX_CLAUSE, line)
+            "refs/tags/<vX.Y.Z>; or git push [-u] origin <branch>; or git push origin "
+            "--delete refs/heads/<branch>" + self.PREFIX_CLAUSE, line)
 
     def test_refusals_name_the_first_problem(self):
         """Issue 402 D4, D5, D16: one row per named problem class, each followed by the

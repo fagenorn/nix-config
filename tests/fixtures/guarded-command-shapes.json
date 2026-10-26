@@ -59,9 +59,9 @@
       "template": "git push origin --delete <branch>",
       "sites": ["SKILL.md", "HUMAN-GATE.md"],
       "label": "push",
-      "bare": {"exit": 2, "reason": "unknown flag --delete"},
-      "prefixed": {"exit": 2, "reason": "unknown flag --delete"},
-      "env_prefixed": {"exit": 2, "reason": "unknown flag --delete"}
+      "bare": {"exit": 2, "reason": "missing refs/heads/<branch>"},
+      "prefixed": {"exit": 2, "reason": "missing refs/heads/<branch>"},
+      "env_prefixed": {"exit": 2, "reason": "missing refs/heads/<branch>"}
     }
   ],
   "refused_shapes": [
