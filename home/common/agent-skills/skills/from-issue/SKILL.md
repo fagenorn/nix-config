@@ -12,19 +12,19 @@ Take one tracker issue from triage to merged code by chaining the canonical skil
 ## Files beside this one
 - `<tracker-cli>` is `bindings.tracker.cli`; before invoking it, unset only the names `bindings.tracker.credential_env.unset_before_invocation` lists.
 - Phases 2–5 ground through `doc-grounded-questions` before their first question, option set or review pass; that skill owns the pass and its git-dir `GROUNDING.md` cache.
-- **`AUTO.md`** — autonomous-mode rules. Read it *once*, now, only if the invocation contains the literal token `--auto`. With a resume pack, defer that read until the pack's checks pass: a failed pack restores the whole read, and a verified pack reads only the opening, `The self-answer pattern` and `When *not* to auto-resolve`, plus its phase's route section — `Phases 2–4 run as subagents` for Phases 2–4; for Phases 5–7, `Other Phase 5–7 routes` (the direct-autonomous controller at Phase 5 reads `rollover.md`, and the delegated owner `delegated-owner.md`, in its place) and `Interface_version 2 delivery relay`.
+- **`AUTO.md`** — autonomous-mode rules. Read it once, now, only with the literal token `--auto`; with a resume pack, after its checks pass. A failed pack reads it whole; a verified pack reads the opening and `The self-answer pattern`, then for Phases 0–5 `When *not* to auto-resolve`, for Phases 2–4 `Phases 2–4 run as subagents`, and for Phases 5–7: `Other Phase 5–7 routes` (the direct-autonomous controller at Phase 5 reads `rollover.md`, and the delegated owner `delegated-owner.md`, in its place) and `Interface_version 2 delivery relay`.
 - **`acquire-dispatcher.md`** — a complete dispatcher envelope, or a generic `delegate` owner.
 - **`acquire-direct.md`** — `--auto` with no dispatcher envelope.
 - **`acquire-durable.md`** — an interactive user's explicit request for durable orchestration.
 - **`acquire-interactive.md`** — any other invocation, and Phase 1's ledger-free flow.
-- **`resume-pack.md`** — the prompt carries a resume pack. A verified pack reads, at every phase, the sections headed `Lifecycle identity`, `Decision ledger (artifact discipline)`, `Skill-tool invocations`, `Dispatch, phase-budget and attempt-budget rules`, `Terminal return procedure` and `Suspension procedure`, then this file's `## Phase <n>` section, the file this index names for that phase, and the phase's sub-skill (`sdd` for Phase 6, `ship-issue` for Phase 7).
+- **`resume-pack.md`** — any resume pack, and a pack-carrying prompt's entry. A verified pack reads, at every phase, `Lifecycle identity`, `Decision ledger (artifact discipline)`, `Skill-tool invocations`, `Dispatch, phase-budget and attempt-budget rules`, `Terminal return procedure` and `Suspension procedure`, then this file's `## Phase <n>` section, the file this index names for that phase, and the phase's sub-skill (`sdd` for Phase 6, `ship-issue` for Phase 7).
 - **`investigate.md`** — Phase 0.
 - **`decision-ledger.md`** — before writing the first ledger row.
 - **`standards-review.md`** — Phase 5.
 - **`REVIEW-CONTRACT.md`** — Phase-5 reviewer contract: hand it over **by absolute path**, never read it in.
 - **`rollover.md`** — the direct autonomous controller's Phase-5 transfer and its stop afterwards.
-- **`delegated-owner.md`** — every delegated owner; read it first, before any resume pack.
-- **`ship-handoff.md`** — Phase 7.
+- **`delegated-owner.md`** — every delegated owner, first: only `## Checks and Phases 6–7` or `## Generic delegate`, as its route selects.
+- **`ship-handoff.md`** — `## Phase 7 — Ship` on, or a generic delegate's handoff.
 
 ## Lifecycle identity
 Select the acquisition route by the first condition that holds:
@@ -38,12 +38,12 @@ Once any route produces lifecycle identity, treat `ledger_repo_root`, `run_id`, 
 
 With lifecycle identity, run each long command, every verification command included, as `launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id> -- <argv>`, still in the foreground; a forge verb never goes through it. Create every scratch directory or scratch worktree under the path that `launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` prints.
 
-Every lifecycle call is one command that reads its input from stdin through a quoted heredoc (`<<'EOF'`): `--request-file -`, `--checkpoint-file -`, `--summary-file -` or `--input -`, with the helper named bare or as `~/.agents/bin/workflow-state`, optionally piped into or out of `artifact-budget validate-report --input -`; no request or summary file is written. Pipe each `workflow-state` reply's raw bytes through `artifact-budget validate-report --boundary workflow-response --input -` before decoding it; `resume-pack` stdout is no workflow response, is never piped through `validate-report`, and stays untrusted until the resume pack's checks pass.
+Every lifecycle call is one command that reads its input from stdin through a quoted heredoc (`<<'EOF'`): `--request-file -`, `--checkpoint-file -`, `--summary-file -` or `--input -`, with the helper named bare or as `~/.agents/bin/workflow-state`, optionally piped into or out of `artifact-budget validate-report --input -`. Pipe each `workflow-state` reply's raw bytes through `artifact-budget validate-report --boundary workflow-response --input -` before decoding it; `resume-pack` stdout is no workflow response, is never piped through `validate-report`, and stays untrusted until the resume pack's checks pass.
 
 The ledger, not tracker or intent data, selects the next delivery stage: follow the returned `owner`, `delivery_remainder`, requirement, or terminal variant without manufacturing authority, a retry, or another permission ritual. Every delivery effect runs through ship-issue's `## Delivery loop`.
 
 ### Resume pack
-A relaunched owner whose prompt carries a resume pack follows `resume-pack.md` before using it.
+A prompt composed with a pack names `<from-issue-dir>/resume-pack.md`, this directory's absolute path, as the owner's entry in place of the skill invocation, keeping its arguments.
 
 ## The flow
 
@@ -120,7 +120,7 @@ Agent(subagent_type="issue-owner", model="opus", effort="high") delegates the re
 Agent(subagent_type="mechanic", model="haiku", effort="low") executes the ledger-only remainder: the exact workflow-state commands and verbatim JSON relay, with no content judgment.
    Give it the exact commands, identities, and paths inline; it decides nothing and edits nothing.
 
-On the direct-autonomous route, `rollover.md` replaces the generic Phase-5 delegation above and `delegated-owner.md` its Phase-6 and Phase-7 `delegate` gates. Every other Phase-6 `delegate` is the Phase-7 ship-owner dispatch. Without lifecycle identity, apply the same action order locally with the default ceilings of `workflow-state progress` and default interactive handoff behavior.
+On the direct-autonomous route, `rollover.md` replaces the generic Phase-5 delegation above and `delegated-owner.md` its Phase-6 and Phase-7 `delegate` gates. Every other Phase-6 `delegate` is the Phase-7 ship-owner dispatch. Without lifecycle identity, apply that order locally with the default ceilings of `workflow-state progress` and the default interactive handoff.
 
 If `workflow-state progress` is rejected with `cannot record progress at or after attempt deadline` or `progress requires an active attempt`, do not retry it: release every worker this owner registered, run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`, then print the canonical re-entry line `/from-issue <num> --auto` and stop, writing no `finish`.
 
@@ -191,7 +191,7 @@ Read `standards-review.md` and follow it, its caller input gate first on every r
 **CHECKPOINT** — Record that standards review is clean. Apply the shared checkpoint rule.
 
 ## Phase 6 — Execute
-Invoke `sdd`: it reads the plan header, dispatches an implementer per task, and reviews each output by risk lane. With lifecycle identity, invoke it with this owner's `ledger_repo_root`, `run_id` and `action_id` as its lifecycle identity, so sdd's `### Lifecycle workers` registers each writing agent under this launch and records a progress marker after each completed task, and hand it the `deadline_at` this owner holds (a later `declare-lane` reply's value supersedes the acquired one).
+Invoke `sdd` with the literal token `--reviewed`: it dispatches an implementer per task and reviews each output by risk lane. With lifecycle identity, pass this owner's `ledger_repo_root`, `run_id` and `action_id` as its lifecycle identity, so sdd's `### Lifecycle workers` registers each writing agent under this launch and records a progress marker after each completed task, and hand it the `deadline_at` this owner holds (a later `declare-lane` reply's value supersedes the acquired one).
 
 If the plan is `mechanical-only`, use one mechanic plus one first-pass reviewer for the whole change. With lifecycle identity, register the mechanic the same way (`workflow-state register-worker` before dispatch, the `Lifecycle worker:` line in its prompt, release on return) and run `workflow-state mark-progress --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>` once before dispatching the mechanic and once after its change is committed; a refusal changes nothing and is not a suspension cause.
 
@@ -209,7 +209,7 @@ sdd returns only canonical JSON: pipe the received bytes through `artifact-budge
 <!-- agent-dispatch: id=from-issue-ship-owner role=ship-owner model=opus effort=high -->
 Agent(subagent_type="issue-owner", model="opus", effort="high") launches `ship-issue` as a fresh ship owner, not inline via `Skill`.
 
-Read `ship-handoff.md` for the exact subagent prompt, the inline fallback when `ship-issue` is absent, and the `## Remainder owner prompt` this same site launches for a validated `delivery_remainder` object; the remainder owner writes its own `finish`, so relay its validated reply unchanged and skip the terminal write.
+Read `ship-handoff.md` for the subagent prompt, the inline fallback when `ship-issue` is absent, and the `## Remainder owner prompt` this same site launches for a validated `delivery_remainder` object; the remainder owner writes its own `finish`, so relay its validated reply unchanged and skip the terminal write.
 
 From-issue owns the terminal durable write: handle the ship report, and any Phase-6 execution failure or Phase-7 stopped/failed report, as `ship-handoff.md` § Ship report handling says.
 

@@ -62,6 +62,7 @@ from pathlib import Path
 from agent_tools.canonical import telemetry_digest
 from agent_tools.model_pricing import usage_cost
 
+ROOT_LABEL = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)=(.+)")
 SCHEMA_VERSION = 1
 RECORD_KIND = "agent-cost-record"
 EXECUTION_TELEMETRY_SCHEMA_VERSION = 1
@@ -1736,6 +1737,40 @@ def _positive_int(text):
     return value
 
 
+def _window_label(args, cutoff, event_start, event_end):
+    """The window a mtime-or-event report names: the event bounds, the day count or all time."""
+    if event_start:
+        return f"events {format_rfc3339_utc(event_start)} → {format_rfc3339_utc(event_end)}"
+    return f"last {args.days}d by file mtime" if cutoff else "all time"
+
+
+def _boot_report(ap, args, cutoff, event_start, event_end, executor_factory):
+    """Run `--report boot`: split each fresh owner's boot into buckets, print text or JSON."""
+    from agent_tools import agent_boot_report  # only for the boot report (issue 448)
+
+    try:
+        roots = agent_boot_report.parse_roots(
+            args.projects_dir or [os.path.expanduser("~/.claude/projects")],
+            hostname=agent_boot_report.short_hostname())
+    except ValueError as error:
+        ap.error(str(error))
+    for _, root in roots:
+        if not root.is_dir():
+            sys.exit(f"no transcript root at {root}")
+    hosts = [
+        agent_boot_report.collect_host(
+            label, root, cutoff=event_start.timestamp() if event_start else cutoff,
+            since=event_start, before=event_end, executor_factory=executor_factory)
+        for label, root in roots]
+    document = agent_boot_report.build_document(
+        hosts, window=_window_label(args, cutoff, event_start, event_end))
+    if args.format == "json":
+        json.dump(document, sys.stdout, separators=(",", ":"))
+        print()
+    else:
+        agent_boot_report.print_document(document, top=args.top)
+
+
 def _owners_report(ap, args, cutoff, event_start, event_end, executor_factory):
     """Run `--report owners`: collect the lineages, print the text tables or the JSON document."""
     from agent_tools import agent_owner_replay, agent_owner_report  # only for the owner report (issue 432)
@@ -1763,12 +1798,8 @@ def _owners_report(ap, args, cutoff, event_start, event_end, executor_factory):
     lineages, footer = agent_owner_report.collect(
         root, cutoff=event_start.timestamp() if event_start else cutoff, since=event_start,
         before=event_end, eval_rows=eval_rows, executor_factory=executor_factory)
-    if eval_rows is not None:
-        window = f"eval {args.eval_case}"
-    elif event_start:
-        window = f"events {format_rfc3339_utc(event_start)} → {format_rfc3339_utc(event_end)}"
-    else:
-        window = f"last {args.days}d by file mtime" if cutoff else "all time"
+    window = (f"eval {args.eval_case}" if eval_rows is not None
+              else _window_label(args, cutoff, event_start, event_end))
     document = agent_owner_report.build_document(lineages, footer, window=window, arms=arms,
                                                  sweep=args.sweep)
     if args.format == "json":
@@ -1785,8 +1816,10 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     ap.add_argument("--top", type=int, default=30, help="rows to print")
     ap.add_argument(
         "--projects-dir",
-        default=os.path.expanduser("~/.claude/projects"),
-        help="transcript root",
+        action="append",
+        default=None,
+        metavar="[LABEL=]PATH",
+        help="transcript root (default ~/.claude/projects); repeatable, as LABEL=PATH, only with --report boot",
     )
     ap.add_argument(
         "--artifacts",
@@ -1803,11 +1836,12 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     ap.add_argument("--codex-sessions", default=os.path.expanduser("~/.codex/sessions"),
                     help="Codex rollout root")
     ap.add_argument("--events-since",
-                    help="RFC3339 event-time lower bound (JSON, --report cache or owners)")
+                    help="RFC3339 event-time lower bound (JSON, --report cache, owners or boot)")
     ap.add_argument("--events-before",
-                    help="RFC3339 event-time upper bound (JSON, --report cache or owners)")
-    ap.add_argument("--report", choices=("issues", "cache", "owners"), default="issues",
-                    help="per-issue tables (default), the cache report or the owner report")
+                    help="RFC3339 event-time upper bound (JSON, --report cache, owners or boot)")
+    ap.add_argument("--report", choices=("issues", "cache", "owners", "boot"), default="issues",
+                    help="per-issue tables (default), the cache report, the owner report or the "
+                         "boot report")
     ap.add_argument("--eval-results", metavar="PATH",
                     help="eval results JSONL to group by trial; --report owners only")
     ap.add_argument("--eval", metavar="SKILL:ID", dest="eval_case",
@@ -1825,6 +1859,7 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     json_mode = args.format == "json"
     cache_report = args.report == "cache"
     owners_report = args.report == "owners"
+    boot_report = args.report == "boot"
     if owners_report:
         if args.project:
             ap.error("--report owners does not take --project")
@@ -1832,6 +1867,18 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
             ap.error("--report owners does not take --artifacts")
         if args.strata != "claude":
             ap.error("--report owners reads Claude transcripts only")
+    if boot_report:
+        if args.project:
+            ap.error("--report boot does not take --project")
+        if args.artifacts:
+            ap.error("--report boot does not take --artifacts")
+        if args.strata != "claude":
+            ap.error("--report boot reads Claude transcripts only")
+    if not boot_report:
+        if args.projects_dir and (len(args.projects_dir) > 1
+                                  or ROOT_LABEL.fullmatch(args.projects_dir[0])):
+            ap.error("--projects-dir is repeatable and takes LABEL=PATH only with --report boot")
+        args.projects_dir = (args.projects_dir or [os.path.expanduser("~/.claude/projects")])[0]
     if (args.policy or args.sweep) and not owners_report:
         ap.error("--policy and --sweep are available only with --report owners")
     if (args.eval_results is None) != (args.eval_case is None):
@@ -1850,9 +1897,10 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
         ap.error("--strata is meaningful only with --format json")
     if json_mode and args.artifacts:
         ap.error("--artifacts is not available with --format json")
-    if not (json_mode or cache_report or owners_report) and (args.events_since or args.events_before):
+    if (not (json_mode or cache_report or owners_report or boot_report)
+            and (args.events_since or args.events_before)):
         ap.error("--events-since/--events-before are available only with --format json "
-                 "or --report cache or owners")
+                 "or --report cache, owners or boot")
     if bool(args.events_since) != bool(args.events_before):
         ap.error("--events-since and --events-before must be used together")
     event_start = event_end = None
@@ -1871,6 +1919,9 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
     if owners_report:
         return _owners_report(ap, args, cutoff, event_start, event_end, executor_factory)
 
+    if boot_report:
+        return _boot_report(ap, args, cutoff, event_start, event_end, executor_factory)
+
     if cache_report:
         from agent_tools import agent_cache_report  # imported only for the cache report (issue 421 D2)
 
@@ -1887,10 +1938,7 @@ def main(argv=None, *, executor_factory=ProcessPoolExecutor):
             executor_factory=executor_factory)
         if not any(result["calls"] > 0 for result in results):
             sys.exit("no calls in window")
-        if event_start:
-            window = f"events {format_rfc3339_utc(event_start)} → {format_rfc3339_utc(event_end)}"
-        else:
-            window = f"last {args.days}d by file mtime" if cutoff else "all time"
+        window = _window_label(args, cutoff, event_start, event_end)
         agent_cache_report.print_report(results, window=window, threshold=threshold, top=args.top)
         return
 
