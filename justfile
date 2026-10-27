@@ -164,6 +164,7 @@ agent-workflow-tests *args:
     tests/test_release_bridge.py \
     tests/test_release_command.py \
     tests/test_forge_adapter.py \
+    tests/test_actions_health_adapter.py \
     tests/test_guard_policy.py \
     tests/test_release_adapter_core.py \
     tests/test_agent_costs.py \

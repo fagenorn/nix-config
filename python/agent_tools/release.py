@@ -11,13 +11,20 @@ not from `compile_profile`, which refuses what is inadmissible. A publication-fr
 (one that authors no publication actions) is reported with empty graphs and no handoff, and
 the command still exits 0.
 
-`release adapter inspect <adapter> <operation> --parameters <json>` is the one adapter read
-the command exposes (D15): it resolves no project, calls the registered adapter's `inspect`
-for one effect and prints the observation. No adapter `invoke` is reachable from any command.
+`release adapter inspect <adapter> <operation> --parameters <json>` is the one project-free
+adapter read (D15): it resolves no project, calls the registered adapter's `inspect` for one
+effect and prints the observation. `release deploy inspect --commit <sha>` (issue 465 D5) is
+the deploy read ship-release Phase 5 polls: it resolves the project with `deploy` required,
+removes the tracker's `credential_env.unset_before_invocation` names from its own environment
+(D10), asks the registered deploy adapter's `inspect` about the commit and prints the
+observation with exit 0 whatever its outcome. No adapter `invoke` is reachable from any
+command.
 """
 
 import argparse
 import json
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -26,7 +33,7 @@ from typing import Any
 from agent_tools import release_adapter, release_profile, transaction_plan
 from agent_tools.resolve_project import (
     ContractError, add_repo_root, emit_error, emit_json, load_contract,
-    require_platform_manifest, resolve, resolves_on_path)
+    registered_deploy_adapter, require_platform_manifest, resolve, resolves_on_path)
 
 SCHEMA_VERSION = 1
 GIT_TIMEOUT_SECONDS = 10
@@ -210,9 +217,43 @@ def command_adapter_inspect(args: argparse.Namespace) -> int:
         {"kind": "effect", "operation": args.operation, "parameters": parameters}))
 
 
+COMMIT = re.compile(r"[0-9a-f]{40}")
+
+
+def command_deploy_inspect(args: argparse.Namespace) -> int:
+    """The registered deploy adapter's observation for one merge commit (issue 465 D5, D10).
+
+    A malformed `--commit`, a resolver refusal (`deploy` is required) and an unregistered
+    deploy adapter are typed errors. Otherwise the tracker's credential variables are removed
+    from this process before the adapter's `inspect` runs, and the observation is printed
+    whatever its outcome.
+    """
+    if COMMIT.fullmatch(args.commit) is None:
+        raise _adapter_error("parameters_invalid", "release.deploy.commit_invalid", "/commit",
+                             "--commit must be 40 lowercase hex characters")
+    bindings = resolve(args.repo_root, ["deploy"])["bindings"]
+    name = registered_deploy_adapter(bindings["deploy"])
+    if name is None:
+        raise _adapter_error(
+            "deploy_adapter_unregistered", "release.deploy.adapter_unregistered",
+            "/bindings/deploy/adapter",
+            f"{bindings['deploy']['adapter']} is not a registered adapter: "
+            "the binding's command is the deploy reader")
+    for variable in bindings["tracker"]["credential_env"]["unset_before_invocation"]:
+        os.environ.pop(variable, None)
+    operation = release_adapter.watch_operation(release_adapter.DESCRIPTORS[name])
+    return emit_json(release_adapter.REGISTRY[name].inspect({
+        "kind": "effect", "operation": operation, "parameters": {
+            "target": {"kind": "github_repository",
+                       "repository": bindings["tracker"]["repo_slug"],
+                       "branch": bindings["vcs"]["default_branch"]},
+            "candidate": {"commit": args.commit},
+            "config": bindings["deploy"]["config"]}}))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="release", description="Inspect the project's release profiles, read-only.")
+        prog="release", description="Read-only release inspection: profiles, adapters and the deploy watch.")
     areas = parser.add_subparsers(dest="area", required=True)
     profile = areas.add_parser("profile", help="release profile inspection")
     actions = profile.add_subparsers(dest="action", required=True)
@@ -228,14 +269,21 @@ def build_parser() -> argparse.ArgumentParser:
     adapter_inspect.add_argument("operation", help="the operation to inspect")
     adapter_inspect.add_argument("--parameters", required=True,
                                  help="the operation parameters, a JSON object")
+    deploy = areas.add_parser("deploy", help="deploy watching")
+    deploy_actions = deploy.add_subparsers(dest="action", required=True)
+    deploy_inspect = deploy_actions.add_parser(
+        "inspect", help="print the deploy observation for one commit on stdout")
+    deploy_inspect.add_argument("--commit", required=True,
+                                help="the merge commit, 40 lowercase hex characters")
+    add_repo_root(deploy_inspect)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        return (command_adapter_inspect if args.area == "adapter"
-                else command_profile_inspect)(args)
+        return {"profile": command_profile_inspect, "adapter": command_adapter_inspect,
+                "deploy": command_deploy_inspect}[args.area](args)
     except ContractError as error:
         return emit_error(error.code, error.repair_id, error.violations, error.reason_code)
     except Exception:

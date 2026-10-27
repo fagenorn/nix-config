@@ -111,11 +111,10 @@ Tone: factual, not promotional; `Merged 57 PRs from <integration> — see list b
 </details>
 
 ## Verification (post-merge)
-- <when bindings.deploy.adapter != none: per-service running-commit check — the latest deployment's status is the platform's SUCCESS value AND its commit starts with the merge SHA. Use retained bindings.deploy command/config values.>
-- A health probe returning 200 is *not* proof — verify the running commit equals the merge SHA at a SUCCESS status (SKILL.md Phase 5).
+- <when bindings.deploy.adapter != none: per-service running-commit check (SKILL.md §5d) — SUCCESS status AND a commit starting with the merge SHA; a health 200 is *not* proof.>
 ```
 
-Skip an empty section. When `deploy.adapter == none`, drop the Verification section's deploy lines and keep only the merged+tagged record.
+Skip an empty section. When `deploy.adapter == none`, drop the Verification deploy line and keep only the merged+tagged record.
 
 ## Quality check before opening the PR
 

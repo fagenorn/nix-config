@@ -16,8 +16,9 @@ compilers and admissibility rules own those, so a derived class or a missing dea
 observable as a compile rejection and never as `invalid_contract`.
 
 Besides the authored `release` the function reads only
-`contract["bindings"]["tracker"]`, `contract["bindings"]["vcs"]["default_branch"]` and
-`contract["capabilities"]["deploy"]`. It imports `release_adapter` and `agent_platform`.
+`contract["bindings"]["tracker"]`, `contract["bindings"]["vcs"]["default_branch"]`,
+`contract["bindings"]["deploy"]["adapter"]` and `contract["capabilities"]["deploy"]`. It imports
+`release_adapter` and `agent_platform`.
 
 The compiler half judges a grammar-valid profile. `admissibility_findings` runs the four
 `RULES` over every node and reports every finding (unlike the core's first-failure
@@ -159,10 +160,21 @@ class _Grammar:
             _Profile(self, base, profiles[profile_id]).run()
         deploy = self.contract.get("capabilities")
         deploy = deploy.get("deploy") if isinstance(deploy, dict) else None
-        if isinstance(deploy, dict) and "support" in deploy and deploy["support"] != "unsupported":
+        if (isinstance(deploy, dict) and "support" in deploy and deploy["support"] != "unsupported"
+                and not self.deploy_watch_coexists(profiles)):
             self.add("/capabilities/deploy/support",
                      "capabilities.deploy must be unsupported while release profiles exist",
                      "deploy_conflict")
+
+    def deploy_watch_coexists(self, profiles: dict) -> bool:
+        """Issue 465 D4: a supported deploy may sit beside profiles when `bindings.deploy`
+        names a registered adapter and no profile authors `activation` as an object."""
+        bindings = self.contract.get("bindings")
+        binding = bindings.get("deploy") if isinstance(bindings, dict) else None
+        adapter = binding.get("adapter") if isinstance(binding, dict) else None
+        return (isinstance(adapter, str) and adapter in self.descriptors
+                and not any(isinstance(profile, dict) and isinstance(profile.get("activation"), dict)
+                            for profile in profiles.values()))
 
 
 class _Profile:

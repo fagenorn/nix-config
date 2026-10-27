@@ -1300,6 +1300,83 @@ class ReleaseMemberTest(ResolverTestCase):
                          [("forge-target", []), ("github-release", ["release", "tag"])])
 
 
+class DeployWatchTest(ResolverTestCase):
+    """Issue 465: a registered deploy adapter beside a release profile (D1, D3, D4, D15)."""
+
+    DEPLOY = {"adapter": "github-actions-health", "command": None,
+              "config": {"workflow": "deploy.yml", "branch": "main",
+                         "services": ["jarbird", "jarbird-caddy"],
+                         "health_url": "https://jarbird.com/health",
+                         "health_commit_field": "commit"}}
+
+    def jarbird(self) -> dict:
+        """This repository's contract reshaped as the issue's JarBird repro."""
+        contract = source_contract()
+        contract["release"] = {"profiles": {"forge-main": publication_free_profile()}}
+        contract["bindings"]["deploy"] = copy.deepcopy(self.DEPLOY)
+        contract["bindings"]["tracker"]["credential_env"]["unset_before_invocation"] = [
+            "GITHUB_TOKEN", "GH_TOKEN"]
+        contract["capabilities"]["deploy"]["support"] = "supported"
+        return contract
+
+    def snapshot(self, contract: dict, stubs: tuple[str, ...]) -> dict:
+        code, out, err = run_with_path(str(make_stub_bin(stubs)), "resolve", "--repo-root",
+                                       str(self.make_root(contract)), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        return json.loads(out)
+
+    def test_a_jarbird_shaped_project_watches_its_deploy(self):
+        snap = self.snapshot(self.jarbird(), ("gh", "git", "just", "codex-companion"))
+        self.assertEqual(snap["capabilities"]["deploy"],
+                         {"state": "available", "reason_code": None, "repair_id": None})
+        self.assertEqual(snap["bindings"]["deploy"], self.DEPLOY)
+        self.assertEqual(snap["capabilities"]["release"]["state"], "unsupported")
+        blocked = self.snapshot(self.jarbird(), ("git", "just", "codex-companion"))
+        self.assertEqual(blocked["capabilities"]["deploy"], {
+            "state": "blocked", "reason_code": "release_adapter_unavailable",
+            "repair_id": "capability.deploy.release_adapter_unavailable"})
+
+    def test_without_profiles_a_registered_adapter_is_available(self):
+        contract = self.jarbird()
+        contract["release"] = "unsupported"
+        self.assertEqual(self.snapshot(contract, ("gh",))["capabilities"]["deploy"]["state"],
+                         "available")
+
+    def test_each_registered_adapter_rule_is_one_contract_error(self):
+        def unwatchable(contract):
+            contract["bindings"]["deploy"] = {"adapter": "github-forge", "command": None,
+                                              "config": {}}
+
+        def command(contract):
+            contract["bindings"]["deploy"]["command"] = "nix-build"
+
+        def config(contract):
+            contract["bindings"]["deploy"]["config"].update(services="jarbird", region="eu")
+
+        def gitlab(contract):
+            contract["release"] = "unsupported"
+            contract["bindings"]["tracker"]["kind"] = "gitlab"
+
+        cases = (
+            (unwatchable, "contract.deploy.adapter_unwatchable", ["/bindings/deploy/adapter"]),
+            (command, "contract.deploy.command_conflict", ["/bindings/deploy/command"]),
+            (config, "contract.deploy.config_invalid", ["/bindings/deploy/config"] * 2),
+            (gitlab, "contract.deploy.tracker_not_github", ["/bindings/deploy/adapter"]),
+        )
+        for mutate, repair_id, pointers in cases:
+            with self.subTest(repair_id=repair_id):
+                contract = self.jarbird()
+                mutate(contract)
+                code, payload, _ = self.resolve(self.make_root(contract))
+                error = self.assert_refusal(code, payload, "invalid_contract")
+                self.assertEqual(error["repair_id"], repair_id)
+                self.assertEqual([v["pointer"] for v in error["violations"]], pointers)
+                if repair_id == "contract.deploy.config_invalid":
+                    self.assertEqual([v["message"] for v in error["violations"]], [
+                        "config member 'region' is not declared",
+                        "config member 'services' must be a string_list"])
+
+
 class ContradictionTest(ResolverTestCase):
     def refuse(self, contract: dict) -> dict:
         code, payload, _ = self.resolve(self.make_root(contract))

@@ -245,7 +245,7 @@ If `gh release create` fails (rejected tag push, token without `contents: write`
 
 Otherwise set `deployState: watching` on entry (`done` when every watched service verifies). The invariant: the running commit starts with `MERGE_SHA`, on branch `<default>`, at a terminal SUCCESS status. A health 200 is not proof: a failed deploy keeps serving the older build.
 
-Before polling, read the retained snapshot's deploy-related context and hint paths; the adapter contract below is generic, the declared documents carry the specifics.
+Before polling, read the retained deploy-related context and hint paths: they carry the platform specifics.
 
 ### 5a. Enumerate services
 
@@ -271,14 +271,21 @@ Poll at ~180s via your harness's wake/poll primitive; no no-op commands between 
 
 ### 5d. Adapter commands
 
-An adapter supplies a service-enumeration command, a per-service **deployment-list** command returning at least `{id, status, commit, branch, createdAt}` for the most recent deployments (a list, not a status summary: the chronology tells a silent rollback from a stale notification), and a build-log command. For the bundled `railway` adapter:
+A command adapter supplies service enumeration, a per-service **deployment list** of at least `{id, status, commit, branch, createdAt}` (a list: its chronology tells a silent rollback from a stale notification) and a build log. The bundled `railway` adapter:
 
 ```bash
 railway deployment list --service <name> --json
-# success: .meta.commitHash startswith MERGE_SHA, .meta.branch == "<default>", .status == "SUCCESS"
+# newest 5 entries; success: .meta.commitHash startswith MERGE_SHA, .meta.branch == "<default>", .status == "SUCCESS"
 ```
 
-Read the five most recent entries of that JSON and, for each, the fields `id`, `status`, `.meta.commitHash`, `.meta.branch`, and `createdAt`.
+If `capabilities.deploy` is available and `deploy.command` null, only this read decides:
+
+```bash
+release deploy inspect --repo-root <checkout> --commit <MERGE_SHA>
+${GH_PREFIX}gh run view <facts.run.id> --repo <repo-slug> --log-failed
+```
+
+`satisfied` → done; `in_progress`, or `absent` within 5c's 3 cycles → wake; `diverged` → failure path with the log line; `parameters_invalid` or exit 2 → stop, surface; other `unknown` → surface after 3 in a row. One run serves all `config.services`.
 
 Any other adapter follows 5a–5c using only retained `bindings.deploy` command/config values; an unrecognised adapter stops and surfaces its declared state.
 

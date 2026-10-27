@@ -3,6 +3,8 @@
 Owns the vocabularies every adapter shares, the `Descriptor` schema and its validator
 (`descriptor_problems`), the closed registry of adapters (`REGISTRY`) and the descriptors
 built from it (`DESCRIPTORS`), and the closed config-schema check (`config_problems`).
+`watch_operation` names the one operation of a descriptor that a deploy watch inspects
+(issue 465 D3).
 An unknown adapter name is a grammar violation, never a lookup fallback (D7), so the
 registry is a fixed mapping and `build_descriptors` refuses a descriptor that is malformed
 or whose `name` differs from its registry key. `DESCRIPTORS` is built at import: a bad
@@ -26,7 +28,8 @@ from collections.abc import Mapping
 from types import MappingProxyType, ModuleType
 from typing import Any
 
-from agent_tools import forge_adapter, transaction_invocation, transaction_plan
+from agent_tools import (actions_health_adapter, forge_adapter, transaction_invocation,
+                         transaction_plan)
 from agent_tools.agent_platform import parse_semver
 from agent_tools.canonical import telemetry_digest
 
@@ -36,7 +39,7 @@ EFFECT_CLASSES = ("reversible_no_incremental_spend", "reversible_bounded_spend",
 MUTABILITIES = ("create_if_absent", "pointer_cas", "in_place")
 SUPPORT = ("supported", "unsupported")
 HOST_CAPACITY = ("not_required", "required")
-CONFIG_TYPES = ("string", "integer", "boolean")
+CONFIG_TYPES = ("string", "integer", "boolean", "string_list")
 
 ADAPTER_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 OPERATION_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
@@ -64,6 +67,11 @@ def _is_int(value: object) -> bool:
 
 def _is_text(value: object) -> bool:
     return isinstance(value, str) and value != ""
+
+
+def _is_string_list(value: object) -> bool:
+    return (isinstance(value, list) and bool(value) and all(_is_text(item) for item in value)
+            and len(set(value)) == len(value))
 
 
 def _closed(value: object, members: frozenset[str] | set[str], where: str,
@@ -248,10 +256,21 @@ def config_problems(schema: dict[str, Any], config: object) -> list[str]:
             continue
         value = config[name]
         ok = {"string": isinstance(value, str), "integer": _is_int(value),
-              "boolean": isinstance(value, bool)}[kind]
+              "boolean": isinstance(value, bool), "string_list": _is_string_list(value)}[kind]
         if not ok:
             problems.append(f"config member {name!r} must be a {kind}")
     return problems
+
+
+def watch_operation(descriptor: Mapping[str, Any]) -> str | None:
+    """The one operation a deploy watch inspects, or None (issue 465 D3).
+
+    That is the descriptor's single operation whose mode is an activation mode and whose
+    `inspect` is supported; none, or more than one, is None.
+    """
+    names = [name for name, entry in descriptor["operations"].items()
+             if entry["mode"] in ACTIVATION_MODES and entry["inspect"] == "supported"]
+    return names[0] if len(names) == 1 else None
 
 
 def _observation_problems(observation: object, members: frozenset[str], outcomes: tuple[str, ...],
@@ -401,5 +420,6 @@ def core_binding(adapter: ModuleType, profile: Mapping[str, Any], alias: str) ->
     return CoreBinding(adapter, expected)
 
 
-REGISTRY = MappingProxyType({"github-forge": forge_adapter})
+REGISTRY = MappingProxyType({"github-forge": forge_adapter,
+                             "github-actions-health": actions_health_adapter})
 DESCRIPTORS = build_descriptors(REGISTRY)
