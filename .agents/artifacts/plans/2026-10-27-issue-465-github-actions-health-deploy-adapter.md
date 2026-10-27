@@ -56,10 +56,7 @@ All figures are estimates: 16 changed files plus this package and the spec ledge
 - Skill tests: about +16.
 - `justfile`: +1.
 
-The change fits one review package. If a split is forced, two slices can ship independently:
-
-- S1 = Tasks 1–2: the adapter and resolver acceptance (AC1, AC3).
-- S2 = Tasks 3–4: the command and Phase 5 (AC2).
+The change fits one review package. If a split is forced, Task 1 can ship alone: the adapter is registered but no profile or binding can reach it yet. Tasks 2–4 ship together, because resolver acceptance without `release deploy inspect` and its §5d wiring would report deploy watching available while Phase 5 still stops on an unrecognised adapter.
 
 ## Task index
 
@@ -78,15 +75,25 @@ Task 4 — ship-release Phase 5 polls the command — `home/common/agent-skills/
 
 ## Decisions
 
-- Task 1 follows D2, D6–D10, D14 and D16. Task 2 follows D1, D3, D4, D9 and D15. Task 3 follows D5, D10 and D16. Task 4 follows D11, D13 and D17.
+- Task 1 follows D2, D6–D10, D14, D16 and D18. Task 2 follows D1, D3, D4, D9 and D15. Task 3 follows D5, D10 and D16. Task 4 follows D11, D13 and D17.
 - Planning appended four rows to the spec's ledger:
   - D14: the adapter's internals;
   - D15: the resolver helper and the report-once rule;
   - D16: test placement, refining D12;
   - D17: the measured skill trims and the vocabulary row.
+- The Phase-5 standards review appended D18: the whole health read, error body included, is bounded by the shared budget and never raises.
 - A planning trial at `2511839e` (a scratch worktree, since discarded) implemented all four tasks to measure the claims the members carry:
   - every failing test was red at its task's start and green afterwards;
   - 344 tests across the touched suites were green together;
   - the Budget run gave `check: pass` at 29,498 bytes.
+
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, isolated read-only mode, fresh thread), no fallback; base `5ae1b9dc`, plan head `e04c077e`; no focus.
+- Dispositions: 3 accepted, 0 rejected, 0 deferred.
+  - PR465-01 (Blocking, accepted): the health read's socket timeout bounded each wait, not the collection. Task 1's `_health` now reads in a daemon thread joined for the remaining budget, and the budget test adds a trickled body and a stalled error body (D18).
+  - PR465-02 (Blocking, accepted): an error-body read failure and a `urlsplit` `ValueError` escaped `inspect`. The first is now `health_unreachable` with the HTTP status kept; the second is `parameters_invalid`, with an `https://[` case (D18).
+  - PR465-03 (Should fix, accepted): Tasks 1–2 were not independently shippable. Only Task 1 may ship alone.
 
 ---

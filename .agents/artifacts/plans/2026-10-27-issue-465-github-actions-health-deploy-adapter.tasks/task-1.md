@@ -36,6 +36,7 @@ No project binding reaches the adapter yet (Task 2), and no command does except 
 - The adapter removes no environment variable: its `gh` child inherits `os.environ` (D10).
 - `satisfied` occurs only for a `success` run at the candidate on `config.branch` whose health commit matches (D6).
 - Health is read only when the selected run is completed.
+- One budget bounds the whole `inspect`, health and error bodies included (D18).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -53,7 +54,7 @@ reads off any proxy. The `gh` logs `{argv, token_visible}` to `calls.jsonl` and 
 credential binding, not the adapter, decides what the child sees.
 
 The world also serves HTTP on `127.0.0.1` from a `ThreadingHTTPServer` in a daemon thread:
-`health(...)` sets one route's status, body, headers and delay, an unset route answers 404,
+`health(...)` sets one route's status, body, headers, delay and body delay, an unset route answers 404,
 and `requests` lists every request's path and headers in arrival order.
 """
 import http.server
@@ -127,20 +128,22 @@ class ActionsWorld:
         gh.chmod(gh.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         (self.state / "responses.json").write_text("{}", encoding="utf-8")
         (self.state / "calls.jsonl").write_text("", encoding="utf-8")
-        self.routes: dict[str, tuple[int, bytes, dict[str, str], float]] = {}
+        self.routes: dict[str, tuple[int, bytes, dict[str, str], float, float]] = {}
         self.requests: list[dict] = []
         world = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 world.requests.append({"path": self.path, "headers": dict(self.headers)})
-                status, body, headers, delay = world.routes.get(self.path, (404, b"", {}, 0))
+                status, body, headers, delay, body_delay = world.routes.get(
+                    self.path, (404, b"", {}, 0, 0))
                 time.sleep(delay)
                 self.send_response(status)
                 for name, value in headers.items():
                     self.send_header(name, value)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
+                time.sleep(body_delay)
                 self.wfile.write(body)
 
             def log_message(self, *args: object) -> None:
@@ -172,11 +175,11 @@ class ActionsWorld:
 
     def health(self, status: int = 200, body: bytes | None = None, *, commit: str = MERGE,
                path: str = "/health", headers: dict[str, str] | None = None,
-               delay: float = 0) -> None:
-        """Serve `path`: by default a 200 JSON object whose `commit` field is `commit`."""
+               delay: float = 0, body_delay: float = 0) -> None:
+        """Serve `path` (default: 200 JSON with `commit`), after `delay` and then `body_delay`."""
         payload = json.dumps({"status": "ok", "commit": commit}).encode() if body is None else body
         self.routes[path] = (status, payload, headers or {"Content-Type": "application/json"},
-                             delay)
+                             delay, body_delay)
 
     def calls(self) -> list[dict]:
         text = (self.state / "calls.jsonl").read_text("utf-8")
@@ -190,6 +193,7 @@ Create `tests/test_actions_health_adapter.py` exactly:
 import json
 import os
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -251,6 +255,7 @@ class AdapterContractTest(unittest.TestCase):
         cases = {"branch differs from the target": request(branch="dev"),
                  "file url": request(health_url="file:///etc/passwd"),
                  "url without a host": request(health_url="https:///health"),
+                 "unparseable url": request(health_url="https://["),
                  "short candidate": request(commit=MERGE[:7]),
                  "upper-case candidate": request(commit=MERGE.upper()),
                  "empty services": request(services=[]),
@@ -442,6 +447,20 @@ class ClassificationTest(unittest.TestCase):
             slow_health = adapter.inspect(request(health_url=self.world.url()))
             self.assertEqual((slow_health["outcome"], slow_health["reason"]),
                              ("unknown", "health_unreachable"))
+        with mock.patch.object(adapter, "COLLECTION_BUDGET_SECONDS", 3):
+            for name, status, delay, body_delay in (("trickled body", 200, 1.0, 2.5),
+                                                    ("stalled error body", 503, 0, 4)):
+                with self.subTest(name):
+                    self.world.runs(run(8, MERGE))
+                    self.world.health(status, body=b"maintenance" if status != 200 else None,
+                                      commit=MERGE, delay=delay, body_delay=body_delay)
+                    started = time.monotonic()
+                    observation = adapter.inspect(request(health_url=self.world.url()))
+                    self.assertLess(time.monotonic() - started, 3.4)
+                    self.assertEqual((observation["outcome"], observation["reason"]),
+                                     ("unknown", "health_unreachable"))
+                    self.assertEqual(observation["facts"]["health"]["http_status"], status)
+                    self.assertTrue(observation["facts"]["health"]["detail"])
         empty = tempfile.TemporaryDirectory()
         self.addCleanup(empty.cleanup)
         with mock.patch.dict(os.environ, {"PATH": empty.name}):
@@ -485,7 +504,7 @@ Expected: `FAILED (failures=1, errors=1)`. The error is `ModuleNotFoundError: No
 
    - Append one sentence to the module docstring's paragraph that begins `Owns the vocabularies`: `` `watch_operation` names the one operation of a descriptor that a deploy watch inspects (issue 465 D3). ``
 
-2. Create `python/agent_tools/actions_health_adapter.py`. Imports are limited to `http.client`, `json`, `re`, `subprocess`, `time`, `urllib.error`, `urllib.parse`, `urllib.request`, `datetime.datetime`, `typing.Any` and `agent_tools.canonical`. Use this module docstring verbatim:
+2. Create `python/agent_tools/actions_health_adapter.py`. Imports are limited to `http.client`, `json`, `re`, `subprocess`, `threading`, `time`, `urllib.error`, `urllib.parse`, `urllib.request`, `datetime.datetime`, `typing.Any` and `agent_tools.canonical`. Use this module docstring verbatim:
 
 ```text
 The GitHub Actions deploy-watch adapter (issue 465 D2, D6-D8, D14): `describe`, `inspect`, `invoke`.
@@ -564,7 +583,7 @@ def describe() -> dict[str, Any]:
      5. `config` does not have exactly the `CONFIG_MEMBERS` keys;
      6. a `string` member is not a non-empty string, or `services` is not a non-empty list of unique non-empty strings;
      7. `config["branch"] != target["branch"]`;
-     8. `urllib.parse.urlsplit(health_url)` has a scheme outside `http`/`https`, or no `hostname`.
+     8. `urllib.parse.urlsplit(health_url)` raises `ValueError` (for example `https://[`), or the split has a scheme outside `http`/`https`, or no `hostname` (D18).
    - `_run_list(slug, workflow, branch, deadline) -> (status, payload, detail)` mirrors the forge's `_gh`, with two differences: no `env=` (the child inherits `os.environ`), and no HTTP-status mapping.
      - argv: `["gh", "run", "list", "--repo", slug, "--workflow", workflow, "--branch", branch, "--limit", str(RUN_LIMIT), "--json", RUN_FIELDS]`.
      - Run options: `capture_output=True, text=True, errors="replace", timeout=<remaining>, stdin=subprocess.DEVNULL`.
@@ -629,19 +648,39 @@ def _health(url: str, field: str, deadline: float) -> dict[str, Any]:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         return result("health_unreachable", detail="the collection budget is spent")
-    request = urllib.request.Request(url, method="GET", headers={
-        "Accept": "application/json", "Cache-Control": "no-cache", "User-Agent": USER_AGENT})
-    try:
-        with urllib.request.build_opener(_NoRedirect).open(request, timeout=remaining) as response:
-            status, body = response.status, response.read(HEALTH_BODY_LIMIT + 1)
-    except urllib.error.HTTPError as error:
+    seen: dict[str, Any] = {}
+
+    def read() -> None:
+        """The read, in a daemon thread joined for the remaining budget (D18)."""
+        request = urllib.request.Request(url, method="GET", headers={
+            "Accept": "application/json", "Cache-Control": "no-cache", "User-Agent": USER_AGENT})
         try:
-            text = error.read(DETAIL_LIMIT * 4).decode("utf-8", "replace")
-        finally:
-            error.close()
-        return result("health_unreachable", error.code, detail=f"HTTP {error.code}: {text}")
-    except (OSError, ValueError, http.client.HTTPException) as error:
-        return result("health_unreachable", detail=str(error) or type(error).__name__)
+            with urllib.request.build_opener(_NoRedirect).open(request,
+                                                               timeout=remaining) as response:
+                seen["http_status"] = response.status
+                seen["body"] = response.read(HEALTH_BODY_LIMIT + 1)
+        except urllib.error.HTTPError as error:
+            seen["http_status"] = error.code
+            try:
+                text = error.read(DETAIL_LIMIT * 4).decode("utf-8", "replace")
+                seen["failure"] = f"HTTP {error.code}: {text}"
+            except (OSError, ValueError, http.client.HTTPException) as failure:
+                seen["failure"] = f"HTTP {error.code}: {str(failure) or type(failure).__name__}"
+            finally:
+                error.close()
+        except (OSError, ValueError, http.client.HTTPException) as error:
+            seen["failure"] = str(error) or type(error).__name__
+
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    worker.join(max(0.0, deadline - time.monotonic()))
+    if worker.is_alive():
+        return result("health_unreachable", seen.get("http_status"),
+                      detail="the budget ran out during the health read")
+    if "body" not in seen:
+        return result("health_unreachable", seen.get("http_status"),
+                      detail=seen.get("failure", "no body was read"))
+    status, body = seen["http_status"], seen["body"]
     if status != 200:
         text = body[:DETAIL_LIMIT * 4].decode("utf-8", "replace")
         return result("health_unreachable", status, detail=f"HTTP {status}: {text}")
@@ -719,7 +758,7 @@ def _deploy(parameters: Any, deadline: float) -> dict[str, Any]:
 4. In `python/README.md` § Release adapters, insert this paragraph after the one that begins ``The forge adapter (`forge_adapter`, D8)``:
 
 ```text
-The GitHub Actions deploy-watch adapter (`actions_health_adapter`, issue 465 D2) is registered as `github-actions-health`. Its one operation, `deploy`, is `publication_triggered`, `unsupported` for `invoke` with reason `bridge_watch_only` and supported for `inspect`, so no profile can bind it yet and its `invoke` refuses every request with `unsupported_operation` and no child process. Its closed config is `workflow`, `branch`, `services`, `health_url` and `health_commit_field`, all required; `services` is the `string_list` config type, a non-empty list of unique non-empty strings. `release_adapter.watch_operation(descriptor)` names a descriptor's single inspectable activation-mode operation, or returns `None` when there is none or more than one. `inspect` answers `parameters_invalid` unless the request carries a `github_repository` target of exactly `kind`, `repository` and `branch`, a 40-lowercase-hex candidate `commit`, and a config whose `branch` equals the target's and whose `health_url` is `http` or `https` with a host. It then makes at most two reads under one 30-second budget. The first is `gh run list --repo <repository> --workflow <workflow> --branch <branch> --limit 5 --json databaseId,status,conclusion,headSha,headBranch,createdAt`, run by name with the caller's environment unchanged: the adapter strips no variable, and `release deploy inspect` applies `bindings.tracker.credential_env` (D10). The second, made only when the newest run at the candidate on that branch is completed, is one `GET <health_url>` that follows no redirect, reads at most 65,536 bytes and loads the body strictly through the `canonical` hooks (D8). Runs are ordered newest first by `createdAt`, which must be an ISO 8601 time with an offset (D14), and a commit matches when it is 7 to 40 hex characters and the candidate starts with it, case-insensitively (D7). The outcome follows the spec's classification table (D6): `absent` (`run_absent`); `in_progress` (`run_in_progress`); `satisfied` (`deployed`) only for a `success` run whose health commit matches; `diverged` (`superseded`) for a completed, unsatisfied run that a run at another commit followed; otherwise `diverged` (`health_commit_mismatch`, `silent_rollback` or `run_failed`) or `unknown` (`health_unreachable` or `health_payload_invalid`). A failed run-list read is `unknown` with `lookup_failed`, `lookup_timeout`, `executable_missing` or `payload_invalid` and the bounded stderr in `facts.detail`. Every effect observation's `facts` hold `runs` (each `{id, status, commit, branch, createdAt}`, newest first), `run`, `health` and the configured `services`. `tests/actions_world.py` is its fake world: a `gh` that answers the exact run-list argv and logs whether a token variable was visible, and a loopback HTTP server.
+The GitHub Actions deploy-watch adapter (`actions_health_adapter`, issue 465 D2) is registered as `github-actions-health`. Its one operation, `deploy`, is `publication_triggered`, `unsupported` for `invoke` with reason `bridge_watch_only` and supported for `inspect`, so no profile can bind it yet and its `invoke` refuses every request with `unsupported_operation` and no child process. Its closed config is `workflow`, `branch`, `services`, `health_url` and `health_commit_field`, all required; `services` is the `string_list` config type, a non-empty list of unique non-empty strings. `release_adapter.watch_operation(descriptor)` names a descriptor's single inspectable activation-mode operation, or returns `None` when there is none or more than one. `inspect` answers `parameters_invalid` unless the request carries a `github_repository` target of exactly `kind`, `repository` and `branch`, a 40-lowercase-hex candidate `commit`, and a config whose `branch` equals the target's and whose `health_url` is `http` or `https` with a host. It then makes at most two reads under one 30-second budget. The first is `gh run list --repo <repository> --workflow <workflow> --branch <branch> --limit 5 --json databaseId,status,conclusion,headSha,headBranch,createdAt`, run by name with the caller's environment unchanged: the adapter strips no variable, and `release deploy inspect` applies `bindings.tracker.credential_env` (D10). The second, made only when the newest run at the candidate on that branch is completed, is one `GET <health_url>` that follows no redirect, reads at most 65,536 bytes and loads the body strictly through the `canonical` hooks (D8). Runs are ordered newest first by `createdAt`, which must be an ISO 8601 time with an offset (D14), and a commit matches when it is 7 to 40 hex characters and the candidate starts with it, case-insensitively (D7). The outcome follows the spec's classification table (D6): `absent` (`run_absent`); `in_progress` (`run_in_progress`); `satisfied` (`deployed`) only for a `success` run whose health commit matches; `diverged` (`superseded`) for a completed, unsatisfied run that a run at another commit followed; otherwise `diverged` (`health_commit_mismatch`, `silent_rollback` or `run_failed`) or `unknown` (`health_unreachable` or `health_payload_invalid`). A failed run-list read is `unknown` with `lookup_failed`, `lookup_timeout`, `executable_missing` or `payload_invalid` and the bounded stderr in `facts.detail`. Every effect observation's `facts` hold `runs` (each `{id, status, commit, branch, createdAt}`, newest first), `run`, `health` and the configured `services`. `tests/actions_world.py` is its fake `gh`, which logs token visibility, and loopback HTTP server.
 ```
 
 - [ ] **Step 4: Verify**
@@ -730,11 +769,11 @@ The GitHub Actions deploy-watch adapter (`actions_health_adapter`, issue 465 D2)
 
 2. Run the Unit run on `tests/test_suite_runner.py -k RecipeWiringTest`.
 
-   Expected: `OK`, because the new member is a valid recipe line.
+   Expected: `OK`.
 
 3. Run `bash -c 'git diff --quiet 5ae1b9dc -- python/agent_tools/forge_adapter.py tests/forge_world.py lib/agent-tools.nix'`.
 
-   Expected: exit 0, because the forge adapter, its world and the command table are untouched.
+   Expected: exit 0 (forge adapter, its world and command table untouched).
 
 4. Run `git add python/agent_tools/actions_health_adapter.py tests/actions_world.py tests/test_actions_health_adapter.py`, then the Build.
 
