@@ -46,6 +46,7 @@ BRANCH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*")
 CANDIDATE_SHA = re.compile(r"[0-9a-f]{40}")
 RUN_SHA = re.compile(r"[0-9A-Fa-f]{40}")
 REPORTED_SHA = re.compile(r"[0-9A-Fa-f]{7,40}")
+CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 CONFIG_MEMBERS = {"workflow": "string", "branch": "string", "services": "string_list",
                   "health_url": "string", "health_commit_field": "string"}
 TARGET_MEMBERS = frozenset(("kind", "repository", "branch"))
@@ -135,8 +136,8 @@ def _parameters_problem(parameters: Any) -> str | None:
         return f"config is not exactly {', '.join(CONFIG_MEMBERS)}"
     for name, kind in CONFIG_MEMBERS.items():
         value = config[name]
-        if kind == "string" and not _text(value):
-            return f"config {name} is not a non-empty string"
+        if kind == "string" and not (_text(value) and CONTROL.search(value) is None):
+            return f"config {name} is not a non-empty string without control characters"
         if kind == "string_list" and not (
                 isinstance(value, list) and value and all(_text(item) for item in value)
                 and len(set(value)) == len(value)):
@@ -158,6 +159,7 @@ def _run_list(slug: str, workflow: str, branch: str, deadline: float) -> tuple[s
 
     `status` is `"ok"` with the parsed JSON payload, or one of `lookup_failed`,
     `lookup_timeout`, `payload_invalid` and `executable_missing`, with a payload of `None`.
+    An argument the operating system cannot pass (`ValueError`) is `lookup_failed`.
     The child inherits the environment unchanged (D10). `detail` is bounded stderr.
     """
     remaining = deadline - time.monotonic()
@@ -172,6 +174,8 @@ def _run_list(slug: str, workflow: str, branch: str, deadline: float) -> tuple[s
         return "lookup_timeout", None, ""
     except OSError as error:
         return "executable_missing", None, str(error)
+    except ValueError as error:
+        return "lookup_failed", None, f"gh could not be started: {error}"
     detail = done.stderr.strip()[:DETAIL_LIMIT]
     if done.returncode != 0:
         return "lookup_failed", None, detail

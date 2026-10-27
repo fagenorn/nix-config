@@ -70,6 +70,8 @@ class AdapterContractTest(unittest.TestCase):
                  "empty services": request(services=[]),
                  "undeclared config member": request(region="eu"),
                  "empty workflow": request(workflow=""),
+                 "NUL in workflow": request(workflow="deploy\x00.yml"),
+                 "newline in health field": request(health_commit_field="com\nmit"),
                  "unknown parameter": extra,
                  "unknown operation": dict(request(), operation="tag"),
                  "not a request": []}
@@ -223,6 +225,15 @@ class ClassificationTest(unittest.TestCase):
         self.world.runs(run(8, MERGE))
         closed = adapter.inspect(request(health_url="http://127.0.0.1:9/health"))
         self.assertEqual((closed["outcome"], closed["reason"]), ("unknown", "health_unreachable"))
+
+    def test_an_argument_the_os_cannot_pass_is_a_failed_lookup_not_a_raise(self):
+        observation = adapter.inspect(request(workflow="deploy\ud800.yml",
+                                              health_url=self.world.url()))
+        self.assertEqual((observation["outcome"], observation["reason"]),
+                         ("unknown", "lookup_failed"))
+        self.assertTrue(observation["facts"]["detail"])
+        self.assertEqual(release_adapter.effect_observation_problems(observation), [])
+        self.assertEqual(self.world.calls(), [])
 
     def test_a_failed_run_list_is_unknown_with_its_detail(self):
         self.world.runs(exit=1, stdout="", stderr="HTTP 502: Bad Gateway")
