@@ -16,8 +16,8 @@ class DescriptorTest(unittest.TestCase):
         self.assertEqual(release_adapter.descriptor_problems(support.FIXTURE_STORE), [])
 
     def test_registry_is_closed(self):
-        self.assertEqual(sorted(release_adapter.REGISTRY), ["github-forge"])
-        self.assertEqual(sorted(release_adapter.DESCRIPTORS), ["github-forge"])
+        self.assertEqual(sorted(release_adapter.REGISTRY), ["github-actions-health", "github-forge"])
+        self.assertEqual(sorted(release_adapter.DESCRIPTORS), ["github-actions-health", "github-forge"])
 
     def test_forge_descriptor_pins_pr_merge_unsupported(self):
         op = forge_adapter.describe()["operations"]["pr_merge"]
