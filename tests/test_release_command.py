@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from .actions_world import CONFIG, MERGE, OLDER, ActionsWorld, run
 from .forge_world import CANONICAL, ROWS, ForgeWorld
 
 REPO = Path(__file__).resolve().parents[1]
@@ -165,6 +166,83 @@ class AdapterInspectTest(ReleaseCommandCase):
         self.assertEqual(observation["facts"]["protection"]["status"], "protected")
         self.assertTrue(world.calls())
         self.assertFalse(any(call["token_visible"] for call in world.calls()))
+
+class DeployInspectTest(ReleaseCommandCase):
+    """`release deploy inspect` over a JarBird-shaped contract (issue 465 D5, D10, D16)."""
+
+    def setUp(self):
+        super().setUp()
+        self.world = ActionsWorld(self)
+        contract = self.contract()
+        profile = json.loads((REPO / "tests/fixtures/release/publication-free-profile.json")
+                             .read_text("utf-8"))
+        contract["release"] = {"profiles": {"forge-main": profile}}
+        contract["bindings"]["deploy"] = {"adapter": "github-actions-health", "command": None,
+                                          "config": dict(CONFIG, health_url=self.world.url())}
+        contract["bindings"]["tracker"]["credential_env"]["unset_before_invocation"] = [
+            "GITHUB_TOKEN", "GH_TOKEN"]
+        contract["capabilities"]["deploy"]["support"] = "supported"
+        self.write_contract(contract)
+
+    def deploy(self, commit=MERGE, env=None):
+        return self.run_release("deploy", "inspect", "--commit", commit, env=env)
+
+    def verdict(self, *runs, **health):
+        self.world.runs(*runs)
+        self.world.health(**health)
+        code, observation, err = self.deploy()
+        self.assertEqual(code, 0, err)
+        return observation["outcome"], observation["reason"]
+
+    def test_satisfied_needs_a_successful_run_and_a_matching_health_commit(self):
+        self.assertEqual(self.verdict(run(8, MERGE), commit=MERGE), ("satisfied", "deployed"))
+        self.assertEqual(self.verdict(run(8, MERGE), commit=OLDER),
+                         ("diverged", "health_commit_mismatch"))
+        self.assertEqual(self.verdict(run(8, MERGE, conclusion="failure"), commit=MERGE),
+                         ("diverged", "run_failed"))
+        self.assertEqual(self.verdict(run(8, MERGE, conclusion="failure"), commit=OLDER),
+                         ("diverged", "silent_rollback"))
+
+    def test_the_credential_binding_decides_what_gh_sees(self):
+        self.assertEqual(self.verdict(run(8, MERGE, status="queued")),
+                         ("in_progress", "run_in_progress"))
+        contract = self.contract()
+        contract["bindings"]["tracker"]["credential_env"]["unset_before_invocation"] = []
+        self.write_contract(contract)
+        self.assertEqual(self.verdict(run(8, MERGE, status="queued")),
+                         ("in_progress", "run_in_progress"))
+        self.assertEqual([call["token_visible"] for call in self.world.calls()], [False, True])
+
+    def test_typed_refusals_exit_2_before_any_read(self):
+        def refusal(*args, **kwargs):
+            code, payload, _ = self.deploy(*args, **kwargs)
+            return code, payload["error"]["code"], payload["error"]["repair_id"]
+
+        for commit in (MERGE.upper(), MERGE[:7], "HEAD"):
+            with self.subTest(commit=commit):
+                self.assertEqual(refusal(commit), (2, "parameters_invalid",
+                                                   "release.deploy.commit_invalid"))
+        empty = tempfile.TemporaryDirectory()
+        self.addCleanup(empty.cleanup)
+        self.assertEqual(refusal(env={"PATH": empty.name}),
+                         (2, "capability_unavailable",
+                          "capability.deploy.release_adapter_unavailable"))
+        contract = self.contract()
+        contract["capabilities"]["deploy"]["support"] = "unsupported"
+        self.write_contract(contract)
+        self.assertEqual(refusal(), (2, "capability_unavailable", "capability.deploy.unsupported"))
+        contract = self.contract()
+        contract["release"] = "unsupported"
+        contract["capabilities"]["deploy"]["support"] = "supported"
+        contract["bindings"]["commands"]["deploy-list"] = {"argv": ["gh", "run", "list"],
+                                                           "cwd": ".", "env": []}
+        contract["bindings"]["deploy"] = {"adapter": "railway", "command": "deploy-list",
+                                          "config": {}}
+        self.write_contract(contract)
+        self.assertEqual(refusal(), (2, "deploy_adapter_unregistered",
+                                     "release.deploy.adapter_unregistered"))
+        self.assertEqual(self.world.calls(), [])
+        self.assertEqual(self.world.requests, [])
 
 if __name__ == "__main__":
     unittest.main()
