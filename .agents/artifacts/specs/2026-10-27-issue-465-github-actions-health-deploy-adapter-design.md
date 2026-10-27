@@ -206,6 +206,15 @@ The **selected run** is the newest entry by `createdAt` whose commit matches
 `MERGE_SHA` decides. An older failed run at the same commit is the §5c "stale
 FAILED" case, and it stays visible in `facts.runs`.
 
+A **newer run** is an entry created after the selected run whose commit does not
+match `MERGE_SHA`, for example a hotfix merged right after the release. A newer run
+can cancel the selected run through a workflow `concurrency` group, or replace the
+build that health serves. So when the selected run is completed and not
+`satisfied`, a newer run, in any status, makes the observation
+`diverged`/`superseded`, and the remaining rows do not apply. Once a newer deploy
+has started, the release commit can no longer become the running one. Calling that
+a rollback would report a false incident.
+
 | Selected run | Health read | `outcome` | `reason` |
 |---|---|---|---|
 | none | not read | `absent` | `run_absent` |
@@ -215,6 +224,9 @@ FAILED" case, and it stays visible in `facts.runs`.
 | `completed` / `success` | not `ok` | `unknown` | `health_unreachable` or `health_payload_invalid` |
 | `completed` / any other conclusion | `ok`, does not match | `diverged` | `silent_rollback` |
 | `completed` / any other conclusion | `ok` and matches, or not `ok` | `diverged` | `run_failed` |
+
+The `superseded` precedence applies to the last four rows. A selected run that is
+`in_progress` stays `in_progress` even when a newer run is queued behind it.
 
 `satisfied` is reachable only through the third row. That row is the §5c invariant:
 a terminal success at `MERGE_SHA` on the watched branch, plus a health commit match.
@@ -241,6 +253,14 @@ they judge shape:
 - **`contract.deploy.config_invalid`**, at `/bindings/deploy/config`: one violation
   per `config_problems` entry against the watch operation's schema. This check is
   skipped when the adapter is unwatchable.
+- **`contract.deploy.tracker_not_github`**, at `/bindings/deploy/adapter`:
+  `bindings.tracker.kind` is not `github`. The command builds the watch target as
+  the tracker's repository, a `github_repository`, which mirrors the profile
+  grammar's same-repository rule ("the tracker is not GitHub").
+
+These rules are the outer check. `inspect` repeats the target and config checks as
+the inner one, and the command trusts the resolved snapshot for everything else
+(bootstrap: trust the `ResolvedProject`).
 
 An unregistered adapter name other than `none` (for example `railway`) keeps today's
 rules: a free-form `config`, and a `command` that is required when deploy is
@@ -262,8 +282,10 @@ supported deploy capability exactly when two things hold:
 - `bindings.deploy.adapter` is a key of the descriptor registry the grammar was given;
 - no profile authors `activation` as `{units}`.
 
-Every other case keeps today's violation at `/capabilities/deploy/support`. The
-condition reads only the adapter's registration, so an unwatchable registered adapter
+Every other case keeps today's violation at `/capabilities/deploy/support`. Like
+the rule's other inputs, `bindings.deploy.adapter` is read through `isinstance`
+guards, so a malformed binding never raises in the grammar. The condition reads
+only the adapter's registration, so an unwatchable registered adapter
 is reported once, by `validate_deploy`. Both rules preserve the invariant that 124 D1
 protects: at most one authority declares activation. The grammar's docstring gains
 `bindings.deploy.adapter` among the members it reads.
@@ -296,6 +318,9 @@ It is a thin shell (agent-helpers rule 2), and it runs these steps in order:
 6. It prints the observation as compact sorted-key JSON and exits 0, whatever the
    outcome. A read never mutates, so the outcome is data, not an exit status.
 
+Each call resolves the project afresh, as `release profile inspect` does, and
+persists nothing. Neither the command nor the adapter holds state between polls.
+
 `release adapter inspect github-actions-health deploy --parameters <json>` keeps
 working for diagnosis, because the operation's `inspect` is supported. That path
 resolves no project (124 D15), so the caller's environment governs it.
@@ -303,15 +328,21 @@ resolves no project (124 D15), so the caller's environment governs it.
 ### ship-release Phase 5 (AC2, D11)
 
 §5 keeps its skip rule (`deploy.adapter == none`) and its state transitions. §5d
-gains the registered-adapter path. It applies when retained `bindings.deploy.command`
-is `null`. For a supported deploy, the resolver allows `null` only for a registered
-adapter. Each poll is the single line
+gains the registered-adapter path. It applies when the retained `capabilities.deploy`
+is `available` and `bindings.deploy.command` is `null`; for a supported deploy, the
+resolver allows `null` only for a registered adapter.
+
+Both conditions are needed. Nodo's live contract has `adapter: railway`,
+`command: null` and deploy `unsupported` (its profiles force it). Keyed on `null`
+alone, the path would send Nodo to a command that refuses. Keyed on both, Nodo keeps
+today's Railway prose path unchanged. Each poll is the single line
 
 ```bash
-${GH_PREFIX}release deploy inspect --repo-root <checkout> --commit <MERGE_SHA>
+release deploy inspect --repo-root <checkout> --commit <MERGE_SHA>
 ```
 
-Each outcome maps onto 5c:
+The line carries no `${GH_PREFIX}`, because the command applies the credential
+binding itself (D10). The outcomes map onto 5c as follows:
 
 | Observation | Phase 5 action |
 |---|---|
@@ -333,6 +364,19 @@ per-service state, so 5a's cross-check is the configured `services` list. The Ph
 
 The existing sentence "any other adapter follows 5a–5c using retained bindings.deploy
 command/config values" keeps covering command-bearing adapters, and nothing else.
+The three-cycle `unknown` count lives only in the owner's session. A resumed Phase 5
+starts it at zero, so a crash adds polls and never skips a verdict.
+
+**Instruction budget (D13).** At the base, the two hot documents of the
+`ship-release` and `release-owner` profiles (SKILL.md and CHANGELOG.md) measure
+29,467 bytes against a 29,507-byte ceiling. The skill text for this path is one
+paragraph: the condition, the command line, the outcome mapping above in one
+sentence, the build-log line and the one-run note. The mapping table is spec
+content, not skill text. Its growth is paid for inside the touched §5/§5d text and
+the CHANGELOG deploy line, for example by folding the Railway "Read the five most
+recent entries…" sentence into its comment line. `instruction-load.json` and its
+ceilings stay unchanged. If the trims cannot absorb the growth, the plan returns to
+the caller: only the user applies `instruction-budget-raise`.
 
 ### Docs
 
@@ -341,8 +385,9 @@ command/config values" keeps covering command-bearing adapters, and nothing else
     reads, classification table reference, credential rule.
   - The `release` command paragraph gains `deploy inspect`.
   - "Release profiles" restates the narrowed `deploy_conflict` rule.
-- The ship-release CHANGELOG's deploy-expectations template line names the
-  registered-adapter verdict.
+- The ship-release CHANGELOG's post-merge Verification template line points at
+  §5d instead of restating "use retained bindings.deploy command/config values".
+  This covers both adapter kinds and frees bytes (D13).
 
 No context or ADR document exists to update, because `knowledge.context` is
 unsupported.
@@ -376,6 +421,8 @@ unsupported.
   - one test per classification row;
   - a stale-FAILED case (an older failure and a newer success at `MERGE_SHA`
     resolve to `satisfied`);
+  - a superseded case (our run is cancelled and a newer run at another commit
+    exists), which is `superseded`, not `silent_rollback`;
   - each `unknown` reason, plus the 3xx and oversized-body cases;
   - the typed exit-2 errors;
   - the credential rule: an unset list `[GITHUB_TOKEN, GH_TOKEN]` with the harness
@@ -392,7 +439,7 @@ unsupported.
     log shows.
 - **Resolver through `resolve-project resolve`.** The resolver suite covers:
   - AC1's two cases;
-  - the three `contract.deploy.*` violations;
+  - the four `contract.deploy.*` violations;
   - `railway` with a command and profiles, which still conflicts (the existing test
     stays);
   - a supported registered adapter without profiles, which is `available`.
@@ -418,6 +465,9 @@ unsupported.
 - Per-service health endpoints, health JSON paths deeper than one top-level field,
   and following redirects.
 - The forge adapter's hardcoded token stripping, which stays as it is.
+- Keying Phase 5's entry on `capabilities.deploy` rather than on `deploy.adapter`.
+  Today an `unsupported` Railway binding (Nodo) still enters Phase 5. Fixing that
+  changes Nodo's behaviour, so it is a separate change.
 
 ## Decision ledger
 
@@ -425,13 +475,14 @@ unsupported.
 |----|--------|-----------|----------------------|
 | D1 | Deploy watching stays in `bindings.deploy`/`capabilities.deploy`; "available" means `capabilities.deploy.state == available`; no snapshot member is added | 124 D1 (Phase 5 reads the bridge binding); 368 D2 (publication-free ⇒ activation `none`); JarBird's live `forge-main` is publication-free; #128 open; the issue's repro shape | A profile activation unit: JarBird's profile cannot carry one, nothing consumes activation, and the trigger (`pr_merge`) is unsupported |
 | D2 | The adapter is a release adapter in the closed `REGISTRY`: one `deploy` operation, `publication_triggered`, `support: unsupported` (`bridge_watch_only`), `inspect: supported`; both predicates unsupported; `invoke` refuses | 124 D7/D19 (one closed registry, describe/inspect/invoke); the bar's framework-first and YAGNI; the core shapes already model this adapter as `publication_triggered` | A separate deploy-watch registry: a second adapter concept and a second schema check. A supported operation now: a core `invoke` and predicate nobody calls |
-| D3 | A registered deploy adapter needs `command: null`, a single watch operation and a config that matches its closed schema (three `contract.deploy.*` repairs). Readiness is the descriptor's executables on `PATH`, reusing `release_adapter_unavailable`. Unregistered adapters keep today's rules | The bar's defense in depth (the resolver is the outer check, `inspect` the inner one); `release_capability`'s executable precedent; closed `REASON_CODES` | A `commands` entry pointing at the read command: plumbing the contract can derive. A new reason code: same meaning as an existing one |
+| D3 | A registered deploy adapter needs `command: null`, a single watch operation, a config that matches its closed schema and a GitHub tracker (four `contract.deploy.*` repairs). Readiness is the descriptor's executables on `PATH`, reusing `release_adapter_unavailable`. Unregistered adapters keep today's rules | The bar's defense in depth (the resolver is the outer check, `inspect` the inner one); `release_capability`'s executable precedent; closed `REASON_CODES`; bootstrap's "every executable invocation is a `commands` entry" binds project-authored executables, while registered adapters declare theirs in the descriptor (124 D7, the forge profile) | A `commands` entry pointing at the read command: plumbing the contract can derive. A new reason code: same meaning as an existing one |
 | D4 | `deploy_conflict` permits profiles plus a supported deploy only when the deploy adapter is registered and no profile authors activation units | 124 D1's purpose (one activation authority); the grammar's report-once rule; the descriptor-injection seam | Dropping the rule: a future activation adapter would reopen dual authority silently. Requiring a watch operation here: double-reports an unwatchable adapter |
 | D5 | Phase 5 reads `release deploy inspect --commit <sha> [--repo-root]`, which resolves with deploy required, builds the request from the bindings, prints the observation and exits 0; typed refusals exit 2 | The bar's token economy (one short handle per poll); agent-helpers rule 2; 124 D15 keeps `adapter inspect` project-free; `profile inspect` is network-free diagnosis | `release adapter inspect` with a JSON request per poll: the model re-emits slug, branch and config, and the credential binding cannot reach it. `profile inspect`: no network by contract |
-| D6 | Classification: only the newest run at `MERGE_SHA` decides; health is read only when that run is completed; outcomes and reasons as in the table; `satisfied` needs a successful run plus a health match | The issue's success and silent-rollback definitions; §5c's stale-FAILED chronology; the bar's truthful terminal states | Reading health on every poll: extra reads with no verdict. Calling a successful run with stale health `in_progress`: hides a deploy that claims success but serves the old build |
+| D6 | Classification: only the newest run at `MERGE_SHA` decides; health is read only when that run is completed; outcomes and reasons as in the table; `satisfied` needs a successful run plus a health match; a completed, unsatisfied run with a newer run at another commit is `superseded` | The issue's success and silent-rollback definitions; §5c's stale-FAILED chronology; the bar's truthful terminal states (a run that a concurrency group cancels is not a rollback) | Reading health on every poll: extra reads with no verdict. Calling a successful run with stale health `in_progress`: hides a deploy that claims success but serves the old build. Calling the superseded case `silent_rollback`: a false incident |
 | D7 | A commit matches when it is 7–40 hex and `MERGE_SHA` starts with it (case-insensitive), for both runs and health | §5c ("startswith…never strict =="); the issue's `==` holds for a full SHA; the 7-char floor stops trivial prefixes | Strict 40-hex equality: a health endpoint that reports a short SHA never succeeds |
 | D8 | Health read: stdlib `urllib` GET, http/https only, no redirects, a 64 KiB cap, a strict JSON load through the `canonical` hooks, a top-level field of 7–40 hex, inside the shared 30 s budget, failure detail bounded to 240 chars | Python shard (no undeclared dependency); agent-helpers rule 4; the bar's log-the-body rule; `urllib` opens `file://` unless the scheme is checked | `requests`/`curl`: undeclared dependencies. Following redirects: the proof could come from another URL |
 | D9 | `CONFIG_TYPES` gains `string_list` (non-empty, unique, non-empty strings, ordered). The issue's five members stay as given, including `branch`, which `inspect` refuses unless it equals `target.branch` (the default branch) | The issue's stated closed schema; JarBird's planned config; the bar's defense in depth | A comma-joined `services` string: a shape the author did not ask for. Dropping `branch`: departs from the issue. A resolver check by member name: an adapter-specific special case in the generic resolver |
 | D10 | The command removes `credential_env.unset_before_invocation` names from its own environment before `inspect`; the adapter strips nothing itself | The issue ("respect … for every gh call"); ship-release's `GH_PREFIX` meaning of "unset before invocation"; JarBird lists both token names | Hardcoding the forge's pair: ignores the binding. Adding the list to the request: plumbing in every adapter call |
-| D11 | Phase 5's registered-adapter path (when `command` is `null`) polls the D5 line and maps outcomes as in the table; `parameters_invalid` and exit 2 stop; three consecutive other `unknown`s surface; the build log uses `gh run view <id> --log-failed`; the report prints one line per configured service | The issue's AC2 ("no prose-only fallback"); existing 5c cadence and three-cycle rule; the issue's build-log command | A prose `gh run list` plus health read in the skill: the fallback AC2 forbids. Per-service runs: Actions reports none |
+| D11 | Phase 5's registered-adapter path (`capabilities.deploy` available and `command` `null`, so Nodo's unsupported `railway`/`null` binding keeps its prose path) polls the D5 line without `${GH_PREFIX}` and maps outcomes as in the table; `parameters_invalid` and exit 2 stop; three consecutive other `unknown`s surface; the build log uses `gh run view <id> --log-failed`; the report prints one line per configured service | The issue's AC2 ("no prose-only fallback"); existing 5c cadence and three-cycle rule; the issue's build-log command | A prose `gh run list` plus health read in the skill: the fallback AC2 forbids. Per-service runs: Actions reports none |
 | D12 | Test seams: the command as a subprocess over a fake `gh` and a loopback `http.server`; the resolver through `resolve-project`; the grammar with injected descriptors; skill-contract pins of the two §5d lines only | The `forge_world` precedent; agent-helpers rules 5 and 6; the bar's tests that can fail (production-shaped fixtures; the activation clause turns red without its rule) | Mocking `urllib`/`subprocess` in process: asserts calls, not behaviour. A live JarBird read: not deterministic |
+| D13 | ship-release growth stays inside the hot ceiling (29,467 of 29,507 bytes at base): one compact §5d paragraph, paid for by trims in the touched §5/§5d text and the CHANGELOG deploy line; no ceiling or `instruction-load.json` change; an infeasible trim returns to the caller | Instruction Budget is a required check on `main` (CLAUDE.md); only the user applies `instruction-budget-raise`; 458 D7 precedent (growth paid inside the touched lines) | A raised ceiling: needs the user-only label. A conditional `DEPLOY.md`: a new profile member changes `instruction-load.json`, and its conditional ceiling has no headroom either |
