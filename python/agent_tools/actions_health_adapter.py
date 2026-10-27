@@ -160,7 +160,9 @@ def _run_list(slug: str, workflow: str, branch: str, deadline: float) -> tuple[s
     `status` is `"ok"` with the parsed JSON payload, or one of `lookup_failed`,
     `lookup_timeout`, `payload_invalid` and `executable_missing`, with a payload of `None`.
     An argument the operating system cannot pass (`ValueError`) is `lookup_failed`.
-    The child inherits the environment unchanged (D10). `detail` is bounded stderr.
+    The child inherits the environment unchanged (D10). `detail` is the bounded stderr after
+    the child ran, empty on `lookup_timeout`, the operating-system error on
+    `executable_missing` and `gh could not be started: <error>` for a `ValueError`.
     """
     remaining = deadline - time.monotonic()
     if remaining <= 0:

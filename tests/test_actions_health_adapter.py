@@ -287,6 +287,19 @@ class ClassificationTest(unittest.TestCase):
             missing = adapter.inspect(request(health_url=self.world.url()))
         self.assertEqual((missing["outcome"], missing["reason"]), ("unknown", "executable_missing"))
 
+    def test_the_two_reads_share_the_budget(self):
+        """Each read fits the budget alone, but the health read gets only what the list left."""
+        with mock.patch.object(adapter, "COLLECTION_BUDGET_SECONDS", 3):
+            self.world.runs(run(8, MERGE), sleep=2)
+            self.world.health(commit=MERGE, delay=2)
+            started = time.monotonic()
+            observation = adapter.inspect(request(health_url=self.world.url()))
+            self.assertLess(time.monotonic() - started, 3.4)
+        self.assertEqual((observation["outcome"], observation["reason"]),
+                         ("unknown", "health_unreachable"))
+        self.assertEqual(len(self.world.calls()), 1)
+        self.assertEqual([seen["path"] for seen in self.world.requests], ["/health"])
+
 
 if __name__ == "__main__":
     unittest.main()

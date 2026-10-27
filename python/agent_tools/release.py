@@ -253,7 +253,7 @@ def command_deploy_inspect(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="release", description="Inspect the project's release profiles, read-only.")
+        prog="release", description="Read-only release inspection: profiles, adapters and the deploy watch.")
     areas = parser.add_subparsers(dest="area", required=True)
     profile = areas.add_parser("profile", help="release profile inspection")
     actions = profile.add_subparsers(dest="action", required=True)

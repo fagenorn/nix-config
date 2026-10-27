@@ -1,4 +1,7 @@
-"""The release command: profile inspection (#124 spec §5). Run: just agent-workflow-tests"""
+"""The release command: profile (#124 spec §5), adapter and deploy inspection (issue 465).
+
+Run: just agent-workflow-tests
+"""
 import json
 import os
 import shutil
@@ -7,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from .actions_world import CONFIG, MERGE, OLDER, ActionsWorld, run
 from .forge_world import CANONICAL, ROWS, ForgeWorld
@@ -212,6 +216,19 @@ class DeployInspectTest(ReleaseCommandCase):
         self.assertEqual(self.verdict(run(8, MERGE, status="queued")),
                          ("in_progress", "run_in_progress"))
         self.assertEqual([call["token_visible"] for call in self.world.calls()], [False, True])
+
+    def test_gh_token_is_stripped_only_when_the_binding_names_it(self):
+        with mock.patch.dict(os.environ, {"GH_TOKEN": "harness-gh-token"}):
+            del os.environ["GITHUB_TOKEN"]
+            for unset, visible in ((["GH_TOKEN"], False), (["GITHUB_TOKEN"], True)):
+                with self.subTest(unset=unset):
+                    contract = self.contract()
+                    contract["bindings"]["tracker"]["credential_env"][
+                        "unset_before_invocation"] = unset
+                    self.write_contract(contract)
+                    self.assertEqual(self.verdict(run(8, MERGE, status="queued")),
+                                     ("in_progress", "run_in_progress"))
+                    self.assertEqual(self.world.calls()[-1]["token_visible"], visible)
 
     def test_typed_refusals_exit_2_before_any_read(self):
         def refusal(*args, **kwargs):

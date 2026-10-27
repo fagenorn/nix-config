@@ -192,6 +192,16 @@ class DeployWatchGrammarTest(unittest.TestCase):
             with self.subTest(binding=binding):
                 self.assertEqual(self.found(support.forge_profile(), binding), [self.CONFLICT])
 
+    def test_non_object_bindings_keep_the_conflict(self):
+        for bindings in ([], "bindings", 7, None):
+            with self.subTest(bindings=bindings):
+                contract = support.base_contract()
+                contract["capabilities"]["deploy"]["support"] = "supported"
+                contract["bindings"] = bindings
+                self.assertEqual(release_profile.grammar_violations(
+                    support.release_of("github-release", support.forge_profile()), contract,
+                    self.descriptors()), [self.CONFLICT])
+
 
 class PublicationFreeGrammarTest(unittest.TestCase):
     """`"publication": "none"` and the rules that hold for it (#368 D1, D2, D11)."""
