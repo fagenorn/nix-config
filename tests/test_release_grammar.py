@@ -2,7 +2,7 @@
 import copy
 import unittest
 
-from agent_tools import forge_adapter, release_adapter, release_profile
+from agent_tools import actions_health_adapter, forge_adapter, release_adapter, release_profile
 from . import release_test_support as support
 
 def violations(release, contract=None):
@@ -138,6 +138,60 @@ class GrammarRefusesTest(unittest.TestCase):
         for contract in ({}, {"bindings": []}, {"bindings": {"tracker": None}}, []):
             with self.subTest(contract=contract):
                 violations(support.release_of("github-release", support.forge_profile()), contract)
+
+class DeployWatchGrammarTest(unittest.TestCase):
+    """Issue 465 D4: profiles allow a supported deploy only through a registered adapter, and
+    only while no profile authors activation units."""
+
+    CONFLICT = {"pointer": "/capabilities/deploy/support",
+                "message": "capabilities.deploy must be unsupported while release profiles exist",
+                "repair_id": "contract.release.deploy_conflict"}
+
+    def descriptors(self):
+        """The fixture registry plus a watcher whose deploy operation a profile may bind."""
+        watcher = actions_health_adapter.describe()
+        watcher["operations"]["deploy"].update(support="supported", reason=None)
+        return {**support.descriptors(), "github-actions-health": watcher}
+
+    def found(self, profile, binding):
+        contract = support.base_contract()
+        contract["capabilities"]["deploy"]["support"] = "supported"
+        contract["bindings"]["deploy"] = binding
+        return release_profile.grammar_violations(
+            support.release_of("github-release", profile), contract, self.descriptors())
+
+    def watch(self, adapter="github-actions-health"):
+        return {"adapter": adapter, "command": None, "config": {}}
+
+    def test_a_registered_adapter_coexists_with_profiles_without_activation(self):
+        self.assertEqual(self.found(support.forge_profile(), self.watch()), [])
+
+    def test_activation_units_keep_the_conflict(self):
+        profile = support.forge_profile()
+        profile["requirements"]["adapters"]["watch"] = {"min_inclusive": "1.0.0",
+                                                        "max_exclusive": "2.0.0"}
+        profile["bindings"]["adapters"]["watch"] = {"adapter": "github-actions-health"}
+        profile["bindings"]["targets"]["site"] = {
+            "adapter": "watch", "kind": "github_repository",
+            "repository": "fagenorn/nix-config", "branch": "main"}
+        profile["bindings"]["credentials"]["gh-cli"] = {"adapter": "watch", "class": "gh_cli"}
+        profile["activation"] = {"units": [{
+            "id": "deploy", "mode": "publication_triggered", "adapter": "watch",
+            "operation": "deploy", "target": "site", "principal": "maintainer",
+            "credential": "gh-cli", "effect": "reversible_no_incremental_spend",
+            "config_schema_version": 1,
+            "config": {"workflow": "deploy.yml", "branch": "main", "services": ["site"],
+                       "health_url": "https://example.com/health", "health_commit_field": "commit"},
+            "deps": [], "observation_deadline_ms": 600000}]}
+        profile["recovery"]["units"]["deploy"] = {"posture": "supersedable_only", "anchor": None,
+                                                  "compatibility": None, "edges": []}
+        self.assertEqual(self.found(profile, self.watch()), [self.CONFLICT])
+
+    def test_an_unregistered_or_malformed_binding_keeps_the_conflict(self):
+        for binding in (self.watch("railway"), self.watch(7), "github-actions-health", None):
+            with self.subTest(binding=binding):
+                self.assertEqual(self.found(support.forge_profile(), binding), [self.CONFLICT])
+
 
 class PublicationFreeGrammarTest(unittest.TestCase):
     """`"publication": "none"` and the rules that hold for it (#368 D1, D2, D11)."""

@@ -170,6 +170,7 @@ PROJECTION_MEMBERS = ("id", "agent", "kind", "target", "source")
 # predicate the authored value must satisfy; failing one is `invalid_contract`,
 # never `blocked`. Only a declared `supported` capability is walked, so an
 # `unsupported` one imposes none of its rows on the bindings.
+# The deploy command row is skipped for a registered release adapter, which is itself the deploy reader (issue 465 D3).
 CAPABILITY_BINDING_REQUIREMENTS = {
     "tracker": (
         (("tracker", "kind"), lambda value: value != "none"),
@@ -836,18 +837,57 @@ def validate_verification_conditions(workflow: dict, violations: list[dict]) -> 
                      "unconditional", "contract.workflow.no_unconditional_verification"))
 
 
-def validate_deploy(deploy: dict, commands: dict | None,
+def registered_deploy_adapter(deploy: object) -> str | None:
+    """The deploy binding's adapter when it is a `release_adapter.REGISTRY` key, else None."""
+    adapter = deploy.get("adapter") if isinstance(deploy, dict) else None
+    return adapter if isinstance(adapter, str) and adapter in release_adapter.REGISTRY else None
+
+
+def validate_deploy(deploy: dict, commands: dict | None, tracker: dict | None,
                     violations: list[dict]) -> None:
+    """Every shape violation of `bindings.deploy`, whatever the authored support.
+
+    A registered release adapter adds four rules (issue 465 D3, D15): `command` must be null,
+    the descriptor must have one watch operation, `config` must pass that operation's closed
+    schema, and the tracker must be GitHub. Any other adapter keeps a free-form `config` and
+    a `command` id checked against `commands`.
+    """
     check_exact_members(
         deploy, "/bindings/deploy", DEPLOY_MEMBERS, "deploy", violations)
     if "adapter" in deploy:
         check_string(deploy["adapter"], "/bindings/deploy/adapter", "deploy",
                      violations)
+    registered = registered_deploy_adapter(deploy)
     if "command" in deploy and deploy["command"] is not None:
-        check_command_id(
-            deploy["command"], "/bindings/deploy/command", commands, violations)
-    if "config" in deploy:
-        check_object(deploy["config"], "/bindings/deploy/config", "deploy", violations)
+        if registered is not None:
+            violations.append(violation(
+                "/bindings/deploy/command",
+                f"must be null: the registered adapter '{registered}' is the deploy reader",
+                "contract.deploy.command_conflict"))
+        else:
+            check_command_id(
+                deploy["command"], "/bindings/deploy/command", commands, violations)
+    config_ok = "config" in deploy and check_object(
+        deploy["config"], "/bindings/deploy/config", "deploy", violations)
+    if registered is None:
+        return
+    descriptor = release_adapter.DESCRIPTORS[registered]
+    operation = release_adapter.watch_operation(descriptor)
+    if operation is None:
+        violations.append(violation(
+            "/bindings/deploy/adapter",
+            f"adapter '{registered}' has no single operation a deploy watch can inspect",
+            "contract.deploy.adapter_unwatchable"))
+    elif config_ok:
+        schema = descriptor["operations"][operation]["config_schema"]
+        for problem in release_adapter.config_problems(schema, deploy["config"]):
+            violations.append(violation(
+                "/bindings/deploy/config", problem, "contract.deploy.config_invalid"))
+    if isinstance(tracker, dict) and "kind" in tracker and tracker["kind"] != "github":
+        violations.append(violation(
+            "/bindings/deploy/adapter",
+            f"adapter '{registered}' watches a GitHub repository, and the tracker is not GitHub",
+            "contract.deploy.tracker_not_github"))
 
 
 def validate_bindings(source: dict, violations: list[dict]) -> None:
@@ -876,7 +916,7 @@ def validate_bindings(source: dict, violations: list[dict]) -> None:
     if "workflow" in present:
         validate_workflow(present["workflow"], commands, violations)
     if "deploy" in present:
-        validate_deploy(present["deploy"], commands, violations)
+        validate_deploy(present["deploy"], commands, present.get("tracker"), violations)
 
 
 def validate_capabilities(source: dict, violations: list[dict]) -> None:
@@ -930,6 +970,9 @@ def validate_capability_bindings(source: dict) -> list[dict]:
                 or declaration.get("support") != "supported"):
             continue
         for path, is_complete in CAPABILITY_BINDING_REQUIREMENTS[name]:
+            if path == ("deploy", "command") and registered_deploy_adapter(
+                    bindings.get("deploy")) is not None:
+                continue
             found, value = find_binding(bindings, path)
             if found and not is_complete(value):
                 violations.append(violation(
@@ -1115,7 +1158,9 @@ def first_unmet_prerequisite(name: str, bindings: dict, root: Path) -> str | Non
     """The first failing prerequisite's reason code, or None when all pass.
 
     Only the declared `supported` capabilities reach here, and D6 has already
-    refused an incomplete binding, so every member read below is present.
+    refused an incomplete binding, so every member read below is present. A deploy binding
+    that names a registered release adapter is ready when every executable its descriptor
+    declares resolves on `PATH`, else `release_adapter_unavailable` (issue 465 D3).
     """
     if name == "tracker":
         # The tracker CLI is not a `commands` entry, so its base is the root.
@@ -1144,6 +1189,11 @@ def first_unmet_prerequisite(name: str, bindings: dict, root: Path) -> str | Non
     elif name == "review.code":
         ids = [bindings["workflow"]["review"]["code"]]
     elif name == "deploy":
+        adapter = registered_deploy_adapter(bindings["deploy"])
+        if adapter is not None:
+            executables = release_adapter.DESCRIPTORS[adapter]["executables"]
+            return None if all(resolves_on_path(executable, root)
+                               for executable in executables) else "release_adapter_unavailable"
         ids = [bindings["deploy"]["command"]]
     else:
         raise ValueError(f"unknown capability name: {name!r}")
