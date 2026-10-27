@@ -220,6 +220,20 @@ class ShipReleaseContractsTest(unittest.TestCase):
         for field in ("headSha", '"pr"', "prUrl", "mergeSha", "tag", "releaseUrl", "deployState"):
             self.assertIn(field, state_section)
 
+    # -- R9: Phase 5 polls a registered deploy adapter through one command -------
+
+    def test_phase_five_polls_the_registered_adapter_command(self):
+        """Issue 465 D11: the registered-adapter verdict is the command's observation; no
+        Phase 5 example reads runs or health by hand."""
+        block = self.section(self.skill, "### 5d. Adapter commands", "### 5e. Wakeup prompt")
+        self.assertIn("\nrelease deploy inspect --repo-root <checkout> --commit <MERGE_SHA>\n",
+                      block)
+        self.assertIn("\n${GH_PREFIX}gh run view <facts.run.id> --repo <repo-slug> --log-failed\n",
+                      block)
+        phase = self.section(self.skill, "## Phase 5 — Watch deploy", "## Phase 6 — Report")
+        for forbidden in ("gh run list", "curl", "${GH_PREFIX}release"):
+            self.assertNotIn(forbidden, phase)
+
     # -- R8: evals match the fixture repo and stay non-destructive -------------
 
     def test_evals_cover_the_fixture_shape_and_release_only_in_the_sandbox(self):
