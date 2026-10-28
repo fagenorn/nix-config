@@ -77,6 +77,7 @@ evals skill id:
 
 # The source package the agent recipes run (#175 D6).
 agent_tools_path := justfile_directory() / "python"
+system_result := justfile_directory() / "result"
 
 # Verify durable workflow lifecycle and skill contracts, 4 test files at a time (--jobs N sets the cap; --jobs 1 runs them serially with live output).
 agent-workflow-tests *args:
@@ -223,7 +224,7 @@ agent-installed-skill-tests: build
       echo "expected exactly one built Claude Code package; found $#" >&2; \
       exit 1; \
     fi; \
-    AGENT_SKILLS_INSTALLED_HOME="$installed_home" CLAUDE_SETTINGS_PATH="$settings" CLAUDE_CODE_PACKAGE="$1" python3 -m unittest -v \
+    AGENT_SKILLS_INSTALLED_HOME="$installed_home" AGENT_TOOLS_SYSTEM_RESULT="{{system_result}}" CLAUDE_SETTINGS_PATH="$settings" CLAUDE_CODE_PACKAGE="$1" python3 -m unittest -v \
       home/common/agent-skills/tests/test_dispatch_contracts.py \
       home/common/agent-skills/tests/test_shell_example_contracts.py \
       home/common/agent-skills/tests/test_workflow_skill_contracts.py \
@@ -243,7 +244,7 @@ agent-retained-tests root: build
     log=$(mktemp "${TMPDIR:-/tmp}/agent-retained-XXXXXX") || exit 1; \
     trap 'rm -f -- "$log"' EXIT; \
     status=0; \
-    AGENT_RETAINED_ROOT="{{root}}" AGENT_SKILLS_INSTALLED_HOME="$1" PYTHONPATH="{{agent_tools_path}}" \
+    AGENT_RETAINED_ROOT="{{root}}" AGENT_SKILLS_INSTALLED_HOME="$1" AGENT_TOOLS_SYSTEM_RESULT="{{system_result}}" PYTHONPATH="{{agent_tools_path}}" \
       python3 -m unittest -v tests/test_review_retained_full.py tests/test_agent_tools_launchers.py \
       >"$log" 2>&1 || status=$?; \
     cat "$log"; \

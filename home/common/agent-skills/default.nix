@@ -2,6 +2,7 @@
   inputs,
   lib,
   pkgs,
+  agentTools,
   ...
 }:
 let
@@ -28,7 +29,6 @@ let
   # Each command-table row of lib/agent-tools.nix becomes ~/.agents/bin/<name>.
   # It enters home.file as a separate definition, so a leftover hand-written
   # entry for the same command is a conflicting definition, not a silent win.
-  agentTools = import ../../../lib/agent-tools.nix { inherit pkgs; };
   agentToolFiles = lib.mapAttrs' (
     name: launcher: lib.nameValuePair ".agents/bin/${name}" { source = launcher; }
   ) agentTools.launchers;
