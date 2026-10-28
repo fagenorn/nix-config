@@ -68,6 +68,8 @@ Rows are rechecked at use, so a registry or contract change that moves a row's b
 - `~/.claude/settings.json`, a writable copy: removing the hook removes the guard.
 - The window between check and use: the verb runs after the verdict, and a remote that changes between them is not seen.
 
+A process started before a switch can keep old store paths, so start a new Claude Code session after switching an agent_tools change. `/hooks` shows that session's loaded hook command, and `just show-claude-settings` shows the generation's registered path. A host that has not switched to a generation containing an adapter still runs the previous code throughout.
+
 ## Context meter
 
 The context meter (issue 424) is the second command hook of the same `matcher = "Bash"` `PreToolUse` entry, after the guard: the `context-meter` launcher from the agent-tools command table, timeout 10 s, no arguments and no matcher of its own, so the guard's registration is unchanged. Claude Code runs it before every Bash call; its contract is in [`python/README.md`](../../../python/README.md) § `context-meter`.

@@ -1,13 +1,13 @@
 """Installed-layout seam for the agent_tools launchers (#175 D8, D11; #179 D8; #177 D9; parent D9).
 
-Run: just agent-installed-skill-tests. That recipe builds first and passes the
-built home-manager-files tree as AGENT_SKILLS_INSTALLED_HOME. Every
-`.agents/bin` entry that names the package, other than `NOT_LAUNCHERS`, must be a
-generated launcher, and
-each launcher must run its store module even with a fake `agent_tools` and a fake
-top-level `agent_platform` on the
-`PYTHONPATH`, `NIX_PYTHONPATH` (with a `.pth` file) and working-directory
-channels.
+Run: just agent-installed-skill-tests. The installed and retained recipes build
+first and pass AGENT_SKILLS_INSTALLED_HOME and AGENT_TOOLS_SYSTEM_RESULT. The
+system closure must hold one package build, with every agent-tools launcher
+execing one environment that imports that build. Every installed `.agents/bin`
+entry that names the package, other than `NOT_LAUNCHERS`, must be a generated
+launcher. Each launcher must run its store module even with a fake `agent_tools`
+and a fake top-level `agent_platform` on the `PYTHONPATH`, `NIX_PYTHONPATH` (with
+a `.pth` file) and working-directory channels.
 """
 
 import hashlib
@@ -18,12 +18,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
 from .retained_evidence_test_support import ANCHOR_SHA256, BUNDLE
 
 INSTALLED_HOME_ENV = "AGENT_SKILLS_INSTALLED_HOME"
+SYSTEM_RESULT_ENV = "AGENT_TOOLS_SYSTEM_RESULT"
 INSTALLED_RECIPE = "just agent-installed-skill-tests"
 PACKAGE_BYTES = b"agent_tools"
 # `launcherScript` (lib/agent-tools.nix) writes a `-p` shebang line, then the body and a newline.
@@ -163,10 +165,74 @@ class AgentToolsLauncherTest(unittest.TestCase):
         self.assertIsNotNone(match, data[:300])
         return match
 
-    def test_workflow_state_runs_under_the_package_interpreter(self):
-        match = self.workflow_state_launcher()
-        pythons = {python for python, _module in self.launchers().values()}
-        self.assertEqual(pythons, {match["python"].decode()})
+    def system_closure(self) -> list[Path]:
+        value = os.environ.get(SYSTEM_RESULT_ENV)
+        self.assertIsNotNone(value, f"{SYSTEM_RESULT_ENV}={value!r} is unset")
+        result = Path(value)
+        self.assertTrue(result.is_absolute() and result.exists(),
+                        f"{SYSTEM_RESULT_ENV}={value!r} is not an existing absolute path")
+        done = subprocess.run(["nix-store", "--query", "--requisites", str(result)],
+                              capture_output=True, text=True, timeout=TIMEOUT_SECONDS,
+                              check=False)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        paths = sorted(Path(line) for line in done.stdout.splitlines() if line)
+        self.assertTrue(paths, f"{SYSTEM_RESULT_ENV}={value!r} has an empty closure")
+        return paths
+
+    def package_builds(self) -> set[Path]:
+        with (Path(__file__).resolve().parents[1] / "python/pyproject.toml").open("rb") as source:
+            project = tomllib.load(source)["project"]
+        package = re.compile(r"[0-9a-z]{32}-python[^-]+-"
+                             + re.escape(project["name"]) + "-" + re.escape(project["version"]))
+        return {path for path in self.system_closure() if package.fullmatch(path.name)}
+
+    def closure_launchers(self) -> list[tuple[Path, str]]:
+        launchers = []
+        for path in self.system_closure():
+            if not re.fullmatch(r"[0-9a-z]{32}-agent-tools-.+", path.name):
+                continue
+            self.assertTrue(path.is_file(), f"{path} is not a launcher file")
+            data = path.read_bytes()
+            match = LAUNCHER.fullmatch(data) or SCRIPT_LAUNCHER.fullmatch(data)
+            self.assertIsNotNone(match, f"{path} is not a recognized agent-tools launcher")
+            launchers.append((path, match["python"].decode()))
+        return launchers
+
+    def test_the_system_closure_holds_one_agent_tools_build(self):
+        builds = self.package_builds()
+        self.assertEqual(len(builds), 1, f"agent_tools builds: {sorted(map(str, builds))}")
+
+    def test_every_launcher_in_the_system_closure_execs_one_environment(self):
+        launchers = self.closure_launchers()
+        self.assertTrue(launchers, "the system closure has no agent-tools launchers")
+        pythons = {python for _path, python in launchers}
+        self.assertEqual(len(pythons), 1,
+                         f"launcher environments: {sorted(pythons)}; "
+                         f"launchers: {[str(path) for path, _python in launchers]}")
+        paths = {path.resolve() for path, _python in launchers}
+        for entry in sorted((self.root / ".agents/bin").iterdir()):
+            if PACKAGE_BYTES in entry.read_bytes() or entry.name == "workflow-state":
+                with self.subTest(entry=str(entry)):
+                    self.assertIn(entry.resolve(), paths,
+                                  f"{entry} -> {entry.resolve()} is outside closure launchers")
+
+    def test_each_system_closure_environment_imports_agent_tools_from_the_closure_build(self):
+        builds = self.package_builds()
+        self.assertEqual(len(builds), 1, f"agent_tools builds: {sorted(map(str, builds))}")
+        build, = builds
+        pythons = {python for _path, python in self.closure_launchers()}
+        self.assertTrue(pythons, "the system closure has no agent-tools environments")
+        clean = {key: value for key, value in os.environ.items() if key not in
+                 ("NIX_PYTHONPATH", "NIX_PYTHONPREFIX", "NIX_PYTHONEXECUTABLE")}
+        for python in sorted(pythons):
+            with self.subTest(python=python):
+                done = self.run_child(
+                    [python, "-I", "-c", "import agent_tools; print(agent_tools.__file__)"],
+                    clean, self.hostile)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                imported = Path(done.stdout.strip()).resolve()
+                self.assertIn(build, imported.parents,
+                              f"{python} imports {imported}, outside {build}")
 
     def test_workflow_state_ignores_a_hostile_agent_tools(self):
         completed = self.run_child(
