@@ -4,12 +4,12 @@
   pkgs,
   inputs,
   libx,
+  agentTools,
   osConfig,
   ...
 }:
 let
   agentPlugins = import ../../../lib/agent-plugins.nix { inherit inputs pkgs; };
-  agentTools = import ../../../lib/agent-tools.nix { inherit pkgs; };
 
   # Bare `codex-companion` on PATH. The codex-collaboration bridge (and its
   # `command -v` pre-flight) invokes it by name; without this every spawned
