@@ -72,4 +72,12 @@ Task 3 — JarBird-shape derive cases — `tests/test_guard_policy.py` — full 
   - Task 3's two fixtures derive `main`/`dev` from source. Under `5ae1b9dc`'s source they refuse `branch_unresolved` and `contract_unresolved`;
   - the Installed tier passes at base.
 
+## Standards review
+
+Clean native Codex review: reviewer `/root/plan_review`, job id
+`/root/plan_review`. The native path was used because `codex-collaboration` is
+unavailable. Reviewed head `0a0822ab133a028896ee566ef85a72636fd7398c`, base
+`00ec4e65bf7e076e11419a32f5079b3f712992fb`.
+Findings: Blocking 0, Should-fix 0, Discussion 0. Dispositions: none.
+
 ---
