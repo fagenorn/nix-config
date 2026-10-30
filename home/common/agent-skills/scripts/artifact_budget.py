@@ -48,7 +48,15 @@ def _delivery_model() -> object:
 
 
 KINDS = ("design-spec", "implementation-plan", "handoff", "review-package")
-VIOLATIONS = ("root_bytes", "member_bytes", "member_count", "aggregate_bytes")
+# One row per violation code: the code, the limit it is measured against and the
+# measured quantity. `violations` and `overages` both derive from it (issue 472 D6).
+_BOUNDS: tuple[tuple[str, str, Callable[[Mapping[str, int]], int]], ...] = (
+    ("root_bytes", "root_max_bytes", lambda metrics: metrics["root_bytes"]),
+    ("member_bytes", "member_max_bytes", lambda metrics: metrics["largest_member_bytes"]),
+    ("member_count", "max_members", lambda metrics: metrics["file_count"] - 1),
+    ("aggregate_bytes", "aggregate_max_bytes", lambda metrics: metrics["total_bytes"]),
+)
+VIOLATIONS = tuple(code for code, _, _ in _BOUNDS)
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 PLAN_MEMBER_RE = re.compile(r"task-([1-9][0-9]*)\.md\Z")
@@ -77,6 +85,7 @@ class CheckResult:
     status: str
     metrics: Mapping[str, int]
     violations: Sequence[str]
+    overages: Mapping[str, Mapping[str, int]]
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -85,6 +94,7 @@ class CheckResult:
             "status": self.status,
             "metrics": dict(self.metrics),
             "violations": list(self.violations),
+            "overages": {code: dict(entry) for code, entry in self.overages.items()},
         }
 
 
@@ -117,22 +127,33 @@ def _pairs_no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
-            raise ArtifactBudgetError("duplicate JSON key")
+            raise ArtifactBudgetError(f"duplicate key {json.dumps(key)}")
         result[key] = value
     return result
 
 
 def _reject_constant(_: str) -> object:
-    raise ArtifactBudgetError("non-standard JSON constant")
+    raise ArtifactBudgetError("non-standard constant")
 
 
-def _decode_json(raw: bytes) -> object:
+def _decode_json(raw: bytes, subject: str = "JSON") -> object:
     try:
         text = raw.decode("utf-8", errors="strict")
         return json.loads(text, object_pairs_hook=_pairs_no_duplicates,
                           parse_constant=_reject_constant)
-    except (UnicodeDecodeError, json.JSONDecodeError, ArtifactBudgetError) as exc:
-        raise ArtifactBudgetError("invalid JSON") from exc
+    except UnicodeDecodeError as exc:
+        raise ArtifactBudgetError(
+            f"invalid {subject}: invalid UTF-8 at byte {exc.start}: {exc.reason}") from exc
+    except json.JSONDecodeError as exc:
+        raise ArtifactBudgetError(
+            f"invalid {subject}: {exc.msg} at line {exc.lineno} column {exc.colno}") from exc
+    except ArtifactBudgetError as exc:
+        raise ArtifactBudgetError(f"invalid {subject}: {exc}") from exc
+
+
+def _os_reason(exc: Exception) -> str:
+    """The OS error string of a failed open or read, never the path it names (issue 472 D2)."""
+    return getattr(exc, "strerror", None) or "path cannot be opened"
 
 
 def _read_regular(path: Path, *, limit: int | None = None) -> bytes:
@@ -142,7 +163,7 @@ def _read_regular(path: Path, *, limit: int | None = None) -> bytes:
     try:
         descriptor = os.open(path, flags)
     except (OSError, ValueError) as exc:
-        raise InputReadError("cannot open regular file") from exc
+        raise InputReadError(_os_reason(exc)) from exc
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
@@ -150,10 +171,10 @@ def _read_regular(path: Path, *, limit: int | None = None) -> bytes:
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             raw = handle.read() if limit is None else handle.read(limit + 1)
         if limit is not None and len(raw) > limit:
-            raise ArtifactBudgetError("input exceeds byte limit")
+            raise ArtifactBudgetError(f"input exceeds the {limit}-byte wire bound")
         return raw
     except OSError as exc:
-        raise InputReadError("cannot read regular file") from exc
+        raise InputReadError(_os_reason(exc)) from exc
     finally:
         os.close(descriptor)
 
@@ -166,12 +187,12 @@ def _load_policy_identity(path: Path) -> tuple[tuple[dict[str, ArtifactLimits], 
     try:
         raw = _read_regular(path)
     except InputReadError as exc:
-        raise ArtifactBudgetError("cannot read policy") from exc
+        raise ArtifactBudgetError(f"cannot read policy: {exc}") from exc
     return _parse_policy(raw), "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
 def _parse_policy(raw: bytes) -> tuple[dict[str, ArtifactLimits], int, int, int]:
-    value = _decode_json(raw)
+    value = _decode_json(raw, "policy JSON")
     if not _exact_keys(value, {"schema_version", "unit", "artifacts", "phase_reports",
                                "workflow_responses"}):
         raise ArtifactBudgetError("invalid policy keys")
@@ -182,7 +203,7 @@ def _parse_policy(raw: bytes) -> tuple[dict[str, ArtifactLimits], int, int, int]
         raise ArtifactBudgetError("invalid policy unit")
     artifacts = value["artifacts"]
     if not _exact_keys(artifacts, set(KINDS)):
-        raise ArtifactBudgetError("invalid artifact kinds")
+        raise ArtifactBudgetError("invalid policy artifact kinds")
     assert isinstance(artifacts, dict)
     limits: dict[str, ArtifactLimits] = {}
     entry_keys = {"root_max_bytes", "member_max_bytes", "max_members", "aggregate_max_bytes"}
@@ -192,22 +213,22 @@ def _parse_policy(raw: bytes) -> tuple[dict[str, ArtifactLimits], int, int, int]
             raise ArtifactBudgetError("invalid artifact policy")
         assert isinstance(entry, dict)
         if not _integer(entry["root_max_bytes"], minimum=1):
-            raise ArtifactBudgetError("invalid root limit")
+            raise ArtifactBudgetError("invalid policy root limit")
         if not _integer(entry["member_max_bytes"]):
-            raise ArtifactBudgetError("invalid member limit")
+            raise ArtifactBudgetError("invalid policy member limit")
         if not _integer(entry["max_members"]):
-            raise ArtifactBudgetError("invalid member count")
+            raise ArtifactBudgetError("invalid policy member count")
         if not _integer(entry["aggregate_max_bytes"], minimum=1):
-            raise ArtifactBudgetError("invalid aggregate limit")
+            raise ArtifactBudgetError("invalid policy aggregate limit")
         if entry["aggregate_max_bytes"] < entry["root_max_bytes"]:
-            raise ArtifactBudgetError("aggregate below root")
+            raise ArtifactBudgetError("policy aggregate below root")
         one_file = kind in {"design-spec", "handoff"}
         if one_file != (entry["member_max_bytes"] == 0 and entry["max_members"] == 0):
-            raise ArtifactBudgetError("inconsistent member limits")
+            raise ArtifactBudgetError("inconsistent policy member limits")
         if one_file and entry["aggregate_max_bytes"] != entry["root_max_bytes"]:
-            raise ArtifactBudgetError("inconsistent one-file aggregate limit")
+            raise ArtifactBudgetError("inconsistent policy one-file aggregate limit")
         if not one_file and (entry["member_max_bytes"] == 0 or entry["max_members"] == 0):
-            raise ArtifactBudgetError("inconsistent package limits")
+            raise ArtifactBudgetError("inconsistent policy package limits")
         limits[kind] = ArtifactLimits(**entry)
     reports = value["phase_reports"]
     if not _exact_keys(reports, {"notes_max_characters", "wire_max_bytes"}):
@@ -216,7 +237,7 @@ def _parse_policy(raw: bytes) -> tuple[dict[str, ArtifactLimits], int, int, int]
     notes = reports["notes_max_characters"]
     wire = reports["wire_max_bytes"]
     if not _integer(notes, minimum=1) or not _integer(wire, minimum=1):
-        raise ArtifactBudgetError("invalid report limits")
+        raise ArtifactBudgetError("invalid policy report limits")
     # A workflow response is helper transport, not an owner-authored phase
     # report: control carries one summary per requested issue plus the full
     # delivery contract of every dispatch, so it takes its own bound.
@@ -226,7 +247,7 @@ def _parse_policy(raw: bytes) -> tuple[dict[str, ArtifactLimits], int, int, int]
     assert isinstance(responses, dict)
     response_wire = responses["wire_max_bytes"]
     if not _integer(response_wire, minimum=1):
-        raise ArtifactBudgetError("invalid response limits")
+        raise ArtifactBudgetError("invalid policy response limits")
     return limits, notes, wire, response_wire
 
 
@@ -359,37 +380,65 @@ def _nonnegative_fields(value: object, keys: set[str]) -> bool:
     return _exact_keys(value, keys) and all(_integer(value[key]) for key in keys)  # type: ignore[index]
 
 
-def _validate_finding(value: object) -> None:
-    keys = {"axis", "severity", "status", "text", "ruling"}
-    if not _exact_keys(value, keys):
-        raise ArtifactBudgetError("invalid finding keys")
+def _quoted(names: set[str]) -> str:
+    return ", ".join(json.dumps(name) for name in sorted(names))
+
+
+def _members_fault(value: object, keys: set[str], subject: str) -> str | None:
+    """Why `value` is not an object with exactly `keys`, or None (issue 472 D2, D3)."""
+    if not isinstance(value, dict):
+        return f"{subject} must be a JSON object"
+    missing, unexpected = keys - set(value), set(value) - keys
+    parts = ([f"missing {_quoted(missing)}"] if missing else []) + (
+        [f"unexpected {_quoted(unexpected)}"] if unexpected else [])
+    return f"{subject} members: {'; '.join(parts)}" if parts else None
+
+
+def _require_members(value: object, keys: set[str], subject: str) -> None:
+    fault = _members_fault(value, keys, subject)
+    if fault is not None:
+        raise ArtifactBudgetError(fault)
+
+
+def _require_notes(value: object, maximum: int) -> None:
+    """Refuse notes that are not a string of at most `maximum` characters (issue 472 D3)."""
+    if not isinstance(value, str):
+        raise ArtifactBudgetError("notes must be a string")
+    if len(value) > maximum:
+        raise ArtifactBudgetError(f"notes has {len(value)} characters; the bound is {maximum}")
+
+
+def _validate_finding(value: object, subject: str) -> None:
+    _require_members(value, {"axis", "severity", "status", "text", "ruling"}, subject)
     assert isinstance(value, dict)
-    if value["axis"] not in {"conformance", "correctness", "ship"}:
-        raise ArtifactBudgetError("invalid finding axis")
-    if value["severity"] not in {"Critical", "Important", "Minor", "Blocking", "Should-fix", "Discussion"}:
-        raise ArtifactBudgetError("invalid finding severity")
-    if value["status"] not in {"parked", "residual", "discussion", "minor"}:
-        raise ArtifactBudgetError("invalid finding status")
+    if not (isinstance(value["axis"], str) and value["axis"] in ("conformance", "correctness", "ship")):
+        raise ArtifactBudgetError(f"{subject}.axis must be conformance, correctness or ship")
+    if not (isinstance(value["severity"], str) and value["severity"] in (
+            "Critical", "Important", "Minor", "Blocking", "Should-fix", "Discussion")):
+        raise ArtifactBudgetError(
+            f"{subject}.severity must be Critical, Important, Minor, Blocking, Should-fix or Discussion")
+    if not (isinstance(value["status"], str)
+            and value["status"] in ("parked", "residual", "discussion", "minor")):
+        raise ArtifactBudgetError(f"{subject}.status must be parked, residual, discussion or minor")
     if not _string(value["text"]):
-        raise ArtifactBudgetError("invalid finding text")
+        raise ArtifactBudgetError(f"{subject}.text must be a non-empty string")
     ruling = value["ruling"]
     if ruling is not None and not _string(ruling):
-        raise ArtifactBudgetError("invalid finding ruling")
+        raise ArtifactBudgetError(f"{subject}.ruling must be null or a non-empty string")
     if value["status"] == "parked" and not _string(ruling):
-        raise ArtifactBudgetError("parked finding requires ruling")
+        raise ArtifactBudgetError(f"{subject}.ruling is required for a parked finding")
 
 
 def validate_detail_input(value: Mapping[str, object]) -> None:
     """Validate the sole D15 non-empty detail-input shape."""
-    if not _exact_keys(value, {"interface_version", "findings"}):
-        raise ArtifactBudgetError("invalid detail input keys")
+    _require_members(value, {"interface_version", "findings"}, "detail input")
     if type(value["interface_version"]) is not int or value["interface_version"] != 1:
-        raise ArtifactBudgetError("invalid detail input version")
+        raise ArtifactBudgetError("interface_version must be 1")
     findings = value["findings"]
     if not isinstance(findings, list) or not findings:
-        raise ArtifactBudgetError("detail findings must be non-empty")
-    for finding in findings:
-        _validate_finding(finding)
+        raise ArtifactBudgetError("findings must be a non-empty list")
+    for index, finding in enumerate(findings):
+        _validate_finding(finding, f"findings[{index}]")
 
 
 def _validate_blob_identity(value: dict) -> None:
@@ -612,9 +661,9 @@ def _validate_manifest(root: Path, root_raw: bytes) -> list[CapturedArtifact]:
             if not lines or any(not line.endswith(b"\n") for line in lines):
                 raise ArtifactBudgetError("invalid JSONL shard")
             findings = []
-            for line in lines:
+            for line_number, line in enumerate(lines, 1):
                 finding = _decode_json(line)
-                _validate_finding(finding)
+                _validate_finding(finding, f"shard-{number:03d}.jsonl line {line_number}")
                 canonical = _canonical(finding)
                 if line != canonical:
                     raise ArtifactBudgetError("non-canonical JSONL finding")
@@ -682,16 +731,15 @@ def _check_artifact(kind: str, root: str | os.PathLike[str],
         "largest_member_bytes": max(member_sizes, default=0),
     }
     policy = limits[kind]
-    violations: list[str] = []
-    if metrics["root_bytes"] > policy.root_max_bytes:
-        violations.append("root_bytes")
-    if member_sizes and max(member_sizes) > policy.member_max_bytes:
-        violations.append("member_bytes")
-    if len(member_sizes) > policy.max_members:
-        violations.append("member_count")
-    if metrics["total_bytes"] > policy.aggregate_max_bytes:
-        violations.append("aggregate_bytes")
-    return CheckResult(kind, "over_budget" if violations else "within_budget", metrics, violations)
+    overages: dict[str, dict[str, int]] = {}
+    for code, limit_name, measure in _BOUNDS:
+        limit = getattr(policy, limit_name)
+        measured = measure(metrics)
+        if measured > limit:
+            overages[code] = {"limit": limit, "over_by": measured - limit}
+    violations = list(overages)
+    return CheckResult(kind, "over_budget" if violations else "within_budget", metrics,
+                       violations, overages)
 
 
 def _valid_metrics(value: object) -> bool:
@@ -706,49 +754,69 @@ def _valid_path(value: object) -> bool:
     return isinstance(value, str) and bool(value) and "\x00" not in value
 
 
+def _artifact_fault(value: object, *, kinds: Sequence[str], over: bool,
+                    root_only: bool = False) -> str | None:
+    """Why `value` is not an artifact of one of `kinds`, or None (issue 472 D3).
+
+    `over` selects the over-budget shape, `root_only` the root-only shape of a
+    failed producer report.
+    """
+    expected = {"kind", "path"} if root_only else {"kind", "path", "metrics", "budget_status"}
+    if over and not root_only:
+        expected.add("violations")
+    fault = _members_fault(value, expected, "artifact")
+    if fault is not None:
+        return fault
+    assert isinstance(value, dict)
+    if not (isinstance(value["kind"], str) and value["kind"] in tuple(kinds)):
+        return f"artifact.kind must be {' or '.join(kinds)}"
+    if not _valid_path(value["path"]):
+        return "artifact.path must be a non-empty string without NUL"
+    if root_only:
+        return None
+    if not _valid_metrics(value["metrics"]):
+        return "artifact.metrics must be four non-negative integer counts of one measurement"
+    status = "over_budget" if over else "within_budget"
+    if value["budget_status"] != status:
+        return f"artifact.budget_status must be {status}"
+    if over:
+        violations = value["violations"]
+        if not (isinstance(violations, list) and bool(violations)
+                and violations == [name for name in VIOLATIONS if name in violations]
+                and len(set(violations)) == len(violations)):
+            return "artifact.violations must be distinct violation codes in checker order"
+    return None
+
+
 def _valid_artifact(value: object, *, kind: str | None = None,
                     over: bool | None = None, root_only: bool = False) -> bool:
-    if root_only:
-        return (_exact_keys(value, {"kind", "path"}) and value["kind"] in KINDS  # type: ignore[index]
-                and _valid_path(value["path"]))  # type: ignore[index]
-    expected = {"kind", "path", "metrics", "budget_status"}
-    if over is True:
-        expected.add("violations")
-    if not _exact_keys(value, expected):
-        return False
-    assert isinstance(value, dict)
-    if value["kind"] not in KINDS or (kind is not None and value["kind"] != kind):
-        return False
-    if not _valid_path(value["path"]) or not _valid_metrics(value["metrics"]):
-        return False
-    if over is True:
-        violations = value["violations"]
-        return (value["budget_status"] == "over_budget" and isinstance(violations, list)
-                and bool(violations) and violations == [name for name in VIOLATIONS if name in violations]
-                and len(set(violations)) == len(violations))
-    return value["budget_status"] == "within_budget"
+    return _artifact_fault(value, kinds=KINDS if kind is None else (kind,),
+                           over=over is True, root_only=root_only) is None
 
 
-def _notes(value: object, maximum: int) -> bool:
-    return isinstance(value, str) and len(value) <= maximum
+# Each producer state's allowed artifact kinds and budget side; `failed` takes a
+# root-only artifact or null (issue 472 D3).
+_PRODUCER_ARTIFACTS = {
+    "complete": (KINDS, False),
+    "decompose_required": (("design-spec", "implementation-plan", "review-package"), True),
+    "stopped": (("handoff",), True),
+}
 
 
 def validate_producer_report(value: Mapping[str, object], notes_max_characters: int) -> None:
-    if not _exact_keys(value, {"state", "artifact", "notes"}) or not _notes(value["notes"], notes_max_characters):
-        raise ArtifactBudgetError("invalid producer report")
+    _require_members(value, {"state", "artifact", "notes"}, "producer report")
+    _require_notes(value["notes"], notes_max_characters)
     state, artifact = value["state"], value["artifact"]
-    valid = False
-    if state == "complete":
-        valid = _valid_artifact(artifact, over=False)
-    elif state == "decompose_required":
-        valid = any(_valid_artifact(artifact, kind=kind, over=True)
-                    for kind in ("design-spec", "implementation-plan", "review-package"))
-    elif state == "stopped":
-        valid = _valid_artifact(artifact, kind="handoff", over=True)
-    elif state == "failed":
-        valid = artifact is None or _valid_artifact(artifact, root_only=True)
-    if not valid:
-        raise ArtifactBudgetError("invalid producer state")
+    if state == "failed":
+        fault = None if artifact is None else _artifact_fault(
+            artifact, kinds=KINDS, over=False, root_only=True)
+    elif isinstance(state, str) and state in _PRODUCER_ARTIFACTS:
+        kinds, over = _PRODUCER_ARTIFACTS[state]
+        fault = _artifact_fault(artifact, kinds=kinds, over=over)
+    else:
+        raise ArtifactBudgetError("state must be complete, decompose_required, stopped or failed")
+    if fault is not None:
+        raise ArtifactBudgetError(f"{fault} for state {state}")
 
 
 def _relative_path(value: object, *, durable: bool) -> bool:
@@ -764,11 +832,9 @@ def _relative_path(value: object, *, durable: bool) -> bool:
     return is_durable if durable else is_retained
 
 
-def _detail_fields(value: Mapping[str, object], notes_max: int,
-                   *, allow_unpublished: bool) -> bool:
+def _detail_fields(value: Mapping[str, object], *, allow_unpublished: bool) -> bool:
+    """Callers check `notes` with `_require_notes` first, so `notes` is a string here."""
     state, path, notes = value["detail_state"], value["report_path"], value["notes"]
-    if not _notes(notes, notes_max):
-        return False
     if state == "none":
         return path is None
     if state == "present":
@@ -805,7 +871,9 @@ def validate_sdd_report(value: Mapping[str, object], notes_max_characters: int) 
     keys = {"state", "review_state", "conformance_verdict", "correctness_verdict",
             "verification_state", "base_sha", "head_sha", "acceptance_state", "detail_state",
             "report_path", "notes"}
-    if not _exact_keys(value, keys) or not _detail_fields(value, notes_max_characters, allow_unpublished=True):
+    _require_members(value, keys, "SDD report")
+    _require_notes(value["notes"], notes_max_characters)
+    if not _detail_fields(value, allow_unpublished=True):
         raise ArtifactBudgetError("invalid SDD report")
     acceptance = value["acceptance_state"]
     if not isinstance(acceptance, str) or acceptance not in ACCEPTANCE_STATES:
@@ -845,8 +913,8 @@ def validate_ship_handoff_report(value: Mapping[str, object], notes_max_characte
             "action_id", "issue_number", "branch", "worktree_path", "spec_artifact",
             "plan_artifact", "head_sha", "review_state", "acceptance_state", "auto", "report_path",
             "notes"}
-    if not _exact_keys(value, keys) or not _notes(value["notes"], notes_max_characters):
-        raise ArtifactBudgetError("invalid ship handoff")
+    _require_members(value, keys, "ship handoff")
+    _require_notes(value["notes"], notes_max_characters)
     lifecycle = [value[name] for name in
                  ("ledger_repo_root", "run_id", "attempt", "owner", "owner_worktree", "action_id")]
     if not (all(item is None for item in lifecycle)
@@ -881,9 +949,11 @@ def validate_ship_handoff_report(value: Mapping[str, object], notes_max_characte
 def validate_ship_summary_report(value: Mapping[str, object], notes_max_characters: int) -> None:
     keys = {"issue", "state", "pr_url", "merge_sha", "issue_closed", "discussion_items",
             "detail_state", "report_path", "notes"}
-    if (not _exact_keys(value, keys) or not _integer(value["issue"], minimum=1)
+    _require_members(value, keys, "ship summary")
+    _require_notes(value["notes"], notes_max_characters)
+    if (not _integer(value["issue"], minimum=1)
             or value["discussion_items"] != [] or type(value["issue_closed"]) is not bool
-            or not _detail_fields(value, notes_max_characters, allow_unpublished=True)):
+            or not _detail_fields(value, allow_unpublished=True)):
         raise ArtifactBudgetError("invalid ship summary")
     pr = value["pr_url"]
     if pr is not None and not _string(pr):
@@ -915,12 +985,11 @@ def validate_ledger_result(value: Mapping[str, object], notes_max_characters: in
         return
     keys = {"issue", "state", "pr_url", "merge_sha", "issue_closed", "discussion_items",
             "detail_state", "report_path", "notes"}
-    if not _exact_keys(value, keys):
-        raise ArtifactBudgetError("invalid ledger result")
+    _require_members(value, keys, "ledger result")
+    _require_notes(value["notes"], notes_max_characters)
     detail, path = value["detail_state"], value["report_path"]
     valid = (_integer(value["issue"], minimum=1) and _string(value["pr_url"])
              and _sha(value["merge_sha"]) and value["discussion_items"] == []
-             and _notes(value["notes"], notes_max_characters)
              and ((detail == "none" and path is None)
                   or (detail == "present" and _relative_path(path, durable=True))
                   or (detail == "unpublished" and _relative_path(path, durable=False))))
@@ -934,6 +1003,13 @@ def _canonical(value: object) -> bytes:
                            separators=(",", ":")) + "\n").encode("utf-8")
     except UnicodeEncodeError as exc:
         raise ArtifactBudgetError("invalid Unicode string") from exc
+
+
+def _v2_cause(model: object, exc: BaseException) -> str:
+    """The message of an error this helper or the delivery model raised, else the class name (issue 472 D12)."""
+    if isinstance(exc, (ArtifactBudgetError, model.DeliveryModelError)):
+        return str(exc)
+    return type(exc).__name__
 
 
 def validate_workflow_response_report(value: object, notes_max_characters: int) -> None:
@@ -953,7 +1029,7 @@ def validate_workflow_response_report(value: object, notes_max_characters: int) 
                     rule=validate_ledger_result,
                 )
     except Exception as exc:
-        raise ArtifactBudgetError("invalid workflow response") from exc
+        raise ArtifactBudgetError(f"workflow-response: {_v2_cause(model, exc)}") from exc
 
 
 def validate_delivery_model_report(
@@ -976,7 +1052,7 @@ def validate_delivery_model_report(
                 rule=validate_ship_summary_report,
             )
     except Exception as exc:
-        raise ArtifactBudgetError(f"invalid {boundary}") from exc
+        raise ArtifactBudgetError(f"{boundary}: {_v2_cause(model, exc)}") from exc
 
 
 def _validate_legacy_result_slot(
@@ -997,7 +1073,7 @@ def _input_bytes(path: str, wire_max: int) -> bytes:
     if path == "-":
         raw = sys.stdin.buffer.read(wire_max + 1)
         if len(raw) > wire_max:
-            raise ArtifactBudgetError("input exceeds wire bound")
+            raise ArtifactBudgetError(f"input exceeds the {wire_max}-byte wire bound")
         return raw
     return _read_regular(Path(path), limit=wire_max)
 
@@ -1031,6 +1107,17 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _refuse(label: str, exc: BaseException) -> int:
+    """Write the one refusal line, `artifact-budget: <label>: <reason>`, and return 2.
+
+    The reason is the error's message with each whitespace run collapsed to one
+    space, or the error's class name when the message is empty (issue 472 D1, D2).
+    """
+    reason = " ".join(str(exc).split()) or type(exc).__name__
+    sys.stderr.write(f"artifact-budget: {label}: {reason}\n")
+    return 2
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = _parser().parse_args(argv)
@@ -1040,12 +1127,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected = getattr(args, "expected_policy_sha256", None)
             if expected is not None and expected != identity:
                 raise ArtifactBudgetError("policy identity disagreement")
-        except ArtifactBudgetError:
+        except ArtifactBudgetError as exc:
             if args.command in {"check", "describe"}:
                 raise
             label = "report" if args.command == "validate-report" else "detail input"
-            sys.stderr.write(f"artifact-budget: invalid {label}\n")
-            return 2
+            return _refuse(f"invalid {label}", exc)
         limits, notes_max, report_wire_max, response_wire_max = loaded
         if args.command == "describe":
             sys.stdout.buffer.write(_canonical({"schema_version": 1,
@@ -1062,14 +1148,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else report_wire_max)
         try:
             raw = _input_bytes(args.input, wire_max)
-        except InputReadError:
+        except InputReadError as exc:
             label = "report" if args.command == "validate-report" else "detail input"
-            sys.stderr.write(f"artifact-budget: cannot read {label}\n")
-            return 2
-        except ArtifactBudgetError:
+            return _refuse(f"cannot read {label}", exc)
+        except ArtifactBudgetError as exc:
             label = "report" if args.command == "validate-report" else "detail input"
-            sys.stderr.write(f"artifact-budget: invalid {label}\n")
-            return 2
+            return _refuse(f"invalid {label}", exc)
         try:
             if args.command == "validate-report" and args.boundary in {
                 "ship-handoff", "ship-checkpoint", "ship-summary", "workflow-response"
@@ -1096,16 +1180,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     validators[args.boundary](value, notes_max)
             output = _canonical(value)
             if len(output) > wire_max:
-                raise ArtifactBudgetError("canonical wire object exceeds bound")
-        except ArtifactBudgetError:
+                raise ArtifactBudgetError(f"canonical output exceeds the {wire_max}-byte wire bound")
+        except ArtifactBudgetError as exc:
             label = "report" if args.command == "validate-report" else "detail input"
-            sys.stderr.write(f"artifact-budget: invalid {label}\n")
-            return 2
+            return _refuse(f"invalid {label}", exc)
         sys.stdout.buffer.write(output)
         return 0
     except ArtifactBudgetError as exc:
-        sys.stderr.write(f"artifact-budget: invalid input: {exc}\n")
-        return 2
+        return _refuse("invalid input", exc)
 
 
 if __name__ == "__main__":
