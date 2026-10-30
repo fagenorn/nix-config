@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 
+from agent_tools.attempt_observations import describe
+
 def seal(model, value, field="id"):
     value[field] = model.canonical_digest(value, omit_derived=field)
     return value
@@ -338,7 +340,7 @@ def workflow_responses(model):
                         "controller": 1, "owner": 1, "worker": 1, "reviewer": 1},
                         "available": 3, "waiting": []}},
         "observe": {"interface_version": 2, "kind": "observe", "issue": 151,
-                    "run_id": "run-1", "requirements": [{"kind": "tracker"}]},
+                    "run_id": "run-1", "requirements": [describe({"kind": "tracker"})]},
         "owner": owner,
         "phase_gate": {"interface_version": 2, "kind": "phase_gate", "run_id": "run-1",
                        "issue": 151, "custody": active, "action": "handoff",

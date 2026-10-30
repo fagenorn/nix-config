@@ -34,7 +34,7 @@ Set `owner_unavailable` true only when the current user instruction explicitly a
 
 Validate the response as exactly one closed discriminator:
 
-1. **`kind: observe`**: require exactly `interface_version`, `kind`, `issue`, nullable `run_id`, and `requirements`, then accept only the five exact requirement shapes, in the returned order: `{"kind":"tracker"}`; `{"kind":"recorded_worktree", "path":"<absolute-path>"}`; `{"kind":"candidate_worktree"}`; `{"kind":"forge_pr", "path":"<issue-branch-prefix>"}`; or `{"kind":"delivery_contract", "subject_id":"<issue>", "reason_code":"delivery_contract_required", "detail_pointer":null}`.
+1. **`kind: observe`**: require exactly `interface_version`, `kind`, `issue`, nullable `run_id`, and `requirements`, then take the requirements in the returned order. Each carries `expects`: the request member its answer fills (`slot`), that answer's `members` with their meanings, an `example` answer, and, when non-null, the `build` command that produces it.
    Observe only what each asks: `tracker` through the tracker adapter; `recorded_worktree` by inspecting exactly the returned path; `candidate_worktree` by reserving and verifying one absent issue-branch candidate; `forge_pr` by observing the issue branch's pull request at the returned prefix, into `forge`. Build `delivery_contract` with one command.
 
    ```text

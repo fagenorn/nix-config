@@ -19,7 +19,7 @@ import sys
 import tempfile
 from typing import Any, Callable, Iterator, NamedTuple
 
-from agent_tools import attempt_store, phase_budget
+from agent_tools import attempt_observations, attempt_store, phase_budget
 from agent_tools.attempt_custody import (
     AUTO_RESUMABLE_BLOCKED_ON,
     BLOCKED_ON_VALUES,
@@ -32,6 +32,9 @@ from agent_tools.attempt_custody import (
     stall_count,
     stalled,
 )
+from agent_tools.attempt_observations import (
+    DECISION_BLOCKER_FIELDS, FORGE_OBSERVATION_FIELDS, FORGE_STATES,
+    TRACKER_OBSERVATION_FIELDS, TRACKER_STATES)
 from agent_tools.attempt_delivery_store import (
     delivery_pending, installing_runs, seal_delivery, settle_delivery, unconverged_deliveries)
 from agent_tools.attempt_identity import (
@@ -214,13 +217,6 @@ DIRECT_OWNER_REQUEST_FIELDS = frozenset(
         "recovery",
     }
 )
-FORGE_OBSERVATION_FIELDS = frozenset({"state", "url", "merge_sha"})
-FORGE_STATES = frozenset({"none", "open", "closed", "merged"})
-TRACKER_OBSERVATION_FIELDS = frozenset(
-    {"issue", "state", "open_blockers", "decision_blockers"}
-)
-TRACKER_STATES = frozenset({"open", "closed"})
-DECISION_BLOCKER_FIELDS = frozenset({"issue", "url"})
 CONTROL_RESPONSE_FIELDS = frozenset(
     {
         "interface_version",
@@ -3686,7 +3682,8 @@ def direct_observe(
         "kind": "observe",
         "issue": issue,
         "run_id": run_id,
-        "requirements": requirements,
+        "requirements": [
+            _call(None, attempt_observations.describe, item) for item in requirements],
     }
 
 
@@ -5621,7 +5618,13 @@ def build_parser() -> argparse.ArgumentParser:
     control.add_argument("--request-file", required=True)
     control.set_defaults(handler=command_control)
 
-    direct_owner = subparsers.add_parser("direct-owner")
+    direct_owner = subparsers.add_parser("direct-owner", description=(
+        "Acquire, resume or replay one issue's direct owner from one interface-2 "
+        "request read from --request-file, and print one observe, owner, "
+        "delivery_remainder or terminal reply. Each requirement of an observe reply "
+        "carries expects: slot names the request member its answer fills, members maps "
+        "each member of that answer to its meaning, example is one illustrative answer, "
+        "and build is null or the workflow-state command that builds the answer."))
     direct_owner.add_argument("--repo-root", required=True)
     direct_owner.add_argument("--request-file", required=True)
     direct_owner.set_defaults(handler=command_direct_owner)

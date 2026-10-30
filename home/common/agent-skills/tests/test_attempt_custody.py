@@ -537,7 +537,8 @@ class DeliveredCustody(CustodyReads, DeliveredControlHarness):
 
     def merge_checkpoint(self, custody, minute):
         """Select, publish, open and reach the merge stage at `minute`; returns the
-        observations and authority the finishing summary still has to carry."""
+        observations and authority the finishing summary still has to carry. The
+        `checkpoint-delivery` reply's bytes are kept in `self.checkpoint_reply`."""
         issue, when = DELIVERED, at(minute)
         contract = self.built[issue]["contract"]
         url, head = f"https://github.com/fagenorn/nix-config/pull/{issue}", "a" * 40
@@ -550,14 +551,15 @@ class DeliveredCustody(CustodyReads, DeliveredControlHarness):
                    self.observed(contract, when, "pr_opened", pr_number=issue, pr_url=url,
                                  head=head)]
         scope = self.build("scope", {"contract": contract, "stage_id": "merge_pr"})
-        self.cli("checkpoint-delivery", *self.run_args, "--now", when, "--checkpoint-file",
-                 "-", stdin=self.validated("ship-checkpoint", {
-                     "interface_version": 2, "issue": issue, "custody": custody,
-                     "contract_digest": self.model.canonical_digest(contract),
-                     "delivery_observations": sorted(pending, key=lambda item: item["id"]),
-                     "authority_observations": [], "reevaluation_evidence": [],
-                     "requested_scope": scope, "detail_state": "none", "report_path": None,
-                     "notes": ""}))
+        self.checkpoint_reply = self.cli(
+            "checkpoint-delivery", *self.run_args, "--now", when, "--checkpoint-file",
+            "-", stdin=self.validated("ship-checkpoint", {
+                "interface_version": 2, "issue": issue, "custody": custody,
+                "contract_digest": self.model.canonical_digest(contract),
+                "delivery_observations": sorted(pending, key=lambda item: item["id"]),
+                "authority_observations": [], "reevaluation_evidence": [],
+                "requested_scope": scope, "detail_state": "none", "report_path": None,
+                "notes": ""})).stdout
         authority = self.build("authority-observation", {
             "contract": contract, "scope_id": scope["id"], "launch_id": custody["action_id"],
             "authority_kind": "native_guard", "verdict": "allowed",

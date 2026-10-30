@@ -16,6 +16,7 @@ import unittest
 from unittest import mock
 
 from agent_tools import attempt_identity
+from agent_tools.attempt_observations import describe
 from agent_tools.transaction_core import TransactionStore
 
 from ._delivery_model_fixtures import (
@@ -229,7 +230,7 @@ class DeliveryAdmissionTest(unittest.TestCase):
             self.assertEqual(direct.returncode, 0, direct.stderr)
             self.assertEqual(json.loads(direct.stdout), {"interface_version": 2,
                 "kind": "observe", "issue": 151, "run_id": None,
-                "requirements": [{"kind": "tracker"}]})
+                "requirements": [describe({"kind": "tracker"})]})
             control_request = self.control_request()
             control_request["worktrees"] = [{"issue": 151, "recorded": None, "candidate": {
                 "path": str(root / "worktree"), "state": "absent"}}]
@@ -2914,6 +2915,7 @@ CONTRACT_REQUIRED = [{"kind": "delivery_contract", "subject_id": "171",
                       "reason_code": "delivery_contract_required", "detail_pointer": None}]
 CONTRACT_REQUIRED_172 = [{"kind": "delivery_contract", "subject_id": "172",
                           "reason_code": "delivery_contract_required", "detail_pointer": None}]
+DIRECT_CONTRACT_REQUIRED = [describe(item) for item in CONTRACT_REQUIRED]
 
 
 class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
@@ -3136,15 +3138,16 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
     def test_direct_acquisition_asks_for_the_contract_last(self):
         self.project()
         facts = {}
-        for key, value, expected in (("tracker", TRACKER, [{"kind": "tracker"}]),
-                ("forge", NO_PR, [{"kind": "forge_pr", "path": "issue-171-"}]),
+        for key, value, expected in (("tracker", TRACKER, [describe({"kind": "tracker"})]),
+                ("forge", NO_PR, [describe({"kind": "forge_pr", "path": "issue-171-"})]),
                 ("worktree", {"issue": 171, "recorded": None, "candidate": {
-                    "path": self.worktree, "state": "absent"}}, [{"kind": "candidate_worktree"}])):
+                    "path": self.worktree, "state": "absent"}},
+                 [describe({"kind": "candidate_worktree"})])):
             response = self.direct(**facts)
             self.assertEqual((response["kind"], response["requirements"]), ("observe", expected))
             facts[key] = value
         self.assertEqual(self.direct(**facts), {"interface_version": 2, "kind": "observe",
-            "issue": 171, "run_id": None, "requirements": CONTRACT_REQUIRED})
+            "issue": 171, "run_id": None, "requirements": DIRECT_CONTRACT_REQUIRED})
         self.assertEqual(self.direct_runs(171), [])
         other = self.build("contract", self.contract_input(
             worktree=str(self.root / ".worktrees/worktree-issue-171-other")))
@@ -3306,7 +3309,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
         facts = {"tracker": TRACKER, "forge": NO_PR, "worktree": {"issue": 171,
                  "recorded": {"path": self.worktree, "state": "absent"}, "candidate": None}}
         self.assertEqual(self.direct(**facts), {"interface_version": 2, "kind": "observe",
-            "issue": 171, "run_id": "direct-171-000001", "requirements": CONTRACT_REQUIRED})
+            "issue": 171, "run_id": "direct-171-000001", "requirements": DIRECT_CONTRACT_REQUIRED})
         built = self.build("contract", self.contract_input())
         owner = self.direct(delivery_contract=built["contract"],
                             authorization_intents=[built["initial_intent"]], **facts)
@@ -3351,7 +3354,7 @@ class ContractLifecycleTest(BuilderHarness, unittest.TestCase):
                  "recorded": {"path": path, "state": "matching_issue_branch"},
                  "candidate": None}}
         self.assertEqual(self.direct(**facts), {"interface_version": 2, "kind": "observe",
-            "issue": 171, "run_id": "direct-171-000001", "requirements": CONTRACT_REQUIRED})
+            "issue": 171, "run_id": "direct-171-000001", "requirements": DIRECT_CONTRACT_REQUIRED})
         built = self.build("contract", self.contract_input(worktree=path))
         owner = self.direct(delivery_contract=built["contract"],
                             authorization_intents=[built["initial_intent"]], **facts)
