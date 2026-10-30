@@ -6,8 +6,10 @@ matches each named `unverified` `code` row's backticked measurements against the
 (`gh pr checks --required --json name,bucket,link`) and the commands run at `--head`, and applies
 sdd's `code` rule: a failure makes the row `unmet`, all observed passes make it `met`, a matched
 measurement left unobserved leaves it unchanged. Spans matching no observation are the caller's
-`--row` judgment that their measurements are already cited. It prints `{acceptance_state, changed}` and replaces the record
-only when a row changed. Every refusal exits 2 with one stderr line and the record untouched.
+`--row` judgment that their measurements are already cited; ship-issue names only a row with at
+least one uncited measurement, so a fully cited row is never named. It prints
+`{acceptance_state, changed}` and replaces the record only when a row changed. Every refusal
+exits 2 with one stderr line and the record untouched.
 """
 
 import argparse
@@ -305,7 +307,10 @@ def _replace_record(path: Path, text: str, mode: int) -> None:
         raise AcceptanceRecordError(f"cannot write record {path}: {error}") from error
     finally:
         if temporary is not None:
-            Path(temporary).unlink(missing_ok=True)
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
 
 
 def main(argv: Sequence[str] | None = None) -> int:
