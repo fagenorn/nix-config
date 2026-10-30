@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import shlex
 import stat
 import subprocess
 import sys
@@ -3713,6 +3714,40 @@ def direct_terminal(
     }
 
 
+# The orchestrate-control argv that re-enters one run for one issue, and the refusal that names
+# it; from-issue's acquire-direct.md and orchestrate-issues branch on them, so they are literals
+# the skill-contract test reads (issue 475 D8, D10).
+ORCHESTRATED_RESUME = "orchestrate-control start --repo-root {repo_root} {issue} --run-id {run_id}"
+HOLD_REFUSAL = ("issue {issue} is held by orchestrated run {run_id}; resume it through "
+                "orchestrate-issues: {resume}")
+
+
+def orchestrated_resume_command(repo_root: str, issue: str, run_id: str) -> str:
+    """The `orchestrate-control start` command line that re-enters run `run_id` for `issue`
+    alone, each value shell-quoted so a repository path with spaces survives a paste."""
+    return ORCHESTRATED_RESUME.format(repo_root=shlex.quote(repo_root),
+                                      issue=shlex.quote(issue), run_id=shlex.quote(run_id))
+
+
+def refuse_orchestrated_hold(repo_root: Path, issue: int) -> None:
+    """Refuse a direct acquisition of an issue an orchestrated run holds; writes nothing.
+
+    The runs come from the issue's hold pointers, never from listing `workflows`. A run whose
+    ledger is absent, or no longer holds the issue, does not hold it; a ledger that does not
+    validate refuses the call with the reader's error (issue 475 D5, D7, D8).
+    """
+    superpowers = repo_root / ".superpowers"
+    for handle in attempt_store.hold_runs(attempt_store.store_root(superpowers), issue):
+        state_path = superpowers / "workflows" / handle / "state.json"
+        if not require_regular_path(state_path, "workflow state", allow_missing=True):
+            continue
+        entry = read_state_unlocked(state_path, handle)["issues"].get(str(issue))
+        if entry is not None and holds_issue(entry):
+            raise WorkflowError(HOLD_REFUSAL.format(
+                issue=issue, run_id=handle,
+                resume=orchestrated_resume_command(str(repo_root), str(issue), handle)))
+
+
 def refuse_unmigrated_direct(attempts: Path, workflows_dir: Path, issue: int) -> None:
     """Refuse a direct run whose legacy ledger the index does not name yet; writes nothing."""
     if attempt_store.unmigrated_direct(attempts, workflows_dir, issue):
@@ -3729,8 +3764,10 @@ def command_direct_owner(args: argparse.Namespace) -> int:
     attempts = attempt_store.store_root(repo_root / ".superpowers")
     workflows_dir = repo_root / ".superpowers" / "workflows"
     # Refused before anything is created: a legacy ledger no index entry names is bound by
-    # `migrate --apply`, not on the spot (D22).
+    # `migrate --apply`, not on the spot (D22), and an issue an orchestrated run holds is resumed
+    # through that run (issue 475).
     refuse_unmigrated_direct(attempts, workflows_dir, issue)
+    refuse_orchestrated_hold(repo_root, issue)
     ensure_workflows_directory(repo_root)
     issue_lock_path = workflows_dir / f".direct-{issue}.lock"
     issue_lock_descriptor = open_stable_lock(

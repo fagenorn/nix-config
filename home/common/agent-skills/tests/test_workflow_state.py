@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -9205,6 +9206,103 @@ class HoldPointerWriteTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(list(attempt_store.hold_runs(self.store_root, 73)), [self.run_id])
         self.acquire_direct(issue=74)
         self.assertEqual(list(attempt_store.hold_runs(self.store_root, 74)), [])
+
+
+class OrchestratedHoldTest(LifecycleHarness, unittest.TestCase):
+    """Issue 475 R2: a direct acquisition of an issue an orchestrated run holds is refused
+    with the command that re-enters that run, and writes nothing."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.workflow_state = load_source_module(SCRIPT, "workflow_state_test_orchestrated_hold")
+
+    def setUp(self):
+        super().setUp()
+        self.init_run()
+        self.spawn(issue=73, worktree=self.root / "wt-73")
+
+    def expected(self, run_id=None):
+        root = self.root.resolve()
+        run_id = self.run_id if run_id is None else run_id
+        return (f"workflow-state: issue 73 is held by orchestrated run {run_id}; resume it "
+                f"through orchestrate-issues: orchestrate-control start --repo-root {root} 73 "
+                f"--run-id {run_id}\n")
+
+    def open_second_run_holding_73(self):
+        """The first run stops holding 73 and a second orchestrated run spawns it; returns both
+        run ids, the first one's `state.json` path included."""
+        first, first_state = self.run_id, self.state_path
+        self.fail_owner(issue=73, attempt=1, now="2026-08-13T20:05:00Z")
+        self.init_run(creation_key="second-orchestrated-run")
+        second = self.run_id
+        self.spawn(issue=73, worktree=self.root / "wt-73-second")
+        return first, second, first_state
+
+    def test_every_direct_request_for_a_held_issue_is_refused_naming_the_resume_command(self):
+        self.suspend(issue=73, attempt=1, blocked_on="human_gate",
+                     now="2026-08-13T20:05:00Z")
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 73)), [self.run_id])
+        before = self.tree_snapshot()
+        for flags in ({}, {"owner_unavailable": True}, {"new_run": True}):
+            with self.subTest(**flags):
+                refused = self.direct_owner_raw(issue=73, ok=False, **flags)
+                self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                 (2, "", self.expected()))
+                self.assertEqual(self.tree_snapshot(), before)
+        self.assertIsNone(TransactionStore(self.store_root).lookup(
+            attempt_identity.direct_key(73, 1)))
+
+    def test_an_issue_the_run_no_longer_holds_is_acquired_directly(self):
+        self.fail_owner(issue=73, attempt=1, now="2026-08-13T20:05:00Z")
+        self.assertEqual(self.direct_owner(issue=73), {
+            "interface_version": 1, "kind": "observe", "issue": 73,
+            "run_id": None, "requirements": [{"kind": "tracker"}]})
+
+    def test_an_invalid_holding_ledger_fails_loudly(self):
+        self.state_path.write_text("{}\n", encoding="utf-8")
+        refused = self.direct_owner_raw(issue=73, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+        self.assertEqual(refused.stderr, "workflow-state: workflow state refused: unknown_schema: "
+                                         "unsupported workflow state schema version: None\n")
+        self.assertIsNone(TransactionStore(self.store_root).lookup(
+            attempt_identity.direct_key(73, 1)))
+
+    def test_the_resume_command_survives_a_repository_path_with_spaces(self):
+        command = self.workflow_state.orchestrated_resume_command(
+            "/tmp/project with spaces; $(x)", "73", "rel_x")
+        self.assertEqual(shlex.split(command), [
+            "orchestrate-control", "start", "--repo-root", "/tmp/project with spaces; $(x)",
+            "73", "--run-id", "rel_x"])
+
+    def test_a_stale_first_pointer_does_not_hide_a_later_holder(self):
+        first, second, first_state = self.open_second_run_holding_73()
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 73)), [first, second])
+        before = self.tree_snapshot()
+        refused = self.direct_owner_raw(issue=73, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, "", self.expected(second)))
+        self.assertEqual(self.tree_snapshot(), before)
+        first_state.unlink()
+        before = self.tree_snapshot()
+        refused = self.direct_owner_raw(issue=73, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, "", self.expected(second)))
+        self.assertEqual(self.tree_snapshot(), before)
+
+    def test_the_first_of_two_live_holders_is_named(self):
+        first = self.run_id
+        self.suspend(issue=73, attempt=1, blocked_on="human_gate",
+                     now="2026-08-13T20:05:00Z")
+        self.init_run(creation_key="second-orchestrated-run")
+        second = self.run_id
+        self.spawn(issue=73, worktree=self.root / "wt-73-second")
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 73)), [first, second])
+        before = self.tree_snapshot()
+        refused = self.direct_owner_raw(issue=73, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, "", self.expected(first)))
+        self.assertEqual(self.tree_snapshot(), before)
 
 
 if __name__ == "__main__":
