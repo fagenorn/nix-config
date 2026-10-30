@@ -55,4 +55,12 @@ Task 2 — End the turn on a blocker another session owns — `home/common/agent
 - The contract class: per D4, with its region-free site check, its fragment fixture and its shell argument class per D7 (appended by this plan).
 - No ceiling moves, and the dictated wrapping keeps every profile under its ceiling: per D5.
 
+## Standards review provenance
+
+- **Reviewer:** Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), fresh isolated read-only thread.
+- **Base SHA:** be429270; plan reviewed at commit 9720281c.
+- **Focus:** none configured.
+- **Findings:** 0 blocking, 0 should-fix, 0 discussion items; 0 accepted, 0 rejected, 0 deferred. Unknowns: the reviewer ran no verification commands, by contract.
+- **Fallback:** not used.
+
 ---
