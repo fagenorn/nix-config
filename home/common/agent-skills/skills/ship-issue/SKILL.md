@@ -149,7 +149,7 @@ Closes #<num>"
 
 This is the one form the lifecycle guard accepts: one command, those five flags in that order, `<resolved-repository>` the retained `bindings.tracker.repo_slug`, and the body a single double-quoted argument that may span lines but contains no `"`, `$`, backtick or backslash. A body from a file, a heredoc or a command substitution is refused: render it in place.
 
-The `## Acceptance` section always appears. `Acceptance state:` carries Phase 0's effective value, and `Acceptance record:` carries the record's repository-relative path or `none`. With a record, `<acceptance table>` is a Markdown table with the three columns `AC`, `Kind` and `Verdict`, one row per record row, copying its closed tokens; without one, drop that line. On a **hold** drop the `Closes #<num>` line too: a hold body carries no closing keyword (close, closes, closed, fix, fixes, fixed, resolve, resolves or resolved before an issue reference), so the merge cannot close the issue.
+The `## Acceptance` section always appears. `Acceptance state:` carries the effective value, and `Acceptance record:` carries the record's repository-relative path or `none`. With a record, `<acceptance table>` is a Markdown table with the three columns `AC`, `Kind` and `Verdict`, one row per record row, copying its closed tokens; without one, drop that line. On a **hold** drop the `Closes #<num>` line too: a hold body carries no closing keyword (close, closes, closed, fix, fixes, fixed, resolve, resolves or resolved before an issue reference), so the merge cannot close the issue.
 
 Title: the issue title verbatim unless the implementation deviated meaningfully. Under 70 chars; details go in the body.
 
