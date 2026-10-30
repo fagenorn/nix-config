@@ -22,7 +22,7 @@ Spec: `.agents/artifacts/specs/2026-10-30-issue-473-observe-requirement-shapes-d
 - Run every long command, each test command included, in the foreground from the worktree root as `launch-scope exec --repo-root <ledger repo root> --run-id <run-id> --worker-id <worker-id> -- <argv>`, with an explicit timeout above its duration.
 - Commit through `launch-commit --repo-root <ledger repo root> --run-id <run-id> --worker-id <worker-id> -- <git commit args>`. Commits are signed (never disable signing) and end with the session's trailer lines. Never run `just switch`, and never push.
 - Payload discipline: targeted `rg` over whole-file reads, bounded reads around the lines that matter, and test output cut to its tail.
-- **Unit run** (timeout 900 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest -q <test file> [-k <pattern>]... 2>&1 | tail -12'`.
+- **Unit run** (timeout 900 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest -q home/common/agent-skills/tests/<test file> [-k <pattern>]... 2>&1 | tail -12'`. Members name `<test file>` by basename (`test_workflow_state.py`); it always expands to that `home/common/agent-skills/tests/` path, since a bare basename fails at module discovery from the worktree root.
 - **Build** (timeout 1800 s): `bash -c 'set -o pipefail; just build 2>&1 | tail -3'`.
 - **Budget** (timeout 600 s): `bash -c 'set -o pipefail; just agent-instruction-budget 2>&1 | tail -3'`; it prints `check: pass`.
 - Final gate (sdd, once on the final head): `just build` and `just agent-workflow-tests` (timeout 3600 s each).
@@ -76,5 +76,12 @@ Task 5 — Skill text and README — `home/common/agent-skills/skills/from-issue
   - the Task 5 replacements shrink `acquire-direct.md` by 125 bytes and `SKILL.md` by 4 bytes;
   - `test_workflow_skill_contracts.py` passes with no `PYTHONPATH`.
 - With every task's dictated code and text applied to that scratch tree, each task's verification passed. `just agent-workflow-tests` passed with 106 of 106 members (about 19 minutes), and `just build` passed on darwin.
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only mode, thread 01a18ca1-da11-7130-8a12-01d21800342e; no fallback.
+- Base SHA: 8212d8fb8e933120db864339e9a8d0d174462268. Focus: none.
+- Findings: 0 blocking, 1 should-fix, 0 discussion. Accepted 1, rejected 0, deferred 0.
+- PR473-01 (accepted): the Unit run template now expands each member's basename to its `home/common/agent-skills/tests/` path; verified that a bare basename fails at module discovery from the worktree root.
 
 ---
