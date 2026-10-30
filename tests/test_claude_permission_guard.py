@@ -61,7 +61,7 @@ if (
     and argv[0:2] == ["pr", "view"]
     and argv[3] == "--repo"
     and argv[5] == "--json"
-    and argv[6] == "state,baseRefName,headRefName,url,statusCheckRollup"
+    and argv[6] == "state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup"
 ):
     stage, number, slug, branch = "pr", argv[2], argv[4], "main"
 elif len(argv) == 2 and argv[0] == "api":
@@ -93,6 +93,8 @@ if stage == "pr":
     default = (
         '{"state":"OPEN","baseRefName":"' + branch + '",'
         '"headRefName":"issue-' + number + '-topic",'
+        '"headRefOid":"d4d9acc0505c73305b3e0ced029db43100bc0e8a",'
+        '"mergeStateStatus":"CLEAN",'
         '"url":"https://github.com/' + slug + "/pull/" + number + '",'
         '"statusCheckRollup":[{"__typename":"CheckRun",'
         '"status":"COMPLETED","conclusion":"SUCCESS"}]}'
@@ -927,7 +929,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "--merge --delete-branch",
             cwd=repo,
             env={"FAKE_PR_JSON":
-                 '{"state":"OPEN","baseRefName":"dev","headRefName":"issue-42-topic",'
+                 '{"state":"OPEN","mergeStateStatus":"CLEAN","baseRefName":"dev","headRefName":"issue-42-topic",'
                  '"url":"https://github.com/elevenyellow/nodocom/pull/42"}',
                  "FAKE_PROTECTION_MODE": "nonzero"},
         )
@@ -941,14 +943,14 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         merge = "gh pr merge 7 --repo elevenyellow/nodocom --merge --delete-branch"
         dev_pr = {
             "FAKE_PROTECTION_MODE": "nonzero",
-            "FAKE_PR_JSON": '{"state":"OPEN","baseRefName":"dev","headRefName":"issue-7-topic",'
+            "FAKE_PR_JSON": '{"state":"OPEN","mergeStateStatus":"CLEAN","baseRefName":"dev","headRefName":"issue-7-topic",'
                             '"url":"https://github.com/elevenyellow/nodocom/pull/7"}',
         }
         allowed = self.run_guard(merge, cwd=repo, env=dev_pr)
         self.assertEqual(0, allowed.returncode, allowed.stderr)
         main_pr = {
             "FAKE_PROTECTION_MODE": "nonzero",
-            "FAKE_PR_JSON": '{"state":"OPEN","baseRefName":"main","headRefName":"issue-7-topic",'
+            "FAKE_PR_JSON": '{"state":"OPEN","mergeStateStatus":"CLEAN","baseRefName":"main","headRefName":"issue-7-topic",'
                             '"url":"https://github.com/elevenyellow/nodocom/pull/7"}',
         }
         blocked = self.run_guard(merge, cwd=repo, env=main_pr)
@@ -961,10 +963,18 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     # the guard demands exactly that PR shape plus a fully green rollup.
     # ------------------------------------------------------------------
 
+    # The PR head commit a merge may pin (issue 402 D10), which must be the PR's
+    # headRefOid (issue 476 D3): the fake gh's default head and RELEASE_PR's.
+    HEAD_SHA = "d4d9acc0505c73305b3e0ced029db43100bc0e8a"
+    # A well-spelled commit that is no fixture PR's head.
+    OTHER_SHA = "0123456789abcdef0123456789abcdef01234567"
+
     RELEASE_PR = {
         "state": "OPEN",
         "baseRefName": "main",
         "headRefName": "dev",
+        "headRefOid": HEAD_SHA,
+        "mergeStateStatus": "CLEAN",
         "url": "https://github.com/elevenyellow/nodocom/pull/1484",
         "statusCheckRollup": [
             {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"},
@@ -1075,9 +1085,6 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertEqual(2, result.returncode)
                 self.assertIn("PR predicate failed", result.stderr)
 
-    # The PR head commit a merge may pin (issue 402 D10): the guard checks only its spelling.
-    HEAD_SHA = "d4d9acc0505c73305b3e0ced029db43100bc0e8a"
-
     def test_merge_takes_an_optional_head_commit_flag(self):
         """Issue 402 AC1, D10: `--match-head-commit <40 lowercase hex>` stands after
         `--subject` and before `--delete-branch`, optional in both arms."""
@@ -1087,6 +1094,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         merge = "gh pr merge 2342 --repo fagenorn/nix-config --merge"
         feature_into_dev = {"FAKE_PR_JSON": json.dumps({
             "state": "OPEN", "baseRefName": "dev", "headRefName": "issue-2342-topic",
+            "headRefOid": sha, "mergeStateStatus": "CLEAN",
             "url": f"https://github.com/{NODO}/pull/2342", "statusCheckRollup": []})}
         for command, cwd, env in (
             (f"{merge} --match-head-commit {sha} --delete-branch", repo, None),
@@ -1242,6 +1250,147 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         )
         self.assertEqual(2, result.returncode)
         self.assertIn("lifecycle guard: unexpected failure:", result.stderr)
+
+    # ------------------------------------------------------------------
+    # Mergeability (issue 476): each merge arm, after its own shape judgment
+    # and before its first gate, refuses a PR behind its base and then a
+    # --match-head-commit that is not the PR's head commit.
+    # ------------------------------------------------------------------
+
+    BEHIND = ("the PR is behind its base {base}; repair: sync the branch with {base}, "
+              "push it and wait for its required checks before merging")
+
+    def mergeability_paths(self):
+        """The three paths the check binds (issue 476 D1), each (name, cwd, command, facts,
+        env): `command` takes the optional `--match-head-commit` group through `{pin}`,
+        and `facts` is a PR payload every check passes."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        clean = {"headRefOid": self.HEAD_SHA, "mergeStateStatus": "CLEAN"}
+        return (
+            ("feature into main", repo,
+             "gh pr merge 1 --repo fagenorn/nix-config --merge{pin} --delete-branch",
+             {"state": "OPEN", "baseRefName": "main", "headRefName": "issue-1-topic",
+              "url": "https://github.com/fagenorn/nix-config/pull/1", **clean}, {}),
+            ("feature into dev", nodo,
+             f"gh pr merge 7 --repo {NODO} --merge{{pin}} --delete-branch",
+             {"state": "OPEN", "baseRefName": "dev", "headRefName": "issue-7-topic",
+              "url": f"https://github.com/{NODO}/pull/7", **clean},
+             {"FAKE_PROTECTION_MODE": "nonzero"}),
+            ("release", nodo, f"gh pr merge 1484 --repo {NODO} --merge{{pin}}",
+             dict(self.RELEASE_PR), {"FAKE_PROTECTION_MODE": "nonzero"}),
+        )
+
+    def test_a_wrong_head_commit_is_refused_naming_the_pr_head(self):
+        """Issue 476 AC1, D3, D5: on every path the check binds, a --match-head-commit
+        that is not the PR's headRefOid is refused with the actual head; the PR's own head
+        passes."""
+        for name, cwd, command, facts, env in self.mergeability_paths():
+            env = {**env, "FAKE_PR_JSON": json.dumps(facts)}
+            with self.subTest(path=name, pin="the PR head"):
+                result = self.run_guard(
+                    command.format(pin=f" --match-head-commit {self.HEAD_SHA}"), cwd=cwd, env=env)
+                self.assertEqual(0, result.returncode, result.stderr)
+            with self.subTest(path=name, pin="another commit"):
+                line = self.refusal_line(self.run_guard(
+                    command.format(pin=f" --match-head-commit {self.OTHER_SHA}"), cwd=cwd,
+                    env=env))
+                self.assertEqual(
+                    f"lifecycle guard: unsafe merge: --match-head-commit {self.OTHER_SHA} is not "
+                    f"the PR head commit {self.HEAD_SHA}; merge only a head you reviewed", line)
+
+    def test_a_pr_behind_its_base_is_refused_naming_the_sync(self):
+        """Issue 476 AC2, D1, D2, D5: on every path the check binds, a BEHIND PR is refused
+        with the sync recovery, ahead of the head comparison; other merge states pass."""
+        for name, cwd, command, facts, env in self.mergeability_paths():
+            behind = {**env, "FAKE_PR_JSON": json.dumps({**facts, "mergeStateStatus": "BEHIND"})}
+            for pin in ("", f" --match-head-commit {self.HEAD_SHA}",
+                        f" --match-head-commit {self.OTHER_SHA}"):
+                with self.subTest(path=name, pin=pin):
+                    line = self.refusal_line(self.run_guard(
+                        command.format(pin=pin), cwd=cwd, env=behind))
+                    self.assertEqual("lifecycle guard: unsafe merge: "
+                                     + self.BEHIND.format(base=facts["baseRefName"]), line)
+            for state in ("UNKNOWN", "BLOCKED", "DIRTY", "UNSTABLE"):
+                with self.subTest(path=name, state=state):
+                    result = self.run_guard(
+                        command.format(pin=f" --match-head-commit {self.HEAD_SHA}"), cwd=cwd,
+                        env={**env, "FAKE_PR_JSON": json.dumps(
+                            {**facts, "mergeStateStatus": state})})
+                    self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_an_arm_refusal_comes_before_the_mergeability_check(self):
+        """Issue 476 D1: a PR whose head no arm admits keeps its arm refusal, whatever its
+        merge state and head commit."""
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        env = {"FAKE_PROTECTION_MODE": "nonzero", "FAKE_PR_JSON": json.dumps({
+            "state": "OPEN", "baseRefName": "dev", "headRefName": "main",
+            "headRefOid": self.HEAD_SHA, "mergeStateStatus": "BEHIND",
+            "url": f"https://github.com/{NODO}/pull/7", "statusCheckRollup": []})}
+        merge = f"gh pr merge 7 --repo {NODO} --merge --match-head-commit {self.OTHER_SHA}"
+        for command, problem in (
+            (merge + " --delete-branch", "--delete-branch would delete the permanent branch main"),
+            (merge, "--delete-branch may be omitted only when merging dev into main; this PR "
+                    "merges main into dev"),
+        ):
+            with self.subTest(command=command):
+                line = self.refusal_line(self.run_guard(command, cwd=nodo, env=env))
+                self.assertEqual(f"lifecycle guard: unsafe merge: {problem}", line)
+
+    def test_the_release_mergeability_check_precedes_the_rollup_predicate(self):
+        """Issue 476 D1 (Phase-5 review PR476-S1): on the release arm the mergeability
+        refusal wins over a rollup that is not entirely green."""
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        failing = [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE"}]
+        merge = f"gh pr merge 1484 --repo {NODO} --merge"
+        for label, rollup in (("empty", []), ("failing", failing)):
+            for check, command, change, problem in (
+                ("behind", merge, {"mergeStateStatus": "BEHIND"},
+                 self.BEHIND.format(base="main")),
+                ("wrong head", f"{merge} --match-head-commit {self.OTHER_SHA}", {},
+                 f"--match-head-commit {self.OTHER_SHA} is not the PR head commit "
+                 f"{self.HEAD_SHA}; merge only a head you reviewed"),
+            ):
+                with self.subTest(rollup=label, check=check):
+                    line = self.refusal_line(self.run_guard(command, cwd=nodo, env=self.release_env(
+                        statusCheckRollup=rollup, **change)))
+                    self.assertEqual(f"lifecycle guard: unsafe merge: {problem}", line)
+
+    def test_an_unreadable_merge_state_or_head_commit_is_refused(self):
+        """Issue 476 D4: a fact the check needs and cannot read fails closed; without
+        --match-head-commit the head commit is neither read nor demanded."""
+        repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
+        merge = "gh pr merge 1 --repo fagenorn/nix-config --merge"
+        bare = f"{merge} --delete-branch"
+        pinned = f"{merge} --match-head-commit {self.HEAD_SHA} --delete-branch"
+        facts = {"state": "OPEN", "baseRefName": "main", "headRefName": "issue-1-topic",
+                 "headRefOid": self.HEAD_SHA, "mergeStateStatus": "CLEAN",
+                 "url": "https://github.com/fagenorn/nix-config/pull/1"}
+
+        def env(**change):
+            payload = {key: value for key, value in {**facts, **change}.items()
+                       if value is not ABSENT}
+            return {"FAKE_PR_JSON": json.dumps(payload)}
+
+        state, head = "cannot read the PR merge state", "cannot read the PR head commit"
+        for label, command, change, problem in (
+            ("state missing", pinned, {"mergeStateStatus": ABSENT}, state),
+            ("state null", bare, {"mergeStateStatus": None}, state),
+            ("state number", bare, {"mergeStateStatus": 7}, state),
+            ("state empty", bare, {"mergeStateStatus": ""}, state),
+            ("head missing", pinned, {"headRefOid": ABSENT}, head),
+            ("head null", pinned, {"headRefOid": None}, head),
+            ("head short", pinned, {"headRefOid": self.HEAD_SHA[:7]}, head),
+            ("head uppercase", pinned, {"headRefOid": self.HEAD_SHA.upper()}, head),
+        ):
+            with self.subTest(fact=label):
+                line = self.refusal_line(self.run_guard(command, cwd=repo, env=env(**change)))
+                self.assertEqual(f"lifecycle guard: unsafe merge: {problem}", line)
+        for label, change in (("missing", {"headRefOid": ABSENT}),
+                              ("short", {"headRefOid": self.HEAD_SHA[:7]})):
+            with self.subTest(head=label, pin="none"):
+                result = self.run_guard(bare, cwd=repo, env=env(**change))
+                self.assertEqual(0, result.returncode, result.stderr)
 
     # ------------------------------------------------------------------
     # Forge adapter arms (#124): the tag push and the release creation the
@@ -1605,6 +1754,16 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             (f"gh pr merge 1484 --repo {NODO} --merge", nodo,
              self.release_env(statusCheckRollup=[]),
              "unsafe merge: the PR's check rollup is not entirely green"),
+            (merge.replace(" --delete-branch", f" --match-head-commit {self.OTHER_SHA} "
+                           "--delete-branch"), repo, None,
+             f"unsafe merge: --match-head-commit {self.OTHER_SHA} is not the PR head commit "
+             f"{self.HEAD_SHA}; merge only a head you reviewed"),
+            (merge, repo, {"FAKE_PR_JSON": json.dumps({
+                "state": "OPEN", "baseRefName": "main", "headRefName": "issue-2342-topic",
+                "headRefOid": self.HEAD_SHA, "mergeStateStatus": "BEHIND",
+                "url": "https://github.com/fagenorn/nix-config/pull/2342"})},
+             "unsafe merge: the PR is behind its base main; repair: sync the branch with main, "
+             "push it and wait for its required checks before merging"),
         ):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=cwd, env=env)
@@ -1620,6 +1779,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         repo = self.make_repo("git@github.com:fagenorn/nix-config.git")
         feature_into_dev = {"FAKE_PR_JSON": json.dumps({
             "state": "OPEN", "baseRefName": "dev", "headRefName": "issue-2342-topic",
+            "headRefOid": self.HEAD_SHA, "mergeStateStatus": "CLEAN",
             "url": f"https://github.com/{NODO}/pull/2342", "statusCheckRollup": []}),
             "FAKE_PROTECTION_MODE": "nonzero"}
         merge = f"gh pr merge 2342 --repo {NODO} --merge --match-head-commit {self.HEAD_SHA}"
@@ -2368,6 +2528,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertEqual(0, create.returncode, create.stderr)
         feature_pr = json.dumps({"state": "OPEN", "baseRefName": "dev",
                                  "headRefName": "issue-7-topic",
+                                 "mergeStateStatus": "CLEAN",
                                  "url": f"https://github.com/{slug}/pull/7"})
         feature = self.run_guard(
             f"gh pr merge 7 --repo {slug} --merge --delete-branch", cwd=repo, guard_args=args,

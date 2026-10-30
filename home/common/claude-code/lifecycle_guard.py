@@ -217,7 +217,8 @@ FORM_TABLE = {
         "scrub_prefix": False,
     },
 }
-# The value `--match-head-commit` takes: a full commit SHA (issue 402 D10).
+# The value `--match-head-commit` takes: a full commit SHA (issue 402 D10), which
+# must also be the PR's head commit (issue 476 D3).
 HEAD_COMMIT = re.compile(r"[0-9a-f]{40}")
 
 Literal = namedtuple("Literal", "word")
@@ -2324,7 +2325,8 @@ def validate_merge(text, context, compiled):
         pr_lookup = subprocess.run(
             [
                 context.gh_bin, "pr", "view", number, "--repo", repository,
-                "--json", "state,baseRefName,headRefName,url,statusCheckRollup",
+                "--json",
+                "state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup",
             ],
             capture_output=True,
             text=True,
@@ -2374,7 +2376,8 @@ def validate_merge(text, context, compiled):
         return refuse("merge", f"PR base {base} is not an authorized base")
 
     if not delete_branch:
-        return validate_release_merge(pr_facts, base, integration_base, context, compiled)
+        return validate_release_merge(
+            pr_facts, base, integration_base, head_commit, context, compiled)
 
     # The feature arm deletes the PR's head branch, so the head must be
     # disposable: never the default branch, never the declared integration
@@ -2393,6 +2396,10 @@ def validate_merge(text, context, compiled):
         ):
             return refuse("merge", permanent, accepted_forms(compiled, context, ["release"]))
         return refuse("merge", permanent)
+
+    problem = mergeability_problem(pr_facts, base, head_commit)
+    if problem is not None:
+        return refuse("merge", problem)
 
     # A declared integration branch is deliberately exempt from the
     # protection demand: it is the development-pace branch, and its CI
@@ -2442,7 +2449,33 @@ def validate_merge(text, context, compiled):
     return 0
 
 
-def validate_release_merge(pr_facts, base, integration_base, context, compiled):
+def mergeability_problem(pr_facts, base, head_commit):
+    """Why the PR's forge state refuses this merge, or None (issue 476 D1-D5).
+
+    `pr_facts` is the PR lookup's object, `base` its read-back base branch and
+    `head_commit` the command's `--match-head-commit` value, None without the
+    flag. A merge state of exactly `BEHIND` is judged first; the head commit is
+    read and compared only when the flag is present. Every other merge state
+    passes: GitHub keeps its own up-to-date rule and its atomic head match.
+    """
+    state = pr_facts.get("mergeStateStatus")
+    if not isinstance(state, str) or not state:
+        return "cannot read the PR merge state"
+    if state == "BEHIND":
+        return (f"the PR is behind its base {base}; repair: sync the branch with {base}, "
+                "push it and wait for its required checks before merging")
+    if head_commit is None:
+        return None
+    head = pr_facts.get("headRefOid")
+    if not isinstance(head, str) or HEAD_COMMIT.fullmatch(head) is None:
+        return "cannot read the PR head commit"
+    if head != head_commit:
+        return (f"--match-head-commit {head_commit} is not the PR head commit {head}; "
+                "merge only a head you reviewed")
+    return None
+
+
+def validate_release_merge(pr_facts, base, integration_base, head_commit, context, compiled):
     """The release arm: the integration branch promoted into the default branch.
 
     Its head is permanent, so the merge may omit `--delete-branch`, and in
@@ -2467,6 +2500,9 @@ def validate_release_merge(pr_facts, base, integration_base, context, compiled):
             return refuse("merge", f"missing --delete-branch: it {omitted}",
                           accepted_forms(compiled, context, ["feature"]))
         return refuse("merge", f"--delete-branch {omitted}")
+    problem = mergeability_problem(pr_facts, base, head_commit)
+    if problem is not None:
+        return refuse("merge", problem)
     try:
         rollup_predicate = subprocess.run(
             [
