@@ -10,6 +10,10 @@ in
 {
   nixpkgs.config.allowUnfree = true;
 
+  # Geist Serif on every host. On darwin this list merges with darwin-common.nix's
+  # FiraCode entries (issue 486 D2).
+  fonts.packages = [ (import ../../lib/geist-serif.nix { inherit pkgs; }) ];
+
   # Pre-built native Codex CLI binaries for Linux and macOS.
   nix.settings = {
     extra-substituters = [ "https://codex-cli.cachix.org" ];
