@@ -53,3 +53,9 @@ Task 1 — Geist Serif package and all-hosts registration — `lib/geist-serif.n
 - Planning ran a trial on `a4428457` in a scratch worktree, then discarded it. It used the exact file text in Task 1. The package built four TTFs, 528 KB. When a member name did not match, `unzip` exited 11. The three `fonts.packages` evals printed `["geist-serif-1.9.0"]` on anis-desktop, and `["fira-code-6.2","nerd-fonts-fira-code-3.4.0+6.2","geist-serif-1.9.0"]` on mbp and on eleven-m5. The AC3 eval printed its expected line on mbp and on anis-desktop. Both darwin system closures held `GeistSerif-Heart.ttf` under `fonts/Library/Fonts/Nix Fonts/`. At base, anis-desktop's `fonts.packages` evaluated to `[]`.
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), thread `01a18e5a-60e7-7333-b333-3162093e9e96`, fresh isolated read-only mode, no focus.
+- Base SHA 07f8981308f56c9ce136773868151a73a2e1da9b; reviewed plan head a4c460c0. No fallback.
+- Findings: 0 Blocking, 0 Should fix; Discussion only (AC4/AC5 pending the owner's switch per D6). Accepted 0, rejected 0, deferred 0.
