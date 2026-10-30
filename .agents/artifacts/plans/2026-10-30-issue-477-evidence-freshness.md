@@ -64,3 +64,7 @@ Task 2 — sdd freshness guidance runs the verb — `home/common/agent-skills/sk
 - A planning trial ran at `2a5a02d5` in a scratch worktree, then discarded. With Task 1's tests and no implementation, `tests/test_verified_tree.py` ran 41 tests with `FAILED (failures=16)` (the ten new tests; the refusal test fails in all seven subtests because argparse prints two stderr lines). With Task 1 applied it ran 41 tests, `OK`. With both tasks applied, `test_workflow_skill_contracts.py` gave `OK (skipped=1)` (155 tests; without the guidance edits the pin test failed for both documents), `test_dispatch_contracts.py` gave `OK (skipped=1)`, the Budget run gave `check: pass`, the documents measured 12882 and 8950 bytes against 12932 and 8962 at base, and `just agent-workflow-tests` passed 106 of 106 members.
 
 ---
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh, job 01a18dd1-bc0b-7581-a7a5-4e18e894d9f7), isolated read-only mode, no focus, base `79cf7e3f`, no fallback. Findings: 2 accepted, 0 rejected, 0 deferred. PR477-01 (Blocking, `fresh` claimed to write nothing while `current_tree` adds Git objects): accepted with the footprint restated as "changes no file" in Task 1's invariant, docstring, README sentence and test name, per D11, not with an isolated object directory. PR477-02 (Should fix, refusal tests checked only the stderr line count): accepted. Task 1's refusal test asserts each exact D9 message and adds a both-invalid case that pins the validation order.

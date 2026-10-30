@@ -17,7 +17,7 @@ Spec § The `fresh` verb and § Documentation of the verb. Rests on D1, D2, D3, 
 
 **Invariants:**
 - `status` is `fresh` exactly when `changed` is empty; `changed` is the tree diff minus the one record path, nothing else excluded (D2, D8).
-- `fresh` never calls `resolve_project`, takes no lock and writes nothing: the real index, `git status --porcelain`, `verified-tree.json` and `verified-tree-plan.json` are byte-identical after it.
+- `fresh` never calls `resolve_project`, takes no lock and changes no file: the real index, `git status --porcelain`, `verified-tree.json` and `verified-tree-plan.json` are byte-identical after it. Like `check`, building the current tree may add Git objects to the object database (D11).
 - Every refusal exits 2 with empty stdout and exactly one `verified-tree: <message>` stderr line, in the order of D9.
 - `check` and `record` behave exactly as at base; the 31 existing tests still pass.
 
@@ -138,7 +138,7 @@ Append these methods at the end of `VerifiedTreeTest`, after `test_usage_errors_
         self.assertEqual((answer["changed"], answer["status"]),
                          ([".agents/project.json"], "stale"))
 
-    def test_fresh_writes_nothing(self):
+    def test_fresh_changes_no_file(self):
         self.verify_and_record()
         self.check()
         (self.repo / "tinytask/cli.py").write_text("# edited\n")
@@ -154,20 +154,31 @@ Append these methods at the end of `VerifiedTreeTest`, after `test_usage_errors_
     def test_fresh_refuses_a_non_commit_or_a_record_outside_the_worktree(self):
         (self.repo / "link").symlink_to(self.scratch)
         head = self.git("rev-parse", "HEAD")
+        tree = self.git("rev-parse", "HEAD^{tree}")
+        outside = str(self.scratch / "elsewhere.md")
+        def since(value):
+            return f"verified-tree: --since {value} names no commit\n"
+        def record(value):
+            return f"verified-tree: --record {value} is not a path inside the worktree {self.repo}\n"
         cases = {
-            "unknown revision": ("--since", "no-such-ref", "--record", RECORD),
-            "option-shaped revision": ("--since=--all", "--record", RECORD),
-            "a tree, not a commit": ("--since", self.git("rev-parse", "HEAD^{tree}"),
-                                     "--record", RECORD),
-            "absolute path outside": ("--since", head, "--record",
-                                      str(self.scratch / "elsewhere.md")),
-            "relative path outside": ("--since", head, "--record", "../elsewhere.md"),
-            "symlink out of the worktree": ("--since", head, "--record", "link/r.md"),
-            "the top level itself": ("--since", head, "--record", "."),
+            "unknown revision": (("--since", "no-such-ref", "--record", RECORD),
+                                 since("no-such-ref")),
+            "option-shaped revision": (("--since=--all", "--record", RECORD), since("--all")),
+            "a tree, not a commit": (("--since", tree, "--record", RECORD), since(tree)),
+            "absolute path outside": (("--since", head, "--record", outside), record(outside)),
+            "relative path outside": (("--since", head, "--record", "../elsewhere.md"),
+                                      record("../elsewhere.md")),
+            "symlink out of the worktree": (("--since", head, "--record", "link/r.md"),
+                                            record("link/r.md")),
+            "the top level itself": (("--since", head, "--record", "."), record(".")),
+            "both invalid: --since is checked first": (
+                ("--since", "no-such-ref", "--record", "../elsewhere.md"), since("no-such-ref")),
         }
-        for name, argv in cases.items():
+        for name, (argv, stderr) in cases.items():
             with self.subTest(name):
-                self.assert_exit_2(self.run_tool("fresh", *argv))
+                done = self.run_tool("fresh", *argv)
+                self.assert_exit_2(done)
+                self.assertEqual(done.stderr, stderr)
                 self.assertFalse(self.record_path().exists())
                 self.assertFalse(self.plan_path().exists())
 ```
@@ -175,7 +186,7 @@ Append these methods at the end of `VerifiedTreeTest`, after `test_usage_errors_
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run (timeout 600 s): `bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest tests/test_verified_tree.py 2>&1 | tail -3'`
-Expected: `Ran 41 tests`, `FAILED (failures=16)`: the ten new tests fail (the refusal test in all seven subtests, because argparse rejects the unknown verb with a two-line stderr), and the renamed and extended usage tests still pass.
+Expected: `Ran 41 tests`, `FAILED (failures=17)`: the ten new tests fail (the refusal test in all eight subtests, because argparse rejects the unknown verb with a two-line stderr), and the renamed and extended usage tests still pass.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -237,8 +248,8 @@ paths that differ between that commit's tree and the current tree, in the same
 `git diff-tree -r --no-renames` form as the changed paths above, drops the
 record's repository-relative path, and exits 0 printing {"changed": ["<path>",
 ...], "since": "<commit sha>", "status": "fresh" | "stale", "tree": "<tree
-id>"}, `fresh` exactly when `changed` is empty. It reads no project contract,
-takes no lock and writes nothing.
+id>"}, `fresh` exactly when `changed` is empty. It reads no project contract
+and takes no lock.
 ```
 
    Change `Neither verb changes the real index, HEAD or` to `No verb changes the real index, HEAD or`. Replace the docstring's last two lines (`consumed). argparse's usage errors also exit 2:` / `neither verb takes a verification id.`) with:
@@ -254,7 +265,7 @@ also exit 2: no verb takes a verification id.
 6. In `python/README.md` § `verified-tree`, change `(#263). Both verbs read the worktree's own` to `` (#263). `check` and `record` read the worktree's own ``, and `both verbs touch the plan under an exclusive lock` to `` `check` and `record` touch the plan under an exclusive lock ``. Append this sentence to the end of that paragraph, after one space:
 
 ```text
-`verified-tree fresh --since <commit> --record <path>` (issue 477) judges evidence measured at a commit: it prints `{changed, since, status, tree}`, where `changed` lists the paths that differ between that commit's tree and the current tree, the acceptance record's own path excluded, and `status` is `fresh` only when `changed` is empty; it reads no contract and writes nothing, and sdd's final review and conformance reviewer run it instead of judging a measured surface by hand.
+`verified-tree fresh --since <commit> --record <path>` (issue 477) judges evidence measured at a commit: it prints `{changed, since, status, tree}`, where `changed` lists the paths that differ between that commit's tree and the current tree, the acceptance record's own path excluded, and `status` is `fresh` only when `changed` is empty; it reads no contract and takes no lock, and sdd's final review and conformance reviewer run it instead of judging a measured surface by hand.
 ```
 
 - [ ] **Step 4: Verify**
