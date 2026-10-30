@@ -3734,16 +3734,22 @@ def refuse_orchestrated_hold(repo_root: Path, issue: int) -> None:
     """Refuse a direct acquisition of an issue an orchestrated run holds; writes nothing.
 
     The runs come from the issue's hold pointers, never from listing `workflows`. A run whose
-    ledger is absent, or no longer holds the issue, does not hold it; a ledger that does not
-    validate refuses the call with the reader's error (issue 475 D5, D7, D8).
+    ledger is absent, no longer holds the issue, or has delivered it does not hold it: a
+    delivery-complete issue has nothing left to resume, whatever state the record that
+    finished it keeps. A ledger is read in its upgraded shape, since a migration cut before
+    its publish leaves a pointer naming a ledger still stored at its legacy schema; one that
+    does not validate refuses the call with the reader's error (issue 475 D5, D7, D8).
     """
+    runtime = _delivery()
     superpowers = repo_root / ".superpowers"
     for handle in attempt_store.hold_runs(attempt_store.store_root(superpowers), issue):
         state_path = superpowers / "workflows" / handle / "state.json"
         if not require_regular_path(state_path, "workflow state", allow_missing=True):
             continue
-        entry = read_state_unlocked(state_path, handle)["issues"].get(str(issue))
-        if entry is not None and holds_issue(entry):
+        state = read_state_unlocked(state_path, handle, upgraded=True)
+        entry = state["issues"].get(str(issue))
+        if (entry is not None and holds_issue(entry)
+                and not runtime.delivery_complete(entry)):
             raise WorkflowError(HOLD_REFUSAL.format(
                 issue=issue, run_id=handle,
                 resume=orchestrated_resume_command(str(repo_root), str(issue), handle)))
@@ -4437,23 +4443,26 @@ def command_finish_delivery(args):
     return 0
 
 
-def read_state_unlocked(state_path: Path, run_id: str) -> dict[str, Any]:
+def read_state_unlocked(state_path: Path, run_id: str, *, upgraded: bool = False
+                        ) -> dict[str, Any]:
     """Read one run's state and validate it without a lock or a write (#193 D4).
 
     check-launch and the build-delivery ledger lookup share this reader. No
     lock: `atomic_write_state` publishes by `os.replace`, so an unlocked reader
     sees either the whole prior file or the whole new one, never a torn one — and
     taking the lock would mean creating `state.lock`, which is a write. The
-    document is checked by `attempt_store.check_unlocked` and returned as stored.
+    document is checked by `attempt_store.check_unlocked` and returned as stored,
+    or with `upgraded` as that check returns it: a legacy ledger in its upgraded
+    shape, as its next locked write would read it.
     """
     try:
         raw_state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise WorkflowError("invalid workflow state") from error
-    attempt_store.check_unlocked(
+    checked = attempt_store.check_unlocked(
         state_path, raw_state, run_id=run_id,
         upgrade=partial(upgrade_state, migration_contracts={}), validate=validate_state)
-    return raw_state
+    return checked if upgraded else raw_state
 
 
 def _stored_contract_digest(raw_state: object, issue: str) -> object:

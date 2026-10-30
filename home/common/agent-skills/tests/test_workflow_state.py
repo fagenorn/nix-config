@@ -9304,6 +9304,46 @@ class OrchestratedHoldTest(LifecycleHarness, unittest.TestCase):
                          (2, "", self.expected(first)))
         self.assertEqual(self.tree_snapshot(), before)
 
+    def test_a_legacy_ledger_behind_a_pointer_is_read_upgraded(self):
+        """A migration cut between `settle_holds` and the publish leaves a pointer naming a
+        ledger still stored as schema 2, which has no `delivery_remainders`: the hold is read
+        from its upgraded state and refuses as usual."""
+        held = self.read_state()
+        first = self.run_id
+        self.fail_owner(issue=73, attempt=1, now="2026-08-13T20:05:00Z")
+        self.install_legacy(held, "orchestrate-73", 2)
+        workflow = load_source_module(SCRIPT, "workflow_state_test_cut_migration")
+        with mock.patch.object(workflow, "atomic_write_state", side_effect=OSError("cut")):
+            with self.assertRaises(OSError):
+                workflow.transact(str(self.root), self.run_id,
+                                  lambda current: (current, False), migration_contracts={})
+        stored = self.read_state()
+        self.assertEqual(stored["schema_version"], 2)
+        self.assertNotIn("delivery_remainders", stored["issues"]["73"])
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 73)),
+                         [first, "orchestrate-73"])
+        before = self.tree_snapshot()
+        refused = self.direct_owner_raw(issue=73, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, "", self.expected("orchestrate-73")))
+        self.assertEqual(self.tree_snapshot(), before)
+
+
+if DeliveredControlHarness is not None:
+    class DeliveredHoldTest(DeliveredControlHarness, unittest.TestCase):
+        """Issue 475 R2: a delivered issue is not held, even while the remainder that delivered
+        it is still recorded `active`."""
+
+        def test_a_delivered_issue_with_an_active_remainder_is_not_refused(self):
+            self.deliver_through_remainder()
+            _, remainders = self.records(DELIVERED)
+            self.assertEqual(remainders[-1]["state"], "active")
+            store = attempt_store.store_root(self.root / ".superpowers")
+            run_id = self.ledger.parent.name
+            self.assertEqual(list(attempt_store.hold_runs(store, DELIVERED)), [run_id])
+            module = load_source_module(SCRIPT, "workflow_state_test_delivered_hold")
+            self.assertIsNone(module.refuse_orchestrated_hold(self.root, DELIVERED))
+
 
 if __name__ == "__main__":
     unittest.main()

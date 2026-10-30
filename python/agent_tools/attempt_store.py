@@ -390,23 +390,22 @@ def locked_read(state_path: Path, document: Any, *, run_id: str, upgrade: Callab
 
 
 def check_unlocked(state_path: Path, document: Any, *, run_id: str, upgrade: Callable[..., dict],
-                   validate: Callable[..., dict]) -> None:
-    """Check a ledger without a lock or a write: schema 10 against its run transaction, schema
-    8 or 9 the same way and as the schema-10 candidate its next write binds, an older one
-    through `upgrade`, `plan_migration` and `plan_custody`. No store or directory is
-    created."""
+                   validate: Callable[..., dict]) -> dict[str, Any]:
+    """Check a ledger without a lock or a write and return it as checked: schema 10 against
+    its run transaction, schema 8 or 9 the same way and as the schema-10 candidate its next
+    write binds, an older one through `upgrade`, `plan_migration` and `plan_custody` as its
+    schema-7 candidate. No store or directory is created."""
     require_known_schema(document)
     version = document["schema_version"]
     if version == CORE_STATE_SCHEMA_VERSION:
         identity = bound_identity(ledger_store(state_path), document, run_id)
-        validate(document, run_id=run_id, identity=identity)
-        return
+        return validate(document, run_id=run_id, identity=identity)
     if version in (BOUND_SCHEMA_VERSION, CUSTODY_SCHEMA_VERSION):
         identity = bound_identity(ledger_store(state_path), document, run_id)
-        _schema_ten(document, identity, run_id=run_id, validate=validate)
-        return
+        return _schema_ten(document, identity, run_id=run_id, validate=validate)[0]
     candidate, _ = _upgraded(document, run_id=run_id, upgrade=upgrade)
     plan_custody(candidate)
+    return candidate
 
 
 class PendingSeal(NamedTuple):
