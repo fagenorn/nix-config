@@ -53,4 +53,10 @@ Task 1 — Install GeistMono Nerd Font on every host and name it in Ghostty — 
 - The plan has one task, not a font task followed by a Ghostty task. `verified-tree fresh` marks a row stale when any file other than the record changes after the row's `Commit`, so every row is measured at the single code commit.
 - Planning trial: at `fc8eaf04`, in a scratch worktree that was then discarded. Before the edits, the gate script exited 1 with Task 1 Step 2's lines; the FiraCode calibration count was 6. With the edits it exited 0 and the proxy counted 9. `just build` exited 0 in 76 s, the `eleven-m5` drvPath eval exited 0, and `nixfmt --check` passed on both files.
 
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no focus. No fallback.
+- Base `07f89813`; reviewed plan commit `f7382869`.
+- Findings: Blocking none, Should fix none, Discussion one (unknowns only: the reviewer ran no evaluations; AC3's literal check and AC4 stay the owner's per D3). Accepted 0, rejected 0, deferred 0.
+
 ---
