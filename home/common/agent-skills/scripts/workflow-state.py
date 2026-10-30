@@ -4812,8 +4812,8 @@ def worker_verdict(runtime: Any, state: dict[str, Any] | None,
     return current_action_id, "live" if reason == "current" else reason
 
 
-# The refusal a direct-owner takeover prints while live workers would be fenced; from-issue's
-# acquire-direct.md branches on it, so it is a literal the skill-contract test reads (issue 475).
+# The prefix of the refusal a direct-owner takeover raises while live workers would be fenced
+# (issue 475).
 TAKEOVER_REFUSAL = "owner_unavailable refused: live workers: "
 
 
