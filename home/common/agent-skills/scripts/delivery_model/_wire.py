@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime
 import math
+import re
 from typing import Any
 
 from ._canonical import (canonical_bytes, canonical_digest, _boolean, _digest,
@@ -301,6 +302,51 @@ def _host_route(value: Any) -> dict[str, Any]:
 
 _LAUNCH_REASONS = frozenset({"unknown_run", "unknown_issue", "unknown_attempt", "superseded_attempt", "inactive_attempt", "superseded_launch", "current"})
 
+# Issue 473 D6: the worker and progress replies' identities, the validator's own copy of
+# the helper's grammar: a launch is `<issue>:[r]<attempt or remainder>:<launch>`.
+_LAUNCH = r"[1-9][0-9]{0,17}:r?[1-9][0-9]{0,17}:[1-9][0-9]{0,17}"
+_LAUNCH_ID = re.compile(_LAUNCH)
+_WORKER_ID = re.compile(rf"({_LAUNCH}):w[1-9][0-9]{{0,17}}")
+_COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+_RELEASE_EVENTS = frozenset({"returned", "stopped"})
+_PROGRESS_OUTCOMES = frozenset({"baseline", "advanced", "unchanged", "diverged"})
+
+
+def _launch_id(value: Any) -> str:
+    if not isinstance(value, str) or _LAUNCH_ID.fullmatch(value) is None: _reject()
+    return value
+
+
+def _worker_launch(value: Any) -> str:
+    """The launch id of worker id `value`."""
+    matched = _WORKER_ID.fullmatch(value) if isinstance(value, str) else None
+    if matched is None: _reject()
+    return matched[1]
+
+
+def _registered_worker(value: dict[str, Any]) -> dict[str, Any]:
+    if _worker_launch(value["worker_id"]) != _launch_id(value["launch"]): _reject()
+    if value["parent"] is not None and _worker_launch(value["parent"]) != value["launch"]: _reject()
+    return value
+
+
+def _released_worker(value: dict[str, Any]) -> dict[str, Any]:
+    launch = _worker_launch(value["worker_id"])
+    if not isinstance(value["release_event"], str) or value["release_event"] not in _RELEASE_EVENTS: _reject()
+    released = value["released"]
+    if not isinstance(released, list) or any(_worker_launch(item) != launch for item in released) \
+            or len(set(released)) != len(released): _reject()
+    if released and value["worker_id"] not in released: _reject()
+    if value["release_event"] == "returned" and released not in ([], [value["worker_id"]]): _reject()
+    return value
+
+
+def _progress_mark(value: dict[str, Any]) -> dict[str, Any]:
+    _launch_id(value["action_id"])
+    if not isinstance(value["outcome"], str) or value["outcome"] not in _PROGRESS_OUTCOMES: _reject()
+    if not isinstance(value["marker"], str) or _COMMIT_ID.fullmatch(value["marker"]) is None: _reject()
+    return value
+
 def _owner_liveness(value: dict[str, Any]) -> dict[str, Any]:
     _object(value, _members("interface_version kind action_id reason verdict since progress_at stall_at wait_seconds"), "owner liveness")
     if type(value["interface_version"]) is not int or value["interface_version"] != 1: _reject()
@@ -330,6 +376,9 @@ def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
         if value["reason"] == "inactive_attempt" and value["current_action_id"] not in {None, value["action_id"]}: _reject()
         if value["reason"] in {"unknown_attempt", "superseded_attempt", "superseded_launch"} and value["current_action_id"] == value["action_id"]: _reject()
         return value
+    if set(value) == {"worker_id", "launch", "parent"}: return _registered_worker(value)
+    if set(value) == {"worker_id", "release_event", "released"}: return _released_worker(value)
+    if set(value) == {"action_id", "outcome", "marker"}: return _progress_mark(value)
     if value.get("kind") == "workflow_bootstrap":
         _object(value, _members("interface_version kind run_id requirements")); _v2(value); _string(value["run_id"], "run id")
         _sorted_unique(value["requirements"], "bootstrap requirements", key=lambda item: (item.get("issue", 0), item.get("custody", {}).get("action_id", "")))
