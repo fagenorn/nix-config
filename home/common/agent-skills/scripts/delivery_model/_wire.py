@@ -34,6 +34,39 @@ def _requirements(values: Any, *, sorted_values: bool) -> list[Any]:
     return values
 
 
+# Issue 473 D4: the request member that answers each direct observe requirement kind. This
+# is the validator's own copy; the AC1 scenarios pin it to the agent_tools catalogue.
+_OBSERVE_SLOTS = {"tracker": "tracker", "recorded_worktree": "worktree",
+                  "candidate_worktree": "worktree", "forge_pr": "forge",
+                  "delivery_contract": "delivery_contract"}
+
+
+def _observe_requirements(values: Any) -> list[Any]:
+    """A direct observe reply's requirements: the five direct kinds, none twice, each with
+    its bare members and one closed `expects` (issue 473 D4)."""
+    if not isinstance(values, list): _reject()
+    seen: set[bytes] = set()
+    for item in values:
+        if (not isinstance(item, dict) or not isinstance(item.get("kind"), str)
+                or item["kind"] not in _OBSERVE_SLOTS or "expects" not in item): _reject()
+        bare = {name: member for name, member in item.items() if name != "expects"}
+        _requirements([bare], sorted_values=False)
+        if canonical_bytes(bare) in seen: _reject()
+        seen.add(canonical_bytes(bare))
+        expects = _object(item["expects"], _members("slot members example build"),
+                          "requirement expects")
+        if expects["slot"] != _OBSERVE_SLOTS[item["kind"]]: _reject()
+        if item["kind"] == "delivery_contract": _string(expects["build"], "requirement build")
+        elif expects["build"] is not None: _reject()
+        members = expects["members"]
+        if not isinstance(members, dict) or not members or any(
+                not name or not isinstance(meaning, str) or not meaning
+                for name, meaning in members.items()): _reject()
+        if not isinstance(expects["example"], dict) or set(expects["example"]) != set(members):
+            _reject()
+    return values
+
+
 def _pending(values: Any, contract: dict[str, Any] | None) -> list[Any]:
     if not isinstance(values, list) or len(values) != len(set(values)) or any(not isinstance(item, str) or not item for item in values): _reject()
     if contract is not None:
@@ -307,7 +340,7 @@ def _workflow_response(value: Any, notes_max: int) -> dict[str, Any]:
     if value.get("kind") == "observe":
         _object(value, _members("interface_version kind issue run_id requirements")); _v2(value); _integer(value["issue"], "observe issue", minimum=1)
         if value["run_id"] is not None: _string(value["run_id"], "observe run")
-        _requirements(value["requirements"], sorted_values=False); return value
+        _observe_requirements(value["requirements"]); return value
     if value.get("kind") == "owner": return _owner_action(value, notes_max)
     if value.get("kind") == "terminal":
         _object(value, _members("interface_version kind issue run_id source reason blockers result reentry")); _v2(value); _integer(value["issue"], "terminal issue", minimum=1)

@@ -19,7 +19,7 @@ import sys
 import tempfile
 from typing import Any, Callable, Iterator, NamedTuple
 
-from agent_tools import attempt_store, phase_budget
+from agent_tools import attempt_observations, attempt_store, phase_budget
 from agent_tools.attempt_custody import (
     AUTO_RESUMABLE_BLOCKED_ON,
     BLOCKED_ON_VALUES,
@@ -3682,7 +3682,8 @@ def direct_observe(
         "kind": "observe",
         "issue": issue,
         "run_id": run_id,
-        "requirements": requirements,
+        "requirements": [
+            _call(None, attempt_observations.describe, item) for item in requirements],
     }
 
 

@@ -288,6 +288,9 @@ class LifecycleHarness:
     def _legacy_direct(value):
         value = copy.deepcopy(value)
         value["interface_version"] = 1
+        if value.get("kind") == "observe":
+            for item in value["requirements"]:
+                del item["expects"]
         if value.get("kind") == "owner":
             for name in ("custody", "contract", "contract_digest",
                          "pending_stage_ids", "requirements",
@@ -9023,6 +9026,62 @@ class ObservationCatalogueTest(unittest.TestCase):
                       attempt_observations.describe({"kind": "tracker"})):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 attempt_observations.describe(value)
+
+
+class DirectObserveExpectsTest(LifecycleHarness, unittest.TestCase):
+    """Issue 473 AC1: every requirement kind a direct-owner observe reply returns carries
+    its `expects`, attached at the envelope and accepted at the workflow-response boundary."""
+
+    def scenarios(self):
+        """One request per kind that makes `direct-owner` ask for exactly that kind."""
+        def contract_missing():
+            request = self.direct_request(
+                issue=76, tracker=self.tracker_fact(76),
+                worktree=self.worktree_fact(76, candidate={
+                    "path": os.path.abspath(self.root / "worktree-issue-76"),
+                    "state": "absent"}))
+            request["delivery_contract"] = None
+            request["authorization_intents"] = []
+            return request
+
+        def resumed():
+            self.acquire_direct(issue=73)
+            return self.direct_request(issue=73, owner_unavailable=True)
+
+        return {
+            "tracker": lambda: self.direct_request(issue=71),
+            "forge_pr": lambda: self.direct_request(
+                issue=72, tracker=self.tracker_fact(72), forge=None),
+            "candidate_worktree": lambda: self.direct_request(
+                issue=74, tracker=self.tracker_fact(74)),
+            "delivery_contract": contract_missing,
+            "recorded_worktree": resumed,
+        }
+
+    def test_every_observe_kind_is_described(self):
+        scenarios = self.scenarios()
+        self.assertEqual(set(scenarios), attempt_observations.OBSERVE_KINDS)
+        for kind, request in scenarios.items():
+            with self.subTest(kind=kind):
+                completed = self.direct_owner_at_root(self.root, request())
+                reply = self.validated_response(completed.stdout)
+                self.assertEqual(reply["kind"], "observe")
+                self.assertEqual([item["kind"] for item in reply["requirements"]], [kind])
+                [item] = reply["requirements"]
+                bare = {name: value for name, value in item.items() if name != "expects"}
+                self.assertEqual(item, attempt_observations.describe(bare))
+                expects = item["expects"]
+                self.assertEqual(set(expects), set(attempt_observations.EXPECTS_MEMBERS))
+                self.assertTrue(expects["members"])
+                self.assertEqual(set(expects["example"]), set(expects["members"]))
+
+    def test_an_undescribed_requirement_refuses_the_reply(self):
+        workflow = load_source_module(SCRIPT, "workflow_state_undescribed_observe")
+        scope_tuple = {"kind": "scope_tuple", "subject_id": "select",
+                       "reason_code": "scope_tuple_required", "detail_pointer": None}
+        with self.assertRaises(workflow.WorkflowError) as refused:
+            workflow.direct_observe(73, None, [scope_tuple])
+        self.assertIn("scope_tuple", str(refused.exception))
 
 
 if __name__ == "__main__":
