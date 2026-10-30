@@ -42,15 +42,28 @@ consumed, removed once read, whether or not `record` then records, so each
 `check` backs at most one `record`. Otherwise it atomically replaces the
 record with `verification` set to the persisted `run` and exits 0 printing
 {"recorded": true, "tree": "<id>"}. So only ids that `check` told the caller to
-run are ever recorded, and a skip never reads as a pass. Both verbs read and
-write the plan under an exclusive lock on `verified-tree-plan.lock` beside it.
+run are ever recorded, and a skip never reads as a pass. `check` and `record`
+read and write the plan under an exclusive lock on `verified-tree-plan.lock`
+beside it.
+
+`verified-tree fresh --since <commit> --record <path>` answers whether evidence
+measured at a commit still describes the current tree. `--since` must resolve
+under `git rev-parse --verify --end-of-options <since>^{commit}`. `--record`,
+resolved against the current directory with symlinks followed, must lie
+strictly inside the worktree's top level; it need not exist. `fresh` lists the
+paths that differ between that commit's tree and the current tree, in the same
+`git diff-tree -r --no-renames` form as the changed paths above, drops the
+record's repository-relative path, and exits 0 printing {"changed": ["<path>",
+...], "since": "<commit sha>", "status": "fresh" | "stale", "tree": "<tree
+id>"}, `fresh` exactly when `changed` is empty. It reads no project contract
+and takes no lock.
 
 The tree is what a Git-backed build sees: the index's entries, staged new
 files included, with tracked files' working-tree edits and deletions applied,
 built by `git add -u` and `git write-tree` against a temporary copy of the
 index, so on a clean worktree it equals `HEAD^{tree}`. An untracked file is not
 in it, as such a build excludes it; committing one changes the tree, so the
-next `check` answers `unverified`. Neither verb changes the real index, HEAD or
+next `check` answers `unverified`. No verb changes the real index, HEAD or
 any working-tree file.
 
 The record is one latest-pass file per worktree,
@@ -70,8 +83,9 @@ but fails strict parsing or that closed schema, a persisted plan that `record`
 reads and that fails them, a missing check of the tree, or a plan changed
 since `check`, prints one `verified-tree: <message>` line on stderr and exits
 2 with empty stdout, writing no record (a plan changed since `check` is still
-consumed). argparse's usage errors also exit 2:
-neither verb takes a verification id.
+consumed). `fresh` exits 2 the same way for a `--since` that names no commit,
+a `--record` outside the worktree or a git failure. argparse's usage errors
+also exit 2: no verb takes a verification id.
 """
 
 from __future__ import annotations
@@ -150,7 +164,7 @@ def plan_path(root: Path) -> Path:
 
 @contextmanager
 def plan_lock(root: Path) -> Iterator[None]:
-    """Hold the exclusive lock under which both verbs read and write the plan."""
+    """Hold the exclusive lock under which `check` and `record` read and write the plan."""
     path = record_path(root).with_name(PLAN_LOCK_NAME)
     try:
         descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
@@ -261,11 +275,18 @@ def verification_policy(root: Path) -> dict:
             "integration_branch": bindings["vcs"]["integration_branch"]}
 
 
+def _tree_diff(root: Path, left: str, right: str) -> list[str]:
+    """Every path whose entry differs between tree-ish `left` and `right`, in git's order.
+
+    `--no-renames` lists both sides of a rename, and a deletion is listed."""
+    names = _git_bytes(["diff-tree", "-r", "--no-renames", "--name-only", "-z", left, right], root)
+    return [os.fsdecode(name) for name in names.split(b"\0") if name]
+
+
 def changed_paths(root: Path, integration_branch: str, tree: str) -> list[str]:
     """Every path `tree` changes against its merge base with `origin/<integration_branch>`."""
     base = _git(["merge-base", "HEAD", f"refs/remotes/origin/{integration_branch}"], root)
-    names = _git_bytes(["diff-tree", "-r", "--no-renames", "--name-only", "-z", base, tree], root)
-    return [os.fsdecode(name) for name in names.split(b"\0") if name]
+    return _tree_diff(root, base, tree)
 
 
 def plan(verification: Sequence[str], conditions: Mapping[str, Mapping],
@@ -343,6 +364,33 @@ def record(tree: str) -> tuple[int, dict]:
     return 0, {"recorded": True, "tree": tree}
 
 
+def _record_relative(root: Path, record: str) -> str:
+    """`record`, resolved against the current directory, as a repository-relative POSIX path."""
+    top = root.resolve()
+    resolved = (Path.cwd() / record).resolve()
+    try:
+        relative = resolved.relative_to(top)
+    except ValueError:
+        relative = None
+    if relative is None or not relative.parts:
+        raise VerifiedTreeError(f"--record {record} is not a path inside the worktree {top}")
+    return relative.as_posix()
+
+
+def fresh(since: str, record: str) -> dict:
+    """{"changed", "since", "status", "tree"}: fresh when only `record` differs from `since`."""
+    root = worktree_root()
+    try:
+        commit = _git(["rev-parse", "--verify", "--end-of-options", f"{since}^{{commit}}"], root)
+    except VerifiedTreeError as error:
+        raise VerifiedTreeError(f"--since {since} names no commit") from error
+    excluded = _record_relative(root, record)
+    tree = current_tree(root)
+    changed = [path for path in _tree_diff(root, commit, tree) if path != excluded]
+    return {"changed": changed, "since": commit,
+            "status": "stale" if changed else "fresh", "tree": tree}
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="verified-tree", description=__doc__,
@@ -351,6 +399,9 @@ def _parser() -> argparse.ArgumentParser:
     verbs.add_parser("check", help="print the plan; is the current tree verified?")
     record_verb = verbs.add_parser("record", help="record a pass against a tree")
     record_verb.add_argument("--tree", required=True, help="the tree the pass verified")
+    fresh_verb = verbs.add_parser("fresh", help="has the tree changed since a commit?")
+    fresh_verb.add_argument("--since", required=True, help="the commit the evidence measured")
+    fresh_verb.add_argument("--record", required=True, help="the acceptance record's path")
     return parser
 
 
@@ -359,6 +410,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.verb == "check":
             status, result = 0, check()
+        elif args.verb == "fresh":
+            status, result = 0, fresh(args.since, args.record)
         else:
             status, result = record(args.tree)
     except VerifiedTreeError as error:

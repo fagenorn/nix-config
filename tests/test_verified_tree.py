@@ -29,6 +29,7 @@ REASON = "no tinytask or docs paths changed"
 CONDITIONS = {"suite": {"when_changed": ["tinytask/*", "docs/*"], "skip_reason": REASON}}
 SKIPPED = [{"id": "suite", "reason": REASON}]
 ABSENT = object()
+RECORD = ".agents/artifacts/plans/p.acceptance.md"
 
 
 class VerifiedTreeTest(unittest.TestCase):
@@ -468,11 +469,12 @@ class VerifiedTreeTest(unittest.TestCase):
                 self.record_path().write_text(body)
                 self.assert_exit_2(self.run_tool("check"))
 
-    def test_outside_a_git_worktree_both_verbs_exit_2(self):
+    def test_outside_a_git_worktree_every_verb_exits_2(self):
         outside = self.scratch / "outside"
         outside.mkdir()
         env = {**self.env, "GIT_CEILING_DIRECTORIES": str(self.scratch)}
-        for argv in (("check",), ("record", "--tree", "0" * 40)):
+        for argv in (("check",), ("record", "--tree", "0" * 40),
+                     ("fresh", "--since", "HEAD", "--record", RECORD)):
             with self.subTest(argv[0]):
                 done = self.run_tool(*argv, cwd=outside, env=env)
                 self.assertEqual(done.returncode, 2)
@@ -482,12 +484,153 @@ class VerifiedTreeTest(unittest.TestCase):
         # Issue 437 D13: `--verification` is gone, with no compatibility handling.
         tree = self.git("rev-parse", "HEAD^{tree}")
         for argv in ((), ("record",), ("forget",), ("check", "--verification", "test"),
-                     ("record", "--tree", tree, "--verification", "test")):
+                     ("record", "--tree", tree, "--verification", "test"),
+                     ("fresh",), ("fresh", "--since", "HEAD"), ("fresh", "--record", RECORD),
+                     ("fresh", "--since", "HEAD", "--record", RECORD, "extra")):
             with self.subTest(argv=argv):
                 done = self.run_tool(*argv)
                 self.assertEqual(done.returncode, 2)
                 self.assertEqual(done.stdout, "")
                 self.assertFalse(self.record_path().exists())
+
+    # Issue 477: `fresh` judges evidence measured at a commit against the content it measured.
+
+    def fresh(self, since, record=RECORD, cwd=None):
+        done = self.run_tool("fresh", "--since", since, "--record", record, cwd=cwd)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        answer = json.loads(done.stdout)
+        self.assertEqual(done.stdout, json.dumps(answer, sort_keys=True,
+                                                 separators=(",", ":")) + "\n")
+        self.assertEqual(sorted(answer), ["changed", "since", "status", "tree"])
+        return answer
+
+    def write_record(self, text):
+        path = self.repo / RECORD
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def answer(self, changed, since):
+        """The `fresh` output for a clean worktree at HEAD."""
+        return {"changed": changed, "since": since,
+                "status": "stale" if changed else "fresh",
+                "tree": self.git("rev-parse", "HEAD^{tree}")}
+
+    def test_a_commit_that_changes_only_the_record_stays_fresh(self):
+        # Issue 477 AC1: today there is no `fresh` verb, so this exits 2.
+        since = self.git("rev-parse", "HEAD")
+        self.write_record("| AC1 | met |\n")
+        self.commit_all("acceptance record")
+        self.assertEqual(self.fresh(since), self.answer([], since))
+        self.write_record("| AC1 | met |\n| AC2 | met |\n")
+        self.commit_all("acceptance record again")
+        self.assertEqual(self.fresh(since), self.answer([], since))
+
+    def test_a_commit_that_changes_a_measured_file_is_stale(self):
+        # Issue 477 AC2.
+        since = self.git("rev-parse", "HEAD")
+        self.write_record("| AC1 | met |\n")
+        (self.repo / "tinytask/cli.py").write_text("# edited\n")
+        self.commit_all("edit cli")
+        self.assertEqual(self.fresh(since), self.answer(["tinytask/cli.py"], since))
+
+    def test_a_tracked_edit_is_measured_and_an_untracked_file_is_not(self):
+        since = self.git("rev-parse", "HEAD")
+        (self.repo / "tinytask/scratch.py").write_text("x = 1\n")
+        self.assertEqual(self.fresh(since), self.answer([], since))
+        (self.repo / "tinytask/cli.py").write_text("# edited\n")
+        answer = self.fresh(since)
+        self.assertEqual((answer["changed"], answer["status"]), (["tinytask/cli.py"], "stale"))
+        self.assertNotEqual(answer["tree"], self.git("rev-parse", "HEAD^{tree}"))
+
+    def test_a_reverted_change_is_fresh_again(self):
+        since = self.git("rev-parse", "HEAD")
+        (self.repo / "tinytask/cli.py").write_text("# edited\n")
+        self.commit_all("edit cli")
+        self.git("revert", "--no-edit", "HEAD")
+        self.assertEqual(self.fresh(since[:12]), self.answer([], since))
+
+    def test_a_merge_that_changes_a_measured_path_is_stale(self):
+        since = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "-b", "side")
+        (self.repo / "tinytask/store.py").write_text("# edited\n")
+        self.commit_all("edit store")
+        self.git("checkout", "-q", "main")
+        self.write_record("| AC1 | met |\n")
+        self.commit_all("acceptance record")
+        self.git("merge", "-q", "--no-ff", "-m", "merge side", "side")
+        self.assertEqual(self.fresh(since), self.answer(["tinytask/store.py"], since))
+
+    def test_a_rename_lists_both_paths_and_a_deletion_counts(self):
+        since = self.git("rev-parse", "HEAD")
+        self.git("mv", "tinytask/model.py", "tinytask/models.py")
+        self.git("rm", "-q", "docs/README.md")
+        self.git("commit", "-q", "-m", "rename and delete")
+        self.assertEqual(self.fresh(since), self.answer(
+            ["docs/README.md", "tinytask/model.py", "tinytask/models.py"], since))
+
+    def test_the_record_path_resolves_against_the_current_directory(self):
+        since = self.git("rev-parse", "HEAD")
+        self.write_record("| AC1 | met |\n")
+        self.commit_all("acceptance record")
+        subdir = self.repo / "tinytask"
+        self.assertEqual(self.fresh(since, record="../" + RECORD, cwd=subdir),
+                         self.answer([], since))
+        self.assertEqual(self.fresh(since, record=str(self.repo / RECORD), cwd=subdir),
+                         self.answer([], since))
+        self.assertEqual(self.fresh(since, record="p.acceptance.md", cwd=subdir),
+                         self.answer([RECORD], since))
+
+    def test_fresh_reads_no_project_contract(self):
+        since = self.git("rev-parse", "HEAD")
+        (self.repo / ".agents/project.json").unlink()
+        answer = self.fresh(since)
+        self.assertEqual((answer["changed"], answer["status"]),
+                         ([".agents/project.json"], "stale"))
+
+    def test_fresh_changes_no_file(self):
+        self.verify_and_record()
+        self.check()
+        (self.repo / "tinytask/cli.py").write_text("# edited\n")
+        (self.repo / "new.py").write_text("n = 1\n")
+        status = self.git("status", "--porcelain")
+        index = Path(self.git("rev-parse", "--absolute-git-dir")) / "index"
+        files = [index, self.record_path(), self.plan_path()]
+        before = [path.read_bytes() for path in files]
+        self.fresh(self.git("rev-parse", "HEAD"))
+        self.assertEqual([path.read_bytes() for path in files], before)
+        self.assertEqual(self.git("status", "--porcelain"), status)
+
+    def test_fresh_refuses_a_non_commit_or_a_record_outside_the_worktree(self):
+        (self.repo / "link").symlink_to(self.scratch)
+        head = self.git("rev-parse", "HEAD")
+        tree = self.git("rev-parse", "HEAD^{tree}")
+        outside = str(self.scratch / "elsewhere.md")
+        def since(value):
+            return f"verified-tree: --since {value} names no commit\n"
+        def record(value):
+            return f"verified-tree: --record {value} is not a path inside the worktree {self.repo}\n"
+        cases = {
+            "unknown revision": (("--since", "no-such-ref", "--record", RECORD),
+                                 since("no-such-ref")),
+            "option-shaped revision": (("--since=--all", "--record", RECORD), since("--all")),
+            "a tree, not a commit": (("--since", tree, "--record", RECORD), since(tree)),
+            "absolute path outside": (("--since", head, "--record", outside), record(outside)),
+            "relative path outside": (("--since", head, "--record", "../elsewhere.md"),
+                                      record("../elsewhere.md")),
+            "symlink out of the worktree": (("--since", head, "--record", "link/r.md"),
+                                            record("link/r.md")),
+            "the top level itself": (("--since", head, "--record", "."), record(".")),
+            "both invalid: --since is checked first": (
+                ("--since", "no-such-ref", "--record", "../elsewhere.md"), since("no-such-ref")),
+        }
+        for name, (argv, stderr) in cases.items():
+            with self.subTest(name):
+                done = self.run_tool("fresh", *argv)
+                self.assert_exit_2(done)
+                self.assertEqual(done.stderr, stderr)
+                self.assertFalse(self.record_path().exists())
+                self.assertFalse(self.plan_path().exists())
 
 
 if __name__ == "__main__":
