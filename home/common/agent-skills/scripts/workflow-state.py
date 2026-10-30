@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import shlex
 import stat
 import subprocess
 import sys
@@ -27,6 +28,7 @@ from agent_tools.attempt_custody import (
     OWNER_BLOCKED_ON_VALUES,
     STALL_LIMIT,
     at_ms,
+    holds_issue,
     launch_id,
     reaped,
     stall_count,
@@ -1421,7 +1423,8 @@ def commit_state(run_dir: Path, state_path: Path, state: dict[str, Any], *,
     state, settles custody in the core (``bound_launches`` is the 8 -> 9 plan and
     ``bound_remainders`` the 9 -> 10 plan of a binding write, ``report`` an owner result it
     submits; the issues whose delivery is complete give up their launch spans; a refusal
-    leaves the ledger untouched), then publishes the state atomically and applies the seals
+    leaves the ledger untouched), ensures the issue hold pointers of an orchestrated run
+    (issue 475), then publishes the state atomically and applies the seals
     the settle deferred: the delivery proofs first, then the custody seals that cite their
     receipts (#338 D4, #339 D5).
     """
@@ -1436,6 +1439,7 @@ def commit_state(run_dir: Path, state_path: Path, state: dict[str, Any], *,
         report=report, delivered=delivered)
     settle_delivery(store, state, now_ms=now_ms, canonical_text=lambda value: (
         _delivery().model.canonical_bytes(value).decode("utf-8")))
+    attempt_store.settle_holds(store, state, identity, now_ms=now_ms)
     atomic_write_state(run_dir, state_path, state)
     receipts = seal_delivery(store, state, now_ms=now_ms, delivered=delivered)
     attempt_store.seal_custody(store, pending, now_ms=now_ms, receipts=receipts)
@@ -1739,9 +1743,10 @@ def fence_owner_exit(
     longer live after it refuses the whole write, so nothing persists. Controller
     writes (``control``, the deadline reaper, ``direct-owner``) never pass
     through this fence: they are the recovery path for a run whose owner died
-    with workers live. ``excused_worker`` is the calling ship owner of a
-    ``checkpoint-delivery``, itself a registered worker; it must be live, and
-    only it is excused, never its descendants (per #222 D4, D11).
+    with workers live. A ``direct-owner`` takeover refuses on its own while a live
+    worker's launch is inside its deadline (``takeover_blockers``). ``excused_worker``
+    is the calling ship owner of a ``checkpoint-delivery``, itself a registered worker;
+    it must be live, and only it is excused, never its descendants (per #222 D4, D11).
     """
 
     def fenced(state: dict[str, Any] | None, *identity: RunIdentity) -> tuple[Any, bool]:
@@ -2436,8 +2441,7 @@ def issue_set_reusable(state: dict[str, Any], issues: list[int]) -> bool:
         entry = state["issues"].get(str(issue))
         if entry is None or entry["outcome"] is None:
             return True
-        if any(records and records[-1]["state"] in {"active", "handed_off", "suspended"}
-               for records in (entry["attempts"], entry["delivery_remainders"])):
+        if holds_issue(entry):
             return True
     return False
 
@@ -3710,6 +3714,47 @@ def direct_terminal(
     }
 
 
+# The orchestrate-control argv that re-enters one run for one issue, and the refusal that names
+# it. orchestrate-issues' final report carries the argv and acquire-direct.md names the refusal's
+# ` is held by orchestrated run ` marker, so both are literals the skill-contract test reads
+# (issue 475 D8, D10).
+ORCHESTRATED_RESUME = "orchestrate-control start --repo-root {repo_root} {issue} --run-id {run_id}"
+HOLD_REFUSAL = ("issue {issue} is held by orchestrated run {run_id}; resume it through "
+                "orchestrate-issues: {resume}")
+
+
+def orchestrated_resume_command(repo_root: str, issue: str, run_id: str) -> str:
+    """The `orchestrate-control start` command line that re-enters run `run_id` for `issue`
+    alone, each value shell-quoted so a repository path with spaces survives a paste."""
+    return ORCHESTRATED_RESUME.format(repo_root=shlex.quote(repo_root),
+                                      issue=shlex.quote(issue), run_id=shlex.quote(run_id))
+
+
+def refuse_orchestrated_hold(repo_root: Path, issue: int) -> None:
+    """Refuse a direct acquisition of an issue an orchestrated run holds; writes nothing.
+
+    The runs come from the issue's hold pointers, never from listing `workflows`. A run whose
+    ledger is absent, no longer holds the issue, or has delivered it does not hold it: a
+    delivery-complete issue has nothing left to resume, whatever state the record that
+    finished it keeps. A ledger is read in its upgraded shape, since a migration cut before
+    its publish leaves a pointer naming a ledger still stored at its legacy schema; one that
+    does not validate refuses the call with the reader's error (issue 475 D5, D7, D8).
+    """
+    runtime = _delivery()
+    superpowers = repo_root / ".superpowers"
+    for handle in attempt_store.hold_runs(attempt_store.store_root(superpowers), issue):
+        state_path = superpowers / "workflows" / handle / "state.json"
+        if not require_regular_path(state_path, "workflow state", allow_missing=True):
+            continue
+        state = read_state_unlocked(state_path, handle, upgraded=True)
+        entry = state["issues"].get(str(issue))
+        if (entry is not None and holds_issue(entry)
+                and not runtime.delivery_complete(entry)):
+            raise WorkflowError(HOLD_REFUSAL.format(
+                issue=issue, run_id=handle,
+                resume=orchestrated_resume_command(str(repo_root), str(issue), handle)))
+
+
 def refuse_unmigrated_direct(attempts: Path, workflows_dir: Path, issue: int) -> None:
     """Refuse a direct run whose legacy ledger the index does not name yet; writes nothing."""
     if attempt_store.unmigrated_direct(attempts, workflows_dir, issue):
@@ -3726,8 +3771,10 @@ def command_direct_owner(args: argparse.Namespace) -> int:
     attempts = attempt_store.store_root(repo_root / ".superpowers")
     workflows_dir = repo_root / ".superpowers" / "workflows"
     # Refused before anything is created: a legacy ledger no index entry names is bound by
-    # `migrate --apply`, not on the spot (D22).
+    # `migrate --apply`, not on the spot (D22), and an issue an orchestrated run holds is resumed
+    # through that run (issue 475).
     refuse_unmigrated_direct(attempts, workflows_dir, issue)
+    refuse_orchestrated_hold(repo_root, issue)
     ensure_workflows_directory(repo_root)
     issue_lock_path = workflows_dir / f".direct-{issue}.lock"
     issue_lock_descriptor = open_stable_lock(
@@ -3904,6 +3951,12 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                             "direct owner time must not move backward",
                             parse_utc(request["now"], "direct owner now"),
                             "run updated_at", state["updated_at"])
+
+                if request["owner_unavailable"] and state is not None:
+                    blocking = takeover_blockers(
+                        runtime, state, parse_utc(request["now"], "direct owner now"))
+                    if blocking:
+                        raise WorkflowError(TAKEOVER_REFUSAL + ", ".join(blocking))
 
                 policy = _apply_one_issue_policy(
                     issue=issue,
@@ -4390,23 +4443,26 @@ def command_finish_delivery(args):
     return 0
 
 
-def read_state_unlocked(state_path: Path, run_id: str) -> dict[str, Any]:
+def read_state_unlocked(state_path: Path, run_id: str, *, upgraded: bool = False
+                        ) -> dict[str, Any]:
     """Read one run's state and validate it without a lock or a write (#193 D4).
 
     check-launch and the build-delivery ledger lookup share this reader. No
     lock: `atomic_write_state` publishes by `os.replace`, so an unlocked reader
     sees either the whole prior file or the whole new one, never a torn one — and
     taking the lock would mean creating `state.lock`, which is a write. The
-    document is checked by `attempt_store.check_unlocked` and returned as stored.
+    document is checked by `attempt_store.check_unlocked` and returned as stored,
+    or with `upgraded` as that check returns it: a legacy ledger in its upgraded
+    shape, as its next locked write would read it.
     """
     try:
         raw_state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise WorkflowError("invalid workflow state") from error
-    attempt_store.check_unlocked(
+    checked = attempt_store.check_unlocked(
         state_path, raw_state, run_id=run_id,
         upgrade=partial(upgrade_state, migration_contracts={}), validate=validate_state)
-    return raw_state
+    return checked if upgraded else raw_state
 
 
 def _stored_contract_digest(raw_state: object, issue: str) -> object:
@@ -4803,6 +4859,33 @@ def worker_verdict(runtime: Any, state: dict[str, Any] | None,
     if record["released_at"] is not None:
         return current_action_id, "released"
     return current_action_id, "live" if reason == "current" else reason
+
+
+# The prefix of the refusal a direct-owner takeover raises while live workers would be fenced;
+# acquire-direct.md names it in backticks without its trailing space, and the skill-contract
+# test reads this literal to check that (issue 475).
+TAKEOVER_REFUSAL = "owner_unavailable refused: live workers: "
+
+
+def takeover_blockers(runtime: Any, state: dict[str, Any], now: datetime) -> list[str]:
+    """The live workers a `direct-owner` takeover at ``now`` would fence, in ledger order.
+
+    A worker blocks while ``worker_verdict`` reads it live and the record its launch belongs
+    to (the issue's latest delivery remainder for an ``:r`` launch, else its latest attempt)
+    has ``deadline_at`` after ``now``; past the deadline the expiry reap recovers the run
+    (issue 475 D1, D2; #310 D18).
+    """
+    blocking = []
+    for worker in state.get("workers", []):
+        if worker_verdict(runtime, state, worker["worker_id"])[1] != "live":
+            continue
+        issue, _, _ = parse_action_id(worker["launch"])
+        issue_state = state["issues"][str(issue)]
+        record = (issue_state["delivery_remainders"][-1] if ":r" in worker["launch"]
+                  else issue_state["attempts"][-1])
+        if now < parse_utc(record["deadline_at"], "attempt deadline"):
+            blocking.append(worker["worker_id"])
+    return blocking
 
 
 def live_worker_ids(runtime: Any, state: dict[str, Any]) -> list[str]:

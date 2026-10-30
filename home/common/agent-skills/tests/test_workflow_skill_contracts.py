@@ -208,6 +208,7 @@ CODEX_COLLABORATION_MACHINE_TEXT = {
 ORCHESTRATE_MACHINE_TEXT = {
     ORCHESTRATE: (
         "orchestrate-control start --repo-root <ledger_repo_root>",
+        "orchestrate-control start --repo-root <ledger_repo_root> <issue> --run-id <run-id>",
         "orchestrate-control step --repo-root <ledger_repo_root> --input -",
         "`session`", "`first_sweep`", "`owners`", "`contracts_due`", "`refused_contracts`",
         "`dispatches`", "`owner_object`", "`resume_pack`", "`contract_refusals`", "`ends_run`",
@@ -3032,6 +3033,34 @@ def module_constants(path, *names):
             found[node.targets[0].id] = ast.literal_eval(node.value)
     assert set(found) == set(names), (path, names, sorted(found))
     return found
+
+
+WORKFLOW_STATE = REPO_ROOT / "home/common/agent-skills/scripts/workflow-state.py"
+# The direct-owner refusal markers acquire-direct.md branches on (issue 475 D10).
+DIRECT_REFUSAL_MARKERS = {"TAKEOVER_REFUSAL": "owner_unavailable refused: live workers:",
+                          "HOLD_REFUSAL": " is held by orchestrated run "}
+
+
+class OrchestratedReentryContractsTest(unittest.TestCase):
+    """Issue 475: the re-entry argv and refusal markers have their home in workflow-state."""
+
+    def setUp(self):
+        self.helper = module_constants(WORKFLOW_STATE, "ORCHESTRATED_RESUME",
+                                       *DIRECT_REFUSAL_MARKERS)
+
+    def test_the_final_report_reentry_is_the_helpers_resume_command(self):
+        resume = self.helper["ORCHESTRATED_RESUME"].format(
+            repo_root="<ledger_repo_root>", issue="<issue>", run_id="<run-id>")
+        self.assertIn(resume, ORCHESTRATE_MACHINE_TEXT[ORCHESTRATE])
+        self.assertNotIn("/from-issue <issue> --auto",
+                         normalized(ORCHESTRATE.read_text(encoding="utf-8")))
+
+    def test_acquire_direct_names_each_refusal_direct_owner_prints(self):
+        text = normalized(ACQUIRE_DIRECT.read_text(encoding="utf-8"))
+        for constant, marker in DIRECT_REFUSAL_MARKERS.items():
+            with self.subTest(constant=constant):
+                self.assertIn(marker, self.helper[constant])
+                self.assertIn(f"`{marker}`", text)
 
 
 class LaneTriageRecordKeysTest(unittest.TestCase):
