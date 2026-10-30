@@ -7,9 +7,9 @@ orchestrated runs holding it (`settle_holds`, `hold_runs`; issue 475). From sche
 applies `agent_tools.attempt_custody`'s settle plan to `TransactionStore` under the store
 lock: `settle_custody` before a ledger write, `seal_custody` after it, and `pending_seals` to
 find a seal a crash left undone. From schema 10 the plan covers every delivery remainder as
-well as every attempt, records a held owner claim on its launch's span, and wakes a `host_capacity` suspension; `launch_views` reads,
-without a lock, what the store says of each current launch for a control sweep's occupancy and
-capacity gate.
+well as every attempt, records a held owner claim on its launch's span, and wakes a
+`host_capacity` suspension; `launch_views` reads, without a lock, what the store says of each
+current launch for a control sweep's occupancy and capacity gate.
 `workflow-state` keeps the ledger lock, the ledger read and commit, the delivery chain and
 `validate_state`; it passes the last two to this module as callbacks.
 """
