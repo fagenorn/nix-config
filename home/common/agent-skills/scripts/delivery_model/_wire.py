@@ -43,8 +43,8 @@ _OBSERVE_SLOTS = {"tracker": "tracker", "recorded_worktree": "worktree",
 
 
 def _observe_requirements(values: Any) -> list[Any]:
-    """A direct observe reply's requirements: the five direct kinds, none twice, each with
-    its bare members and one closed `expects` (issue 473 D4)."""
+    """A direct observe reply's requirements: the five direct kinds, no bare requirement
+    twice, each with its bare members and one closed `expects` (issue 473 D4)."""
     if not isinstance(values, list): _reject()
     seen: set[bytes] = set()
     for item in values:
