@@ -15,6 +15,19 @@ from .test_delivery_workflow import (
     LATER, NOW, POLICY, SOURCES, URL, WORKFLOW,
 )
 
+# Issue 478: an acceptance record as sdd writes it, for ship's re-observation step.
+RECORD_TOP = ("# Acceptance record — issue 171\n\n"
+              "| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |\n"
+              "|----|-----------|------|------------------|----------|--------|------------|---------|\n")
+SUITE_MET = ("| AC1 | the suite passes | code | `just agent-workflow-tests` "
+             "| in final verification | 1111111 | host mbp | met |\n")
+CI_PENDING = ("| AC2 | CI `Nix Eval` green | code | `just build`; CI `Nix Eval` green on the PR "
+              "| just build: exit 0 at 1111111 | 1111111 | host mbp | unverified |\n")
+HUMAN_PENDING = ("| AC2 | the user confirms the demo | human | the user reads the hold comment "
+                 "| — | 1111111 | — | human_pending |\n")
+CHECK_LINK = "https://github.com/fagenorn/nix-config/actions/runs/1/job/1"
+
+
 
 class ShipDeliveryTest(BuilderHarness, unittest.TestCase):
     @classmethod
@@ -93,7 +106,9 @@ class ShipDeliveryTest(BuilderHarness, unittest.TestCase):
         self.assertEqual(response["pending_stage_ids"][0], "merge_pr")
         return path
 
-    def deliver(self, *, hold=False, remainder=False):
+    def deliver(self, *, acceptance_state="met", remainder=False):
+        """Merge, then close or hold per `acceptance_state`; returns the stored issue."""
+        hold = acceptance_state in ("unmet", "human_pending")
         self.selected()
         response, merged = self.checkpoint({"requested_stage": "close_tracker",
             "observations": [self.obs("pr_merged", pr_number=5, pr_url=URL,
@@ -111,7 +126,7 @@ class ShipDeliveryTest(BuilderHarness, unittest.TestCase):
             self.custody = context["custody"]
             self.checkpoint({"requested_stage": None})
         tracker = self.obs("tracker_held", comment_url=HELD_COMMENT, record_path=HELD_RECORD,
-            acceptance_state="unmet", observation_identity="github:issue:171:held") if hold else self.obs(
+            acceptance_state=acceptance_state, observation_identity="github:issue:171:held") if hold else self.obs(
             "tracker_closed", close_reason="completed", observation_identity="github:issue:171:closed")
         # Remote deletion by merge is observation-only. No fake authority is manufactured.
         response, closed = self.checkpoint({"requested_stage": "remove_worktree",
@@ -150,9 +165,72 @@ class ShipDeliveryTest(BuilderHarness, unittest.TestCase):
         else:
             self.assertEqual(issue["attempts"][-1]["state"], "merged")
             self.assertIs(issue["attempts"][-1]["result"]["issue_closed"], not hold)
+        return issue
+
+    def tracker_outcome(self, issue):
+        """The observation that satisfied the issue's tracker_closed postcondition."""
+        delivery = issue["delivery"]
+        observed = delivery["postconditions"]["tracker_closed"]["observation_id"]
+        return next(item for item in delivery["delivery_observations"] if item["id"] == observed)
+
+    def write_record(self, *rows):
+        path = self.root / HELD_RECORD
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(RECORD_TOP + "".join(rows), encoding="utf-8")
+        return path, path.read_bytes()
+
+    def reobserve(self, buckets, *targets):
+        """Issue 478: ship's re-observation, from source, at the selected head."""
+        checks = self.runtime / "required-checks.json"
+        checks.write_text(json.dumps([{"name": name, "bucket": bucket, "link": CHECK_LINK}
+                                      for name, bucket in buckets]))
+        argv = [sys.executable, "-m", "agent_tools.acceptance_record", "reobserve",
+                "--record", HELD_RECORD, "--head", "a" * 40, "--checks", str(checks)]
+        for target in targets:
+            argv += ["--row", target]
+        return subprocess.run(argv, cwd=self.root, env=self.env, capture_output=True,
+                              text=True, check=False, timeout=60)
+
+    def test_a_ci_pending_code_row_observed_green_closes_the_issue(self):
+        # Issue 478 AC1: the handoff's `unmet` held this issue; the re-observed record closes it.
+        path, before = self.write_record(SUITE_MET, CI_PENDING)
+        pending = self.reobserve([("Nix Eval", "pending"), ("Instruction Budget", "pass")], "AC2")
+        self.assertEqual((pending.returncode, pending.stderr), (0, ""))
+        self.assertEqual(json.loads(pending.stdout), {"acceptance_state": "unmet", "changed": []})
+        self.assertEqual(path.read_bytes(), before)
+        green = self.reobserve([("Nix Eval", "pass"), ("Instruction Budget", "pass")], "AC2")
+        self.assertEqual((green.returncode, green.stderr), (0, ""))
+        answer = json.loads(green.stdout)
+        self.assertEqual(answer, {"acceptance_state": "met", "changed": ["AC2"]})
+        self.assertEqual(path.read_text(encoding="utf-8"), RECORD_TOP + SUITE_MET + (
+            "| AC2 | CI `Nix Eval` green | code | `just build`; CI `Nix Eval` green on the PR "
+            "| just build: exit 0 at 1111111; ship re-observed Nix Eval: pass at aaaaaaa "
+            f"{CHECK_LINK} | {'a' * 40} | host mbp | met |\n"))
+        issue = self.deliver(acceptance_state=answer["acceptance_state"])
+        self.assertEqual(self.tracker_outcome(issue)["observation_kind"], "tracker_closed")
+        self.assertIs(issue["attempts"][-1]["result"]["issue_closed"], True)
+
+    def test_a_pending_human_row_still_holds_the_issue(self):
+        # Issue 478 AC2: re-observation never grades a human row, so the issue holds.
+        ci_row = CI_PENDING.replace("| AC2 |", "| AC1 |")
+        path, before = self.write_record(ci_row, HUMAN_PENDING)
+        refused = self.reobserve([("Nix Eval", "pass")], "AC2")
+        self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+        self.assertEqual(path.read_bytes(), before)
+        done = self.reobserve([("Nix Eval", "pass")], "AC1")
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        answer = json.loads(done.stdout)
+        self.assertEqual(answer, {"acceptance_state": "human_pending", "changed": ["AC1"]})
+        issue = self.deliver(acceptance_state=answer["acceptance_state"])
+        held = self.tracker_outcome(issue)
+        self.assertEqual(held["observation_kind"], "tracker_held")
+        self.assertEqual((held["subject"]["label"], held["subject"]["acceptance_state"],
+                          held["subject"]["record_path"]),
+                         ("needs-verification", "human_pending", HELD_RECORD))
+        self.assertIs(issue["attempts"][-1]["result"]["issue_closed"], False)
 
     def test_complete_delivery_and_hold_use_engine_accepted_payloads(self):
-        self.deliver(hold=True)
+        self.deliver(acceptance_state="unmet")
 
     def test_close_delivery_uses_engine_accepted_payloads(self):
         self.deliver()
