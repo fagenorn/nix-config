@@ -78,3 +78,7 @@ Task 4 — Guidance, READMEs and skill contracts — `home/common/agent-skills/s
   - `just build` built the darwin system.
 
 ---
+
+## Standards review provenance
+
+Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), fresh isolated read-only thread, base `9cb00414`, no fallback, no focus. Findings: 1 blocking and 2 should-fix, all verified against the live worktree and accepted (Task 3 quoting and R2 traversal cases, Task 1 deadline fixture; per D15); 0 rejected, 0 deferred; no discussion items.

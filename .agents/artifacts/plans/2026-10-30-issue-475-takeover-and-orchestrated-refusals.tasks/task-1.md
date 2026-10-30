@@ -105,6 +105,10 @@ class TakeoverBlockersTest(LifecycleHarness, unittest.TestCase):
 
 In the predicate test, `73:1:1:w1` sits under a superseded launch and `73:1:2:w2` is released. Neither blocks. At 13:00 the deadline has passed, so nothing blocks.
 
+**Standards-review amendment (PR475-02, per D15).** The fixture above gives the attempt and the remainder one shared deadline and a remainder with no delivery contract, so a predicate that checked the attempt's deadline for every worker would pass. Replace it with two fixtures and keep the rest of the case:
+- *Attempt fixture:* an `active` attempt (deadline `2026-08-20T12:00:00Z`, two launches) and no remainder. `73:1:2:w1` blocks at 11:00; `73:1:1:w1` (superseded launch) and the released `73:1:2:w2` never block; at 12:00 nothing blocks.
+- *Remainder fixture:* a realistic remainder: the source attempt `finished` (deadline `2026-08-20T12:00:00Z`) and an `active` remainder with an installed delivery contract and its own deadline `2026-08-20T13:00:00Z`. Build it from the delivery-model fixtures in `home/common/agent-skills/tests/_delivery_model_fixtures.py` (or the state a `LifecycleHarness` run reaches after a finish that leaves a remainder) rather than by hand, so it is a shape production validation accepts. Assert `73:r1:2:w1` blocks at 12:30 (after the attempt's deadline, before the remainder's), and does not block at exactly 13:00.
+
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run (Unit run): `home/common/agent-skills/tests/test_workflow_state.py -k DirectTakeoverWorkerTest -k TakeoverBlockersTest`

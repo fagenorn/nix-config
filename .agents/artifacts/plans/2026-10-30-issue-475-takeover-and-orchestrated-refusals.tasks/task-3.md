@@ -71,14 +71,20 @@ class OrchestratedHoldTest(LifecycleHarness, unittest.TestCase):
             attempt_identity.direct_key(73, 1)))
 ```
 
+**Standards-review amendments (PR475-01, PR475-03, per D15).** Add to `OrchestratedHoldTest`:
+- `test_the_resume_command_survives_a_repository_path_with_spaces`: load `workflow-state.py` with `load_source_module` and assert `shlex.split(module.orchestrated_resume_command("/tmp/project with spaces; $(x)", "73", "rel_x"))` equals `["orchestrate-control", "start", "--repo-root", "/tmp/project with spaces; $(x)", "73", "--run-id", "rel_x"]`.
+- `test_a_stale_first_pointer_does_not_hide_a_later_holder`: open a second orchestrated run with `init_run(creation_key=...)` after making the first run stop holding 73 (`fail_owner`), and spawn 73 in the second run on a different worktree. Assert `hold_runs` yields `[first, second]` and the refusal names the second run and its exact resume command, with the `.superpowers` tree bytes unchanged. Repeat with the first run's `state.json` removed (an absent ledger is skipped, and the second run is still named).
+- `test_the_first_of_two_live_holders_is_named`: both runs hold 73 (the first suspended, the second active). The refusal names the first run and its resume command, and the tree bytes are unchanged.
+If the harness cannot spawn one issue in two orchestrated runs, build the second ledger through the harness's own `init-run`/`spawn` CLI calls with the second `run_id`, never by hand-writing `state.json`; each new case fails at this task's starting commit and passes after Step 3.
+
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run (Unit run): `home/common/agent-skills/tests/test_workflow_state.py -k OrchestratedHoldTest`
-Expected: FAILED (failures=5). Each of the positive case's three flag subtests fails, the positive case fails once more at the end, and the invalid-ledger case fails. Each gets exit 0 with an `observe` reply where it expects the refusal. `test_an_issue_the_run_no_longer_holds_is_acquired_directly` passes, which pins today's behaviour.
+Expected: FAILED. (The pre-amendment count was failures=5; the PR475-01/03 cases add their own failures or errors, so check that every case except `test_an_issue_the_run_no_longer_holds_is_acquired_directly` fails, not the exact count.) Each of the positive case's three flag subtests fails, the positive case fails once more at the end, and the invalid-ledger case fails. Each gets exit 0 with an `observe` reply where it expects the refusal. `test_an_issue_the_run_no_longer_holds_is_acquired_directly` passes, which pins today's behaviour.
 
 - [ ] **Step 3: Write the implementation**
 
-In `workflow-state.py`, just above `def refuse_unmigrated_direct`, add:
+In `workflow-state.py`, add `import shlex` to the standard-library imports (alphabetical, after `import runpy`), and just above `def refuse_unmigrated_direct`, add:
 
 ```python
 # The orchestrate-control argv that re-enters one run for one issue, and the refusal that names
@@ -90,8 +96,10 @@ HOLD_REFUSAL = ("issue {issue} is held by orchestrated run {run_id}; resume it t
 
 
 def orchestrated_resume_command(repo_root: str, issue: str, run_id: str) -> str:
-    """The `orchestrate-control start` argv that re-enters run `run_id` for `issue` alone."""
-    return ORCHESTRATED_RESUME.format(repo_root=repo_root, issue=issue, run_id=run_id)
+    """The `orchestrate-control start` command line that re-enters run `run_id` for `issue`
+    alone, each value shell-quoted so a repository path with spaces survives a paste."""
+    return ORCHESTRATED_RESUME.format(repo_root=shlex.quote(repo_root),
+                                      issue=shlex.quote(issue), run_id=shlex.quote(run_id))
 
 
 def refuse_orchestrated_hold(repo_root: Path, issue: int) -> None:
