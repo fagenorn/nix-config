@@ -290,17 +290,22 @@ def _read_checks(source: str | None) -> dict[str, list[tuple[str, str]]]:
 
 def _replace_record(path: Path, text: str, mode: int) -> None:
     """Atomically replace the record through a temporary file beside it."""
-    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".acceptance-record-")
+    temporary: str | None = None
     try:
+        data = text.encode("utf-8")
+        descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".acceptance-record-")
         with os.fdopen(descriptor, "wb") as handle:
             os.fchmod(handle.fileno(), mode)
-            handle.write(text.encode("utf-8"))
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-    except OSError as error:
-        Path(temporary).unlink(missing_ok=True)
+        temporary = None
+    except (OSError, UnicodeEncodeError) as error:
         raise AcceptanceRecordError(f"cannot write record {path}: {error}") from error
+    finally:
+        if temporary is not None:
+            Path(temporary).unlink(missing_ok=True)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

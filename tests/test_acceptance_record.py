@@ -194,6 +194,20 @@ class AcceptanceRecordTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o640)
         self.assertEqual(sorted(os.listdir(self.dir)), ["checks.json", NAME])
 
+    def test_a_failed_write_is_refused_and_leaves_no_temporary_file(self):
+        before = self.write(record(MET, PENDING))
+        unencodable = json.dumps([{"name": "Nix Eval", "bucket": "pass", "link": "\ud800"}])
+        self.refused(self.reobserve("--row", "AC2", checks_json=unencodable),
+                     "cannot write record", before)
+        self.assertEqual(sorted(os.listdir(self.dir)), ["checks.json", NAME])
+        if os.geteuid() == 0:
+            return
+        (self.dir / "checks.json").write_text(GREEN, encoding="utf-8")
+        self.addCleanup(self.dir.chmod, 0o755)
+        self.dir.chmod(0o555)
+        self.refused(self.run_tool("reobserve", "--record", NAME, "--head", HEAD, "--checks",
+                                   "checks.json", "--row", "AC2"), "cannot write record", before)
+
     def test_no_row_only_rederives_the_state(self):
         human = row("AC2", "human", "the user reads it", "human_pending")
         for rows, state in (((MET,), "met"), ((MET, PENDING), "unmet"), ((MET, human), "human_pending"),
