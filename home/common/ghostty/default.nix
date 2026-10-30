@@ -24,7 +24,7 @@ in
     enableBashIntegration = false;
     installBatSyntax = false;
     settings = {
-      font-family = "FiraCode Nerd Font Mono";
+      font-family = "GeistMono Nerd Font Mono";
       font-size = 13;
 
       background-opacity = 0.93;
