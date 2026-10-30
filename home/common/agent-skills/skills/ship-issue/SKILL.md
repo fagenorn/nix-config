@@ -9,10 +9,7 @@ description: 'Delivers a finished feature-branch worktree: integration-branch sy
 
 Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. The only sanctioned exception is `workflow-state build-delivery`, which performs its own sealed, read-only resolution when it builds a delivery object (and `verified-tree`, which reads `bindings.workflow.verification` and its conditions itself); this skill still never resolves again itself. Use `bindings.tracker`, `bindings.vcs`, `bindings.commands`, `bindings.workflow.review.code`, and `bindings.workflow.verification`; dereference verification IDs through `bindings.commands`.
 
-For code review, select `bindings.workflow.review.code` and route retained
-`capabilities.review.code` first. `blocked` stops; authored `unsupported` takes
-only its documented route. Only `available` dereferences
-`bindings.commands[review_id].argv` before execution.
+For code review, select `bindings.workflow.review.code` and route retained `capabilities.review.code` first. `blocked` stops; authored `unsupported` takes only its documented route. Only `available` dereferences `bindings.commands[review_id].argv` before execution.
 
 A blocked required capability stops. An authored unsupported tracker takes the existing tracker-free route; the sync/verify/consolidate/merge machinery still applies.
 
@@ -59,33 +56,13 @@ Before **every forge or `origin` write this skill makes up to and including the 
 
 `<issue:attempt:launch>` is the `action_id` the handoff carried, passed through verbatim — never recomputed, never derived from `attempt`. Proceed only on `current: true`. Anything else — `current: false`, a non-zero exit, a missing helper, or output that does not parse into the exact four keys `action_id`, `current`, `current_action_id` and `reason` — refuses the write; this check never degrades gracefully. Skip it silently only without lifecycle identity (standalone, or an all-null group).
 
-Guarded: the Phase-4 push, the Phase-4 PR create, every push in REVIEW.md's
-five-step apply/push flow, and the Phase-7 merge. There is no post-merge
-exemption: under lifecycle identity each post-merge effect is a `## Delivery loop`
-cycle — the remote branch delete, and Phase 8's issue close or hold, `git worktree
-remove` and the branch delete — fenced by `current-launch` before and after the
-effect exactly like the merge. Local commits are fenced separately
-(### Local commits).
+Guarded: the Phase-4 push, the Phase-4 PR create, every push in REVIEW.md's five-step apply/push flow, and the Phase-7 merge. There is no post-merge exemption: under lifecycle identity each post-merge effect is a `## Delivery loop` cycle — the remote branch delete, and Phase 8's issue close or hold, `git worktree remove` and the branch delete — fenced by `current-launch` before and after the effect exactly like the merge. Local commits are fenced separately (### Local commits).
 
 **A refusal is a stop that writes nothing anywhere**: no further forge write, **no ledger write**, no cleanup; leave the worktree, the branch and any PR as they are. Print the re-entry line `/from-issue <num> --auto` on its own line, then return a truthful `stopped` ship summary (under lifecycle identity, a `terminal_failed` `ship-summary/v2`'s `historical_owner_result`): notes name the refusal, its `reason`, this `action_id` and the reported `current_action_id`; `merge_sha: null`, `issue_closed: false`, `discussion_items: []`, `pr_url` the opened PR or null, `detail_state: "none"` and `report_path: null`, or the failure-only `unpublished` shape when Phase 5 retained readable Minor/Discussion findings (notes name that source and its root; keep the worktree). Phase 8 does not run.
 
 ### Local commits
 
-When the prompt carries a `Lifecycle worker:` line, this run is a
-registered worker, and it creates every local commit as
-`launch-commit --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <git commit arguments>`.
-That includes Phase 1's sync, run as
-`git merge --no-commit --no-ff origin/<integration>` followed by
-`launch-commit`, and Phase 3's commits. Exit 3 is a refusal like
-`check-launch`'s: stop with the same no-write rule. An agent this run
-dispatches that can write is registered with
-`--parent <worker_id>` added to `workflow-state register-worker` (this
-handoff's `action_id` as `--action-id`), gets its own `Lifecycle worker:`
-line followed by the sentences "Run each long command, every verification command included, as
-`launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <argv>`,
-still in the foreground." and "Create every scratch directory or scratch worktree under the path that
-`launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>` prints.", and is released when it returns. Without the line, commit with plain
-`git`.
+When the prompt carries a `Lifecycle worker:` line, this run is a registered worker, and it creates every local commit as `launch-commit --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <git commit arguments>`. That includes Phase 1's sync, run as `git merge --no-commit --no-ff origin/<integration>` followed by `launch-commit`, and Phase 3's commits. Exit 3 is a refusal like `check-launch`'s: stop with the same no-write rule. An agent this run dispatches that can write is registered with `--parent <worker_id>` added to `workflow-state register-worker` (this handoff's `action_id` as `--action-id`), gets its own `Lifecycle worker:` line followed by the sentences "Run each long command, every verification command included, as `launch-scope exec --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id> -- <argv>`, still in the foreground." and "Create every scratch directory or scratch worktree under the path that `launch-scope scratch --repo-root <ledger_repo_root> --run-id <run-id> --worker-id <worker_id>` prints.", and is released when it returns. Without the line, commit with plain `git`.
 
 ## Doc-grounded escalations
 
@@ -93,8 +70,7 @@ Before any user-facing question mid-flow, invoke `doc-grounded-questions`, read 
 
 ## gh hygiene
 
-Run the push, the merge and a branch delete each as its own Bash call, spelled exactly as shown: no `cd`, chain, pipe, redirection or wrapper. Read the result from that call's output or a follow-up call, never through a pipe or an appended `echo`. The only prefix unsets exactly the names in `bindings.tracker.credential_env.unset_before_invocation` (`GITHUB_TOKEN` yields `unset GITHUB_TOKEN && `) and goes only on a forge or `origin` call, never on the local branch delete. Text that only mentions one of these commands goes in one quoted argument. When `bindings.tracker.cli` is `glab`, substitute the equivalent `glab` verbs.
-Throughout, follow `writing-plans`' Payload discipline: targeted `rg`, bounded reads, summarized output, logs on disk, artifacts as paths.
+Run the push, the merge and a branch delete each as its own Bash call, spelled exactly as shown: no `cd`, chain, pipe, redirection or wrapper. Read the result from that call's output or a follow-up call, never through a pipe or an appended `echo`. The only prefix unsets exactly the names in `bindings.tracker.credential_env.unset_before_invocation` (`GITHUB_TOKEN` yields `unset GITHUB_TOKEN && `) and goes only on a forge or `origin` call, never on the local branch delete. Text that only mentions one of these commands goes in one quoted argument. When `bindings.tracker.cli` is `glab`, substitute the equivalent `glab` verbs. Throughout, follow `writing-plans`' Payload discipline: targeted `rg`, bounded reads, summarized output, logs on disk, artifacts as paths.
 
 ## Phase 0 — Pre-flight
 
@@ -113,7 +89,7 @@ Standalone, tell the user the probe failed, end with that line and stop, keeping
 
 Any failure: pause, ground, surface. Don't auto-fix the branch name or stash changes.
 
-**Effective acceptance state.** Start from the handoff's `acceptance_state`. The record is `<plan stem>.acceptance.md` beside the plan root, named by its repository-relative path, or `none` when absent. With `human_pending` and `auto: false`, ask the user in one grounded question to attest each `human_pending` row; if every row is attested, rewrite those Verdict cells to `met (attested)`, commit the record (### Local commits) and continue with `met`, else keep `human_pending`. `--auto` never asks and never self-attests. The value is then fixed for the run and ship grades nothing: `met` or `not_applicable` **closes** the issue, `unmet` or `human_pending` **holds** it open as `needs-verification` (Phase 8). A hold whose record is `none` stops with `terminal_failed` before any hold effect.
+**Effective acceptance state.** Start from the handoff's `acceptance_state`. The record is `<plan stem>.acceptance.md` beside the plan root, named by its repository-relative path, or `none` when absent. With `human_pending` and `auto: false`, ask the user in one grounded question to attest each `human_pending` row; if every row is attested, rewrite those Verdict cells to `met (attested)`, commit the record (### Local commits) and continue with `met`, else keep `human_pending`. `--auto` never asks and never self-attests. The value is then fixed for the run, save Phase 6's re-observation, and ship grades nothing: `met` or `not_applicable` **closes** the issue, `unmet` or `human_pending` **holds** it open as `needs-verification` (Phase 8). A hold whose record is `none` stops with `terminal_failed` before any hold effect.
 
 ## Phase 1 — Sync from the integration branch
 
@@ -173,14 +149,7 @@ Closes #<num>"
 
 This is the one form the lifecycle guard accepts: one command, those five flags in that order, `<resolved-repository>` the retained `bindings.tracker.repo_slug`, and the body a single double-quoted argument that may span lines but contains no `"`, `$`, backtick or backslash. A body from a file, a heredoc or a command substitution is refused: render it in place.
 
-The `## Acceptance` section always appears. `Acceptance state:` carries Phase 0's
-effective value, and `Acceptance record:` carries the record's repository-relative
-path or `none`. With a record, `<acceptance table>` is a Markdown table with the
-three columns `AC`, `Kind` and `Verdict`, one row per record row, copying its
-closed tokens; without one, drop that line. On a **hold** drop the
-`Closes #<num>` line too: a hold body carries no closing keyword (close, closes,
-closed, fix, fixes, fixed, resolve, resolves or resolved before an issue
-reference), so the merge cannot close the issue.
+The `## Acceptance` section always appears. `Acceptance state:` carries the effective value, and `Acceptance record:` carries the record's repository-relative path or `none`. With a record, `<acceptance table>` is a Markdown table with the three columns `AC`, `Kind` and `Verdict`, one row per record row, copying its closed tokens; without one, drop that line. On a **hold** drop the `Closes #<num>` line too: a hold body carries no closing keyword (close, closes, closed, fix, fixes, fixed, resolve, resolves or resolved before an issue reference), so the merge cannot close the issue.
 
 Title: the issue title verbatim unless the implementation deviated meaningfully. Under 70 chars; details go in the body.
 
@@ -238,7 +207,7 @@ If the fix changes unrelated behavior or the finding cannot be checked in that b
 
 ## Phase 6 — Wait for CI
 
-**Docs-only changes never wait for CI.** `git diff --name-only <base>..HEAD` — every path ends in `.md` → skip straight to Phase 7; anything else → the phase runs normally.
+**Docs-only changes never wait for CI.** `git diff --name-only <base>..HEAD` — every path ends in `.md` → skip to Phase 7 unless rows need re-observing; anything else → the phase runs normally.
 
 Before blocking, `gh pr view <pr-num> --json headRefOid` must equal the reviewed `HEAD_SHA` (fixed in Phase 5, re-fixed by REVIEW.md's step 5 after each applied fix), never `git rev-parse HEAD` read afresh: two attempts of one issue share this checkout, so live local HEAD is not evidence. Diverged → the PR head carries **unreviewed commits**: never resolve it by re-pushing, resetting, re-reviewing or merging, except for a head POST-SELECTION-SYNC.md admits. In `--auto` this is the genuinely-blocked stop: before the CI wait and the merge, make no further forge write, run no cleanup, keep the worktree and the branch, and return a truthful `stopped` ship summary naming the reviewed `HEAD_SHA` and the observed `headRefOid`. Interactive, surface and wait at the same point.
 
@@ -249,6 +218,8 @@ timeout 300 gh pr checks <pr-num> --required --watch --fail-fast --interval 30
 ```
 
 Exit `0` → list advisory states, then Phase 7. `124` → one short narration turn, re-run the identical command, up to 8 times (~40 min), then escalate. `1` with gh's `no required checks reported` error → run `timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30` for the rest of the phase under the same exit codes and retry budget, list no advisory states, and note `CI: no required checks reported; waited on all`. Other non-zero → a gating check failed. After the required watch exits `0`, run `gh pr checks <pr-num> --json name,bucket` once and append each non-`pass` row to the ship summary's notes as `advisory CI: <name>=<bucket>, …`; an advisory failure does not block the merge. Escalation, failing checks and advisory overflow: `CI-MERGE.md`.
+
+**Re-observe pending rows.** Outside remainder mode, with a record and an `unmet` effective state, do this before the selection gate or a ledger-free merge. On GitHub, once the required watch exits `0`, save `gh pr checks <pr-num> --required --json name,bucket,link` to a scratch `<file>`; otherwise omit `--checks`. Pick each `unverified` `code` row with a measurement its `Observed` cell does not cite and whose uncited ones are all required checks or read-only commands; run its commands once at `HEAD_SHA`. In the worktree, run `acceptance-record reobserve --record <record-path> --head <HEAD_SHA> --checks <file>` with `--row <ACn>` per picked row and `--ran "<command>=<exit code>"` per command; it applies sdd's `code` rule to observations and grades nothing. Its printed `acceptance_state` becomes the effective state; exit `2` keeps it. If `changed` is non-empty, commit the record alone (### Local commits), push per REVIEW.md's steps 4–5, rewrite the PR body's `## Acceptance` per Phase 4 and rerun Phase 6, watch included. Only `human` rows and rows no agent can observe here still hold.
 
 ## Phase 7 — Merge
 
@@ -266,7 +237,7 @@ gh pr merge <pr-num> --repo <resolved-repository> --merge --subject "<rendered s
 
 Before cleanup, invoke review-package (`~/.agents/bin/review-package`) in `delivery-detail` mode over every non-empty Minor/Discussion finding retained per REVIEW.md, independently run `artifact-budget check --kind review-package` on the returned durable root and compare metrics, and record the checked `detail_state` and single `report_path`, constructing no `merged` summary yet. A publication failure may return `unpublished` only as REVIEW.md's durable detail allows, keeping the worktree; otherwise fail closed. Only `none` or a checker-valid `present` detail proceeds to remove the worktree. Under lifecycle identity this effect is a `## Delivery loop` cycle.
 
-1. Close or hold, per Phase 0's effective acceptance state.
+1. Close or hold, per the effective acceptance state.
    - **Close** (`met` or `not_applicable`): `gh issue view <num> --json state`; if `OPEN`, `gh issue close <num>` (see Phase 4).
    - **Hold** (`unmet` or `human_pending`), in this order: `gh issue view <num> --json state,comments`; if `CLOSED` (a commit's closing keyword can close it), `gh issue reopen <num>`. When `gh label list --repo <resolved-repository> --search needs-verification --json name` shows no name exactly `needs-verification`, run `gh label create needs-verification --repo <resolved-repository> --description "Merged, acceptance criteria await verification"` — never `--force`, which would overwrite a user's label. Then `gh issue edit <num> --add-label needs-verification`. The hold comment's first line is `Held for verification: <PR URL>`; the rest gives the effective acceptance state, the PR body's three-column table and the record's link at the merge SHA (`https://github.com/<resolved-repository>/blob/<merge-sha>/<record-path>`). When the earlier view already shows one or more comments with that first line, reuse the earliest one's URL; otherwise post it with `gh issue comment <num> --body "<hold comment>"`, whose stdout is the comment URL. Finally `gh issue view <num> --json state,labels` must show `OPEN` with `needs-verification`; anything else keeps ownership and retries, as for any failed post-merge action.
 2. Remove the worktree from the main repo root, never from inside the worktree (branch delete: `## gh hygiene`):
