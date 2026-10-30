@@ -10,6 +10,13 @@ in
 {
   nixpkgs.config.allowUnfree = true;
 
+  # System fonts for every host: Geist Serif (issue 486 D2) and GeistMono Nerd Font
+  # (issue 487 D2). On darwin this list merges with darwin-common.nix's FiraCode entries.
+  fonts.packages = [
+    (import ../../lib/geist-serif.nix { inherit pkgs; })
+    pkgs.nerd-fonts.geist-mono
+  ];
+
   # Pre-built native Codex CLI binaries for Linux and macOS.
   nix.settings = {
     extra-substituters = [ "https://codex-cli.cachix.org" ];
@@ -103,7 +110,4 @@ in
       unstablePkgs.devenv
       unstablePkgs.spicetify-cli
     ];
-
-  # System fonts for every host; darwin-common.nix adds the FiraCode fonts on macOS.
-  fonts.packages = [ pkgs.nerd-fonts.geist-mono ];
 }
