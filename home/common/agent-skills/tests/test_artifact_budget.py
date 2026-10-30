@@ -11,6 +11,7 @@ import subprocess
 import shutil
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -734,6 +735,165 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 self.assertEqual(result.stdout, expected)
             else:
                 self.assert_refusal(result, "invalid report")
+
+    def test_a_producer_refusal_names_its_member_or_bound(self):
+        """Issue 472 AC1, D2, D3: the notes bound and the key set are named; the notes text never is."""
+        bound = json.loads(POLICY.read_text(encoding="utf-8"))["phase_reports"]["notes_max_characters"]
+        marker = "secret-notes-text"
+        notes = marker + "n" * (bound + 1 - len(marker))
+        for use_stdin in (True, False):
+            with self.subTest(use_stdin=use_stdin):
+                result = self.run_validate(
+                    "producer", {"state": "failed", "artifact": None, "notes": notes}, use_stdin)
+                reason = self.assert_refusal(result, "invalid report")
+                self.assertIn("notes", reason)
+                self.assertIn(str(bound), reason)
+                self.assertIn(str(bound + 1), reason)
+                self.assertNotIn(marker, reason)
+        keys = {"state": "failed", "artifact": None, "decisions": []}
+        reason = self.assert_refusal(self.run_validate("producer", keys, True), "invalid report")
+        self.assertIn('"decisions"', reason)
+        self.assertIn('"notes"', reason)
+
+    def test_a_producer_refusal_names_the_failing_artifact_member(self):
+        """Issue 472 D3: the producer boundary names state, or the artifact member its state breaks."""
+        over = self.full("design-spec", True)
+        rows = (
+            ({"state": "done", "artifact": None}, ("state", "decompose_required")),
+            ({"state": [], "artifact": None}, ("state", "decompose_required")),
+            ({"state": "stopped", "artifact": over}, ("artifact.kind", "handoff")),
+            ({"state": "decompose_required", "artifact": self.full("handoff", True)},
+             ("artifact.kind",)),
+            ({"state": "complete", "artifact": self.full("handoff", True)},
+             ("artifact", '"violations"')),
+            ({"state": "complete", "artifact": {**self.full("handoff"), "path": ""}},
+             ("artifact.path",)),
+            ({"state": "complete", "artifact": {**self.full("handoff"),
+                                                "metrics": {**self.metrics(), "file_count": 0}}},
+             ("artifact.metrics",)),
+            ({"state": "decompose_required", "artifact": {**over, "budget_status": "within_budget"}},
+             ("artifact.budget_status",)),
+            ({"state": "decompose_required",
+              "artifact": {**over, "violations": ["aggregate_bytes", "root_bytes"]}},
+             ("artifact.violations",)),
+            ({"state": "failed", "artifact": {"kind": "handoff", "path": "h.md",
+                                              "metrics": self.metrics()}},
+             ("artifact", '"metrics"')),
+            ({"state": "failed", "artifact": "h.md"}, ("artifact",)),
+        )
+        for number, (fields, tokens) in enumerate(rows):
+            with self.subTest(row=number):
+                result = self.run_validate("producer", {**fields, "notes": "ok"}, number % 2 == 0)
+                reason = self.assert_refusal(result, "invalid report")
+                for token in tokens:
+                    self.assertIn(token, reason)
+
+    def test_every_legacy_boundary_names_its_members_and_notes_bound(self):
+        """Issue 472 D3, D12: each legacy validator checks its key set, then notes, before its matrix."""
+        bound = json.loads(POLICY.read_text(encoding="utf-8"))["phase_reports"]["notes_max_characters"]
+        long_notes = "n" * (bound + 1)
+        payloads = {
+            "sdd": self.make_sdd("complete", "clean", "clean", "clean", "passed",
+                                 "a" * 40, "b" * 40, "none", None),
+            "ship-handoff": {**self.lifecycle(), "state": "complete",
+                             "spec_artifact": self.full("design-spec"),
+                             "plan_artifact": self.full("implementation-plan"),
+                             "head_sha": "b" * 40, "review_state": "clean",
+                             "report_path": None, "notes": "ok"},
+            "ship-summary": {"issue": 49, "state": "stopped", "pr_url": None, "merge_sha": None,
+                             "issue_closed": False, "discussion_items": [],
+                             "detail_state": "none", "report_path": None, "notes": "ok"},
+        }
+        for boundary, payload in payloads.items():
+            with self.subTest(boundary=boundary):
+                self.assertEqual(self.run_validate(boundary, payload, True).returncode, 0)
+                reason = self.assert_refusal(
+                    self.run_validate(boundary, {**payload, "notes": long_notes}, True),
+                    "invalid report")
+                self.assertIn("notes", reason)
+                self.assertIn(str(bound), reason)
+                without = {key: value for key, value in payload.items() if key != "report_path"}
+                reason = self.assert_refusal(self.run_validate(boundary, without, False),
+                                             "invalid report")
+                self.assertIn('"report_path"', reason)
+        # Only a whole workflow response reaches this row at the CLI (issue 472 D12).
+        ledger = {"issue": 49, "state": "merged", "pr_url": "https://example.test/pr/1",
+                  "merge_sha": "c" * 40, "issue_closed": False, "discussion_items": [],
+                  "detail_state": "none", "report_path": None, "notes": long_notes}
+        with self.assertRaises(artifact_budget.ArtifactBudgetError) as caught:
+            artifact_budget.validate_ledger_result(ledger, bound)
+        self.assertIn("notes", str(caught.exception))
+        self.assertIn(str(bound), str(caught.exception))
+
+    def test_a_detail_refusal_names_the_failing_finding_member(self):
+        """Issue 472 AC2, D3: a detail refusal names the finding by index and its member."""
+        finding = {"axis": "ship", "severity": "Minor", "status": "minor",
+                   "text": "kept", "ruling": None}
+        parked = {**finding, "status": "parked"}
+        cases = (
+            ({"interface_version": 1, "findings": [parked]}, ("findings[0]", "ruling")),
+            ({"interface_version": 1, "findings": [finding, parked]}, ("findings[1]", "ruling")),
+            ({"interface_version": 1, "findings": [{**finding, "axis": "style"}]},
+             ("findings[0].axis",)),
+            ({"interface_version": 1,
+              "findings": [{key: value for key, value in finding.items() if key != "text"}]},
+             ("findings[0]", '"text"')),
+            ({"interface_version": 1, "items": []}, ('"findings"', '"items"')),
+        )
+        for payload, tokens in cases:
+            with self.subTest(tokens=tokens):
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), "validate-detail-input", "--input", "-",
+                     "--policy", str(POLICY)],
+                    input=json.dumps(payload).encode("utf-8"), capture_output=True, check=False)
+                reason = self.assert_refusal(result, "invalid detail input")
+                for token in tokens:
+                    self.assertIn(token, reason)
+                self.assertNotIn("style", reason)
+
+    def test_v2_refusals_name_the_boundary_and_its_cause(self):
+        """Issue 472 D4: a v2 refusal names its boundary, then the cause it wraps."""
+        model = artifact_budget._delivery_model()
+        contract, delivery = contract_and_delivery(model)
+        handoff = ship_handoff(model, contract, delivery)
+        unpaired = self.run_validate("ship-handoff", {**handoff, "acceptance_state": "unmet"}, True)
+        reason = self.assert_refusal(unpaired, "invalid report")
+        self.assertTrue(reason.startswith("ship-handoff: "), reason)
+        self.assertIn("acceptance_state", reason)
+        missing_scope = deepcopy(workflow_responses(model)["owner"])
+        missing_scope.pop("requested_scope")
+        refused = self.run_validate("workflow-response", missing_scope, True)
+        reason = self.assert_refusal(refused, "invalid report")
+        self.assertTrue(reason.startswith("workflow-response: "), reason)
+
+    def test_a_foreign_v2_cause_is_named_by_its_class(self):
+        """Issue 472 D12: a v2 reason carries only the helper's or the model's own message."""
+        class ModelError(ValueError):
+            pass
+
+        def model_raising(error):
+            def validate_delivery_object(value, **_):
+                raise error
+            return types.SimpleNamespace(DeliveryModelError=ModelError,
+                                         validate_delivery_object=validate_delivery_object)
+
+        cases = (
+            (ModelError("invalid checkpoint"), "ship-checkpoint: invalid checkpoint"),
+            (ValueError("invalid literal for int() with base 10: 'secret'"),
+             "ship-checkpoint: ValueError"),
+            (KeyError("secret"), "ship-checkpoint: KeyError"),
+        )
+        for error, expected in cases:
+            with self.subTest(error=type(error).__name__), mock.patch.object(
+                    artifact_budget, "_delivery_model", return_value=model_raising(error)):
+                with self.assertRaises(artifact_budget.ArtifactBudgetError) as caught:
+                    artifact_budget.validate_delivery_model_report({}, 500, "ship-checkpoint")
+                self.assertEqual(str(caught.exception), expected)
+        with mock.patch.object(artifact_budget, "_delivery_model",
+                               return_value=model_raising(KeyError("secret"))):
+            with self.assertRaises(artifact_budget.ArtifactBudgetError) as caught:
+                artifact_budget.validate_workflow_response_report({}, 500)
+        self.assertEqual(str(caught.exception), "workflow-response: KeyError")
 
     def make_sdd(self, state, review, conformance, correctness, verification,
                  base, head, detail_state, report_path, acceptance="not_applicable"):

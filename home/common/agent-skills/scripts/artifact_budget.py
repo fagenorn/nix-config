@@ -370,37 +370,65 @@ def _nonnegative_fields(value: object, keys: set[str]) -> bool:
     return _exact_keys(value, keys) and all(_integer(value[key]) for key in keys)  # type: ignore[index]
 
 
-def _validate_finding(value: object) -> None:
-    keys = {"axis", "severity", "status", "text", "ruling"}
-    if not _exact_keys(value, keys):
-        raise ArtifactBudgetError("invalid finding keys")
+def _quoted(names: set[str]) -> str:
+    return ", ".join(json.dumps(name) for name in sorted(names))
+
+
+def _members_fault(value: object, keys: set[str], subject: str) -> str | None:
+    """Why `value` is not an object with exactly `keys`, or None (issue 472 D2, D3)."""
+    if not isinstance(value, dict):
+        return f"{subject} must be a JSON object"
+    missing, unexpected = keys - set(value), set(value) - keys
+    parts = ([f"missing {_quoted(missing)}"] if missing else []) + (
+        [f"unexpected {_quoted(unexpected)}"] if unexpected else [])
+    return f"{subject} members: {'; '.join(parts)}" if parts else None
+
+
+def _require_members(value: object, keys: set[str], subject: str) -> None:
+    fault = _members_fault(value, keys, subject)
+    if fault is not None:
+        raise ArtifactBudgetError(fault)
+
+
+def _require_notes(value: object, maximum: int) -> None:
+    """Refuse notes that are not a string of at most `maximum` characters (issue 472 D3)."""
+    if not isinstance(value, str):
+        raise ArtifactBudgetError("notes must be a string")
+    if len(value) > maximum:
+        raise ArtifactBudgetError(f"notes has {len(value)} characters; the bound is {maximum}")
+
+
+def _validate_finding(value: object, subject: str) -> None:
+    _require_members(value, {"axis", "severity", "status", "text", "ruling"}, subject)
     assert isinstance(value, dict)
-    if value["axis"] not in {"conformance", "correctness", "ship"}:
-        raise ArtifactBudgetError("invalid finding axis")
-    if value["severity"] not in {"Critical", "Important", "Minor", "Blocking", "Should-fix", "Discussion"}:
-        raise ArtifactBudgetError("invalid finding severity")
-    if value["status"] not in {"parked", "residual", "discussion", "minor"}:
-        raise ArtifactBudgetError("invalid finding status")
+    if not (isinstance(value["axis"], str) and value["axis"] in ("conformance", "correctness", "ship")):
+        raise ArtifactBudgetError(f"{subject}.axis must be conformance, correctness or ship")
+    if not (isinstance(value["severity"], str) and value["severity"] in (
+            "Critical", "Important", "Minor", "Blocking", "Should-fix", "Discussion")):
+        raise ArtifactBudgetError(
+            f"{subject}.severity must be Critical, Important, Minor, Blocking, Should-fix or Discussion")
+    if not (isinstance(value["status"], str)
+            and value["status"] in ("parked", "residual", "discussion", "minor")):
+        raise ArtifactBudgetError(f"{subject}.status must be parked, residual, discussion or minor")
     if not _string(value["text"]):
-        raise ArtifactBudgetError("invalid finding text")
+        raise ArtifactBudgetError(f"{subject}.text must be a non-empty string")
     ruling = value["ruling"]
     if ruling is not None and not _string(ruling):
-        raise ArtifactBudgetError("invalid finding ruling")
+        raise ArtifactBudgetError(f"{subject}.ruling must be null or a non-empty string")
     if value["status"] == "parked" and not _string(ruling):
-        raise ArtifactBudgetError("parked finding requires ruling")
+        raise ArtifactBudgetError(f"{subject}.ruling is required for a parked finding")
 
 
 def validate_detail_input(value: Mapping[str, object]) -> None:
     """Validate the sole D15 non-empty detail-input shape."""
-    if not _exact_keys(value, {"interface_version", "findings"}):
-        raise ArtifactBudgetError("invalid detail input keys")
+    _require_members(value, {"interface_version", "findings"}, "detail input")
     if type(value["interface_version"]) is not int or value["interface_version"] != 1:
-        raise ArtifactBudgetError("invalid detail input version")
+        raise ArtifactBudgetError("interface_version must be 1")
     findings = value["findings"]
     if not isinstance(findings, list) or not findings:
-        raise ArtifactBudgetError("detail findings must be non-empty")
-    for finding in findings:
-        _validate_finding(finding)
+        raise ArtifactBudgetError("findings must be a non-empty list")
+    for index, finding in enumerate(findings):
+        _validate_finding(finding, f"findings[{index}]")
 
 
 def _validate_blob_identity(value: dict) -> None:
@@ -623,9 +651,9 @@ def _validate_manifest(root: Path, root_raw: bytes) -> list[CapturedArtifact]:
             if not lines or any(not line.endswith(b"\n") for line in lines):
                 raise ArtifactBudgetError("invalid JSONL shard")
             findings = []
-            for line in lines:
+            for line_number, line in enumerate(lines, 1):
                 finding = _decode_json(line)
-                _validate_finding(finding)
+                _validate_finding(finding, f"shard-{number:03d}.jsonl line {line_number}")
                 canonical = _canonical(finding)
                 if line != canonical:
                     raise ArtifactBudgetError("non-canonical JSONL finding")
@@ -717,49 +745,69 @@ def _valid_path(value: object) -> bool:
     return isinstance(value, str) and bool(value) and "\x00" not in value
 
 
+def _artifact_fault(value: object, *, kinds: Sequence[str], over: bool,
+                    root_only: bool = False) -> str | None:
+    """Why `value` is not an artifact of one of `kinds`, or None (issue 472 D3).
+
+    `over` selects the over-budget shape, `root_only` the root-only shape of a
+    failed producer report.
+    """
+    expected = {"kind", "path"} if root_only else {"kind", "path", "metrics", "budget_status"}
+    if over and not root_only:
+        expected.add("violations")
+    fault = _members_fault(value, expected, "artifact")
+    if fault is not None:
+        return fault
+    assert isinstance(value, dict)
+    if not (isinstance(value["kind"], str) and value["kind"] in tuple(kinds)):
+        return f"artifact.kind must be {' or '.join(kinds)}"
+    if not _valid_path(value["path"]):
+        return "artifact.path must be a non-empty string without NUL"
+    if root_only:
+        return None
+    if not _valid_metrics(value["metrics"]):
+        return "artifact.metrics must be four non-negative integer counts of one measurement"
+    status = "over_budget" if over else "within_budget"
+    if value["budget_status"] != status:
+        return f"artifact.budget_status must be {status}"
+    if over:
+        violations = value["violations"]
+        if not (isinstance(violations, list) and bool(violations)
+                and violations == [name for name in VIOLATIONS if name in violations]
+                and len(set(violations)) == len(violations)):
+            return "artifact.violations must be distinct violation codes in checker order"
+    return None
+
+
 def _valid_artifact(value: object, *, kind: str | None = None,
                     over: bool | None = None, root_only: bool = False) -> bool:
-    if root_only:
-        return (_exact_keys(value, {"kind", "path"}) and value["kind"] in KINDS  # type: ignore[index]
-                and _valid_path(value["path"]))  # type: ignore[index]
-    expected = {"kind", "path", "metrics", "budget_status"}
-    if over is True:
-        expected.add("violations")
-    if not _exact_keys(value, expected):
-        return False
-    assert isinstance(value, dict)
-    if value["kind"] not in KINDS or (kind is not None and value["kind"] != kind):
-        return False
-    if not _valid_path(value["path"]) or not _valid_metrics(value["metrics"]):
-        return False
-    if over is True:
-        violations = value["violations"]
-        return (value["budget_status"] == "over_budget" and isinstance(violations, list)
-                and bool(violations) and violations == [name for name in VIOLATIONS if name in violations]
-                and len(set(violations)) == len(violations))
-    return value["budget_status"] == "within_budget"
+    return _artifact_fault(value, kinds=KINDS if kind is None else (kind,),
+                           over=over is True, root_only=root_only) is None
 
 
-def _notes(value: object, maximum: int) -> bool:
-    return isinstance(value, str) and len(value) <= maximum
+# Each producer state's allowed artifact kinds and budget side; `failed` takes a
+# root-only artifact or null (issue 472 D3).
+_PRODUCER_ARTIFACTS = {
+    "complete": (KINDS, False),
+    "decompose_required": (("design-spec", "implementation-plan", "review-package"), True),
+    "stopped": (("handoff",), True),
+}
 
 
 def validate_producer_report(value: Mapping[str, object], notes_max_characters: int) -> None:
-    if not _exact_keys(value, {"state", "artifact", "notes"}) or not _notes(value["notes"], notes_max_characters):
-        raise ArtifactBudgetError("invalid producer report")
+    _require_members(value, {"state", "artifact", "notes"}, "producer report")
+    _require_notes(value["notes"], notes_max_characters)
     state, artifact = value["state"], value["artifact"]
-    valid = False
-    if state == "complete":
-        valid = _valid_artifact(artifact, over=False)
-    elif state == "decompose_required":
-        valid = any(_valid_artifact(artifact, kind=kind, over=True)
-                    for kind in ("design-spec", "implementation-plan", "review-package"))
-    elif state == "stopped":
-        valid = _valid_artifact(artifact, kind="handoff", over=True)
-    elif state == "failed":
-        valid = artifact is None or _valid_artifact(artifact, root_only=True)
-    if not valid:
-        raise ArtifactBudgetError("invalid producer state")
+    if state == "failed":
+        fault = None if artifact is None else _artifact_fault(
+            artifact, kinds=KINDS, over=False, root_only=True)
+    elif isinstance(state, str) and state in _PRODUCER_ARTIFACTS:
+        kinds, over = _PRODUCER_ARTIFACTS[state]
+        fault = _artifact_fault(artifact, kinds=kinds, over=over)
+    else:
+        raise ArtifactBudgetError("state must be complete, decompose_required, stopped or failed")
+    if fault is not None:
+        raise ArtifactBudgetError(f"{fault} for state {state}")
 
 
 def _relative_path(value: object, *, durable: bool) -> bool:
@@ -775,11 +823,9 @@ def _relative_path(value: object, *, durable: bool) -> bool:
     return is_durable if durable else is_retained
 
 
-def _detail_fields(value: Mapping[str, object], notes_max: int,
-                   *, allow_unpublished: bool) -> bool:
+def _detail_fields(value: Mapping[str, object], *, allow_unpublished: bool) -> bool:
+    """Callers check `notes` with `_require_notes` first, so `notes` is a string here."""
     state, path, notes = value["detail_state"], value["report_path"], value["notes"]
-    if not _notes(notes, notes_max):
-        return False
     if state == "none":
         return path is None
     if state == "present":
@@ -816,7 +862,9 @@ def validate_sdd_report(value: Mapping[str, object], notes_max_characters: int) 
     keys = {"state", "review_state", "conformance_verdict", "correctness_verdict",
             "verification_state", "base_sha", "head_sha", "acceptance_state", "detail_state",
             "report_path", "notes"}
-    if not _exact_keys(value, keys) or not _detail_fields(value, notes_max_characters, allow_unpublished=True):
+    _require_members(value, keys, "SDD report")
+    _require_notes(value["notes"], notes_max_characters)
+    if not _detail_fields(value, allow_unpublished=True):
         raise ArtifactBudgetError("invalid SDD report")
     acceptance = value["acceptance_state"]
     if not isinstance(acceptance, str) or acceptance not in ACCEPTANCE_STATES:
@@ -856,8 +904,8 @@ def validate_ship_handoff_report(value: Mapping[str, object], notes_max_characte
             "action_id", "issue_number", "branch", "worktree_path", "spec_artifact",
             "plan_artifact", "head_sha", "review_state", "acceptance_state", "auto", "report_path",
             "notes"}
-    if not _exact_keys(value, keys) or not _notes(value["notes"], notes_max_characters):
-        raise ArtifactBudgetError("invalid ship handoff")
+    _require_members(value, keys, "ship handoff")
+    _require_notes(value["notes"], notes_max_characters)
     lifecycle = [value[name] for name in
                  ("ledger_repo_root", "run_id", "attempt", "owner", "owner_worktree", "action_id")]
     if not (all(item is None for item in lifecycle)
@@ -892,9 +940,11 @@ def validate_ship_handoff_report(value: Mapping[str, object], notes_max_characte
 def validate_ship_summary_report(value: Mapping[str, object], notes_max_characters: int) -> None:
     keys = {"issue", "state", "pr_url", "merge_sha", "issue_closed", "discussion_items",
             "detail_state", "report_path", "notes"}
-    if (not _exact_keys(value, keys) or not _integer(value["issue"], minimum=1)
+    _require_members(value, keys, "ship summary")
+    _require_notes(value["notes"], notes_max_characters)
+    if (not _integer(value["issue"], minimum=1)
             or value["discussion_items"] != [] or type(value["issue_closed"]) is not bool
-            or not _detail_fields(value, notes_max_characters, allow_unpublished=True)):
+            or not _detail_fields(value, allow_unpublished=True)):
         raise ArtifactBudgetError("invalid ship summary")
     pr = value["pr_url"]
     if pr is not None and not _string(pr):
@@ -926,12 +976,11 @@ def validate_ledger_result(value: Mapping[str, object], notes_max_characters: in
         return
     keys = {"issue", "state", "pr_url", "merge_sha", "issue_closed", "discussion_items",
             "detail_state", "report_path", "notes"}
-    if not _exact_keys(value, keys):
-        raise ArtifactBudgetError("invalid ledger result")
+    _require_members(value, keys, "ledger result")
+    _require_notes(value["notes"], notes_max_characters)
     detail, path = value["detail_state"], value["report_path"]
     valid = (_integer(value["issue"], minimum=1) and _string(value["pr_url"])
              and _sha(value["merge_sha"]) and value["discussion_items"] == []
-             and _notes(value["notes"], notes_max_characters)
              and ((detail == "none" and path is None)
                   or (detail == "present" and _relative_path(path, durable=True))
                   or (detail == "unpublished" and _relative_path(path, durable=False))))
@@ -945,6 +994,13 @@ def _canonical(value: object) -> bytes:
                            separators=(",", ":")) + "\n").encode("utf-8")
     except UnicodeEncodeError as exc:
         raise ArtifactBudgetError("invalid Unicode string") from exc
+
+
+def _v2_cause(model: object, exc: BaseException) -> str:
+    """The message of an error this helper or the delivery model raised, else the class name (issue 472 D12)."""
+    if isinstance(exc, (ArtifactBudgetError, model.DeliveryModelError)):
+        return str(exc)
+    return type(exc).__name__
 
 
 def validate_workflow_response_report(value: object, notes_max_characters: int) -> None:
@@ -964,7 +1020,7 @@ def validate_workflow_response_report(value: object, notes_max_characters: int) 
                     rule=validate_ledger_result,
                 )
     except Exception as exc:
-        raise ArtifactBudgetError("invalid workflow response") from exc
+        raise ArtifactBudgetError(f"workflow-response: {_v2_cause(model, exc)}") from exc
 
 
 def validate_delivery_model_report(
@@ -987,7 +1043,7 @@ def validate_delivery_model_report(
                 rule=validate_ship_summary_report,
             )
     except Exception as exc:
-        raise ArtifactBudgetError(f"invalid {boundary}") from exc
+        raise ArtifactBudgetError(f"{boundary}: {_v2_cause(model, exc)}") from exc
 
 
 def _validate_legacy_result_slot(
