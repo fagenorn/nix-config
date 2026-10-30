@@ -13,6 +13,7 @@
         "status": "over_budget",
         "metrics": {"root_bytes": 65537, "total_bytes": 65537, "file_count": 1, "largest_member_bytes": 0},
         "violations": ["root_bytes", "aggregate_bytes"],
+        "overages": {"root_bytes": {"limit": 65536, "over_by": 1}, "aggregate_bytes": {"limit": 65536, "over_by": 1}},
         "producer_state": "decompose_required"
       }
     },
@@ -27,6 +28,7 @@
         "status": "over_budget",
         "metrics": {"root_bytes": 1024, "total_bytes": 1924, "file_count": 10, "largest_member_bytes": 100},
         "violations": ["member_count"],
+        "overages": {"member_count": {"limit": 8, "over_by": 1}},
         "producer_state": "decompose_required"
       }
     },
@@ -41,6 +43,7 @@
         "status": "over_budget",
         "metrics": {"root_bytes": 1024, "total_bytes": 50177, "file_count": 2, "largest_member_bytes": 49153},
         "violations": ["member_bytes"],
+        "overages": {"member_bytes": {"limit": 49152, "over_by": 1}},
         "producer_state": "decompose_required"
       }
     },
@@ -55,6 +58,7 @@
         "status": "over_budget",
         "metrics": {"root_bytes": 8193, "total_bytes": 8193, "file_count": 1, "largest_member_bytes": 0},
         "violations": ["root_bytes", "aggregate_bytes"],
+        "overages": {"root_bytes": {"limit": 8192, "over_by": 1}, "aggregate_bytes": {"limit": 8192, "over_by": 1}},
         "producer_state": "stopped"
       }
     },
@@ -69,6 +73,7 @@
         "status": "over_budget",
         "metrics": {"root_bytes": 1024, "total_bytes": 66561, "file_count": 2, "largest_member_bytes": 65537},
         "violations": ["member_bytes"],
+        "overages": {"member_bytes": {"limit": 65536, "over_by": 1}},
         "producer_state": "decompose_required"
       }
     },
@@ -83,6 +88,7 @@
         "status": "over_budget",
         "metrics": {"root_bytes": 1024, "total_bytes": 541024, "file_count": 10, "largest_member_bytes": 60000},
         "violations": ["member_count", "aggregate_bytes"],
+        "overages": {"member_count": {"limit": 8, "over_by": 1}, "aggregate_bytes": {"limit": 524288, "over_by": 16736}},
         "producer_state": "decompose_required"
       }
     }

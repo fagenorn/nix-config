@@ -1486,12 +1486,6 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         )
         text = normalized(direct)
         for shape in (
-            '{"kind":"tracker"}',
-            '{"kind":"recorded_worktree", "path":"<absolute-path>"}',
-            '{"kind":"candidate_worktree"}',
-            '{"kind":"forge_pr", "path":"<issue-branch-prefix>"}',
-            '{"kind":"delivery_contract", "subject_id":"<issue>", '
-            '"reason_code":"delivery_contract_required", "detail_pointer":null}',
             "`interface_version`, `kind`, `issue`, nullable `run_id`, and `requirements`",
             "`interface_version`, `kind`, `issue`, nullable `run_id`, `source`, `reason`, "
             "`blockers`, nullable `result`, and `reentry`",
@@ -1503,6 +1497,11 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "deadline_at",
         ):
             self.assertIn(field, direct)
+        observe = text[text.index("**`kind: observe`**"):text.index("**`kind: owner`**")]
+        expects = module_constants(REPO_ROOT / "python/agent_tools/attempt_observations.py",
+                                   "EXPECTS_MEMBERS")["EXPECTS_MEMBERS"]
+        for name in ("expects", *expects):
+            self.assertIn(f"`{name}`", observe)
 
     def test_adjacent_from_issue_acquisition_modes_remain_unchanged(self):
         for route in (ACQUIRE_DISPATCHER, ACQUIRE_INTERACTIVE, ACQUIRE_DURABLE):
@@ -1877,6 +1876,16 @@ class ResumePackContractsTest(unittest.TestCase):
 
     PACK = ("workflow-state resume-pack --repo-root <ledger_repo_root> "
             "--run-id <run-id> --action-id <action_id>")
+
+    def test_the_lifecycle_call_rule_exempts_build_delivery_and_the_pack(self):
+        """Issue 473 D5: the only skill-named workflow-state stdout never piped through the
+        workflow-response boundary."""
+        text = FROM_ISSUE.read_text(encoding="utf-8")  # raw: the rule is one line
+        section = text[text.index("## Lifecycle identity"):text.index("### Resume pack")]
+        [rule] = [line for line in section.splitlines()
+                  if "--boundary workflow-response" in line]
+        for name in ("`build-delivery`", "`resume-pack`"):
+            self.assertIn(name, rule)
 
     def assert_ordered(self, text, *anchors):
         position = -1
