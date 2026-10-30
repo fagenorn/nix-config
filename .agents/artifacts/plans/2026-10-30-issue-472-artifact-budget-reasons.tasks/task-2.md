@@ -258,7 +258,8 @@ _PRODUCER_ARTIFACTS = {
    - `validate_detail_input` runs `_require_members(value, {"interface_version", "findings"}, "detail input")`.
    - It then raises `"interface_version must be 1"` and `"findings must be a non-empty list"` where it raises its version and findings reasons today.
    - It calls `_validate_finding(finding, f"findings[{index}]")` for each `index, finding in enumerate(findings)`.
-   - `_validate_finding` starts with `_require_members(value, keys, subject)`. It keeps today's checks in today's order and set literals, and raises:
+   - The review-package manifest's JSONL loop in `_validate_manifest` is the other caller (Phase-5 B1). It iterates `for line_number, line in enumerate(lines, 1):` and calls `_validate_finding(finding, f"shard-{number:03d}.jsonl line {line_number}")`, reusing the loop's existing shard `number`, so a delivery-detail package that validates at base still validates. The existing delivery-detail and review-package success tests stay green without edits.
+   - `_validate_finding` starts with `_require_members(value, keys, subject)`. It keeps today's checks in today's order, but each enum membership test is against a tuple literal, not a set, so an unhashable value such as `"axis": []` is refused with the reason below instead of a `TypeError` (Phase-5 S1). It raises:
      - `f"{subject}.axis must be conformance, correctness or ship"`
      - `f"{subject}.severity must be Critical, Important, Minor, Blocking, Should-fix or Discussion"`
      - `f"{subject}.status must be parked, residual, discussion or minor"`

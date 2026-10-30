@@ -69,3 +69,9 @@ Task 3 — Over-budget overages and the strict consumer — `home/common/agent-s
 - Planning trials on 2026-10-30 at base: the test file is green, with 46 tests in about 37 s. The sdd-gate over-budget and decompose cases are green in about 17 s. The review-feasibility full-range case is green in about 58 s. A scratch probe, never committed, ran a shim built from one dict three times in one sdd-gate case, and each run reached `budget-check`.
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, gpt-6-astra, xhigh), isolated read-only, no fallback; no focus.
+- Base SHA 8212d8fb8e933120db864339e9a8d0d174462268; reviewed plan head 69a9ed9a.
+- Accepted 3, rejected 0, deferred 0: B1 (Task 2 updates the manifest JSONL caller of `_validate_finding`), S1 (tuple membership in finding checks, per D15), S2 (policy schema reasons name the policy, per D15).

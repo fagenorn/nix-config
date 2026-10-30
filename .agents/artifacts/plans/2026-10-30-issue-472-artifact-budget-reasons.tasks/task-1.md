@@ -121,7 +121,11 @@ Add this test after `test_validate_report_rejects_escaped_lone_surrogate_without
                              os.strerror(errno.ELOOP))
             broken = directory / "broken-policy.json"
             broken.write_bytes(b"{")
-            for policy in (broken, directory / "absent-policy.json"):
+            schema = directory / "schema-policy.json"
+            policy_value = json.loads(POLICY.read_text(encoding="utf-8"))
+            policy_value["artifacts"]["handoff"]["root_max_bytes"] = 0
+            schema.write_text(json.dumps(policy_value), encoding="utf-8")
+            for policy in (broken, schema, directory / "absent-policy.json"):
                 with self.subTest(policy=policy.name):
                     result = subprocess.run(report + ["--input", "-", "--policy", str(policy)],
                                             input=good, capture_output=True, check=False)
@@ -160,7 +164,7 @@ def _refuse(label: str, exc: BaseException) -> int:
    - `json.JSONDecodeError` gives `f"invalid {subject}: {exc.msg} at line {exc.lineno} column {exc.colno}"`, and never `exc.doc`.
    - An `ArtifactBudgetError` from the hooks gives `f"invalid {subject}: {exc}"`.
    - Every branch chains with `from exc`.
-5. **Policy (D13).** `_parse_policy` calls `_decode_json(raw, "policy JSON")`. `_load_policy_identity` raises `ArtifactBudgetError(f"cannot read policy: {exc}")`, where `exc` is the `InputReadError`. `policy identity disagreement` and `cannot resolve installed policy` keep their text.
+5. **Policy (D13).** `_parse_policy` calls `_decode_json(raw, "policy JSON")`. `_load_policy_identity` raises `ArtifactBudgetError(f"cannot read policy: {exc}")`, where `exc` is the `InputReadError`. `policy identity disagreement` and `cannot resolve installed policy` keep their text. Every other `_parse_policy` reason that does not already say `policy` gains the word, so a schema fault names the policy too (D13, Phase-5 S2): `invalid artifact kinds`, `invalid root limit`, `invalid member limit`, `invalid member count`, `invalid aggregate limit`, `invalid report limits` and `invalid response limits` become `invalid policy artifact kinds`, `invalid policy root limit`, `invalid policy member limit`, `invalid policy member count`, `invalid policy aggregate limit`, `invalid policy report limits` and `invalid policy response limits`; `aggregate below root` becomes `policy aggregate below root`; and `inconsistent member limits`, `inconsistent one-file aggregate limit` and `inconsistent package limits` become `inconsistent policy member limits`, `inconsistent policy one-file aggregate limit` and `inconsistent policy package limits`. No test pins the old texts.
 
 Leave `JSON root is not an object` and every validator message as they are. Task 2 sharpens the validators.
 
