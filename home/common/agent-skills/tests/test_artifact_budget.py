@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import hashlib
 import importlib.util
@@ -65,7 +66,9 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                     self.assertEqual(good.returncode, 0, good.stderr)
                     policy.write_bytes(original + b"\n")
                     refused = subprocess.run(pinned, input=payload, capture_output=True)
-                    self.assertEqual((refused.returncode, refused.stdout), (2, b""))
+                    label = {"check": "invalid input", "validate-report": "invalid report",
+                             "validate-detail-input": "invalid detail input"}[argv[0]]
+                    self.assertIn("policy", self.assert_refusal(refused, label))
 
     def run_check(self, kind: str, root: Path, policy: Path = POLICY):
         return subprocess.run(
@@ -90,6 +93,21 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                  "--input", str(candidate), "--policy", str(POLICY)],
                 capture_output=True, check=False,
             )
+
+    def assert_refusal(self, result, label: str) -> str:
+        """Exit 2, empty stdout, one stderr line `artifact-budget: <label>: <reason>` (issue 472 D1, D10)."""
+        stdout, stderr = result.stdout, result.stderr
+        if isinstance(stderr, str):
+            stdout, stderr = stdout.encode("utf-8"), stderr.encode("utf-8")
+        self.assertEqual((result.returncode, stdout), (2, b""), stderr)
+        prefix = f"artifact-budget: {label}: ".encode("utf-8")
+        self.assertTrue(stderr.startswith(prefix), stderr)
+        self.assertTrue(stderr.endswith(b"\n"), stderr)
+        self.assertEqual(stderr.count(b"\n"), 1, stderr)
+        reason = stderr[len(prefix):-1].decode("utf-8")
+        self.assertTrue(reason, stderr)
+        self.assertEqual(reason, reason.strip(), stderr)
+        return reason
 
     def test_ship_handoff_v2_acceptance_state_is_required_closed_and_paired(self):
         """#272 D8, D9, D11: the v2 handoff gets the same pairing as the legacy one."""
@@ -121,8 +139,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         for index, payload in enumerate(rejected):
             with self.subTest(rejected=index):
                 result = self.run_validate("ship-handoff", payload, use_stdin=True)
-                self.assertEqual((result.returncode, result.stdout, result.stderr),
-                                 (2, b"", b"artifact-budget: invalid report\n"))
+                self.assert_refusal(result, "invalid report")
 
     def test_workflow_response_boundary_red_accepts_valid_v2_bootstrap_shape(self):
         """Task 2 must add this closed raw boundary, not repair this fixture."""
@@ -168,8 +185,8 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         while len(canonical(bootstrap(count))) <= response_bound:
             count += 1
         refused = self.run_validate("workflow-response", bootstrap(count), use_stdin=True)
-        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
-                         (2, b"", b"artifact-budget: invalid report\n"))
+        reason = self.assert_refusal(refused, "invalid report")
+        self.assertIn(str(response_bound), reason)
 
     def test_null_digest_summary_carries_legacy_custody_and_bootstrap_reports_digest(self):
         model = artifact_budget._delivery_model()
@@ -211,8 +228,8 @@ class ArtifactBudgetCliTest(unittest.TestCase):
         self.assertGreater(len(accepted.stdout), report_bound)
         beyond = {**candidate, "worktree_path": "/tmp/" + "w" * response_bound}
         refused = self.run_validate("ship-handoff", beyond, use_stdin=True)
-        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
-                         (2, b"", b"artifact-budget: invalid report\n"))
+        reason = self.assert_refusal(refused, "invalid report")
+        self.assertIn(str(response_bound), reason)
 
     def test_delivery_v2_boundaries_accept_closed_shapes_and_reject_hybrids(self):
         model = artifact_budget._delivery_model()
@@ -716,8 +733,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                                        separators=(",", ":")) + "\n").encode()
                 self.assertEqual(result.stdout, expected)
             else:
-                self.assertEqual((result.stdout, result.stderr),
-                                 (b"", b"artifact-budget: invalid report\n"))
+                self.assert_refusal(result, "invalid report")
 
     def make_sdd(self, state, review, conformance, correctness, verification,
                  base, head, detail_state, report_path, acceptance="not_applicable"):
@@ -751,13 +767,10 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             self.assertEqual(self.run_validate("sdd", payload, i % 2 == 0).returncode, 0)
         for i, payload in enumerate(invalid):
             result = self.run_validate("sdd", payload, i % 2 == 1)
-            self.assertEqual((result.returncode, result.stdout, result.stderr),
-                             (2, b"", b"artifact-budget: invalid report\n"))
+            self.assert_refusal(result, "invalid report")
 
     def assert_rejected(self, boundary, payload, use_stdin):
-        result = self.run_validate(boundary, payload, use_stdin)
-        self.assertEqual((result.returncode, result.stdout, result.stderr),
-                         (2, b"", b"artifact-budget: invalid report\n"), payload)
+        self.assert_refusal(self.run_validate(boundary, payload, use_stdin), "invalid report")
 
     def test_sdd_acceptance_state_is_required_closed_and_paired(self):
         """#272 D8: clean never carries unmet; residual unmet needs a conformance finding."""
@@ -904,8 +917,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                      "head_sha": "b" * 40, "review_state": "residuals",
                      "report_path": None, "notes": "detail was dropped"}
         result = self.run_validate("ship-handoff", candidate, use_stdin=True)
-        self.assertEqual((result.returncode, result.stdout, result.stderr),
-                         (2, b"", b"artifact-budget: invalid report\n"))
+        self.assert_refusal(result, "invalid report")
 
     def test_ship_handoff_lifecycle_group_is_all_or_nothing_with_the_launch(self):
         present = {"ledger_repo_root": "/repo", "run_id": "issue-49-run",
@@ -939,8 +951,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             "a" * 40, "b" * 40, "unpublished", ".superpowers/issue-delivery",
         )
         result = self.run_validate("sdd", candidate, use_stdin=False)
-        self.assertEqual((result.returncode, result.stdout, result.stderr),
-                         (2, b"", b"artifact-budget: invalid report\n"))
+        self.assert_refusal(result, "invalid report")
 
     def test_validate_report_rejects_wire_parse_and_io_failures(self):
         malformed = (b'{"state":"failed","state":"failed","artifact":null,"notes":"x"}',
@@ -950,14 +961,12 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
                  "--input", "-", "--policy", str(POLICY)], input=raw,
                 capture_output=True, check=False)
-            self.assertEqual((result.returncode, result.stdout, result.stderr),
-                             (2, b"", b"artifact-budget: invalid report\n"))
+            self.assert_refusal(result, "invalid report")
         missing = subprocess.run(
             [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
              "--input", "/definitely/missing/report.json", "--policy", str(POLICY)],
             capture_output=True, check=False)
-        self.assertEqual((missing.returncode, missing.stdout, missing.stderr),
-                         (2, b"", b"artifact-budget: cannot read report\n"))
+        self.assert_refusal(missing, "cannot read report")
         with tempfile.TemporaryDirectory() as raw:
             target = Path(raw) / "target.json"
             target.write_text('{"state":"failed","artifact":null,"notes":"x"}', encoding="utf-8")
@@ -966,16 +975,14 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             symlinked = subprocess.run(
                 [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer",
                  "--input", str(link), "--policy", str(POLICY)], capture_output=True, check=False)
-            self.assertEqual((symlinked.returncode, symlinked.stdout, symlinked.stderr),
-                             (2, b"", b"artifact-budget: cannot read report\n"))
+            self.assert_refusal(symlinked, "cannot read report")
         policy = json.loads(POLICY.read_text(encoding="utf-8"))
         oversized = {"issue": 49, "state": "stopped",
                      "pr_url": "https://example.test/" + "x" * policy["phase_reports"]["wire_max_bytes"],
                      "merge_sha": None, "issue_closed": False, "discussion_items": [],
                      "detail_state": "none", "report_path": None, "notes": "wire bound"}
         over = self.run_validate("ship-summary", oversized, use_stdin=True)
-        self.assertEqual((over.returncode, over.stdout, over.stderr),
-                         (2, b"", b"artifact-budget: invalid report\n"))
+        self.assert_refusal(over, "invalid report")
 
     def test_validate_report_rejects_escaped_lone_surrogate_without_traceback(self):
         result = subprocess.run(
@@ -984,8 +991,79 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             input=b'{"state":"failed","artifact":null,"notes":"\\ud800"}',
             capture_output=True, check=False,
         )
-        self.assertEqual((result.returncode, result.stdout, result.stderr),
-                         (2, b"", b"artifact-budget: invalid report\n"))
+        self.assert_refusal(result, "invalid report")
+
+    def test_refusal_reasons_name_the_wire_parse_read_and_policy_failure(self):
+        """Issue 472 D1-D3, D13: a refusal names its failure, never a path or an input value."""
+        report = [sys.executable, str(SCRIPT), "validate-report", "--boundary", "producer"]
+        good = b'{"state":"failed","artifact":null,"notes":"x"}'
+        bound = json.loads(POLICY.read_text(encoding="utf-8"))["phase_reports"]["wire_max_bytes"]
+        stdin_cases = (
+            (b'{"state":"failed","state":"failed","artifact":null,"notes":"x"}',
+             ('duplicate key "state"',)),
+            (b'{"st\\nate":1,"st\\nate":2}', ('duplicate key "st\\nate"',)),
+            (b"\xff", ("invalid JSON", "UTF-8")),
+            (b"{}{}", ("invalid JSON", "column")),
+            (b'{"value":NaN}', ("invalid JSON", "constant")),
+            (b"[]", ("object",)),
+            (b" " * (bound + 1), (str(bound),)),
+        )
+        for payload, tokens in stdin_cases:
+            with self.subTest(payload=payload[:48]):
+                result = subprocess.run(report + ["--input", "-", "--policy", str(POLICY)],
+                                        input=payload, capture_output=True, check=False)
+                reason = self.assert_refusal(result, "invalid report")
+                for token in tokens:
+                    self.assertIn(token, reason)
+        # Exactly the wire bound in, one byte over it once canonical output adds its newline.
+        summary = {"issue": 49, "state": "stopped", "pr_url": "", "merge_sha": None,
+                   "issue_closed": False, "discussion_items": [], "detail_state": "none",
+                   "report_path": None, "notes": "canonical bound"}
+
+        def compact(value):
+            return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                              separators=(",", ":")).encode("utf-8")
+
+        prefix = "https://example.test/"
+        summary["pr_url"] = prefix + "x" * (bound - len(compact(summary)) - len(prefix))
+        self.assertEqual(len(compact(summary)), bound)
+        canonical = subprocess.run(
+            [sys.executable, str(SCRIPT), "validate-report", "--boundary", "ship-summary",
+             "--input", "-", "--policy", str(POLICY)],
+            input=compact(summary), capture_output=True, check=False)
+        self.assertIn(str(bound), self.assert_refusal(canonical, "invalid report"))
+        detail = subprocess.run(
+            [sys.executable, str(SCRIPT), "validate-detail-input", "--input", "-",
+             "--policy", str(POLICY)], input=b"{", capture_output=True, check=False)
+        self.assertIn("invalid JSON", self.assert_refusal(detail, "invalid detail input"))
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            missing = directory / "missing-report.json"
+            result = subprocess.run(report + ["--input", str(missing), "--policy", str(POLICY)],
+                                    capture_output=True, check=False)
+            self.assertEqual(self.assert_refusal(result, "cannot read report"),
+                             os.strerror(errno.ENOENT))
+            target = directory / "target.json"
+            target.write_bytes(good)
+            link = directory / "link.json"
+            link.symlink_to(target)
+            result = subprocess.run(report + ["--input", str(link), "--policy", str(POLICY)],
+                                    capture_output=True, check=False)
+            self.assertEqual(self.assert_refusal(result, "cannot read report"),
+                             os.strerror(errno.ELOOP))
+            broken = directory / "broken-policy.json"
+            broken.write_bytes(b"{")
+            schema = directory / "schema-policy.json"
+            policy_value = json.loads(POLICY.read_text(encoding="utf-8"))
+            policy_value["artifacts"]["handoff"]["root_max_bytes"] = 0
+            schema.write_text(json.dumps(policy_value), encoding="utf-8")
+            for policy in (broken, schema, directory / "absent-policy.json"):
+                with self.subTest(policy=policy.name):
+                    result = subprocess.run(report + ["--input", "-", "--policy", str(policy)],
+                                            input=good, capture_output=True, check=False)
+                    reason = self.assert_refusal(result, "invalid report")
+                    self.assertIn("policy", reason)
+                    self.assertNotIn(raw, reason)
 
     def test_validate_detail_input_is_one_strict_cli_boundary(self):
         finding = {"axis": "ship", "severity": "Minor", "status": "minor",
@@ -1008,8 +1086,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, str(SCRIPT), "validate-detail-input", "--input", "-",
                  "--policy", str(POLICY)], input=payload, capture_output=True, check=False)
-            self.assertEqual((result.returncode, result.stdout, result.stderr),
-                             (2, b"", b"artifact-budget: invalid detail input\n"))
+            self.assert_refusal(result, "invalid detail input")
 
     def test_validate_detail_input_rejects_escaped_lone_surrogate_without_traceback(self):
         payload = (
@@ -1020,8 +1097,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             [sys.executable, str(SCRIPT), "validate-detail-input", "--input", "-",
              "--policy", str(POLICY)], input=payload, capture_output=True, check=False,
         )
-        self.assertEqual((result.returncode, result.stdout, result.stderr),
-                         (2, b"", b"artifact-budget: invalid detail input\n"))
+        self.assert_refusal(result, "invalid detail input")
 
     def review_manifest(self, directory: Path, suffix="diff", size=4):
         root = directory / "review.json"

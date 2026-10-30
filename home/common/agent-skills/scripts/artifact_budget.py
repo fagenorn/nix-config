@@ -117,22 +117,33 @@ def _pairs_no_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
-            raise ArtifactBudgetError("duplicate JSON key")
+            raise ArtifactBudgetError(f"duplicate key {json.dumps(key)}")
         result[key] = value
     return result
 
 
 def _reject_constant(_: str) -> object:
-    raise ArtifactBudgetError("non-standard JSON constant")
+    raise ArtifactBudgetError("non-standard constant")
 
 
-def _decode_json(raw: bytes) -> object:
+def _decode_json(raw: bytes, subject: str = "JSON") -> object:
     try:
         text = raw.decode("utf-8", errors="strict")
         return json.loads(text, object_pairs_hook=_pairs_no_duplicates,
                           parse_constant=_reject_constant)
-    except (UnicodeDecodeError, json.JSONDecodeError, ArtifactBudgetError) as exc:
-        raise ArtifactBudgetError("invalid JSON") from exc
+    except UnicodeDecodeError as exc:
+        raise ArtifactBudgetError(
+            f"invalid {subject}: invalid UTF-8 at byte {exc.start}: {exc.reason}") from exc
+    except json.JSONDecodeError as exc:
+        raise ArtifactBudgetError(
+            f"invalid {subject}: {exc.msg} at line {exc.lineno} column {exc.colno}") from exc
+    except ArtifactBudgetError as exc:
+        raise ArtifactBudgetError(f"invalid {subject}: {exc}") from exc
+
+
+def _os_reason(exc: Exception) -> str:
+    """The OS error string of a failed open or read, never the path it names (issue 472 D2)."""
+    return getattr(exc, "strerror", None) or "path cannot be opened"
 
 
 def _read_regular(path: Path, *, limit: int | None = None) -> bytes:
@@ -142,7 +153,7 @@ def _read_regular(path: Path, *, limit: int | None = None) -> bytes:
     try:
         descriptor = os.open(path, flags)
     except (OSError, ValueError) as exc:
-        raise InputReadError("cannot open regular file") from exc
+        raise InputReadError(_os_reason(exc)) from exc
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
@@ -150,10 +161,10 @@ def _read_regular(path: Path, *, limit: int | None = None) -> bytes:
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             raw = handle.read() if limit is None else handle.read(limit + 1)
         if limit is not None and len(raw) > limit:
-            raise ArtifactBudgetError("input exceeds byte limit")
+            raise ArtifactBudgetError(f"input exceeds the {limit}-byte wire bound")
         return raw
     except OSError as exc:
-        raise InputReadError("cannot read regular file") from exc
+        raise InputReadError(_os_reason(exc)) from exc
     finally:
         os.close(descriptor)
 
@@ -166,12 +177,12 @@ def _load_policy_identity(path: Path) -> tuple[tuple[dict[str, ArtifactLimits], 
     try:
         raw = _read_regular(path)
     except InputReadError as exc:
-        raise ArtifactBudgetError("cannot read policy") from exc
+        raise ArtifactBudgetError(f"cannot read policy: {exc}") from exc
     return _parse_policy(raw), "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
 def _parse_policy(raw: bytes) -> tuple[dict[str, ArtifactLimits], int, int, int]:
-    value = _decode_json(raw)
+    value = _decode_json(raw, "policy JSON")
     if not _exact_keys(value, {"schema_version", "unit", "artifacts", "phase_reports",
                                "workflow_responses"}):
         raise ArtifactBudgetError("invalid policy keys")
@@ -182,7 +193,7 @@ def _parse_policy(raw: bytes) -> tuple[dict[str, ArtifactLimits], int, int, int]
         raise ArtifactBudgetError("invalid policy unit")
     artifacts = value["artifacts"]
     if not _exact_keys(artifacts, set(KINDS)):
-        raise ArtifactBudgetError("invalid artifact kinds")
+        raise ArtifactBudgetError("invalid policy artifact kinds")
     assert isinstance(artifacts, dict)
     limits: dict[str, ArtifactLimits] = {}
     entry_keys = {"root_max_bytes", "member_max_bytes", "max_members", "aggregate_max_bytes"}
@@ -192,22 +203,22 @@ def _parse_policy(raw: bytes) -> tuple[dict[str, ArtifactLimits], int, int, int]
             raise ArtifactBudgetError("invalid artifact policy")
         assert isinstance(entry, dict)
         if not _integer(entry["root_max_bytes"], minimum=1):
-            raise ArtifactBudgetError("invalid root limit")
+            raise ArtifactBudgetError("invalid policy root limit")
         if not _integer(entry["member_max_bytes"]):
-            raise ArtifactBudgetError("invalid member limit")
+            raise ArtifactBudgetError("invalid policy member limit")
         if not _integer(entry["max_members"]):
-            raise ArtifactBudgetError("invalid member count")
+            raise ArtifactBudgetError("invalid policy member count")
         if not _integer(entry["aggregate_max_bytes"], minimum=1):
-            raise ArtifactBudgetError("invalid aggregate limit")
+            raise ArtifactBudgetError("invalid policy aggregate limit")
         if entry["aggregate_max_bytes"] < entry["root_max_bytes"]:
-            raise ArtifactBudgetError("aggregate below root")
+            raise ArtifactBudgetError("policy aggregate below root")
         one_file = kind in {"design-spec", "handoff"}
         if one_file != (entry["member_max_bytes"] == 0 and entry["max_members"] == 0):
-            raise ArtifactBudgetError("inconsistent member limits")
+            raise ArtifactBudgetError("inconsistent policy member limits")
         if one_file and entry["aggregate_max_bytes"] != entry["root_max_bytes"]:
-            raise ArtifactBudgetError("inconsistent one-file aggregate limit")
+            raise ArtifactBudgetError("inconsistent policy one-file aggregate limit")
         if not one_file and (entry["member_max_bytes"] == 0 or entry["max_members"] == 0):
-            raise ArtifactBudgetError("inconsistent package limits")
+            raise ArtifactBudgetError("inconsistent policy package limits")
         limits[kind] = ArtifactLimits(**entry)
     reports = value["phase_reports"]
     if not _exact_keys(reports, {"notes_max_characters", "wire_max_bytes"}):
@@ -216,7 +227,7 @@ def _parse_policy(raw: bytes) -> tuple[dict[str, ArtifactLimits], int, int, int]
     notes = reports["notes_max_characters"]
     wire = reports["wire_max_bytes"]
     if not _integer(notes, minimum=1) or not _integer(wire, minimum=1):
-        raise ArtifactBudgetError("invalid report limits")
+        raise ArtifactBudgetError("invalid policy report limits")
     # A workflow response is helper transport, not an owner-authored phase
     # report: control carries one summary per requested issue plus the full
     # delivery contract of every dispatch, so it takes its own bound.
@@ -226,7 +237,7 @@ def _parse_policy(raw: bytes) -> tuple[dict[str, ArtifactLimits], int, int, int]
     assert isinstance(responses, dict)
     response_wire = responses["wire_max_bytes"]
     if not _integer(response_wire, minimum=1):
-        raise ArtifactBudgetError("invalid response limits")
+        raise ArtifactBudgetError("invalid policy response limits")
     return limits, notes, wire, response_wire
 
 
@@ -997,7 +1008,7 @@ def _input_bytes(path: str, wire_max: int) -> bytes:
     if path == "-":
         raw = sys.stdin.buffer.read(wire_max + 1)
         if len(raw) > wire_max:
-            raise ArtifactBudgetError("input exceeds wire bound")
+            raise ArtifactBudgetError(f"input exceeds the {wire_max}-byte wire bound")
         return raw
     return _read_regular(Path(path), limit=wire_max)
 
@@ -1031,6 +1042,17 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _refuse(label: str, exc: BaseException) -> int:
+    """Write the one refusal line, `artifact-budget: <label>: <reason>`, and return 2.
+
+    The reason is the error's message with each whitespace run collapsed to one
+    space, or the error's class name when the message is empty (issue 472 D1, D2).
+    """
+    reason = " ".join(str(exc).split()) or type(exc).__name__
+    sys.stderr.write(f"artifact-budget: {label}: {reason}\n")
+    return 2
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = _parser().parse_args(argv)
@@ -1040,12 +1062,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             expected = getattr(args, "expected_policy_sha256", None)
             if expected is not None and expected != identity:
                 raise ArtifactBudgetError("policy identity disagreement")
-        except ArtifactBudgetError:
+        except ArtifactBudgetError as exc:
             if args.command in {"check", "describe"}:
                 raise
             label = "report" if args.command == "validate-report" else "detail input"
-            sys.stderr.write(f"artifact-budget: invalid {label}\n")
-            return 2
+            return _refuse(f"invalid {label}", exc)
         limits, notes_max, report_wire_max, response_wire_max = loaded
         if args.command == "describe":
             sys.stdout.buffer.write(_canonical({"schema_version": 1,
@@ -1062,14 +1083,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else report_wire_max)
         try:
             raw = _input_bytes(args.input, wire_max)
-        except InputReadError:
+        except InputReadError as exc:
             label = "report" if args.command == "validate-report" else "detail input"
-            sys.stderr.write(f"artifact-budget: cannot read {label}\n")
-            return 2
-        except ArtifactBudgetError:
+            return _refuse(f"cannot read {label}", exc)
+        except ArtifactBudgetError as exc:
             label = "report" if args.command == "validate-report" else "detail input"
-            sys.stderr.write(f"artifact-budget: invalid {label}\n")
-            return 2
+            return _refuse(f"invalid {label}", exc)
         try:
             if args.command == "validate-report" and args.boundary in {
                 "ship-handoff", "ship-checkpoint", "ship-summary", "workflow-response"
@@ -1096,16 +1115,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     validators[args.boundary](value, notes_max)
             output = _canonical(value)
             if len(output) > wire_max:
-                raise ArtifactBudgetError("canonical wire object exceeds bound")
-        except ArtifactBudgetError:
+                raise ArtifactBudgetError(f"canonical output exceeds the {wire_max}-byte wire bound")
+        except ArtifactBudgetError as exc:
             label = "report" if args.command == "validate-report" else "detail input"
-            sys.stderr.write(f"artifact-budget: invalid {label}\n")
-            return 2
+            return _refuse(f"invalid {label}", exc)
         sys.stdout.buffer.write(output)
         return 0
     except ArtifactBudgetError as exc:
-        sys.stderr.write(f"artifact-budget: invalid input: {exc}\n")
-        return 2
+        return _refuse("invalid input", exc)
 
 
 if __name__ == "__main__":
