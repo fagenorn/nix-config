@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from agent_tools import attempt_identity, attempt_store
+from agent_tools import attempt_identity, attempt_observations, attempt_store
 from agent_tools.transaction_core import TransactionStore
 
 if __package__:
@@ -35,6 +35,33 @@ ARTIFACT_BUDGET = Path(__file__).parents[1] / "scripts" / "artifact_budget.py"
 BUDGET_POLICY = Path(__file__).parents[1] / "artifact-budget-policy.json"
 DEFAULT_NOW = "2026-08-13T20:00:00Z"
 ORCHESTRATED = attempt_identity.RunIdentity("orchestrated", None, None)
+
+BUILDER = Path(__file__).parents[1] / "scripts" / "workflow_delivery_build.py"
+WIRE = Path(__file__).parents[1] / "scripts" / "workflow_delivery_wire.py"
+# Each direct observe requirement kind in the bare shape the policy emits for issue 73.
+BARE_REQUIREMENTS = {
+    "tracker": {"kind": "tracker"},
+    "recorded_worktree": {"kind": "recorded_worktree",
+                          "path": "/repo/.worktrees/worktree-issue-73-example"},
+    "candidate_worktree": {"kind": "candidate_worktree"},
+    "forge_pr": {"kind": "forge_pr", "path": "issue-73-"},
+    "delivery_contract": {"kind": "delivery_contract", "subject_id": "73",
+                          "reason_code": "delivery_contract_required",
+                          "detail_pointer": None},
+}
+OBSERVE_SLOTS = {"tracker": "tracker", "recorded_worktree": "worktree",
+                 "candidate_worktree": "worktree", "forge_pr": "forge",
+                 "delivery_contract": "delivery_contract"}
+
+
+def empty_direct_request(issue=73):
+    """acquire-direct.md's interface-2 request before any observation is sent."""
+    return {"interface_version": 2, "issue": issue, "attempt_budget_minutes": 180,
+            "new_run": False, "owner_unavailable": False, "tracker": None,
+            "worktree": None, "forge": None, "delivery_contract": None,
+            "authorization_intents": [], "authority_observations": [],
+            "reevaluation_evidence": [], "delivery_observations": [],
+            "requested_scope": None, "recovery": None}
 
 
 def load_source_module(path, name, *, package=False):
@@ -8897,6 +8924,105 @@ class ControlWaitSecondsTest(LifecycleHarness, unittest.TestCase):
                     input=json.dumps(mutated), capture_output=True, text=True, check=False,
                     env=self.cli_env)
                 self.assertEqual(checked.returncode, 2)
+
+
+class ObservationCatalogueTest(unittest.TestCase):
+    """Issue 473 D2, D3, D10: the observation vocabulary's one home and its catalogue."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = load_source_module(SCRIPT, "workflow_state_observation_catalogue")
+        cls.builder = load_source_module(BUILDER, "workflow_state_observation_builder")
+        cls.wire = load_source_module(WIRE, "workflow_state_observation_wire")
+
+    @staticmethod
+    def expects(kind):
+        return attempt_observations.describe(BARE_REQUIREMENTS[kind])["expects"]
+
+    def test_every_kind_carries_a_closed_constant_description(self):
+        self.assertEqual(set(BARE_REQUIREMENTS), attempt_observations.OBSERVE_KINDS)
+        self.assertEqual(attempt_observations.EXPECTS_MEMBERS,
+                         ("slot", "members", "example", "build"))
+        for kind, bare in BARE_REQUIREMENTS.items():
+            with self.subTest(kind=kind):
+                described = attempt_observations.describe(bare)
+                self.assertEqual({k: v for k, v in described.items() if k != "expects"},
+                                 bare)
+                expects = described["expects"]
+                self.assertEqual(set(expects), set(attempt_observations.EXPECTS_MEMBERS))
+                self.assertEqual(expects["slot"], OBSERVE_SLOTS[kind])
+                self.assertEqual(expects["build"],
+                                 attempt_observations.CONTRACT_BUILD
+                                 if kind == "delivery_contract" else None)
+                self.assertTrue(expects["members"])
+                for name, meaning in expects["members"].items():
+                    self.assertTrue(name)
+                    self.assertIsInstance(meaning, str)
+                    self.assertTrue(meaning)
+                    self.assertTrue(meaning.isascii())
+                self.assertEqual(set(expects["example"]), set(expects["members"]))
+                expects["members"].clear()
+                expects["example"].clear()
+                self.assertTrue(self.expects(kind)["members"])
+                self.assertTrue(self.expects(kind)["example"])
+
+    def test_each_observed_example_is_a_request_the_helper_accepts(self):
+        for kind in sorted(attempt_observations.OBSERVE_KINDS - {"delivery_contract"}):
+            expects = self.expects(kind)
+            request = empty_direct_request()
+            request[expects["slot"]] = expects["example"]
+            with self.subTest(kind=kind):
+                self.workflow.validate_direct_owner_request(request)
+            if "issue" in expects["example"]:
+                other = empty_direct_request(74)
+                other[expects["slot"]] = expects["example"]
+                with self.subTest(kind=kind, issue=74), \
+                        self.assertRaises(self.workflow.WorkflowError):
+                    self.workflow.validate_direct_owner_request(other)
+
+    def test_the_contract_description_restates_the_builder_input(self):
+        expects = self.expects("delivery_contract")
+        self.assertEqual(set(expects["members"]), self.builder._CONTRACT_INPUT - {"now"})
+        for source_kind in self.builder._SOURCE_KINDS:
+            self.assertIn(source_kind, expects["members"]["source_kind"])
+        self.assertIn(expects["example"]["source_kind"], self.builder._SOURCE_KINDS)
+        self.assertEqual(expects["build"], "workflow-state build-delivery --repo-root "
+                                           "<ledger_repo_root> --kind contract --input -")
+
+    def test_meanings_list_each_closed_value_set(self):
+        listed = {
+            ("tracker", "state"): attempt_observations.TRACKER_STATES,
+            ("tracker", "decision_blockers"): attempt_observations.DECISION_BLOCKER_FIELDS,
+            ("forge_pr", "state"): attempt_observations.FORGE_STATES,
+            ("recorded_worktree", "recorded"): attempt_observations.RECORDED_WORKTREE_STATES,
+            ("candidate_worktree", "candidate"):
+                attempt_observations.CANDIDATE_WORKTREE_STATES,
+        }
+        for (kind, member), values in listed.items():
+            meaning = self.expects(kind)["members"][member]
+            for value in sorted(values):
+                with self.subTest(kind=kind, member=member, value=value):
+                    self.assertRegex(meaning, rf"\b{re.escape(value)}\b")
+
+    def test_the_helper_and_wire_module_check_the_shared_vocabulary(self):
+        for module, names in (
+                (self.workflow, ("TRACKER_OBSERVATION_FIELDS", "TRACKER_STATES",
+                                 "DECISION_BLOCKER_FIELDS", "FORGE_OBSERVATION_FIELDS",
+                                 "FORGE_STATES")),
+                (self.wire, ("WORKTREE_OBSERVATION_FIELDS", "WORKTREE_ENTRY_FIELDS",
+                             "RECORDED_WORKTREE_STATES", "CANDIDATE_WORKTREE_STATES"))):
+            for name in names:
+                with self.subTest(module=module.__name__, name=name):
+                    self.assertIs(getattr(module, name), getattr(attempt_observations, name))
+
+    def test_an_undescribed_requirement_is_refused(self):
+        scope_tuple = {"kind": "scope_tuple", "subject_id": "select",
+                       "reason_code": "scope_tuple_required", "detail_pointer": None}
+        for value in (scope_tuple, {"kind": "observation"}, {"path": "issue-73-"},
+                      {"kind": ["tracker"]}, "tracker", None,
+                      attempt_observations.describe({"kind": "tracker"})):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                attempt_observations.describe(value)
 
 
 if __name__ == "__main__":

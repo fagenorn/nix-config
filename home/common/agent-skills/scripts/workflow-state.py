@@ -32,6 +32,9 @@ from agent_tools.attempt_custody import (
     stall_count,
     stalled,
 )
+from agent_tools.attempt_observations import (
+    DECISION_BLOCKER_FIELDS, FORGE_OBSERVATION_FIELDS, FORGE_STATES,
+    TRACKER_OBSERVATION_FIELDS, TRACKER_STATES)
 from agent_tools.attempt_delivery_store import (
     delivery_pending, installing_runs, seal_delivery, settle_delivery, unconverged_deliveries)
 from agent_tools.attempt_identity import (
@@ -214,13 +217,6 @@ DIRECT_OWNER_REQUEST_FIELDS = frozenset(
         "recovery",
     }
 )
-FORGE_OBSERVATION_FIELDS = frozenset({"state", "url", "merge_sha"})
-FORGE_STATES = frozenset({"none", "open", "closed", "merged"})
-TRACKER_OBSERVATION_FIELDS = frozenset(
-    {"issue", "state", "open_blockers", "decision_blockers"}
-)
-TRACKER_STATES = frozenset({"open", "closed"})
-DECISION_BLOCKER_FIELDS = frozenset({"issue", "url"})
 CONTROL_RESPONSE_FIELDS = frozenset(
     {
         "interface_version",
