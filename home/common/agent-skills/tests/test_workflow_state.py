@@ -9084,5 +9084,16 @@ class DirectObserveExpectsTest(LifecycleHarness, unittest.TestCase):
         self.assertIn("scope_tuple", str(refused.exception))
 
 
+class DirectOwnerHelpTest(LifecycleHarness, unittest.TestCase):
+    """Issue 473 AC2: `direct-owner --help` names where an observation's shape is described."""
+
+    def test_direct_owner_help_names_expects_and_its_members(self):
+        completed = self.run_cli("direct-owner", "--help")
+        self.assertEqual(completed.returncode, 0)
+        for name in ("expects", *attempt_observations.EXPECTS_MEMBERS):
+            with self.subTest(name=name):
+                self.assertRegex(completed.stdout, rf"\b{name}\b")
+
+
 if __name__ == "__main__":
     unittest.main()

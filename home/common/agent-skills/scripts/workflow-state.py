@@ -5618,7 +5618,13 @@ def build_parser() -> argparse.ArgumentParser:
     control.add_argument("--request-file", required=True)
     control.set_defaults(handler=command_control)
 
-    direct_owner = subparsers.add_parser("direct-owner")
+    direct_owner = subparsers.add_parser("direct-owner", description=(
+        "Acquire, resume or replay one issue's direct owner from one interface-2 "
+        "request read from --request-file, and print one observe, owner, "
+        "delivery_remainder or terminal reply. Each requirement of an observe reply "
+        "carries expects: slot names the request member its answer fills, members maps "
+        "each member of that answer to its meaning, example is one illustrative answer, "
+        "and build is null or the workflow-state command that builds the answer."))
     direct_owner.add_argument("--repo-root", required=True)
     direct_owner.add_argument("--request-file", required=True)
     direct_owner.set_defaults(handler=command_direct_owner)
