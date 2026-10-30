@@ -40,6 +40,7 @@ let
   # A command's module is its name with each "-" replaced by "_".
   # context-map-lint is a stable path other projects' CIs call without vendoring it (parent D15).
   commands = [
+    "acceptance-record"
     "adopt-project"
     "agent-evidence"
     "agent-model-matrix"
