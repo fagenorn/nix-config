@@ -1739,9 +1739,10 @@ def fence_owner_exit(
     longer live after it refuses the whole write, so nothing persists. Controller
     writes (``control``, the deadline reaper, ``direct-owner``) never pass
     through this fence: they are the recovery path for a run whose owner died
-    with workers live. ``excused_worker`` is the calling ship owner of a
-    ``checkpoint-delivery``, itself a registered worker; it must be live, and
-    only it is excused, never its descendants (per #222 D4, D11).
+    with workers live. A ``direct-owner`` takeover refuses on its own while a live
+    worker's launch is inside its deadline (``takeover_blockers``). ``excused_worker``
+    is the calling ship owner of a ``checkpoint-delivery``, itself a registered worker;
+    it must be live, and only it is excused, never its descendants (per #222 D4, D11).
     """
 
     def fenced(state: dict[str, Any] | None, *identity: RunIdentity) -> tuple[Any, bool]:
@@ -3905,6 +3906,12 @@ def command_direct_owner(args: argparse.Namespace) -> int:
                             parse_utc(request["now"], "direct owner now"),
                             "run updated_at", state["updated_at"])
 
+                if request["owner_unavailable"] and state is not None:
+                    blocking = takeover_blockers(
+                        runtime, state, parse_utc(request["now"], "direct owner now"))
+                    if blocking:
+                        raise WorkflowError(TAKEOVER_REFUSAL + ", ".join(blocking))
+
                 policy = _apply_one_issue_policy(
                     issue=issue,
                     ledger_issue=issue_state,
@@ -4803,6 +4810,32 @@ def worker_verdict(runtime: Any, state: dict[str, Any] | None,
     if record["released_at"] is not None:
         return current_action_id, "released"
     return current_action_id, "live" if reason == "current" else reason
+
+
+# The refusal a direct-owner takeover prints while live workers would be fenced; from-issue's
+# acquire-direct.md branches on it, so it is a literal the skill-contract test reads (issue 475).
+TAKEOVER_REFUSAL = "owner_unavailable refused: live workers: "
+
+
+def takeover_blockers(runtime: Any, state: dict[str, Any], now: datetime) -> list[str]:
+    """The live workers a `direct-owner` takeover at ``now`` would fence, in ledger order.
+
+    A worker blocks while ``worker_verdict`` reads it live and the record its launch belongs
+    to (the issue's latest delivery remainder for an ``:r`` launch, else its latest attempt)
+    has ``deadline_at`` after ``now``; past the deadline the expiry reap recovers the run
+    (issue 475 D1, D2; #310 D18).
+    """
+    blocking = []
+    for worker in state.get("workers", []):
+        if worker_verdict(runtime, state, worker["worker_id"])[1] != "live":
+            continue
+        issue, _, _ = parse_action_id(worker["launch"])
+        issue_state = state["issues"][str(issue)]
+        record = (issue_state["delivery_remainders"][-1] if ":r" in worker["launch"]
+                  else issue_state["attempts"][-1])
+        if now < parse_utc(record["deadline_at"], "attempt deadline"):
+            blocking.append(worker["worker_id"])
+    return blocking
 
 
 def live_worker_ids(runtime: Any, state: dict[str, Any]) -> list[str]:

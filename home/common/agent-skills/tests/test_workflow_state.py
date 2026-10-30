@@ -9095,5 +9095,105 @@ class DirectOwnerHelpTest(LifecycleHarness, unittest.TestCase):
                 self.assertRegex(completed.stdout, rf"\b{name}\b")
 
 
+class DirectTakeoverWorkerTest(LifecycleHarness, unittest.TestCase):
+    """Issue 475 R1: an `owner_unavailable` takeover never fences a live worker inside its bound."""
+
+    def setUp(self):
+        super().setUp()
+        self.worktree = self.root / "worktree-issue-73"
+        self.init_worktree(self.worktree, branch="issue-73")
+        owner = self.acquire_direct(worktree=self.worktree)
+        self.run_id = owner["run_id"]
+        self.assertEqual((owner["action_id"], owner["deadline_at"]),
+                         ("73:1:1", "2026-08-20T13:00:00Z"))
+        self.assertEqual(self.mark_progress(action_id="73:1:1", now="2026-08-20T10:01:00Z")[
+            "outcome"], "baseline")
+        self.register_worker(action_id="73:1:1", now="2026-08-20T10:02:00Z")
+        self.register_worker(action_id="73:1:1", now="2026-08-20T10:02:00Z",
+                             parent="73:1:1:w1")
+
+    def takeover(self, now, *, ok=True):
+        return self.direct_owner_raw(
+            now=now, owner_unavailable=True, ok=ok,
+            worktree=self.worktree_fact(73, recorded={
+                "path": os.path.abspath(self.worktree), "state": "matching_issue_branch"}))
+
+    def test_a_takeover_inside_the_deadline_names_every_live_worker(self):
+        before = self.tree_snapshot()
+        refused = self.takeover("2026-08-20T11:00:00Z", ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr), (
+            2, "", "workflow-state: owner_unavailable refused: live workers: "
+                   "73:1:1:w1, 73:1:1:w2\n"))
+        self.assertEqual(self.tree_snapshot(), before)
+
+    def test_a_takeover_proceeds_once_every_worker_is_released(self):
+        self.release_worker(worker_id="73:1:1:w1", event="stopped",
+                            now="2026-08-20T10:30:00Z")
+        resumed = json.loads(self.takeover("2026-08-20T11:00:00Z").stdout)
+        self.assertEqual((resumed["kind"], resumed["action_id"], resumed["launch_kind"]),
+                         ("owner", "73:1:2", "resume"))
+
+    def test_a_takeover_past_the_deadline_takes_the_expiry_path(self):
+        resumed = json.loads(self.takeover("2026-08-20T13:00:00Z").stdout)
+        self.assertEqual((resumed["kind"], resumed["action_id"], resumed["launch_kind"]),
+                         ("owner", "73:1:2", "resume"))
+        self.assertEqual(self.check_worker("73:1:1:w1")["reason"], "superseded_launch")
+
+
+class TakeoverBlockersTest(LifecycleHarness, unittest.TestCase):
+    """Issue 475 D1: the takeover predicate over attempt and remainder launches."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.workflow_state = load_source_module(SCRIPT, "workflow_state_test_takeover")
+
+    @staticmethod
+    def worker(launch, ordinal=1, released_at=None):
+        return {"worker_id": f"{launch}:w{ordinal}", "launch": launch, "parent": None,
+                "registered_at": "2026-08-20T10:00:00Z", "released_at": released_at,
+                "release_event": None if released_at is None else "stopped"}
+
+    def attempt_state(self, workers):
+        """An active attempt (deadline 12:00, two launches) and no remainder."""
+        attempt = {"issue": 73, "attempt": 1, "state": "active",
+                   "deadline_at": "2026-08-20T12:00:00Z", "launches": [{}, {}]}
+        return {"issues": {"73": {
+            "attempts": [attempt], "delivery_remainders": [],
+            "outcome": None, "delivery": self.empty_delivery()}}, "workers": workers}
+
+    def remainder_state(self, workers):
+        """A handed-off source attempt (deadline 12:00) and an active remainder with an
+        installed delivery contract and its own deadline (13:00), as `suspended_remainder`
+        shapes it."""
+        fixtures = self.delivery_fixtures
+        _, delivery = fixtures.contract_and_delivery(self.delivery_model)
+        issue_state = fixtures.suspended_remainder(delivery)
+        remainder = issue_state["delivery_remainders"][0]
+        remainder.update(state="active", deadline_at="2026-08-20T13:00:00Z",
+                         launches=remainder["launches"] * 2)
+        issue_state["attempts"] = [{
+            "issue": 151, "attempt": 1, "state": "handed_off",
+            "deadline_at": "2026-08-20T12:00:00Z", "launches": [{}]}]
+        return {"issues": {"151": issue_state}, "workers": workers}
+
+    def blockers(self, state, now):
+        module = self.workflow_state
+        return module.takeover_blockers(module._delivery(), state,
+                                        module.parse_utc(now, "now"))
+
+    def test_only_live_workers_of_the_current_attempt_launch_inside_its_deadline_block(self):
+        state = self.attempt_state([
+            self.worker("73:1:1"), self.worker("73:1:2"),
+            self.worker("73:1:2", 2, "2026-08-20T10:30:00Z")])
+        self.assertEqual(self.blockers(state, "2026-08-20T11:00:00Z"), ["73:1:2:w1"])
+        self.assertEqual(self.blockers(state, "2026-08-20T12:00:00Z"), [])
+
+    def test_a_remainder_worker_blocks_until_the_remainders_own_deadline(self):
+        state = self.remainder_state([self.worker("151:r1:2")])
+        self.assertEqual(self.blockers(state, "2026-08-20T12:30:00Z"), ["151:r1:2:w1"])
+        self.assertEqual(self.blockers(state, "2026-08-20T13:00:00Z"), [])
+
+
 if __name__ == "__main__":
     unittest.main()
