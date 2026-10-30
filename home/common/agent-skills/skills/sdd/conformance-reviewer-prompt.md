@@ -87,11 +87,11 @@ Subagent (reviewer, Opus/high as selected above):
         named check that is absent, or that you ran and saw fail, is `unmet`.
       - `evidence`: `met` only when its row in the acceptance record
         (`<plan stem>.acceptance.md`, beside the plan) shows a value inside
-        the criterion's literal threshold, and the commits after the
-        measured commit leave the measured surface alone. An evidence `met`
-        must cite the observed value and the threshold; rounding or "close
-        enough" never counts. A missing row is `unverified`, a stale row is
-        `unverified`, and a value outside the threshold is `unmet`.
+        the criterion's literal threshold, and
+        `verified-tree fresh --since <Commit> --record <record path>` prints
+        `fresh`. An evidence `met` must cite the observed value and the
+        threshold; rounding or "close enough" never counts. A row missing or
+        not `fresh` is `unverified`; a value outside the threshold is `unmet`.
       - `human`: always `human_pending`. Never attest a human criterion.
       Every `unmet` or `unverified` row is an acceptance finding: list it
       under Important, labelled `conformance` and its `ACn`. An acceptance

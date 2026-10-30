@@ -159,14 +159,15 @@ The record is one committed file per plan, beside the plan:
   `met`, `unmet`, `unverified` and `human_pending`; ship-issue Phase 0 may later
   rewrite an attested row to `met (attested)`.
 
-Before writing, check freshness against each `evidence` row's own `Commit`, not
-the head the conformance first pass graded. When a commit after the `Commit` of
-an `evidence` row recorded `met` touches that row's measured surface, that row
-becomes `unverified` (a fixer's re-measurement writes a fresh `Commit`, so only
-later commits count). A `code` row recorded `met` on a cited run outside the
-Declared verification line follows the same rule from that run's commit, unless
-the check was run again and the fresh run cited. A row made `unverified` here is
-an acceptance finding that survives the fix wave.
+Before writing, run
+`verified-tree fresh --since <Commit> --record <record path>` for each
+`evidence` row recorded `met`, with that row's own `Commit`, not the head the
+conformance first pass graded (a fixer's re-measurement writes a fresh
+`Commit`, so only later commits count). Run it also for a `code` row recorded
+`met` on a cited run outside the Declared verification line, with that run's
+commit, unless the check was run again and the fresh run cited. `stale`, or an
+exit 2, makes the row `unverified`: an acceptance finding that survives the
+fix wave.
 
 Write each row's final verdict into `Verdict`. When the record has no rows yet,
 write the whole record. Commit the acceptance record, then run the **Final
@@ -208,8 +209,8 @@ to the SDD ledger, and `verification_state` reports the per-task focused tests.
    its log path, the `git status --porcelain` output for `tree_changed`, or the
    helper's stderr line for an exit 2, then run one scoped correctness
    re-review of that fix diff (the final correctness re-review, same fix-range
-   package gate). With an acceptance record, every `met` `evidence` row whose
-   measured surface the repair's commits touch becomes `unverified` in a record
+   package gate). With an acceptance record, every `met` `evidence` row that
+   `verified-tree fresh` now reports `stale` becomes `unverified` in a record
    commit made the same way, landing before steps 1–3 run again. Then run steps 1–3 once more. If verification
    still does not pass, record the failure as a load-bearing correctness finding
    in the retained detail: the terminal state is Residuals, with

@@ -144,6 +144,7 @@ SDD_MACHINE_TEXT = {
         "review-package PLAN_FILE DELIVERY_BASE DELIVERY_HEAD",
         "`verified-tree check`",
         "verified-tree record --tree <the checked tree>",
+        "verified-tree fresh --since <Commit> --record <record path>",
         "launch-commit --repo-root <ledger_repo_root> --run-id <run-id> "
         "--worker-id <worker_id> -- <git commit arguments>",
         "<tracker-cli> issue view <num> --repo <repo_slug> --json body",
@@ -157,6 +158,7 @@ SDD_MACHINE_TEXT = {
     SDD_DIR / "re-review-prompt.md": (WHOLE_FILE_POLICY, *GENERATED_EVIDENCE_KINDS),
     SDD_DIR / "conformance-reviewer-prompt.md": (
         WHOLE_FILE_POLICY, *GENERATED_EVIDENCE_KINDS, "[ACCEPTANCE_CRITERIA]",
+        "verified-tree fresh --since <Commit> --record <record path>",
     ),
     SDD_DIR / "correctness-reviewer-prompt.md": (
         WHOLE_FILE_POLICY, *GENERATED_EVIDENCE_KINDS,
