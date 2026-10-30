@@ -48,7 +48,15 @@ def _delivery_model() -> object:
 
 
 KINDS = ("design-spec", "implementation-plan", "handoff", "review-package")
-VIOLATIONS = ("root_bytes", "member_bytes", "member_count", "aggregate_bytes")
+# One row per violation code: the code, the limit it is measured against and the
+# measured quantity. `violations` and `overages` both derive from it (issue 472 D6).
+_BOUNDS: tuple[tuple[str, str, Callable[[Mapping[str, int]], int]], ...] = (
+    ("root_bytes", "root_max_bytes", lambda metrics: metrics["root_bytes"]),
+    ("member_bytes", "member_max_bytes", lambda metrics: metrics["largest_member_bytes"]),
+    ("member_count", "max_members", lambda metrics: metrics["file_count"] - 1),
+    ("aggregate_bytes", "aggregate_max_bytes", lambda metrics: metrics["total_bytes"]),
+)
+VIOLATIONS = tuple(code for code, _, _ in _BOUNDS)
 SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 PLAN_MEMBER_RE = re.compile(r"task-([1-9][0-9]*)\.md\Z")
@@ -77,6 +85,7 @@ class CheckResult:
     status: str
     metrics: Mapping[str, int]
     violations: Sequence[str]
+    overages: Mapping[str, Mapping[str, int]]
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -85,6 +94,7 @@ class CheckResult:
             "status": self.status,
             "metrics": dict(self.metrics),
             "violations": list(self.violations),
+            "overages": {code: dict(entry) for code, entry in self.overages.items()},
         }
 
 
@@ -721,16 +731,15 @@ def _check_artifact(kind: str, root: str | os.PathLike[str],
         "largest_member_bytes": max(member_sizes, default=0),
     }
     policy = limits[kind]
-    violations: list[str] = []
-    if metrics["root_bytes"] > policy.root_max_bytes:
-        violations.append("root_bytes")
-    if member_sizes and max(member_sizes) > policy.member_max_bytes:
-        violations.append("member_bytes")
-    if len(member_sizes) > policy.max_members:
-        violations.append("member_count")
-    if metrics["total_bytes"] > policy.aggregate_max_bytes:
-        violations.append("aggregate_bytes")
-    return CheckResult(kind, "over_budget" if violations else "within_budget", metrics, violations)
+    overages: dict[str, dict[str, int]] = {}
+    for code, limit_name, measure in _BOUNDS:
+        limit = getattr(policy, limit_name)
+        measured = measure(metrics)
+        if measured > limit:
+            overages[code] = {"limit": limit, "over_by": measured - limit}
+    violations = list(overages)
+    return CheckResult(kind, "over_budget" if violations else "within_budget", metrics,
+                       violations, overages)
 
 
 def _valid_metrics(value: object) -> bool:

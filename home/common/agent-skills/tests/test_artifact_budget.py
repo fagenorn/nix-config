@@ -600,7 +600,26 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             self.assertEqual(first.returncode, 3)
             self.assertEqual(first.stdout, second.stdout)
             self.assertEqual(set(json.loads(first.stdout)),
-                             {"interface_version", "kind", "status", "metrics", "violations"})
+                             {"interface_version", "kind", "status", "metrics", "violations",
+                              "overages"})
+
+    def test_an_over_budget_check_reports_limit_and_overage(self):
+        """Issue 472 AC3, D6, D7: overages carry each violated code's limit and how far over it is."""
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "handoff.md"
+            path.write_bytes(b"h" * 8_193)
+            over = self.run_check("handoff", path)
+            self.assertEqual(over.returncode, 3, over.stderr)
+            self.assertEqual(over.stdout, (
+                '{"interface_version":1,"kind":"handoff","metrics":{"file_count":1,'
+                '"largest_member_bytes":0,"root_bytes":8193,"total_bytes":8193},'
+                '"overages":{"aggregate_bytes":{"limit":8192,"over_by":1},'
+                '"root_bytes":{"limit":8192,"over_by":1}},"status":"over_budget",'
+                '"violations":["root_bytes","aggregate_bytes"]}\n'))
+            path.write_bytes(b"h" * 8_192)
+            within = self.run_check("handoff", path)
+            self.assertEqual(within.returncode, 0, within.stderr)
+            self.assertEqual(json.loads(within.stdout)["overages"], {})
 
     def test_malformed_policy_and_package_shape_fail_without_success_output(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -687,7 +706,8 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 self.assertEqual(set(item), {"kind", "case", "shape", "root_bytes",
                                              "member_bytes", "expected"})
                 self.assertEqual(set(item["expected"]), {"exit_code", "status", "metrics",
-                                                         "violations", "producer_state"})
+                                                         "violations", "overages",
+                                                         "producer_state"})
                 with self.subTest(fixture=fixture_name, case=item["case"]), \
                      tempfile.TemporaryDirectory() as raw:
                     root = self.materialize_descriptor(item, Path(raw))
@@ -698,6 +718,7 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                     self.assertEqual(measured["status"], expected["status"])
                     self.assertEqual(measured["metrics"], expected["metrics"])
                     self.assertEqual(measured["violations"], expected["violations"])
+                    self.assertEqual(measured["overages"], expected["overages"])
                     if result.returncode == 3:
                         self.assertNotEqual(measured["status"], "within_budget")
 

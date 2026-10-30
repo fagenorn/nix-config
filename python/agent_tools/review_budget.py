@@ -15,6 +15,8 @@ from agent_tools.review_pack import ReviewLimits, canonical_manifest
 DESCRIPTION_WIRE_MAX_BYTES = 4096
 _LIMIT_KEYS = {"root_max_bytes", "member_max_bytes", "max_members", "aggregate_max_bytes"}
 _METRIC_KEYS = {"root_bytes", "total_bytes", "file_count", "largest_member_bytes"}
+_CHECK_KEYS = {"interface_version", "kind", "status", "metrics", "violations", "overages"}
+_OVERAGE_KEYS = {"limit", "over_by"}
 _VIOLATIONS = ("root_bytes", "member_bytes", "member_count", "aggregate_bytes")
 
 
@@ -41,6 +43,15 @@ def _invoke(argv: list[str], *, payload: bytes | None = None) -> subprocess.Comp
                               capture_output=True, check=False)
     except OSError as exc:
         raise BudgetError("budget authority unavailable") from exc
+
+
+def _valid_overages(overages: object, violations: list[str]) -> bool:
+    """Exactly one `{limit, over_by}` entry per violated code (issue 472 D8)."""
+    return (isinstance(overages, dict) and set(overages) == set(violations)
+            and all(isinstance(entry, dict) and set(entry) == _OVERAGE_KEYS
+                    and type(entry["limit"]) is int and entry["limit"] >= 0
+                    and type(entry["over_by"]) is int and entry["over_by"] >= 1
+                    for entry in overages.values()))
 
 
 @dataclass(frozen=True)
@@ -70,7 +81,7 @@ class BudgetAuthority:
         if result.returncode not in {0, 3} or result.stderr:
             raise BudgetError("budget check failed")
         value = _object(result.stdout, self.report_wire_max_bytes)
-        if (set(value) != {"interface_version", "kind", "status", "metrics", "violations"}
+        if (set(value) != _CHECK_KEYS
                 or type(value["interface_version"]) is not int or value["interface_version"] != 1
                 or value["kind"] != kind):
             raise BudgetError("invalid budget check")
@@ -80,7 +91,8 @@ class BudgetAuthority:
                 or not isinstance(violations, list)
                 or violations != [name for name in _VIOLATIONS if name in violations]
                 or value["status"] != ("over_budget" if violations else "within_budget")
-                or result.returncode != (3 if violations else 0)):
+                or result.returncode != (3 if violations else 0)
+                or not _valid_overages(value["overages"], violations)):
             raise BudgetError("invalid budget check")
         return BudgetCheck(kind, value["status"], metrics, tuple(violations))
 
