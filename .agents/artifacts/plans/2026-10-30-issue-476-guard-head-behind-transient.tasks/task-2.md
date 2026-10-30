@@ -93,7 +93,7 @@ Expected: `Ran 5 tests` and `FAILED (failures=2)`. Both timeout tests fail their
 - [ ] **Step 4: Verify**
 
 Run the Guard suite with no `-k`.
-Expected: `Ran 93 tests` and `OK`.
+Expected: `Ran 94 tests` and `OK`.
 
 Run: `bash -c 'set -e; test "$(grep -c "transient: rerun the command" home/common/claude-code/lifecycle_guard.py)" = 1; test "$(grep -c "repair: run claude-guard-policy" home/common/claude-code/lifecycle_guard.py)" = 3; grep -qF "timed out; transient: rerun the command" home/common/claude-code/README.md; if git diff -U0 -- home/common/claude-code/lifecycle_guard.py | grep -E "^\+.*(import |subprocess\.)"; then exit 1; fi'`
 Expected: exit 0. The marker appears once, all three repair clauses survive, the README names the marker, and there is no new import or child process.

@@ -70,12 +70,18 @@ Task 3 — Global guidance states the accepted lifecycle-verb form — `home/com
 | AC2 | code | Task 1 | `tests/test_claude_permission_guard.py::ClaudePermissionGuardTest::test_a_pr_behind_its_base_is_refused_naming_the_sync`, run by the Guard suite |
 | AC3 | code | Task 2 | `tests/test_claude_permission_guard.py::ClaudePermissionGuardTest::test_a_row_check_past_its_bound_is_killed_with_its_process_group` (the marker present), and `assert_unconfirmed` (the marker absent) through `test_a_failing_row_check_refuses_with_no_fallback`, `test_a_row_for_an_unregistered_repository_is_refused_at_use` and `test_a_row_whose_branches_differ_from_the_derivation_is_refused`, all run by the Guard suite |
 | AC4 | code | Task 3 | The Budget run (`just agent-instruction-budget` ends `check: pass`) on Task 3's commit, and CI `Instruction Budget` on the PR |
-| AC5 | code | Task 1 | The whole Guard suite (`OK`, 93 tests), with the adversarial table touched only as D9 allows, by Task 1's Step 4 gate. sdd's final gate runs the Guard suite and `just agent-workflow-tests` again |
+| AC5 | code | Task 1 | The whole Guard suite (`OK`, 94 tests), with the adversarial table touched only as D9 allows, by Task 1's Step 4 gate. sdd's final gate runs the Guard suite and `just agent-workflow-tests` again |
 
 ## Decisions
 
 - Task 1 rests on D1, D2, D3, D4, D5, D8 and D9. Task 2 rests on D6, D8 and D10. Task 3 rests on D7.
 - Planning appended D9 (the two-step test sequence and the adversarial table's data-only edit) and D10 (a timeout of a row check whose bound the deadline clipped still carries the marker).
-- A planning trial ran at `4ab6b0cc` in a scratch worktree, which was then discarded. It measured the claims the tasks make. Task 1's new rows, run against the base guard, gave 22 failing subtests, every one `2 != 0`, while the arm-order row passed. After Tasks 1 and 2 were applied and the guard rebuilt, the Guard suite ran 93 tests, all `OK`. Both row-check timeout tests passed in about 29 s. The Task 3 paragraph gave `check: pass`, and `test_dispatch_contracts.py` stayed `OK`.
+- A planning trial ran at `4ab6b0cc` in a scratch worktree, which was then discarded. It measured the claims the tasks make. Task 1's new rows, run against the base guard, gave 22 failing subtests, every one `2 != 0`, while the arm-order row passed. After Tasks 1 and 2 were applied and the guard rebuilt, the Guard suite ran 93 tests, all `OK` (before Phase 5 added the release-order row PR476-S1, which makes it 94). Both row-check timeout tests passed in about 29 s. The Task 3 paragraph gave `check: pass`, and `test_dispatch_contracts.py` stayed `OK`.
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, gpt-6-astra, xhigh), isolated read-only mode, no focus override; base SHA `46c616eff853e3a12b6ca8813da0c166206aaf18`; no fallback.
+- Findings: 0 blocking, 1 should-fix, 0 discussion. Accepted 1, rejected 0, deferred 0.
+- PR476-S1 (accepted, verified against the live `RELEASE_PR` fixture, which is green): Task 1 gains `test_the_release_mergeability_check_precedes_the_rollup_predicate`, pinning D1's release-arm order against an empty and a failing rollup; it stays outside D9's red-run selection, and the Guard-suite totals become 94.

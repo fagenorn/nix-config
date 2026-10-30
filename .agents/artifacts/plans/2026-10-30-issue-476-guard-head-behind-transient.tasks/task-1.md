@@ -160,6 +160,25 @@ All edits are in `tests/test_claude_permission_guard.py`. Per D9, leave the fake
                 line = self.refusal_line(self.run_guard(command, cwd=nodo, env=env))
                 self.assertEqual(f"lifecycle guard: unsafe merge: {problem}", line)
 
+    def test_the_release_mergeability_check_precedes_the_rollup_predicate(self):
+        """Issue 476 D1 (Phase-5 review PR476-S1): on the release arm the mergeability
+        refusal wins over a rollup that is not entirely green."""
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        failing = [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE"}]
+        merge = f"gh pr merge 1484 --repo {NODO} --merge"
+        for label, rollup in (("empty", []), ("failing", failing)):
+            for check, command, change, problem in (
+                ("behind", merge, {"mergeStateStatus": "BEHIND"},
+                 self.BEHIND.format(base="main")),
+                ("wrong head", f"{merge} --match-head-commit {self.OTHER_SHA}", {},
+                 f"--match-head-commit {self.OTHER_SHA} is not the PR head commit "
+                 f"{self.HEAD_SHA}; merge only a head you reviewed"),
+            ):
+                with self.subTest(rollup=label, check=check):
+                    line = self.refusal_line(self.run_guard(command, cwd=nodo, env=self.release_env(
+                        statusCheckRollup=rollup, **change)))
+                    self.assertEqual(f"lifecycle guard: unsafe merge: {problem}", line)
+
     def test_an_unreadable_merge_state_or_head_commit_is_refused(self):
         """Issue 476 D4: a fact the check needs and cannot read fails closed; without
         --match-head-commit the head commit is neither read nor demanded."""
@@ -201,7 +220,7 @@ All edits are in `tests/test_claude_permission_guard.py`. Per D9, leave the fake
 - [ ] **Step 2: Run the tests and watch them fail**
 
 Run the Guard suite with `-k wrong_head_commit -k behind_its_base -k arm_refusal_comes -k unreadable_merge_state -k test_state_refusals_print_no_accepted_forms`.
-Expected: `Ran 5 tests` and `FAILED (failures=22)`, and every failure is `AssertionError: 2 != 0`. Each wrong-head, `BEHIND`, unreadable-fact and new state-class merge exits 0 on the base guard, so it is allowed through to GitHub. `test_an_arm_refusal_comes_before_the_mergeability_check` passes, because base already refuses there; it pins the order.
+Expected: `Ran 5 tests` and `FAILED (failures=22)`, and every failure is `AssertionError: 2 != 0`. Each wrong-head, `BEHIND`, unreadable-fact and new state-class merge exits 0 on the base guard, so it is allowed through to GitHub. `test_an_arm_refusal_comes_before_the_mergeability_check` passes, because base already refuses there; it pins the order. `test_the_release_mergeability_check_precedes_the_rollup_predicate` is deliberately outside this selection (D9's red-run counts stay as measured): on the base guard it fails on its refusal line, which is the rollup refusal, not on an exit code.
 
 - [ ] **Step 3: Write the minimal implementation**
 
@@ -271,7 +290,7 @@ def mergeability_problem(pr_facts, base, head_commit):
 - [ ] **Step 4: Verify**
 
 Run the Guard suite with no `-k`.
-Expected: `Ran 93 tests` and `OK`. That covers the 89 base tests, the adversarial table and the four new tests.
+Expected: `Ran 94 tests` and `OK`. That covers the 89 base tests, the adversarial table and the five new tests.
 
 Run: `bash -c 'sect() { sed -n "/# Adversarial table\./,/# Release arm: the declared integration branch/p"; }; diff <(git show HEAD:tests/test_claude_permission_guard.py | sect) <(sect < tests/test_claude_permission_guard.py | sed "s/\"mergeStateStatus\":\"CLEAN\",//")'`
 Expected: no output and exit 0. The table differs from the start commit only by D9's field.
