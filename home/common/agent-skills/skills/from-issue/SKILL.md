@@ -140,7 +140,7 @@ When acquisition returns a terminal replay (`kind: terminal`) rather than an own
 Failure to persist is a failure to finish: surface it and never report the issue as merged or completed. Without lifecycle identity, send the same compact schema directly.
 
 ## Suspension procedure
-Suspend — do not finish — when an environmental interruption pauses the work: an imminent quota or session limit, a repeated transport failure, a permission prompt only a human can approve, an external wait (never a child's interim result), or a context that cannot launch the agents a phase needs. A suspension consumes no attempt and needs no authorization phrase.
+Suspend — do not finish — when an environmental interruption pauses the work: an imminent quota or session limit, a repeated transport failure, a permission prompt only a human can approve, an external wait (a blocker another session owns: end the turn, never poll), or a context that cannot launch the agents a phase needs. A suspension consumes no attempt and needs no authorization phrase.
 
 Release every worker this owner registered (the helper refuses with `live workers: <ids>` while one is live), run `launch-scope reap --repo-root <ledger_repo_root> --run-id <run-id> --action-id <action_id>`, and then call:
 

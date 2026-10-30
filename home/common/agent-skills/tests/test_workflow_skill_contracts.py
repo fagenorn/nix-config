@@ -3065,8 +3065,9 @@ class HandBuiltTimeContractsTest(unittest.TestCase):
 
 
 class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
-    """#474: no skill document chains a check onto a foreground `sleep`, and
-    each former no-wait-loops site names both Claude-compatible waits."""
+    """#474: no skill document chains a check onto a foreground `sleep`, each
+    former no-wait-loops site names both Claude-compatible waits, and from-issue
+    ends the turn on a blocker another session owns."""
 
     QUOTE_MARKER = re.compile(r"(?m)^[ \t]*>[ \t]?")
     # The retired "`sleep N`, then check once" family, read whitespace-normalized.
@@ -3085,6 +3086,7 @@ class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
         "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
     )
     WAIT_FORMS = ("Monitor with an until-condition", "bare `sleep N` call")
+    END_THE_TURN = "a blocker another session owns: end the turn, never poll"
 
     @classmethod
     def unquoted(cls, text):
@@ -3136,6 +3138,12 @@ class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
             for form in self.WAIT_FORMS:
                 with self.subTest(site=relative, form=form):
                     self.assertIn(form, text)
+
+    def test_from_issue_ends_the_turn_on_another_sessions_blocker(self):
+        text = FROM_ISSUE.read_text(encoding="utf-8")
+        start = text.index("\n## Suspension procedure\n")
+        end = text.index("\n## ", start + 1)
+        self.assertIn(self.END_THE_TURN, normalized(text[start:end]))
 
 
 if __name__ == "__main__":
