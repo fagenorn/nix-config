@@ -15,7 +15,7 @@ let
   # This immutable model revision is the template installed on eleven-m5.
   # Fetch only its small prompt template, never the 106 GB checkpoint.
   qwenTemplate = pkgs.fetchurl {
-    url = "https://huggingface.co/Jundot/Qwen3.8-Flash-Next-oQ4e-mtp/resolve/e878710debbe7b31b9cd5a5756af629c903eb91d/chat_template.jinja";
+    url = "https://huggingface.co/Jundot/Qwen3.8-Flash-Next-oQ4e-mtp/resolve/2322c888c2c314d4eceddf0159dec5d821aa1e41/chat_template.jinja";
     hash = "sha256-w8+eNKv0+eNsLXIWWqnBMtPipyW2wlhqqjqK+deoEEE=";
   };
 in
