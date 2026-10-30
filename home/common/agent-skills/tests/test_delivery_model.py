@@ -11,6 +11,8 @@ import tempfile
 import unittest
 import runpy
 
+from agent_tools import attempt_observations
+
 from ._delivery_model_fixtures import (
     seal,
     custody,
@@ -1635,6 +1637,156 @@ class OwnerLivenessResponseTest(unittest.TestCase):
         self.assertEqual(self.validate(copy.deepcopy(reply)), reply)
         with self.assertRaises(self.model.DeliveryModelError):
             self.validate({**reply, "reason": "late"})
+
+
+class ObserveExpectsResponseTest(unittest.TestCase):
+    """Issue 473 D4: a direct observe reply's requirements carry one closed `expects`."""
+
+    BARE = (
+        {"kind": "tracker"},
+        {"kind": "recorded_worktree", "path": "/repo/.worktrees/worktree-issue-73-example"},
+        {"kind": "candidate_worktree"},
+        {"kind": "forge_pr", "path": "issue-73-"},
+        {"kind": "delivery_contract", "subject_id": "73",
+         "reason_code": "delivery_contract_required", "detail_pointer": None},
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = load_model(SOURCE, "delivery_model_observe_expects_test")
+
+    def validate(self, value):
+        return self.model.validate_delivery_object(
+            value, expected_kind="workflow-response", notes_max_characters=4096)
+
+    @staticmethod
+    def observe(*bare):
+        return {"interface_version": 2, "kind": "observe", "issue": 73, "run_id": None,
+                "requirements": [attempt_observations.describe(item) for item in bare]}
+
+    def test_each_direct_kind_is_accepted_with_its_description(self):
+        for value in (*(self.observe(item) for item in self.BARE), self.observe(*self.BARE)):
+            with self.subTest(kinds=[item["kind"] for item in value["requirements"]]):
+                self.assertEqual(self.validate(copy.deepcopy(value)), value)
+
+    def test_every_broken_expects_is_rejected(self):
+        tracker, contract = self.observe(self.BARE[0]), self.observe(self.BARE[4])
+
+        def mutated(base, change):
+            value = copy.deepcopy(base)
+            change(value["requirements"][0])
+            return value
+
+        scope_tuple = {"kind": "scope_tuple", "subject_id": "select",
+                       "reason_code": "scope_tuple_required", "detail_pointer": None,
+                       "expects": copy.deepcopy(tracker["requirements"][0]["expects"])}
+        duplicate = copy.deepcopy(tracker)
+        duplicate["requirements"].append(copy.deepcopy(duplicate["requirements"][0]))
+        rejected = {
+            "missing": mutated(tracker, lambda item: item.pop("expects")),
+            "extra_member": mutated(tracker, lambda item: item["expects"].update(extra=1)),
+            "missing_member": mutated(tracker, lambda item: item["expects"].pop("build")),
+            "wrong_slot": mutated(tracker, lambda item: item["expects"].update(slot="forge")),
+            "build_on_observed": mutated(
+                tracker, lambda item: item["expects"].update(build="workflow-state x")),
+            "null_build_on_contract": mutated(
+                contract, lambda item: item["expects"].update(build=None)),
+            "empty_build_on_contract": mutated(
+                contract, lambda item: item["expects"].update(build="")),
+            "example_keys_differ": mutated(
+                tracker, lambda item: item["expects"]["example"].pop("state")),
+            "example_not_object": mutated(
+                tracker, lambda item: item["expects"].update(example=[])),
+            "members_empty": mutated(tracker, lambda item: (
+                item["expects"]["members"].clear(), item["expects"]["example"].clear())),
+            "meaning_not_string": mutated(
+                tracker, lambda item: item["expects"]["members"].update(state=1)),
+            "meaning_empty": mutated(
+                tracker, lambda item: item["expects"]["members"].update(state="")),
+            "bare_extra_member": mutated(tracker, lambda item: item.update(path="issue-73-")),
+            "control_only_kind": {**copy.deepcopy(tracker), "requirements": [scope_tuple]},
+            "duplicate": duplicate,
+        }
+        for name, value in rejected.items():
+            with self.subTest(mutation=name), self.assertRaises(self.model.DeliveryModelError):
+                self.validate(value)
+
+    def test_the_shared_requirement_shape_is_unchanged(self):
+        checkpointed = copy.deepcopy(workflow_responses(self.model)["checkpointed"])
+        checkpointed["requirements"][0]["expects"] = copy.deepcopy(
+            self.observe(self.BARE[0])["requirements"][0]["expects"])
+        with self.assertRaises(self.model.DeliveryModelError):
+            self.validate(checkpointed)
+
+
+class WorkerReplyResponseTest(unittest.TestCase):
+    """Issue 473 D6: the register-worker, release-worker and mark-progress replies at the
+    workflow-response boundary, matched by exact member set."""
+
+    REGISTERED = {"worker_id": "207:1:1:w1", "launch": "207:1:1", "parent": None}
+    RELEASED = {"worker_id": "207:1:1:w1", "release_event": "returned",
+                "released": ["207:1:1:w1"]}
+    MARKED = {"action_id": "207:1:1", "outcome": "baseline", "marker": "a" * 40}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = load_model(SOURCE, "delivery_model_worker_reply_test")
+
+    def validate(self, value):
+        return self.model.validate_delivery_object(
+            value, expected_kind="workflow-response", notes_max_characters=4096)
+
+    def test_each_reply_shape_is_accepted_unchanged(self):
+        accepted = {
+            "registered": self.REGISTERED,
+            "registered_child": {**self.REGISTERED, "worker_id": "207:1:1:w2",
+                                 "parent": "207:1:1:w1"},
+            "registered_remainder": {"worker_id": "207:r1:1:w1", "launch": "207:r1:1",
+                                     "parent": None},
+            "released_returned": self.RELEASED,
+            "released_repeat": {**self.RELEASED, "released": []},
+            "released_stopped_subtree": {**self.RELEASED, "release_event": "stopped",
+                                         "released": ["207:1:1:w1", "207:1:1:w2"]},
+            "released_stopped_repeat": {**self.RELEASED, "release_event": "stopped",
+                                        "released": []},
+            **{f"marked_{outcome}": {**self.MARKED, "outcome": outcome}
+               for outcome in ("baseline", "advanced", "unchanged", "diverged")},
+            "marked_sha256": {**self.MARKED, "marker": "b" * 64},
+        }
+        for name, value in accepted.items():
+            with self.subTest(name=name):
+                self.assertEqual(self.validate(copy.deepcopy(value)), value)
+
+    def test_every_broken_invariant_is_rejected(self):
+        rejected = {
+            "register_other_launch": {**self.REGISTERED, "worker_id": "207:1:2:w1"},
+            "register_bad_launch": {**self.REGISTERED, "launch": "207:1",
+                                    "worker_id": "207:1:w1"},
+            "register_zero_ordinal": {**self.REGISTERED, "worker_id": "207:1:1:w0"},
+            "register_parent_other_launch": {**self.REGISTERED, "worker_id": "207:1:1:w2",
+                                             "parent": "207:1:2:w1"},
+            "register_parent_not_worker": {**self.REGISTERED, "parent": "207:1:1"},
+            "register_extra": {**self.REGISTERED, "registered_at": "2026-09-21T00:00:00Z"},
+            "release_unknown_event": {**self.RELEASED, "release_event": "expired"},
+            "release_without_worker": {**self.RELEASED, "released": ["207:1:1:w2"]},
+            "release_returned_subtree": {**self.RELEASED,
+                                         "released": ["207:1:1:w1", "207:1:1:w2"]},
+            "release_other_launch": {**self.RELEASED, "release_event": "stopped",
+                                     "released": ["207:1:1:w1", "207:1:2:w1"]},
+            "release_duplicate": {**self.RELEASED, "release_event": "stopped",
+                                  "released": ["207:1:1:w1", "207:1:1:w1"]},
+            "release_not_list": {**self.RELEASED, "released": "207:1:1:w1"},
+            "release_bad_worker": {**self.RELEASED, "worker_id": "w1", "released": []},
+            "mark_unknown_outcome": {**self.MARKED, "outcome": "stalled"},
+            "mark_short_marker": {**self.MARKED, "marker": "a" * 39},
+            "mark_upper_marker": {**self.MARKED, "marker": "A" * 40},
+            "mark_null_marker": {**self.MARKED, "marker": None},
+            "mark_bad_action": {**self.MARKED, "action_id": "207:1"},
+            "mark_extra": {**self.MARKED, "changed": True},
+        }
+        for name, value in rejected.items():
+            with self.subTest(mutation=name), self.assertRaises(self.model.DeliveryModelError):
+                self.validate(value)
 
 
 class ControlWaitResponseTest(unittest.TestCase):

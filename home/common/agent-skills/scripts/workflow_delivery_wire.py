@@ -10,6 +10,10 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from agent_tools.attempt_observations import (
+    CANDIDATE_WORKTREE_STATES, RECORDED_WORKTREE_STATES, WORKTREE_ENTRY_FIELDS,
+    WORKTREE_OBSERVATION_FIELDS)
+
 WORKFLOW_DELIVERY_WIRE_INTERFACE_VERSION = 1
 _LIVE_STATES = {"active", "handed_off", "suspended"}
 
@@ -118,16 +122,16 @@ class DeliveryProjection:
 
     @staticmethod
     def _worktree(value: object) -> dict[str, Any]:
-        if not isinstance(value, dict) or set(value) != {"issue", "recorded", "candidate"}:
+        if not isinstance(value, dict) or set(value) != WORKTREE_OBSERVATION_FIELDS:
             raise ValueError("invalid worktree observation")
         if type(value["issue"]) is not int or value["issue"] < 1:
             raise ValueError("invalid worktree issue")
-        for name, states in (("recorded", {"matching_issue_branch", "absent", "mismatch"}),
-                             ("candidate", {"available", "absent"})):
+        for name, states in (("recorded", RECORDED_WORKTREE_STATES),
+                             ("candidate", CANDIDATE_WORKTREE_STATES)):
             item = value[name]
             if item is None:
                 continue
-            if not isinstance(item, dict) or set(item) != {"path", "state"}:
+            if not isinstance(item, dict) or set(item) != WORKTREE_ENTRY_FIELDS:
                 raise ValueError(f"invalid {name} fields")
             if not isinstance(item["path"], str) or not item["path"].startswith("/"):
                 raise ValueError(f"invalid {name} path")

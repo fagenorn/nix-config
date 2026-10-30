@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import json
 import hashlib
 import importlib.util
 import os
+import re
 from copy import deepcopy
 from pathlib import Path
 import subprocess
@@ -14,6 +16,9 @@ import unittest
 from unittest import mock
 
 from ._delivery_model_fixtures import contract_and_delivery, custody, ship_handoff, workflow_responses
+from .test_attempt_custody import DeliveredCustody
+from .test_delivered_control import DELIVERED, at
+from .test_workflow_state import load_source_module
 
 
 ROOT = Path(__file__).parents[4]
@@ -22,6 +27,36 @@ POLICY = ROOT / "home/common/agent-skills/artifact-budget-policy.json"
 FIXTURES = Path(__file__).parent / "fixtures/artifact-budgets"
 sys.path.insert(0, str(SCRIPT.parent))
 import artifact_budget
+
+WORKFLOW_STATE = ROOT / "home/common/agent-skills/scripts/workflow-state.py"
+SKILL_TREES = (ROOT / "home/common/agent-skills/skills", ROOT / "home/common/claude-code/skills",
+               ROOT / "home/common/codex/skills")
+# Issue 473 D5: the skill-named subcommands whose stdout is no workflow response.
+NOT_WORKFLOW_RESPONSES = frozenset({"build-delivery", "resume-pack"})
+SKILL_CALL = re.compile(r"workflow-state ([a-z][a-z-]*)")
+VALIDATOR_PIPE = re.compile(r"\|\s*artifact-budget validate-report(?P<arguments>[^|]*)")
+
+
+def skill_texts():
+    """Every skill document of the shared, Claude-only and Codex trees, evals excluded."""
+    for tree in SKILL_TREES:
+        for path in sorted(tree.rglob("*.md")):
+            if "evals" not in path.relative_to(tree).parts:
+                yield path, path.read_text(encoding="utf-8")
+
+
+def workflow_state_subcommands():
+    """The subcommand names of workflow-state's own parser, loaded from source."""
+    parser = load_source_module(WORKFLOW_STATE, "artifact_budget_test_workflow_state").build_parser()
+    return frozenset(next(action for action in parser._actions
+                          if isinstance(action, argparse._SubParsersAction)).choices)
+
+
+def skill_named_workflow_responses():
+    """Every workflow-state subcommand a skill names whose reply is a workflow response."""
+    commands = workflow_state_subcommands()
+    named = {name for _, text in skill_texts() for name in SKILL_CALL.findall(text)}
+    return frozenset(named & commands) - NOT_WORKFLOW_RESPONSES
 
 # The closed acceptance_state set (#272 D8), spelled out so the test can fail.
 ACCEPTANCE = ("met", "unmet", "human_pending", "not_applicable")
@@ -1441,6 +1476,116 @@ class ArtifactBudgetCliTest(unittest.TestCase):
                 path.write_text(json.dumps(policy), encoding="utf-8")
                 result = self.run_check("handoff", root, path)
                 self.assertEqual((result.returncode, result.stdout), (2, ""))
+
+
+class SkillNamedReplyTest(DeliveredCustody, unittest.TestCase):
+    """Issue 473 AC3: each workflow-state reply a skill names passes the workflow-response
+    boundary. A driver is a `reply_<subcommand>` method that returns one real reply."""
+
+    def drivers(self):
+        return {name[len("reply_"):].replace("_", "-"): getattr(self, name)
+                for name in dir(self) if name.startswith("reply_")}
+
+    def launched(self):
+        """Spawn 207 under its contract at minute 0: its custody and action id."""
+        custody = self.spawn(DELIVERED)[DELIVERED]
+        return custody, custody["action_id"]
+
+    def reply_init_run(self):
+        self.project()
+        return self.cli("init-run", "--repo-root", self.root, "--creation-key",
+                        "from-issue:207:1", "--now", at(0)).stdout
+
+    def reply_control(self):
+        self.setup_run()
+        return self.cli("control", *self.run_args, "--request-file", "-", stdin=self.request(
+            0, recorded={DELIVERED: None}, contracts=True)).stdout
+
+    def reply_direct_owner(self):
+        self.project()
+        return self.cli("direct-owner", "--repo-root", self.root, "--request-file", "-",
+                        stdin=json.dumps(self.direct_request()).encode()).stdout
+
+    def reply_check_launch(self):
+        _, action = self.launched()
+        return self.cli("check-launch", *self.run_args, "--action-id", action).stdout
+
+    def reply_current_launch(self):
+        _, action = self.launched()
+        return self.cli("current-launch", *self.run_args, "--action-id", action).stdout
+
+    def reply_owner_liveness(self):
+        _, action = self.launched()
+        with mock.patch.dict(os.environ, {"WORKFLOW_STATE_TEST_CLOCK": at(1)}):
+            return self.cli("owner-liveness", *self.run_args, "--action-id", action,
+                            "--stall-minutes", "90").stdout
+
+    def reply_register_worker(self):
+        _, action = self.launched()
+        return self.cli("register-worker", *self.run_args, "--now", at(1),
+                        "--action-id", action).stdout
+
+    def reply_release_worker(self):
+        _, action = self.launched()
+        self.cli("register-worker", *self.run_args, "--now", at(1), "--action-id", action)
+        return self.cli("release-worker", *self.run_args, "--now", at(2),
+                        "--worker-id", f"{action}:w1", "--event", "returned").stdout
+
+    def reply_mark_progress(self):
+        _, action = self.launched()
+        self.linked_worktree(Path(self.worktrees[DELIVERED]).name, "issue-207-shape")
+        return self.cli("mark-progress", *self.run_args, "--now", at(1),
+                        "--action-id", action).stdout
+
+    def reply_progress(self):
+        _, action = self.launched()
+        return self.cli("progress", *self.run_args, "--action-id", action, "--phase", "1",
+                        "--next-needs-context", "true", "--artifacts-sufficient", "false",
+                        "--remainder-self-contained", "false", "--now", at(1)).stdout
+
+    def reply_suspend(self):
+        _, action = self.launched()
+        return self.cli("suspend", *self.run_args, "--action-id", action,
+                        "--blocked-on", "transport", "--now", at(1)).stdout
+
+    def reply_finish(self):
+        custody, _ = self.launched()
+        return self.cli("finish", *self.run_args, "--now", at(1), "--summary-file", "-",
+                        stdin=self.summary(custody, "stopped")).stdout
+
+    def reply_checkpoint_delivery(self):
+        custody, _ = self.launched()
+        self.merge_checkpoint(custody, 1)
+        return self.checkpoint_reply
+
+    def reply_host_route(self):
+        self.setup_run()
+        return self.cli("host-route", "--route", "codex").stdout
+
+    def test_the_drivers_cover_exactly_the_skill_named_replies(self):
+        self.assertEqual(set(self.drivers()), skill_named_workflow_responses())
+
+    def test_every_skill_named_reply_passes_the_workflow_response_boundary(self):
+        for name, reply in sorted(self.drivers().items()):
+            with self.subTest(subcommand=name):
+                raw = reply()
+                checked = self.boundary("workflow-response", raw)
+                self.assertEqual((checked.returncode, checked.stderr), (0, b""))
+                self.assertEqual(checked.stdout, raw)
+
+    def test_every_explicit_validator_pipe_names_the_workflow_response_boundary(self):
+        replies = skill_named_workflow_responses()
+        piped = []
+        for path, text in skill_texts():
+            for line in text.splitlines():
+                for call in SKILL_CALL.finditer(line):
+                    pipe = VALIDATOR_PIPE.search(line, call.end())
+                    if call[1] not in replies or pipe is None:
+                        continue
+                    piped.append((path.name, call[1]))
+                    with self.subTest(document=path.name, subcommand=call[1]):
+                        self.assertIn("--boundary workflow-response", pipe["arguments"])
+        self.assertTrue(piped)
 
 
 if __name__ == "__main__":
