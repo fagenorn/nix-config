@@ -79,6 +79,13 @@ _SUSPENDED = "suspended:"
 _EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 
+def holds_issue(issue_state: Mapping) -> bool:
+    """Whether a run still holds an issue: its latest attempt or latest delivery remainder is
+    in `LIVE_STATES` (issue 475 D7)."""
+    return any(records and records[-1]["state"] in LIVE_STATES
+               for records in (issue_state["attempts"], issue_state["delivery_remainders"]))
+
+
 def stall_count(*, phase: int, suspend_phase: int | None, stalled_resumes: int) -> int:
     """The resumes already spent at `phase` once one more suspension lands there:
     `stalled_resumes + 1` when the last suspension was at the same phase, else 0."""

@@ -1,6 +1,7 @@
 """The pure half of an attempt run's identity (#337 D1-D3, D6, D7).
 
-Grammar, plan, subject and report: which dialect a run id is in, the creation key and subject
+Grammar, plan, subject and report, and the key and closed subject of an issue hold pointer
+(issue 475): which dialect a run id is in, the creation key and subject
 a run's one core `rel_` transaction is created under, the lineage rule, and the migration
 report's shape. Every function here is pure, with no file, directory, clock or environment
 read. `agent_tools.attempt_store` owns the store effects (`TransactionStore.create`, `lookup`
@@ -44,6 +45,8 @@ _KINDS = ("direct", "orchestrated")
 _MAX_SCHEMA_VERSION = 10
 _MAX_ISSUE = 9_999_999
 _MAX_SEQUENCE = 999_999
+HOLD_SCHEMA = "issue-hold/v1"
+_HOLD_KEYS = frozenset({"schema", "issue", "run"})
 
 
 class MigrationRefused(ValueError):
@@ -302,6 +305,35 @@ def subject_handle(subject: Mapping, transaction_id: str) -> str:
     """The run_id a ledger records: the legacy alias's id, else the transaction id."""
     alias = subject["alias"]
     return transaction_id if alias is None else alias["run_id"]
+
+
+def hold_key(issue: int, ordinal: int) -> str:
+    """The creation key of the `ordinal`th pointer from `issue` to a run holding it (issue 475)."""
+    return f"{HOLD_SCHEMA}:{issue}:{ordinal}"
+
+
+def hold_violation(subject: object) -> str | None:
+    """Why `subject` is not the closed issue-hold/v1 subject, else None."""
+    if not isinstance(subject, Mapping) or set(subject) != _HOLD_KEYS:
+        return "subject is not the closed issue-hold/v1 object"
+    if subject["schema"] != HOLD_SCHEMA:
+        return f"subject schema is not {HOLD_SCHEMA}"
+    if not _is_int(subject["issue"], 1, _MAX_ISSUE):
+        return f"subject issue is not an integer in 1 to {_MAX_ISSUE}"
+    if not is_id(subject["run"]):
+        return "subject run is not a core transaction id"
+    return None
+
+
+def hold_plan(issue: int, ordinal: int, run: str) -> RunPlan:
+    """The creation key and subject of the `ordinal`th hold pointer of `issue`, naming `run`."""
+    if type(ordinal) is not int or ordinal < 1:
+        raise ValueError(f"hold ordinal {ordinal!r} is not an integer of at least 1")
+    subject = {"schema": HOLD_SCHEMA, "issue": issue, "run": run}
+    violation = hold_violation(subject)
+    if violation is not None:
+        raise ValueError(violation)
+    return RunPlan(hold_key(issue, ordinal), subject)
 
 
 def creation_arguments(plan: RunPlan) -> dict:

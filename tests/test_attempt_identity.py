@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from agent_tools import attempt_identity as ai
+from agent_tools import attempt_store
 from agent_tools.transaction_core import StateInvalid, TransactionStore
 
 CORE_ID = "rel_0190f0e0-0000-7000-8000-000000000000"
@@ -203,3 +204,92 @@ class IssueSetKeyTest(unittest.TestCase):
             with self.subTest(issues=issues, ordinal=ordinal):
                 with self.assertRaises(ValueError):
                     ai.issue_set_caller_key(issues, ordinal)
+
+
+class HoldGrammarTest(unittest.TestCase):
+    """Issue 475 D5: the issue-hold/v1 key and closed subject."""
+
+    def test_the_key_and_subject_name_the_issue_and_the_run(self):
+        plan = ai.hold_plan(73, 2, CORE_ID)
+        self.assertEqual((plan.creation_key, plan.subject_json()), (
+            "issue-hold/v1:73:2", {"schema": "issue-hold/v1", "issue": 73, "run": CORE_ID}))
+        self.assertIsNone(ai.hold_violation(plan.subject_json()))
+        self.assertEqual(ai.creation_arguments(plan)["concurrency_keys"],
+                         ["attempt-run:issue-hold/v1:73:2"])
+
+    def test_anything_else_is_not_a_hold_subject(self):
+        good = {"schema": "issue-hold/v1", "issue": 73, "run": CORE_ID}
+        for subject in ({**good, "extra": 1}, {**good, "schema": "attempt-run/v1"},
+                        {**good, "issue": 0}, {**good, "issue": True}, {**good, "issue": "73"},
+                        {**good, "run": "orchestrate-73"}, [], None):
+            with self.subTest(subject=subject):
+                self.assertIsNotNone(ai.hold_violation(subject))
+        for ordinal in (0, True, "1"):
+            with self.subTest(ordinal=ordinal):
+                with self.assertRaises(ValueError):
+                    ai.hold_plan(73, ordinal, CORE_ID)
+
+
+class HoldPointerStoreTest(unittest.TestCase):
+    """Issue 475 D5, D6: `settle_holds` writes the pointers `hold_runs` reads."""
+
+    ORCHESTRATED = ai.RunIdentity("orchestrated", None, None)
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.store = Path(directory.name) / "attempt-transactions"
+
+    def run_transaction(self, key):
+        return attempt_store.mint_run(self.store, attempt_store.creation_key_plan(key))
+
+    @staticmethod
+    def state(run, **states):
+        return {"transaction_id": run, "issues": {
+            str(issue): {"attempts": [{"state": state}], "delivery_remainders": []}
+            for issue, state in ((int(name[1:]), value) for name, value in states.items())}}
+
+    def settle(self, state, identity=ORCHESTRATED):
+        attempt_store.settle_holds(self.store, state, identity, now_ms=1_790_000_000_000)
+
+    def pointers(self, issue):
+        core = TransactionStore(self.store)
+        found, ordinal = [], 1
+        while (transaction_id := core.lookup(ai.hold_key(issue, ordinal))) is not None:
+            found.append(core.load(transaction_id).subject["run"])
+            ordinal += 1
+        return found
+
+    def test_each_held_issue_gets_one_pointer_however_often_the_run_writes(self):
+        run = self.run_transaction("first")
+        for _ in range(2):
+            self.settle(self.state(run, i73="suspended", i74="merged", i75="active"))
+        self.assertEqual((self.pointers(73), self.pointers(74), self.pointers(75)),
+                         ([run], [], [run]))
+        self.assertEqual(list(attempt_store.hold_runs(self.store, 73)), [run])
+
+    def test_a_second_run_holding_the_issue_takes_the_next_ordinal(self):
+        first, second = self.run_transaction("first"), self.run_transaction("second")
+        self.settle(self.state(first, i73="active"))
+        self.settle(self.state(second, i73="handed_off"))
+        self.settle(self.state(first, i73="active"))
+        self.assertEqual(self.pointers(73), [first, second])
+        self.assertEqual(list(attempt_store.hold_runs(self.store, 73)), [first, second])
+
+    def test_a_direct_run_and_a_settled_run_create_nothing(self):
+        self.settle(self.state(CORE_ID, i73="active"), ai.RunIdentity("direct", 73, 1))
+        self.assertFalse(self.store.exists())
+        run = self.run_transaction("first")
+        self.settle(self.state(run, i73="active"))
+        before = sorted(path for path in self.store.rglob("*"))
+        self.settle(self.state(run, i73="active"))
+        self.assertEqual(sorted(path for path in self.store.rglob("*")), before)
+        self.assertEqual(list(attempt_store.hold_runs(self.store, 99)), [])
+
+    def test_an_index_entry_that_is_not_a_hold_pointer_is_refused(self):
+        run = self.run_transaction("first")
+        plan = ai.hold_plan(73, 1, run)
+        TransactionStore(self.store).create(plan.creation_key, {"schema": "other"},
+                                            **ai.creation_arguments(plan))
+        with self.assertRaises(attempt_store.StoreRefused):
+            list(attempt_store.hold_runs(self.store, 73))

@@ -560,5 +560,22 @@ class SettlePlanTest(unittest.TestCase):
                                      (reached, ()))
 
 
+class HoldsIssueTest(unittest.TestCase):
+    """Issue 475 D7: a run holds an issue while its latest attempt or remainder is live."""
+
+    def test_the_latest_attempt_or_remainder_decides(self):
+        def entry(attempts, remainders=()):
+            return {"attempts": [{"state": state} for state in attempts],
+                    "delivery_remainders": [{"state": state} for state in remainders]}
+
+        for value, held in ((entry([]), False), (entry(["active"]), True),
+                            (entry(["suspended", "failed"]), False),
+                            (entry(["handed_off"]), True),
+                            (entry(["merged"], ["suspended"]), True),
+                            (entry(["merged"], ["active", "stopped"]), False)):
+            with self.subTest(value=value):
+                self.assertIs(ac.holds_issue(value), held)
+
+
 if __name__ == "__main__":
     unittest.main()

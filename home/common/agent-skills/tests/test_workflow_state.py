@@ -9195,5 +9195,17 @@ class TakeoverBlockersTest(LifecycleHarness, unittest.TestCase):
         self.assertEqual(self.blockers(state, "2026-08-20T13:00:00Z"), [])
 
 
+class HoldPointerWriteTest(LifecycleHarness, unittest.TestCase):
+    """Issue 475 D6: a locked write of an orchestrated run gives each issue it holds a pointer."""
+
+    def test_an_orchestrated_write_points_at_its_run_and_a_direct_one_does_not(self):
+        self.init_run()
+        self.spawn(issue=73, worktree=self.root / "wt-73")
+        self.suspend(issue=73, attempt=1, blocked_on="transport", now="2026-08-13T20:05:00Z")
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 73)), [self.run_id])
+        self.acquire_direct(issue=74)
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 74)), [])
+
+
 if __name__ == "__main__":
     unittest.main()

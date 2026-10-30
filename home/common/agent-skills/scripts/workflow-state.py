@@ -27,6 +27,7 @@ from agent_tools.attempt_custody import (
     OWNER_BLOCKED_ON_VALUES,
     STALL_LIMIT,
     at_ms,
+    holds_issue,
     launch_id,
     reaped,
     stall_count,
@@ -1421,7 +1422,8 @@ def commit_state(run_dir: Path, state_path: Path, state: dict[str, Any], *,
     state, settles custody in the core (``bound_launches`` is the 8 -> 9 plan and
     ``bound_remainders`` the 9 -> 10 plan of a binding write, ``report`` an owner result it
     submits; the issues whose delivery is complete give up their launch spans; a refusal
-    leaves the ledger untouched), then publishes the state atomically and applies the seals
+    leaves the ledger untouched), ensures the issue hold pointers of an orchestrated run
+    (issue 475), then publishes the state atomically and applies the seals
     the settle deferred: the delivery proofs first, then the custody seals that cite their
     receipts (#338 D4, #339 D5).
     """
@@ -1436,6 +1438,7 @@ def commit_state(run_dir: Path, state_path: Path, state: dict[str, Any], *,
         report=report, delivered=delivered)
     settle_delivery(store, state, now_ms=now_ms, canonical_text=lambda value: (
         _delivery().model.canonical_bytes(value).decode("utf-8")))
+    attempt_store.settle_holds(store, state, identity, now_ms=now_ms)
     atomic_write_state(run_dir, state_path, state)
     receipts = seal_delivery(store, state, now_ms=now_ms, delivered=delivered)
     attempt_store.seal_custody(store, pending, now_ms=now_ms, receipts=receipts)
@@ -2437,8 +2440,7 @@ def issue_set_reusable(state: dict[str, Any], issues: list[int]) -> bool:
         entry = state["issues"].get(str(issue))
         if entry is None or entry["outcome"] is None:
             return True
-        if any(records and records[-1]["state"] in {"active", "handed_off", "suspended"}
-               for records in (entry["attempts"], entry["delivery_remainders"])):
+        if holds_issue(entry):
             return True
     return False
 
