@@ -1,0 +1,8 @@
+# Acceptance record — issue #475
+
+| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |
+|----|-----------|------|------------------|----------|--------|------------|---------|
+| AC1 | [code] An `owner_unavailable` takeover of an attempt with a live child worker (a `mark-progress` heartbeat within its bound) is refused with a detail naming the live worker. — measured: new case in `home/common/agent-skills/tests/test_workflow_state.py` (fails today: takeover proceeds) | code | `test_workflow_state.py::DirectTakeoverWorkerTest::test_a_takeover_inside_the_deadline_names_every_live_worker` | in final verification | — | — | met |
+| AC2 | [code] A direct-owner acquisition for an issue held by an orchestrated run is refused with a detail containing the run id and the `orchestrate-control start --run-id` resume command. — measured: new case in `home/common/agent-skills/tests/test_workflow_state.py` or `tests/test_orchestrate_control.py` | code | `test_workflow_state.py::OrchestratedHoldTest::test_every_direct_request_for_a_held_issue_is_refused_naming_the_resume_command` | in final verification | — | — | met |
+| AC3 | [code] The from-issue acquisition guidance and the orchestrate-issues re-entry section describe both behaviours. — measured: `home/common/agent-skills/tests/test_workflow_skill_contracts.py` | code | `test_workflow_skill_contracts.py::OrchestratedReentryContractsTest` (both tests), `::WorkflowSkillContractsTest::test_orchestrate_documents_carry_their_machine_text` | in final verification | — | — | met |
+| AC4 | [code] `just agent-workflow-tests` passes. — measured: `just agent-workflow-tests` | code | `just agent-workflow-tests` | in final verification | — | — | met |
