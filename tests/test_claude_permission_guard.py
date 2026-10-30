@@ -2601,6 +2601,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 if exact:
                     expected += "; repair: run claude-guard-policy"
                 self.assertIn(expected, result.stderr)
+                self.assertNotIn("transient", result.stderr)
 
     def test_a_row_for_an_unregistered_repository_is_refused_at_use(self):
         """Issue 377 criterion 3, R2, R3."""
@@ -2648,8 +2649,10 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             guard_args=("--gh-bin", str(self.fake_gh), "--derive-timeout-seconds", "2"),
             env={"FAKE_DERIVE_MODE": "hang", "FAKE_DERIVE_PIDFILE": str(pidfile)})
         self.assertEqual(2, result.returncode, result.stderr)
-        self.assertIn("the row check did not confirm its derived policy row: timed out",
-                      result.stderr)
+        line = self.refusal_line(result)
+        self.assertTrue(line.endswith("the row check did not confirm its derived policy row: "
+                                      "timed out; transient: rerun the command"), line)
+        self.assertNotIn("claude-guard-policy", line)
         self.assert_row_check_killed(pidfile)
 
     def test_the_invocation_deadline_bounds_the_row_check_and_every_later_child(self):
@@ -2675,13 +2678,15 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             hung, exhausted = hung.result(), exhausted.result()
         elapsed = time.monotonic() - started
         self.assertEqual(2, hung.returncode, hung.stderr)
-        self.assertIn("the row check did not confirm its derived policy row: timed out",
-                      hung.stderr)
+        self.assertTrue(self.refusal_line(hung).endswith(
+            "the row check did not confirm its derived policy row: timed out; "
+            "transient: rerun the command"), hung.stderr)
         self.assertEqual(2, exhausted.returncode, exhausted.stderr)
         self.assertIn("lifecycle guard: unsafe push: the 27-second invocation deadline leaves "
                       "too little time for the next check, so it was not started",
                       exhausted.stderr)
         self.assertEqual(1, exhausted.stderr.count("lifecycle guard:"), exhausted.stderr)
+        self.assertNotIn("transient", exhausted.stderr)
         self.assertGreater(elapsed, 20)
         self.assertLess(elapsed, 29)
         self.assert_row_check_killed(pidfile)

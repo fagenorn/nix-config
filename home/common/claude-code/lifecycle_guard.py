@@ -1536,8 +1536,12 @@ def row_check_problem(derive_bin, repository, row, timeout):
     so one SIGKILL to its process group on the bound takes its descendants with
     it. The pipes are not read again after the kill; only the direct child is
     reaped.
+
+    A timeout's refusal ends in the transient marker, every other refusal in the
+    claude-guard-policy repair (issue 476 D6).
     """
     why = None
+    remedy = "repair: run claude-guard-policy"
     try:
         child = subprocess.Popen(
             [derive_bin, "--repository", repository],
@@ -1560,6 +1564,9 @@ def row_check_problem(derive_bin, repository, row, timeout):
                 pass
             child.wait()
             why = "timed out"
+            # Issue 476 D6: a slow check clears on a plain rerun, and recompiling
+            # the policy cannot speed it up.
+            remedy = "transient: rerun the command"
         else:
             try:
                 report = json.loads(stdout)
@@ -1570,7 +1577,7 @@ def row_check_problem(derive_bin, repository, row, timeout):
         return None
     return (
         f"repository {repository}: the row check did not confirm its derived "
-        f"policy row: {why}; repair: run claude-guard-policy"
+        f"policy row: {why}; {remedy}"
     )
 
 
