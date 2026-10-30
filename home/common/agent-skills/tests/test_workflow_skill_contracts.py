@@ -3073,5 +3073,87 @@ class HandBuiltTimeContractsTest(unittest.TestCase):
         self.assertGreater(checked, 20)
 
 
+class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
+    """#474: no skill document chains a check onto a foreground `sleep`, each
+    former no-wait-loops site names both Claude-compatible waits, and from-issue
+    ends the turn on a blocker another session owns."""
+
+    QUOTE_MARKER = re.compile(r"(?m)^[ \t]*>[ \t]?")
+    # The retired "`sleep N`, then check once" family, read whitespace-normalized.
+    CHAINED_CHECK = re.compile(r"`sleep [^`]*`, then check")
+    # A `sleep <arg>` opening a command, at a line or code-span start, chained by && || ;
+    CHAINED_SHELL = re.compile(r"(?:^[ \t]*|`)sleep[ \t]+[^\s`;&|]+[ \t]*(?:&&|\|\||;)", re.M)
+    FORMER_SITES = (
+        "home/common/agent-skills/skills/sdd/implementer-prompt.md",
+        "home/common/agent-skills/skills/sdd/task-reviewer-prompt.md",
+        "home/common/agent-skills/skills/sdd/re-review-prompt.md",
+        "home/common/agent-skills/skills/sdd/correctness-reviewer-prompt.md",
+        "home/common/agent-skills/skills/sdd/conformance-reviewer-prompt.md",
+        "home/common/agent-skills/skills/from-issue/ship-handoff.md",
+        "home/common/agent-skills/skills/from-issue/SKILL.md",
+        "home/common/agent-skills/skills/sdd/SKILL.md",
+        "home/common/claude-code/skills/orchestrate-issues/SKILL.md",
+    )
+    WAIT_FORMS = ("Monitor with an until-condition", "bare `sleep N` call")
+    END_THE_TURN = "a blocker another session owns: end the turn, never poll"
+
+    @classmethod
+    def unquoted(cls, text):
+        return cls.QUOTE_MARKER.sub("", text)
+
+    @classmethod
+    def chained_waits(cls, text):
+        """The shapes `text` matches: "prose", "shell", both or neither."""
+        body = cls.unquoted(text)
+        found = []
+        if cls.CHAINED_CHECK.search(normalized(body)):
+            found.append("prose")
+        if cls.CHAINED_SHELL.search(body):
+            found.append("shell")
+        return found
+
+    def test_the_shapes_match_the_chained_forms_and_spare_the_rest(self):
+        for text, shape in (
+            ("    run one bounded foreground `sleep N`, then check\n    once.", ["prose"]),
+            ("> run one bounded foreground `sleep N`, then\n> check once.", ["prose"]),
+            ("`sleep 30 && gh pr checks 1`", ["shell"]),
+            ("sleep 60; workflow-state status", ["shell"]),
+            ("  > `sleep 5 || true`", ["shell"]),
+        ):
+            with self.subTest(hit=text):
+                self.assertEqual(self.chained_waits(text), shape)
+        for text in (
+            "`sleep <wait_seconds>`",
+            "background `sleep <wait_seconds>`; every wait",
+            "`until <check>; do sleep 2; done`",
+            "or one short bare `sleep N` call and check in the next.",
+        ):
+            with self.subTest(spare=text):
+                self.assertEqual(self.chained_waits(text), [])
+
+    def test_no_skill_document_chains_a_check_onto_a_foreground_sleep(self):
+        checked = 0
+        for tree in SKILL_TREES:
+            self.assertTrue(tree.is_dir(), tree)
+            for path in sorted(path for path in tree.rglob("*.md") if path.is_file()):
+                checked += 1
+                with self.subTest(document=str(path.relative_to(REPO_ROOT))):
+                    self.assertEqual(self.chained_waits(path.read_text(encoding="utf-8")), [])
+        self.assertGreater(checked, 20)
+
+    def test_each_former_site_names_both_claude_compatible_waits(self):
+        for relative in self.FORMER_SITES:
+            text = normalized(self.unquoted((REPO_ROOT / relative).read_text(encoding="utf-8")))
+            for form in self.WAIT_FORMS:
+                with self.subTest(site=relative, form=form):
+                    self.assertIn(form, text)
+
+    def test_from_issue_ends_the_turn_on_another_sessions_blocker(self):
+        text = FROM_ISSUE.read_text(encoding="utf-8")
+        start = text.index("\n## Suspension procedure\n")
+        end = text.index("\n## ", start + 1)
+        self.assertIn(self.END_THE_TURN, normalized(text[start:end]))
+
+
 if __name__ == "__main__":
     unittest.main()

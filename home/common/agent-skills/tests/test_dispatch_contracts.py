@@ -44,9 +44,9 @@ CONTRACTS = {
         "still runs."
     ),
     "no-wait-loops": (
-        "Never write an `until` or `while` loop around `sleep` to wait for "
-        "something: if a wait is truly needed, run one bounded foreground "
-        "`sleep N`, then check once."
+        "Never loop `sleep` in the foreground or chain a check onto it: use "
+        "Monitor with an until-condition, or one short bare `sleep N` call "
+        "and check in the next."
     ),
 }
 
