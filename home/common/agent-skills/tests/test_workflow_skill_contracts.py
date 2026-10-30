@@ -62,6 +62,11 @@ PHASE_5_REVIEW_CONTRACT = FROM_ISSUE_DIR / "REVIEW-CONTRACT.md"
 REQUIRED_WATCH = "timeout 300 gh pr checks <pr-num> --required --watch --fail-fast --interval 30"
 ALL_CHECKS_WATCH = "timeout 300 gh pr checks <pr-num> --watch --fail-fast --interval 30"
 ADVISORY_CALL = "gh pr checks <pr-num> --json name,bucket"
+# Issue 478: Phase 6 re-observes pending acceptance rows before any merge.
+REQUIRED_CHECKS_CALL = "gh pr checks <pr-num> --required --json name,bucket,link"
+REOBSERVE_CALL = ("acceptance-record reobserve --record <record-path> --head <HEAD_SHA>"
+                  " --checks <file>")
+PHASE_SEVEN_MERGE = "gh pr merge <pr-num> --repo <resolved-repository> --merge --subject"
 
 SKILL_ROOTS = (
     REPO_ROOT / "home/common/agent-skills/skills",
@@ -253,7 +258,7 @@ SHIP_ISSUE_MACHINE_TEXT = {
         WORKER_EXEC_ARGV, WORKER_SCRATCH_ARGV,
         "`verified-tree check`",
         "verified-tree record --tree <the checked tree>",
-        REQUIRED_WATCH, ALL_CHECKS_WATCH, ADVISORY_CALL,
+        REQUIRED_WATCH, ALL_CHECKS_WATCH, ADVISORY_CALL, REQUIRED_CHECKS_CALL, REOBSERVE_CALL,
         "Acceptance state: <effective acceptance state>",
         "Acceptance record: <record-path or none>", "Closes #<num>",
         "Held for verification: <PR URL>",
@@ -1590,6 +1595,14 @@ class WorkflowSkillContractsTest(unittest.TestCase):
     def test_phase_five_merge_delta_dispatch_and_handoff_reviewer_count(self):
         self.assertIn("<!-- agent-dispatch: id=ship-issue-merge-delta-review role=reviewer"
                       " model=opus effort=high -->", self.ship_issue)
+
+    def test_phase_six_reobserves_pending_rows_between_the_watch_and_the_merge(self):
+        # Issue 478 AC3: the helper runs after the required watch and before Phase 7's merge.
+        text = normalized(self.ship_issue)
+        self.assertEqual(text.count(REOBSERVE_CALL), 1)
+        self.assertLess(text.index(REQUIRED_WATCH), text.index(REQUIRED_CHECKS_CALL))
+        self.assertLess(text.index(REQUIRED_CHECKS_CALL), text.index(REOBSERVE_CALL))
+        self.assertLess(text.index(REOBSERVE_CALL), text.index(PHASE_SEVEN_MERGE))
 
     def test_phase_six_waits_on_required_checks_and_lists_advisory_states(self):
         # #264 D6-D8: the blocking watch is its own fence; the handoff names it.
