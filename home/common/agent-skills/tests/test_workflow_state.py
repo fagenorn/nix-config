@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -9093,6 +9094,255 @@ class DirectOwnerHelpTest(LifecycleHarness, unittest.TestCase):
         for name in ("expects", *attempt_observations.EXPECTS_MEMBERS):
             with self.subTest(name=name):
                 self.assertRegex(completed.stdout, rf"\b{name}\b")
+
+
+class DirectTakeoverWorkerTest(LifecycleHarness, unittest.TestCase):
+    """Issue 475 R1: an `owner_unavailable` takeover never fences a live worker inside its bound."""
+
+    def setUp(self):
+        super().setUp()
+        self.worktree = self.root / "worktree-issue-73"
+        self.init_worktree(self.worktree, branch="issue-73")
+        owner = self.acquire_direct(worktree=self.worktree)
+        self.run_id = owner["run_id"]
+        self.assertEqual((owner["action_id"], owner["deadline_at"]),
+                         ("73:1:1", "2026-08-20T13:00:00Z"))
+        self.assertEqual(self.mark_progress(action_id="73:1:1", now="2026-08-20T10:01:00Z")[
+            "outcome"], "baseline")
+        self.register_worker(action_id="73:1:1", now="2026-08-20T10:02:00Z")
+        self.register_worker(action_id="73:1:1", now="2026-08-20T10:02:00Z",
+                             parent="73:1:1:w1")
+
+    def takeover(self, now, *, ok=True):
+        return self.direct_owner_raw(
+            now=now, owner_unavailable=True, ok=ok,
+            worktree=self.worktree_fact(73, recorded={
+                "path": os.path.abspath(self.worktree), "state": "matching_issue_branch"}))
+
+    def test_a_takeover_inside_the_deadline_names_every_live_worker(self):
+        before = self.tree_snapshot()
+        refused = self.takeover("2026-08-20T11:00:00Z", ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr), (
+            2, "", "workflow-state: owner_unavailable refused: live workers: "
+                   "73:1:1:w1, 73:1:1:w2\n"))
+        self.assertEqual(self.tree_snapshot(), before)
+
+    def test_a_takeover_proceeds_once_every_worker_is_released(self):
+        self.release_worker(worker_id="73:1:1:w1", event="stopped",
+                            now="2026-08-20T10:30:00Z")
+        resumed = json.loads(self.takeover("2026-08-20T11:00:00Z").stdout)
+        self.assertEqual((resumed["kind"], resumed["action_id"], resumed["launch_kind"]),
+                         ("owner", "73:1:2", "resume"))
+
+    def test_a_takeover_past_the_deadline_takes_the_expiry_path(self):
+        resumed = json.loads(self.takeover("2026-08-20T13:00:00Z").stdout)
+        self.assertEqual((resumed["kind"], resumed["action_id"], resumed["launch_kind"]),
+                         ("owner", "73:1:2", "resume"))
+        self.assertEqual(self.check_worker("73:1:1:w1")["reason"], "superseded_launch")
+
+
+class TakeoverBlockersTest(LifecycleHarness, unittest.TestCase):
+    """Issue 475 D1: the takeover predicate over attempt and remainder launches."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.workflow_state = load_source_module(SCRIPT, "workflow_state_test_takeover")
+
+    @staticmethod
+    def worker(launch, ordinal=1, released_at=None):
+        return {"worker_id": f"{launch}:w{ordinal}", "launch": launch, "parent": None,
+                "registered_at": "2026-08-20T10:00:00Z", "released_at": released_at,
+                "release_event": None if released_at is None else "stopped"}
+
+    def attempt_state(self, workers):
+        """An active attempt (deadline 12:00, two launches) and no remainder."""
+        attempt = {"issue": 73, "attempt": 1, "state": "active",
+                   "deadline_at": "2026-08-20T12:00:00Z", "launches": [{}, {}]}
+        return {"issues": {"73": {
+            "attempts": [attempt], "delivery_remainders": [],
+            "outcome": None, "delivery": self.empty_delivery()}}, "workers": workers}
+
+    def remainder_state(self, workers):
+        """A handed-off source attempt (deadline 12:00) and an active remainder with an
+        installed delivery contract and its own deadline (13:00), as `suspended_remainder`
+        shapes it."""
+        fixtures = self.delivery_fixtures
+        _, delivery = fixtures.contract_and_delivery(self.delivery_model)
+        issue_state = fixtures.suspended_remainder(delivery)
+        remainder = issue_state["delivery_remainders"][0]
+        remainder.update(state="active", deadline_at="2026-08-20T13:00:00Z",
+                         launches=remainder["launches"] * 2)
+        issue_state["attempts"] = [{
+            "issue": 151, "attempt": 1, "state": "handed_off",
+            "deadline_at": "2026-08-20T12:00:00Z", "launches": [{}]}]
+        return {"issues": {"151": issue_state}, "workers": workers}
+
+    def blockers(self, state, now):
+        module = self.workflow_state
+        return module.takeover_blockers(module._delivery(), state,
+                                        module.parse_utc(now, "now"))
+
+    def test_only_live_workers_of_the_current_attempt_launch_inside_its_deadline_block(self):
+        state = self.attempt_state([
+            self.worker("73:1:1"), self.worker("73:1:2"),
+            self.worker("73:1:2", 2, "2026-08-20T10:30:00Z")])
+        self.assertEqual(self.blockers(state, "2026-08-20T11:00:00Z"), ["73:1:2:w1"])
+        self.assertEqual(self.blockers(state, "2026-08-20T12:00:00Z"), [])
+
+    def test_a_remainder_worker_blocks_until_the_remainders_own_deadline(self):
+        state = self.remainder_state([self.worker("151:r1:2")])
+        self.assertEqual(self.blockers(state, "2026-08-20T12:30:00Z"), ["151:r1:2:w1"])
+        self.assertEqual(self.blockers(state, "2026-08-20T13:00:00Z"), [])
+
+
+class HoldPointerWriteTest(LifecycleHarness, unittest.TestCase):
+    """Issue 475 D6: a locked write of an orchestrated run gives each issue it holds a pointer."""
+
+    def test_an_orchestrated_write_points_at_its_run_and_a_direct_one_does_not(self):
+        self.init_run()
+        self.spawn(issue=73, worktree=self.root / "wt-73")
+        self.suspend(issue=73, attempt=1, blocked_on="transport", now="2026-08-13T20:05:00Z")
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 73)), [self.run_id])
+        self.acquire_direct(issue=74)
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 74)), [])
+
+
+class OrchestratedHoldTest(LifecycleHarness, unittest.TestCase):
+    """Issue 475 R2: a direct acquisition of an issue an orchestrated run holds is refused
+    with the command that re-enters that run, and writes nothing."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.workflow_state = load_source_module(SCRIPT, "workflow_state_test_orchestrated_hold")
+
+    def setUp(self):
+        super().setUp()
+        self.init_run()
+        self.spawn(issue=73, worktree=self.root / "wt-73")
+
+    def expected(self, run_id=None):
+        root = self.root.resolve()
+        run_id = self.run_id if run_id is None else run_id
+        return (f"workflow-state: issue 73 is held by orchestrated run {run_id}; resume it "
+                f"through orchestrate-issues: orchestrate-control start --repo-root {root} 73 "
+                f"--run-id {run_id}\n")
+
+    def open_second_run_holding_73(self):
+        """The first run stops holding 73 and a second orchestrated run spawns it; returns both
+        run ids, the first one's `state.json` path included."""
+        first, first_state = self.run_id, self.state_path
+        self.fail_owner(issue=73, attempt=1, now="2026-08-13T20:05:00Z")
+        self.init_run(creation_key="second-orchestrated-run")
+        second = self.run_id
+        self.spawn(issue=73, worktree=self.root / "wt-73-second")
+        return first, second, first_state
+
+    def test_every_direct_request_for_a_held_issue_is_refused_naming_the_resume_command(self):
+        self.suspend(issue=73, attempt=1, blocked_on="human_gate",
+                     now="2026-08-13T20:05:00Z")
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 73)), [self.run_id])
+        before = self.tree_snapshot()
+        for flags in ({}, {"owner_unavailable": True}, {"new_run": True}):
+            with self.subTest(**flags):
+                refused = self.direct_owner_raw(issue=73, ok=False, **flags)
+                self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                                 (2, "", self.expected()))
+                self.assertEqual(self.tree_snapshot(), before)
+        self.assertIsNone(TransactionStore(self.store_root).lookup(
+            attempt_identity.direct_key(73, 1)))
+
+    def test_an_issue_the_run_no_longer_holds_is_acquired_directly(self):
+        self.fail_owner(issue=73, attempt=1, now="2026-08-13T20:05:00Z")
+        self.assertEqual(self.direct_owner(issue=73), {
+            "interface_version": 1, "kind": "observe", "issue": 73,
+            "run_id": None, "requirements": [{"kind": "tracker"}]})
+
+    def test_an_invalid_holding_ledger_fails_loudly(self):
+        self.state_path.write_text("{}\n", encoding="utf-8")
+        refused = self.direct_owner_raw(issue=73, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout), (2, ""))
+        self.assertEqual(refused.stderr, "workflow-state: workflow state refused: unknown_schema: "
+                                         "unsupported workflow state schema version: None\n")
+        self.assertIsNone(TransactionStore(self.store_root).lookup(
+            attempt_identity.direct_key(73, 1)))
+
+    def test_the_resume_command_survives_a_repository_path_with_spaces(self):
+        command = self.workflow_state.orchestrated_resume_command(
+            "/tmp/project with spaces; $(x)", "73", "rel_x")
+        self.assertEqual(shlex.split(command), [
+            "orchestrate-control", "start", "--repo-root", "/tmp/project with spaces; $(x)",
+            "73", "--run-id", "rel_x"])
+
+    def test_a_stale_first_pointer_does_not_hide_a_later_holder(self):
+        first, second, first_state = self.open_second_run_holding_73()
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 73)), [first, second])
+        before = self.tree_snapshot()
+        refused = self.direct_owner_raw(issue=73, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, "", self.expected(second)))
+        self.assertEqual(self.tree_snapshot(), before)
+        first_state.unlink()
+        before = self.tree_snapshot()
+        refused = self.direct_owner_raw(issue=73, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, "", self.expected(second)))
+        self.assertEqual(self.tree_snapshot(), before)
+
+    def test_the_first_of_two_live_holders_is_named(self):
+        first = self.run_id
+        self.suspend(issue=73, attempt=1, blocked_on="human_gate",
+                     now="2026-08-13T20:05:00Z")
+        self.init_run(creation_key="second-orchestrated-run")
+        second = self.run_id
+        self.spawn(issue=73, worktree=self.root / "wt-73-second")
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 73)), [first, second])
+        before = self.tree_snapshot()
+        refused = self.direct_owner_raw(issue=73, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, "", self.expected(first)))
+        self.assertEqual(self.tree_snapshot(), before)
+
+    def test_a_legacy_ledger_behind_a_pointer_is_read_upgraded(self):
+        """A migration cut between `settle_holds` and the publish leaves a pointer naming a
+        ledger still stored as schema 2, which has no `delivery_remainders`: the hold is read
+        from its upgraded state and refuses as usual."""
+        held = self.read_state()
+        first = self.run_id
+        self.fail_owner(issue=73, attempt=1, now="2026-08-13T20:05:00Z")
+        self.install_legacy(held, "orchestrate-73", 2)
+        workflow = load_source_module(SCRIPT, "workflow_state_test_cut_migration")
+        with mock.patch.object(workflow, "atomic_write_state", side_effect=OSError("cut")):
+            with self.assertRaises(OSError):
+                workflow.transact(str(self.root), self.run_id,
+                                  lambda current: (current, False), migration_contracts={})
+        stored = self.read_state()
+        self.assertEqual(stored["schema_version"], 2)
+        self.assertNotIn("delivery_remainders", stored["issues"]["73"])
+        self.assertEqual(list(attempt_store.hold_runs(self.store_root, 73)),
+                         [first, "orchestrate-73"])
+        before = self.tree_snapshot()
+        refused = self.direct_owner_raw(issue=73, ok=False)
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (2, "", self.expected("orchestrate-73")))
+        self.assertEqual(self.tree_snapshot(), before)
+
+
+if DeliveredControlHarness is not None:
+    class DeliveredHoldTest(DeliveredControlHarness, unittest.TestCase):
+        """Issue 475 R2: a delivered issue is not held, even while the remainder that delivered
+        it is still recorded `active`."""
+
+        def test_a_delivered_issue_with_an_active_remainder_is_not_refused(self):
+            self.deliver_through_remainder()
+            _, remainders = self.records(DELIVERED)
+            self.assertEqual(remainders[-1]["state"], "active")
+            store = attempt_store.store_root(self.root / ".superpowers")
+            run_id = self.ledger.parent.name
+            self.assertEqual(list(attempt_store.hold_runs(store, DELIVERED)), [run_id])
+            module = load_source_module(SCRIPT, "workflow_state_test_delivered_hold")
+            self.assertIsNone(module.refuse_orchestrated_hold(self.root, DELIVERED))
 
 
 if __name__ == "__main__":

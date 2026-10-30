@@ -2,13 +2,14 @@
 
 The store root beside `workflows`, the blocking store lock, mint and lookup, the binding
 check, the locked-read and unlocked-check transform under the caller's lock, and the direct
-index probe. From schema 9 it also applies `agent_tools.attempt_custody`'s settle plan to
-`TransactionStore` under the store lock: `settle_custody` before a ledger write,
-`seal_custody` after it, and `pending_seals` to find a seal a crash left undone. From schema
-10 the plan covers every delivery remainder as well as every attempt, records a held owner
-claim on its launch's span, and wakes a `host_capacity` suspension; `launch_views` reads,
-without a lock, what the store says of each current launch for a control sweep's occupancy and
-capacity gate.
+index probe. It also keeps the issue hold pointers that lead from an issue to the
+orchestrated runs holding it (`settle_holds`, `hold_runs`; issue 475). From schema 9 it also
+applies `agent_tools.attempt_custody`'s settle plan to `TransactionStore` under the store
+lock: `settle_custody` before a ledger write, `seal_custody` after it, and `pending_seals` to
+find a seal a crash left undone. From schema 10 the plan covers every delivery remainder as
+well as every attempt, records a held owner claim on its launch's span, and wakes a
+`host_capacity` suspension; `launch_views` reads, without a lock, what the store says of each
+current launch for a control sweep's occupancy and capacity gate.
 `workflow-state` keeps the ledger lock, the ledger read and commit, the delivery chain and
 `validate_state`; it passes the last two to this module as callbacks.
 """
@@ -29,9 +30,9 @@ from agent_tools import attempt_custody as custody_rules
 from agent_tools import attempt_delivery as delivery_rules
 from agent_tools.attempt_identity import (
     LEGACY_DIALECTS, REFUSAL_REASONS, REPORT_ROW_FIELDS, MigrationRefused, RunIdentity,
-    RunPlan, classify, creation_arguments, direct_key, identity_of, legacy_alias,
-    legacy_identity, legacy_key, minted_plan, plan_migration, report, schema_refusal,
-    subject_handle, subject_violation)
+    RunPlan, classify, creation_arguments, direct_key, hold_key, hold_plan, hold_violation,
+    identity_of, legacy_alias, legacy_identity, legacy_key, minted_plan, plan_migration,
+    report, schema_refusal, subject_handle, subject_violation)
 from agent_tools.canonical import telemetry_digest
 from agent_tools.transaction_core import TransactionError, TransactionStore
 from agent_tools.transaction_history import TERMINALS, Transaction
@@ -389,23 +390,22 @@ def locked_read(state_path: Path, document: Any, *, run_id: str, upgrade: Callab
 
 
 def check_unlocked(state_path: Path, document: Any, *, run_id: str, upgrade: Callable[..., dict],
-                   validate: Callable[..., dict]) -> None:
-    """Check a ledger without a lock or a write: schema 10 against its run transaction, schema
-    8 or 9 the same way and as the schema-10 candidate its next write binds, an older one
-    through `upgrade`, `plan_migration` and `plan_custody`. No store or directory is
-    created."""
+                   validate: Callable[..., dict]) -> dict[str, Any]:
+    """Check a ledger without a lock or a write and return it as checked: schema 10 against
+    its run transaction, schema 8 or 9 the same way and as the schema-10 candidate its next
+    write binds, an older one through `upgrade`, `plan_migration` and `plan_custody` as its
+    schema-7 candidate. No store or directory is created."""
     require_known_schema(document)
     version = document["schema_version"]
     if version == CORE_STATE_SCHEMA_VERSION:
         identity = bound_identity(ledger_store(state_path), document, run_id)
-        validate(document, run_id=run_id, identity=identity)
-        return
+        return validate(document, run_id=run_id, identity=identity)
     if version in (BOUND_SCHEMA_VERSION, CUSTODY_SCHEMA_VERSION):
         identity = bound_identity(ledger_store(state_path), document, run_id)
-        _schema_ten(document, identity, run_id=run_id, validate=validate)
-        return
+        return _schema_ten(document, identity, run_id=run_id, validate=validate)[0]
     candidate, _ = _upgraded(document, run_id=run_id, upgrade=upgrade)
     plan_custody(candidate)
+    return candidate
 
 
 class PendingSeal(NamedTuple):
@@ -1083,6 +1083,73 @@ def direct_runs(store: Path, workflows_dir: Path, issue: int) -> Iterator[tuple[
         if _path_status(run_dir / "state.json") is None:
             return
         yield sequence, handle, run_dir
+
+
+def _hold_subject(store: Path, transaction_id: str) -> Mapping[str, Any]:
+    """The closed issue-hold/v1 subject of the pointer `transaction_id`, read without a lock."""
+    try:
+        subject = TransactionStore(store).load(transaction_id).subject
+    except UnknownTransaction as error:
+        raise StoreRefused(f"issue hold store: {error}") from error
+    except TransactionError as error:
+        raise StoreFault(f"issue hold store: {error}") from error
+    violation = hold_violation(subject)
+    if violation is not None:
+        raise StoreRefused(f"issue hold index entry is not a hold pointer: {violation}")
+    return subject
+
+
+def _hold_slot(store: Path, issue: int, run: str) -> int | None:
+    """The first free pointer ordinal of `issue`, or None when a pointer already names `run`."""
+    ordinal = 0
+    while True:
+        ordinal += 1
+        transaction_id = lookup_run(store, hold_key(issue, ordinal))
+        if transaction_id is None:
+            return ordinal
+        if _hold_subject(store, transaction_id)["run"] == run:
+            return None
+
+
+def settle_holds(store: Path, state: dict, identity: RunIdentity, *, now_ms: int) -> None:
+    """Give each issue an orchestrated run's `state` holds a pointer naming its run (issue 475
+    D6, D11).
+
+    The read phase takes no lock: with every pointer in place (or for a direct run, which the
+    direct index already finds) it creates nothing, not even the store. Otherwise, under the
+    store lock, each missing pointer's slot is decided again and created at the first free
+    ordinal with the run transactions' creation arguments. Pointers are never removed.
+    """
+    if identity.direct:
+        return
+    run = state["transaction_id"]
+    held = [int(key) for key in sorted(state["issues"], key=int)
+            if custody_rules.holds_issue(state["issues"][key])]
+    missing = [issue for issue in held if _hold_slot(store, issue, run) is not None]
+    if not missing:
+        return
+    with writing(store, now_ms) as core:
+        for issue in missing:
+            ordinal = _hold_slot(store, issue, run)
+            if ordinal is not None:
+                plan = hold_plan(issue, ordinal, run)
+                core.create(plan.creation_key, plan.subject_json(), **creation_arguments(plan))
+
+
+def hold_runs(store: Path, issue: int) -> Iterator[str]:
+    """The handle of each run a hold pointer of `issue` names, in pointer order, read without a
+    lock and never by listing `workflows`; nothing is created (issue 475 D5). A pointer that
+    names no attempt run is a `StoreRefused`."""
+    ordinal = 0
+    while True:
+        ordinal += 1
+        transaction_id = lookup_run(store, hold_key(issue, ordinal))
+        if transaction_id is None:
+            return
+        handle = run_handle(store, _hold_subject(store, transaction_id)["run"])
+        if handle is None:
+            raise StoreRefused("issue hold pointer does not name a run transaction")
+        yield handle
 
 
 def unmigrated_direct(store: Path, workflows_dir: Path, issue: int) -> bool:
