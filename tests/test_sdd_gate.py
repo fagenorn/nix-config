@@ -38,15 +38,23 @@ REFUSAL_KEYS = {"command", "outcome", "step", "gate", "detail", "report", "compl
 # review-package check, and only it, answer over budget in the checker's wire form.
 BUDGET_SHIM = ("#!{python}\nimport os, sys\n{force}"
                "os.execv(sys.executable, [sys.executable, {module!r}, *sys.argv[1:]])\n")
-FORCE_OVER_BUDGET = (
-    'if sys.argv[1:5] == ["check", "--kind", "review-package", "--root"]:\n'
-    '    import json\n'
-    '    sys.stdout.write(json.dumps({"interface_version": 1, "kind": "review-package",\n'
-    '        "metrics": {"file_count": 1, "largest_member_bytes": 1, "root_bytes": 1,\n'
-    '                    "total_bytes": 2},\n'
-    '        "status": "over_budget", "violations": ["aggregate_bytes"]},\n'
-    '        ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\\n")\n'
-    '    raise SystemExit(3)\n')
+
+
+def force_check(result):
+    """Shim code that makes the review-package check, and only it, print `result` and exit 3."""
+    line = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    return ('if sys.argv[1:5] == ["check", "--kind", "review-package", "--root"]:\n'
+            f'    sys.stdout.write({line!r})\n'
+            '    raise SystemExit(3)\n')
+
+
+# The checker's over-budget wire form: metrics, violations and overages agree (issue 472 D6).
+OVER_BUDGET = {"interface_version": 1, "kind": "review-package",
+               "metrics": {"file_count": 1, "largest_member_bytes": 1, "root_bytes": 1,
+                           "total_bytes": 2},
+               "overages": {"aggregate_bytes": {"limit": 1, "over_by": 1}},
+               "status": "over_budget", "violations": ["aggregate_bytes"]}
+FORCE_OVER_BUDGET = force_check(OVER_BUDGET)
 
 FAIL_DESCRIBE = ('if sys.argv[1:2] == ["describe"]:\n'
                  '    raise SystemExit(4)\n')
@@ -246,10 +254,31 @@ class ReviewTest(GateCase):
         self.brief().unlink()
         # The producer runs the same check, so the refusal is forced on the reuse path (D14).
         self.write_budget_shim(FORCE_OVER_BUDGET)
-        self.assert_gate_refused(
+        out = self.assert_gate_refused(
             self.review(1), command="review", step="budget-check", gate="failed",
             steps=["ledger", "review-package", "validate-report"])
+        self.assertEqual(out["detail"], "package is over_budget")
         self.assertFalse(self.brief().exists())
+
+    def test_a_check_that_breaks_the_overages_contract_is_refused_at_budget_check(self):
+        """Issue 472 D8, D14: the budget authority refuses a check whose overages break the wire form."""
+        self.start_task(1, "src/app.py", "value = 2\n")
+        self.ready(self.review(1))
+        self.brief().unlink()
+        broken = {
+            "missing": {key: value for key, value in OVER_BUDGET.items() if key != "overages"},
+            "keys": {**OVER_BUDGET, "overages": {}},
+            "over_by": {**OVER_BUDGET,
+                        "overages": {"aggregate_bytes": {"limit": 1, "over_by": 0}}},
+        }
+        for name, result in broken.items():
+            with self.subTest(result=name):
+                self.write_budget_shim(force_check(result))
+                out = self.assert_gate_refused(
+                    self.review(1), command="review", step="budget-check", gate="failed",
+                    steps=["ledger", "review-package", "validate-report"])
+                self.assertEqual(out["detail"], "budget check refused: invalid budget check")
+                self.assertFalse(self.brief().exists())
 
     def test_a_worker_is_released_and_a_repeated_call_reuses_the_package(self):
         self.launch()
