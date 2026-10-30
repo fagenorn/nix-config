@@ -67,3 +67,11 @@ Task 3 — ship-issue Phase 6 re-observes pending rows — `home/common/agent-sk
 - A planning trial ran at `cb1d0ad5` in a scratch worktree, then was discarded. It used all three tasks' tests and edits as written here, plus a reference implementation of Task 1. Without the module, `tests/test_acceptance_record.py` ran 16 tests, `FAILED (failures=49)` with subtests counted; with it, `OK`. Re-deriving every committed record (no `--row`) succeeded for 66 of 71. `test_ship_delivery.py` ran 12 tests: `FAILED (errors=3)` with the old `deliver` signature, `OK` after Task 2. `test_workflow_skill_contracts.py` ran 158 tests: `FAILED (failures=3, skipped=1)` against base SKILL.md, `OK (skipped=1)` after Task 3. Before D11 the spec's paragraph took SKILL.md to 516 reflowed lines, which the Budget run refused under skill-lint L2. With Task 3 as written it measured 500 lines and +1,146 bytes. The Budget run gave `check: pass`. With the skill-lint and instruction-load modules added, the contract modules ran 293 tests: `OK (skipped=3)`. With all three tasks applied and the new files staged, `just build` passed in about a minute. An unstaged module fails evaluation, which is why Task 1 stages before building. `just agent-workflow-tests` passed 107 of 107 members in about 965 s.
 
 ---
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-plan-review`, `gpt-6-astra`, effort xhigh), fresh isolated read-only thread; no fallback.
+- Base SHA `07f8981308f56c9ce136773868151a73a2e1da9b`, plan reviewed at `3640f411`; no optional focus.
+- Findings: 0 Blocking, 2 Should fix, 0 Discussion. Accepted 2, rejected 0, deferred 0.
+  - PR-1 (Task 1): a `--checks` `link` containing a line break would split the rewritten row; `load_checks` now refuses it as a malformed entry, with a boundary case.
+  - PR-2 (Task 1): the README and module docstring now say that only a matched span left unobserved keeps a row unchanged, and that unmatched spans are the caller's `--row` judgment (spec § matching).
