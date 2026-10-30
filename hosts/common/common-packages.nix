@@ -103,4 +103,7 @@ in
       unstablePkgs.devenv
       unstablePkgs.spicetify-cli
     ];
+
+  # System fonts for every host; darwin-common.nix adds the FiraCode fonts on macOS.
+  fonts.packages = [ pkgs.nerd-fonts.geist-mono ];
 }
