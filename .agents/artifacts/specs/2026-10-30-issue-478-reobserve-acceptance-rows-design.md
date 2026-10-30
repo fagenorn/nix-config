@@ -149,9 +149,11 @@ contract is documented in `python/README.md`.
   1. **Required checks.** After the required watch exits 0, save
      `gh pr checks <pr-num> --required --json name,bucket,link` to a scratch file
      (GitHub only). A docs-only run takes Phase 6's tip check and watch here too.
-  2. **Pick rows and run commands.** Pick the `unverified` `code` rows whose
-     measurements that the `Observed` cell does not cite are only required checks or
-     read-only commands. Run those commands once at `HEAD_SHA`.
+  2. **Pick rows and run commands.** Pick each `unverified` `code` row that has at
+     least one measurement its `Observed` cell does not cite and whose uncited
+     measurements are all required checks or read-only commands. A fully cited row is
+     not picked, so it still holds (D14). Run the picked rows' commands once at
+     `HEAD_SHA`.
   3. **Call the helper** in the worktree, with `--row` per picked row and `--ran` per
      command. Its printed state becomes the effective state. An exit 2 keeps the
      current effective state.
@@ -177,9 +179,10 @@ contract is documented in `python/README.md`.
 - **Phase 8, step 1.** "Close or hold, per Phase 0's effective acceptance state" drops
   "Phase 0's": it closes or holds on the effective state, now possibly recomputed.
 - **Unchanged documents.** `DELIVERY-LOOP.md`, `REMAINDER.md`, `CI-MERGE.md`,
-  `HUMAN-GATE.md`, from-issue and sdd keep their text. Phase 4 and Gate 1 still render
-  Phase 0's value, which is current when the PR opens. The hold comment copies the
-  rewritten PR table, and a remainder reads the rewritten PR body lines (D7).
+  `HUMAN-GATE.md`, from-issue and sdd keep their text. Phase 4 renders the effective
+  value, which is Phase 0's when the PR opens and the recomputed one when Phase 6
+  rewrites the body (D13); Gate 1 still renders Phase 0's value. The hold comment
+  copies the rewritten PR table, and a remainder reads the rewritten PR body lines (D7).
 
 ## Test seams
 
@@ -261,3 +264,5 @@ All of these run under `just agent-workflow-tests` (criterion 4).
 | D10 | Prose budget. ship-issue grows by one Phase 6 paragraph and one Phase 0 clause, about 1 KB, within the 1,608-byte ship-owner hot headroom, with no raise. No other skill file changes, and the contract detail lives in `python/README.md`. | `instruction-load.json`: ship-owner conditional headroom is 2 bytes; implementation-owner hot (sdd) is 79 bytes. CLAUDE.md: command contracts go in `python/README.md`. Raising the ceiling needs the user's label. | Spread the step across `REMAINDER.md`/`CI-MERGE.md`: over the conditional ceiling. Teach sdd to mark CI-pending rows: over the sdd budget, and sdd is out of scope. |
 | D11 | Refines D10: `ship-issue/SKILL.md` stays at most 500 reflowed lines. The step paragraph is at most 1,100 characters, and the docs-only sentence gains only "unless rows need re-observing". Five hard-wrapped paragraphs are joined onto single lines with no byte change: the review-routing note, the Launch guard's Guarded list, `### Local commits`, `## gh hygiene` and Phase 4's Acceptance rules. | skill-lint L2 (`REFLOW_WIDTH` 100, cap 500), which the Instruction Budget gate runs. SKILL.md measures exactly 500 at `cb1d0ad5`, and the spec's paragraph took it to 516 in the planning trial. #296 reflowed this file to fit the cap. Every test pin on the joined text is whitespace-normalized. | Move the step into a reference file: a new file needs membership edits in three `instruction-load.json` profiles, and the conditional references have 2 bytes of headroom. Cut unrelated SKILL.md content: out of scope. Raise L2: it binds every skill. |
 | D12 | `acceptance-record` details the spec left open. Usage errors come from a parser whose `error` raises the refusal, so they are one stderr line, and `--help` still exits 0. `AC<n>` is `AC[1-9][0-9]*`, a delimiter cell is `:?-+:?`, and a row line must end in an unescaped pipe. Only a span observed `pass` or `fail` gets an `Observed` entry, and a check entry carries the first report's `link`. A changed row is re-rendered from its stripped cells, one space each side of every pipe, keeping its `\r`. The replacement file keeps the record's permission bits. | The spec's one-diagnostic-line and byte-preservation rules. Precedent: the `_Parser` in `review_package` and `sdd_gate`, and `verified_tree._write_atomically`. The planning trial parsed 66 of the 71 committed records; the 5 it refuses are the 2026-10-07 records with `—` verdicts and #278's unescaped pipe inside a code span. | argparse's default two-line usage error: breaks the one-line refusal. An entry for an unobserved span: it has no `pass` or `fail` to write. Re-rendering every row: breaks byte preservation. |
+| D13 | ship-issue Phase 4's rule says `Acceptance state:` carries the effective value, no longer "Phase 0's effective value". The spec's "Phase 4 and Gate 1 still render Phase 0's value" is narrowed to Gate 1. | Phase 6 rewrites the PR body's `## Acceptance` "per Phase 4" after a re-observation; a rule pinned to Phase 0's value would re-render the state the helper just replaced. Before Phase 6 the effective value is Phase 0's, so the PR as opened is unchanged. | Keep "Phase 0's" and spell the recomputed state out in the Phase 6 paragraph: over its 1,100-character limit (D11). A second rendering rule for the rewrite: two rules for one section. |
+| D14 | Refines D3: the owner picks only an `unverified` `code` row that has at least one measurement its `Observed` cell does not cite, all of those uncited measurements being required checks or read-only commands. A fully cited `unverified` row is not picked and still holds. The helper is unchanged. | sdd's final-review freshness rule turns a `code` row recorded `met` on a cited run `unverified` when later commits touch its surface. That row cites every measurement, so D3's wording picked it vacuously; if it also names a required check, the helper matches the check, skips the stale cited command as already cited, and makes the row `met` without a current pass. | Teach the helper to detect stale citations: it would grade the `Observed` cell, which D1 and D3 keep out of the helper. Re-run every cited command at ship: commands that are not read-only, and a measurement the record already holds. |
