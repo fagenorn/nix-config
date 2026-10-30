@@ -271,9 +271,9 @@ one.
 Render a `finalize` action, or a `delivery_contract` action whose report's `ends_run` is true,
 from the bounded summaries in the same interface_version 3 control response.
 Produce a per-issue table with issue, state, custody, PR, one-line reason, `blocked_on`, open
-delivery stages, and a re-entry line — `/from-issue <issue> --auto` for an issue suspended on a
-cause that a `--label` or `--milestone` sweep does not resume (`human_gate`, `external` or
-`agent_dispatch`), and the orchestrate re-invocation itself for the whole run — every column sourced
+delivery stages, and a re-entry line — `orchestrate-control start --repo-root <ledger_repo_root>
+<issue> --run-id <run-id>` for an issue suspended on `human_gate`, `external` or `agent_dispatch`
+(a direct `/from-issue` is refused with it), and the orchestrate re-invocation for the whole run — every column sourced
 from those finalize summaries: `custody` names the attempt or delivery remainder that holds the
 issue, `pending_stage_ids` the open delivery stages, and the PR and `discussion_items` come from the
 summary's `result`. A null `contract_digest` means the issue ran lifecycle-only: say so, and name

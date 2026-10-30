@@ -3715,8 +3715,9 @@ def direct_terminal(
 
 
 # The orchestrate-control argv that re-enters one run for one issue, and the refusal that names
-# it; from-issue's acquire-direct.md and orchestrate-issues branch on them, so they are literals
-# the skill-contract test reads (issue 475 D8, D10).
+# it. orchestrate-issues' final report carries the argv and acquire-direct.md names the refusal's
+# ` is held by orchestrated run ` marker, so both are literals the skill-contract test reads
+# (issue 475 D8, D10).
 ORCHESTRATED_RESUME = "orchestrate-control start --repo-root {repo_root} {issue} --run-id {run_id}"
 HOLD_REFUSAL = ("issue {issue} is held by orchestrated run {run_id}; resume it through "
                 "orchestrate-issues: {resume}")
@@ -4851,8 +4852,9 @@ def worker_verdict(runtime: Any, state: dict[str, Any] | None,
     return current_action_id, "live" if reason == "current" else reason
 
 
-# The prefix of the refusal a direct-owner takeover raises while live workers would be fenced
-# (issue 475).
+# The prefix of the refusal a direct-owner takeover raises while live workers would be fenced;
+# acquire-direct.md names it in backticks without its trailing space, and the skill-contract
+# test reads this literal to check that (issue 475).
 TAKEOVER_REFUSAL = "owner_unavailable refused: live workers: "
 
 
