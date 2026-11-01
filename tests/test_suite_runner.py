@@ -1,16 +1,19 @@
 """End-to-end tests for `agent_tools.suite_runner`, the scheduler behind
 `just agent-workflow-tests` (issue 436).
 
-Every case but the report-ordering one runs `python -m agent_tools.suite_runner`
-in a temporary working directory over fixture members written there. Members
-that must overlap meet at a filesystem barrier instead of sleeping, so no
-assertion depends on how long anything took (D9). The one exception is
+Most cases run `python -m agent_tools.suite_runner` in a temporary working
+directory over fixture members written there. The report-ordering case and the
+members' git environment cases (issue 496) call the module's functions
+directly, and one control runs a fixture member with `bash` outside the runner.
+Members that must overlap meet at a filesystem barrier instead of sleeping, so
+no assertion depends on how long anything took (D9). The one exception is
 `CpuTimeTest`, which compares each member's CPU with its wall time by design
 (issue 497 D4).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal
@@ -20,6 +23,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 
 from agent_tools import suite_runner
@@ -239,6 +243,23 @@ PLAIN_MEMBER = textwrap.dedent('''\
             pass
 ''')
 
+# A shell member that commits once in a fresh repository of its own, with
+# global and system git configuration nulled and a fixed identity. Only the
+# commit is traced, to the absolute file $SUITE_RUNNER_TEST_TRACE (issue 496).
+COMMIT_MEMBER = textwrap.dedent('''\
+    set -eu
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+    export GIT_AUTHOR_NAME=Suite GIT_AUTHOR_EMAIL=suite@example.invalid
+    export GIT_COMMITTER_NAME=Suite GIT_COMMITTER_EMAIL=suite@example.invalid
+    repo=$(mktemp -d)
+    trap 'rm -rf "$repo"' EXIT
+    cd "$repo"
+    git init -q -b main
+    echo probe > probe.txt
+    git add probe.txt
+    GIT_TRACE2_EVENT="$SUITE_RUNNER_TEST_TRACE" git commit -q -m probe
+''')
+
 # A unittest module that runs a grandchild spinning until it has used 1.0 s of
 # its own CPU. Around the grandchild it measures its share of a CPU: the change
 # in its own and its children's CPU seconds over the change in wall seconds. It
@@ -299,6 +320,17 @@ ROW = re.compile(r"^suite-runner: +(?P<wall>\d+\.\d)s wall +(?P<cpu>\d+\.\d)s cp
                  r"(?P<state>passed|failed) (?P<member>\S+)$")
 SUMMARY = re.compile(r"^suite-runner: summary members=(\d+) passed=(\d+) failed=(\d+) "
                      r"jobs=(\d+) wall=\d+\.\ds cpu=(\d+\.\d)s$")
+
+
+def without_command_git_config(environ: Mapping[str, str]) -> dict[str, str]:
+    """`environ` less every variable that carries command-scope git
+    configuration: `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT` and its key and
+    value variables. This module runs under the suite runner, which gives it the
+    suite's git entries (issue 496); a case that kept them would pass against a
+    runner that adds nothing."""
+    return {key: value for key, value in environ.items()
+            if key not in ("GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")
+            and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
 
 
 class RunnerCase(unittest.TestCase):
@@ -706,6 +738,121 @@ class InterruptTest(RunnerCase):
         lines = self.interrupted_lines(runner)
         self.assertEqual([match.group(1, 2, 3) for match in map(END.match, lines) if match],
                          [("exit3.sh", "failed", "3")], lines)
+
+
+class MemberEnvironmentTest(unittest.TestCase):
+    """`member_environment` observed through what git reads under its result
+    (issue 496). Each case fails for one wrong composition."""
+
+    def setUp(self) -> None:
+        raw = tempfile.TemporaryDirectory()
+        self.addCleanup(raw.cleanup)
+        self.scratch = Path(raw.name).resolve()
+        self.parent = {**without_command_git_config(os.environ),
+                       "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+    def read(self, environment: Mapping[str, str], key: str) -> str | None:
+        """The value git reads for `key` under `environment`, or None when it
+        has none. Any other exit, such as 128 for a `GIT_CONFIG_PARAMETERS` git
+        cannot parse, fails the case."""
+        result = subprocess.run(
+            ["git", "config", "--get", key], cwd=self.scratch, env=environment,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+            check=False)
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    def compose(self, inherited: str | None) -> dict[str, str]:
+        parent = dict(self.parent)
+        if inherited is not None:
+            parent["GIT_CONFIG_PARAMETERS"] = inherited
+        return suite_runner.member_environment(parent)
+
+    def assert_suite_entries(self, environment: Mapping[str, str]) -> None:
+        self.assertEqual(self.read(environment, "maintenance.auto"), "false")
+        self.assertEqual(self.read(environment, "gc.auto"), "0")
+
+    def test_with_nothing_inherited_git_reads_the_suite_entries(self):
+        self.assert_suite_entries(self.compose(None))
+
+    def test_an_inherited_entry_still_reads_beside_the_suite_entries(self):
+        environment = self.compose("'user.name'='Inherited'")
+        self.assertEqual(self.read(environment, "user.name"), "Inherited")
+        self.assert_suite_entries(environment)
+
+    def test_an_empty_inherited_value_still_parses(self):
+        self.assert_suite_entries(self.compose(""))
+
+    def test_the_suite_entry_wins_over_an_inherited_entry_for_the_same_key(self):
+        environment = self.compose("'maintenance.auto'='true'")
+        self.assertEqual(self.read(environment, "maintenance.auto"), "false")
+
+    def test_a_tests_own_config_count_keeps_the_suite_entries(self):
+        # As tests/test_review_task7.py does with HOSTILE_GIT_ENV.
+        environment = {**self.compose(None), "GIT_CONFIG_COUNT": "1",
+                       "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "Counted"}
+        self.assertEqual(self.read(environment, "user.name"), "Counted")
+        self.assert_suite_entries(environment)
+
+    def test_only_git_config_parameters_changes_and_the_parent_is_untouched(self):
+        parent = {**self.parent, "GIT_CONFIG_PARAMETERS": "'user.name'='Inherited'"}
+        before = dict(parent)
+        environment = suite_runner.member_environment(parent)
+        self.assertEqual(parent, before)
+        self.assertEqual(set(environment), set(before))
+        self.assertEqual({key: value for key, value in environment.items()
+                          if key != "GIT_CONFIG_PARAMETERS"},
+                         {key: value for key, value in before.items()
+                          if key != "GIT_CONFIG_PARAMETERS"})
+
+
+class GitMaintenanceTest(RunnerCase):
+    """A commit under the runner starts no `git maintenance` child (issue 496),
+    against a control that shows the same commit outside the runner does."""
+
+    def environment(self, cap: int, total: int, extra: dict) -> dict:
+        return without_command_git_config(super().environment(cap, total, extra))
+
+    def trace_events(self) -> list[dict]:
+        return [json.loads(line)
+                for line in self.trace.read_text(encoding="utf-8").splitlines() if line]
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.trace = self.work.parent / "trace.jsonl"
+        self.commit = self.member("commit.sh", COMMIT_MEMBER)
+
+    def commit_under_the_runner(self, jobs: str) -> None:
+        result = self.run_suite("--jobs", jobs, self.commit,
+                                env={"SUITE_RUNNER_TEST_TRACE": str(self.trace)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        events = self.trace_events()
+        self.assertTrue(any(event["event"] == "start" and "commit" in event["argv"]
+                            for event in events), events)
+        self.assertEqual([event["argv"] for event in events
+                          if "maintenance" in event.get("argv", [])], [])
+
+    def test_a_commit_in_serial_mode_starts_no_maintenance_child(self):
+        self.commit_under_the_runner("1")
+
+    def test_a_commit_in_parallel_mode_starts_no_maintenance_child(self):
+        self.commit_under_the_runner("2")
+
+    def test_the_same_commit_outside_the_runner_starts_a_maintenance_child(self):
+        # maintenance.autoDetach=false runs the maintenance child in the
+        # foreground, so it has finished when the commit returns.
+        environment = {**self.environment(1, 1, {"SUITE_RUNNER_TEST_TRACE": str(self.trace)}),
+                       "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "maintenance.autoDetach",
+                       "GIT_CONFIG_VALUE_0": "false"}
+        result = subprocess.run(
+            ["bash", self.commit], cwd=self.work, env=environment,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300,
+            check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        children = [event["argv"] for event in self.trace_events()
+                    if event["event"] == "child_start"]
+        self.assertTrue(any(argv[:4] == ["git", "maintenance", "run", "--auto"]
+                            for argv in children), children)
 
 
 class RecipeWiringTest(unittest.TestCase):
