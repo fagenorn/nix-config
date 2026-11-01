@@ -1,7 +1,7 @@
-diff -ruN a/omlx/engine/batched.py b/omlx/engine/batched.py
---- a/omlx/engine/batched.py	2026-10-26 14:29:44
-+++ b/omlx/engine/batched.py	2026-10-26 14:48:25
-@@ -708,6 +708,23 @@
+diff --git a/omlx/engine/batched.py b/omlx/engine/batched.py
+--- a/omlx/engine/batched.py
++++ b/omlx/engine/batched.py
+@@ -724,6 +724,23 @@ class BatchedEngine(BaseEngine):
              else SchedulerConfig()
          )
          scheduler_config.moe_offload_active = bool(moe_offload_wrapped)
@@ -25,10 +25,10 @@ diff -ruN a/omlx/engine/batched.py b/omlx/engine/batched.py
          signature = getattr(self._model, "_omlx_k2_ane_signature", None)
          if signature:
              scheduler_config.model_name = (
-diff -ruN a/omlx/engine/vlm.py b/omlx/engine/vlm.py
---- a/omlx/engine/vlm.py	2026-10-26 14:29:44
-+++ b/omlx/engine/vlm.py	2026-10-26 14:48:28
-@@ -2581,6 +2581,23 @@
+diff --git a/omlx/engine/vlm.py b/omlx/engine/vlm.py
+--- a/omlx/engine/vlm.py
++++ b/omlx/engine/vlm.py
+@@ -2485,6 +2485,23 @@ class VLMBatchedEngine(BaseEngine):
              else SchedulerConfig()
          )
          scheduler_config.moe_offload_active = bool(moe_offload_wrapped)
@@ -49,12 +49,13 @@ diff -ruN a/omlx/engine/vlm.py b/omlx/engine/vlm.py
 +            scheduler_config.model_name = (
 +                (scheduler_config.model_name or self._model_name) + ":steer-" + steering
 +            )
-         if (
-             self._adapter.model_type == "deepseek_v41"
-             and self._adapter.config.ced_prefill
-diff -ruN a/omlx/patches/neuron_steering.py b/omlx/patches/neuron_steering.py
---- a/omlx/patches/neuron_steering.py	1969-12-31 16:00:00
-+++ b/omlx/patches/neuron_steering.py	2026-10-26 14:47:57
+ 
+         engine_config = EngineConfig(
+             model_name=self._model_name,
+diff --git a/omlx/patches/neuron_steering.py b/omlx/patches/neuron_steering.py
+new file mode 100644
+--- /dev/null
++++ b/omlx/patches/neuron_steering.py
 @@ -0,0 +1,177 @@
 +"""Constant neuron steering declared by a model directory's steering.json.
 +

@@ -22,6 +22,9 @@ class OmlxConfigureTest(unittest.TestCase):
             "model_settings.py", "model_profiles.py",
             "patches/mlx_vlm_glm5_next_compat/__init__.py",
             "engine/batched.py", "engine/vlm.py",
+            # api/tool_calling.py imports omlx.utils.tokenizer (0.7.3).
+            "utils/__init__.py", "utils/tokenizer.py", "utils/formatting.py",
+            "utils/install.py", "utils/hardware.py",
         ):
             destination = self.package / "omlx" / name
             destination.parent.mkdir(parents=True, exist_ok=True)
