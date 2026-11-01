@@ -4,7 +4,9 @@
 Every case but the report-ordering one runs `python -m agent_tools.suite_runner`
 in a temporary working directory over fixture members written there. Members
 that must overlap meet at a filesystem barrier instead of sleeping, so no
-assertion depends on how long anything took (D9).
+assertion depends on how long anything took (D9). The one exception is
+`CpuTimeTest`, which compares each member's CPU with its wall time by design
+(issue 497 D4).
 """
 
 from __future__ import annotations
@@ -237,12 +239,66 @@ PLAIN_MEMBER = textwrap.dedent('''\
             pass
 ''')
 
+# A unittest module that runs a grandchild spinning until it has used 1.0 s of
+# its own CPU. Around the grandchild it measures its share of a CPU: the change
+# in its own and its children's CPU seconds over the change in wall seconds. It
+# writes the share to `seen`, then its `done` marker (issue 497 D4).
+BUSY_MEMBER = textwrap.dedent('''\
+    import os
+    import subprocess
+    import sys
+    import time
+    import unittest
+    from pathlib import Path
+
+    BARRIER = Path(os.environ["SUITE_RUNNER_TEST_BARRIER"])
+    NAME = Path(__file__).name
+    SPIN = "while __import__('time').process_time() < 1.0: pass"
+
+
+    def cpu_seconds():
+        times = os.times()
+        return times.user + times.system + times.children_user + times.children_system
+
+
+    class Member(unittest.TestCase):
+        def test_member(self):
+            cpu, wall = cpu_seconds(), time.monotonic()
+            subprocess.run([sys.executable, "-c", SPIN], check=True)
+            share = (cpu_seconds() - cpu) / (time.monotonic() - wall)
+            (BARRIER / "seen" / NAME).write_text(repr(share))
+            (BARRIER / "done" / NAME).touch()
+''')
+
+# A unittest module that waits for a `done` marker, then sleeps 1.0 s. Run
+# after the busy member in parallel mode, it is still running when the runner
+# reaps the busy member (issue 497 D4).
+SLEEP_MEMBER = textwrap.dedent('''\
+    import os
+    import time
+    import unittest
+    from pathlib import Path
+
+    BARRIER = Path(os.environ["SUITE_RUNNER_TEST_BARRIER"])
+
+
+    class Member(unittest.TestCase):
+        def test_member(self):
+            deadline = time.monotonic() + 60
+            while not any((BARRIER / "done").iterdir()):
+                if time.monotonic() > deadline:
+                    self.fail("the busy member never finished")
+                time.sleep(0.01)
+            time.sleep(1.0)
+''')
+
 RUNNER_LINE = re.compile(r"^suite-runner: ")
 START = re.compile(r"^suite-runner: start (\S+)$")
 END = re.compile(r"^suite-runner: end (\S+) (passed|failed) exit=(\S+) \d+\.\ds$")
-ROW = re.compile(r"^suite-runner: +(\d+\.\d)s (passed|failed) (\S+)$")
+ROW = re.compile(r"^suite-runner: +(?P<wall>\d+\.\d)s wall +(?P<cpu>\d+\.\d)s cpu "
+                 r"(?P<state>passed|failed) (?P<member>\S+)$")
 SUMMARY = re.compile(r"^suite-runner: summary members=(\d+) passed=(\d+) failed=(\d+) "
-                     r"jobs=(\d+) wall=\d+\.\ds$")
+                     r"jobs=(\d+) wall=\d+\.\ds cpu=(\d+\.\d)s$")
 
 
 class RunnerCase(unittest.TestCase):
@@ -399,43 +455,86 @@ class ReportTest(RunnerCase):
         report = lines[lines.index("suite-runner: timings, slowest first") + 1:]
         rows = [ROW.match(line) for line in report[:len(members)]]
         self.assertTrue(all(rows), report)
-        self.assertEqual({row.group(3): row.group(2) for row in rows}, {
+        self.assertEqual({row["member"]: row["state"] for row in rows}, {
             "test_m0.py": "passed", "test_fail_m1.py": "failed",
             "test_m2.py": "passed", "test_fail_m3.py": "failed"})
-        seconds = [float(row.group(1)) for row in rows]
+        seconds = [float(row["wall"]) for row in rows]
         self.assertEqual(seconds, sorted(seconds, reverse=True))
         self.assertEqual(report[len(members):-1], [
             "suite-runner: failed test_fail_m1.py", "suite-runner: failed test_fail_m3.py"])
         summary = SUMMARY.match(report[-1])
         self.assertIsNotNone(summary, report[-1])
-        self.assertEqual(summary.groups(), ("4", "2", "2", "2"))
+        self.assertEqual(summary.group(1, 2, 3, 4), ("4", "2", "2", "2"))
 
     def test_rows_run_slowest_first_with_ties_in_list_order(self):
         results = [
-            MemberResult(index=0, member="a.py", returncode=0, seconds=2.0),
-            MemberResult(index=1, member="b.py", returncode=0, seconds=5.0),
-            MemberResult(index=2, member="c.py", returncode=1, seconds=2.0),
-            MemberResult(index=3, member="d.py", returncode=-9, seconds=0.04),
-            MemberResult(index=4, member="e.py", returncode=0, seconds=5.0),
-            MemberResult(index=5, member="f.py", returncode=0, seconds=3.21),
-            MemberResult(index=6, member="g.sh", returncode=None, seconds=3.24),
+            MemberResult(index=0, member="a.py", returncode=0, seconds=2.0, cpu_seconds=1.5),
+            MemberResult(index=1, member="b.py", returncode=0, seconds=5.0, cpu_seconds=2.0),
+            MemberResult(index=2, member="c.py", returncode=1, seconds=2.0, cpu_seconds=0.04),
+            MemberResult(index=3, member="d.py", returncode=-9, seconds=0.04, cpu_seconds=0.04),
+            MemberResult(index=4, member="e.py", returncode=0, seconds=5.0, cpu_seconds=4.9),
+            MemberResult(index=5, member="f.py", returncode=0, seconds=3.21, cpu_seconds=0.04),
+            MemberResult(index=6, member="g.sh", returncode=None, seconds=3.24, cpu_seconds=0.0),
         ]
         lines = suite_runner.report_lines(
             list(reversed(results)), jobs=3, wall_seconds=12.34)
+        # c, d and f spend 0.04 s each: their rows print 0.0, and the total
+        # counts their 0.12 s, so it is 8.5 where the printed rows add to 8.4.
         self.assertEqual(lines, [
             "suite-runner: timings, slowest first",
-            "suite-runner:     5.0s passed b.py",
-            "suite-runner:     5.0s passed e.py",
-            "suite-runner:     3.2s passed f.py",
-            "suite-runner:     3.2s failed g.sh",
-            "suite-runner:     2.0s passed a.py",
-            "suite-runner:     2.0s failed c.py",
-            "suite-runner:     0.0s failed d.py",
+            "suite-runner:     5.0s wall     2.0s cpu passed b.py",
+            "suite-runner:     5.0s wall     4.9s cpu passed e.py",
+            "suite-runner:     3.2s wall     0.0s cpu passed f.py",
+            "suite-runner:     3.2s wall     0.0s cpu failed g.sh",
+            "suite-runner:     2.0s wall     1.5s cpu passed a.py",
+            "suite-runner:     2.0s wall     0.0s cpu failed c.py",
+            "suite-runner:     0.0s wall     0.0s cpu failed d.py",
             "suite-runner: failed c.py",
             "suite-runner: failed d.py",
             "suite-runner: failed g.sh",
-            "suite-runner: summary members=7 passed=4 failed=3 jobs=3 wall=12.3s",
+            "suite-runner: summary members=7 passed=4 failed=3 jobs=3 wall=12.3s cpu=8.5s",
         ])
+
+
+class CpuTimeTest(RunnerCase):
+    """A busy member's CPU is close to its wall time and a sleeping member's far
+    below it, in both modes (issue 497 D4). No bound rests on host load: the
+    busy member spins to a CPU target and measures the share of a CPU it got,
+    and load only lengthens the sleeping member's wall time."""
+
+    def assert_cpu_follows_the_work(self, jobs: str) -> None:
+        members = [self.member("test_busy.py", BUSY_MEMBER),
+                   self.member("test_sleep.py", SLEEP_MEMBER)]
+        result = self.run_suite("--jobs", jobs, *members)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        report = lines[lines.index("suite-runner: timings, slowest first") + 1:]
+        rows = [ROW.match(line) for line in report[:2]]
+        self.assertTrue(all(rows), report)
+        figures = {row["member"]: (float(row["wall"]), float(row["cpu"])) for row in rows}
+        self.assertEqual(sorted(figures), sorted(members))
+        busy_wall, busy_cpu = figures["test_busy.py"]
+        sleep_wall, sleep_cpu = figures["test_sleep.py"]
+        share = float((self.barrier / "seen" / "test_busy.py").read_text())
+        # The grandchild alone spent 1.0 s.
+        self.assertGreaterEqual(busy_cpu, 1.0, report)
+        # The member and its grandchild never run at once, so their CPU cannot
+        # outrun the wall clock; 0.1 s covers the rounding of both figures.
+        self.assertLessEqual(busy_cpu, busy_wall + 0.1, report)
+        # Close to wall, scaled by the share of a CPU the host gave the member.
+        self.assertGreaterEqual(busy_cpu, share * busy_wall / 2, (share, report))
+        self.assertLessEqual(sleep_cpu, sleep_wall / 4, report)
+        summary = SUMMARY.match(report[-1])
+        self.assertIsNotNone(summary, report[-1])
+        total = float(summary.group(5))
+        self.assertGreaterEqual(total, 1.0, report[-1])
+        self.assertLessEqual(abs(total - busy_cpu - sleep_cpu), 0.15, report)
+
+    def test_parallel_rows_show_busy_cpu_near_wall_and_sleeping_cpu_far_below(self):
+        self.assert_cpu_follows_the_work("2")
+
+    def test_serial_rows_show_busy_cpu_near_wall_and_sleeping_cpu_far_below(self):
+        self.assert_cpu_follows_the_work("1")
 
 
 class ExitStatusTest(RunnerCase):

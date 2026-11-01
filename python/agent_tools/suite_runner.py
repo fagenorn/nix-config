@@ -29,6 +29,7 @@ class MemberResult:
     member: str
     returncode: int | None
     seconds: float
+    cpu_seconds: float
 
     @property
     def passed(self) -> bool:
@@ -81,12 +82,14 @@ def report_lines(results: Sequence[MemberResult], *, jobs: int,
     lines = [f"{PREFIX} timings, slowest first"]
     for result in sorted(ordered, key=lambda r: (-round(r.seconds, 1), r.index)):
         state = "passed" if result.passed else "failed"
-        lines.append(f"{PREFIX} {result.seconds:7.1f}s {state} {result.member}")
+        lines.append(f"{PREFIX} {result.seconds:7.1f}s wall "
+                     f"{result.cpu_seconds:7.1f}s cpu {state} {result.member}")
     failed = [result for result in ordered if not result.passed]
     lines.extend(f"{PREFIX} failed {result.member}" for result in failed)
     lines.append(f"{PREFIX} summary members={len(ordered)} "
                  f"passed={len(ordered) - len(failed)} failed={len(failed)} "
-                 f"jobs={jobs} wall={wall_seconds:.1f}s")
+                 f"jobs={jobs} wall={wall_seconds:.1f}s "
+                 f"cpu={sum(result.cpu_seconds for result in ordered):.1f}s")
     return lines
 
 
@@ -137,15 +140,19 @@ def _wait_exited(process: subprocess.Popen) -> None:
 def _reap(index: int, member: str, process: subprocess.Popen | None,
           started: float) -> MemberResult:
     """The member's result, reaping its process if it launched; one that never
-    launched has no exit code. One `os.wait4` on its pid is the only wait that
-    reaps a member, in either mode (issue 497 D1), and its status is stored as
-    the Popen's `returncode`, so nothing waits on it again. The wall time runs
-    from `started` to just after the reap."""
-    returncode = None
+    launched has no exit code and 0.0 CPU. One `os.wait4` on its pid is the
+    only wait that reaps a member, in either mode (issue 497 D1), and its
+    status is stored as the Popen's `returncode`, so nothing waits on it again.
+    Its CPU seconds are the user plus system time that `wait4` reports for the
+    process and every descendant reaped beneath it. The wall time runs from
+    `started` to just after the reap."""
+    returncode, cpu_seconds = None, 0.0
     if process is not None:
-        _, status, _ = os.wait4(process.pid, 0)
+        _, status, usage = os.wait4(process.pid, 0)
         returncode = process.returncode = os.waitstatus_to_exitcode(status)
-    return MemberResult(index, member, returncode, time.monotonic() - started)
+        cpu_seconds = usage.ru_utime + usage.ru_stime
+    return MemberResult(index, member, returncode, time.monotonic() - started,
+                        cpu_seconds)
 
 
 def _run_serial(members: Sequence[str], out: _Output) -> list[MemberResult]:
