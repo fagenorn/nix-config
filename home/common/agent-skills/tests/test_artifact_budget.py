@@ -870,6 +870,8 @@ class ArtifactBudgetCliTest(unittest.TestCase):
             (self.sdd_stop({"kind": "actual_overage", "artifact": self.full("review-package")}), False),
             (self.sdd_stop({"kind": "actual_overage", "artifact": self.full("design-spec", True)}), False),
             (self.sdd_stop({"kind": "other", "projection": over}), False),
+            (self.sdd_stop({"kind": []}), False),
+            (self.sdd_stop({"kind": {"projected_overflow": 1}, "projection": over}), False),
             (self.sdd_stop({"kind": "projected_overflow", "projection": over}, review_state="clean"), False),
             (self.sdd_stop({"kind": "projected_overflow", "projection": over}, report_path="x"), False),
             (self.sdd_stop({"kind": "projected_overflow", "projection": over}, verification_state="passed"), False),

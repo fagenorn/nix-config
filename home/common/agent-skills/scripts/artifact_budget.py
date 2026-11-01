@@ -980,7 +980,8 @@ _SDD_STOP_CELLS = {"review_state": "unknown", "conformance_verdict": "not_run",
 def _sdd_stop_fault(stop: object, base: str, head: str, *, review_limits: ArtifactLimits,
                     policy_sha256: str) -> str | None:
     kind = stop.get("kind") if isinstance(stop, dict) else None
-    member = {"projected_overflow": "projection", "actual_overage": "artifact"}.get(kind)  # type: ignore[arg-type]
+    member = {"projected_overflow": "projection", "actual_overage": "artifact"}.get(
+        kind if isinstance(kind, str) else "")
     if member is None:
         return "stop.kind must be projected_overflow or actual_overage"
     fault = _members_fault(stop, {"kind", member}, "stop")
