@@ -58,21 +58,13 @@ in
   power.restartAfterPowerFailure = true;
   power.restartAfterFreeze = true;
 
-  # Coming back unattended also needs FileVault off and automatic login as the owner (set by
-  # hand: it takes the password), because the Tailscale app only runs in a logged-in session.
-  # That boot-time session would sit open at the console, so put the display to sleep right
-  # after it. That only locks it once the owner has also run, by hand (it takes the password),
-  # `sysadminctl -screenLock immediate -password -`; Tailscale keeps running behind the lock.
-  # Only near boot, so a later login or a switch reloading this agent is left alone.
-  launchd.user.agents.lock-after-autologin = {
-    script = ''
-      boot=$(/usr/sbin/sysctl -n kern.boottime | /usr/bin/sed -E 's/^\{ sec = ([0-9]+).*/\1/')
-      [ $(( $(/bin/date +%s) - boot )) -lt 300 ] || exit 0
-      /bin/sleep 15
-      /usr/bin/pmset displaysleepnow
-    '';
-    serviceConfig.RunAtLoad = true;
-  };
+  # Tailscale as the tailscaled system daemon, not the menu-bar app (the tailscale-app cask is
+  # MBP-only): the app is controlled by one logged-in user's session, which on this multi-user
+  # Mac locks the others out, and it does not run without a login. The daemon starts at boot
+  # with no session; drive it as root (`sudo tailscale up`, `sudo tailscale switch`).
+  # Coming back unattended needs FileVault off (set by hand). Keep automatic login off: no
+  # session is needed, and one would sit unlocked at the console.
+  services.tailscale.enable = true;
 
   system.defaults.dock.persistent-apps = [
     "/Applications/Helium.app"
