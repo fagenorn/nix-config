@@ -55,8 +55,8 @@ clause the only place a body names a file. Per D3 and D2.
 
 ### The rules (AC 1)
 
-- **Titles.** Step 2's sentence about the terms titles and descriptions use gains: "A title
-  states the outcome in plain words, never plan shorthand." Glossary terms stay allowed in a
+- **Titles.** Step 2 sets the terms that titles and descriptions use. Right after that sentence
+  it gains: "A title states the outcome in plain words, never plan shorthand." Glossary terms stay allowed in a
   title, and the body explains them. Per D4 and D5.
 - **First use and the stranger read.** The "body is the contract" paragraph is rewritten to name
   its reader and to hold both rules:
@@ -70,6 +70,10 @@ clause the only place a body names a file. Per D3 and D2.
   The paragraph drops "no file paths outside `measured:`", a copy of the sentence above it, and
   `no "as discussed above"`, which the stranger read now covers. The publishing agent rereads
   each body itself, and no subagent is dispatched. Per D4.
+- **The no-tracker route publishes too.** The tracker sentence's "means no publishing: emit the
+  slices as a Markdown list" becomes "means no filing: publish the slices as a Markdown list". The
+  Problem section and the stranger read then also cover the blocks the user files by hand, and
+  the agent still files nothing. Per D7.
 
 The falsifiable-criterion paragraph, the criterion-kind list and the `measured:` sentence do not
 change.
@@ -91,12 +95,29 @@ headroom. The new text is paid for by removing duplicated or redundant text in t
   approval sentence, the GitLab bullet with the "Blocked by is the record" sentence after it, and
   the wide-refactor sentence.
 
-These edits were prototyped on 8d0bbc25. They measure 6484 B, a change of −10 B. Both the gate
-(`instruction_load check --base origin/main`) and the full `test_workflow_skill_contracts` module
-pass. The result stays within 5% of the ceiling, so `instruction-load.json` is not edited. If the
+These edits, with D7's rewording, were prototyped on 8d0bbc25. They measure 6483 B, a change of
+−11 B. The gate (`instruction_load check --base origin/main`) passes. So do the skill-text and
+gate suites (`test_workflow_skill_contracts`, `test_shell_example_contracts`,
+`test_dispatch_contracts`, `test_skill_lint`, `test_instruction_load`, `test_eval_cases`: 332
+tests). The result stays within 5% of the ceiling, so `instruction-load.json` is not edited. If the
 final wording falls more than 5% below the ceiling, the plan runs
 `just agent-instruction-load tighten`, which only lowers a ceiling and needs no label. The gate
 decides. Per D1.
+
+### Grill refinements
+
+- **Titles are plain before the user sees them.** The title rule is in step 2, which comes
+  before step 4 shows the breakdown's titles to the user. So the user approves titles that
+  already follow it. Per D4.
+- **Decision IDs and the Decisions section.** A decision listed under Decisions already carries
+  its gist, and that gist is the few words the first-use rule asks for. A decision ID used
+  earlier, in Problem or What to build, needs its few words or a link at that point.
+- **"Glossary term" stays the issue's word.** In a repo with no bound glossary, a term coined
+  in the spec still fails the stranger read, because a stranger would need the spec to
+  understand it.
+- **No glossary or ADR change.** No context or decision-record path is bound
+  (`knowledge.context` unsupported). Every choice here is a wording change that is easy to
+  reverse.
 
 ## Test seams
 
@@ -108,8 +129,8 @@ decides. Per D1.
   2. The whitespace-normalized skill text contains the tokens `at first use` and
      `reread each body`.
 
-  Both cases fail at 8d0bbc25, where Problem and both tokens are absent, and both pass on the
-  prototype. The class follows #274's `ToIssuesCriterionLineContractsTest`, which slices the
+  The class was prototyped. At 8d0bbc25 it fails three times: once on the headings and once for
+  each token. On the prototype it passes, and so does the existing class. The class follows #274's `ToIssuesCriterionLineContractsTest`, which slices the
   template the same way, and #474's short-token pins. Per D6.
 - **`ToIssuesCriterionLineContractsTest` (existing, unchanged)** measures AC 2.
 - **The instruction-budget gate and the verification bindings** measure AC 3:
@@ -138,3 +159,4 @@ decides. Per D1.
 | D4 | The title rule joins step 2's sentence that sets the vocabulary of titles and descriptions. The first-use rule and the stranger read join the "body is the contract" paragraph, which now names a stranger holding only that page as its reader. The publishing agent rereads each body itself. | The issue's diagnosis: step 2's use-the-glossary rule has no rule to explain the terms. The brief's recommended fold into that paragraph. The bar: Token economy. | A new readability subsection: a new heading, and the rules it would hold are already spread over two places. A fresh-context reviewer subagent per issue: a new dispatch site with a model-matrix row and pins, run for every issue, where the issue asks the agent to reread. |
 | D5 | A title bans plan shorthand (slice labels, part numbers, decision IDs) but may use a glossary term. The first-use rule applies to the body, where a term can be explained. | Step 2 already has titles use the glossary's terms. The issue: a title "doesn't depend on plan shorthand". | Banning glossary terms from titles: contradicts step 2 and the project's consistent vocabulary. Applying the first-use rule to the title itself: a title has no room for an explanation. |
 | D6 | AC 1's test is one new class. It pins the exact template heading list and two short tokens, `at first use` and `reread each body`. The title rule is not pinned. | AC 1, written by the user, names the file and the assertions. The standards README: a user instruction outranks Layer 2. Rule 6 allows text a subagent consumes, and sdd's final review reads the `## Acceptance criteria` heading. #474 D4 is the precedent for short tokens. | Full-sentence pins: rule 6 forbids them, and they fail on rewording. A headings-only test: it leaves AC 1's rule clause unmeasured. Pinning the title rule: no criterion asks for it, and rule 6 forbids a new phrase pin. |
+| D7 | Grill: the no-tracker route counts as publishing. "means no publishing: emit" becomes "means no filing: publish", so the Markdown blocks carry the Problem section and get the stranger read, and the agent still files nothing. The change is −1 B. | The issue: every issue to-issues produces must read on its own, and a hand-filed block is still an issue. The tracker sentence was the only place where "publishing" excluded that route. | Leaving it as it was: "Before publishing" would skip the stranger read on that route. "Before publishing or emitting": costs 12 B, which would push the file over its ceiling. |
