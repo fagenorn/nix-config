@@ -92,7 +92,9 @@
     # "viscosity",          # Feature-rich OpenVPN client (Paid)
 
     # === Gaming ===
-    "starsector" # Open-world single-player space combat and trading RPG
+    # Served from the self-authored fagenorn/palmier tap because the upstream cask is
+    # disabled (fails_gatekeeper_check); see homebrew/palmier-tap/Casks/starsector.rb.
+    "fagenorn/palmier/starsector" # Open-world single-player space combat and trading RPG
     # "steam"              # Valve's game distribution platform client
 
     # === Window Management ===
