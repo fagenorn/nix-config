@@ -9,7 +9,9 @@ from agent_tools.review_forecast import canonical_bytes
 from agent_tools.review_issue121 import (ContributionError, compact_121, derive_121, expand_121, model_121,
                                          unavailable_ids, validate_121)
 
-from .retained_review_test_support import commit_files, linear_fixture, source_budget_env, task7_fixture
+from .retained_review_test_support import (BOUND_PEAK, BOUND_SECONDS, SITES_121, WINDOW, amplified_121, commit_files,
+                                          committed, edges_by_rows_121, linear_fixture, maximal, measured,
+                                          source_budget_env, task7_fixture)
 
 MEMBERS = {"schema_version", "kind", "range", "classes", "paths", "entries", "edges", "signer_sha256", "anchors",
            "records", "outcomes", "operational_effects", "record_table_policy"}
@@ -246,6 +248,67 @@ class Compact121Test(unittest.TestCase):
         for e, n, side in sides:
             with self.subTest(edge=e):
                 self.refused(lambda p: p["edges"][e][n].__setitem__(side, blob), payload, pins, table)
+
+
+class Bounded121Test(unittest.TestCase):
+    """Issue 256: what `expand_121` builds from a forged payload is bounded (D3, D6, D8)."""
+
+    def refused(self, payload, *, bound=True):
+        for traced in ((False, True) if bound else (False,)):
+            error, elapsed, peak = measured(lambda: expand_121(payload), traced=traced)
+            self.assertIsInstance(error, ContributionError, f"{error!r} after {elapsed:.2f} s")
+            self.assertEqual(error.code, "invalid_payload")
+            if traced:
+                self.assertLess(peak, BOUND_PEAK)
+            else:
+                self.assertLess(elapsed, BOUND_SECONDS)
+
+    def test_maximal_edges_by_rows_is_refused_within_the_bound(self):
+        self.assertEqual(expand_121(edges_by_rows_121(20))["schema_version"], 3)  # the forgery is well formed
+        payload, size = maximal(edges_by_rows_121)
+        self.assertTrue(WINDOW[0] <= size <= WINDOW[1], size)
+        self.refused(payload)
+
+    def test_each_amplified_site_is_refused(self):
+        for site in SITES_121:
+            with self.subTest(site=site):
+                self.refused(amplified_121(site), bound=False)
+
+    def test_the_budget_reads_the_public_bound(self):
+        payload = committed("issue-121.json")
+        self.assertEqual(expand_121(payload)["schema_version"], 3)
+        with patch("agent_tools.review_expansion.MEMBER_MAX_BYTES", 100_000):  # below the real model's charge
+            with self.assertRaises(ContributionError) as caught:
+                expand_121(payload)
+        self.assertEqual(caught.exception.code, "invalid_payload")
+
+    def test_lineage_keeps_the_pre_256_rule(self):
+        """Below the budget, `aggregate.actual` lineage keeps `DELIVERY_BASE`'s rule exactly (Codex S1, D4)."""
+        def reference(edges):  # sets unioned per record, then every edge in edge order whose id is in a set
+            sets = {}
+            for edge in edges:
+                for r in edge["records"]:
+                    sets[r["path"]] = sets.get(r["old_path"], set()) | sets.get(r["path"], set()) | {edge["id"]}
+                    if r["old_path"] != r["path"]:
+                        sets[r["old_path"]] = sets.get(r["old_path"], set()) | {edge["id"]}
+            return {path: [edge["id"] for edge in edges if edge["id"] in ids] for path, ids in sets.items()}
+        chain = [("R100", "b", "a"), ("R100", "c", "b"), ("A", "a", "a"), ("M", "a", "a")]  # a -> b -> c, a again
+        same = [("M", "d", "d"), ("M", "e", "e"), ("M", "e", "e")]  # one parent and commit: the last two ids coincide
+        for forged, expected in ((chain, {"a": [0, 2, 3], "b": [0, 1], "c": [0, 1]}), (same, {"d": [0], "e": [1, 2]})):
+            payload, names = committed("issue-121.json"), sorted(expected)
+            at = {name: len(payload["paths"]) + k for k, name in enumerate(names)}
+            payload["paths"] += [f"lineage/{name}" for name in names]
+            for op, new, old in forged:
+                payload["classes"].append(["c", 0])
+                payload["edges"].append([[op, at[new], None, None, 0, "", "", *([at[old]] if old != new else [])]])
+            payload["records"]["aggregate.actual"]["rows"] += [[at[name], 0, ""] for name in names]
+            model = expand_121(payload)
+            ids, first = [edge["id"] for edge in model["edges"]], len(model["edges"]) - len(forged)
+            lineage = {r["path"]: r["edge_ids"] for r in model["records"] if r["scope"] == "aggregate.actual"}
+            self.assertEqual(lineage, {path: reference(model["edges"])[path] for path in lineage})
+            self.assertEqual({name: lineage[f"lineage/{name}"] for name in names},
+                             {name: [ids[first + k] for k in ks] for name, ks in expected.items()})
+            self.assertEqual(len(set(ids[first:])), len(forged) - (forged is same))
 
 
 if __name__ == "__main__":

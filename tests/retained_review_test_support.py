@@ -440,3 +440,48 @@ def amplified_100(site: str) -> dict:
         payload["pending_overlaps"] += [[path, None]] * 10
         payload["overlap_sha256"] = _repacked(payload["overlap_sha256"], bytes(96 * 10))
     return payload
+
+
+def edges_by_rows_121(n: int) -> dict:
+    """The committed issue-121 payload plus `n` edges that each modify one path, `forged`, and `n`
+    `aggregate.actual` rows on it (#254's M1). Each value is as short as expansion reads it, so that a
+    maximal member holds about 19,000 of each and its expansion at the base outlasts the bound (D8)."""
+    payload = committed("issue-121.json")
+    path = len(payload["paths"])
+    payload["paths"].append("forged")
+    for k in range(n):
+        payload["classes"].append([f"{k:x}", 0])
+        payload["edges"].append([["M", path, None, None, 0, "", ""]])
+    payload["records"]["aggregate.actual"]["rows"] += [[path, 0, ""]] * n
+    return payload
+
+
+SITES_121 = ("class", "tree_entry", "edge_record", "anchor", "final_record", "outcome_edge_list", "lineage")
+
+
+def amplified_121(site: str) -> dict:
+    """The committed issue-121 payload with the rows of one charged site of `expand_121` amplified past
+    the budget. Each is well formed: before issue 256 every one expanded without refusal (D8)."""
+    payload = committed("issue-121.json")
+    long = len(payload["paths"])
+    payload["paths"].append(LONG)
+    if site == "class":  # 60,000 more classes, beyond the last edge
+        payload["classes"] += [["", 0]] * 60_000
+    elif site == "tree_entry":  # 50,000 more entries, never referenced
+        payload["entries"].append(["100644", "blob", [""] * 50_000])
+    elif site == "edge_record":
+        payload["edges"][0] += [["M", long, None, None, 0, "", ""]] * 10
+    elif site == "anchor":
+        payload["anchors"] += [[long, "", ""]] * 10
+    elif site == "final_record":
+        payload["records"]["aggregate.projected"]["rows"] += [[long, 0, 0, 0]] * 10
+    elif site == "outcome_edge_list":  # one failure's evidence references, 30,000 more
+        failed = next(row for row in payload["outcomes"] if "failure" in row)
+        failed["failure"]["evidence_refs"] += [0] * 30_000
+    elif site == "lineage":  # a chain of 1,500 renames, one per edge: the sets copied grow by one each
+        start = len(payload["paths"])
+        payload["paths"] += [f"forged/{k}" for k in range(1_501)]
+        for k in range(1_500):
+            payload["classes"].append([f"{k:x}", 0])
+            payload["edges"].append([["R100", start + k + 1, None, None, 0, "", "", start + k]])
+    return payload

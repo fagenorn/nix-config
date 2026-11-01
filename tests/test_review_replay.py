@@ -14,15 +14,16 @@ from agent_tools.review_issue121 import ContributionError, expand_121
 from agent_tools.review_replay import ReplayUnavailable, replay
 from agent_tools.review_witness import ANCHOR_NAME, WitnessError, authenticate, build_anchor, build_witness
 
-from .retained_review_test_support import (BOUND_PEAK, BOUND_SECONDS, SOURCE, maximal, measured, rename_chain_100,
-                                          retained_fixture, source_budget_env, tool_fixture)
+from .retained_review_test_support import (BOUND_PEAK, BOUND_SECONDS, SOURCE, edges_by_rows_121, maximal, measured,
+                                          rename_chain_100, retained_fixture, source_budget_env, tool_fixture)
 
 UNAVAILABLE = dict(owners=(1, 2, 3, 6, 3), touches={4: 3})
 NAMES = ("task7_pins", "issue121_pins", "issue100_pins")
 GROUPS = ("tool", "issue_121", "issue_100", "archive", "estimate")
 PREFIX = "replay-retained: "
 ZERO = "sha256:" + "0" * 64
-FORGED = (("issue-100-derived.json", rename_chain_100, Issue100Error),)  # maximal forged members (issue 256)
+FORGED = (("issue-100-derived.json", rename_chain_100, Issue100Error),  # maximal forged members (issue 256)
+          ("issue-121.json", edges_by_rows_121, ContributionError))
 
 
 def derived_bundle(tmp, limits=None, **shape):

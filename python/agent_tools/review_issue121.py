@@ -21,13 +21,14 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from agent_tools.canonical import telemetry_digest
 from agent_tools.review_actual import (PACKING_POLICY_SHA256, RECORD_POLICY, RECORD_POLICY_SHA256, FutureCommit,
                                        GenerationError, _split_diff, actual_inputs, actual_inputs_from_trees,
                                        git_diff, select_candidate)
 from agent_tools.review_budget import BudgetAuthority
+from agent_tools.review_expansion import Budget
 from agent_tools.review_forecast import ForecastError, canonical_bytes, edge_facts, raw_digest, tree_entry
 from agent_tools.review_git import HistoryError, original_commit, original_range
 from agent_tools.review_pack import ReviewRecordSize
@@ -336,23 +337,50 @@ def _measured(row: dict, tree: str, inputs: list, authority: BudgetAuthority, re
             "measurement": measurement}, records
 
 
-def _lineage(edges: Sequence[dict]) -> dict[str, list[str]]:
-    """Each path's edge ids in edge order: the edges that record it or a path it was renamed from."""
-    lineage: dict[str, set] = {}
+def _lineage(edges: Sequence[dict], budget: Budget | None = None) -> Callable[[str], list | None]:
+    """The lookup of a path's edge ids in edge order: the edges that record it or a path it was renamed from.
+    One pass over the records, in edge order, keeps a set of edge ids per path: a record on `new` gives `new`
+    the old path's ids, its own and this edge's, and a rename also gives `old` this edge's. A path's list is
+    every edge, in edge order, whose id is in its set, so edges whose ids coincide are all listed. Lists are
+    built on first request and kept; a path no record names is `None`. With a `budget`, every id added to a
+    set or copied into one is charged its canonical width; only that set work is charged here (D4)."""
+    sets: dict[str, set] = {}
+    positions: dict[str, list[int]] = {}
+    for n, edge in enumerate(edges):
+        positions.setdefault(edge["id"], []).append(n)
     for edge in edges:
+        ident = edge["id"]
+        width = len(canonical_bytes(ident))
         for record in edge["records"]:
             old, new = record["old_path"], record["path"]
-            lineage[new] = lineage.get(old, set()) | lineage.get(new, set()) | {edge["id"]}
-            if old != new:  # the rename also ends the old path's record
-                lineage[old] = lineage.get(old, set()) | {edge["id"]}
-    return {path: [edge["id"] for edge in edges if edge["id"] in ids] for path, ids in lineage.items()}
+            if old == new:
+                ids = sets.setdefault(new, set())
+                added = ident not in ids
+                ids.add(ident)
+            else:  # a fresh set for `new`, so no later record on `old` reaches it; the rename also ends `old`
+                sets[new] = sets.get(old, set()) | sets.get(new, set()) | {ident}
+                added = len(sets[new])
+                ids = sets.setdefault(old, set())
+                added += ident not in ids
+                ids.add(ident)
+            if budget is not None:
+                budget.add(width * added)
+    lists: dict[str, list] = {}
+
+    def lookup(path: str) -> list | None:
+        if path not in sets:
+            return None
+        if path not in lists:
+            lists[path] = [edges[n]["id"] for n in sorted(n for ident in sets[path] for n in positions[ident])]
+        return lists[path]
+    return lookup
 
 
 def _actual(label: str, item, edges: Sequence[dict]) -> list[dict]:
     """Whole initial-context final records, each with its ordered, non-empty edge lineage."""
     lineage, rows = _lineage(edges), []
     for record in sorted(item.records, key=lambda r: r.path):
-        refs = lineage.get(record.path)
+        refs = lineage(record.path)
         if not refs:
             raise ContributionError("record_lineage_missing")
         if record.generated_evidence is not None:  # a compact summary is not the whole record
@@ -583,7 +611,18 @@ def expand_121(payload: dict) -> dict:
     """The schema-3 model that the schema-4 `payload` encodes. Pure: it reads the payload alone and leaves
     it unchanged. Anything but the closed version-4 object of this kind is `invalid_payload`, and so are
     a value of the wrong type where one is read, a row of the wrong length and an index that is not an
-    in-range `int`. Ids, edge identity, lineage and outcome references are recomputed, never read."""
+    in-range `int`. Ids, edge identity, lineage and outcome references are recomputed, never read. Every row
+    it builds is charged, as it is built, to a budget of `review_expansion.MEMBER_MAX_BYTES` canonical bytes
+    read when the call starts, and the first charge past it is `invalid_payload`, so the work a payload
+    causes is bounded by its size and that budget."""
+    budget = Budget(lambda: ContributionError("invalid_payload"))
+
+    def charged(ids) -> list:  # an id list built from edges or indices, each element charged as it joins
+        built = []
+        for ident in ids:
+            budget.add(len(canonical_bytes(ident)))
+            built.append(ident)
+        return built
     c = _closed(payload, "schema_version", "kind", "range", "classes", "paths", "entries", "edges", "signer_sha256",
                 "anchors", "records", "outcomes", "operational_effects", "record_table_policy")
     paths, slots, stored = c["paths"], c["records"], c["outcomes"]
@@ -594,22 +633,26 @@ def expand_121(payload: dict) -> dict:
     entries = []
     for mode, kind, oids in _rows(c["entries"], 3):
         _require(isinstance(oids, list))
-        entries.extend({"mode": mode, "kind": kind, "oid": oid} for oid in oids)
+        entries.extend(budget.charge({"mode": mode, "kind": kind, "oid": oid}) for oid in oids)
 
     def entry(index):
         return None if index is None else dict(_at(entries, index))
-    classes = [{"commit": r[0], "owner": r[1], "reason": r[2] if len(r) > 2 else None}
+    classes = [budget.charge({"commit": r[0], "owner": r[1], "reason": r[2] if len(r) > 2 else None})
                for r in _rows(c["classes"], 2, 3)]
     edges, parent = [], _closed(c["range"], "base", "head")["base"]
     for row, facts in zip(classes, c["edges"]):
-        records = [{"operation": r[0], "path": _at(paths, r[1]), "old_path": _at(paths, r[7] if len(r) > 7 else r[1]),
-                    "before": entry(r[2]), "after": entry(r[3]), "record_bytes": r[4], "record_sha256": r[5],
-                    "hunk_header_sha256": r[6]} for r in _rows(facts, 7, 8)]
-        edges.append(_identified({"parent": parent, "commit": row["commit"], "parent_ordinal": 1, "records": records,
-                                  "owner": row["owner"]}))
+        records = [budget.charge({
+            "operation": r[0], "path": _at(paths, r[1]), "old_path": _at(paths, r[7] if len(r) > 7 else r[1]),
+            "before": entry(r[2]), "after": entry(r[3]), "record_bytes": r[4], "record_sha256": r[5],
+            "hunk_header_sha256": r[6]}) for r in _rows(facts, 7, 8)]
+        edge = _identified({"parent": parent, "commit": row["commit"], "parent_ordinal": 1, "records": records,
+                            "owner": row["owner"]})
+        budget.charge({**edge, "records": []})  # its records were charged as each was built
+        edges.append(edge)
         parent = row["commit"]
-    anchors = [_identified({"path": _at(paths, path), "commit": commit, "blob": blob,
-                            "signer_sha256": c["signer_sha256"]}) for path, commit, blob in _rows(c["anchors"], 3)]
+    anchors = [budget.charge(_identified({"path": _at(paths, path), "commit": commit, "blob": blob,
+                                          "signer_sha256": c["signer_sha256"]}))
+               for path, commit, blob in _rows(c["anchors"], 3)]
     selected = {label: [e for e in edges if label.startswith("aggregate.") or e["owner"] in _TASKS[label]]
                 for label in LABELS}
     records, refs = [], {label: [] for label in LABELS}
@@ -618,23 +661,32 @@ def expand_121(payload: dict) -> dict:
             continue
         slot = _closed(slots[label], "kind", "rows")
         _require(slot["kind"] in ("actual", "estimate"))
-        actual, lineage = slot["kind"] == "actual", _lineage(selected[label])
+        actual = slot["kind"] == "actual"
+        lineage = _lineage(selected[label], budget) if actual else None
         for r in _rows(slot["rows"], 3 if actual else 4):
             row = {"kind": slot["kind"], "scope": label, "path": _at(paths, r[0]), "record_bytes": r[1]}
-            row.update({"record_sha256": r[2], "edge_ids": lineage.get(row["path"])} if actual
+            row.update({"record_sha256": r[2], "edge_ids": lineage(row["path"])} if actual
                        else {"added_lines": r[2], "deleted_lines": r[3]})
-            records.append(_identified(row))
-            refs[label].append(records[-1]["id"])
+            row = _identified(row)
+            if actual:  # charged without its `edge_ids`, then one id width per element
+                budget.charge({**row, "edge_ids": []})
+                for ident in row["edge_ids"] or ():
+                    budget.add(len(canonical_bytes(ident)))
+            else:
+                budget.charge(row)
+            records.append(row)
+            refs[label].append(row["id"])
     outcomes = []
     for label, row in zip(LABELS, stored):
         _require(isinstance(row, dict))
-        row = {**row, "boundary": label, "edge_ids": [e["id"] for e in selected[label]]}
+        row = {**row, "boundary": label, "edge_ids": charged(e["id"] for e in selected[label])}
         if row.get("state") == "measured":
             row["record_refs"] = refs[label]
         else:
             failure = row.get("failure")
             _require(isinstance(failure, dict) and isinstance(failure.get("evidence_refs"), list))
-            row["failure"] = {**failure, "evidence_refs": [_at(edges, n)["id"] for n in failure["evidence_refs"]]}
+            evidence = charged(_at(edges, n)["id"] for n in failure["evidence_refs"])
+            row["failure"] = {**failure, "evidence_refs": evidence}
         outcomes.append(row)
     return {"schema_version": 3, "kind": KIND, "range": c["range"], "classes": classes, "edges": edges,
             "anchors": anchors, "records": records, "aggregate": {"actual": outcomes[0], "projected": outcomes[1]},
