@@ -106,12 +106,12 @@ Run `git merge --no-commit --no-ff origin/<integration>`; unless it reports `Alr
 
 A blocked verification capability stops and reports its `reason_code` and `repair_id`; authored unsupported follows only its documented no-verification route.
 
-1. **Check.** Run `verified-tree check` in the worktree; keep the `tree`, `run` and `skipped` it prints. On Phase 2's own run, note each `skipped` entry as `verification skipped: <id> (<reason>)` in the PR body's Summary.
+1. **Check.** Run `verified-tree check` in the worktree; keep its `tree`, `run` and `skipped`. On Phase 2's own run, note each skip as `verification skipped: <id> (<reason>)` in the Delivery record.
 2. **Skip only on `verified`** (exit 0). On Phase 2's own run, note
-   `verification reused: tree <id>` in the PR body's Summary.
+   `verification reused: tree <id>` in the Delivery record.
 3. **Otherwise run and record.** Run each `run` id's `bindings.commands` argv and cwd; when all pass, run `verified-tree record --tree <the checked tree>`. `record` exit 3 `tree_changed` is a failing verification; `check` exit 2 means run every retained `bindings.workflow.verification` id anyway and leave the pass unrecorded, as does `record` exit 2, but `plan changed since check` reruns step 1.
 
-On a failing verification command, pause, ground and surface; never invent a fix command outside retained `bindings.commands`. Tell *environmental* test failures (container connectivity, missing network, sandbox limits) from *real* ones with a baseline run in a scratch worktree on `origin/<integration>`: the same failures are pre-existing (continue; note the baseline diff in the PR body), different ones are real (pause, ground, surface).
+On a failing verification command, pause, ground and surface; never invent a fix command outside retained `bindings.commands`. Tell *environmental* test failures (container connectivity, missing network, sandbox limits) from *real* ones with a baseline run in a scratch worktree on `origin/<integration>`: the same failures are pre-existing (continue; note the baseline diff in the Delivery record), different ones are real (pause, ground, surface).
 
 ## Phase 3 — Consolidate learnings
 
@@ -174,7 +174,7 @@ Review only what sdd's final two-axis review could not have seen, unless a risk 
 - The delta since the final-review head is small: **≤1,000 product lines AND ≤20 product files**. Measure, never hand-count: start with `~/.agents/bin/review-range --integration-ref origin/<integration> --head $HEAD_SHA --final-review-head <final-review head> --max-lines 1000 --max-files 20 --artifact-path <spec_path> --artifact-path <plan_path>`, then append one argument for each plan member and any other process artifact this run wrote. Each exclusion is an individual `--artifact-path <path>` argument. It prints one JSON object whose `route` is `delta`, `empty` or `full`, with a closed `reason`; its `product_lines` and `product_files` measure `<review_base>..$HEAD_SHA` after dropping lockfiles, generated-header files, and those exact artifacts. The gate measures PRODUCT changes, not process artifacts; never exclude the resolved artifact directories themselves, which hold every artifact this repo has ever accepted, and a historical artifact that is itself the requested product still counts. No measurement — exit 1, unparseable stdout, or invalid plan discovery — is not a small diff: the range is full, recorded as `review-range unavailable`.
 - The issue does NOT carry the `risky` label (`<tracker-cli> issue view <num> --json labels`; with an unsupported tracker capability the condition passes), and the retained `capabilities.review.code` state permits the documented review route.
 
-**Route the review.** `delta` → the full two-axis review below over `<review_base>..$HEAD_SHA`, with REVIEW.md's delta-route conformance brief. `empty` → nothing to review: record it and skip to Phase 6. `full`, a failed prerequisite, or an unavailable helper → the full two-axis review below over `$BASE_SHA..$HEAD_SHA`. Record the route in the PR body per REVIEW.md.
+**Route the review.** `delta` → the full two-axis review below over `<review_base>..$HEAD_SHA`, with REVIEW.md's delta-route conformance brief. `empty` → nothing to review: record it and skip to Phase 6. `full`, a failed prerequisite, or an unavailable helper → the full two-axis review below over `$BASE_SHA..$HEAD_SHA`. Record the route in the Delivery record per REVIEW.md.
 
 **Merge-delta reviewer**, dispatched only by POST-SELECTION-SYNC.md, never by Phase 5:
 
@@ -195,7 +195,7 @@ Run it in parallel with the correctness axis. Choose the correctness route from 
 <!-- agent-dispatch: id=ship-issue-full-correctness-fallback role=reviewer model=opus effort=high -->
 Agent(subagent_type="reviewer", model="opus", effort="high") performs the full correctness fallback review.
 
-A Codex call made under `unsupported` anyway is a routing error: discard its outcome — verdict, refusal or failure — record the routing error in the PR body beside the correctness verdict, and run the rung-3 native dispatch, with no retry, stop or suspension.
+A Codex call made under `unsupported` anyway is a routing error: discard its outcome — verdict, refusal or failure — record the routing error in the Delivery record beside the correctness verdict, and run the rung-3 native dispatch, with no retry, stop or suspension.
 
 Apply findings through REVIEW.md's severity mapping and five-step flow. After the fix lands, re-review only a named finding and the bounded fix diff, never first-pass, merge-delta or whole-branch:
 

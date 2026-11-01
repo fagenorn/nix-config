@@ -321,6 +321,19 @@ INLINE_FALLBACK_MARKUP = (
     "Delivery record",
 )
 
+# Each closed note line and the document that sends it to the PR body
+# (#494 D6, D9): the paragraph or list item holding it names the Delivery record.
+NOTE_DESTINATION_ANCHORS = {
+    SHIP_ISSUE: ("`verification skipped: <id> (<reason>)`", "`verification reused: tree <id>`"),
+    SHIP_ISSUE_REVIEW: ("`review range: delta", "`unmeasured`"),
+}
+
+
+def note_blocks(text):
+    """Paragraphs and list items: the unit a note's destination sentence lives in."""
+    return re.split(r"\n\s*\n|\n(?=\d+\. |- )", text)
+
+
 # "sibling <=2 words> candidate" — the in-working-tree prescription being
 # removed. The bounded gap keeps it off handoff's legitimate
 # "candidate ... sibling temporary" sentences, where the words appear in the
@@ -1624,6 +1637,16 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         fallback = self.section(self.ship_handoff, "## Inline fallback (no ship-issue skill)",
                                 "## Remainder owner prompt")
         self.assert_ordered(normalized(fallback), *INLINE_FALLBACK_MARKUP)
+
+    def test_ship_issue_notes_go_to_the_delivery_record(self):
+        for path, anchors in NOTE_DESTINATION_ANCHORS.items():
+            blocks = note_blocks(path.read_text(encoding="utf-8"))
+            for anchor in anchors:
+                with self.subTest(document=path.name, anchor=anchor):
+                    holders = [block for block in blocks if anchor in block]
+                    self.assertEqual(len(holders), 1)
+                    self.assertIn("Delivery record", normalized(holders[0]))
+                    self.assertNotIn("Summary", holders[0])
 
     def test_sdd_documents_carry_their_machine_text(self):
         for path, items in SDD_MACHINE_TEXT.items():
