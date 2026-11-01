@@ -12,6 +12,9 @@
     "discord" # Chat and VoIP platform
     "whatsapp"
     "slack" # Team communication platform
+    # The menu-bar app: one user's session controls it, which suits a single-user laptop.
+    # eleven-m5 runs services.tailscale (the system daemon) instead.
+    "tailscale-app" # Mesh VPN client
 
     # === Development & IT ===
     "nikitabobko/tap/aerospace"
