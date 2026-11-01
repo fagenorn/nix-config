@@ -119,7 +119,7 @@ in
               "jundot/homebrew-omlx" = omlx-tap;
               # Referenced as `incoai/tap/splash`.
               "incoai/homebrew-tap" = splash-tap;
-              # Local tap carrying the self-authored darktable cask
+              # Local tap carrying the self-authored darktable and starsector casks
               # (listed in homebrew.casks in hosts/darwin/mbp/default.nix).
               # builtins.path copies the dir to its OWN top-level store path so it satisfies
               # nix-homebrew's `package`-typed taps option (a bare subpath would not).
@@ -143,6 +143,7 @@ in
             trust.casks = [
               "nikitabobko/tap/aerospace"
               "fagenorn/palmier/darktable"
+              "fagenorn/palmier/starsector"
             ];
           };
         }
