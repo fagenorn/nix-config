@@ -10,12 +10,15 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Sequence
+from typing import BinaryIO, Mapping, Sequence
 
 PREFIX = "suite-runner:"
 DEFAULT_JOBS = 4
 INTERRUPTED = f"{PREFIX} interrupted, waiting for running members"
 INTERRUPT_EXIT = 130
+# Appended to every member's GIT_CONFIG_PARAMETERS, in the form `git -c` exports
+# (issue 496).
+SUITE_GIT_CONFIG = "'maintenance.auto'='false' 'gc.auto'='0'"
 
 
 class UsageError(ValueError):
@@ -41,6 +44,26 @@ def member_command(member: str) -> list[str]:
     if suffix == ".sh":
         return ["bash", member]
     raise UsageError(f"{member}: a member must be a .py or a .sh file")
+
+
+def member_environment(parent: Mapping[str, str]) -> dict[str, str]:
+    """A copy of `parent` whose `GIT_CONFIG_PARAMETERS` ends with
+    `SUITE_GIT_CONFIG`, so every git command run with it reads
+    `maintenance.auto=false` and `gc.auto=0` (issue 496).
+
+    The entries are appended as `git -c` appends its own: after one space when
+    the inherited value is non-empty, standing alone otherwise. Coming last,
+    they win over an inherited entry for the same key, and a test's own
+    `GIT_CONFIG_COUNT` entries still apply beside them. The inherited value is
+    passed on unparsed: one git cannot parse already fails every git call with
+    exit 128. `parent` is not modified, and every other variable is copied
+    unchanged.
+    """
+    environment = dict(parent)
+    inherited = environment.get("GIT_CONFIG_PARAMETERS", "")
+    environment["GIT_CONFIG_PARAMETERS"] = (
+        f"{inherited} {SUITE_GIT_CONFIG}" if inherited else SUITE_GIT_CONFIG)
+    return environment
 
 
 def validate_members(members: Sequence[str], cwd: Path) -> None:

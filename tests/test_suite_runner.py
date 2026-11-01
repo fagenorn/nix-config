@@ -18,6 +18,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 
 from agent_tools import suite_runner
@@ -182,6 +183,17 @@ END = re.compile(r"^suite-runner: end (\S+) (passed|failed) exit=(\S+) \d+\.\ds$
 ROW = re.compile(r"^suite-runner: +(\d+\.\d)s (passed|failed) (\S+)$")
 SUMMARY = re.compile(r"^suite-runner: summary members=(\d+) passed=(\d+) failed=(\d+) "
                      r"jobs=(\d+) wall=\d+\.\ds$")
+
+
+def without_command_git_config(environ: Mapping[str, str]) -> dict[str, str]:
+    """`environ` less every variable that carries command-scope git
+    configuration: `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT` and its key and
+    value variables. This module runs under the suite runner, which gives it the
+    suite's git entries (issue 496); a case that kept them would pass against a
+    runner that adds nothing."""
+    return {key: value for key, value in environ.items()
+            if key not in ("GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")
+            and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
 
 
 class RunnerCase(unittest.TestCase):
@@ -516,6 +528,72 @@ class InterruptTest(RunnerCase):
         self.assertEqual(sorted(path.name for path in (self.barrier / "done").iterdir()),
                          members[:1])
         self.assertEqual(list((self.barrier / "live").iterdir()), [])
+
+
+class MemberEnvironmentTest(unittest.TestCase):
+    """`member_environment` observed through what git reads under its result
+    (issue 496). Each case fails for one wrong composition."""
+
+    def setUp(self) -> None:
+        raw = tempfile.TemporaryDirectory()
+        self.addCleanup(raw.cleanup)
+        self.scratch = Path(raw.name).resolve()
+        self.parent = {**without_command_git_config(os.environ),
+                       "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+    def read(self, environment: Mapping[str, str], key: str) -> str | None:
+        """The value git reads for `key` under `environment`, or None when it
+        has none. Any other exit, such as 128 for a `GIT_CONFIG_PARAMETERS` git
+        cannot parse, fails the case."""
+        result = subprocess.run(
+            ["git", "config", "--get", key], cwd=self.scratch, env=environment,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60,
+            check=False)
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    def compose(self, inherited: str | None) -> dict[str, str]:
+        parent = dict(self.parent)
+        if inherited is not None:
+            parent["GIT_CONFIG_PARAMETERS"] = inherited
+        return suite_runner.member_environment(parent)
+
+    def assert_suite_entries(self, environment: Mapping[str, str]) -> None:
+        self.assertEqual(self.read(environment, "maintenance.auto"), "false")
+        self.assertEqual(self.read(environment, "gc.auto"), "0")
+
+    def test_with_nothing_inherited_git_reads_the_suite_entries(self):
+        self.assert_suite_entries(self.compose(None))
+
+    def test_an_inherited_entry_still_reads_beside_the_suite_entries(self):
+        environment = self.compose("'user.name'='Inherited'")
+        self.assertEqual(self.read(environment, "user.name"), "Inherited")
+        self.assert_suite_entries(environment)
+
+    def test_an_empty_inherited_value_still_parses(self):
+        self.assert_suite_entries(self.compose(""))
+
+    def test_the_suite_entry_wins_over_an_inherited_entry_for_the_same_key(self):
+        environment = self.compose("'maintenance.auto'='true'")
+        self.assertEqual(self.read(environment, "maintenance.auto"), "false")
+
+    def test_a_tests_own_config_count_keeps_the_suite_entries(self):
+        # As tests/test_review_task7.py does with HOSTILE_GIT_ENV.
+        environment = {**self.compose(None), "GIT_CONFIG_COUNT": "1",
+                       "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "Counted"}
+        self.assertEqual(self.read(environment, "user.name"), "Counted")
+        self.assert_suite_entries(environment)
+
+    def test_only_git_config_parameters_changes_and_the_parent_is_untouched(self):
+        parent = {**self.parent, "GIT_CONFIG_PARAMETERS": "'user.name'='Inherited'"}
+        before = dict(parent)
+        environment = suite_runner.member_environment(parent)
+        self.assertEqual(parent, before)
+        self.assertEqual(set(environment), set(before))
+        self.assertEqual({key: value for key, value in environment.items()
+                          if key != "GIT_CONFIG_PARAMETERS"},
+                         {key: value for key, value in before.items()
+                          if key != "GIT_CONFIG_PARAMETERS"})
 
 
 class RecipeWiringTest(unittest.TestCase):
