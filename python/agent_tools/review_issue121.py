@@ -611,10 +611,15 @@ def expand_121(payload: dict) -> dict:
     """The schema-3 model that the schema-4 `payload` encodes. Pure: it reads the payload alone and leaves
     it unchanged. Anything but the closed version-4 object of this kind is `invalid_payload`, and so are
     a value of the wrong type where one is read, a row of the wrong length and an index that is not an
-    in-range `int`. Ids, edge identity, lineage and outcome references are recomputed, never read. Every row
-    it builds is charged, as it is built, to a budget of `review_expansion.MEMBER_MAX_BYTES` canonical bytes
-    read when the call starts, and the first charge past it is `invalid_payload`, so the work a payload
-    causes is bounded by its size and that budget."""
+    in-range `int`. Ids, edge identity, lineage and outcome references are recomputed, never read. Each tree
+    entry, class, edge record, edge (its records apart), anchor and record row, each id `_lineage` adds to a
+    set, and each element of a record row's `edge_ids` and of an outcome's `edge_ids` or failure
+    `evidence_refs` is charged, as it is built, to a budget of `review_expansion.MEMBER_MAX_BYTES` canonical
+    bytes read when the call starts, and the first charge past it is `invalid_payload`. The rest is not
+    charged. The five outcome rows are shallow copies of payload rows, so the member's size bounds them. A
+    measured outcome's `record_refs` is its label's list of the ids of charged record rows. The per-label
+    edge selections and the per-path lineage lists hold only charged edges and ids from charged sets. So the
+    work a payload causes is bounded by its size and that budget."""
     budget = Budget(lambda: ContributionError("invalid_payload"))
 
     def charged(ids) -> list:  # an id list built from edges or indices, each element charged as it joins

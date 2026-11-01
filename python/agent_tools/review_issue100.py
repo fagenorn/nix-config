@@ -306,8 +306,9 @@ def _refs(edges, budget=None) -> Callable[[str], list]:
     """The lookup of `[edge, record]` per record on a path or on a name it was renamed from or to, however
     many renames away: the path's rename-connected component, in edge and then record order, and `[]` for a
     path no record names. One union-find pass over each record's `path` and `old_path` groups the names and
-    one more pass lists each component's pairs, so the cost is linear in the records. Each lookup returns a
-    fresh copy, and with a `budget` it charges each pair as it is copied."""
+    one more pass lists each component's pairs. Path halving without union by rank makes the cost near-linear
+    in the records. Each lookup returns a fresh copy, and with a `budget` it charges each pair as it is
+    copied."""
     parent, groups = {}, {}
 
     def root(name):
@@ -506,20 +507,26 @@ def expand_100(payload: dict) -> dict:
     """The schema-1 model that the schema-2 `payload` encodes. Pure: it reads the payload alone and leaves
     it unchanged. Every refusal it makes of a JSON value is `invalid_payload`. That describes its checks; it
     guards no interpreter limit: a value nested about as deep as the JSON decoder allows raises
-    `RecursionError`. Every row it builds is charged, as it is built, to a budget of
-    `review_expansion.MEMBER_MAX_BYTES` canonical bytes read when the call starts, and the first charge past
-    it is `invalid_payload`, so the work a payload causes is bounded by its size and that budget. Anything but
-    the closed version-2 object of this kind is refused, and so are a value of the wrong type where one is
-    read, a row or a column of the wrong length, an index that is not an in-range `int`, and a packed string
-    that is not a `str`, that `b85decode` rejects, or whose bytes are not whole items. One second spelling
-    passes that last test (see `_unpacked`): a single dangling character after the last whole token decodes
-    to no byte, so the string expands to the same items. Expansion does not refuse it; the canonical-form
-    check in `validate_100` does. So that the first-parent walk ends, the base and the commits are distinct,
-    the head is one of them, and each commit names a parent, every one the base or an earlier commit. A
-    fresh path and an overlap path have a head entry to take: the first is recorded on the walk, the second
-    is a fresh path. Edge identity, repeated records, labels, references, ids, the summary and criterion
-    digests are recomputed, never read. So is a head entry, except for a path that `head_trees` lists, a
-    directory at the head: that entry is read from its row."""
+    `RecursionError`. Each parent edge, tree entry, historical and fresh row, contribution row (its
+    `edge_refs` apart), overlap and criterion row, each edge record at every reference to it, and each
+    `edge_refs` pair is charged, as it is built, to a budget of `review_expansion.MEMBER_MAX_BYTES` canonical
+    bytes read when the call starts, and the first charge past it is `invalid_payload`. The rest is not
+    charged. The hex values a packed string decodes to, and the record facts that pair them with payload
+    record rows, come from the payload, so the member's size bounds them. The others are bounded by a charged
+    count: an edge's wrapper (one per parent edge), a contribution row before its charge and the lookups
+    keyed by fresh index or path (one per fresh row), and the head-entry map (over the edge records). So the
+    work a payload causes is bounded by its size and that budget. Anything but the closed version-2 object
+    of this kind is refused, and so are a value of the wrong type where one is read, a row or a column of the
+    wrong length, an index that is not an in-range `int`, and a packed string that is not a `str`, that
+    `b85decode` rejects, or whose bytes are not whole items. One second spelling passes that last test (see
+    `_unpacked`): a single dangling character after the last whole token decodes to no byte, so the string
+    expands to the same items. Expansion does not refuse it; the canonical-form check in `validate_100` does.
+    So that the first-parent walk ends, the base and the commits are distinct, the head is one of them, and
+    each commit names a parent, every one the base or an earlier commit. A fresh path and an overlap path
+    have a head entry to take: the first is recorded on the walk, the second is a fresh path. Edge identity,
+    repeated records, labels, references, ids, the summary and criterion digests are recomputed, never read.
+    So is a head entry, except for a path that `head_trees` lists, a directory at the head: that entry is
+    read from its row."""
     budget = Budget(lambda: Issue100Error("invalid_payload"))
     c = _closed(payload, ("schema_version", "kind", "range", "commits", "parents", "paths", "entries", "records",
                           "record_sha256", "edges", "tables", "live", "head_trees", "process", "pending_overlaps",
@@ -594,7 +601,8 @@ def expand_100(payload: dict) -> dict:
              tables={"historical": {"record_table_policy": old["record_table_policy"], "records": historical},
                      "fresh": {"record_table_policy": new["record_table_policy"], "records": fresh}},
              # A lone surrogate, which JSON can spell, is hashed rather than raised on.
-             criteria=[{**row, "text_sha256": _sha(row["text"].encode("utf-8", "surrogatepass"))} for row in criteria])
+             criteria=[budget.charge({**row, "text_sha256": _sha(row["text"].encode("utf-8", "surrogatepass"))})
+                       for row in criteria])
     m["summary"] = _counts(m)
     return m
 

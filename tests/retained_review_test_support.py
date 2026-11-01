@@ -410,7 +410,8 @@ def rename_chain_100(n: int) -> dict:
     return payload
 
 
-SITES_100 = ("parent_edge", "tree_entry", "edge_record", "historical_row", "fresh_row", "contribution", "overlap")
+SITES_100 = ("parent_edge", "tree_entry", "edge_record", "historical_row", "fresh_row", "contribution", "overlap",
+             "criterion")
 
 
 def amplified_100(site: str) -> dict:
@@ -439,6 +440,8 @@ def amplified_100(site: str) -> dict:
         _fresh(payload, [path])
         payload["pending_overlaps"] += [[path, None]] * 10
         payload["overlap_sha256"] = _repacked(payload["overlap_sha256"], bytes(96 * 10))
+    elif site == "criterion":  # 20,000 more empty criteria, each built with its 64-digit text digest
+        payload["criteria"] += [{"text": ""} for _ in range(20_000)]
     return payload
 
 
