@@ -5,8 +5,8 @@
   ...
 }:
 let
-  # Teammates who reach this Studio over the owner's tailnet; SSH with the listed keys is the only
-  # remote way in. An entry nix-darwin creates is a standard account with no password; admin rights
+  # Teammates who reach this Studio over the elevenyellow.org.github tailnet; SSH with the listed
+  # keys is the only remote way in. An entry nix-darwin creates is a standard account with no password; admin rights
   # and a password (e.g. from `sysadminctl -addUser ... -admin`) are left alone, since the admin
   # group is not declared here. Reuse an existing account's uid, or pick an unused one above 500
   # (`dscl . -list /Users UniqueID`), e.g.
