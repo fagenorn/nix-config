@@ -2,6 +2,7 @@
 
     sdd-gate review PLAN_FILE --skill-dir DIR --task N [--standards PATH ...]
         [--repo-root R --run-id I --action-id A --worker-id W]
+    sdd-gate record PLAN_FILE --task N
     sdd-gate next PLAN_FILE --skill-dir DIR [--standards PATH ...]
         [--completed N [--parked K]] [--task M [--context-file PATH]] [--delivery-base SHA]
         [--repo-root R --run-id I --action-id A]
@@ -18,17 +19,35 @@ given, builds (or reuses) the review package for `base..HEAD`, checks the
 package against the budget authority and writes the rendered reviewer brief
 into the plan's workspace.
 
-`next` closes task N and/or opens task M. It runs up to eleven steps in order
+`record` writes the ownership evidence of finished task N into the plan's
+forecast blocks, from the ledger and Git, and commits nothing (the controller
+commits the two files). It runs three steps: `ledger` (tasks 1..N-1 are
+complete, N is dispatched and not complete, and an earlier recorded head for N
+is HEAD or its single-parent recording commit), `worktree` (no tracked change
+but the plan root and task N's member, and the task's base is a proper ancestor
+of its head with the forecast's evidence head behind the base) and `record`
+(the task's commits left every forecast block alone; the two files take the
+computed bytes; the ledger gains `Task N: recorded (head H)` once). The ready
+object is `command`, `outcome`, `task`, `head_sha`, `paths` (root, member) and
+`changed`, false when the files already hold the computed bytes. Refusals carry
+gate `null`.
+
+`next` closes task N and/or opens task M. It runs up to thirteen steps in order
 and stops at the first that fails (a ledger that cannot be read or appended to
 refuses at the step that needs it, and the delivery gate line's write refuses
-at `metrics-match` with gate `failed`, not listed as passed): `ledger`, `ledger-complete` (with
-`--completed`), `mark-progress` (under an identity), `review-package`,
-`validate-report`, `budget-check`, `metrics-match` (the cumulative delivery
-package, delivery base to HEAD), then, with `--task`, `task-brief`,
+at `metrics-match` with gate `failed`, not listed as passed): `ledger`,
+`evidence` (the recording commit of the completed task, or of task M-1 for a
+fresh `--task M`, is HEAD's one commit over the recorded head and commits the
+computed bytes; refuses `failed`), `ledger-complete` (with `--completed`),
+`mark-progress` (under an identity), `review-package`, `validate-report`,
+`budget-check`, `metrics-match` (the cumulative delivery package, delivery
+base to HEAD), then, with a fresh `--task M`, `projection` (project the
+delivery with tasks 1..M-1 complete over HEAD; `decompose_required` or
+`failed` ends the call before any dispatch), and with `--task`, `task-brief`,
 `prepare-brief`, `register-worker` (under an identity) and `write-brief`. A
 step that does not apply does not run. It appends the ledger's delivery base,
-completion, delivery gate and dispatch lines, each once, and writes the
-implementer brief into the plan's workspace.
+completion, delivery gate, projection gate and dispatch lines, each once, and
+writes the implementer brief into the plan's workspace.
 
 Stdout is one compact JSON object and a newline: the ready object (exit 0) or
 the refusal object (exit 3 when the package must be decomposed, exit 2 for
@@ -55,10 +74,15 @@ import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.review_budget import BudgetAuthority, BudgetError, describe
+from agent_tools.review_forecast import ForecastError, history_commit
+from agent_tools.review_gate import (
+    GateError, capture, plan_relative, project_argv, save_result, summarize,
+)
+from agent_tools.review_record import RangeError, RecordError, paths, recorded
 from agent_tools.sdd_brief import (
     IMPLEMENTER_TEMPLATE, IMPLEMENTER_TOKENS, REVIEWER_TEMPLATE, REVIEWER_TOKENS, BriefError,
     plan_section, render, select_standards, standards_value, task_row, worker_block,
@@ -78,6 +102,10 @@ STATES = ("complete", "decompose_required")
 PRODUCER_EXIT = {"complete": 0, "decompose_required": 3}
 # The budget metrics, in the order a brief names them, and the token each fills.
 METRIC_KEYS = ("root_bytes", "total_bytes", "file_count", "largest_member_bytes")
+COMPLETE_LINE = re.compile(r"Task ([1-9][0-9]*): complete \(.*\)")
+PROJECTION_LINE = re.compile(
+    r"Projection gate: ([0-9a-f]{40})\.\.([0-9a-f]{40}) through ([0-9]+) "
+    + " ".join(rf"{key}=([0-9]+)" for key in METRIC_KEYS))
 
 
 class InvocationError(Exception):
@@ -119,6 +147,21 @@ class Package:
     root: Path
     metrics: dict[str, int]
     authority: BudgetAuthority
+
+
+@dataclass(frozen=True)
+class Reads:
+    """What step `ledger` of `next` reads: the delivery base and whether it is new, the base of the
+    completed task and of the task to dispatch (`None` when not asked for or not recorded), the
+    task whose recording step `evidence` checks (task, dispatched base, recorded head) and, for
+    a re-dispatch, the projection the ledger already holds."""
+
+    delivery_base: str
+    new_base: bool
+    completed_base: str | None
+    dispatched: str | None
+    evidence: tuple[int, str, str] | None
+    projected: dict | None
 
 
 def _run(argv: Sequence[str]) -> subprocess.CompletedProcess:
@@ -213,16 +256,16 @@ def append_line(ledger: Ledger, line: str) -> None:
         handle.write(lead + line.encode("utf-8") + b"\n")  # append mode: it lands at the end
 
 
-def pinned_head() -> str:
-    """The full `git rev-parse HEAD` of the current checkout; refuses at `review-package`."""
+def pinned_head(step: str = "review-package", gate: str | None = "failed") -> str:
+    """The full `git rev-parse HEAD` of the current checkout; refuses at `step` (default
+    `review-package`, gate `failed`)."""
     try:
         done = _run(["git", "rev-parse", "HEAD"])
     except OSError as error:
-        raise Refusal("review-package", f"cannot run git: {error}", gate="failed") from None
+        raise Refusal(step, f"cannot run git: {error}", gate=gate) from None
     head = done.stdout.decode("utf-8", "replace").strip()
     if done.returncode != 0 or FULL_SHA.fullmatch(head) is None:
-        raise Refusal("review-package", f"cannot read HEAD (exit {done.returncode}){_why(done)}",
-                      gate="failed")
+        raise Refusal(step, f"cannot read HEAD (exit {done.returncode}){_why(done)}", gate=gate)
     return head
 
 
@@ -467,19 +510,60 @@ def _ledger_has(ledger: Ledger, matches) -> bool:
     return any(matches(line) for line in ledger.path.read_text(encoding="utf-8").splitlines())
 
 
-def _ledger_reads(ledger: Ledger, args: argparse.Namespace) -> tuple[
-        str, bool, str | None, str | None]:
-    """What step `ledger` reads: the delivery base, whether it is new, and the bases of the
-    completed task and of the task to dispatch (`None` when not asked for or not recorded)."""
+def _recorded_head(ledger: Ledger, task: int) -> str | None:
+    """The head the ledger's `recorded` line names for `task`, if it has one."""
+    return recorded_sha(ledger, rf"Task {task}: recorded \(head ([0-9a-f]{{40}})\)")
+
+
+def _completed_tasks(ledger: Ledger) -> set[int]:
+    return {int(match.group(1)) for line in ledger.lines
+            if (match := COMPLETE_LINE.fullmatch(line)) is not None}
+
+
+def _earlier_projection(ledger: Ledger, delivery_base: str, task: int, base: str) -> dict:
+    """The projection a re-dispatch of `task` reuses: the ledger's line through `task - 1` whose
+    head is the task's dispatch base."""
+    for line in ledger.lines:
+        match = PROJECTION_LINE.fullmatch(line)
+        if match is not None and match.group(1) == delivery_base and match.group(2) == base \
+                and int(match.group(3)) == task - 1:
+            return {"completed_through": task - 1, "head_sha": base,
+                    "metrics": dict(zip(METRIC_KEYS, map(int, match.groups()[3:])))}
+    raise Refusal("ledger", f"{ledger.path} has no projection through task {task - 1} at the "
+                            f"dispatch base {base[:7]}")
+
+
+def _evidence_target(ledger: Ledger, task: int) -> tuple[int, str, str]:
+    """The task, dispatched base and recorded head `evidence` checks for `task`."""
+    head = _recorded_head(ledger, task)
+    if head is None:
+        raise Refusal("ledger", f"{ledger.path} has no recorded line for task {task}: run "
+                                "`sdd-gate record` and commit it first")
+    return task, task_base(ledger, task), head
+
+
+def _ledger_reads(ledger: Ledger, args: argparse.Namespace) -> Reads:
     recorded = recorded_sha(ledger, r"Delivery base: ([0-9a-f]{40})")
     if recorded is None and args.delivery_base is None:
         raise Refusal("ledger", f"{ledger.path} records no delivery base: pass --delivery-base")
     if recorded is not None and args.delivery_base not in (None, recorded):
         raise Refusal("ledger", f"{ledger.path} records delivery base {recorded[:7]}, "
                                 f"not {args.delivery_base[:7]}")
+    delivery_base = recorded or args.delivery_base
     completed = task_base(ledger, args.completed) if args.completed else None
     dispatched = _dispatched(ledger, args.task) if args.task else None
-    return recorded or args.delivery_base, recorded is None, completed, dispatched
+    evidence = _evidence_target(ledger, args.completed) if args.completed else None
+    projected = None
+    if args.task:
+        closed = _completed_tasks(ledger) | ({args.completed} if args.completed else set())
+        if closed != set(range(1, args.task)):
+            raise Refusal("ledger", f"{ledger.path} does not record exactly tasks "
+                                    f"1..{args.task - 1} complete before task {args.task}")
+        if dispatched is not None:
+            projected = _earlier_projection(ledger, delivery_base, args.task, dispatched)
+        elif evidence is None and args.task > 1:
+            evidence = _evidence_target(ledger, args.task - 1)
+    return Reads(delivery_base, recorded is None, completed, dispatched, evidence, projected)
 
 
 def _mark_progress(args: argparse.Namespace) -> str:
@@ -595,6 +679,65 @@ def _dispatch(plan: Path, ledger: Ledger, args: argparse.Namespace, entries: Seq
     return documents, worker_id
 
 
+def _committed(path: PurePosixPath, commit: str) -> bytes | None:
+    """The bytes of `path` committed at `commit`, or `None` when it has none."""
+    done = _run(["git", "cat-file", "blob", f"{commit}:{path}"])
+    return done.stdout if done.returncode == 0 else None
+
+
+def _check_evidence(ledger: Ledger, plan: Path, target: tuple[int, str, str], head: str) -> None:
+    """Step `evidence`: `head` is the single commit that records the target task over its recorded
+    head, changes only the plan root and that task's member and commits the computed bytes."""
+    task, base, recorded_head = target
+
+    def refuse(detail: str) -> Refusal:
+        return Refusal("evidence", detail, gate="failed")
+
+    try:
+        if history_commit(ledger.top, head).parents != (recorded_head,):
+            raise refuse(f"HEAD is not the one commit recording task {task} over "
+                         f"{recorded_head[:7]}")
+        files = paths(ledger.top, plan, task)
+        if not set(_touched(recorded_head, head)) <= {str(path) for path in files}:
+            raise refuse(f"the commit recording task {task} changes more than its plan files")
+        for path, data in zip(files, recorded(ledger.top, plan, task, base, recorded_head)):
+            if _committed(path, head) != data:
+                raise refuse(f"{path} at HEAD is not task {task}'s computed record")
+    except (BriefError, ForecastError, RecordError) as error:
+        raise refuse(str(error)) from None
+
+
+def _project(plan: Path, ledger: Ledger, delivery_base: str, head: str, through: int,
+             package: Package) -> dict:
+    """Step `projection`: project the delivery with tasks 1..`through` complete over `head`.
+
+    The validated result is saved in the workspace before it is acted on. A projection that must be
+    decomposed refuses with `decompose_required` and the canonical summary; one that cannot be
+    produced refuses with `failed`. A passing one appends its ledger line once.
+    """
+    try:
+        captured = capture(project_argv(plan, delivery_base, head, through), cwd=ledger.top,
+                           authority=package.authority)
+        result = captured.result
+        if (result["base"], result["head"], result["completed_through"]) != (
+                delivery_base, head, through):
+            raise GateError("projection result is for another range")
+        save_result(ledger.workspace, captured)
+        if captured.exit == 3:
+            raise Refusal("projection", "the projection must be decomposed",
+                          gate="decompose_required",
+                          report=summarize(captured, plan_relative(plan)))
+    except GateError as error:
+        raise Refusal("projection", str(error), gate="failed") from None
+    metrics = {key: result["metrics"][key] for key in METRIC_KEYS}
+    line = f"Projection gate: {delivery_base}..{head} through {through} " + " ".join(
+        f"{key}={metrics[key]}" for key in METRIC_KEYS)
+    with _ledger_io("projection", ledger, "failed"):
+        if not _ledger_has(ledger, line.__eq__):
+            append_line(ledger, line)
+    return {"completed_through": through, "head_sha": head, "metrics": metrics}
+
+
 def next_task(args: argparse.Namespace, done: list[str]) -> dict:
     """Run the `next` steps and return the ready object.
 
@@ -605,20 +748,25 @@ def next_task(args: argparse.Namespace, done: list[str]) -> dict:
     plan = Path(os.path.abspath(args.plan_file))
     entries = [Path(os.path.abspath(value)) for value in args.standards]
     ledger = open_ledger(plan)
-    delivery_base, new_base, completed_base, dispatched = _ledger_reads(ledger, args)
-    if new_base:
+    reads = _ledger_reads(ledger, args)
+    delivery_base, dispatched = reads.delivery_base, reads.dispatched
+    if reads.new_base:
         with _ledger_io("ledger", ledger):
             append_line(ledger, f"Delivery base: {delivery_base}")
     done.append("ledger")
 
     head = pinned_head()
+    if reads.evidence is not None:
+        _check_evidence(ledger, plan, reads.evidence, head)
+        done.append("evidence")
+
     if args.completed:
         done_line = f"Task {args.completed}: complete"
         with _ledger_io("ledger-complete", ledger):
             if not _ledger_has(ledger, lambda line: line.startswith(done_line)):
                 ending = f"{args.parked} parked" if args.parked else "review clean"
-                append_line(ledger,
-                            f"{done_line} (commits {completed_base[:7]}..{head[:7]}, {ending})")
+                append_line(ledger, f"{done_line} (commits {reads.completed_base[:7]}.."
+                                    f"{reads.evidence[2][:7]}, {ending})")
         done.append("ledger-complete")
 
     progress = _mark_progress(args)
@@ -636,12 +784,17 @@ def next_task(args: argparse.Namespace, done: list[str]) -> dict:
         done.pop()  # the gate's result was not recorded, so `metrics-match` has not passed
         raise
 
+    projection = reads.projected
+    if args.task and dispatched is None:
+        projection = _project(plan, ledger, delivery_base, head, args.task - 1, package)
+        done.append("projection")
+
     out = {"command": "next", "outcome": "ready", "completed": args.completed, "task": None,
            "brief_path": None, "report_path": None, "base_sha": None, "worker_id": None,
            "mark_progress": progress,
            "delivery": {"base_sha": delivery_base, "head_sha": head,
                         "manifest_root": package.manifest_root, "metrics": package.metrics},
-           "standards": []}
+           "projection": projection, "standards": []}
     if args.task:
         base = dispatched or head
         documents, worker_id = _dispatch(plan, ledger, args, entries, package, base,
@@ -651,6 +804,82 @@ def next_task(args: argparse.Namespace, done: list[str]) -> dict:
                    report_path=str(ledger.workspace / f"task-{args.task}-report.md"),
                    standards=[str(document) for document in documents])
     return out
+
+
+def _dirty_paths() -> set[str]:
+    """The tracked paths whose worktree or index state differs from `HEAD`."""
+    done = _run(["git", "status", "--porcelain", "--untracked-files=no", "--no-renames", "-z"])
+    if done.returncode != 0:
+        raise Refusal("worktree", f"git status failed (exit {done.returncode}){_why(done)}")
+    return {entry[3:] for entry in done.stdout.decode("utf-8", "replace").split("\0") if entry}
+
+
+def _record_head(ledger: Ledger, task: int, current: str) -> str:
+    """`H`: `HEAD`, or the head an earlier `recorded` line names when `HEAD` is that head or the
+    one commit over it."""
+    earlier = _recorded_head(ledger, task)
+    if earlier is None or earlier == current:
+        return earlier or current
+    try:
+        parents = history_commit(ledger.top, current).parents
+    except ForecastError as error:
+        raise Refusal("ledger", str(error)) from None
+    if parents != (earlier,):
+        raise Refusal("ledger", f"task {task} was recorded at {earlier[:7]}, which neither HEAD "
+                                "nor its parent is")
+    return earlier
+
+
+def record(args: argparse.Namespace, done: list[str]) -> dict:
+    """Run the three `record` steps and return the ready object.
+
+    `ledger` (this plan's ledger holds tasks 1..N-1 complete and N dispatched, not complete),
+    `worktree` (no tracked change but the plan root and the task's member, and the task's commits
+    are a range over the forecast's evidence head) and `record` (the task's commits left every
+    forecast block alone; the two files take the computed bytes and the ledger the `recorded`
+    line). Nothing is committed.
+    """
+    plan = Path(os.path.abspath(args.plan_file))
+    task = args.task
+    ledger = open_ledger(plan)
+    closed = _completed_tasks(ledger)
+    if task in closed or not set(range(1, task)) <= closed:
+        raise Refusal("ledger", f"{ledger.path} must record tasks 1..{task - 1} complete and "
+                                f"task {task} not complete")
+    base = task_base(ledger, task)
+    head = _record_head(ledger, task, pinned_head("ledger", None))
+    done.append("ledger")
+
+    files = [ledger.top / path for path in paths(ledger.top, plan, task)]
+    stray = _dirty_paths() - {str(path.relative_to(ledger.top)) for path in files}
+    if stray:
+        raise Refusal("worktree", f"uncommitted change outside the plan record: {min(stray)}")
+    try:
+        computed = recorded(ledger.top, plan, task, base, head)
+    except RecordError as error:
+        if not isinstance(error, RangeError):
+            done.append("worktree")
+        raise Refusal("worktree" if isinstance(error, RangeError) else "record", str(error)) from None
+    done.append("worktree")
+
+    stale = [(path, data) for path, data in zip(files, computed) if _read(path) != data]
+    try:
+        for path, data in stale:
+            write_atomic(path, data)
+        if _recorded_head(ledger, task) is None:
+            append_line(ledger, f"Task {task}: recorded (head {head})")
+    except OSError as error:
+        raise Refusal("record", f"cannot write the record: {_errno(error)}") from None
+    done.append("record")
+    return {"command": "record", "outcome": "ready", "task": task, "head_sha": head,
+            "paths": [str(path) for path in files], "changed": bool(stale)}
+
+
+def _read(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
 
 
 class _Parser(argparse.ArgumentParser):
@@ -683,6 +912,11 @@ def _parser() -> _Parser:
     for flag in ("--repo-root", "--run-id", "--action-id", "--worker-id"):
         review_parser.add_argument(flag)
 
+    record_parser = commands.add_parser("record", help="record a finished task's commits in the "
+                                                       "plan's forecast")
+    record_parser.add_argument("plan_file", metavar="PLAN_FILE")
+    record_parser.add_argument("--task", required=True, type=_task)
+
     next_parser = commands.add_parser("next", help="close a task, open the next and render "
                                                    "the implementer brief")
     next_parser.add_argument("plan_file", metavar="PLAN_FILE")
@@ -700,6 +934,8 @@ def _parser() -> _Parser:
 
 def _parse(argv: Sequence[str] | None) -> argparse.Namespace:
     args = _parser().parse_args(argv)
+    if args.command == "record":
+        return args
     identity = (args.repo_root, args.run_id, args.action_id)
     if any(value is not None for value in identity) and any(value is None for value in identity):
         raise InvocationError("a lifecycle identity is all three flags or none")
@@ -733,7 +969,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     done: list[str] = []
     try:
-        _print({"review": review, "next": next_task}[args.command](args, done))
+        _print({"review": review, "record": record, "next": next_task}[args.command](args, done))
     except Refusal as refusal:
         _print(_refusal_object(args.command, refusal, done))
         return 3 if refusal.gate == "decompose_required" else 2
