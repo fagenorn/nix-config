@@ -65,9 +65,9 @@ Timeout 900 s; for a `tests/test_agent_tools_launchers.py` test run `launch-scop
 Make the smallest change that meets the documented contract. Then, each expected to pass:
 
 - the Step 4 command → `exit=0`, `OK`;
-- the whole seam module: `launch-scope exec … -- bash -c 'PYTHONPATH="$PWD/python" python3 -m unittest "$1" 2>&1 | tail -3' _ <test file>` (timeout 1800 s) → `OK`;
-- after a `.nix` edit: `launch-scope exec … -- bash -c 'just build 2>&1 | tail -3'` (timeout 1800 s) → exit 0;
-- after an edit under `home/common/agent-skills/skills/`: `launch-scope exec … -- bash -c 'just agent-instruction-budget 2>&1 | tail -3'` (timeout 600 s) → last line `check: pass`;
+- the whole seam module: `launch-scope exec … -- bash -c 'set -o pipefail; PYTHONPATH="$PWD/python" python3 -m unittest "$1" 2>&1 | tail -3' _ <test file>` (timeout 1800 s) → exit 0, `OK`;
+- after a `.nix` edit: `launch-scope exec … -- bash -c 'set -o pipefail; just build 2>&1 | tail -3'` (timeout 1800 s) → exit 0 (`pipefail` makes the exit status the build's, not `tail`'s);
+- after an edit under `home/common/agent-skills/skills/`: `launch-scope exec … -- bash -c 'set -o pipefail; just agent-instruction-budget 2>&1 | tail -3'` (timeout 600 s) → exit 0 and last line `check: pass`;
 - `git diff --numstat` over the edited files sums to at most 150.
 
 A bar that fails now (2, 3 or 4): undo your uncommitted edits to those files with the editor (no destructive Git command), set the row `filed` / `issue pending (bar <k>)`, and take the next row. Otherwise:

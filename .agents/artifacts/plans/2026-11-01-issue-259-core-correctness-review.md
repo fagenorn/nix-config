@@ -57,5 +57,12 @@ Task 3 — File follow-ups, verify, post the record, acceptance evidence — the
 - The record's path and parts: per D7. The demo comment and AC1/AC2 as evidence rows: per D8.
 - Who acts as the controller, the record as carrier, the bar's measured form and the no-seam rule: per D9.
 - What the record's Verification holds, AC classification and the acceptance-record writer: per D10.
+- Where AC3 is measured and how launcher regressions replay: per D11.
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, model gpt-6-astra, effort xhigh), isolated read-only reviewer thread; no fallback used.
+- Base SHA: `8c475824d7ea3b766183e5514b5ed33f623b1749`; plan reviewed at `1f91dabb`. Focus: none beyond the plan-review contract.
+- Findings: 3 accepted, 0 rejected, 0 deferred. PR259-01 (Blocking: AC3 measured at the record commit, per D11, Task 3 Steps 6–7); PR259-02 (Blocking: launcher regressions replay through `just agent-installed-skill-tests` and reject skips, per D11, Task 3 Step 3); PR259-03 (Should fix: `set -o pipefail` on Task 2 Step 5's piped gates).
 
 ---

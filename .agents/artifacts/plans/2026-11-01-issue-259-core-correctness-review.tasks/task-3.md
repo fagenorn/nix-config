@@ -123,7 +123,9 @@ git show "<fix>:<test file>" > "$S/red-<ID>/<test file>"
 grep -E '^(FAIL|ERROR):|^(FAILED|OK)' "$S/red-<ID>.log"
 ```
 
-Expected: `exit=1`, one `FAIL:` line, no `ERROR:` line. Then the same test at `CODE_HEAD` from the worktree root: `exit=0`, `OK`.
+For a `tests/test_agent_tools_launchers.py` test, plain `unittest` skips the whole class without `AGENT_SKILLS_INSTALLED_HOME`, so replay it as Task 2 Step 4 does: in `$S/red-<ID>` run `launch-scope exec … -- bash -c 'just agent-installed-skill-tests 2>&1' > "$S/red-<ID>.log"` (timeout 3600 s), which builds that tree and supplies the installed home, and at `CODE_HEAD` the same recipe from the worktree root (timeout 3600 s). On either route a log in which the named test is reported skipped (`skipped` on its line, or an `OK (skipped=` summary with the test absent from the `FAIL:` lines on the red run) fails the replay.
+
+Expected: `exit=1`, one `FAIL:` line naming the test, no `ERROR:` line. Then the same test at `CODE_HEAD` from the worktree root: `exit=0`, `OK`, the test run and not skipped.
 
 3. Each `rejected` row citing a CR test: that test at `CODE_HEAD` → `OK`.
 
@@ -200,13 +202,15 @@ EOF
 
 Expected: exit 0, both lines ending `met)`.
 
+Then re-run Step 3's findings check (item 1, timeout 600 s) at `RECORD_COMMIT` with a clean tree, and keep its line as AC3's observation. AC3 is measured here, not at `CODE_HEAD`: Step 4 commits `R` after `CODE_HEAD`, and evidence freshness excludes only the acceptance record, so a `CODE_HEAD` measurement would read as stale. `git diff --name-only "$CODE_HEAD" "$RECORD_COMMIT"` must print only `R`'s path, so Step 3's red/green results still describe `RECORD_COMMIT`'s product tree.
+
 - [ ] **Step 7: Write the acceptance record (per D10)**
 
 Create `A` holding, in order: `# Acceptance record — issue 259`; a blank line; `Each row's Commit is the head its evidence was taken on (https://github.com/fagenorn/nix-config/issues/259).`; a blank line; the table `| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |`, its `|---|…|` line, and rows `AC1`–`AC4`:
 
 - `Criterion`: the issue's criterion line verbatim without its `- [ ] ` (`gh issue view 259 --repo fagenorn/nix-config --json body --jq .body`), each `|` written `\|`. `Kind` and `Check or command`: copied from the plan root's Acceptance map.
 - `AC1`, `AC2`: `Observed` the Step 6 line and the comment URL; `Commit` `RECORD_COMMIT`'s 8 hex; `Conditions` the Step 6 command as run, the `date -u` instant, `gh` against `fagenorn/nix-config`.
-- `AC3`: `Observed` the Step 3 findings-check line, the red and green results of each fixed row, and `threshold 0 violating rows: met|missed`; `Commit` `CODE_HEAD`'s 8 hex; `Conditions` the Step 3 commands and the instant.
+- `AC3`: `Observed` the Step 6 findings-check line taken at `RECORD_COMMIT`, the Step 3 red and green results of each fixed row, and `threshold 0 violating rows: met|missed`; `Commit` `RECORD_COMMIT`'s 8 hex; `Conditions` the Step 6 findings-check command, the Step 3 replay commands, the `CODE_HEAD..RECORD_COMMIT` diff showing only `R`, and the instant.
 - `AC4`: `Observed` `in final verification`; `Commit` and `Conditions` `—`.
 - Every `Verdict`: `—`.
 
