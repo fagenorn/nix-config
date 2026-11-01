@@ -35,7 +35,7 @@ g0 "$EV/g0-$N.json"; X=$?; g0 "$EV/g0-$N.again"; Y=$?
   && echo "G0 exit=$X" || echo "G0 failed (exits $X/$Y)"
 ```
 
-G0 clears only on `G0 exit=0`; `G0 exit=3` ends SDD `decompose_required`; `G0 failed` (exit 2, a disagreeing rerun or an invalid result) ends it `failed`. G0 at 0 precedes `sdd-gate next --task 1`. After task N's clean review: a hand recording commit `plan: record task N evidence` (this root and `task-N.md`, D2's four changes), `sdd-gate next --completed N` (G1), G0 at N, `sdd-gate next --task N+1`. Task 5 ends at G1. Planning G0 at 0, head `abeead1`: exit 0 `complete/within_budget`, validated and reproduced; root 14,707 of 16,384 B, total 470,387 of 524,288 B, all eight members (largest 63,488 B), so a forecast revision has no spare member.
+G0 clears only on `G0 exit=0`; `G0 exit=3` ends SDD `decompose_required`; `G0 failed` (exit 2, a disagreeing rerun or an invalid result) ends it `failed`. G0 at 0 precedes `sdd-gate next --task 1`. After task N's clean review: a hand recording commit `plan: record task N evidence` (this root and `task-N.md`, D2's four changes), `sdd-gate next --completed N` (G1), G0 at N, `sdd-gate next --task N+1`. Task 5 ends at G1. Phase-5 G0 at 0 (D21 recipe), head `973b24d`: exit 0 `complete/within_budget`, reproduced and validated; root 14,940 of 16,384 B, total 470,620 of 524,288 B, all eight members (largest 63,488 B), so a forecast revision has no spare member.
 
 ## Delivery estimate and boundaries
 
