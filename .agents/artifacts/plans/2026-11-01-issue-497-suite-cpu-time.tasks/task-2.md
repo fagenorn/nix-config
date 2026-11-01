@@ -246,7 +246,7 @@ Change nothing else in the paragraph.
 - [ ] **Step 4: Verify**
 
 Run the focused form on the whole module.
-Expected: `OK`, 19 tests.
+Expected: `OK`, 20 tests.
 
 Run `bash -c 'set -e; grep -qF "<wall>s wall <cpu>s cpu passed|failed <member>" python/README.md; grep -qF "wall=<seconds>s cpu=<seconds>s" python/README.md; grep -qF "resource usage that \`os.wait4\` returns" python/README.md; if grep -nE "getrusage|os\.times" python/agent_tools/suite_runner.py; then exit 1; fi; echo docs-ok'`.
 Expected: `docs-ok` and no other output. At Task 1's head the README greps fail.

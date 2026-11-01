@@ -15,7 +15,7 @@ This task implements spec § Measurement (D1) and § Reaping and interrupts (D2)
 
 **Invariants:**
 - `suite_runner.py` calls `os.wait4` once, inside `_reap`. It never calls `Popen.wait`, `Popen.communicate`, `Popen.poll` or `os.waitpid`.
-- `os.wait4` and `os.waitid` are called as attributes of the `os` module and never imported by name, so a wrapper that replaces `os.wait4` reaches every reap (D5).
+- `os.wait4` and `os.waitid` are called as attributes of the `os` module and never imported by name, so a wrapper that replaces `os.wait4` or `os.waitid` reaches every reap and every non-reaping wait (D5, D7).
 - `_reap` stores the converted status as `process.returncode`, so nothing waits on the member again.
 - A death by signal still reads `exit=signal-<n>`, through a negative returncode from `os.waitstatus_to_exitcode`. A launch failure still reads `exit=launch-error`.
 - Serial mode handles a SIGINT before the reap as it does today: the member is unreaped, and the runner writes the `interrupted` line, waits, writes the end line and exits 130. A SIGINT during the reap is re-delivered only after the result is bound. The interrupt path then writes the end line from that result without waiting again (D2, D6).
@@ -51,6 +51,42 @@ SERIAL_REAP_INTERRUPT = textwrap.dedent('''\
     os.wait4 = wait4_then_interrupt
     sys.exit(suite_runner.main(sys.argv[1:]))
 ''')
+
+
+# Runs the runner with SIGINT raised right after its first non-reaping wait
+# returns in serial mode, so the member has exited unreaped, and a second SIGINT
+# raised right after the interrupt path's own reap, before its end line
+# (issue 497 D6, D7).
+SERIAL_INTERRUPTED_REAP_INTERRUPT = textwrap.dedent('''\
+    import os
+    import signal
+    import sys
+
+    from agent_tools import suite_runner
+
+    waitid = os.waitid
+    wait4 = os.wait4
+    waited = []
+
+
+    def waitid_then_interrupt(*args):
+        result = waitid(*args)
+        waited.append(result)
+        if len(waited) == 1:
+            signal.raise_signal(signal.SIGINT)
+        return result
+
+
+    def wait4_then_interrupt(*args):
+        reaped = wait4(*args)
+        signal.raise_signal(signal.SIGINT)
+        return reaped
+
+
+    os.waitid = waitid_then_interrupt
+    os.wait4 = wait4_then_interrupt
+    sys.exit(suite_runner.main(sys.argv[1:]))
+''')
 ```
 
 2. In `InterruptTest`, rename `finish_interrupted` to `interrupted_lines`. Keep its body, except that its last line returns `lines` instead of `starts`. Replace its docstring with:
@@ -72,7 +108,7 @@ Directly after it, add:
                 if match]
 ```
 
-3. Append this method to `InterruptTest`, after `test_an_interrupt_as_a_serial_member_launches_still_waits_for_it`:
+3. Append these two methods to `InterruptTest`, after `test_an_interrupt_as_a_serial_member_launches_still_waits_for_it`:
 
 ```python
     def test_an_interrupt_right_after_a_serial_reap_keeps_the_members_exit_status(self):
@@ -85,14 +121,27 @@ Directly after it, add:
         lines = self.interrupted_lines(runner)
         self.assertEqual([match.group(1, 2, 3) for match in map(END.match, lines) if match],
                          [("exit3.sh", "failed", "3")], lines)
+
+    def test_a_second_interrupt_during_the_interrupted_serial_reap_waits_for_its_end_line(self):
+        """SIGINT lands once the first serial member has exited unreaped, and a
+        second one right after the interrupt path reaps it. The second is held
+        until that member's end line is written, so the runner still reports
+        its own exit status, then stops (issue 497 D6, D7). The test fails if
+        the interrupt path's hold is removed or released before the end line."""
+        members = [self.member("exit3.sh", "exit 3\n"),
+                   self.member("test_plain.py", PLAIN_MEMBER)]
+        runner = self.launch("-c", SERIAL_INTERRUPTED_REAP_INTERRUPT, "--jobs", "1", *members)
+        lines = self.interrupted_lines(runner)
+        self.assertEqual([match.group(1, 2, 3) for match in map(END.match, lines) if match],
+                         [("exit3.sh", "failed", "3")], lines)
 ```
 
 Leave the four existing `InterruptTest` test methods as they are.
 
-- [ ] **Step 2: Run the test and watch it fail**
+- [ ] **Step 2: Run the tests and watch them fail**
 
-Run the focused form with `-k test_an_interrupt_right_after_a_serial_reap`.
-Expected: `FAILED (failures=1)`, 1 test, `AssertionError: 1 != 130`. At base nothing calls `os.wait4`, so the wrapper never interrupts, and the run completes with exit 1 because `exit3.sh` failed.
+Run the focused form with `-k serial_reap`.
+Expected: `FAILED (failures=2)`, 2 tests, each `AssertionError: 1 != 130`. At base nothing calls `os.wait4` or `os.waitid`, so neither wrapper interrupts, and each run completes with exit 1 because `exit3.sh` failed.
 
 - [ ] **Step 3: Write the minimal implementation**
 
@@ -213,7 +262,9 @@ Change nothing else. Leave `MemberResult`, `report_lines`, `end_line` and both l
 - [ ] **Step 4: Verify**
 
 Run the focused form on the whole module.
-Expected: `OK`, 17 tests.
+Expected: `OK`, 18 tests.
+
+Then confirm the second new test pins the interrupt path's hold: in a scratch copy only (never committed), delete the three hold lines around the interrupt path's reap and end line (`hold = _HeldSigint()`, the `try:` and the `finally: hold.release()` wrapping them, leaving their body) and run the focused form with `-k test_a_second_interrupt_during_the_interrupted_serial_reap`. Expected: it fails (no `exit3.sh` end line). Restore the code and rerun: `OK`.
 
 Run `bash -c 'set -e; test "$(grep -c "os\.wait4(" python/agent_tools/suite_runner.py)" = 1; if grep -nE "process\.(wait|communicate|poll)\(|os\.waitpid|from os import" python/agent_tools/suite_runner.py; then exit 1; fi; echo reap-ok'`.
 Expected: `reap-ok` and no other output. At base, `grep -c` counts 0 and `process.wait()` matches, so this gate fails there.

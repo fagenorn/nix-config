@@ -46,8 +46,15 @@ Task 2 â€” The timing report shows each member's child CPU and the suite total â
 ## Decisions
 
 - Measurement and the single reap function: D1. Task 1 builds `_reap`, and Task 2 reads its CPU.
-- Parallel read-then-reap, the serial non-reaping wait and the held reap: D2, refined by D6 for the interrupt path, and pinned by the reap-interrupt test per D5 (Task 1).
+- Parallel read-then-reap, the serial non-reaping wait and the held reap: D2, refined by D6 for the interrupt path, and pinned by the reap-interrupt tests per D5 and D7 (Task 1).
 - The report row, the summary total and their documentation: D3 (Task 2).
 - The busy and sleeping members and their bounds: D4 (Task 2).
+
+## Standards review provenance
+
+- Reviewer: Codex (`codex-companion task --fresh --reviewer plan-review`, model gpt-6-astra, effort xhigh), isolated read-only mode, no fallback, no extra focus.
+- Base SHA: 8d0bbc25383663fa3bc86623d0701e7d4bd4f9bc; reviewed plan commit 48747fff.
+- Findings: 0 Blocking, 1 Should fix, 0 Discussion. Accepted 1, rejected 0, deferred 0.
+- PR-01 (accepted, verified against the live plan and `tests/test_suite_runner.py`): Task 1 adds a second-SIGINT test pinning D6's interrupt-path hold, per D7.
 
 ---
