@@ -167,7 +167,68 @@ SERIAL_LAUNCH_INTERRUPT = textwrap.dedent('''\
     sys.exit(suite_runner.main(sys.argv[1:]))
 ''')
 
-PLAIN_MEMBER = textwrap.dedent('''\
+# Runs the runner with SIGINT raised right after it reaps its first member in
+# serial mode, before it records the result (issue 497 D2).
+SERIAL_REAP_INTERRUPT = textwrap.dedent('''\
+    import os
+    import signal
+    import sys
+
+    from agent_tools import suite_runner
+
+    wait4 = os.wait4
+    reaped = []
+
+
+    def wait4_then_interrupt(*args):
+        reaped.append(wait4(*args))
+        if len(reaped) == 1:
+            signal.raise_signal(signal.SIGINT)
+        return reaped[-1]
+
+
+    os.wait4 = wait4_then_interrupt
+    sys.exit(suite_runner.main(sys.argv[1:]))
+''')
+
+
+# Runs the runner with SIGINT raised right after its first non-reaping wait
+# returns in serial mode, so the member has exited unreaped, and a second SIGINT
+# raised right after the interrupt path's own reap, before its end line
+# (issue 497 D6, D7).
+SERIAL_INTERRUPTED_REAP_INTERRUPT = textwrap.dedent('''\
+    import os
+    import signal
+    import sys
+
+    from agent_tools import suite_runner
+
+    waitid = os.waitid
+    wait4 = os.wait4
+    waited = []
+
+
+    def waitid_then_interrupt(*args):
+        result = waitid(*args)
+        waited.append(result)
+        if len(waited) == 1:
+            signal.raise_signal(signal.SIGINT)
+        return result
+
+
+    def wait4_then_interrupt(*args):
+        reaped = wait4(*args)
+        signal.raise_signal(signal.SIGINT)
+        return reaped
+
+
+    os.waitid = waitid_then_interrupt
+    os.wait4 = wait4_then_interrupt
+    sys.exit(suite_runner.main(sys.argv[1:]))
+''')
+
+
+PLAIN_MEMBER =textwrap.dedent('''\
     import unittest
 
 
@@ -454,11 +515,12 @@ class InterruptTest(RunnerCase):
         self.addCleanup((self.barrier / "release").touch)
         return runner
 
-    def finish_interrupted(self, runner: subprocess.Popen) -> list[str]:
+    def interrupted_lines(self, runner: subprocess.Popen) -> list[str]:
         """Release the held members only once the runner says it is waiting for
         them, then require exit 130, the interrupted line, an end line for each
-        started member and no report. The held members write nothing to stdout,
-        so every stdout line is the runner's."""
+        started member and no report, and return the runner's stdout lines.
+        The members write nothing to stdout, so every stdout line is the
+        runner's."""
         lines = []
         for line in runner.stdout:
             lines.append(line.rstrip("\n"))
@@ -476,7 +538,12 @@ class InterruptTest(RunnerCase):
                          sorted(starts))
         self.assertEqual([line for line in lines if line.startswith(
             ("suite-runner: timings", "suite-runner: summary"))], [])
-        return starts
+        return lines
+
+    def finish_interrupted(self, runner: subprocess.Popen) -> list[str]:
+        """The members the interrupted run started, in start order."""
+        return [match.group(1) for match in map(START.match, self.interrupted_lines(runner))
+                if match]
 
     def interrupt_while_running(self, jobs: int) -> None:
         """SIGINT the runner alone once `jobs` held members are live."""
@@ -516,6 +583,30 @@ class InterruptTest(RunnerCase):
         self.assertEqual(sorted(path.name for path in (self.barrier / "done").iterdir()),
                          members[:1])
         self.assertEqual(list((self.barrier / "live").iterdir()), [])
+
+    def test_an_interrupt_right_after_a_serial_reap_keeps_the_members_exit_status(self):
+        """SIGINT lands right after the runner reaps its first member in serial
+        mode, before it records the result. The runner still reports that
+        member's own exit status, then stops (issue 497 D2)."""
+        members = [self.member("exit3.sh", "exit 3\n"),
+                   self.member("test_plain.py", PLAIN_MEMBER)]
+        runner = self.launch("-c", SERIAL_REAP_INTERRUPT, "--jobs", "1", *members)
+        lines = self.interrupted_lines(runner)
+        self.assertEqual([match.group(1, 2, 3) for match in map(END.match, lines) if match],
+                         [("exit3.sh", "failed", "3")], lines)
+
+    def test_a_second_interrupt_during_the_interrupted_serial_reap_waits_for_its_end_line(self):
+        """SIGINT lands once the first serial member has exited unreaped, and a
+        second one right after the interrupt path reaps it. The second is held
+        until that member's end line is written, so the runner still reports
+        its own exit status, then stops (issue 497 D6, D7). The test fails if
+        the interrupt path's hold is removed or released before the end line."""
+        members = [self.member("exit3.sh", "exit 3\n"),
+                   self.member("test_plain.py", PLAIN_MEMBER)]
+        runner = self.launch("-c", SERIAL_INTERRUPTED_REAP_INTERRUPT, "--jobs", "1", *members)
+        lines = self.interrupted_lines(runner)
+        self.assertEqual([match.group(1, 2, 3) for match in map(END.match, lines) if match],
+                         [("exit3.sh", "failed", "3")], lines)
 
 
 class RecipeWiringTest(unittest.TestCase):

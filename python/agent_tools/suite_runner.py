@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import subprocess
 import sys
@@ -109,9 +110,12 @@ class _Output:
 class _HeldSigint:
     """Records a SIGINT instead of raising it, from construction until
     `release`, which restores the caller's handler and re-delivers a recorded
-    SIGINT under it (D14). Construct it before the `try` that handles the
-    interrupt and release it inside that `try`, so a SIGINT on either side of
-    the held span reaches that handler or nothing has started yet."""
+    SIGINT under it (D14). Release it inside the `try` that handles the
+    interrupt. A hold over a launch or the parallel workers' start is
+    constructed before that `try`, so a SIGINT just before it finds nothing
+    started. A hold over a serial reap is constructed once the member has
+    exited, so a SIGINT just before it finds the member exited and unreaped
+    (issue 497 D2)."""
 
     def __init__(self) -> None:
         self.held = threading.Event()
@@ -123,12 +127,33 @@ class _HeldSigint:
             signal.raise_signal(signal.SIGINT)
 
 
+def _wait_exited(process: subprocess.Popen) -> None:
+    """Block until the member has exited, reaping nothing: `waitid` with
+    WNOWAIT leaves its status for `_reap`, so a SIGINT that interrupts this
+    wait loses nothing (issue 497 D2)."""
+    os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+
+
+def _reap(index: int, member: str, process: subprocess.Popen | None,
+          started: float) -> MemberResult:
+    """The member's result, reaping its process if it launched; one that never
+    launched has no exit code. One `os.wait4` on its pid is the only wait that
+    reaps a member, in either mode (issue 497 D1), and its status is stored as
+    the Popen's `returncode`, so nothing waits on it again. The wall time runs
+    from `started` to just after the reap."""
+    returncode = None
+    if process is not None:
+        _, status, _ = os.wait4(process.pid, 0)
+        returncode = process.returncode = os.waitstatus_to_exitcode(status)
+    return MemberResult(index, member, returncode, time.monotonic() - started)
+
+
 def _run_serial(members: Sequence[str], out: _Output) -> list[MemberResult]:
     results = []
     for index, member in enumerate(members):
         out.write(_line(f"{PREFIX} start {member}") + _line(f"{PREFIX} begin {member}"))
         started = time.monotonic()
-        process = None
+        process = result = None
         # A SIGINT while the member launches is held, so a launched member is
         # always waited for.
         hold = _HeldSigint()
@@ -139,16 +164,31 @@ def _run_serial(members: Sequence[str], out: _Output) -> list[MemberResult]:
                 out.write(_line(str(error)))
             finally:
                 hold.release()
-            returncode = None if process is None else process.wait()
+            if process is not None:
+                _wait_exited(process)
+            # The member has exited. A SIGINT while it is reaped is held until
+            # its result is bound (issue 497 D2).
+            hold = _HeldSigint()
+            try:
+                result = _reap(index, member, process, started)
+            finally:
+                hold.release()
         except KeyboardInterrupt:
             # The member shares the terminal's process group, so a Ctrl-C
-            # reaches it too: wait for it, close its block, then stop.
+            # reaches it too: wait for it, close its block, then stop. A result
+            # bound before the interrupt is reported without waiting again, and
+            # a further SIGINT is held until the end line is written.
             out.write(_line(INTERRUPTED))
-            returncode = None if process is None else process.wait()
-            out.write(_line(end_line(MemberResult(
-                index, member, returncode, time.monotonic() - started))))
+            if result is None and process is not None:
+                _wait_exited(process)
+            hold = _HeldSigint()
+            try:
+                if result is None:
+                    result = _reap(index, member, process, started)
+                out.write(_line(end_line(result)))
+            finally:
+                hold.release()
             raise
-        result = MemberResult(index, member, returncode, time.monotonic() - started)
         out.write(_line(end_line(result)))
         results.append(result)
     return results
@@ -182,10 +222,13 @@ def _run_parallel(members: Sequence[str], jobs: int,
                 except OSError as error:
                     process, output = None, _line(str(error))
             if process is not None:
-                output, _ = process.communicate()
-            result = MemberResult(
-                index, member, None if process is None else process.returncode,
-                time.monotonic() - started)
+                # Read the merged output to its end, then reap: what
+                # communicate() does for one pipe and no input. Signal handlers
+                # run on the main thread only, so this reap is never
+                # interrupted (issue 497 D2).
+                with process.stdout:
+                    output = process.stdout.read()
+            result = _reap(index, member, process, started)
             if output and not output.endswith(b"\n"):
                 output += b"\n"
             # One write per block, before this worker takes its next member.
@@ -235,7 +278,7 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO) -> int:
 
     A KeyboardInterrupt propagates after the running members have finished and
     written their blocks. Must be called from the main thread: the runner holds
-    SIGINT while it launches a serial member or starts its parallel workers.
+    SIGINT while it launches or reaps a serial member or starts its parallel workers.
     """
     output = _Output(out)
     started = time.monotonic()
