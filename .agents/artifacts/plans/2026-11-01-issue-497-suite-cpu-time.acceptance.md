@@ -1,0 +1,5 @@
+# Acceptance record — issue #497
+
+| AC | Criterion | Kind | Check or command | Observed | Commit | Conditions | Verdict |
+|----|-----------|------|------------------|----------|--------|------------|---------|
+| AC1 | [code] The closing timing report lists child CPU seconds for every module and a suite total. A module that sleeps reports CPU well below wall time, and a module that busy-loops reports CPU close to wall time. Measured by: a runner test added to the agent workflow test suite. | code | `tests/test_suite_runner.py::CpuTimeTest::test_parallel_rows_show_busy_cpu_near_wall_and_sleeping_cpu_far_below`, `::CpuTimeTest::test_serial_rows_show_busy_cpu_near_wall_and_sleeping_cpu_far_below` and `::ReportTest::test_rows_run_slowest_first_with_ties_in_list_order`, run by `just agent-workflow-tests` | in final verification | 419255ae | host mbp; Python 3.13.12; `just agent-workflow-tests` from the worktree root, in the foreground under `launch-scope exec`; Linux is covered by the PR's CI run | met |
